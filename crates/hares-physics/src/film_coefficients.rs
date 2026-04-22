@@ -161,19 +161,30 @@ pub fn film_resistances(
 
     let h_conv = tarp_h_natural(tilt_deg, delta_t, above_hotter);
 
-    // Linearized interior radiative coefficient: h_rad = 4·ε·σ·T_mean³.
-    // Standard ASHRAE interior surface emissivity (0.9) and mean temperature
-    // (20 °C = 293.15 K). Combined with TARP convection this yields
-    // h_combined ≈ 8.2 W/(m²·K), R ≈ 0.122 m²·K/W -- matching BESTEST.
+    // Interior film resistance is convection-only: R_film = 1/h_conv.
+    // Inter-surface longwave radiation is handled separately by the
+    // star-mesh radiation conductances in the A-matrix (TRNSYS Type 56,
+    // ESP-r, EnergyPlus "Option 2" architecture).  At ε_ir = 0.9 and
+    // T_ref = 293.15 K the linearized h_rad ≈ 5.14 W/(m²·K); this is
+    // NOT included in R_film to avoid double-counting with the star-mesh.
+    //
+    // The combined h_si = h_conv + h_rad ≈ 8.21 W/(m²·K) for a vertical
+    // surface (TARP h_conv ≈ 3.08), consistent with ASHRAE 140-2017
+    // Table 25.  In the decomposed model, h_conv provides the
+    // zone-air ↔ surface coupling and h_rad provides the
+    // surface ↔ surface coupling via the star-mesh.
+    //
+    // h_rad is computed here for use by the window U-factor decomposition
+    // in boundary_rc.rs, where h_conv = h_si - h_rad recovers the
+    // convection-only film from the combined window interior film.
     const INTERIOR_EMISSIVITY: f64 = 0.9;
     const INTERIOR_MEAN_TEMP_K: f64 = 293.15;
-    let h_rad = 4.0
+    let _h_rad = 4.0
         * INTERIOR_EMISSIVITY
         * crate::constants::STEFAN_BOLTZMANN
         * INTERIOR_MEAN_TEMP_K.powi(3);
-    let h_combined = h_conv + h_rad;
 
-    let r_int = 1.0 / h_combined;
+    let r_int = 1.0 / h_conv;
 
     let r_ext = if exterior_zone == ZoneLabel::Outdoor {
         let h_glass = (h_conv.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
@@ -230,10 +241,12 @@ mod tests {
         );
         let h_conv = 1.31 * 12.9_f64.cbrt();
         let h_rad = 4.0 * 0.9 * crate::constants::STEFAN_BOLTZMANN * 293.15_f64.powi(3);
-        let h_combined = h_conv + h_rad;
+        // Interior film is convection-only (h_rad handled by star-mesh).
+        assert_approx(r_int, 1.0 / h_conv, 1e-10);
+        // Conv-only R_film is larger than combined R_film.
+        assert!(r_int > 1.0 / (h_conv + h_rad), "conv-only r_int={r_int} must be > combined {:.4}", 1.0 / (h_conv + h_rad));
         let h_glass = (h_conv.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();
         let h_forced = 1.67 * (h_glass - h_conv);
-        assert_approx(r_int, 1.0 / h_combined, 1e-10);
         assert_approx(r_ext, 1.0 / (h_conv + h_forced), 1e-10);
         assert!(r_ext < r_int, "r_ext={r_ext} should be < r_int={r_int}");
     }
@@ -251,6 +264,63 @@ mod tests {
             SurfaceRoughness::Rough,
         );
         assert_approx(r_int, r_ext, 1e-15);
+    }
+
+    #[test]
+    fn interior_film_resistance_is_convection_only() {
+        // For a vertical wall (tilt=90°, ΔT=12.9°C), TARP gives
+        // h_conv = 1.31 × 12.9^(1/3) ≈ 3.076 W/(m²·K).
+        // Linearized h_rad = 4·ε·σ·T_ref³ ≈ 5.14 W/(m²·K) at ε=0.9, T=20°C.
+        // In Option 2 (EnergyPlus/TRNSYS/ESP-r), R_film = 1/h_conv (conv-only).
+        // h_rad is carried by the star-mesh radiation conductances in the
+        // A-matrix, not by R_film.
+        let (r_int, _) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            2.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::Rough,
+        );
+        let h_conv = 1.31 * 12.9_f64.cbrt();
+        let h_rad = 4.0 * 0.9 * crate::constants::STEFAN_BOLTZMANN * 293.15_f64.powi(3);
+        let r_conv_only = 1.0 / h_conv;
+        let r_combined = 1.0 / (h_conv + h_rad);
+
+        // R_film must equal convection-only value.
+        assert_approx(r_int, r_conv_only, 1e-10);
+        // Conv-only R_film is distinctly larger than combined.
+        assert!(
+            r_int > r_combined + 0.1,
+            "conv-only R_film ({r_int:.4}) must be significantly larger than combined ({r_combined:.4})"
+        );
+        // Verify approximate expected value for vertical wall conv-only film.
+        assert!(
+            (r_int - 0.325).abs() < 0.01,
+            "vertical wall conv-only R_film ≈ 0.325, got {r_int:.4}"
+        );
+    }
+
+    #[test]
+    fn exterior_film_resistance_is_convection_only_no_h_rad() {
+        // Exterior film resistance for outdoor-facing surfaces uses
+        // h_conv + h_forced (no h_rad). Exterior LWR is handled by
+        // the explicit exterior longwave solver, not by h_rad in R_film.
+        let (_, r_ext) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            2.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::Rough,
+        );
+        let h_conv = 1.31 * 12.9_f64.cbrt();
+        let h_glass = (h_conv.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();
+        let h_forced = 1.67 * (h_glass - h_conv);
+        let r_expected = 1.0 / (h_conv + h_forced);
+        assert_approx(r_ext, r_expected, 1e-10);
     }
 
     /// When delta_t=0, all TARP formulas produce h=0 (cbrt(0)=0).

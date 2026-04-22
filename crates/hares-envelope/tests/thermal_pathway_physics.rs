@@ -365,9 +365,10 @@ fn rc_network_exposes_ground_column() {
         r_film_interior_m2_k_w: 0.17,
         r_film_exterior_m2_k_w: 0.03,
         framing_factor: None,
+        interior_emissivity: 0.9,
     }];
 
-    let (rc, diag) = assemble_building_rc(&boundaries, 1, &zone_caps).unwrap();
+    let (rc, diag) = assemble_building_rc(&boundaries, 1, &zone_caps, InteriorLwrMethod::StarMesh).unwrap();
 
     assert!(
         rc.ground_col.is_some(),

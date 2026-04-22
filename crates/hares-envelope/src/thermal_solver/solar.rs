@@ -4,7 +4,7 @@ use hares_types::{EnvironmentState, ZoneId};
 use nalgebra::DVector;
 
 use super::ThermalSolver;
-use super::config::InteriorSurfaceInfo;
+use super::config::{InteriorSolarSurfaceInfo, InteriorSurfaceInfo};
 
 #[inline]
 fn beam_floor_fraction(solar_altitude_deg: f64) -> f64 {
@@ -103,12 +103,43 @@ impl ThermalSolver {
         diffuse_w: f64,
         solar_altitude_deg: f64,
     ) -> bool {
-        let zone_cfg = self
+        // Prefer interior_lwr_zones (populated in ScriptF mode, which has
+        // full InteriorSurfaceInfo), fall back to interior_solar_zones
+        // (populated in StarMesh mode).
+        let lwr_zone = self
             .config
             .interior_lwr_zones
             .iter()
             .find(|z| z.zone_id == zone_id);
-        let Some(zone_cfg) = zone_cfg else {
+        if let Some(zone_cfg) = lwr_zone {
+            if !zone_cfg.surfaces.is_empty() {
+                let beam_floor_frac = beam_floor_fraction(solar_altitude_deg);
+                let reflected_w = compute_solar_distribution_into(
+                    &zone_cfg.surfaces,
+                    beam_w,
+                    diffuse_w,
+                    beam_floor_frac,
+                    &mut self.solar_absorbed_buf,
+                );
+                let air_spillover =
+                    deposit_solar_to_surface_nodes(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
+                if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
+                    let air_total = reflected_w + air_spillover;
+                    if air_idx < u.len() && air_total > 0.0 {
+                        u[air_idx] += air_total;
+                    }
+                }
+                return true;
+            }
+        }
+
+        // StarMesh mode: use interior_solar_zones for distribution.
+        let solar_zone = self
+            .config
+            .interior_solar_zones
+            .iter()
+            .find(|z| z.zone_id == zone_id);
+        let Some(zone_cfg) = solar_zone else {
             return false;
         };
         if zone_cfg.surfaces.is_empty() {
@@ -116,23 +147,21 @@ impl ThermalSolver {
         }
 
         let beam_floor_frac = beam_floor_fraction(solar_altitude_deg);
-        let reflected_w = compute_solar_distribution_into(
+        let reflected_w = compute_solar_distribution_into_solar(
             &zone_cfg.surfaces,
             beam_w,
             diffuse_w,
             beam_floor_frac,
             &mut self.solar_absorbed_buf,
         );
-
         let air_spillover =
-            deposit_solar_to_surface_nodes(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
+            deposit_solar_to_solar_surfaces(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
         if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
             let air_total = reflected_w + air_spillover;
             if air_idx < u.len() && air_total > 0.0 {
                 u[air_idx] += air_total;
             }
         }
-
         true
     }
 
@@ -279,6 +308,87 @@ fn deposit_solar_to_surface_nodes(
         if q > 0.0 {
             if s.input_index < u.len() {
                 u[s.input_index] += q * s.radiation_frac;
+            }
+            air_total += q * (1.0 - s.radiation_frac);
+        }
+    }
+    air_total
+}
+
+/// Solar distribution for [`InteriorSolarSurfaceInfo`] (StarMesh mode).
+pub(crate) fn compute_solar_distribution_into_solar(
+    surfaces: &[InteriorSolarSurfaceInfo],
+    beam_w: f64,
+    diffuse_w: f64,
+    beam_floor_frac: f64,
+    absorbed: &mut Vec<f64>,
+) -> f64 {
+    let n = surfaces.len();
+    absorbed.clear();
+    absorbed.resize(n, 0.0);
+
+    let floor_wa: f64 = surfaces
+        .iter()
+        .filter(|s| s.is_floor)
+        .map(|s| s.area_m2 * s.solar_absorptance)
+        .sum();
+    let nonfloor_wa: f64 = surfaces
+        .iter()
+        .filter(|s| !s.is_floor)
+        .map(|s| s.area_m2 * s.solar_absorptance)
+        .sum();
+    let total_wa: f64 = floor_wa + nonfloor_wa;
+
+    if beam_w > 0.0 {
+        let (beam_to_floors, beam_to_walls) = if floor_wa > 0.0 && nonfloor_wa > 0.0 {
+            (beam_w * beam_floor_frac, beam_w * (1.0 - beam_floor_frac))
+        } else if floor_wa > 0.0 {
+            (beam_w, 0.0)
+        } else if nonfloor_wa > 0.0 {
+            (0.0, beam_w)
+        } else {
+            (0.0, 0.0)
+        };
+        for (i, s) in surfaces.iter().enumerate() {
+            let factor = if s.is_floor && floor_wa > 0.0 {
+                s.area_m2 * s.solar_absorptance / floor_wa
+            } else if !s.is_floor && nonfloor_wa > 0.0 {
+                s.area_m2 * s.solar_absorptance / nonfloor_wa
+            } else {
+                0.0
+            };
+            absorbed[i] += if s.is_floor {
+                beam_to_floors * factor
+            } else {
+                beam_to_walls * factor
+            };
+        }
+    }
+
+    if diffuse_w > 0.0 && total_wa > 0.0 {
+        for (i, s) in surfaces.iter().enumerate() {
+            let factor = s.area_m2 * s.solar_absorptance / total_wa;
+            absorbed[i] += diffuse_w * factor;
+        }
+    }
+
+    let total_distributed: f64 = absorbed.iter().sum();
+    (beam_w + diffuse_w) - total_distributed
+}
+
+/// Deposit per-surface absorbed solar into `u` for [`InteriorSolarSurfaceInfo`].
+fn deposit_solar_to_solar_surfaces(
+    surfaces: &[InteriorSolarSurfaceInfo],
+    absorbed: &[f64],
+    u: &mut DVector<f64>,
+) -> f64 {
+    let mut air_total = 0.0;
+    for (s, &q) in surfaces.iter().zip(absorbed.iter()) {
+        if q > 0.0 {
+            if let Some(idx) = s.input_index {
+                if idx < u.len() {
+                    u[idx] += q * s.radiation_frac;
+                }
             }
             air_total += q * (1.0 - s.radiation_frac);
         }

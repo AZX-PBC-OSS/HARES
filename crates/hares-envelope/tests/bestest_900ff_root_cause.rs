@@ -157,9 +157,10 @@ fn heavyweight_concrete_wall_produces_two_rc_sub_layers() {
         r_film_interior_m2_k_w: 0.12,
         r_film_exterior_m2_k_w: 0.03,
         framing_factor: None,
+        interior_emissivity: 0.9,
     }];
 
-    let (_, diag) = assemble_building_rc(&boundaries, 1, &zone_caps).unwrap();
+    let (_, diag) = assemble_building_rc(&boundaries, 1, &zone_caps, InteriorLwrMethod::StarMesh).unwrap();
     let n_nodes = diag.boundaries[0].n_rc_nodes;
 
     // Concrete is split into 2 sub-layers: total nodes = 1 (wood) + 1 (ins) + 2 (concrete) = 4

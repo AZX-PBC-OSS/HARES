@@ -239,6 +239,38 @@ pub struct InteriorSurfaceInfo {
     pub driving_temp: Option<DrivingTemp>,
 }
 
+/// Per-zone interior solar distribution configuration.
+///
+/// Independent of `InteriorLwrZoneConfig` so that solar distribution works
+/// in both `StarMesh` and `ScriptF` interior LWR modes. In `StarMesh` mode,
+/// `interior_lwr_zones` is empty (radiation is in the A-matrix), but solar
+/// still needs to be distributed to surface nodes via `radiation_frac`.
+#[derive(Debug, Clone, Default)]
+pub struct InteriorSolarZoneConfig {
+    pub zone_id: ZoneId,
+    pub surfaces: Vec<InteriorSolarSurfaceInfo>,
+}
+
+/// Surface info needed for interior solar distribution only.
+///
+/// A subset of `InteriorSurfaceInfo` — just the fields required to split
+/// absorbed solar between the surface RC node and zone air.
+#[derive(Debug, Clone)]
+pub struct InteriorSolarSurfaceInfo {
+    /// Index into input vector `u` for the surface RC node.
+    /// `None` for windows (no RC node — all solar goes to zone air).
+    pub input_index: Option<usize>,
+    /// Surface area [m²].
+    pub area_m2: f64,
+    /// Solar absorptance [-].
+    pub solar_absorptance: f64,
+    /// Fraction of absorbed solar deposited to the RC node.
+    /// Remainder `(1 - radiation_frac)` goes to zone air.
+    pub radiation_frac: f64,
+    /// Whether this surface is a floor (receives beam solar preferentially).
+    pub is_floor: bool,
+}
+
 /// Interior longwave radiation configuration for one zone.
 ///
 /// Surfaces listed here participate in grey interchange (ScriptF) interior LW
@@ -376,6 +408,8 @@ pub struct ThermalSolverConfig {
     /// using the current zone air temperature as the linearisation point and accumulates
     /// the net surface fluxes into the corresponding `input_index` entries in `u`.
     pub interior_lwr_zones: Vec<InteriorLwrZoneConfig>,
+    /// Per-zone interior solar distribution (works in both StarMesh and ScriptF modes).
+    pub interior_solar_zones: Vec<InteriorSolarZoneConfig>,
     /// Per-zone infiltration methods. Zones not listed default to zero ACH.
     /// Uses a `Vec` instead of `HashMap` for cache-friendly hot-loop iteration.
     pub infiltration: Vec<(ZoneId, InfiltrationMethod)>,
@@ -395,6 +429,12 @@ pub struct ThermalSolverConfig {
     pub natural_ventilation: Option<NaturalVentilationConfig>,
     /// Per-boundary conduction diagnostics for BESTEST per-component heat gain tracking.
     pub boundary_diagnostics: Vec<BoundaryDiagnosticInfo>,
+    /// Interior longwave radiation method.
+    ///
+    /// `StarMesh` (default): linearized inter-surface conductances baked into
+    /// the A-matrix at construction time. No iterative LWR injection needed.
+    /// `ScriptF`: iterative T⁴ radiosity injection each timestep (legacy mode).
+    pub interior_lwr_method: crate::boundary_rc::InteriorLwrMethod,
 }
 
 impl Default for ThermalSolverConfig {
@@ -405,6 +445,7 @@ impl Default for ThermalSolverConfig {
             window_zone_ids: HashMap::new(),
             exterior_surfaces: Vec::new(),
             interior_lwr_zones: Vec::new(),
+            interior_solar_zones: Vec::new(),
             infiltration: Vec::new(),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -412,6 +453,7 @@ impl Default for ThermalSolverConfig {
             ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
         }
     }
 }

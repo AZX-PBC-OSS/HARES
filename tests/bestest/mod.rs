@@ -75,26 +75,19 @@ fn bestest_case_600() {
 }
 
 // ASHRAE 140-2017 Case 900: heavyweight conditioned building, annual loads.
-// Currently fails with ~2068 kWh annual heating load vs band max 2041 kWh
-// (a HEATING overshoot, not cooling). The window exterior long-wave radiation
-// fix adds physically correct cooling at the outer window surface, which
-// increases the heating load for conditioned buildings. The window interior
-// LWR fix (which warms the zone by adding interior-surface radiation) will
-// partially offset this regression. Construction: 100 mm concrete walls,
-// 80 mm concrete floor slab, 1.007 m floor insulation (R≈25 m²·K/W). The
-// floor slab's time constant τ≈33 days means annual results are acutely
-// sensitive to initialization — the slab carries thermal memory across
-// seasons; concrete inner nodes retain excess heat long after zone air has
-// equilibrated, shifting the seasonal load balance. Denver TMY3 climate
+// 100 mm concrete walls, 80 mm concrete floor slab, 1.007 m floor insulation
+// (R≈25 m²·K/W). The floor slab's time constant τ≈33 days means annual results
+// are acutely sensitive to initialization — the slab carries thermal memory
+// across seasons; concrete inner nodes retain excess heat long after zone air
+// has equilibrated, shifting the seasonal load balance. Denver TMY3 climate
 // (large diurnal swing, cold winter) drives both heating and cooling loads.
 // Reference bands from ASHRAE 140 Table B8-2: annual heating load
 // [1170, 2041] kWh, annual cooling load [2132, 3415] kWh. ASHRAE 140 bands
 // are published oracles and must NOT be widened.
-// The should_panic documents a known regression: exterior-window LWR adds
-// physically correct cooling that raises the conditioned heating load above
-// the ASHRAE band; the interior-window LWR fix will partially offset this.
+// Window interior LWR correction (q × (1 − radiation_frac) to zone air) offsets
+// the exterior LWR cooling regression, reducing heating load back within the
+// ASHRAE band. E+ Eng.Ref "Inside Surface Heat Balance".
 #[test]
-#[should_panic(expected = "metric=annual_heating_load_kwh")]
 fn bestest_case_900() {
     let case = core_cases().into_iter().find(|c| c.id == "900").unwrap();
     run_single_case(&case);

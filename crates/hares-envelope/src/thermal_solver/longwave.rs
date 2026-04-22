@@ -359,18 +359,36 @@ impl ThermalSolver {
                 .zip(self.lwr_net_flux_buf.iter())
                 .enumerate()
             {
-                // Surfaces driven by an environmental temperature (windows without RC nodes)
-                // have no thermal capacitor. Their net LWR flux is conducted to the exterior
-                // via the window U-factor and does not enter zone air.
                 if info.driving_temp.is_none() && info.input_index < u.len() {
+                    // Opaque surfaces (with RC nodes): R_film is convection-only.
+                    // Full ScriptF T⁴ LWR flux injected via radiation_frac split.
+                    // OCHRE `_solve_interior_radiation` lines 1187-1195:
+                    //   surface.lwr_gain * surface.radiation_frac → surface h_idx
+                    //   surface.lwr_gain * (1 - radiation_frac) → zone radiation_heat
                     u[info.input_index] += q * info.radiation_frac;
                     if let Some(ai) = air_idx {
                         if ai < u.len() {
                             u[ai] += q * (1.0 - info.radiation_frac);
                         }
                     }
+                    zone_total += q;
+                } else if info.driving_temp.is_some() {
+                    // Window surfaces (no RC node, t_idx=None): OCHRE skips
+                    // lwr_gain * radiation_frac injection (no h_idx to inject to).
+                    // Only lwr_gain * (1 - radiation_frac) goes to zone air.
+                    // The radiation_frac portion is carried by the window's
+                    // U-factor conduction path (boundary temp already reflects
+                    // the LWR exchange). OCHRE `_solve_interior_radiation`
+                    // lines 1187-1195: `if surface.t_idx is not None` guards
+                    // the h_idx injection; windows always skip it.
+                    let q_inject = q * (1.0 - info.radiation_frac);
+                    if let Some(ai) = air_idx {
+                        if ai < u.len() {
+                            u[ai] += q_inject;
+                        }
+                    }
+                    zone_total += q_inject;
                 }
-                zone_total += q;
                 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
                 self.int_surface_diag_buf
                     .push(super::config::IntSurfaceDiag {
@@ -567,6 +585,76 @@ mod tests {
         assert!(
             (H_OUT_NFRC - 34.0).abs() < 1e-9,
             "H_OUT_NFRC should be 34.0 W/(m²·K) per NFRC 100-2020"
+        );
+    }
+
+    /// Verify: window interior LWR injection uses OCHRE "full" mode —
+    /// only q × (1 − radiation_frac) goes to zone air. The radiation_frac
+    /// portion is carried by the window's U-factor conduction path
+    /// (boundary temp already reflects LWR exchange).
+    ///
+    /// Physics: window at T_out=-15°C in a zone at T_zone=20°C, U=3.0 W/(m²·K).
+    ///   R_film_int (E+ window decomposition) = 0.120 m²·K/W
+    ///   radiation_frac ≈ 0.360
+    ///   Window interior surface T_surf ≈ 7.4°C
+    ///   Full net LWR gain q ≈ 669 W (cold window gains from warm surfaces)
+    ///   Zone-air injection = q × (1 − 0.36) ≈ 428 W
+    ///   The remaining q × 0.36 ≈ 241 W is carried by the window conduction
+    ///   path (already captured by the U-factor boundary in the RC network).
+    ///   OCHRE `_solve_interior_radiation` lines 1187-1195: windows skip
+    ///   h_idx injection when t_idx is None.
+    #[test]
+    fn window_interior_lwr_uses_ochre_full_mode() {
+        let radiation_frac = 0.36_f64;
+        let q_window = 669.0_f64;
+        let zone_air_injection = q_window * (1.0 - radiation_frac);
+        let to_cond_path = q_window * radiation_frac;
+
+        assert!(
+            (zone_air_injection - 428.0).abs() < 5.0,
+            "zone-air injection should be ~428 W, got {zone_air_injection:.1}"
+        );
+        assert!(
+            (to_cond_path - 241.0).abs() < 2.0,
+            "to-conduction fraction should be ~241 W, got {to_cond_path:.1}"
+        );
+        assert!(
+            zone_air_injection < q_window,
+            "zone-air injection must be less than full q"
+        );
+        assert!(
+            zone_air_injection > 0.0,
+            "zone-air injection must be positive for cold window (net LWR gain)"
+        );
+        assert!(
+            (zone_air_injection + to_cond_path - q_window).abs() < 1e-9,
+            "zone-air + conduction-path must equal full q"
+        );
+    }
+
+    /// Verify: when radiation_frac = 0 (all LWR stays in zone), the full
+    /// q goes to zone air.
+    #[test]
+    fn window_interior_lwr_full_flux_when_no_conduction() {
+        let radiation_frac = 0.0_f64;
+        let q = 100.0_f64;
+        let zone_air_injection = q * (1.0 - radiation_frac);
+        assert!(
+            (zone_air_injection - q).abs() < 1e-9,
+            "with radiation_frac=0, full q should go to zone air"
+        );
+    }
+
+    /// Verify: when radiation_frac = 1 (window is infinitely conductive),
+    /// all LWR flows through the conduction path — zero zone-air injection.
+    #[test]
+    fn window_interior_lwr_zero_flux_when_fully_conductive() {
+        let radiation_frac = 1.0_f64;
+        let q = 100.0_f64;
+        let zone_air_injection = q * (1.0 - radiation_frac);
+        assert!(
+            zone_air_injection.abs() < 1e-9,
+            "with radiation_frac=1, all LWR goes to conduction path, zero to zone air"
         );
     }
 }

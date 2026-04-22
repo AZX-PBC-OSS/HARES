@@ -9,6 +9,7 @@ use hares_envelope::{
     ExteriorTarget, FluidSolver, FluidSolverConfig, HumiditySolver, HumiditySolverConfig, NodeId,
     SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring,
     SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
+    InteriorSolarSurfaceInfo, InteriorSolarZoneConfig,
     assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
@@ -242,6 +243,9 @@ fn build_solver_boundaries(
             .get(&surface_idx)
             .and_then(|d| d.r_inner_half_m2_k_w)
             .unwrap_or(0.0);
+        // OCHRE "full" mode: radiation_frac = R_film_conv / (R_film_conv + R_inner_half).
+        // R_film is convection-only (1/h_conv from TARP). LWR is handled
+        // entirely by the explicit ScriptF injection module.
         let interior_rad_frac = if r_inner_half > 0.0 {
             r_film_int / (r_film_int + r_inner_half)
         } else {
@@ -470,8 +474,12 @@ pub(crate) fn build_default_solvers(
     let zone_capacitances = derive_zone_capacitances(&zone_inputs);
 
     // Build the RC network from material layers where available.
+    // StarMesh mode bakes linearized inter-surface radiation conductances
+    // into the A-matrix at construction time. ScriptF mode preserves the
+    // iterative T⁴ radiosity injection path.
+    let interior_lwr_method = hares_envelope::InteriorLwrMethod::default(); // StarMesh
     let (rc, envelope_diagnostics) =
-        assemble_building_rc(&boundary_inputs, n_zones, &zone_capacitances)
+        assemble_building_rc(&boundary_inputs, n_zones, &zone_capacitances, interior_lwr_method)
             .map_err(HaresError::Envelope)?;
 
     let BuildingRC {
@@ -565,6 +573,7 @@ pub(crate) fn build_default_solvers(
             .first()
             .map(|z| z.id)
             .unwrap_or(hares_types::ZoneId(1)),
+        interior_lwr_method,
         ..ThermalSolverConfig::default()
     };
     for (zone_idx, zone) in env.zones.iter().enumerate() {
@@ -664,14 +673,16 @@ pub(crate) fn build_default_solvers(
         }
 
         // Add interior surfaces for LWR and solar distribution.
-        // Windows participate in interior LWR (emissivity=0.84 per EnergyPlus)
-        // but receive solar via SHGC/IAM, not the floor/wall distribution path.
         //
-        // Window LWR flux goes entirely to zone air (no RC node). The window
-        // surface temperature is estimated from outdoor driving temp and the
-        // conduction gradient: T_surf = radiation_frac × T_outdoor + (1-radiation_frac) × T_zone.
-        // This matches OCHRE's approach where windows have t_idx=None and all
-        // LWR goes to zone.radiation_heat.
+        // Opaque surfaces: R_film_int is convection-only (1/h_conv from TARP).
+        // The full LWR flux q is split by the radiation_frac divider:
+        //   q × radiation_frac       → surface RC node
+        //   q × (1 − radiation_frac) → zone air
+        // No double-counting since R_film does not include h_rad.
+        //
+        // Window surfaces: no RC node (t_idx=None in OCHRE). Only
+        // q × (1 − radiation_frac) → zone air. The radiation_frac
+        // portion is carried by the window U-factor conduction path.
         let is_window = sb.boundary_category == Some(BoundaryCategory::Window);
         let include_in_lwr = include_interior_lwr(
             is_window,
@@ -696,13 +707,15 @@ pub(crate) fn build_default_solvers(
 
             let (emissivity, solar_absorptance, radiation_frac, rad_res_k_w, driving_temp) =
                 if is_window {
-                    // Window LWR: emissivity=0.84 (EnergyPlus default).
+                    // Window LWR: emissivity=0.9 per ASHRAE 140-2017 §5.3.1.9
+                    // Table 24: ε_ir = 0.9 for ALL interior surfaces including windows.
+                    // The 0.84 value is the NFRC glass thermal emissivity for U-factor
+                    // rating only; for interior LWR exchange ASHRAE 140 specifies 0.9.
                     // Surface temp driven by outdoor conduction.
-                    // radiation_frac from EnergyPlus interior film decomposition:
+                    // radiation_frac from E+ interior film decomposition:
                     //   res_int = 1 / (0.359073 × ln(U) + 6.949915)
                     //   radiation_frac = res_int / (1/U)
-                    // where U is the window U-factor in W/(m²·K).
-                    const WINDOW_EMISSIVITY: f64 = 0.84;
+                    const WINDOW_EMISSIVITY: f64 = 0.9;
                     let diag = diag_by_idx.get(&sb.surface_idx);
                     let r_total = diag.map(|d| d.r_total_m2_k_w).unwrap_or(0.5);
                     let u_window = if r_total > 1e-9 { 1.0 / r_total } else { 2.0 };
@@ -716,6 +729,8 @@ pub(crate) fn build_default_solvers(
                         Some(DrivingTemp::Outdoor),
                     )
                 } else {
+                    // Opaque surfaces: rad_res_k_w uses convection-only R_film
+                    // (OCHRE "full" mode: R_film = 1/h_conv, no parallel R_rad).
                     (
                         sb.attic_emissivity,
                         0.6,
@@ -780,16 +795,43 @@ pub(crate) fn build_default_solvers(
         }
     }
 
+    // Always populate interior_solar_zones so that solar distribution works
+    // in both StarMesh and ScriptF modes. In StarMesh mode, interior_lwr_zones
+    // is empty but solar still needs surface metadata for the radiation_frac split.
+    for (zid, surfaces) in &surfaces_by_zone {
+        let solar_surfaces: Vec<InteriorSolarSurfaceInfo> = surfaces
+            .iter()
+            .map(|s| InteriorSolarSurfaceInfo {
+                input_index: Some(s.input_index),
+                area_m2: s.area_m2,
+                solar_absorptance: s.solar_absorptance,
+                radiation_frac: s.radiation_frac,
+                is_floor: s.is_floor,
+            })
+            .collect();
+        if !solar_surfaces.is_empty() {
+            thermal_cfg.interior_solar_zones.push(InteriorSolarZoneConfig {
+                zone_id: *zid,
+                surfaces: solar_surfaces,
+            });
+        }
+    }
+
     // Group surfaces_by_zone into interior_lwr_zones.
-    for (zid, surfaces) in surfaces_by_zone {
-        if surfaces.len() >= 2 {
-            let mut zone_cfg = hares_envelope::InteriorLwrZoneConfig {
-                zone_id: zid,
-                surfaces,
-                scriptf: None,
-            };
-            zone_cfg.compute_scriptf();
-            thermal_cfg.interior_lwr_zones.push(zone_cfg);
+    // Only populate when using ScriptF mode — StarMesh bakes radiation
+    // conductances into the A-matrix at construction time, so per-timestep
+    // ScriptF injection is not needed (and would double-count).
+    if interior_lwr_method == hares_envelope::InteriorLwrMethod::ScriptF {
+        for (zid, surfaces) in surfaces_by_zone {
+            if surfaces.len() >= 2 {
+                let mut zone_cfg = hares_envelope::InteriorLwrZoneConfig {
+                    zone_id: zid,
+                    surfaces,
+                    scriptf: None,
+                };
+                zone_cfg.compute_scriptf();
+                thermal_cfg.interior_lwr_zones.push(zone_cfg);
+            }
         }
     }
 

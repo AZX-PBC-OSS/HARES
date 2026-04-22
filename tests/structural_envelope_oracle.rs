@@ -15,7 +15,7 @@ mod tests {
     use hares_core::{
         building_to_boundary_inputs, building_to_zone_inputs, mass_multiplier_for_zone,
     };
-    use hares_envelope::{ExteriorTarget, RCPath, assemble_building_rc, derive_zone_capacitances};
+    use hares_envelope::{ExteriorTarget, InteriorLwrMethod, RCPath, assemble_building_rc, derive_zone_capacitances};
     use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use hares_io::{DefaultsStore, parse_hpxml};
@@ -417,7 +417,7 @@ mod tests {
         );
 
         // Assemble the RC network
-        let (rc, _diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps)
+        let (rc, _diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps, InteriorLwrMethod::StarMesh)
             .expect("assemble_building_rc must succeed");
 
         // Zone state rows
@@ -517,7 +517,7 @@ mod tests {
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
         let zone_caps = derive_zone_capacitances(&zone_inputs);
 
-        let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps)
+        let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps, InteriorLwrMethod::StarMesh)
             .expect("assemble_building_rc must succeed");
 
         eprintln!("\n=== Boundary-by-Boundary UA Diagnostics ===");
@@ -667,13 +667,14 @@ mod tests {
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
         let zone_caps = derive_zone_capacitances(&zone_inputs);
 
-        let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps)
+        let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps, InteriorLwrMethod::StarMesh)
             .expect("assemble_building_rc must succeed");
 
-        // Load ASHRAE-correct RC reference. Interior film R includes combined
-        // convection (TARP, EnergyPlus Eng. Ref. Sec. 9.4) + linearized radiation
-        // (ASHRAE Handbook of Fundamentals 2021 Ch. 26 Table 1). Window U-factor
-        // converts IP BTU/(hr*ft2*F) -> SI via x5.678 per ASHRAE 90.1-2022.
+        // Load ASHRAE-correct RC reference. Interior film R is convection-only
+        // (TARP h_conv, no h_rad). Longwave radiation is handled by the
+        // explicit interior LWR exchange module (ScriptF surface-to-surface).
+        // Window U-factor converts IP BTU/(hr*ft2*F) -> SI via x5.678 per
+        // ASHRAE 90.1-2022.
         let ref_json_path = project_root().join("tests/fixtures/parity/ashrae_rc_reference.json");
         let ref_json: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(&ref_json_path)
@@ -1018,32 +1019,31 @@ mod tests {
         }
     }
 
-    // ── Test 6: ASHRAE interior film resistance regression ─────────────────
+    // ── Test 6: Interior film resistance regression ─────────────────
     //
-    // Locks in the ASHRAE/EnergyPlus convention that interior surface film
-    // resistance accounts for BOTH natural convection (TARP) AND linearized
-    // longwave radiation (h_rad = 4·ε·σ·T³, ε=0.9, T_mean=293.15 K).  The
-    // OCHRE reference omitted the radiative contribution, understating the
-    // combined interior film conductance by ~2.7× and inflating R_i to
-    // ~0.326 m²·K/W on vertical walls.
+    // Locks in the convection-only interior film resistance convention.
+    // R_film_int = 1/h_conv (TARP natural convection only). Longwave
+    // radiation is handled entirely by the explicit interior LWR exchange
+    // module (ScriptF surface-to-surface), not by the linearized h_rad
+    // in the film coefficient. This matches EnergyPlus Eng.Ref "Inside
+    // Heat Balance" which explicitly separates q''_conv (h_c only) from
+    // q''_LWX (surface-to-surface LWR).
     //
-    // Reference values (ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1
-    // "Surface Film Resistances for Surfaces of Emittance ε = 0.90"):
-    //   - Vertical wall, horizontal heat flow:    R_i ≈ 0.120 m²·K/W
-    //   - Horizontal surface, heat flow up:       R_i ≈ 0.106 m²·K/W
-    //   - Horizontal surface, heat flow down:     R_i ≈ 0.162 m²·K/W
+    // Reference values (TARP h_conv for vertical wall with ΔT=12.9°C):
+    //   h_conv = 1.31 × 12.9^(1/3) ≈ 3.076 W/(m²·K)
+    //   R_film_int = 1/h_conv ≈ 0.325 m²·K/W
     //
-    // HARES computes these dynamically in
-    // `hares_physics::film_coefficients::film_resistances`
-    // (see crates/hares-physics/src/film_coefficients.rs); the combined
-    // h_conv + h_rad matches the ASHRAE table values to within the
-    // convection model's own sensitivity to ΔT.
+    // ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 gives the
+    // COMBINED film resistance (convection + radiation) as 0.120 m²·K/W
+    // for vertical walls. The convection-only portion is ~0.325 m²·K/W.
+    // The radiative portion (h_rad ≈ 5.14 W/(m²·K)) is handled by the
+    // interior LWR module, not by R_film_int.
     #[test]
     fn ashrae_interior_film_resistance_regression() {
         use hares_physics::film_coefficients::{SurfaceRoughness, ZoneLabel, film_resistances};
 
         // Vertical wall, Conditioned interior, Outdoor exterior.
-        // ASHRAE Ch. 26 Table 1 vertical-wall interior film R: 0.120 m²·K/W.
+        // Convection-only R_film_int ≈ 0.325 m²·K/W for vertical wall.
         let (r_int_wall, _) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
@@ -1053,16 +1053,17 @@ mod tests {
             10.0,
             SurfaceRoughness::MediumRough,
         );
+        let h_conv = 1.31 * 12.9_f64.cbrt();
+        let r_conv_only = 1.0 / h_conv;
         assert!(
-            (r_int_wall - 0.120).abs() < 0.01,
-            "vertical wall R_i={r_int_wall:.4} must be 0.120 ± 0.01 m²·K/W \
-             (ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 -- \
-             vertical surface, horizontal heat flow, ε=0.9).  \
-             Regression check: combined TARP convection + linearized radiation."
+            (r_int_wall - r_conv_only).abs() < 0.01,
+            "vertical wall R_i={r_int_wall:.4} must equal 1/h_conv ≈ {r_conv_only:.4} \
+             (convection-only from TARP with ΔT=12.9°C). \
+             LWR is handled by the interior exchange module, not R_film."
         );
 
         // Ceiling from below (Conditioned looking up at Attic boundary -- heat
-        // flow upward).  ASHRAE Ch. 26 Table 1: R_i ≈ 0.106 m²·K/W upward.
+        // flow upward).  Convection-only R_film for horizontal, above_hotter=true.
         let (r_int_ceiling, _) = film_resistances(
             0.0,
             ZoneLabel::Conditioned,
@@ -1073,13 +1074,13 @@ mod tests {
             SurfaceRoughness::MediumRough,
         );
         assert!(
-            r_int_ceiling > 0.08 && r_int_ceiling < 0.20,
-            "ceiling (heat flow up) R_i={r_int_ceiling:.4} out of ASHRAE range \
-             [0.08, 0.20] m²·K/W (Handbook of Fundamentals 2021 Ch. 26 Table 1)."
+            r_int_ceiling > 0.1 && r_int_ceiling < 0.7,
+            "ceiling (heat flow up) R_i={r_int_ceiling:.4} out of convection-only range \
+             [0.1, 0.7] m²·K/W."
         );
 
         // Floor from above (Conditioned looking down at Ground -- heat flow
-        // down, stable).  ASHRAE Ch. 26 Table 1: R_i ≈ 0.162 m²·K/W downward.
+        // down, stable).  Convection-only R_film for horizontal, above_hotter=false.
         let (r_int_floor, _) = film_resistances(
             0.0,
             ZoneLabel::Conditioned,
@@ -1090,19 +1091,20 @@ mod tests {
             SurfaceRoughness::MediumRough,
         );
         assert!(
-            r_int_floor > 0.08 && r_int_floor < 0.25,
-            "floor (heat flow down) R_i={r_int_floor:.4} out of ASHRAE range \
-             [0.08, 0.25] m²·K/W (Handbook of Fundamentals 2021 Ch. 26 Table 1)."
+            r_int_floor > 0.1 && r_int_floor < 0.5,
+            "floor (heat flow down) R_i={r_int_floor:.4} out of convection-only range \
+             [0.1, 0.5] m²·K/W."
         );
 
-        // Convection-only regression guard: R_i must never approach OCHRE's
-        // ~0.325 on a vertical wall (that value corresponds to h_rad=0, which
-        // violates ASHRAE Ch. 26 surface resistance tables).
+        // Regression guard: R_film_int MUST be convection-only.
+        // The old combined R_film ≈ 0.120 violated this by baking h_rad
+        // into the film resistance, causing double-counting with the
+        // interior LWR module.
         assert!(
-            r_int_wall < 0.20,
-            "vertical wall R_i={r_int_wall:.4} ≥ 0.20 -- radiative film contribution \
-             appears missing (convection-only regression).  See \
-             crates/hares-physics/src/film_coefficients.rs (h_rad term)."
+            r_int_wall > 0.25,
+            "vertical wall R_i={r_int_wall:.4} < 0.25 -- appears to include h_rad \
+             (combined film regression). Interior film must be convection-only; \
+             LWR is handled by the explicit interior exchange module."
         );
     }
 }

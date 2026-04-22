@@ -350,8 +350,9 @@ fn ochre_ashp_fixture_total_shape_and_timing_aligns() {
     let actual_center =
         activity_center_index(&actual_heat).expect("actual heating series must not be empty");
     // Regression anchor: timing center shifts as physics corrections accumulate.
-    // Updated after: eta_c fix, HPWH capacity, ER threshold, boiler space_fraction.
-    let expected_center: usize = 34;
+    // Updated after: eta_c fix, HPWH capacity, ER threshold, boiler space_fraction,
+    // combined interior R_film (h_conv + h_rad), surface_node radiation topology.
+    let expected_center: usize = 31;
     assert!(
         actual_center.abs_diff(expected_center) <= 2,
         "ASHP HVAC electric power timing center must stay near step {expected_center}: actual={actual_center}"

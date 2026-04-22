@@ -178,8 +178,12 @@ def typical_zone_temperature(
 def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
     """Return ``(r_interior, r_exterior)`` in m^2*K/W.
 
-    Interior film = TARP natural convection + linearised long-wave
-    radiation, per ASHRAE Ch. 26 Table 1 and EnergyPlus §9.4.
+    Interior film = TARP natural convection only (1/h_conv). Longwave
+    radiation is handled entirely by the explicit interior LWR exchange
+    module (ScriptF surface-to-surface), not by the linearized h_rad in
+    the film coefficient. This matches EnergyPlus Eng.Ref "Inside Heat
+    Balance" which explicitly separates q''_conv (h_c only) from
+    q''_LWX (surface-to-surface LWR).
 
     Exterior film:
 
@@ -205,7 +209,14 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
     delta_t = max(abs(t_ext - t_int), MIN_DELTA_T_TARP_NATURAL_K)
     h_conv = tarp_h_natural(inputs.tilt_deg, delta_t, above_hotter)
     h_rad = h_radiation_interior()
-    r_int = 1.0 / (h_conv + h_rad)
+    # Interior film resistance uses convection only (h_conv from TARP).
+    # Longwave radiation is handled entirely by the explicit interior LWR
+    # exchange module (ScriptF surface-to-surface), not by the linearized
+    # h_rad in the film coefficient. This matches EnergyPlus Eng.Ref
+    # "Inside Heat Balance" which explicitly separates q''_conv (h_c only)
+    # from q''_LWX (surface-to-surface LWR), and OCHRE which uses
+    # R_film = 1/h_natural (convection-only).
+    r_int = 1.0 / h_conv
 
     if inputs.exterior_zone == "EXT":
         h_glass = math.sqrt(h_conv**2 + (3.40 * inputs.avg_wind_speed_m_s**0.75) ** 2)
@@ -217,6 +228,25 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
         r_ext = r_int
 
     return r_int, r_ext
+
+
+def film_resistances_combined(inputs: FilmInputs) -> tuple[float, float, float]:
+    """Return ``(r_interior_conv_only, r_interior_combined, r_exterior)`` in m²·K/W.
+
+    ``r_interior_conv_only`` is the convection-only film (1/h_conv), used as
+    the R_film_int input to the RC builder.
+
+    ``r_interior_combined`` is 1/(h_conv + h_rad), used for the effective
+    R_total and UA of the assembly (the parallel R_conv||R_rad in the
+    RC network provides this combined conductance to zone air).
+
+    ``r_exterior`` is the same as ``film_resistances``.
+    """
+    r_conv, r_ext = film_resistances(inputs)
+    h_conv = 1.0 / r_conv
+    h_rad = h_radiation_interior()
+    r_combined = 1.0 / (h_conv + h_rad)
+    return r_conv, r_combined, r_ext
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +634,18 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
             )
         )
 
+    def _film_combined(tilt: float, interior: str, exterior: str) -> tuple[float, float, float]:
+        return film_resistances_combined(
+            FilmInputs(
+                tilt_deg=tilt,
+                interior_zone=interior,
+                exterior_zone=exterior,
+                avg_wind_speed_m_s=location.avg_wind_speed_m_s,
+                avg_ground_temp_c=location.avg_ground_temp_c,
+                avg_ambient_temp_c=location.avg_ambient_temp_c,
+            )
+        )
+
     boundaries: list[dict[str, Any]] = []
 
     # ── Exterior Wall ─────────────────────────────────────────────────────
@@ -617,7 +659,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_ext_wall_layer, cap_kj_m2 = _assembly_r_capacitance_kj(
         ASSEMBLY_LAYERS["exterior_wall"]
     )
-    r_fi, r_fe = _film(90.0, "LIV", "EXT")
+    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "LIV", "EXT")
     r_total = r_ext_wall_layer + r_fi + r_fe
     ua = wall_net_area / r_total
     cap_kj = cap_kj_m2 * wall_net_area
@@ -643,7 +685,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_attic_wall_layer, cap_kj_m2 = _assembly_r_capacitance_kj(
         ASSEMBLY_LAYERS["attic_wall"]
     )
-    r_fi, r_fe = _film(90.0, "ATC", "EXT")
+    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "ATC", "EXT")
     r_total = r_attic_wall_layer + r_fi + r_fe
     ua = attic_wall_area / r_total
     cap_kj = cap_kj_m2 * attic_wall_area
@@ -672,7 +714,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     # Horizontal, heat flow up (conditioned warmer than attic in heating
     # season with anchors 20 °C vs 15 °C).  Tilt = 0, interior LIV, exterior
     # ATC -- both sides unconditioned so r_ext = r_int by symmetry.
-    r_fi, r_fe = _film(0.0, "LIV", "ATC")
+    r_fi, r_fi_eff, r_fe = _film_combined(0.0, "LIV", "ATC")
     r_total = r_attic_floor_layer + r_fi + r_fe
     ua = attic_floor_area / r_total
     cap_kj = cap_kj_m2 * attic_floor_area
@@ -696,7 +738,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     # ── Floor (slab-on-grade) ─────────────────────────────────────────────
     slab_area = sum(s["area_m2"] for s in b.slabs)
     r_slab_layer, cap_kj_m2 = _assembly_r_capacitance_kj(ASSEMBLY_LAYERS["floor"])
-    r_fi, r_fe = _film(0.0, "LIV", "GND")
+    r_fi, r_fi_eff, r_fe = _film_combined(0.0, "LIV", "GND")
     r_total = r_slab_layer + r_fi + r_fe
     ua = slab_area / r_total
     cap_kj = cap_kj_m2 * slab_area
@@ -722,7 +764,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_roof_layer, cap_kj_m2 = _assembly_r_capacitance_kj(ASSEMBLY_LAYERS["attic_roof"])
     # Roof tilt from Pitch (rise per 12").  tilt_deg = atan(rise/12).
     pitch_angle_deg = math.degrees(math.atan(b.roof_pitch_rise_12 / 12.0))
-    r_fi, r_fe = _film(pitch_angle_deg, "ATC", "EXT")
+    r_fi, r_fi_eff, r_fe = _film_combined(pitch_angle_deg, "ATC", "EXT")
     r_total = r_roof_layer + r_fi + r_fe
     ua = roof_area / r_total
     cap_kj = cap_kj_m2 * roof_area
@@ -773,7 +815,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     # ── Door ──────────────────────────────────────────────────────────────
     door_area = sum(d["area_m2"] for d in b.doors)
     r_door_layer, cap_kj_m2 = _assembly_r_capacitance_kj(ASSEMBLY_LAYERS["door"])
-    r_fi, r_fe = _film(90.0, "LIV", "EXT")
+    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "LIV", "EXT")
     r_total = r_door_layer + r_fi + r_fe
     ua = door_area / r_total
     cap_kj = cap_kj_m2 * door_area
@@ -803,10 +845,12 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_interior_wall_layer, cap_kj_m2 = _assembly_r_capacitance_kj(
         ASSEMBLY_LAYERS["interior_wall"]
     )
-    r_fi, r_fe = _film(90.0, "LIV", "LIV")
+    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "LIV", "LIV")
     # Same-zone boundary: halved resistor rule (RC topology puts both outer
     # nodes at the same zone node, giving an equivalent resistor half the
     # layer R; see EnergyPlus SameZoneOption documentation).
+    # R_film_int is convection-only; longwave radiation is handled by the
+    # explicit interior LWR exchange module (star-mesh conductances).
     r_total_iw = r_interior_wall_layer / 2.0 + r_fi
     ua_iw = interior_wall_area / r_total_iw
     cap_kj = cap_kj_m2 * interior_wall_area
@@ -835,7 +879,10 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     r_furniture_layer, cap_kj_m2 = _assembly_r_capacitance_kj(
         ASSEMBLY_LAYERS["indoor_furniture"]
     )
-    r_fi, r_fe = _film(90.0, "LIV", "LIV")
+    r_fi, r_fi_eff, r_fe = _film_combined(90.0, "LIV", "LIV")
+    # Same-zone boundary: halved resistor + convection-only interior film.
+    # Longwave radiation is handled by the explicit interior LWR exchange
+    # module (star-mesh conductances), not by R_film_int.
     r_total_f = r_furniture_layer / 2.0 + r_fi
     ua_f = furniture_area / r_total_f
     cap_kj = cap_kj_m2 * furniture_area

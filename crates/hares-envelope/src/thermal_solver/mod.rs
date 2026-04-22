@@ -11,9 +11,10 @@ mod stepping;
 pub(crate) use config::Result;
 pub use config::{
     BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
-    ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo,
-    MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSolverConfig,
-    ThermalSolverError, WindowSolarProperties,
+    ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
+    InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
+    NaturalVentilationConfig, StateSpaceWiring, ThermalSolverConfig, ThermalSolverError,
+    WindowSolarProperties,
 };
 
 use std::collections::HashMap;
@@ -235,7 +236,12 @@ impl ThermalSolver {
         let after_ext_solar = u[z_idx];
         self.apply_exterior_longwave_inputs_iterative(&mut u, env);
         let after_ext_lwr = u[z_idx];
-        self.apply_interior_longwave_inputs(&mut u, env);
+        // Interior LWR: ScriptF iterative injection only when not using
+        // StarMesh (star-mesh bakes radiation conductances into the A-matrix
+        // at construction time, so no per-timestep injection is needed).
+        if self.config.interior_lwr_method == crate::boundary_rc::InteriorLwrMethod::ScriptF {
+            self.apply_interior_longwave_inputs(&mut u, env);
+        }
         let after_int_lwr = u[z_idx];
         self.apply_port_sensible_inputs(&mut u, ports);
         let after_port = u[z_idx];
@@ -472,9 +478,17 @@ impl ThermalSolver {
 
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.int_surface_diag_buf.clear();
-        self.apply_interior_longwave_inputs(&mut u, env);
-        // Interior LWR redistributes heat between surfaces (zero-sum on u).
-        // Use the per-zone total from lwr_by_zone_buf for the indoor zone.
+        // Interior LWR: ScriptF iterative injection only when not using
+        // StarMesh (star-mesh bakes radiation conductances into the A-matrix
+        // at construction time, so no per-timestep injection is needed).
+        if self.config.interior_lwr_method == crate::boundary_rc::InteriorLwrMethod::ScriptF {
+            self.apply_interior_longwave_inputs(&mut u, env);
+        }
+        // Interior LWR: per-zone net LWR to zone air [W]. For opaque surfaces,
+        // the convective fraction q × (1 − radiation_frac) goes to zone air. For
+        // windows, only q × (1 − radiation_frac) is injected (the remainder flows
+        // to outdoors via the U-factor conduction path, already in the RC network).
+        // E+ Eng.Ref "Inside Surface Heat Balance".
         let interior_lwr_w = self
             .lwr_by_zone_buf
             .iter()
@@ -845,7 +859,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
     }
@@ -924,7 +940,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
     }
@@ -1052,7 +1070,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();
         let state = solver.state();
@@ -1141,7 +1161,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
         solver.x[0] = 20.0;
@@ -1592,7 +1614,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -1637,7 +1661,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -1805,7 +1831,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -1868,7 +1896,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -1915,7 +1945,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -1966,7 +1998,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2101,7 +2135,9 @@ mod tests {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -2248,7 +2284,9 @@ mod tests {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, &env, zone_temp)
@@ -2406,7 +2444,9 @@ mod tests {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
             };
             let env = make_env();
             let mut s =
@@ -2749,7 +2789,9 @@ mod tests {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -2860,7 +2902,9 @@ mod tests {
             )),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver_nv =
             ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
@@ -2939,7 +2983,9 @@ mod tests {
             )),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver_nv =
             ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
@@ -3031,7 +3077,9 @@ mod tests {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -3176,7 +3224,9 @@ mod tests {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -3287,12 +3337,14 @@ mod tests {
                     natural_ventilation: None,
                     supply_duct_leakage_m3_s: 0.0,
                     return_duct_leakage_m3_s: 0.0,
-                    boundary_diagnostics: Vec::new(),
-                };
-                let mut s =
-                    ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
-                        .unwrap();
-                s.x[0] = zone_temp;
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
+            };
+            let mut s =
+                ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
+                    .unwrap();
+            s.x[0] = zone_temp;
                 s
             };
 
@@ -3473,14 +3525,14 @@ mod tests {
 
     #[test]
     fn radiation_frac_correction_magnitude_for_lightweight_boundary() {
-        // Lightweight wall: R_film = 0.12 m²K/W, R_material = 0.05 m²K/W
-        // radiation_frac = 0.12 / (0.12 + 0.05) ≈ 0.706
-        // Node at 28 °C, zone at 22 °C → true surface ≈ 26.24 °C (1.76 °C correction)
-        let r_film = 0.12_f64;
+        // Lightweight wall: R_film = 0.325 m²K/W (convection-only), R_material = 0.05 m²K/W
+        // radiation_frac = 0.325 / (0.325 + 0.05) ≈ 0.867
+        // Node at 35 °C, zone at 20 °C → true surface ≈ 33.0 °C (2.0 °C correction)
+        let r_film = 0.325_f64;
         let r_material = 0.05_f64;
         let rad_frac = r_film / (r_film + r_material);
-        let t_node = 28.0_f64;
-        let t_zone = 22.0_f64;
+        let t_node = 35.0_f64;
+        let t_zone = 20.0_f64;
         let t_surf = rad_frac * t_node + (1.0 - rad_frac) * t_zone;
         let correction = (t_node - t_surf).abs();
 
@@ -3590,10 +3642,10 @@ mod tests {
                     state_index: 0,
                     input_index: 2,
                     area_m2: 25.0,
-                    emissivity: 0.9,
-                    radiation_frac: 1.0,
-                    rad_res_k_w: 0.02,
-                    solar_absorptance: 0.5,
+                    emissivity: 0.84,
+                    radiation_frac: 0.36,
+                    rad_res_k_w: 0.020,
+                    solar_absorptance: 0.0,
                     is_floor: false,
                     driving_temp: Some(DrivingTemp::Outdoor),
                 },
@@ -3623,7 +3675,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 300.0, &env, 22.0).unwrap();
         solver.x[0] = 30.0;
@@ -3684,7 +3738,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -3866,7 +3922,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let mut solver_combined = ThermalSolver::new(
             model,
@@ -4021,7 +4079,9 @@ mod tests {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -4329,7 +4389,9 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            boundary_diagnostics: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
         };
         let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
 
@@ -4372,6 +4434,257 @@ mod tests {
             "energy conservation: total = {:.6}, expected {:.6}",
             total,
             radiant_w
+        );
+    }
+
+    #[test]
+    fn window_interior_lwr_applied_to_zone_air() {
+        let t_zone = 22.0;
+        let t_out = -15.0;
+        let env = env_for_temp(t_zone, t_out);
+
+        let a_c = DMatrix::from_row_slice(
+            3,
+            3,
+            &[
+                -1.0 / 50_000.0,
+                0.0,
+                0.0,
+                0.0,
+                -1.0 / 40_000.0,
+                0.0,
+                0.0,
+                0.0,
+                -1.0 / 30_000.0,
+            ],
+        );
+        let b_c = DMatrix::zeros(3, 4);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let zone = ZoneId(1);
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(zone, 0)]),
+            zone_output_indices: HashMap::from([(zone, 0)]),
+            zone_sensible_input_indices: HashMap::from([(zone, 3)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+        let rad_frac_opaque = 0.7;
+        // Window radiation_frac from EnergyPlus interior film decomposition
+        // for U=3.0 W/(m²·K): res_int ≈ 0.120, R_total ≈ 0.333, rad_frac ≈ 0.36.
+        let rad_frac_window = 0.36;
+        let interior_lwr_zone = InteriorLwrZoneConfig {
+            zone_id: zone,
+            surfaces: vec![
+                InteriorSurfaceInfo {
+                    state_index: 1,
+                    input_index: 1,
+                    area_m2: 40.0,
+                    emissivity: 0.9,
+                    radiation_frac: rad_frac_opaque,
+                    rad_res_k_w: 0.003,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+                InteriorSurfaceInfo {
+                    state_index: 2,
+                    input_index: 2,
+                    area_m2: 6.0,
+                    emissivity: 0.84,
+                    radiation_frac: rad_frac_window,
+                    rad_res_k_w: 0.020,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: Some(DrivingTemp::Outdoor),
+                },
+            ],
+            scriptf: None,
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: zone,
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![interior_lwr_zone],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+                boundary_diagnostics: Vec::new(),
+        };
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, t_zone).unwrap();
+        solver.x[0] = t_zone;
+        solver.x[1] = 24.0;
+        solver.x[2] = t_zone;
+
+        let mut u = DVector::zeros(4);
+        solver.apply_interior_longwave_inputs(&mut u, &env);
+
+        let air_idx = solver.wiring.zone_sensible_input_indices[&zone];
+        assert!(
+            u[1] != 0.0 || u[air_idx] != 0.0,
+            "opaque surface LWR must be deposited somewhere"
+        );
+
+        let opaque_flux = u[1] / rad_frac_opaque;
+        let opaque_air = opaque_flux * (1.0 - rad_frac_opaque);
+
+        let window_air = u[air_idx] - opaque_air;
+
+        assert!(
+            window_air > 0.0,
+            "window interior LWR zone-air fraction must be positive (cold window gains from warm surfaces), got {window_air:.4}"
+        );
+
+        // Verify the resistance-divider scaling: window zone-air injection
+        // must equal q_window × (1 − radiation_frac), which is strictly
+        // less than the full q_window. Derive q_window from the opaque
+        // surface's contribution (energy conservation: Σq = 0 in a 2-surface
+        // zone means q_window = −q_opaque).
+        let q_opaque = u[1] / rad_frac_opaque;
+        let q_window = -q_opaque; // two-surface energy conservation
+        // OCHRE "full" mode: window zone-air injection = q_window × (1 − radiation_frac).
+        // Windows have no RC node (t_idx=None), so only the zone-air fraction
+        // is injected. The radiation_frac portion is carried by the window's
+        // U-factor conduction path. OCHRE `_solve_interior_radiation` lines
+        // 1187-1195: `if surface.t_idx is not None` guards h_idx injection.
+        let expected_window_air = q_window * (1.0 - rad_frac_window);
+        assert!(
+            (window_air - expected_window_air).abs() < 1e-6,
+            "window zone-air injection ({window_air:.6}) should equal q×(1−rad_frac) = {expected_window_air:.6}"
+        );
+        assert!(
+            window_air.abs() < q_window.abs() || q_window.abs() < 1e-9,
+            "window zone-air injection ({window_air:.4}) must be less than full q ({q_window:.4})"
+        );
+
+        assert!(
+            u[2] == 0.0,
+            "window surface input must be zero (no RC node), got {:.6}",
+            u[2]
+        );
+    }
+
+    #[test]
+    fn window_interior_lwr_energy_conservation() {
+        use crate::longwave_radiation::{InteriorSurface, interior_longwave_linearised_w};
+
+        let t_zone = 20.0;
+        let t_out = -10.0;
+
+        let infos = [
+            InteriorSurfaceInfo {
+                state_index: 0,
+                input_index: 0,
+                area_m2: 50.0,
+                emissivity: 0.90,
+                radiation_frac: 0.7,
+                rad_res_k_w: 0.003,
+                solar_absorptance: 0.0,
+                is_floor: false,
+                driving_temp: None,
+            },
+            InteriorSurfaceInfo {
+                state_index: 1,
+                input_index: 1,
+                area_m2: 30.0,
+                emissivity: 0.90,
+                radiation_frac: 0.85,
+                rad_res_k_w: 0.003,
+                solar_absorptance: 0.0,
+                is_floor: false,
+                driving_temp: None,
+            },
+            InteriorSurfaceInfo {
+                state_index: 2,
+                input_index: 2,
+                area_m2: 40.0,
+                emissivity: 0.90,
+                radiation_frac: 0.6,
+                rad_res_k_w: 0.003,
+                solar_absorptance: 0.0,
+                is_floor: true,
+                driving_temp: None,
+            },
+            InteriorSurfaceInfo {
+                state_index: 0,
+                input_index: 3,
+                area_m2: 6.0,
+                emissivity: 0.84,
+                radiation_frac: 0.36,
+                rad_res_k_w: 0.020,
+                solar_absorptance: 0.0,
+                is_floor: false,
+                driving_temp: Some(DrivingTemp::Outdoor),
+            },
+        ];
+
+        let t_nodes = [25.0, 18.0, 22.0];
+        let surfaces: Vec<InteriorSurface> = infos
+            .iter()
+            .map(|s| InteriorSurface {
+                area_m2: s.area_m2,
+                emissivity: s.emissivity,
+            })
+            .collect();
+        let t_surfaces: Vec<f64> = infos
+            .iter()
+            .zip(t_nodes.iter().chain(std::iter::once(&t_out)))
+            .map(|(s, &t_node)| s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone)
+            .collect();
+
+        let net = interior_longwave_linearised_w(&surfaces, &t_surfaces, t_zone);
+
+        let sum_flux: f64 = net.iter().sum();
+        assert!(
+            sum_flux.abs() < 1e-8,
+            "LWR exchange must conserve energy: Σq = {sum_flux:.10}"
+        );
+
+        // Total injected to solver inputs: opaque surfaces get the full q
+        // (split via radiation_frac between surface node and zone air — no
+        // double-counting since R_film is convection-only), while window
+        // surfaces only get q × (1 − radiation_frac) to zone air (OCHRE
+        // "full" mode: t_idx=None → no h_idx injection). The window's
+        // q × radiation_frac portion is carried by the U-factor conduction
+        // path (boundary temp already reflects LWR exchange).
+        let total_injected: f64 = infos
+            .iter()
+            .zip(net.iter())
+            .map(|(info, &q)| {
+                if info.driving_temp.is_none() {
+                    q * info.radiation_frac + q * (1.0 - info.radiation_frac)
+                } else {
+                    q * (1.0 - info.radiation_frac)
+                }
+            })
+            .sum();
+
+        // The "missing" energy (Σ q_window × radiation_frac) is not destroyed —
+        // it is carried by the window boundary temperature update and the
+        // U-factor conduction path (OCHRE `_solve_interior_radiation`:
+        // windows skip h_idx injection when t_idx is None).
+        let window_to_cond: f64 = infos
+            .iter()
+            .zip(net.iter())
+            .filter(|(info, _)| info.driving_temp.is_some())
+            .map(|(info, &q)| q * info.radiation_frac)
+            .sum();
+
+        assert!(
+            (total_injected + window_to_cond - sum_flux).abs() < 1e-9,
+            "total injected ({total_injected:.6}) + window-to-cond ({window_to_cond:.6}) must equal Σq ({sum_flux:.6}) — no energy destroyed"
         );
     }
 }

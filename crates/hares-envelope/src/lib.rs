@@ -10,9 +10,9 @@ pub mod state_space;
 pub mod thermal_solver;
 
 pub use boundary_rc::{
-    BoundaryDiagnostic, BoundaryInput, BuildingRC, EnvelopeDiagnostics, ExteriorTarget, LayerInput,
-    PrecomputedRCLayer, RCPath, SurfaceLayerInfo, ZoneInput, assemble_building_rc,
-    derive_zone_capacitances, parallel_path_conductivity,
+    BoundaryDiagnostic, BoundaryInput, BuildingRC, EnvelopeDiagnostics, ExteriorTarget,
+    InteriorLwrMethod, LayerInput, PrecomputedRCLayer, RCPath, SurfaceLayerInfo, ZoneInput,
+    assemble_building_rc, derive_zone_capacitances, parallel_path_conductivity,
 };
 pub use electrical_solver::{
     ElectricalSolver, ElectricalSolverConfig, ElectricalSolverError, ZipCoefficients,
@@ -33,7 +33,8 @@ pub use state_space::{
 };
 pub use thermal_solver::{
     BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
-    ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo,
-    MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSolver,
-    ThermalSolverConfig, ThermalSolverError, WindowSolarProperties,
+    ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
+    InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
+    NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
+    ThermalSolverError, WindowSolarProperties,
 };

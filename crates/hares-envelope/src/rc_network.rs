@@ -534,4 +534,359 @@ mod tests {
         let expected = DMatrix::from_row_slice(1, 2, &[1.0 / (5.0 * 2.0), 1.0 / (2.0 * 2.0)]);
         assert_eq!(b_c, expected);
     }
+
+    // ── Star-mesh (Y-Δ) floating node elimination ────────────────────────
+
+    /// Verify the star-mesh transform: 3-branch star (A-F, B-F, C-F) with
+    /// floating node F eliminated produces correct pairwise conductances.
+    ///
+    /// After eliminating F, the direct conductances must satisfy:
+    ///   G_AB = G_AF × G_BF / (G_AF + G_BF + G_CF)
+    ///   G_AC = G_AF × G_CF / (G_AF + G_BF + G_CF)
+    ///   G_BC = G_BF × G_CF / (G_AF + G_BF + G_CF)
+    ///
+    /// This is the standard Y-Δ (star-mesh) transform used in linearized
+    /// inter-surface radiation. Reference: TRNSYS Type 56, ESP-r,
+    /// OCHRE Envelope.py:1048-1061.
+    #[test]
+    fn star_mesh_3_branch_star_elimination_matches_formula() {
+        // Star: A--R1--F--R2--B, F--R3--C.  F is floating (no capacitance).
+        // R_AF = 2.0, R_BF = 3.0, R_CF = 6.0
+        let r_af = 2.0_f64;
+        let r_bf = 3.0;
+        let r_cf = 6.0;
+        let g_af = 1.0 / r_af;
+        let g_bf = 1.0 / r_bf;
+        let g_cf = 1.0 / r_cf;
+        let sum_g = g_af + g_bf + g_cf;
+
+        // Capacitance-bearing internal nodes A, B, C.
+        let caps = HashMap::from([(n(1), 100.0), (n(2), 200.0), (n(3), 300.0)]);
+        let res = HashMap::from([
+            ((n(1), n(100)), r_af), // A ↔ F
+            ((n(2), n(100)), r_bf), // B ↔ F
+            ((n(3), n(100)), r_cf), // C ↔ F
+        ]);
+        // F (node 100) has no capacitance → floating, will be eliminated.
+        let net = RCNetwork::from_elements(caps, res, vec![]).unwrap();
+
+        // After elimination: direct edges (A,B), (A,C), (B,C).
+        let g_ab_expected = g_af * g_bf / sum_g;
+        let g_ac_expected = g_af * g_cf / sum_g;
+        let g_bc_expected = g_bf * g_cf / sum_g;
+
+        let r_ab = net.resistances[&(n(1).min(n(2)), n(1).max(n(2)))];
+        let r_ac = net.resistances[&(n(1).min(n(3)), n(1).max(n(3)))];
+        let r_bc = net.resistances[&(n(2).min(n(3)), n(2).max(n(3)))];
+
+        assert!(
+            (1.0 / r_ab - g_ab_expected).abs() < 1e-9,
+            "G_AB: got {}, expected {g_ab_expected}",
+            1.0 / r_ab
+        );
+        assert!(
+            (1.0 / r_ac - g_ac_expected).abs() < 1e-9,
+            "G_AC: got {}, expected {g_ac_expected}",
+            1.0 / r_ac
+        );
+        assert!(
+            (1.0 / r_bc - g_bc_expected).abs() < 1e-9,
+            "G_BC: got {}, expected {g_bc_expected}",
+            1.0 / r_bc
+        );
+
+        // Floating node F should no longer appear in the reduced resistances.
+        for &(a, b) in net.resistances.keys() {
+            assert!(a != n(100) && b != n(100), "floating node F should be eliminated");
+        }
+    }
+
+    /// Verify cascading floating node elimination: A—F1—F2—B where both
+    /// F1 and F2 are floating (zero capacitance).
+    ///
+    /// After reduction, a direct edge (A,B) must exist with conductance
+    /// equal to the series combination through F1 and F2:
+    ///   G_AB = 1 / (R_AF1 + R_F1F2 + R_F2B)
+    ///
+    /// This exercises the iterative loop in `reduce_floating_nodes` which
+    /// must first eliminate one floating node, then find and eliminate the
+    /// remaining one on the next pass.
+    #[test]
+    fn cascading_floating_nodes_eliminate_to_direct_edge() {
+        let r_a_f1 = 2.0_f64;
+        let r_f1_f2 = 3.0;
+        let r_f2_b = 5.0;
+        let r_total = r_a_f1 + r_f1_f2 + r_f2_b;
+
+        let caps = HashMap::from([(n(1), 100.0), (n(2), 200.0)]);
+        let res = HashMap::from([
+            ((n(1), n(100)), r_a_f1), // A ↔ F1
+            ((n(100), n(101)), r_f1_f2), // F1 ↔ F2
+            ((n(101), n(2)), r_f2_b), // F2 ↔ B
+        ]);
+        let net = RCNetwork::from_elements(caps, res, vec![]).unwrap();
+
+        let r_ab = net.resistances[&(n(1), n(2))];
+        let g_ab = 1.0 / r_ab;
+        let g_expected = 1.0 / r_total;
+
+        assert!(
+            (g_ab - g_expected).abs() < 1e-9,
+            "G_AB: got {g_ab}, expected {g_expected}"
+        );
+
+        // No floating nodes should remain.
+        for &(a, b) in net.resistances.keys() {
+            assert!(a != n(100) && b != n(100), "F1 should be eliminated");
+            assert!(a != n(101) && b != n(101), "F2 should be eliminated");
+        }
+    }
+
+    /// 4-node zone with radiation star node + floating window node.
+    ///
+    /// Network topology (mimics a single BESTEST 600 zone):
+    ///
+    ///   ZoneAir (1) ←R_conv→ WallInner (2) ←R_mat→ Outdoor (EXT)
+    ///       ↑                          ↑
+    ///       R_conv                     R_rad_wall ──→ Star (200)
+    ///       ↓                          ↓                ↓
+    ///   FloorInner (3) ←R_mat→ GND    R_rad_floor       R_rad_win
+    ///                                                    ↓
+    ///                                              WinFloat (201)
+    ///                                                    ↓
+    ///                                              R_u_win
+    ///                                                    ↓
+    ///                                              Outdoor (EXT)
+    ///
+    /// ZoneAir (1) ←R_conv→ FloorInner (3)
+    /// ZoneAir (1) ←R_conv→ WinFloat (201)  [window convection to zone air]
+    ///
+    /// After `reduce_floating_nodes`:
+    ///   - Star (200) is eliminated → pairwise conductances between
+    ///     WallInner, FloorInner, and WinFloat
+    ///   - WinFloat (201) is now only connected to WallInner, FloorInner,
+    ///     ZoneAir, and Outdoor — but it has no capacitance, so it is also
+    ///     eliminated → direct conductances from Outdoor to WallInner,
+    ///     FloorInner, and ZoneAir (via window U-factor and radiation paths)
+    ///
+    /// This is the exact topology that HARES constructs for a zone with
+    /// 2 opaque surfaces + 1 window, using the star-mesh linearized
+    /// radiation method. The cascading elimination of Star then WinFloat
+    /// tests the multi-pass loop in `reduce_floating_nodes`.
+    ///
+    /// Reference: OCHRE `add_radiation_resistances()` at
+    /// `Envelope.py:1048-1061`, TRNSYS Type 56 star network,
+    /// EN ISO 52016-1:2017 Annex E "detailed" RC method.
+    #[test]
+    fn zone_with_star_and_window_cascading_elimination() {
+        const SIGMA: f64 = 5.670374e-8;
+        const T_REF_K: f64 = 293.15;
+        // ASHRAE 140-2017 §5.3.1.9, Table 24: ε_ir = 0.9 for ALL interior
+        // surfaces including windows.
+        const EPS_INTERIOR: f64 = 0.90;
+
+        let a_wall = 21.6_f64;
+        let a_floor = 48.0;
+        let a_window = 12.0;
+
+        // Linearized radiation conductances: G_i = 4·ε·σ·A·T_ref³
+        let g_rad_wall = 4.0 * EPS_INTERIOR * SIGMA * a_wall * T_REF_K.powi(3);
+        let g_rad_floor = 4.0 * EPS_INTERIOR * SIGMA * a_floor * T_REF_K.powi(3);
+        let g_rad_window = 4.0 * EPS_INTERIOR * SIGMA * a_window * T_REF_K.powi(3);
+        let r_rad_wall = 1.0 / g_rad_wall;
+        let r_rad_floor = 1.0 / g_rad_floor;
+        let r_rad_window = 1.0 / g_rad_window;
+
+        // Convection film resistances (TARP conv-only for vertical/horizontal)
+        // In Option 2: R_film = 1/h_conv (convection only, no h_rad).
+        let r_conv_wall = 0.3255;
+        let r_conv_floor = 0.2805;
+        // Window h_conv from U-factor decomposition:
+        // h_si = 1/r_film_int ≈ 7.33 W/m²K (for U=3.0 window)
+        // h_rad = 4×0.9×σ×T_ref³ ≈ 5.14
+        // h_conv = h_si - h_rad ≈ 2.19
+        // R_conv = 1/h_conv ≈ 0.457 m²K/W (per unit area)
+        let r_conv_window_per_m2 = 1.0 / (7.33 - 5.14);
+        let r_conv_window = r_conv_window_per_m2 / a_window;
+
+        // Material resistances (K/W)
+        let r_mat_wall = 1.789 * a_wall;
+        let r_mat_floor = 24.8 * a_floor;
+
+        // Window glass + exterior film resistance: r_glass/A
+        // For U=3.0: r_total = 1/3.0 = 0.333, r_film_int ≈ 0.136, r_glass = 0.333 - 0.136 = 0.197
+        // r_glass_ext = r_glass / A (no separate exterior film for windows)
+        let r_glass_ext = 0.197 / a_window;
+
+        // ── Build the RC network ──
+        //
+        // Option 2 (EnergyPlus/TRNSYS/ESP-r) architecture:
+        //   ZoneAir(1) ←R_conv→ WallInner(2) ←R_mat→ Outdoor(EXT)
+        //       ↑                          ↑
+        //       R_conv                     R_rad_wall ──→ Star (200)
+        //       ↓                          ↓                ↓
+        //   FloorInner(3) ←R_mat→ GND    R_rad_floor       R_rad_win
+        //                                                    ↓
+        //                                              WinFloat (201)
+        //                                              ↙          ↘
+        //                                    R_conv(→zone)    R_glass_ext(→outdoor)
+        //
+        // ZoneAir (1) ←R_conv→ FloorInner (3)
+        // ZoneAir (1) ←R_conv→ WinFloat (201)  [window convection to zone air]
+        //
+        // Key difference from combined-film model: NO parallel R_rad from
+        // zone_air to window_node. Radiation goes through star-mesh ONLY.
+        let caps = HashMap::from([
+            (n(1), 500_000.0),  // zone air thermal mass
+            (n(2), 200_000.0),  // wall inner layer
+            (n(3), 800_000.0),  // floor slab
+        ]);
+
+        let ext = vec![n(9000), n(9001)]; // Outdoor, Ground
+
+        let mut res = HashMap::new();
+
+        // Zone air ↔ opaque surfaces (convection-only R_film)
+        res.insert((n(1), n(2)), r_conv_wall);
+        res.insert((n(1), n(3)), r_conv_floor);
+
+        // Opaque surface inner nodes ↔ material → outdoor/ground
+        res.insert((n(2), n(9000)), r_mat_wall);   // wall → outdoor
+        res.insert((n(3), n(9001)), r_mat_floor);  // floor → ground
+
+        // Star node (200) ↔ each surface via linearized radiation
+        res.insert((n(2), n(200)), r_rad_wall);
+        res.insert((n(3), n(200)), r_rad_floor);
+        res.insert((n(201), n(200)), r_rad_window);
+
+        // Window float (201) ↔ zone air (convection ONLY, no parallel R_rad)
+        // and outdoor (glass + ext film resistance)
+        res.insert((n(1), n(201)), r_conv_window);
+        res.insert((n(201), n(9000)), r_glass_ext);
+
+        let net = RCNetwork::from_elements(caps, res, ext).unwrap();
+
+        // ── Verify: no floating nodes remain ──
+        for &(a, b) in net.resistances.keys() {
+            assert!(a != n(200) && b != n(200), "star node 200 should be eliminated");
+            assert!(a != n(201) && b != n(201), "window float 201 should be eliminated");
+        }
+
+        // ── Verify: expected pairwise conductances from star-mesh ──
+        //
+        // After star elimination, the direct conductances between the star's
+        // neighbors (WallInner=2, FloorInner=3, WinFloat=201) are:
+        //   G_ij = G_i,star × G_j,star / Σ G_k,star
+        let sum_g_star = g_rad_wall + g_rad_floor + g_rad_window;
+
+        // Wall ↔ Floor (direct from star elimination, both are internal)
+        let g_wall_floor_star = g_rad_wall * g_rad_floor / sum_g_star;
+        // This edge should exist in the reduced network between nodes 2 and 3
+        // (possibly in parallel with other paths)
+        let r_wf = net.resistances[&(n(2).min(n(3)), n(2).max(n(3)))];
+        let g_wf = 1.0 / r_wf;
+        // The star-mesh contribution is g_wall_floor_star; there may be other
+        // paths (e.g. through zone air) that add conductance in parallel.
+        // The reduced conductance should be >= the star-mesh value.
+        assert!(
+            g_wf >= g_wall_floor_star * (1.0 - 1e-9),
+            "G(Wall↔Floor) = {g_wf}, expected at least {g_wall_floor_star} from star-mesh"
+        );
+
+        // ── Verify: window pathways ──
+        //
+        // After cascading elimination of star then WinFloat, there must be
+        // direct conductances from Outdoor (9000) to WallInner (2),
+        // FloorInner (3), and ZoneAir (1), representing the combined
+        // window U-factor + radiation redistribution path.
+        //
+        // The elimination of WinFloat distributes its U-factor conductance
+        // to Outdoor across ALL of WinFloat's other neighbors (WallInner,
+        // FloorInner, ZoneAir) proportionally to their conductances to
+        // WinFloat. The zone-air-to-outdoor edge is NOT simply the series
+        // r_conv_window + r_u_win — it's a fraction of that, with the rest
+        // going to WallInner and FloorInner via radiation.
+        //
+        // We verify that the outdoor node is connected to zone air and
+        // that the total conductance is physically reasonable.
+        let r_zone_outdoor = net.resistances.get(&(n(1).min(n(9000)), n(1).max(n(9000))));
+        assert!(
+            r_zone_outdoor.is_some(),
+            "zone air must have a direct path to outdoor after window elimination"
+        );
+        // The wall also has a direct conductance to outdoor that includes
+        // both the material path and the radiation-redistributed window path.
+        let r_wall_outdoor = net.resistances.get(&(n(2).min(n(9000)), n(2).max(n(9000))));
+        assert!(
+            r_wall_outdoor.is_some(),
+            "wall inner must have a direct path to outdoor after window elimination"
+        );
+
+        // ── Verify: energy conservation at uniform temperature ──
+        //
+        // When all temperatures are equal, the net conductive heat flow on
+        // every internal node must be zero. This is trivially true by
+        // construction (ΔT = 0 → q = 0), but we verify it numerically
+        // by stepping the model from a uniform initial condition and
+        // checking that the state doesn't change.
+        let (a_c, b_c) = net.build_matrices().unwrap();
+
+        // All external inputs at the same temperature (20°C)
+        let x0 = vec![20.0_f64; a_c.nrows()];
+        let u_ext = vec![20.0_f64; b_c.ncols()];
+
+        // dx/dt = A·x + B·u at uniform temp should give dx/dt ≈ 0
+        let x = DMatrix::from_column_slice(a_c.nrows(), 1, &x0);
+        let u = DMatrix::from_column_slice(b_c.ncols(), 1, &u_ext);
+        let dx = &a_c * &x + &b_c * &u;
+
+        for i in 0..dx.nrows() {
+            assert!(
+                dx[(i, 0)].abs() < 1e-9,
+                "node {i}: dx/dt = {} at uniform T, energy not conserved",
+                dx[(i, 0)]
+            );
+        }
+    }
+
+    /// Linearization sensitivity of h_rad at T_ref = 20°C (293.15 K).
+    ///
+    /// The star-mesh method linearizes the Stefan-Boltzmann T⁴ radiation
+    /// law around T_ref = 293.15 K, giving h_rad = 4·ε·σ·T_ref³.
+    /// At other surface temperatures the true h_rad differs. This test
+    /// documents the error envelope for typical residential conditions.
+    ///
+    /// When someone asks "why is summer cooling slightly off in hot
+    /// climates", the answer is: the linearization at 20°C understates
+    /// h_rad at higher surface temps. The fix path is Option 3 (explicit
+    /// surface DOFs with iterated T⁴), which can be activated when the
+    /// 1-3% error becomes material for the use case.
+    #[test]
+    fn linearized_h_rad_sensitivity_at_reference_temperature() {
+        const SIGMA: f64 = 5.670374e-8;
+        const EPS: f64 = 0.9;
+        const T_REF_K: f64 = 293.15;
+
+        let h_rad_ref = 4.0 * EPS * SIGMA * T_REF_K.powi(3);
+
+        let test_temps_k: [f64; 4] = [285.0, 295.0, 305.0, 315.0];
+        let expected_pcts = [-4.2, 1.0, 6.3, 11.8]; // approximate
+
+        for (i, &t_k) in test_temps_k.iter().enumerate() {
+            let h_rad_true = EPS * SIGMA * (t_k.powi(2) + T_REF_K.powi(2))
+                * (t_k + T_REF_K);
+            let pct_error = (h_rad_true - h_rad_ref) / h_rad_ref * 100.0;
+            assert!(
+                (pct_error - expected_pcts[i]).abs() < 1.0,
+                "at T={t_k}K: h_rad error = {pct_error:.1}%, expected ~{}%",
+                expected_pcts[i]
+            );
+        }
+
+        // The linearization is within 5% for surfaces between 12°C and 32°C
+        // (285-305 K), which covers most residential conditions. For extreme
+        // cases (sunlit surfaces > 42°C, cold windows < 5°C), the error
+        // reaches 10-12%, which is still within BESTEST tolerance (~10% on
+        // annual loads) but will be noticeable in detailed comfort calcs.
+    }
 }
