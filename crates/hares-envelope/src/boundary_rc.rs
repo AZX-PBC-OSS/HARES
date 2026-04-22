@@ -633,13 +633,12 @@ pub fn assemble_building_rc(
                 // For windows: r_film_interior comes from E+ window U-factor
                 // decomposition and includes combined h_si = h_conv + h_rad.
                 // We decompose: h_conv = h_si - h_rad_linearized.
-                // R_conv = 1/h_conv provides the zone-air ↔ window convection path.
-                // The radiation path is added as a parallel R_rad from window_node
-                // to zone_air (surface-to-zone-air radiation) PLUS the star-mesh
-                // edge (inter-surface radiation), both added in the star-mesh
-                // section below. The parallel R_rad restores the full h_si
-                // conductance that was lost when R_film was decomposed to
-                // convection-only.
+                // R_conv = 1/h_conv provides the zone-air ↔ window convection path
+                // (the ONLY zone-air coupling; air is transparent to LWR).
+                // Inter-surface radiation is handled by the star-mesh edge
+                // (window_node ↔ star_node), added in the star-mesh section below.
+                // This matches EnergyPlus Option 2 where h_c (convection-only)
+                // couples surface to zone air, with LWR handled separately.
                 //
                 // For non-window fallback-R boundaries: r_film_interior from TARP
                 // is already convection-only (Step 1 change). h_si < h_rad → no
@@ -665,12 +664,12 @@ pub fn assemble_building_rc(
                     // Create floating window node for radiation topology.
                     // The window_node represents the window glass interior surface
                     // temperature. It connects to zone_air via convection ONLY
-                    // in this section; a parallel R_rad (surface-to-zone-air
-                    // radiation) is added in the star-mesh section below, along
-                    // with the star-mesh edge for inter-surface radiation. This
-                    // matches EnergyPlus Option 2 where h_si = h_conv + h_rad
-                    // provides total zone-air coupling, with inter-surface LWR
-                    // handled separately via the star-mesh.
+                    // in this section; the star-mesh edge for inter-surface
+                    // radiation is added in the star-mesh section below.
+                    // Air is transparent to LWR — there is no surface-to-zone-air
+                    // radiation path. The convection-only R_conv is the sole
+                    // zone-air coupling, matching EnergyPlus Option 2 where h_c
+                    // (not h_si) provides surface-to-air heat transfer.
                     let window_node = graph.alloc_node_no_cap();
 
                     // zone_air ↔ window_node via convection-only interior film.
@@ -692,14 +691,13 @@ pub fn assemble_building_rc(
                     // surface_node for star-mesh radiation participation.
                     // zone_air ← R_film_conv → surface_node ← R_assembly+R_ext → outdoor
                     // surface_node ← R_rad_star → star_node ← R_rad_star → other surfaces
-                    // surface_node ← R_rad_zone → zone_air (parallel to R_film_conv)
                     //
-                    // This gives opaque fallback-R surfaces the same radiation
-                    // topology as windows and RC-layer boundaries. Without this
-                    // decomposition, the h_rad path is missing entirely (R_film
-                    // is conv-only and no star-mesh edge exists), which removes
-                    // ~5.14 W/(m²K) of conductance per surface. The parallel
-                    // R_rad_zone is added in the star-mesh section below.
+                    // Air is transparent to LWR, so there is no surface-to-zone-air
+                    // radiation path. The star-mesh carries inter-surface radiation
+                    // only; R_film_conv (convection-only) provides the sole zone-air
+                    // coupling. After Y-Δ elimination of surface_node and star_node,
+                    // radiation conductances are correctly distributed to inner_node
+                    // and zone_air.
                     let surface_node = graph.alloc_node_no_cap();
 
                     // zone_air ↔ surface_node via convection-only interior film.
@@ -788,15 +786,13 @@ pub fn assemble_building_rc(
     // TRNSYS Type 56, and ESP-r. The conductances are baked into the A-matrix
     // at construction time, so no iterative LWR injection is needed at runtime.
     //
-    // In addition to the star-mesh edge (inter-surface radiation), each surface
-    // also receives a parallel R_rad from surface_node to zone_air representing
-    // surface-to-zone-air radiation. When R_film was decomposed from combined
-    // h_si to convection-only h_conv, the h_rad portion was removed. The star-
-    // mesh only provides inter-surface radiation, not surface-to-zone-air. The
-    // parallel R_rad restores the full h_si conductance:
-    //   G_zone→surface = h_conv·A + h_rad·A = h_si·A
-    // This matches EnergyPlus Option 2 where interior heat balance uses h_si for
-    // zone-air coupling while inter-surface radiation is separate.
+    // Air is transparent to longwave radiation, so there is no surface-to-zone-air
+    // LWR flux path. The combined h_si = h_conv + h_rad is a bookkeeping shorthand,
+    // NOT a physical flux decomposition. In Option 2, h_conv provides the sole
+    // zone-air ↔ surface coupling (via R_film_conv), while h_rad provides inter-
+    // surface coupling via the star-mesh. They are NOT parallel paths to the same
+    // destination — h_rad redistributes energy between surfaces, carrying zero net
+    // energy through zone air.
     //
     // Radiation conductances connect from the interior surface temperature node
     // (not the inner RC node). For RC-layer boundaries, a floating surface_node
@@ -854,42 +850,28 @@ pub fn assemble_building_rc(
                 if let Some(s_node) = surface_node {
                     // Surface has a surface_node (from StarMesh decomposition).
                     //
-                    // Two radiation paths from surface_node:
+                    // Inter-surface radiation via star node:
+                    //    surface_node ↔ star_node, G = 4·ε·σ·A·T_ref³
                     //
-                    // 1. surface_node ↔ star_node: inter-surface radiation.
-                    //    G = 4·ε·σ·A·T_ref³
-                    //    Reference: OCHRE Envelope.py:1053
-                    //    `R = 1 / (4 * emissivity * sigma * area * T_ref**3)`
+                    // Air is transparent to longwave radiation — there is no
+                    // surface-to-zone-air LWR flux path. The only zone-air ↔
+                    // surface coupling is convection (h_conv through R_film_conv).
+                    // Inter-surface radiation is carried exclusively by the star-
+                    // mesh; it redistributes energy between surfaces but carries
+                    // zero net energy through zone air.
                     //
-                    // 2. surface_node ↔ zone_air: surface-to-zone-air radiation.
-                    //    When R_film was decomposed from combined h_si to
-                    //    convection-only h_conv, the h_rad portion was routed
-                    //    exclusively to the star-mesh (inter-surface radiation).
-                    //    The surface-to-zone-air radiation path was LOST. Without
-                    //    it, the total zone_air→surface conductance is only h_conv,
-                    //    not h_si = h_conv + h_rad, producing an 11.6% conductance
-                    //    deficit (197 W at ΔT=20K in BESTEST 600).
+                    // After Y-Δ elimination of surface_node and star_node, pairwise
+                    // conductances between inner_nodes and zone_air correctly
+                    // distribute both convective and radiative exchange.
                     //
-                    //    Adding a parallel R_rad from surface_node to zone_air
-                    //    restores the full h_si conductance while keeping the
-                    //    star-mesh for inter-surface radiation:
-                    //      zone_air ← R_conv → surface_node  (convection)
-                    //      zone_air ← R_rad  → surface_node  (radiation, PARALLEL)
-                    //      surface_node ← R_star → star_node  (inter-surface radiation)
-                    //    Total G_zone→surface = h_conv·A + h_rad·A = h_si·A ✓
-                    //
-                    //    This matches EnergyPlus "Option 2" where interior surface
-                    //    heat balance uses combined h_si for zone-air coupling
-                    //    while inter-surface radiation is handled separately.
-                    //    Reference: E+ EngRef §Inside Surface Heat Balance,
-                    //    eq. h_si = h_c + h_r for the convection+radiation split.
+                    // Reference: OCHRE Envelope.py:1053
+                    //   `R = 1 / (4 * emissivity * sigma * area * T_ref**3)`
+                    // Reference: E+ Eng.Ref §Inside Surface Heat Balance uses
+                    //   h_c (convection-only) for surface-to-air coupling, with
+                    //   LWR handled separately by ScriptF / star-mesh.
                     let g = 4.0 * e * SIGMA * a * T_REF_K.powi(3);
                     if g > 0.0 {
-                        // Inter-surface radiation via star node.
                         graph.add_resistance(s_node, star_node, 1.0 / g);
-                        // Surface-to-zone-air radiation (parallel to R_conv).
-                        let zone_node = NodeId((bd.interior_zone_idx + 1) as u32);
-                        graph.add_resistance(s_node, zone_node, 1.0 / g);
                     }
                 }
                 // Boundaries without surface_node (same-zone or ScriptF mode)
@@ -2679,157 +2661,4 @@ mod tests {
         }
     }
 
-    // ── Star-mesh parallel R_rad restores combined h_si conductance ──────
-    //
-    // When StarMesh mode decomposes R_film from combined h_si to convection-only
-    // h_conv, the h_rad portion must be preserved as a parallel R_rad from
-    // surface_node to zone_air. Without it, the zone→surface conductance
-    // drops from h_si·A to h_conv·A, producing an ~11.6% deficit. With the
-    // parallel R_rad, the total zone→surface conductance becomes
-    // h_conv·A + h_rad·A = h_si·A, matching the combined film model.
-    #[test]
-    fn star_mesh_parallel_r_rad_restores_combined_film_conductance() {
-        // Simplified BESTEST-600-like setup using fallback-R boundaries.
-        // Wall (opaque, convection-only film) + Window (fallback-R with h_rad decomposition).
-        const SIGMA: f64 = crate::longwave_radiation::STEFAN_BOLTZMANN;
-        const T_REF_K: f64 = 293.15;
-        const EPS: f64 = 0.9;
-        let h_rad = 4.0 * EPS * SIGMA * T_REF_K.powi(3); // ~5.14 W/(m²K)
-
-        // Wall parameters (opaque, TARP convection-only film)
-        let wall_area = 63.6_f64;
-        let h_si_wall = 8.29; // combined film coefficient
-        let h_conv_wall = h_si_wall - h_rad; // convection-only ≈ 3.15
-        let r_film_wall = 1.0 / h_conv_wall; // convection-only R_film
-        let r_mat_wall = 1.789; // wall material R-value
-
-        // Window parameters (combined film includes h_rad)
-        let win_area = 12.0_f64;
-        let u_win: f64 = 3.0;
-        let r_int_win = 1.0 / (0.359073 * u_win.ln() + 6.949915);
-        let h_si_win = 1.0 / r_int_win; // ~7.34
-        let h_conv_win = (h_si_win - h_rad).max(0.1);
-        let r_film_win = 1.0 / h_conv_win;
-        let r_glass = 1.0 / u_win - r_int_win;
-
-        let zones = vec![ZoneInput {
-            floor_area_m2: Some(48.0),
-            volume_m3: Some(129.6),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }];
-        let caps = derive_zone_capacitances(&zones);
-
-        // Wall: fallback-R boundary (no layers, convection-only film)
-        let wall_bd = BoundaryInput {
-            area_m2: wall_area,
-            interior_zone_idx: 0,
-            exterior: ExteriorTarget::Outdoor,
-            material_layers: vec![],
-            precomputed_rc: Vec::new(),
-            fallback_r_m2_k_w: r_mat_wall,
-            r_film_interior_m2_k_w: r_film_wall,
-            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
-            framing_factor: None,
-            interior_emissivity: EPS,
-        };
-
-        // Window: fallback-R boundary (no layers, combined film)
-        let win_bd = BoundaryInput {
-            area_m2: win_area,
-            interior_zone_idx: 0,
-            exterior: ExteriorTarget::Outdoor,
-            material_layers: vec![],
-            precomputed_rc: Vec::new(),
-            fallback_r_m2_k_w: r_glass,
-            r_film_interior_m2_k_w: r_film_win,
-            r_film_exterior_m2_k_w: 0.0,
-            framing_factor: None,
-            interior_emissivity: EPS,
-        };
-
-        let boundaries = vec![wall_bd, win_bd];
-        let (rc, _diag) =
-            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::StarMesh).unwrap();
-
-        // For fallback-R boundaries only (no RC layers), all intermediate
-        // nodes are floating and get eliminated, leaving only the zone air
-        // node as an internal state.
-        assert_eq!(rc.a_c.nrows(), 1, "expected 1 internal state (zone air only)");
-
-        // Compute total zone-to-outdoor conductance from A/B matrices.
-        // For a 1-state system: A_c[0,0] = -G_total / C_zone
-        // where G_total is the total conductance from zone to all external nodes.
-        // B_ext[0, k] = G_zone→ext_k / C_zone
-        let c_zone = rc.node_capacitances[&NodeId(1)];
-        let g_total = -rc.a_c[(0, 0)] * c_zone;
-        let outdoor_col = rc.outdoor_col.expect("outdoor column must exist");
-        let g_outdoor = rc.b_ext[(0, outdoor_col)] * c_zone;
-
-        // Sanity: g_total should equal sum of all external conductances.
-        let g_b_ext_sum: f64 = (0..rc.b_ext.ncols())
-            .map(|k| rc.b_ext[(0, k)] * c_zone)
-            .sum();
-        assert!(
-            (g_total - g_b_ext_sum).abs() < 1.0,
-            "g_total={g_total:.2}, g_b_ext_sum={g_b_ext_sum:.2}, mismatch"
-        );
-
-        // Reference conductances (zone→outdoor, including material resistance):
-        //   G_correct = A_wall / R_total_wall + A_win / R_total_win  (combined film)
-        //   G_broken  = zone→outdoor without parallel R_rad (conv-only film)
-        let r_total_wall_combined = 1.0 / h_si_wall + r_mat_wall + R_FILM_EXTERIOR_M2_K_W;
-        let r_total_win_combined = 1.0 / u_win;
-        let g_correct = wall_area / r_total_wall_combined + win_area / r_total_win_combined;
-
-        // Without the fix, the wall's R_film is conv-only (0.3175 instead of 0.121),
-        // and the window's R_film is conv-only too.
-        let r_total_wall_broken = r_film_wall + r_mat_wall + R_FILM_EXTERIOR_M2_K_W;
-        let r_total_win_broken = r_film_win + r_glass;
-        let g_broken = wall_area / r_total_wall_broken + win_area / r_total_win_broken;
-
-        // Note: g_broken doesn't include the star-mesh short-circuit contribution
-        // that partially compensates for the missing R_rad. The actual broken
-        // model conductance would be somewhat higher than g_broken. But the
-        // key comparison is g_outdoor vs g_correct.
-
-        let deficit_broken = (g_correct - g_broken) / g_correct;
-        let deficit_fixed = (g_correct - g_outdoor) / g_correct;
-
-        // With the parallel R_rad fix, g_outdoor should be close to g_correct.
-        // It may slightly exceed g_correct (overshoot) due to inter-surface
-        // radiation short circuits through the star-mesh, which is physically
-        // correct (warm wall radiates to cooler window → outdoor).
-        // Without the fix, the deficit would be at least as large as
-        // deficit_broken (the star-mesh partially compensates but not enough).
-        assert!(
-            deficit_fixed.abs() < 0.10,
-            "parallel R_rad fix insufficient: deficit_fixed={:.1}%, \
-             G_outdoor={:.2} W/K, G_correct={:.2} W/K, G_broken={:.2} W/K",
-            deficit_fixed * 100.0,
-            g_outdoor,
-            g_correct,
-            g_broken,
-        );
-
-        // The fixed model should have g_outdoor >= g_correct (slight overshoot OK).
-        assert!(
-            g_outdoor >= g_correct * 0.95,
-            "g_outdoor={g_outdoor:.2} < g_correct*0.95={:.2}",
-            g_correct * 0.95
-        );
-
-        // Also verify the broken model would indeed have a significant deficit.
-        assert!(
-            deficit_broken > 0.20,
-            "expected broken model deficit >20%, got {:.1}%",
-            deficit_broken * 100.0
-        );
-
-        // Also verify the broken model would indeed have a significant deficit.
-        assert!(
-            deficit_broken > 0.08,
-            "expected broken model deficit >8%, got {:.1}%",
-            deficit_broken * 100.0
-        );
-    }
 }
