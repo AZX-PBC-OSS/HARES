@@ -1878,7 +1878,9 @@ impl Dwelling {
     /// Accumulates occupancy-driven internal heat gains into zone thermal ports.
     ///
     /// Reads the current occupancy count from the schedule payload carried in
-    /// `latest_env.custom_domains`, then for every declared thermal zone injects:
+    /// `latest_env.custom_domains`, then deposits gains into the **conditioned
+    /// (indoor) zone only** — matching OCHRE behaviour where occupant heat is
+    /// applied solely to the `indoor_zone`:
     ///   - sensible convective: `n_occupants × OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_CONVECTIVE_FRACTION`
     ///   - sensible radiative:  `n_occupants × OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_RADIATIVE_FRACTION`
     ///   - latent:              `n_occupants × OCCUPANT_LATENT_GAIN_W`
@@ -1909,7 +1911,8 @@ impl Dwelling {
         let radiant_w = n_occupants * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_RADIATIVE_FRACTION;
         let latent_w = n_occupants * OCCUPANT_LATENT_GAIN_W;
 
-        for thermal in &mut self.ports.thermal {
+        let indoor_zone = self.thermal_solver.config().indoor_zone_id;
+        if let Some(thermal) = self.ports.thermal.iter_mut().find(|t| t.zone == indoor_zone) {
             thermal.add(sensible_w, radiant_w, latent_w, ThermalCategory::InternalGain);
         }
     }
@@ -5308,25 +5311,52 @@ occupancy = 1.0
         let expected_radiant = 2.0 * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_RADIATIVE_FRACTION;
         let expected_latent = 2.0 * OCCUPANT_LATENT_GAIN_W;
 
+        // Occupancy gains must be deposited into the indoor (conditioned)
+        // zone ONLY — not broadcast to every zone.
+        let indoor_zone = dwelling.thermal_solver.config().indoor_zone_id;
+
+        let indoor_port = dwelling
+            .ports
+            .thermal
+            .iter()
+            .find(|t| t.zone == indoor_zone)
+            .expect("indoor zone must have a thermal port");
+
         assert!(
-            !dwelling.ports.thermal.is_empty(),
-            "fixture must have at least one thermal port"
+            (indoor_port.sensible_gain_w - expected_sensible).abs() < 1e-9,
+            "indoor zone convective sensible gain: expected {expected_sensible}, got {}",
+            indoor_port.sensible_gain_w
         );
+        assert!(
+            (indoor_port.radiant_gain_w - expected_radiant).abs() < 1e-9,
+            "indoor zone radiant sensible gain: expected {expected_radiant}, got {}",
+            indoor_port.radiant_gain_w
+        );
+        assert!(
+            (indoor_port.latent_gain_w - expected_latent).abs() < 1e-9,
+            "indoor zone latent gain: expected {expected_latent}, got {}",
+            indoor_port.latent_gain_w
+        );
+
+        // Non-indoor zones must receive ZERO occupancy gains.
         for thermal in &dwelling.ports.thermal {
-            assert!(
-                (thermal.sensible_gain_w - expected_sensible).abs() < 1e-9,
-                "convective sensible gain: expected {expected_sensible}, got {}",
-                thermal.sensible_gain_w
+            if thermal.zone == indoor_zone {
+                continue;
+            }
+            assert_eq!(
+                thermal.sensible_gain_w, 0.0,
+                "non-indoor zone {:?} must not receive convective sensible gain",
+                thermal.zone
             );
-            assert!(
-                (thermal.radiant_gain_w - expected_radiant).abs() < 1e-9,
-                "radiant sensible gain: expected {expected_radiant}, got {}",
-                thermal.radiant_gain_w
+            assert_eq!(
+                thermal.radiant_gain_w, 0.0,
+                "non-indoor zone {:?} must not receive radiant gain",
+                thermal.zone
             );
-            assert!(
-                (thermal.latent_gain_w - expected_latent).abs() < 1e-9,
-                "latent gain: expected {expected_latent}, got {}",
-                thermal.latent_gain_w
+            assert_eq!(
+                thermal.latent_gain_w, 0.0,
+                "non-indoor zone {:?} must not receive latent gain",
+                thermal.zone
             );
         }
     }
