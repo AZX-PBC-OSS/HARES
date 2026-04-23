@@ -330,7 +330,11 @@ impl ResampleOverrides {
             infrared: Some(ResampleMethod::Zoh),
             ground_temp: Some(ResampleMethod::Zoh),
             opaque_sky_cover: Some(ResampleMethod::Zoh),
-            ..Default::default()
+            ghi: Some(ResampleMethod::Zoh),
+            dni: Some(ResampleMethod::Zoh),
+            dhi: Some(ResampleMethod::Zoh),
+            wind_speed: Some(ResampleMethod::Zoh),
+            wind_dir: Some(ResampleMethod::Zoh),
         }
     }
 }

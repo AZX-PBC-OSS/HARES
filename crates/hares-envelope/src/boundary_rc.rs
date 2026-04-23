@@ -1075,18 +1075,12 @@ impl RcGraphState {
                 let needs_split = layer.density_kg_m3 > SPLIT_MIN_DENSITY
                     && layer.conductivity_w_m_k > SPLIT_MIN_CONDUCTIVITY;
                 let n = if needs_split {
-                    // Minimum 2 nodes for any qualifying layer (front and back)
-                    // to represent the thermal gradient. A single node would
-                    // collapse the entire layer to one temperature (lumped
-                    // capacitance), which is inconsistent with the decision to
-                    // split the layer.
                     split_layer_count(
                         layer.thickness_m,
                         layer.conductivity_w_m_k,
                         layer.density_kg_m3,
                         layer.specific_heat_j_kg_k,
                     )
-                    .max(2)
                 } else {
                     1
                 };
@@ -1578,17 +1572,18 @@ mod tests {
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
         let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
-        // 1 zone air + 4 layer nodes (layer0 splits into 2, layer1 splits into 2) = 5 states.
-        // Layer1 (50mm, ρ=2000) qualifies for splitting and gets min(2) nodes
-        // even though ceil(0.05/Λ) = 1, because qualifying layers need front+back nodes.
-        assert_eq!(rc.a_c.nrows(), 5);
+        // Diurnal penetration depth Λ = √(α·86400/(4π)).
+        // layer0 (100mm, k=0.5, ρ=1000, cp=800): α=6.25e-7 → Λ≈0.066 m → ceil(0.10/0.066)=2 nodes.
+        // layer1 (50mm,  k=1.0, ρ=2000, cp=900): α=5.56e-7 → Λ≈0.062 m → ceil(0.05/0.062)=1 node.
+        // 1 zone air + 2 + 1 = 4 states.
+        assert_eq!(rc.a_c.nrows(), 4);
 
-        // Diagnostics: single material-layer boundary with 4 RC nodes after splitting.
+        // Diagnostics: single material-layer boundary with 3 RC nodes after splitting.
         assert_eq!(diag.boundaries.len(), 1);
         assert_eq!(diag.boundaries[0].path, RCPath::MaterialLayer);
-        assert_eq!(diag.boundaries[0].n_rc_nodes, 4);
+        assert_eq!(diag.boundaries[0].n_rc_nodes, 3);
         assert!(diag.boundaries[0].capacitance_j_k > 0.0);
-        assert_eq!(rc.a_c.ncols(), 5);
+        assert_eq!(rc.a_c.ncols(), 4);
         // Layer info present for boundary 0.
         assert!(rc.layer_info.contains_key(&0));
         let info = &rc.layer_info[&0];
@@ -1677,12 +1672,15 @@ mod tests {
             make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
             make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
         ];
-        // Same-zone boundary with 4 layers → after splitting: 2+2+2+2=8 sub-layers → halved to 4 internal mass nodes.
+        // Same-zone boundary, diurnal-criterion node counts:
+        //   layer0 (50mm, k=0.5, ρ=1000): Λ≈0.066 m → 1 node
+        //   layer1 (100mm, k=1.0, ρ=2000): Λ≈0.062 m → 2 nodes
+        //   layer2 same as layer0 → 1 node
+        //   layer3 same as layer1 → 2 nodes
+        // Total sub-layers = 6, halved to 3 internal mass nodes + 1 zone air = 4 states.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
-        // 8 sub-layers (2+2+2+2) halved to 4 internal mass nodes + 1 zone air = 5 states.
-        // Each qualifying layer gets min(2) sub-layers (front+back nodes).
-        assert_eq!(rc.a_c.nrows(), 5);
+        assert_eq!(rc.a_c.nrows(), 4);
     }
 
     // ── Same-zone boundary with odd layers halves middle cap ──────────
@@ -1756,11 +1754,11 @@ mod tests {
         }];
         let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
 
-        // 20 boundaries, each with 3 layers. After diurnal-criterion splitting:
-        // layer0 (0.05m, k=0.5, ρ=1000, cp=800): Λ=0.066 → ceil(0.05/0.066)=1, min(2)=2
-        // layer1 (0.10m, k=1.0, ρ=2000, cp=900): Λ=0.062 → ceil(0.10/0.062)=2
-        // layer2 (0.02m, k=0.3, ρ=800,  cp=700): Λ=0.061 → ceil(0.02/0.061)=1, min(2)=2
-        // = 6 sub-layers per boundary = 120 layer nodes total.
+        // 20 boundaries, each with 3 layers. Diurnal-criterion splitting:
+        //   layer0 (0.05m, k=0.5, ρ=1000, cp=800): Λ≈0.066 m → ceil(0.05/0.066)=1
+        //   layer1 (0.10m, k=1.0, ρ=2000, cp=900): Λ≈0.062 m → ceil(0.10/0.062)=2
+        //   layer2 (0.02m, k=0.3, ρ=800,  cp=700): Λ≈0.061 m → ceil(0.02/0.061)=1
+        // = 4 sub-layers per boundary × 20 = 80 layer nodes total.
         let layers = vec![
             make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
             make_layer(0.1, 1.0, 2000.0, 900.0, 0.0),
@@ -1771,8 +1769,8 @@ mod tests {
             .collect();
 
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
-        // 1 zone + 120 layer nodes = 121 internal nodes.
-        assert_eq!(rc.a_c.nrows(), 121);
+        // 1 zone + 80 layer nodes = 81 internal nodes.
+        assert_eq!(rc.a_c.nrows(), 81);
         // All node IDs should be distinct from OUTDOOR_NODE_ID and GROUND_NODE_ID.
         for &nid in rc.node_index.keys() {
             assert_ne!(nid, NodeId(OUTDOOR_NODE_ID));
@@ -2337,10 +2335,8 @@ mod tests {
     #[test]
     fn split_layer_count_thin_wood_no_split() {
         // 9mm wood: k=0.14, rho=530, cp=900 → Λ ≈ 0.045 m
-        // Thickness (9mm) << Λ (45mm) → 1 node suffices.
-        // Note: the caller qualifies this layer for splitting (ρ > 100, k > 0.1)
-        // and applies .max(2), yielding 2 nodes in production. Here we test
-        // the pure physics computation.
+        // Thickness (9mm) << Λ (45mm) → lumped-capacitance (1 node) is exact
+        // for the diurnal forcing band; ISO 13786:2007 §6.2.
         let n = split_layer_count(0.009, 0.14, 530.0, 900.0);
         assert_eq!(n, 1, "9mm wood is thin relative to Λ, 1 node suffices");
     }

@@ -5,6 +5,17 @@
 **Status**: Open
 **Areas**: hares-io/hpxml, hares-equipment/hvac
 
+## Consolidation Note
+
+This was the original catch-all wiring-gaps ticket. G5 (ChargeDefectRatio) and
+G7 (HeatingCapacity17F) have been broken out into dedicated tickets that carry
+verified file:line evidence and primary-source citations:
+- G5 → ticket 081-charge-defect-ratio-parsed-not-applied.md
+- G7 → ticket 080-ashp-heating-capacity-17f-silently-dropped.md
+
+The remaining gaps below (G1, G2, G3, G4, G6) are not covered by any other
+ticket and are tracked here.
+
 ## Problem
 
 Several HPXML fields that describe real HVAC equipment behavior are not wired
@@ -56,16 +67,6 @@ the same EIR curve regardless.
 lower return water temperatures. OCHRE uses different biquadratic EIR curves
 (`boiler_eff_curve_condensing` vs `boiler_eff_curve_non_condensing`).
 
-### G5: ChargeDefectRatio — READ BUT DROPPED
-
-HPXML `<extension/ChargeDefectRatio>` is read into the raw params map by
-`resolve_hvac.rs` but never consumed by any equipment model. The value is
-silently dropped.
-
-**Impact**: Charge degradation can reduce cooling capacity 5-20% and increase
-power consumption. OCHRE applies a charge defect correction to capacity and
-EIR.
-
 ### G6: SupplementalHeatingLockoutTemperature — NOT FULLY WIRED
 
 HPXML 4.x distinguishes supplemental lockout from backup lockout. The config
@@ -73,15 +74,6 @@ field `max_oat_supplemental_c` exists in `HeatPumpHeaterConfig` but is only
 populated from extension fields, not from the standard HPXML element.
 
 **Impact**: Subtle control distinction; low priority.
-
-### G7: HeatingCapacity at 17°F (H3 test) — NOT WIRED
-
-HPXML can specify low-temperature heating capacity separately from rated
-(47°F) capacity. HARES only reads rated capacity. Low-OAT capacity is derived
-from biquadratic curves, but without explicit H3 data the curve extrapolation
-may be inaccurate.
-
-**Impact**: Cold-climate heating capacity accuracy depends on curve quality.
 
 ## Required Behavior
 
@@ -131,14 +123,6 @@ In `resolve_hvac.rs`, when building boiler config:
 2. This requires adding a `condensing: bool` field to `GasBoilerConfig`
 3. Use different efficiency curve coefficients (from OCHRE defaults)
 
-### G5: Consume charge_defect_ratio (MEDIUM priority)
-
-In `air_conditioner.rs` or `coil_physics.rs`:
-1. Read `charge_defect_ratio` from raw params
-2. Apply capacity and EIR corrections per OCHRE model
-3. OCHRE applies: `capacity *= 1 - 0.05 * defect_ratio` and
-   `eir *= 1 + 0.05 * defect_ratio` (approximate — verify against OCHRE source)
-
 ### G6: Wire SupplementalHeatingLockoutTemperature (LOW priority)
 
 In `resolve_hvac.rs`:
@@ -153,7 +137,6 @@ In `resolve_hvac.rs`:
 - [ ] G2: `DefrostType` and `DefrostControl` wired from HPXML to `DefrostConfig` (depends on ticket 014)
 - [ ] G3: `MinimumCapacity` wired from HPXML to `min_compressor_fraction` (depends on ticket 013)
 - [ ] G4: Gas boiler detects condensing mode from AFUE > 0.90 and applies appropriate efficiency curves
-- [ ] G5: `charge_defect_ratio` consumed by cooling equipment model with capacity/EIR corrections
 - [ ] G6: `SupplementalHeatingLockoutTemperature` wired to `max_oat_supplemental_c`
 - [ ] All changes have `tracing::debug!` for new field values at equipment init
 - [ ] All changes tested with HPXML fixtures that provide these fields
@@ -182,3 +165,5 @@ heater and defrost configurations.
 - 013 (min_compressor_fraction — provides the config field G3 writes to)
 - 014 (defrost typed config — provides the DefrostConfig struct G2 writes to)
 - 015 (ER on/off modeling — coordinates with backup heat wiring)
+- 080 (HeatingCapacity17F — extracted from G7 of this ticket)
+- 081 (ChargeDefectRatio — extracted from G5 of this ticket)

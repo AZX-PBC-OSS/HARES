@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
-use hares_core::{EnvironmentManager, SimClock};
+use hares_core::{EnvironmentInitOptions, EnvironmentManager, SimClock};
 use hares_io::hpxml::building::XmlNode;
 use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
 use hares_io::schedule::ColumnAggregation;
-use hares_io::{ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
+use hares_io::{ResampleMethod, ResampleOverrides, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -545,8 +545,30 @@ fn resampled_weather_produces_smooth_environment() {
     let time_res = StdDuration::from_secs(60);
     let total_steps = 1440u64; // 24h * 60 steps/h
 
-    let mut mgr = EnvironmentManager::new(weather, schedule, &building, time_res, start, None)
-        .expect("EnvironmentManager::new failed");
+    // 24-hour synthetic series — endpoints do not match (h0=15°C, h23≈6.9°C),
+    // so the year-boundary cyclic wrap that PchipCyclic enforces is wrong here.
+    // Use non-cyclic Pchip explicitly.
+    let overrides = ResampleOverrides {
+        dry_bulb: Some(ResampleMethod::Pchip),
+        dew_point: Some(ResampleMethod::Pchip),
+        rel_humidity: Some(ResampleMethod::Pchip),
+        pressure: Some(ResampleMethod::Pchip),
+        infrared: Some(ResampleMethod::Pchip),
+        ground_temp: Some(ResampleMethod::Pchip),
+        ..ResampleOverrides::default()
+    };
+    let mut mgr = EnvironmentManager::new_with_resample(
+        weather,
+        schedule,
+        &building,
+        time_res,
+        start,
+        EnvironmentInitOptions {
+            resample_overrides: Some(&overrides),
+            ..EnvironmentInitOptions::default()
+        },
+    )
+    .expect("EnvironmentManager::new_with_resample failed");
 
     let mut clock = SimClock::new(start, Duration::seconds(60), Duration::hours(24));
 
