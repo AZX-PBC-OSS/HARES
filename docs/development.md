@@ -308,6 +308,23 @@ production.
 
 ---
 
+## Key Reference Documentation
+
+| Resource | URL | Use |
+|----------|-----|-----|
+| EnergyPlus Engineering Reference (v25.2) | https://bigladdersoftware.com/epx/docs/25-2/engineering-reference/index.html | Physics model validation — DX coil curves, defrost, zone heat balance, psychrometrics |
+| EnergyPlus I/O Reference (v25.2) | https://bigladdersoftware.com/epx/docs/25-2/input-output-reference/index.html | Object/field names for `Coil:Heating:DX`, `Coil:Cooling:DX`, `Curve:Biquadratic`, etc. |
+| EnergyPlus Docs (all versions) | https://bigladdersoftware.com/epx/docs/ | Version-specific engineering and I/O reference |
+| HPXML Specification v4.2 | https://github.com/hpxmlwg/hpxml/releases/tag/v4.2 | Residential building XML schema — HVAC equipment, duct systems, envelope |
+| HPXML Schema Definitions | https://github.com/hpxmlwg/hpxml/tree/master/schemas | XSD files for HPXML validation — field names, types, enumerations |
+
+When citing EnergyPlus in tickets or code comments, reference the **specific object name**
+(e.g., `Coil:Heating:DX:SingleSpeed`) and **field name** (e.g., `Defrost Strategy`),
+not just the section title. The I/O Reference is the canonical source for field names;
+the Engineering Reference provides the physics equations and model descriptions.
+
+---
+
 ## Quick Reference
 
 | I want to... | Command |
