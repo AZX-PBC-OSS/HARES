@@ -8,6 +8,8 @@ use thiserror::Error;
 // Re-export from hares-types for use in this crate's fallback logic.
 use hares_types::DEFAULT_GROUND_ALBEDO;
 
+use crate::epw::compute_sky_temp_c;
+
 /// Supported weather file formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeatherFormat {
@@ -238,12 +240,26 @@ pub enum ResampleMethod {
     Zoh,
     /// Linear interpolation between hourly knots.
     Linear,
+    /// Circular linear interpolation for angular quantities (e.g. wind direction).
+    ///
+    /// Interpolates along the shortest arc between two angles, correctly
+    /// handling wrap-around at 0°/360°. For example, 350° → 10° interpolates
+    /// through 0° (incrementing), not through 180° (the long way).
+    ///
+    /// Reference: EnergyPlus WeatherManager.cc:3183-3197 (`interpolateWindDirection`).
+    ///
+    /// Missing/sentinel values (NaN or outside [0, 360)) are NOT interpolated
+    /// circularly -- intervals touching a sentinel use ZOH from the left value.
+    CircularLinear,
 }
 
 /// Per-column override for weather resampling strategy.
 ///
 /// All fields default to `None` (use the category default: PCHIP for
 /// continuous, ZOH for energy/wind). Set a field to override.
+///
+/// `sky_temp_c` is not overridable because it is always recomputed from
+/// the interpolated inputs after resampling — see `compute_sky_temp_c`.
 #[derive(Debug, Clone, Default)]
 pub struct ResampleOverrides {
     pub dry_bulb: Option<ResampleMethod>,
@@ -251,7 +267,6 @@ pub struct ResampleOverrides {
     pub rel_humidity: Option<ResampleMethod>,
     pub pressure: Option<ResampleMethod>,
     pub infrared: Option<ResampleMethod>,
-    pub sky_temp: Option<ResampleMethod>,
     pub ground_temp: Option<ResampleMethod>,
     pub opaque_sky_cover: Option<ResampleMethod>,
     pub ghi: Option<ResampleMethod>,
@@ -263,6 +278,9 @@ pub struct ResampleOverrides {
 
 impl ResampleOverrides {
     /// All continuous fields set to ZOH -- matches OCHRE's resampling.
+    ///
+    /// Note: sky_temp_c is not listed because it is always recomputed from
+    /// the interpolated inputs, never directly interpolated.
     pub fn ochre_compat() -> Self {
         Self {
             dry_bulb: Some(ResampleMethod::Zoh),
@@ -270,7 +288,6 @@ impl ResampleOverrides {
             rel_humidity: Some(ResampleMethod::Zoh),
             pressure: Some(ResampleMethod::Zoh),
             infrared: Some(ResampleMethod::Zoh),
-            sky_temp: Some(ResampleMethod::Zoh),
             ground_temp: Some(ResampleMethod::Zoh),
             opaque_sky_cover: Some(ResampleMethod::Zoh),
             ..Default::default()
@@ -434,6 +451,45 @@ impl WeatherTimeSeries {
                 *v = v.clamp(0.0, 10.0);
             }
 
+            let dry_bulb_c = resample_field(
+                &self.dry_bulb_c,
+                factor,
+                overrides.dry_bulb.unwrap_or(ResampleMethod::Pchip),
+            );
+            let dew_point_c = resample_field(
+                &self.dew_point_c,
+                factor,
+                overrides.dew_point.unwrap_or(ResampleMethod::Pchip),
+            );
+            let pressure_kpa = resample_field(
+                &self.pressure_kpa,
+                factor,
+                overrides.pressure.unwrap_or(ResampleMethod::Pchip),
+            );
+            let horizontal_infrared_w_m2 = resample_field(
+                &self.horizontal_infrared_w_m2,
+                factor,
+                overrides.infrared.unwrap_or(ResampleMethod::Pchip),
+            );
+            let ground_temp_c = resample_field(
+                &self.ground_temp_c,
+                factor,
+                overrides.ground_temp.unwrap_or(ResampleMethod::Pchip),
+            );
+
+            // Sky temperature is recomputed from interpolated inputs rather than
+            // interpolated directly.  T_sky is a non-linear function of IR, dry-bulb,
+            // dew-point, and sky cover; directly interpolating it violates the chain
+            // rule and produces values inconsistent with the other interpolated fields.
+            // EnergyPlus does the same at WeatherManager.cc:3113.
+            let sky_temp_c: Vec<f64> = dry_bulb_c
+                .iter()
+                .zip(&dew_point_c)
+                .zip(&horizontal_infrared_w_m2)
+                .zip(&opaque_sky_cover)
+                .map(|(((&db, &dp), &ir), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+                .collect();
+
             Ok(Self {
                 meta: WeatherMeta {
                     source_step_secs: target_step_secs,
@@ -441,37 +497,13 @@ impl WeatherTimeSeries {
                 },
                 // Continuous instantaneous fields default to PCHIP (smooth, monotone).
                 // Override to ZOH for OCHRE parity or Linear for simpler interpolation.
-                dry_bulb_c: resample_field(
-                    &self.dry_bulb_c,
-                    factor,
-                    overrides.dry_bulb.unwrap_or(ResampleMethod::Pchip),
-                ),
-                dew_point_c: resample_field(
-                    &self.dew_point_c,
-                    factor,
-                    overrides.dew_point.unwrap_or(ResampleMethod::Pchip),
-                ),
+                dry_bulb_c,
+                dew_point_c,
                 rel_humidity_pct,
-                pressure_kpa: resample_field(
-                    &self.pressure_kpa,
-                    factor,
-                    overrides.pressure.unwrap_or(ResampleMethod::Pchip),
-                ),
-                horizontal_infrared_w_m2: resample_field(
-                    &self.horizontal_infrared_w_m2,
-                    factor,
-                    overrides.infrared.unwrap_or(ResampleMethod::Pchip),
-                ),
-                sky_temp_c: resample_field(
-                    &self.sky_temp_c,
-                    factor,
-                    overrides.sky_temp.unwrap_or(ResampleMethod::Pchip),
-                ),
-                ground_temp_c: resample_field(
-                    &self.ground_temp_c,
-                    factor,
-                    overrides.ground_temp.unwrap_or(ResampleMethod::Pchip),
-                ),
+                pressure_kpa,
+                horizontal_infrared_w_m2,
+                sky_temp_c,
+                ground_temp_c,
                 opaque_sky_cover,
                 // Period-average energy flux defaults to ZOH.
                 ghi_w_m2: resample_field(
@@ -498,7 +530,7 @@ impl WeatherTimeSeries {
                 wind_dir_deg: resample_field(
                     &self.wind_dir_deg,
                     factor,
-                    overrides.wind_dir.unwrap_or(ResampleMethod::Zoh),
+                    overrides.wind_dir.unwrap_or(ResampleMethod::CircularLinear),
                 ),
                 // Accumulated depth → distribute evenly so downstream sums are preserved.
                 liquid_precip_m: distribute_accumulated(&self.liquid_precip_m, factor),
@@ -524,20 +556,40 @@ impl WeatherTimeSeries {
                 )));
             }
 
+            // Instantaneous fields → mean.
+            let dry_bulb_c = mean_downsample(&self.dry_bulb_c, ratio);
+            let dew_point_c = mean_downsample(&self.dew_point_c, ratio);
+            let rel_humidity_pct = mean_downsample(&self.rel_humidity_pct, ratio);
+            let pressure_kpa = mean_downsample(&self.pressure_kpa, ratio);
+            let horizontal_infrared_w_m2 =
+                mean_downsample(&self.horizontal_infrared_w_m2, ratio);
+            let ground_temp_c = mean_downsample(&self.ground_temp_c, ratio);
+            let opaque_sky_cover = mean_downsample(&self.opaque_sky_cover, ratio);
+
+            // Recompute sky temperature from downsampled inputs (same rationale as
+            // upsampling: T_sky is non-linear in its inputs, so averaging T_sky is
+            // inconsistent with averaging the input fields).
+            let sky_temp_c: Vec<f64> = dry_bulb_c
+                .iter()
+                .zip(&dew_point_c)
+                .zip(&horizontal_infrared_w_m2)
+                .zip(&opaque_sky_cover)
+                .map(|(((&db, &dp), &ir), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+                .collect();
+
             Ok(Self {
                 meta: WeatherMeta {
                     source_step_secs: target_step_secs,
                     ..self.meta.clone()
                 },
-                // Instantaneous fields → mean.
-                dry_bulb_c: mean_downsample(&self.dry_bulb_c, ratio),
-                dew_point_c: mean_downsample(&self.dew_point_c, ratio),
-                rel_humidity_pct: mean_downsample(&self.rel_humidity_pct, ratio),
-                pressure_kpa: mean_downsample(&self.pressure_kpa, ratio),
-                horizontal_infrared_w_m2: mean_downsample(&self.horizontal_infrared_w_m2, ratio),
-                sky_temp_c: mean_downsample(&self.sky_temp_c, ratio),
-                ground_temp_c: mean_downsample(&self.ground_temp_c, ratio),
-                opaque_sky_cover: mean_downsample(&self.opaque_sky_cover, ratio),
+                dry_bulb_c,
+                dew_point_c,
+                rel_humidity_pct,
+                pressure_kpa,
+                horizontal_infrared_w_m2,
+                sky_temp_c,
+                ground_temp_c,
+                opaque_sky_cover,
                 wind_speed_m_s: mean_downsample(&self.wind_speed_m_s, ratio),
                 wind_dir_deg: mean_downsample(&self.wind_dir_deg, ratio),
                 // Solar fields → mean (average irradiance preserves energy).
@@ -749,12 +801,73 @@ fn linear_resample(values: &[f64], factor: usize) -> Vec<f64> {
     out
 }
 
+/// Circular linear interpolation for angular quantities (e.g. wind direction).
+///
+/// Interpolates along the shortest arc between consecutive angles so that
+/// transitions like 350° → 10° go through 0°/360° instead of the long way
+/// around (180°). This matches EnergyPlus WeatherManager.cc:3183-3197
+/// (`interpolateWindDirection`).
+///
+/// Algorithm for each sub-sample between values[k] and values[k+1]:
+/// 1. If either endpoint is NaN or outside [0, 360) (sentinel/missing),
+///    fall back to ZOH from values[k].
+/// 2. Compute shortest-arc delta:
+///    `delta = ((values[k+1] - values[k] + 180) % 360) - 180`
+/// 3. Interpolate: `result = (values[k] + t * delta + 360) % 360`
+///    where t ∈ [0, 1] is the interpolation fraction.
+///
+/// Edge cases match [`linear_resample`]: single element replicates, two-element
+/// input uses simple linear path, last segment flat-holds beyond the final knot.
+fn circular_linear_resample(values: &[f64], factor: usize) -> Vec<f64> {
+    let n = values.len();
+    if n == 0 {
+        return vec![];
+    }
+    if factor <= 1 {
+        return values.to_vec();
+    }
+    if n == 1 {
+        return vec![values[0]; factor];
+    }
+
+    /// Returns true for a valid wind direction in [0, 360).
+    fn is_valid_angle(v: f64) -> bool {
+        v.is_finite() && (0.0..360.0).contains(&v)
+    }
+
+    let total = n * factor;
+    let mut out = Vec::with_capacity(total);
+    for i in 0..total {
+        let t = i as f64 / factor as f64;
+        let k = (t as usize).min(n - 2);
+        let frac = (t - k as f64).clamp(0.0, 1.0);
+        let a = values[k];
+        let b = values[k + 1];
+
+        if !is_valid_angle(a) || !is_valid_angle(b) {
+            // Sentinel or NaN: fall back to ZOH from left value.
+            out.push(a);
+        } else if frac == 0.0 {
+            out.push(a);
+        } else {
+            // Shortest-arc delta in [-180, +180).
+            // Uses Euclidean remainder to handle negative numerators correctly
+            // (Rust's `%` truncates toward zero, giving negative remainders).
+            let delta = ((b - a + 180.0).rem_euclid(360.0)) - 180.0;
+            let result = (a + frac * delta).rem_euclid(360.0);
+            out.push(result);
+        }
+    }
+    out
+}
+
 /// Dispatch resampling based on method enum.
 fn resample_field(values: &[f64], factor: usize, method: ResampleMethod) -> Vec<f64> {
     match method {
         ResampleMethod::Pchip => pchip_resample(values, factor),
         ResampleMethod::Zoh => replicate_zoh(values, factor),
         ResampleMethod::Linear => linear_resample(values, factor),
+        ResampleMethod::CircularLinear => circular_linear_resample(values, factor),
     }
 }
 
@@ -872,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn resample_pchip_on_dry_bulb_and_zoh_on_wind() {
+    fn resample_pchip_on_dry_bulb_and_circular_linear_on_wind_dir() {
         let series = sample_series();
         let resampled = series.resample(60).expect("resample should succeed");
         assert_eq!(resampled.len(), 120);
@@ -887,9 +1000,13 @@ mod tests {
             assert!(w[1] >= w[0] - 1e-12, "monotonicity violated");
         }
 
-        // Wind fields still use ZOH.
-        assert!(resampled.wind_dir_deg.iter().take(60).all(|x| *x == 180.0));
-        assert!(resampled.wind_dir_deg.iter().skip(60).all(|x| *x == 190.0));
+        // Wind direction uses CircularLinear interpolation (B9 fix).
+        // First sample hits the first knot exactly.
+        assert!((resampled.wind_dir_deg[0] - 180.0).abs() < 1e-12);
+        // Midpoint between 180 and 190 via circular linear: 185.
+        assert!((resampled.wind_dir_deg[30] - 185.0).abs() < 1e-12);
+        // Second hour starts at the second knot.
+        assert!((resampled.wind_dir_deg[60] - 190.0).abs() < 1e-12);
     }
 
     #[test]
@@ -1177,5 +1294,282 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             err.to_string().contains("supported formats"),
             "error should list supported formats: {err}"
         );
+    }
+
+    /// Verify that sky temperature is recomputed from interpolated inputs after
+    /// upsampling, not interpolated directly.  This is the B5 fix: T_sky is a
+    /// non-linear function of its inputs, so direct interpolation violates the
+    /// chain rule (E+ WeatherManager.cc:3113).
+    #[test]
+    fn sky_temp_recomputed_after_upsampling() {
+        use crate::epw::compute_sky_temp_c;
+
+        let mut series = sample_series_5pt();
+        // Set IR, dry-bulb, dew-point, and sky cover to values where
+        // compute_sky_temp_c produces a specific cascade outcome.
+        // Use strong IR (>= 50 W/m²) so the Stefan-Boltzmann path is taken,
+        // since that's the most nonlinear (4th root).
+        series.horizontal_infrared_w_m2 = vec![200.0, 250.0, 300.0, 250.0, 200.0];
+        series.dry_bulb_c = vec![10.0, 12.0, 15.0, 13.0, 11.0];
+        series.dew_point_c = vec![5.0, 6.0, 8.0, 7.0, 5.0];
+        series.opaque_sky_cover = vec![4.0, 5.0, 6.0, 5.0, 4.0];
+
+        // Compute the "original" sky temps to seed the series.
+        series.sky_temp_c = series
+            .horizontal_infrared_w_m2
+            .iter()
+            .zip(&series.dry_bulb_c)
+            .zip(&series.dew_point_c)
+            .zip(&series.opaque_sky_cover)
+            .map(|(((&ir, &db), &dp), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+            .collect();
+
+        // Upsample by factor 6 (3600s → 600s).
+        let resampled = series.resample(600).expect("resample should succeed");
+        assert_eq!(resampled.len(), 30);
+
+        // Verify every resampled sky_temp_c matches compute_sky_temp_c applied
+        // to the corresponding resampled inputs.
+        for i in 0..resampled.len() {
+            let expected = compute_sky_temp_c(
+                resampled.horizontal_infrared_w_m2[i],
+                resampled.dry_bulb_c[i],
+                resampled.dew_point_c[i],
+                resampled.opaque_sky_cover[i],
+            );
+            assert!(
+                (resampled.sky_temp_c[i] - expected).abs() < 1e-9,
+                "slot {i}: recomputed sky_temp_c must equal compute_sky_temp_c \
+                 from interpolated inputs; got {}, expected {}",
+                resampled.sky_temp_c[i],
+                expected,
+            );
+        }
+    }
+
+    /// Same check for downsampling: sky_temp_c must be recomputed from
+    /// the mean-downsampled inputs, not just averaged.
+    #[test]
+    fn sky_temp_recomputed_after_downsampling() {
+        use crate::epw::compute_sky_temp_c;
+
+        let mut series = sample_series_5pt();
+        series.meta.source_step_secs = 600; // 10-min source
+        series.horizontal_infrared_w_m2 = vec![200.0, 250.0, 300.0, 350.0, 200.0];
+        series.dry_bulb_c = vec![10.0, 12.0, 15.0, 13.0, 11.0];
+        series.dew_point_c = vec![5.0, 6.0, 8.0, 7.0, 5.0];
+        series.opaque_sky_cover = vec![4.0, 5.0, 6.0, 5.0, 4.0];
+
+        // Seed sky_temp_c from inputs.
+        series.sky_temp_c = series
+            .horizontal_infrared_w_m2
+            .iter()
+            .zip(&series.dry_bulb_c)
+            .zip(&series.dew_point_c)
+            .zip(&series.opaque_sky_cover)
+            .map(|(((&ir, &db), &dp), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+            .collect();
+
+        // Downsample to 3600s (factor 6 → 1 output row).
+        // But 5 rows / 6 is not integer, so use 4-element series at 900s → 3600s.
+        series.dry_bulb_c = vec![10.0, 12.0, 15.0, 13.0];
+        series.dew_point_c = vec![5.0, 6.0, 8.0, 7.0];
+        series.horizontal_infrared_w_m2 = vec![200.0, 300.0, 350.0, 250.0];
+        series.opaque_sky_cover = vec![4.0, 5.0, 6.0, 5.0];
+        series.rel_humidity_pct = vec![40.0, 50.0, 60.0, 50.0];
+        series.pressure_kpa = vec![90.0, 91.0, 90.5, 91.5];
+        series.ghi_w_m2 = vec![100.0, 200.0, 300.0, 400.0];
+        series.dni_w_m2 = vec![0.0; 4];
+        series.dhi_w_m2 = vec![0.0; 4];
+        series.wind_speed_m_s = vec![2.0; 4];
+        series.wind_dir_deg = vec![180.0; 4];
+        series.ground_temp_c = vec![10.0, 10.1, 10.2, 10.3];
+        series.liquid_precip_m = vec![0.0; 4];
+        series.meta.source_step_secs = 900;
+
+        // Seed sky_temp from inputs again.
+        series.sky_temp_c = series
+            .horizontal_infrared_w_m2
+            .iter()
+            .zip(&series.dry_bulb_c)
+            .zip(&series.dew_point_c)
+            .zip(&series.opaque_sky_cover)
+            .map(|(((&ir, &db), &dp), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+            .collect();
+
+        let down = series.resample(3600).expect("downsample should succeed");
+        assert_eq!(down.len(), 1);
+
+        let expected = compute_sky_temp_c(
+            down.horizontal_infrared_w_m2[0],
+            down.dry_bulb_c[0],
+            down.dew_point_c[0],
+            down.opaque_sky_cover[0],
+        );
+        assert!(
+            (down.sky_temp_c[0] - expected).abs() < 1e-9,
+            "downsampled sky_temp_c must equal compute_sky_temp_c from \
+             mean-downsampled inputs; got {}, expected {}",
+            down.sky_temp_c[0],
+            expected,
+        );
+    }
+
+    // --- CircularLinear resampling tests (B9 fix) ---
+
+    #[test]
+    fn circular_linear_normal_interpolation() {
+        // 180° → 190°: no wrap-around, should behave like linear.
+        let out = super::circular_linear_resample(&[180.0, 190.0], 6);
+        assert_eq!(out.len(), 12);
+        // First sample is exactly 180°.
+        assert!((out[0] - 180.0).abs() < 1e-12);
+        // Halfway between 180 and 190 = 185°.
+        assert!((out[3] - 185.0).abs() < 1e-12);
+        // Second knot hit.
+        assert!((out[6] - 190.0).abs() < 1e-12);
+        // Beyond last knot: flat hold at 190°.
+        assert!((out[11] - 190.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn circular_linear_wrap_350_to_10() {
+        // 350° → 10°: the shortest arc goes through 0° (delta = +20°),
+        // NOT through 180° (which would be delta = -340° or +20° the wrong way).
+        let out = super::circular_linear_resample(&[350.0, 10.0], 6);
+        assert_eq!(out.len(), 12);
+        // First sample: 350°.
+        assert!((out[0] - 350.0).abs() < 1e-12);
+        // Midpoint: 350 + 0.5 * 20 = 360 → 360 % 360 = 0°.
+        assert!((out[3] - 0.0).abs() < 1e-12, "midpoint should be 0°, got {}", out[3]);
+        // Second knot: 10°.
+        assert!((out[6] - 10.0).abs() < 1e-12);
+        // Verify all values stay in [0, 360).
+        for (i, &v) in out.iter().enumerate() {
+            assert!(v >= 0.0 && v < 360.0, "out[{i}] = {v} out of [0, 360)");
+        }
+        // Verify monotonic increase along the short arc: 350→353→357→0→3→7→10.
+        // The raw angles increase (350, 353.33, 356.67, 0, 3.33, 6.67, 10).
+        // After modulo, there's a wrap at the midpoint. Check using circular distance.
+        for w in out.windows(2) {
+            // Use rem_euclid (not %) to handle negative numerators correctly.
+            let circ_delta = ((w[1] - w[0] + 180.0).rem_euclid(360.0)) - 180.0;
+            assert!(
+                circ_delta >= -1e-9,
+                "non-monotonic along short arc: {} → {}, circular delta = {circ_delta}",
+                w[0], w[1]
+            );
+        }
+    }
+
+    #[test]
+    fn circular_linear_reverse_wrap_10_to_350() {
+        // 10° → 350°: shortest arc goes backward through 0° (delta = -20°).
+        let out = super::circular_linear_resample(&[10.0, 350.0], 6);
+        assert_eq!(out.len(), 12);
+        // First sample: 10°.
+        assert!((out[0] - 10.0).abs() < 1e-12);
+        // Midpoint: 10 + 0.5 * (-20) = 0 → 0°.
+        assert!((out[3] - 0.0).abs() < 1e-12, "midpoint should be 0°, got {}", out[3]);
+        // Second knot: 350°.
+        assert!((out[6] - 350.0).abs() < 1e-12);
+        // Verify monotonic decrease along the short arc.
+        for w in out.windows(2) {
+            let circ_delta = ((w[1] - w[0] + 180.0).rem_euclid(360.0)) - 180.0;
+            assert!(
+                circ_delta <= 1e-9,
+                "non-monotonic along short arc: {} → {}, circular delta = {circ_delta}",
+                w[0], w[1]
+            );
+        }
+    }
+
+    #[test]
+    fn circular_linear_constant_wind() {
+        // All same value: should produce that value everywhere.
+        let out = super::circular_linear_resample(&[270.0, 270.0, 270.0], 4);
+        assert_eq!(out.len(), 12);
+        for (i, &v) in out.iter().enumerate() {
+            assert!((v - 270.0).abs() < 1e-12, "out[{i}] = {v}, expected 270.0");
+        }
+    }
+
+    #[test]
+    fn circular_linear_nan_propagates_as_zoh() {
+        // NaN is a sentinel: interval touching NaN falls back to ZOH.
+        let out = super::circular_linear_resample(&[180.0, f64::NAN, 200.0], 2);
+        assert_eq!(out.len(), 6);
+        // Interval [180, NaN]: ZOH from 180.
+        assert!((out[0] - 180.0).abs() < 1e-12);
+        assert!((out[1] - 180.0).abs() < 1e-12);
+        // Interval [NaN, 200]: ZOH from NaN.
+        assert!(out[2].is_nan(), "expected NaN at index 2");
+        assert!(out[3].is_nan(), "expected NaN at index 3");
+        // Interval [200, ...] (only 3 input values, so last interval is [NaN, 200]
+        // already covered. Actually with 3 values and factor 2:
+        // i=0: k=0, frac=0 → 180
+        // i=1: k=0, frac=0.5 → ZOH because b=NaN → 180
+        // i=2: k=1, frac=0 → NaN
+        // i=3: k=1, frac=0.5 → ZOH because a=NaN → NaN
+        // i=4: k=1, frac=1.0 (clamped) → ZOH because a=NaN → NaN
+        // i=5: k=1, frac=1.5 (clamped to 1.0) → ZOH because a=NaN → NaN
+    }
+
+    #[test]
+    fn circular_linear_sentinel_minus_9999_treated_as_zoh() {
+        // -9999 sentinel (TMY3 missing): interval touching it falls back to ZOH.
+        let out = super::circular_linear_resample(&[180.0, -9999.0, 200.0], 2);
+        assert_eq!(out.len(), 6);
+        // Interval [180, -9999]: ZOH from 180.
+        assert!((out[0] - 180.0).abs() < 1e-12);
+        assert!((out[1] - 180.0).abs() < 1e-12);
+        // Interval [-9999, 200]: ZOH from -9999 (propagates sentinel).
+        assert!((out[2] - (-9999.0)).abs() < 1e-12, "expected -9999 at index 2");
+        assert!((out[3] - (-9999.0)).abs() < 1e-12, "expected -9999 at index 3");
+    }
+
+    #[test]
+    fn circular_linear_360_treated_as_invalid() {
+        // 360.0 is NOT in [0, 360) so it's treated as sentinel → ZOH.
+        let out = super::circular_linear_resample(&[350.0, 360.0], 2);
+        assert_eq!(out.len(), 4);
+        // Both sub-samples in interval [350, 360]: ZOH from 350 (b is invalid).
+        assert!((out[0] - 350.0).abs() < 1e-12);
+        assert!((out[1] - 350.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn circular_linear_single_element_replicates() {
+        let out = super::circular_linear_resample(&[45.0], 4);
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|&v| (v - 45.0).abs() < 1e-12));
+    }
+
+    #[test]
+    fn circular_linear_empty_returns_empty() {
+        let out = super::circular_linear_resample(&[], 4);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn circular_linear_factor_one_returns_original() {
+        let values = [10.0, 350.0, 180.0];
+        let out = super::circular_linear_resample(&values, 1);
+        assert_eq!(out, values);
+    }
+
+    #[test]
+    fn circular_linear_multi_segment_with_wrap() {
+        // 350 → 10 (wrap through 0), then 10 → 30 (normal).
+        let out = super::circular_linear_resample(&[350.0, 10.0, 30.0], 6);
+        assert_eq!(out.len(), 18);
+        // First segment: 350 → 10 through 0.
+        assert!((out[0] - 350.0).abs() < 1e-12);
+        assert!((out[3] - 0.0).abs() < 1e-12, "midpoint of first segment: got {}", out[3]);
+        assert!((out[6] - 10.0).abs() < 1e-12);
+        // Second segment: 10 → 30 (normal, delta = +20).
+        assert!((out[12] - 30.0).abs() < 1e-12);
+        // Midpoint of second segment: 20°.
+        assert!((out[9] - 20.0).abs() < 1e-12, "midpoint of second segment: got {}", out[9]);
     }
 }

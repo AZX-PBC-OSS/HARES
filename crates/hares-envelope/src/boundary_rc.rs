@@ -320,8 +320,37 @@ pub enum InteriorLwrMethod {
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-/// Derive zone air-node capacitances [J/K] from zone volumes and mass multipliers.
-pub fn derive_zone_capacitances(zones: &[ZoneInput]) -> Vec<f64> {
+/// Derive zone air-node capacitances [J/K] from zone volumes, mass multipliers,
+/// and site barometric pressure.
+///
+/// Zone air capacitance: C = ρ × cp × V × mass_multiplier, where ρ is computed
+/// from the ideal gas law: ρ = p / (R_da × T_ref).
+///
+/// - `site_pressure_pa`: ISA standard atmospheric pressure at site elevation [Pa].
+///   Use [`hares_physics::air_properties::standard_pressure_pa`] to compute from
+///   elevation, or [`hares_physics::constants::SEA_LEVEL_PRESSURE_PA`] (101 325 Pa)
+///   when elevation is unknown (backward-compatible with the former sea-level constant).
+/// - Reference temperature T_ref = 293.15 K (20 °C), consistent with the
+///   linearization operating point used for interior LWR and film coefficients.
+///
+/// Cite: ASHRAE HoF 2021 §1.8 Eq.28; EnergyPlus `PsyRhoAirFnPbTdbW`;
+/// ISA 1976 / ICAO Doc 7488.
+pub fn derive_zone_capacitances(zones: &[ZoneInput], site_pressure_pa: f64) -> Vec<f64> {
+    /// Reference temperature for zone air density computation [K].
+    /// 20 °C matches the linearization operating point used throughout the
+    /// RC network (star-mesh LWR, TARP film coefficients).
+    const T_REF_K: f64 = 293.15;
+
+    let rho = if site_pressure_pa > 0.0 {
+        // Ideal gas law for dry air: ρ = p / (R_da × T)
+        // Cite: ASHRAE HoF 2021 §1.8 Eq.28
+        site_pressure_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * T_REF_K)
+    } else {
+        // Fallback: sea-level density at ~20 °C, 101.325 kPa.
+        // Matches OCHRE's 1.2041 for parity when pressure is unavailable.
+        AIR_DENSITY_KG_M3
+    };
+
     zones
         .iter()
         .map(|z| {
@@ -329,8 +358,7 @@ pub fn derive_zone_capacitances(zones: &[ZoneInput]) -> Vec<f64> {
                 .volume_m3
                 .or_else(|| z.floor_area_m2.map(|a| a * DEFAULT_HEIGHT_M))
                 .unwrap_or(DEFAULT_VOLUME_M3);
-            (AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * volume * z.mass_multiplier)
-                .max(MIN_CAPACITANCE_J_K)
+            (rho * AIR_CP_J_KG_K * volume * z.mass_multiplier).max(MIN_CAPACITANCE_J_K)
         })
         .collect()
 }
@@ -1405,12 +1433,12 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
+        let caps = derive_zone_capacitances(&zones, p_pa);
         assert_eq!(caps.len(), 1);
-        let expected = AIR_DENSITY_KG_M3
-            * AIR_CP_J_KG_K
-            * (100.0 * DEFAULT_HEIGHT_M)
-            * INTERIOR_MASS_MULTIPLIER;
+        // ρ computed from ideal gas law at 20 °C, not the 1.2041 constant.
+        let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
+        let expected = rho * AIR_CP_J_KG_K * (100.0 * DEFAULT_HEIGHT_M) * INTERIOR_MASS_MULTIPLIER;
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 
@@ -1421,9 +1449,11 @@ mod tests {
             volume_m3: Some(300.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
+        let caps = derive_zone_capacitances(&zones, p_pa);
         // Should use 300 m³ (explicit), not 100 × 2.5 = 250 m³ (derived from area)
-        let expected = AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * 300.0 * INTERIOR_MASS_MULTIPLIER;
+        let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
+        let expected = rho * AIR_CP_J_KG_K * 300.0 * INTERIOR_MASS_MULTIPLIER;
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 
@@ -1434,9 +1464,11 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
+        let caps = derive_zone_capacitances(&zones, p_pa);
+        let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
         let expected =
-            AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * DEFAULT_VOLUME_M3 * INTERIOR_MASS_MULTIPLIER;
+            rho * AIR_CP_J_KG_K * DEFAULT_VOLUME_M3 * INTERIOR_MASS_MULTIPLIER;
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 
@@ -1448,8 +1480,41 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         assert!((caps[0] - MIN_CAPACITANCE_J_K).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zone_capacitance_denver_is_lower_than_sea_level() {
+        // Denver (1609 m) pressure produces ~17% lower density than sea level.
+        // Cite: ASHRAE HoF 2021 §1.8; ISA 1976.
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let p_sea = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
+        let p_denver = hares_physics::air_properties::standard_pressure_pa(1609.0);
+        let caps_sea = derive_zone_capacitances(&zones, p_sea);
+        let caps_denver = derive_zone_capacitances(&zones, p_denver);
+        let reduction_pct = (1.0 - caps_denver[0] / caps_sea[0]) * 100.0;
+        assert!(
+            reduction_pct > 15.0,
+            "Denver zone capacitance should be >15% lower than sea-level, got {reduction_pct:.1}%"
+        );
+    }
+
+    #[test]
+    fn zone_capacitance_zero_pressure_uses_fallback() {
+        // site_pressure_pa ≤ 0 triggers the AIR_DENSITY_KG_M3 fallback.
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps = derive_zone_capacitances(&zones, 0.0);
+        let expected = AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * 250.0 * INTERIOR_MASS_MULTIPLIER;
+        assert!((caps[0] - expected).abs() < 1e-6);
     }
 
     // ── Single zone, single boundary (no layers) ───────────────────────
@@ -1461,7 +1526,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
         let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
@@ -1488,7 +1553,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![
             make_layer(0.1, 0.5, 1000.0, 800.0, 50.0),
             make_layer(0.05, 1.0, 2000.0, 900.0, 50.0),
@@ -1529,7 +1594,7 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let boundaries = vec![
             make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5),
             make_boundary(30.0, 1, ExteriorTarget::Ground, vec![], 3.0),
@@ -1550,7 +1615,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Only a slab boundary connecting zone 0 to ground.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Ground, vec![], 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -1569,7 +1634,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Same-zone boundary with no material layers -- no thermal mass to model.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), vec![], 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -1586,7 +1651,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![
             make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
             make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
@@ -1609,7 +1674,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Use low-density materials (density=50 < SPLIT_MIN_DENSITY=100) to avoid auto-splitting,
         // so we can test the same-zone halving logic directly.
         // layers are exterior→interior: [thin, thick-middle, thin]
@@ -1642,7 +1707,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Use low-density material (density=50 < SPLIT_MIN_DENSITY=100) to avoid auto-splitting.
         // density=50, cp=900, thickness=0.10, area=50 → full cap = 225 J/K
         let layers = vec![make_layer(0.10, 1.0, 50.0, 900.0, 0.0)];
@@ -1669,7 +1734,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
 
         // 20 boundaries, each with 3 layers. After auto-splitting (C=3, dt=3600):
         // layer0 (0.05m, k=0.5, ρ=1000, cp=800): α=6.25e-7, dx=0.082 → 1
@@ -1711,7 +1776,7 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Only zone 0 has a boundary; zone 1 is disconnected.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -1731,7 +1796,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let (rc, _diag) = assemble_building_rc(&[], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         assert_eq!(rc.a_c.nrows(), 1);
@@ -1754,7 +1819,7 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Zone 0 ↔ Zone 1 internal boundary (no outdoor/ground).
         let boundaries = vec![make_boundary(30.0, 0, ExteriorTarget::Zone(1), vec![], 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -1781,7 +1846,7 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![make_layer(0.1, 0.5, 1000.0, 800.0, 0.0)];
         let boundaries = vec![
             make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers.clone(), 2.5),
@@ -1802,7 +1867,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![make_layer(0.1, 0.5, 1000.0, 800.0, 50.0)];
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -1825,7 +1890,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let boundaries = vec![make_boundary(0.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
         // Zone gets fallback; zero-area boundary is ignored.
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -1862,7 +1927,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let precomputed = vec![PrecomputedRCLayer {
             resistance_m2_k_w: 2.0,
             capacitance_kj_m2_k: 50.0,
@@ -1893,7 +1958,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let precomputed = vec![
             PrecomputedRCLayer {
                 resistance_m2_k_w: 1.0,
@@ -1929,7 +1994,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Middle layer has zero capacitance -- should be merged out.
         let precomputed = vec![
             PrecomputedRCLayer {
@@ -1965,7 +2030,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // 4 layers, outdoor exterior → not same-zone, all layers kept.
         let precomputed = vec![
             PrecomputedRCLayer {
@@ -2011,7 +2076,7 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Zone 0 ↔ Zone 1: different zones, so same_zone=false, all layers kept.
         let precomputed = vec![
             PrecomputedRCLayer {
@@ -2050,7 +2115,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // All layers have zero capacitance → no layer nodes, just a single resistance.
         let precomputed = vec![
             PrecomputedRCLayer {
@@ -2083,7 +2148,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Boundary has both material layers AND precomputed -- precomputed wins.
         let precomputed = vec![PrecomputedRCLayer {
             resistance_m2_k_w: 2.0,
@@ -2144,7 +2209,7 @@ mod tests {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-            }])[0],
+            }], hares_physics::constants::SEA_LEVEL_PRESSURE_PA)[0],
         ];
 
         // Without framing
@@ -2206,9 +2271,12 @@ mod tests {
             volume_m3: None,
             mass_multiplier: 1.5,
         };
-        let caps = derive_zone_capacitances(&[conditioned, attic, foundation]);
+        let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
+        let caps = derive_zone_capacitances(&[conditioned, attic, foundation], p_pa);
         let vol = 100.0 * DEFAULT_HEIGHT_M;
-        let base = AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * vol;
+        // Density computed from ideal gas law at 20 °C, not the 1.2041 constant.
+        let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
+        let base = rho * AIR_CP_J_KG_K * vol;
         assert!((caps[0] - base * 7.0).abs() < 1e-6, "conditioned: 7x");
         assert!((caps[1] - base * 1.0).abs() < 1e-6, "attic: 1x");
         assert!((caps[2] - base * 1.5).abs() < 1e-6, "foundation: 1.5x");
@@ -2265,7 +2333,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Exterior→interior: insulation first, concrete (interior-facing) last.
         let layers = vec![
             make_layer(1.007, 0.040, 0.0, 0.0, 48.0), // insulation (exterior)
@@ -2305,7 +2373,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let r_film_int = 0.16_f64;
         // 120mm concrete splits into 2 sub-layers of 60mm each.
         let concrete = make_layer(0.120, 1.130, 1400.0, 1000.0, 48.0);
@@ -2347,7 +2415,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let precomputed = vec![
             PrecomputedRCLayer {
                 resistance_m2_k_w: 1.0,
@@ -2390,7 +2458,7 @@ mod tests {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }]);
+        }], hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let concrete = make_layer(0.100, 0.51, 1400.0, 840.0, 20.0);
         assert_eq!(
             split_layer_count(0.100, 0.51, 1400.0, 840.0, DEFAULT_DT_S),
@@ -2427,7 +2495,7 @@ mod tests {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }]);
+        }], hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let insulation = make_layer(0.089, 0.04, 12.0, 840.0, 20.0);
         let concrete_inner = make_layer(0.100, 0.51, 1400.0, 840.0, 20.0);
         assert_eq!(
@@ -2465,7 +2533,7 @@ mod tests {
             floor_area_m2: Some(48.0),
             volume_m3: Some(129.6),
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }]);
+        }], hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let concrete = make_layer(0.100, 0.51, 1400.0, 840.0, 0.0);
         let insulation = make_layer(0.0615, 0.04, 12.0, 840.0, 0.0);
         let plasterboard = make_layer(0.012, 0.16, 950.0, 840.0, 0.0);
@@ -2522,7 +2590,7 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones);
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![make_layer(0.1, 0.5, 1000.0, 800.0, 0.0)];
 
         let boundaries: Vec<BoundaryInput> = areas

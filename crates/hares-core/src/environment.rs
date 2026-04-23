@@ -1292,7 +1292,7 @@ mod tests {
         .expect("manager");
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
         let env = manager.update(&sim_clock, &[]);
-        assert!((env.weather.wind_dir_deg - 180.0).abs() < 1.0e-6);
+        assert!((env.weather.wind_dir_deg - 185.0).abs() < 1.0e-6);
     }
 
     #[test]

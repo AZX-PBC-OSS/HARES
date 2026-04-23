@@ -21,7 +21,7 @@ const EXPECTED_RECORDS_STANDARD: usize = 8760;
 const EXPECTED_RECORDS_LEAP: usize = 8784;
 const DEFAULT_GROUND_TEMP_C: f64 = 10.0;
 /// Mirrors `hares_types::KELVIN_OFFSET` -- kept local to avoid import verbosity.
-const KELVIN_OFFSET_C: f64 = 273.15;
+pub const KELVIN_OFFSET_C: f64 = 273.15;
 
 const LOCATION_MIN_FIELDS: usize = 10;
 const DATA_PERIOD_MIN_FIELDS: usize = 3;
@@ -467,7 +467,7 @@ pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64
 }
 
 /// Stefan-Boltzmann constant [W/m²/K⁴].
-const STEFAN_BOLTZMANN: f64 = 5.6697e-8;
+pub const STEFAN_BOLTZMANN: f64 = 5.6697e-8;
 
 /// Minimum infrared threshold [W/m²] below which we fall back to empirical models.
 /// Values below 50 W/m² are physically implausible for atmospheric downwelling
@@ -480,7 +480,14 @@ const INFRARED_FALLBACK_THRESHOLD: f64 = 50.0;
 /// 1. Stefan-Boltzmann inversion when IR >= 50 W/m² (direct measurement).
 /// 2. Berdahl-Martin + Walton cloud correction when opaque sky cover > 0.
 /// 3. Clark-Allen as last resort (no cloud data).
-fn compute_sky_temp_c(
+///
+/// Recompute sky temperature from the (possibly interpolated) weather inputs.
+///
+/// Called both during EPW parsing and after resampling so that T_sky stays
+/// consistent with its non-linear inputs.  Directly interpolating T_sky
+/// violates the chain rule — E+ WeatherManager.cc:3113 recomputes after
+/// interpolating all input fields, and so must we.
+pub fn compute_sky_temp_c(
     horizontal_infrared_w_m2: f64,
     dry_bulb_c: f64,
     dew_point_c: f64,
@@ -529,7 +536,7 @@ pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
 /// Cite: Martin, M. and Berdahl, P. (1984), "Characteristics of Infrared Sky
 /// Radiation in the United States", Solar Energy, 33(3/4), 321-336.
 #[must_use]
-pub(crate) fn berdahl_martin_sky_emissivity(t_dp_c: f64) -> f64 {
+pub fn berdahl_martin_sky_emissivity(t_dp_c: f64) -> f64 {
     let x = t_dp_c / 100.0;
     0.758 + 0.521 * x + 0.625 * x * x
 }
@@ -588,7 +595,7 @@ pub(crate) fn walton_cloud_correction(epsilon_clear: f64, opaque_sky_cover: f64)
 ///
 /// T_sky = T_db_K × ε_sky^0.25 - 273.15
 #[must_use]
-pub(crate) fn sky_temp_from_emissivity(t_db_c: f64, epsilon: f64) -> f64 {
+pub fn sky_temp_from_emissivity(t_db_c: f64, epsilon: f64) -> f64 {
     let t_db_k = t_db_c + KELVIN_OFFSET_C;
     t_db_k * epsilon.powf(0.25) - KELVIN_OFFSET_C
 }

@@ -19,6 +19,12 @@ mod tests {
     use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use hares_io::{DefaultsStore, parse_hpxml};
+    use hares_physics::air_properties::standard_pressure_pa;
+
+    /// Compute site pressure from building elevation, falling back to sea level.
+    fn site_pressure_for_building(building: &hares_io::Building) -> f64 {
+        standard_pressure_pa(building.site.elevation_m.unwrap_or(0.0))
+    }
 
     fn project_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -380,7 +386,7 @@ mod tests {
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
-        let zone_caps = derive_zone_capacitances(&zone_inputs);
+        let zone_caps = derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
 
         assert_eq!(zone_caps.len(), n_zones, "zone capacitances length");
 
@@ -388,14 +394,18 @@ mod tests {
         let cond_idx = zone_index(&building, ZoneType::Conditioned);
         let attic_idx = zone_index(&building, ZoneType::Attic);
 
-        // Conditioned zone capacitance: C = rho_air * cp_air * V * TCM, where TCM is
-        // the interior thermal-capacitance multiplier accounting for furniture and
-        // partition walls. HARES resolves TCM per zone via
-        // `mass_multiplier_for_zone` (conversions.rs).
+        // Conditioned zone capacitance: C = rho_air * cp_air * V * TCM.
+        // BEopt HPXML generates furniture boundaries (conditioned_furniture) which
+        // provide explicit RC thermal-mass nodes equivalent to E+ InternalMass
+        // objects. Per E+ convention, ZoneCapacitanceMultiplier and InternalMass are
+        // mutually exclusive, so TCM = 1.0 (air capacitance only) when furniture
+        // boundaries are present. This avoids double-counting the ~39% overstating
+        // that occurs when both the 7.0 multiplier and furniture RC nodes are used.
+        // See: building_to_zone_inputs (conversions.rs); E+ InputOutputRef.
         let hares_indoor_cap = 1.2
             * 1006.0
             * OCHRE_INDOOR_VOLUME_M3
-            * mass_multiplier_for_zone(&ZoneType::Conditioned);
+            * 1.0; // furniture boundaries present → TCM = 1.0
         assert_within_pct(
             zone_caps[cond_idx],
             hares_indoor_cap,
@@ -404,7 +414,7 @@ mod tests {
         );
 
         // Attic zone capacitance uses TCM = 1.0 (air only: unconditioned attics have
-        // no furniture or partition mass). OCHRE applies x7 uniformly, which
+        // no furniture boundaries). OCHRE applies x7 uniformly, which
         // overstates attic inertia ~7x. HARES attic mass = air only; see
         // `mass_multiplier_for_zone` in hares-core/src/dwelling/conversions.rs.
         let hares_attic_cap =
@@ -515,7 +525,7 @@ mod tests {
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
-        let zone_caps = derive_zone_capacitances(&zone_inputs);
+        let zone_caps = derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
 
         let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps, InteriorLwrMethod::StarMesh)
             .expect("assemble_building_rc must succeed");
@@ -665,7 +675,7 @@ mod tests {
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
-        let zone_caps = derive_zone_capacitances(&zone_inputs);
+        let zone_caps = derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
 
         let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps, InteriorLwrMethod::StarMesh)
             .expect("assemble_building_rc must succeed");
@@ -982,15 +992,15 @@ mod tests {
 
         assert_within_pct(hares_total, ochre_total_ua, 3.0, "total building UA");
 
-        // Zone capacitances within 1%. TCM is resolved per zone type via
-        // `mass_multiplier_for_zone` (conversions.rs). Attic TCM = 1.0 (air only);
-        // OCHRE's uniform x7 over-counts attic thermal inertia ~7x.
+        // Zone capacitances within 1%. Conditioned zone TCM = 1.0 because
+        // furniture boundaries are present (see building_to_zone_inputs);
+        // attic TCM = 1.0 (air only). OCHRE's uniform x7 over-counts both.
         let cond_idx = zone_index(&building, ZoneType::Conditioned);
         let attic_idx = zone_index(&building, ZoneType::Attic);
         let hares_indoor_cap = 1.2
             * 1006.0
             * OCHRE_INDOOR_VOLUME_M3
-            * mass_multiplier_for_zone(&ZoneType::Conditioned);
+            * 1.0; // furniture boundaries present → TCM = 1.0
         assert_within_pct(
             zone_caps[cond_idx],
             hares_indoor_cap,

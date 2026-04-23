@@ -471,7 +471,13 @@ pub(crate) fn build_default_solvers(
     );
 
     // Zone air node capacitances [J/K].
-    let zone_capacitances = derive_zone_capacitances(&zone_inputs);
+    // Use ISA standard atmosphere pressure from building site elevation.
+    // Falls back to sea-level pressure when elevation is unknown.
+    // Cite: ASHRAE HoF 2021 §1.8 Eq.28; ISA 1976 / ICAO Doc 7488.
+    let site_pressure_pa = hares_physics::air_properties::standard_pressure_pa(
+        building.site.elevation_m.unwrap_or(0.0),
+    );
+    let zone_capacitances = derive_zone_capacitances(&zone_inputs, site_pressure_pa);
 
     // Build the RC network from material layers where available.
     // StarMesh mode bakes linearized inter-surface radiation conductances
@@ -1372,7 +1378,7 @@ mod tests {
     fn attic_radiant_barrier_keeps_exterior_roof_physics() {
         let boundary = attic_roof_boundary(None, None, true);
 
-        assert_eq!(exterior_solar_absorptance(&boundary), 0.60);
+        assert_eq!(exterior_solar_absorptance(&boundary), 0.70);
         assert_eq!(attic_interior_solar_absorptance(&boundary), 0.05);
         assert_eq!(exterior_emissivity(&boundary), 0.90);
         assert_eq!(attic_interior_emissivity(&boundary), 0.05);

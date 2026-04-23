@@ -737,10 +737,66 @@ pub(crate) fn build_synthetic_weather(
         source_step_secs: 3600,
         midpoint_offset_secs: 0,
     };
+
+    let outdoor_temp_c = config.weather.outdoor_temp_c;
+    let dew_point_c = config.weather.dew_point_c;
+
+    // Compute clear-sky horizontal IR from Berdahl-Martin (1984) emissivity.
+    //
+    // ε_clear = 0.758 + 0.521·(T_dp/100) + 0.625·(T_dp/100)²
+    // IR_horizontal = ε_clear · σ · T_air_K⁴
+    //
+    // With sky_cover = 0 (clear sky) this is the correct downwelling LWR.
+    // The previous value of 300 W/m² was inconsistent with clear sky at
+    // typical BESTEST winter conditions (Denver, ~0 °C) where IR ≈ 180–200 W/m².
+    //
+    // Cite: Martin, M. and Berdahl, P. (1984), "Characteristics of Infrared
+    // Sky Radiation in the United States", Solar Energy, 33(3/4), 321-336.
+    let eps_clear = hares_io::berdahl_martin_sky_emissivity(dew_point_c);
+    let t_air_k = outdoor_temp_c + hares_io::KELVIN_OFFSET_C;
+    let horizontal_ir_w_m2 = eps_clear * hares_io::STEFAN_BOLTZMANN * t_air_k.powi(4);
+
+    // Compute sky temperature from the IR we just computed, using the same
+    // Stefan-Boltzmann inversion as the EPW/TMY3 pipeline.
+    //
+    // T_sky = (IR / σ)^0.25 − 273.15
+    //
+    // This ensures sky_temp_c and horizontal_infrared_w_m2 are physically
+    // consistent with each other and with opaque_sky_cover = 0.0.
+    // The previous code set sky_temp_c = outdoor_temp_c, which eliminated ALL
+    // longwave radiative cooling to the sky — the clear sky is typically
+    // 10–30 °C colder than ambient air.
+    //
+    // Cite: Clark, G. and Allen, C. (1978), "The Estimation of Atmospheric
+    // Radiation for Clear and Cloudy Skies", Proc. 2nd National Passive Solar
+    // Conference, pp. 675-678.
+    // Cite: EnergyPlus WeatherManager.cc:3113 (sky temp recomputation).
+    let sky_temp_c = hares_io::compute_sky_temp_c(
+        horizontal_ir_w_m2,
+        outdoor_temp_c,
+        dew_point_c,
+        0.0, // opaque_sky_cover = 0 (clear sky)
+    );
+
+    // Ground temperature: use outdoor air temperature.
+    //
+    // The DOE-2 ground temperature model (used in the EPW pipeline) gives
+    // T_ground ≈ T_annual_mean for constant weather (zero seasonal amplitude),
+    // so T_ground = T_outdoor is consistent when the outdoor temperature equals
+    // the annual mean. For the default synthetic config (10 °C) this matches
+    // Denver's deep-ground temperature (~10 °C).
+    //
+    // LIMITATION: in real winter conditions the ground surface stays warmer
+    // than air due to thermal inertia, but without a full annual temperature
+    // profile we cannot apply the DOE-2 damping model. Users modelling
+    // extreme cold snaps (e.g. −20 °C) should supply an EPW file for
+    // accurate ground temperatures.
+    let ground_temp_c = outdoor_temp_c;
+
     Ok(WeatherTimeSeries {
         meta,
-        dry_bulb_c: vec![config.weather.outdoor_temp_c; n],
-        dew_point_c: vec![config.weather.dew_point_c; n],
+        dry_bulb_c: vec![outdoor_temp_c; n],
+        dew_point_c: vec![dew_point_c; n],
         rel_humidity_pct: vec![config.weather.rel_humidity_pct; n],
         pressure_kpa: vec![config.weather.pressure_kpa; n],
         ghi_w_m2: vec![0.0; n],
@@ -749,9 +805,9 @@ pub(crate) fn build_synthetic_weather(
         wind_speed_m_s: vec![0.0; n],
         wind_dir_deg: vec![0.0; n],
         opaque_sky_cover: vec![0.0; n],
-        horizontal_infrared_w_m2: vec![300.0; n],
-        sky_temp_c: vec![config.weather.outdoor_temp_c; n],
-        ground_temp_c: vec![config.weather.outdoor_temp_c; n],
+        horizontal_infrared_w_m2: vec![horizontal_ir_w_m2; n],
+        sky_temp_c: vec![sky_temp_c; n],
+        ground_temp_c: vec![ground_temp_c; n],
         liquid_precip_m: vec![0.0; n],
         surface_albedo: None,
     })
@@ -882,6 +938,126 @@ equipment_name = "None"
         assert!(
             result.is_err(),
             "negative initialization_duration_s must be rejected at parse time"
+        );
+    }
+
+    /// B3 fix: synthetic weather sky_temp_c must be computed from physics,
+    /// NOT set equal to outdoor_temp_c (which eliminates all LWR cooling).
+    #[test]
+    fn synthetic_sky_temp_is_below_outdoor_temp() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        // Clear sky at 10 °C / 5 °C dew point should produce sky_temp well
+        // below outdoor_temp. The clear sky is typically 10–30 °C colder.
+        assert!(
+            weather.sky_temp_c[0] < config.weather.outdoor_temp_c - 5.0,
+            "sky_temp_c ({}) must be at least 5 °C below outdoor_temp_c ({}) for clear sky",
+            weather.sky_temp_c[0],
+            config.weather.outdoor_temp_c,
+        );
+    }
+
+    /// B3 fix: horizontal_infrared_w_m2 must be physically consistent with
+    /// clear sky (sky_cover = 0), NOT hardcoded to 300 W/m².
+    #[test]
+    fn synthetic_horizontal_ir_matches_clear_sky_emissivity() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 0.0
+dew_point_c = -5.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        let ir = weather.horizontal_infrared_w_m2[0];
+        // At 0 °C / -5 °C dew point (cold clear sky, Denver winter):
+        // Berdahl-Martin ε ≈ 0.732, IR ≈ 0.732 × σ × 273.15⁴ ≈ 183 W/m².
+        // Must be well below the old hardcoded 300 W/m².
+        assert!(
+            (150.0..=250.0).contains(&ir),
+            "horizontal IR {ir} out of expected range [150, 250] W/m² for clear sky at 0 °C",
+        );
+        assert_ne!(
+            ir, 300.0,
+            "horizontal IR must not equal the old hardcoded 300 W/m²"
+        );
+    }
+
+    /// B3 fix: sky_temp_c and horizontal_infrared_w_m2 must be consistent
+    /// with each other via the Stefan-Boltzmann relation.
+    #[test]
+    fn synthetic_sky_temp_and_ir_are_physically_consistent() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        let ir = weather.horizontal_infrared_w_m2[0];
+        let sky_temp_c = weather.sky_temp_c[0];
+        // Stefan-Boltzmann inversion: T_sky_K = (IR / σ)^0.25
+        let sky_temp_k = (ir / hares_io::STEFAN_BOLTZMANN).powf(0.25);
+        let sky_temp_c_check = sky_temp_k - hares_io::KELVIN_OFFSET_C;
+        assert!(
+            (sky_temp_c - sky_temp_c_check).abs() < 0.01,
+            "sky_temp_c ({sky_temp_c}) inconsistent with IR ({ir}): \
+             expected {sky_temp_c_check} from Stefan-Boltzmann inversion",
         );
     }
 }

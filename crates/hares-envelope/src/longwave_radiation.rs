@@ -62,9 +62,9 @@ pub const EMISSIVITY_RADIANT_BARRIER: f64 = 0.05;
 
 /// Default solar absorptance for opaque building surfaces.
 ///
-/// OCHRE `Envelope.py:222` uses 0.60. EnergyPlus default is 0.70.
-/// We match OCHRE here.
-pub const SOLAR_ABSORPTANCE_DEFAULT: f64 = 0.60;
+/// EnergyPlus Material IDD default is 0.70 (the authoritative source).
+/// OCHRE `Envelope.py:222` uses 0.60; we follow EnergyPlus here.
+pub const SOLAR_ABSORPTANCE_DEFAULT: f64 = 0.70;
 
 /// Solar absorptance for attic radiant barriers.
 ///

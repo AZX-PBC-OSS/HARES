@@ -74,33 +74,55 @@ fn zone_air_capacitance_uses_sea_level_density() {
     );
 }
 
-/// Verify that derive_zone_capacitances returns sea-level density.
-/// This test documents the defect; it will FAIL once derive_zone_capacitances
-/// accepts an altitude/pressure parameter and uses altitude-corrected density.
+/// Verify that derive_zone_capacitances uses altitude-corrected density when
+/// given Denver site pressure, and sea-level density when given sea-level pressure.
+///
+/// Formerly a defect: `derive_zone_capacitances` used the hardcoded sea-level
+/// constant AIR_DENSITY_KG_M3 regardless of site altitude. Now fixed: the
+/// function accepts `site_pressure_pa` and computes density from the ideal
+/// gas law ρ = p / (R_da × T_ref).
+///
+/// Cite: ASHRAE HoF 2021 §1.8 Eq.28; ISA 1976 / ICAO Doc 7488.
 #[test]
-fn derive_zone_capacitances_uses_sea_level_density_regardless_of_site() {
+fn derive_zone_capacitances_uses_altitude_corrected_density() {
     let zones = vec![ZoneInput {
         floor_area_m2: Some(48.0),
         volume_m3: Some(129.6),
         mass_multiplier: 1.0,
     }];
 
-    let caps = derive_zone_capacitances(&zones);
-    let expected_sea_level = AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * 129.6 * 1.0;
-    let expected_denver =
-        dry_air_density_kg_m3(standard_pressure_pa(1609.0), 20.0) * AIR_CP_J_KG_K * 129.6 * 1.0;
+    let p_sea_level = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
+    let p_denver = standard_pressure_pa(1609.0);
 
+    let caps_sea = derive_zone_capacitances(&zones, p_sea_level);
+    let caps_denver = derive_zone_capacitances(&zones, p_denver);
+
+    let expected_sea_level =
+        dry_air_density_kg_m3(p_sea_level, 20.0) * AIR_CP_J_KG_K * 129.6 * 1.0;
+    let expected_denver =
+        dry_air_density_kg_m3(p_denver, 20.0) * AIR_CP_J_KG_K * 129.6 * 1.0;
+
+    // Sea-level capacitance matches formula-derived value
     assert!(
-        (caps[0] - expected_sea_level).abs() < 1.0,
-        "current capacitance ({:.0}) matches sea-level ({:.0}), not Denver ({:.0})",
-        caps[0],
-        expected_sea_level,
-        expected_denver
+        (caps_sea[0] - expected_sea_level).abs() / expected_sea_level < 0.001,
+        "sea-level capacitance ({:.0}) should match formula ({:.0})",
+        caps_sea[0],
+        expected_sea_level
     );
 
+    // Denver capacitance is ~17% lower than sea-level
+    let reduction_pct = (1.0 - caps_denver[0] / caps_sea[0]) * 100.0;
     assert!(
-        expected_denver < expected_sea_level * 0.85,
-        "Denver capacitance ({expected_denver:.0}) should be <85 % of sea-level ({expected_sea_level:.0})"
+        reduction_pct > 15.0,
+        "Denver capacitance should be >15% lower than sea-level, got {reduction_pct:.1}%"
+    );
+
+    // Denver capacitance matches formula-derived value
+    assert!(
+        (caps_denver[0] - expected_denver).abs() / expected_denver < 0.001,
+        "Denver capacitance ({:.0}) should match formula ({:.0})",
+        caps_denver[0],
+        expected_denver
     );
 }
 
@@ -123,7 +145,7 @@ fn heavyweight_concrete_wall_produces_two_rc_sub_layers() {
         volume_m3: Some(129.6),
         mass_multiplier: 1.0,
     }];
-    let zone_caps = derive_zone_capacitances(&zones);
+    let zone_caps = derive_zone_capacitances(&zones, standard_pressure_pa(1609.0));
 
     let boundaries = vec![BoundaryInput {
         area_m2: wall_area,

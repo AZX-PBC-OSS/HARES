@@ -237,7 +237,11 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         timezone_offset_h,
         elevation_m,
         source_step_secs: 3600,
-        midpoint_offset_secs: 0,
+        // TMY3 uses hour-ending convention: timestamp marks the end of each
+        // measurement interval (e.g., hour 1 = 00:01–01:00). The midpoint of
+        // each hour is 30 minutes before the timestamp, so offset = 1800 s.
+        // See Wilcox & Marion 2008, NREL/TP-581-43156. Consistent with EPW.
+        midpoint_offset_secs: 1800,
     })
 }
 

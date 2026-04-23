@@ -29,7 +29,10 @@ pub use draw_profile::{
 pub use envelope_lut::{
     EnvelopeLookup, EnvelopeLookupResult, EnvelopeLutError, PrecomputedLayer, resolve_boundary_name,
 };
-pub use epw::parse_epw;
+pub use epw::{
+    compute_sky_temp_c, berdahl_martin_sky_emissivity, sky_temp_from_emissivity,
+    parse_epw, KELVIN_OFFSET_C, STEFAN_BOLTZMANN,
+};
 pub use hpxml::{Building, EquipmentSpec, ValidationReport, parse_hpxml, resolve_equipment};
 pub use output::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,

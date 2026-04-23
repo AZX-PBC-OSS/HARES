@@ -19,26 +19,73 @@ const DEFAULT_R_M2_K_W: f64 = hares_envelope::boundary_rc::DEFAULT_R_M2_K_W;
 
 /// Interior mass multiplier by zone type.
 ///
-/// Conditioned space has furniture, partition walls, etc. that store heat.
-/// Foundation zones have minimal interior mass; 1.0 = air capacitance only.
-/// OCHRE uses 7.0 for all zones which overstates foundation thermal mass.
+/// Conditioned space has furniture, partition walls, etc. that store heat;
+/// the 7.0 multiplier captures this implicitly. All other zone types use
+/// 1.0 (air capacitance only). OCHRE uses 7.0 for all zones, which
+/// overstates foundation thermal mass.
+///
+/// **IMPORTANT**: EnergyPlus uses EITHER `ZoneCapacitanceMultiplier` (default
+/// 1.0) OR explicit `InternalMass` objects — never both. When furniture RC
+/// boundaries are present for a zone, `building_to_zone_inputs` overrides
+/// this multiplier to 1.0 so the furniture thermal mass is counted only once
+/// (via the explicit RC nodes). See E+ InputOutputRef, ZoneCapacitanceMultiplier.
 pub fn mass_multiplier_for_zone(zone_type: &ZoneType) -> f64 {
     match zone_type {
         ZoneType::Conditioned => 7.0,
-        ZoneType::Foundation => 1.0,
-        ZoneType::Attic | ZoneType::Garage => 1.0,
-        _ => 7.0,
+        ZoneType::Foundation
+        | ZoneType::Attic
+        | ZoneType::Garage
+        | ZoneType::Outdoor
+        | ZoneType::Ground
+        | ZoneType::Adjacent
+        | ZoneType::Other(_) => 1.0,
     }
 }
 
+/// Check if the building has auto-generated furniture boundaries for the given zone type.
+///
+/// Furniture boundaries are same-zone boundaries (interior == exterior) whose `id`
+/// contains "furniture", e.g. "conditioned_furniture", "garage_furniture".
+/// When these exist, they provide explicit RC thermal-mass nodes that replace the
+/// implicit mass captured by `mass_multiplier > 1.0`.
+///
+/// Per EnergyPlus convention, `ZoneCapacitanceMultiplier` (default 1.0) and
+/// `InternalMass` objects are mutually exclusive; the furniture boundary is the
+/// HARES equivalent of an E+ InternalMass object.
+fn zone_has_furniture_boundaries(building: &Building, zone_type: &ZoneType) -> bool {
+    building.boundaries.iter().any(|bd| {
+        bd.id.contains("furniture")
+            && bd.interior_zone.as_ref() == Some(zone_type)
+            && bd.exterior_zone.as_ref() == Some(zone_type)
+    })
+}
+
 /// Convert building zones to envelope-crate ZoneInput.
+///
+/// When furniture RC boundaries exist for a zone (same-zone boundaries whose `id`
+/// contains "furniture"), the mass multiplier is set to 1.0 (air capacitance only)
+/// because the furniture thermal mass is already modeled via explicit RC nodes.
+/// This avoids double-counting: E+ uses EITHER ZoneCapacitanceMultiplier (default
+/// 1.0) OR InternalMass objects, never both.
 pub fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneInput> {
     (0..n_zones)
         .map(|idx| {
             let zone = building.zones.get(idx);
             let mass_multiplier = building.mass_multiplier_override.unwrap_or_else(|| {
-                zone.map(|z| mass_multiplier_for_zone(&z.zone_type))
-                    .unwrap_or(7.0)
+                let zone_type_mult = zone
+                    .map(|z| mass_multiplier_for_zone(&z.zone_type))
+                    .unwrap_or(1.0);
+                // When furniture RC boundaries exist for this zone, the furniture
+                // thermal mass is modeled explicitly via RC nodes (equivalent to
+                // EnergyPlus InternalMass objects). The ZoneCapacitanceMultiplier
+                // must be 1.0 (air capacitance only) to avoid double-counting.
+                // Ref: E+ InputOutputRef ZoneCapacitanceMultiplier default=1.0;
+                // E+ InternalMass and ZoneCapacitanceMultiplier are mutually exclusive.
+                if zone.map_or(false, |z| zone_has_furniture_boundaries(building, &z.zone_type)) {
+                    1.0
+                } else {
+                    zone_type_mult
+                }
             });
             ZoneInput {
                 floor_area_m2: zone.and_then(|z| z.floor_area_m2),
@@ -591,9 +638,232 @@ mod tests {
     use serde_json::json;
 
     use hares_equipment::hvac::heating_config::{DuctConfig, GasFurnaceConfig};
+    use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
     use hares_types::FuelType;
 
-    use super::merged_equipment_config;
+    use super::{
+        building_to_zone_inputs, mass_multiplier_for_zone, zone_has_furniture_boundaries,
+        merged_equipment_config,
+    };
+
+    // ── mass_multiplier_for_zone tests ─────────────────────────────────
+
+    #[test]
+    fn mass_multiplier_conditioned_is_7() {
+        assert!((mass_multiplier_for_zone(&ZoneType::Conditioned) - 7.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mass_multiplier_non_conditioned_is_1() {
+        for zt in [
+            ZoneType::Attic,
+            ZoneType::Garage,
+            ZoneType::Foundation,
+            ZoneType::Outdoor,
+            ZoneType::Ground,
+            ZoneType::Adjacent,
+            ZoneType::Other("Custom".to_string()),
+        ] {
+            assert!(
+                (mass_multiplier_for_zone(&zt) - 1.0).abs() < 1e-12,
+                "expected 1.0 for {:?}, got {}",
+                zt,
+                mass_multiplier_for_zone(&zt)
+            );
+        }
+    }
+
+    // ── zone_has_furniture_boundaries tests ────────────────────────────
+
+    fn minimal_building(zones: Vec<Zone>, boundaries: Vec<Boundary>) -> hares_io::Building {
+        hares_io::Building {
+            site: hares_io::hpxml::Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+            },
+            zones,
+            boundaries,
+            windows: Vec::new(),
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: hares_io::hpxml::building::XmlNode {
+                name: "root".into(),
+                attrs: Default::default(),
+                text: String::new(),
+                children: Vec::new(),
+            },
+        }
+    }
+
+    fn furniture_boundary(id: &str, zone_type: ZoneType) -> Boundary {
+        Boundary {
+            id: id.to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: 10.0,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(zone_type.clone()),
+            exterior_zone: Some(zone_type.clone()),
+            material_layers: Vec::new(),
+            framing_factor: None,
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(90.0),
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+        }
+    }
+
+    #[test]
+    fn furniture_boundaries_detected_for_conditioned() {
+        let building = minimal_building(
+            vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: Vec::new(),
+                duct_systems: Vec::new(),
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            vec![furniture_boundary("conditioned_furniture", ZoneType::Conditioned)],
+        );
+        assert!(zone_has_furniture_boundaries(&building, &ZoneType::Conditioned));
+        assert!(!zone_has_furniture_boundaries(&building, &ZoneType::Attic));
+    }
+
+    #[test]
+    fn no_furniture_boundaries_returns_false() {
+        let building = minimal_building(
+            vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: Vec::new(),
+                duct_systems: Vec::new(),
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            Vec::new(),
+        );
+        assert!(!zone_has_furniture_boundaries(&building, &ZoneType::Conditioned));
+    }
+
+    // ── building_to_zone_inputs furniture override tests ──────────────
+
+    #[test]
+    fn furniture_override_reduces_conditioned_multiplier_to_1() {
+        let building = minimal_building(
+            vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: Vec::new(),
+                duct_systems: Vec::new(),
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            vec![furniture_boundary("conditioned_furniture", ZoneType::Conditioned)],
+        );
+        let zone_inputs = building_to_zone_inputs(&building, 1);
+        assert!(
+            (zone_inputs[0].mass_multiplier - 1.0).abs() < 1e-12,
+            "expected 1.0 (furniture override), got {}",
+            zone_inputs[0].mass_multiplier
+        );
+    }
+
+    #[test]
+    fn no_furniture_uses_default_conditioned_multiplier() {
+        let building = minimal_building(
+            vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: Vec::new(),
+                duct_systems: Vec::new(),
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            Vec::new(),
+        );
+        let zone_inputs = building_to_zone_inputs(&building, 1);
+        assert!(
+            (zone_inputs[0].mass_multiplier - 7.0).abs() < 1e-12,
+            "expected 7.0 (no furniture), got {}",
+            zone_inputs[0].mass_multiplier
+        );
+    }
+
+    #[test]
+    fn mass_multiplier_override_takes_precedence_over_furniture() {
+        let mut building = minimal_building(
+            vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: Vec::new(),
+                duct_systems: Vec::new(),
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            vec![furniture_boundary("conditioned_furniture", ZoneType::Conditioned)],
+        );
+        building.mass_multiplier_override = Some(5.0);
+        let zone_inputs = building_to_zone_inputs(&building, 1);
+        assert!(
+            (zone_inputs[0].mass_multiplier - 5.0).abs() < 1e-12,
+            "expected 5.0 (explicit override), got {}",
+            zone_inputs[0].mass_multiplier
+        );
+    }
+
+    #[test]
+    fn missing_zone_defaults_to_multiplier_1() {
+        let building = minimal_building(Vec::new(), Vec::new());
+        let zone_inputs = building_to_zone_inputs(&building, 1);
+        assert!(
+            (zone_inputs[0].mass_multiplier - 1.0).abs() < 1e-12,
+            "expected 1.0 (no zone → air only), got {}",
+            zone_inputs[0].mass_multiplier
+        );
+    }
+
+    // ── equipment override tests ───────────────────────────────────────
 
     fn gas_furnace_spec() -> hares_io::EquipmentSpec {
         let typed_cfg = GasFurnaceConfig {
