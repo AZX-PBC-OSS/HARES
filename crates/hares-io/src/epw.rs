@@ -13,6 +13,7 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 
+use hares_physics::constants::{CELSIUS_TO_KELVIN as KELVIN_OFFSET_C, STEFAN_BOLTZMANN};
 use hares_types::parse_trimmed_f64;
 
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
@@ -20,8 +21,6 @@ use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
 const EXPECTED_RECORDS_LEAP: usize = 8784;
 const DEFAULT_GROUND_TEMP_C: f64 = 10.0;
-/// Mirrors `hares_types::KELVIN_OFFSET` -- kept local to avoid import verbosity.
-pub const KELVIN_OFFSET_C: f64 = 273.15;
 
 const LOCATION_MIN_FIELDS: usize = 10;
 const DATA_PERIOD_MIN_FIELDS: usize = 3;
@@ -465,9 +464,6 @@ pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64
     }
     result
 }
-
-/// Stefan-Boltzmann constant [W/m²/K⁴].
-pub const STEFAN_BOLTZMANN: f64 = 5.6697e-8;
 
 /// Minimum infrared threshold [W/m²] below which we fall back to empirical models.
 /// Values below 50 W/m² are physically implausible for atmospheric downwelling
@@ -1017,9 +1013,9 @@ mod tests {
 
     #[test]
     fn sky_temp_from_infrared_300() {
-        // T_sky_K = (300 / 5.6697e-8)^0.25
+        // T_sky_K = (300 / σ)^0.25 where σ = STEFAN_BOLTZMANN (CODATA 2018)
         let ir = 300.0;
-        let expected_k = (ir / 5.6697e-8_f64).powf(0.25);
+        let expected_k = (ir / STEFAN_BOLTZMANN).powf(0.25);
         let expected_c = expected_k - 273.15;
         let t_sky_c = compute_sky_temp_c(ir, 25.0, 15.0, 5.0);
         assert!(

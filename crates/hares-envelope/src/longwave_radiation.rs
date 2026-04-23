@@ -38,12 +38,8 @@
 //! - ASHRAE HOF 2021, Ch. 25: "Heat, Air, and Moisture Control in Building Assemblies"
 //! - OCHRE Envelope.py: `_solve_exterior_radiation`, `_solve_interior_radiation`
 
-/// Stefan-Boltzmann constant [W/(m²·K⁴)].
-/// NIST CODATA 2018: σ = 5.670374419 × 10⁻⁸ W·m⁻²·K⁻⁴.
-pub const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
-
-/// Celsius-to-Kelvin offset.
-pub(crate) const CELSIUS_TO_KELVIN: f64 = 273.15;
+pub use hares_physics::constants::STEFAN_BOLTZMANN;
+pub(crate) use hares_physics::constants::CELSIUS_TO_KELVIN;
 
 /// Default emissivity for opaque building surfaces (walls, roof, floor).
 /// EnergyPlus default; typical range 0.85–0.95.

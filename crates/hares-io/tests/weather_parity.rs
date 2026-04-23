@@ -18,13 +18,11 @@
 //! These are the same formulas OCHRE uses (EnergyPlus method + Clark-Allen).
 
 // ---------------------------------------------------------------------------
-// Sky temperature formula constants (mirrors epw.rs private constants).
+// Sky temperature formula constants (imported from hares-physics).
 // These reproduce the exact computation to verify HARES uses the right values.
 // ---------------------------------------------------------------------------
 
-/// Stefan-Boltzmann constant [W/m²/K⁴] -- OCHRE/EnergyPlus value.
-const STEFAN_BOLTZMANN: f64 = 5.6697e-8;
-const KELVIN_OFFSET: f64 = 273.15;
+use hares_physics::constants::{CELSIUS_TO_KELVIN as KELVIN_OFFSET, STEFAN_BOLTZMANN};
 /// Threshold below which Clark-Allen fallback is used (matches INFRARED_FALLBACK_THRESHOLD in epw.rs).
 const INFRARED_FALLBACK_THRESHOLD: f64 = 50.0;
 
@@ -54,8 +52,8 @@ fn sky_temp_clark_allen_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
 // OCHRE / EnergyPlus method: T_sky = (IR / σ)^(1/4) in Kelvin, then to °C.
 //
 // Reference values computed from the formula:
-//   IR = 300 W/m²: T_sky_k = (300 / 5.6697e-8)^0.25 = 269.7 K → -3.5 °C
-//   IR = 400 W/m²: T_sky_k = (400 / 5.6697e-8)^0.25 = 289.7 K → 16.5 °C
+//   IR = 300 W/m²: T_sky_k = (300 / 5.670374419e-8)^0.25 ≈ 269.7 K → -3.5 °C
+//   IR = 400 W/m²: T_sky_k = (400 / 5.670374419e-8)^0.25 ≈ 289.7 K → 16.5 °C
 //
 // Tolerance: 0.1 °C (formula-based, no numerical table rounding).
 // ---------------------------------------------------------------------------
@@ -64,13 +62,13 @@ fn sky_temp_clark_allen_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
 fn sky_temp_stefan_boltzmann_300_w_m2() {
     let sky_c = sky_temp_stefan_boltzmann_c(300.0);
 
-    // Reference value from Stefan-Boltzmann inversion using σ = 5.6697e-8 W/m²/K⁴
-    // (the OCHRE/EnergyPlus value defined as STEFAN_BOLTZMANN above):
-    //   T_K = (300 / 5.6697e-8)^0.25 = (5.2930e9)^0.25 ≈ 269.706 K
-    //   T_C = 269.706 - 273.15 ≈ -3.44 °C
+    // Reference value from Stefan-Boltzmann inversion using σ = 5.670374419e-8 W/m²/K⁴
+    // (NIST CODATA 2018):
+    //   T_K = (300 / 5.670374419e-8)^0.25 ≈ 269.7 K
+    //   T_C ≈ -3.5 °C
     // Value independently derived, not computed via the function under test.
     // Tolerance: 0.1°C to allow for minor floating-point differences across platforms.
-    let expected_c = -3.44_f64;
+    let expected_c = -3.5_f64;
     assert!(
         (sky_c - expected_c).abs() < 0.1,
         "Stefan-Boltzmann sky temp at IR=300 W/m²: got {sky_c:.3}°C, expected ≈{expected_c:.2}°C"
@@ -105,7 +103,7 @@ fn sky_temp_infrared_fallback_threshold_is_50_w_m2() {
 
     // Stefan-Boltzmann at IR = 50.0 W/m² (boundary -- just at threshold).
     let sky_sb = sky_temp_stefan_boltzmann_c(50.0);
-    // Expected: (50 / 5.6697e-8)^0.25 - 273.15 ≈ 182.6 K - 273.15 ≈ -90.5°C.
+    // Expected: (50 / 5.670374419e-8)^0.25 - 273.15 ≈ 182.6 K - 273.15 ≈ -90.5°C.
     // This is the transition point -- values below 50 fall back to Clark-Allen
     // because 50 W/m² is physically implausible for atmospheric IR.
     assert!(
@@ -679,7 +677,10 @@ fn pchip_handles_all_nan() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn solar_fields_remain_zoh_after_resample() {
+fn solar_fields_use_triangular_by_default() {
+    // Solar fields (GHI, DNI, DHI) default to Triangular resampling,
+    // NOT ZOH. At the midpoint of each hour (frac = 0.5), the value
+    // must equal the original hourly value.
     let n = 5;
     let ghi = vec![0.0, 200.0, 500.0, 300.0, 0.0];
     let dni = vec![0.0, 400.0, 800.0, 600.0, 0.0];
@@ -700,19 +701,32 @@ fn solar_fields_remain_zoh_after_resample() {
         .resample(3600 / factor as u32)
         .expect("resample should succeed");
 
+    // Verify triangular behavior: midpoint of each hour = hourly value.
     for (field_name, source, resampled_field) in [
         ("GHI", &ghi, &resampled.ghi_w_m2),
         ("DNI", &dni, &resampled.dni_w_m2),
         ("DHI", &dhi, &resampled.dhi_w_m2),
     ] {
         for (k, &src_val) in source.iter().enumerate() {
-            for j in 0..factor {
-                let idx = k * factor + j;
+            let mid_idx = k * factor + factor / 2;
+            assert!(
+                (resampled_field[mid_idx] - src_val).abs() < 1e-12,
+                "{field_name} midpoint violated at hour {k}: \
+                 expected {src_val}, got {}",
+                resampled_field[mid_idx]
+            );
+        }
+        // Verify NOT ZOH: sub-hourly values should vary within the hour.
+        for k in 0..n {
+            let hour_slice = &resampled_field[k * factor..(k + 1) * factor];
+            let min = hour_slice.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = hour_slice.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            // Triangular produces variation unless the hour and both neighbors are equal.
+            // For our test data, at least some hours must show variation.
+            if source.iter().any(|&v| v != source[0]) {
                 assert!(
-                    (resampled_field[idx] - src_val).abs() < 1e-15,
-                    "{field_name} ZOH violated at hour {k}, sub-step {j} (index {idx}): \
-                     expected {src_val}, got {}",
-                    resampled_field[idx]
+                    max - min > 1e-12 || source.iter().all(|&v| v == source[0]),
+                    "{field_name} at hour {k}: no variation detected (looks like ZOH), min={min}, max={max}"
                 );
             }
         }
@@ -720,7 +734,8 @@ fn solar_fields_remain_zoh_after_resample() {
 }
 
 #[test]
-fn wind_fields_remain_zoh_after_resample() {
+fn wind_speed_uses_zoh_wind_dir_uses_circular_linear() {
+    // Wind speed defaults to ZOH; wind direction defaults to CircularLinear.
     let n = 5;
     let ws = vec![1.0, 5.0, 3.0, 8.0, 2.0];
     let wd = vec![90.0, 180.0, 270.0, 0.0, 45.0];
@@ -740,22 +755,37 @@ fn wind_fields_remain_zoh_after_resample() {
         .resample(3600 / factor as u32)
         .expect("resample should succeed");
 
-    for (field_name, source, resampled_field) in [
-        ("wind_speed", &ws, &resampled.wind_speed_m_s),
-        ("wind_dir", &wd, &resampled.wind_dir_deg),
-    ] {
-        for (k, &src_val) in source.iter().enumerate() {
-            for j in 0..factor {
-                let idx = k * factor + j;
-                assert!(
-                    (resampled_field[idx] - src_val).abs() < 1e-15,
-                    "{field_name} ZOH violated at hour {k}, sub-step {j} (index {idx}): \
-                     expected {src_val}, got {}",
-                    resampled_field[idx]
-                );
-            }
+    // Wind speed: ZOH — each sub-step equals the source value.
+    for (k, &src_val) in ws.iter().enumerate() {
+        for j in 0..factor {
+            let idx = k * factor + j;
+            assert!(
+                (resampled.wind_speed_m_s[idx] - src_val).abs() < 1e-15,
+                "wind_speed ZOH violated at hour {k}, sub-step {j} (index {idx}): \
+                 expected {src_val}, got {}",
+                resampled.wind_speed_m_s[idx]
+            );
         }
     }
+
+    // Wind direction: CircularLinear — at the start of each segment (frac=0),
+    // the value equals the source value, but sub-hourly values vary.
+    for (k, &src_val) in wd.iter().enumerate() {
+        let start_idx = k * factor;
+        assert!(
+            (resampled.wind_dir_deg[start_idx] - src_val).abs() < 1e-12,
+            "wind_dir at start of hour {k}: expected {src_val}, got {}",
+            resampled.wind_dir_deg[start_idx]
+        );
+    }
+    // Verify wind_dir is NOT ZOH: at least some sub-hourly values differ.
+    let all_constant = wd.iter().enumerate().all(|(k, &src_val)| {
+        (0..factor).all(|j| (resampled.wind_dir_deg[k * factor + j] - src_val).abs() < 1e-12)
+    });
+    assert!(
+        !all_constant,
+        "wind_dir appears to use ZOH — expected CircularLinear interpolation"
+    );
 }
 
 // ---------------------------------------------------------------------------

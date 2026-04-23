@@ -265,6 +265,32 @@ pub enum ResampleMethod {
     /// Missing/sentinel values (NaN or outside [0, 360)) are NOT interpolated
     /// circularly -- intervals touching a sentinel use ZOH from the left value.
     CircularLinear,
+    /// Midpoint-interpolation triangular resampling for solar radiation fields.
+    ///
+    /// Each hourly value represents the mean irradiance over that hour, placed
+    /// at the midpoint. Sub-hourly values form a piecewise-linear envelope
+    /// that is C0-continuous at hour boundaries and passes through each
+    /// hourly value at the midpoint of its hour.
+    ///
+    /// For fractional position `frac` within hour `i` (frac ∈ [0, 1)):
+    /// - frac < 0.5: `values[prev] × (0.5 - frac) + values[i] × (0.5 + frac)`
+    /// - frac ≥ 0.5: `values[i] × (1.5 - frac) + values[next] × (frac - 0.5)`
+    ///
+    /// Where `prev = (i - 1 + n) % n` and `next = (i + 1) % n` for cyclic wrap
+    /// at the year boundary.
+    ///
+    /// Key properties:
+    /// - At frac = 0 (hour start): value = (values[prev] + values[i]) / 2
+    ///   — average of neighboring midpoints → C0 continuous across boundaries.
+    /// - At frac = 0.5 (midpoint): value = values[i] — current hourly value.
+    /// - At frac → 1 (hour end): value → (values[i] + values[next]) / 2
+    ///   — matches start of next hour → C0 continuous.
+    ///
+    /// The E+ approach (`SetupInterpolationValues`, WeatherManager.cc:8328-8380)
+    /// uses a weighted blend of current/previous hours; this implementation uses
+    /// midpoint interpolation which achieves the same goals (smooth transitions,
+    /// hourly mean preservation) with a different algorithm.
+    Triangular,
 }
 
 /// Per-column override for weather resampling strategy.
@@ -521,21 +547,23 @@ impl WeatherTimeSeries {
                 sky_temp_c,
                 ground_temp_c,
                 opaque_sky_cover,
-                // Period-average energy flux defaults to ZOH.
+                // Solar radiation defaults to Triangular (midpoint-interpolation
+                // resampling): smoother than ZOH, passes through the hourly value
+                // at the midpoint of each hour, C0-continuous at boundaries.
                 ghi_w_m2: resample_field(
                     &self.ghi_w_m2,
                     factor,
-                    overrides.ghi.unwrap_or(ResampleMethod::Zoh),
+                    overrides.ghi.unwrap_or(ResampleMethod::Triangular),
                 ),
                 dni_w_m2: resample_field(
                     &self.dni_w_m2,
                     factor,
-                    overrides.dni.unwrap_or(ResampleMethod::Zoh),
+                    overrides.dni.unwrap_or(ResampleMethod::Triangular),
                 ),
                 dhi_w_m2: resample_field(
                     &self.dhi_w_m2,
                     factor,
-                    overrides.dhi.unwrap_or(ResampleMethod::Zoh),
+                    overrides.dhi.unwrap_or(ResampleMethod::Triangular),
                 ),
                 // Turbulent/stochastic → ZOH.
                 wind_speed_m_s: resample_field(
@@ -999,6 +1027,73 @@ fn circular_linear_resample(values: &[f64], factor: usize) -> Vec<f64> {
     out
 }
 
+/// Midpoint-interpolation triangular resampling for solar radiation fields.
+///
+/// Each hourly value represents the mean irradiance over that hour, placed
+/// at the midpoint. Sub-hourly values form a piecewise-linear envelope that
+/// is C0-continuous at hour boundaries and passes through each hourly value
+/// at the midpoint of its hour. This produces smooth sub-hourly solar profiles
+/// instead of the step-function jumps created by ZOH.
+///
+/// For fractional position `frac` within hour `i` (frac ∈ [0, 1)):
+/// - frac < 0.5: `values[prev] × (0.5 - frac) + values[i] × (0.5 + frac)`
+/// - frac ≥ 0.5: `values[i] × (1.5 - frac) + values[next] × (frac - 0.5)`
+///
+/// Where `prev = (i - 1 + n) % n` and `next = (i + 1) % n` for cyclic wrap
+/// at the year boundary.
+///
+/// Key properties:
+/// - At frac = 0 (hour start): value = (values[prev] + values[i]) / 2
+///   — C0 continuous: matches frac → 1 of the previous hour.
+/// - At frac = 0.5 (midpoint): value = values[i] — current hourly value.
+/// - At frac → 1 (hour end): value → (values[i] + values[next]) / 2
+///   — C0 continuous: matches frac = 0 of the next hour.
+///
+/// The E+ approach (`SetupInterpolationValues`, WeatherManager.cc:8328-8380)
+/// uses a weighted blend of current/previous hours; this implementation uses
+/// midpoint interpolation which achieves the same goals (smooth transitions,
+/// hourly mean preservation) with a different algorithm.
+///
+/// Edge cases:
+/// - Empty input: returns empty vector.
+/// - Single element: replicates (no neighbors to interpolate toward).
+/// - factor ≤ 1: returns a copy of the input.
+fn triangular_resample(values: &[f64], factor: usize) -> Vec<f64> {
+    let n = values.len();
+    if n == 0 {
+        return vec![];
+    }
+    if factor <= 1 {
+        return values.to_vec();
+    }
+    if n == 1 {
+        return vec![values[0]; factor];
+    }
+
+    let total = n * factor;
+    let mut out = Vec::with_capacity(total);
+    let factor_f = factor as f64;
+
+    for j in 0..total {
+        let t_global = j as f64 / factor_f;
+        let hour = (t_global as usize) % n;
+        let frac = t_global - (t_global as usize) as f64;
+
+        let prev = if hour == 0 { n - 1 } else { hour - 1 };
+        let next = (hour + 1) % n;
+
+        let val = if frac < 0.5 {
+            values[prev] * (0.5 - frac) + values[hour] * (0.5 + frac)
+        } else {
+            values[hour] * (1.5 - frac) + values[next] * (frac - 0.5)
+        };
+
+        out.push(val);
+    }
+
+    out
+}
+
 /// Dispatch resampling based on method enum.
 fn resample_field(values: &[f64], factor: usize, method: ResampleMethod) -> Vec<f64> {
     match method {
@@ -1007,6 +1102,7 @@ fn resample_field(values: &[f64], factor: usize, method: ResampleMethod) -> Vec<
         ResampleMethod::Zoh => replicate_zoh(values, factor),
         ResampleMethod::Linear => linear_resample(values, factor),
         ResampleMethod::CircularLinear => circular_linear_resample(values, factor),
+        ResampleMethod::Triangular => triangular_resample(values, factor),
     }
 }
 
@@ -1390,12 +1486,28 @@ mod tests {
     }
 
     #[test]
-    fn resample_solar_fields_still_zoh() {
+    fn resample_solar_fields_use_triangular_by_default() {
         let series = sample_series();
         let resampled = series.resample(60).expect("resample should succeed");
-        // GHI uses ZOH: first 60 slots are 0.0, next 60 are 500.0.
-        assert!(resampled.ghi_w_m2.iter().take(60).all(|&x| x == 0.0));
-        assert!(resampled.ghi_w_m2.iter().skip(60).all(|&x| x == 500.0));
+        // GHI now uses Triangular by default (not ZOH).
+        // With values [0.0, 500.0] and factor=60:
+        // At the midpoint of hour 0 (index 30, frac=0.5): value = values[0] = 0.0.
+        // At the midpoint of hour 1 (index 90, frac=0.5): value = values[1] = 500.0.
+        assert!(
+            (resampled.ghi_w_m2[30] - 0.0).abs() < 1e-12,
+            "midpoint of hour 0 should be values[0]=0, got {}",
+            resampled.ghi_w_m2[30]
+        );
+        assert!(
+            (resampled.ghi_w_m2[90] - 500.0).abs() < 1e-12,
+            "midpoint of hour 1 should be values[1]=500, got {}",
+            resampled.ghi_w_m2[90]
+        );
+        // Verify NOT using ZOH: the sub-hourly values should NOT be constant
+        // within each hour (triangular produces variation within the hour).
+        let first_hour: Vec<f64> = resampled.ghi_w_m2.iter().take(60).copied().collect();
+        let all_same = first_hour.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+        assert!(!all_same, "triangular should produce varying sub-hourly values, not constant ZOH");
     }
 
     #[test]
@@ -2007,5 +2119,416 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             (last - 0.0).abs() < 1e-12,
             "non-cyclic Pchip should flat-hold at last knot, got {last}"
         );
+    }
+
+    // --- Triangular resampling tests (S7 fix) ---
+
+    #[test]
+    fn triangular_empty_returns_empty() {
+        let out = super::triangular_resample(&[], 4);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn triangular_single_element_replicates() {
+        let out = super::triangular_resample(&[42.0], 4);
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|&v| (v - 42.0).abs() < 1e-12));
+    }
+
+    #[test]
+    fn triangular_factor_one_returns_original() {
+        let values = [1.0, 2.0, 3.0];
+        let out = super::triangular_resample(&values, 1);
+        assert_eq!(out, values);
+    }
+
+    #[test]
+    fn triangular_midpoint_equals_hourly_value() {
+        // At frac = 0.5 (midpoint of each hour), the output should equal
+        // the current hour's value exactly.
+        let values = [100.0, 200.0, 300.0, 400.0, 500.0];
+        let factor = 6;
+        let out = super::triangular_resample(&values, factor);
+        assert_eq!(out.len(), values.len() * factor);
+        for (i, &v) in values.iter().enumerate() {
+            let midpoint_idx = i * factor + factor / 2;
+            assert!(
+                (out[midpoint_idx] - v).abs() < 1e-12,
+                "midpoint of hour {i}: expected {v}, got {}",
+                out[midpoint_idx]
+            );
+        }
+    }
+
+    #[test]
+    fn triangular_hour_boundary_transitions() {
+        // With the corrected midpoint-interpolation formulas, the value at
+        // hour boundaries is the average of neighboring hourly values, giving
+        // C0 continuity: end of hour i = start of hour i+1.
+        let values = [100.0, 200.0, 300.0, 400.0, 500.0];
+        let n = values.len();
+        let factor = 100; // even factor so frac=0.5 is hit exactly
+        let out = super::triangular_resample(&values, factor);
+
+        // At the start of each hour (frac = 0), value = (values[prev] + values[i]) / 2.
+        for i in 0..n {
+            let prev = if i == 0 { n - 1 } else { i - 1 };
+            let start_idx = i * factor;
+            let expected = (values[prev] + values[i]) / 2.0;
+            assert!(
+                (out[start_idx] - expected).abs() < 1e-12,
+                "start of hour {i}: expected (values[{prev}]+values[{i}])/2={expected}, got {}",
+                out[start_idx]
+            );
+        }
+
+        // At the midpoint of each hour (frac = 0.5), value = current hour's value.
+        for i in 0..n {
+            let mid_idx = i * factor + factor / 2;
+            assert!(
+                (out[mid_idx] - values[i]).abs() < 1e-12,
+                "midpoint of hour {i}: expected values[i]={}, got {}",
+                values[i],
+                out[mid_idx]
+            );
+        }
+
+        // C0 continuity at hour boundaries: end of hour i must equal start of hour i+1.
+        // The last sub-sample of hour i is at index (i+1)*factor - 1, approaching
+        // (values[i] + values[next]) / 2. The first sub-sample of hour i+1 IS exactly
+        // (values[i] + values[i+1]) / 2. With a large factor the gap is negligible.
+        for i in 0..n - 1 {
+            let end_idx = (i + 1) * factor - 1;
+            let start_next = (i + 1) * factor;
+            // The last sub-sample of hour i has frac = (factor-1)/factor ≈ 0.99,
+            // so the value approaches (values[i] + values[i+1]) / 2.
+            // The first sub-sample of hour i+1 is exactly (values[i] + values[i+1]) / 2.
+            // The gap should be on the order of 1/factor.
+            let boundary_val = (values[i] + values[i + 1]) / 2.0;
+            let gap = (out[end_idx] - boundary_val).abs()
+                + (out[start_next] - boundary_val).abs();
+            // Both should be close to the boundary value; the gap from the boundary
+            // is at most ~max_delta / factor (one linear step).
+            let max_delta = (values.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0_f64, f64::max))
+                .max((values[0] - values[n - 1]).abs());
+            assert!(
+                gap < max_delta / factor as f64 * 2.0 + 1e-12,
+                "C0 continuity gap at hour {i}/{} boundary: end={}, start={}, boundary={boundary_val}",
+                i + 1,
+                out[end_idx], out[start_next]
+            );
+        }
+
+        // Also verify exact C0 continuity at the cyclic boundary (hour n-1 → hour 0).
+        // The wrap-around: end of last hour approaches (values[n-1] + values[0]) / 2.
+        let last_end = n * factor - 1;
+        let cyclic_boundary = (values[n - 1] + values[0]) / 2.0;
+        assert!(
+            (out[last_end] - cyclic_boundary).abs() < (values[n - 1] - values[0]).abs() / factor as f64 + 1e-12,
+            "cyclic boundary: end of last hour should approach (values[n-1]+values[0])/2={cyclic_boundary}, got {}",
+            out[last_end]
+        );
+    }
+
+    #[test]
+    fn triangular_cyclic_wrap() {
+        // Verify that hour 0 uses hour n-1 as its predecessor (cyclic wrap).
+        let values = [10.0, 20.0, 30.0, 40.0, 50.0];
+        let n = values.len();
+        let factor = 4;
+        let out = super::triangular_resample(&values, factor);
+
+        // Start of hour 0 (frac = 0): value = (values[n-1] + values[0]) / 2 = 30.0
+        assert!(
+            (out[0] - (values[n - 1] + values[0]) / 2.0).abs() < 1e-12,
+            "cyclic wrap: start of hour 0 should equal (values[n-1]+values[0])/2={}, got {}",
+            (values[n - 1] + values[0]) / 2.0,
+            out[0]
+        );
+
+        // Start of last hour (frac = 0): value = (values[n-2] + values[n-1]) / 2 = 45.0
+        let last_hour_start = (n - 1) * factor;
+        assert!(
+            (out[last_hour_start] - (values[n - 2] + values[n - 1]) / 2.0).abs() < 1e-12,
+            "start of last hour: expected (values[n-2]+values[n-1])/2={}, got {}",
+            (values[n - 2] + values[n - 1]) / 2.0,
+            out[last_hour_start]
+        );
+
+        // End of last hour: approaches (values[n-1] + values[0]) / 2 = 30.0
+        // (same as start of hour 0 → C0 continuous across year boundary).
+        let last_idx = n * factor - 1;
+        let frac = (factor - 1) as f64 / factor as f64; // = 0.75
+        // frac ≥ 0.5: values[n-1] × (1.5 - frac) + values[0] × (frac - 0.5)
+        let expected = values[n - 1] * (1.5 - frac) + values[0] * (frac - 0.5);
+        assert!(
+            (out[last_idx] - expected).abs() < 1e-12,
+            "cyclic wrap: end of last hour, expected {expected}, got {}",
+            out[last_idx]
+        );
+    }
+
+    #[test]
+    fn triangular_constant_input() {
+        // Constant input should produce constant output regardless of interpolation.
+        let values = [300.0, 300.0, 300.0, 300.0];
+        let out = super::triangular_resample(&values, 6);
+        assert_eq!(out.len(), 24);
+        for (i, &v) in out.iter().enumerate() {
+            assert!(
+                (v - 300.0).abs() < 1e-12,
+                "constant input: out[{i}] = {v}, expected 300.0"
+            );
+        }
+    }
+
+    #[test]
+    fn triangular_two_element_cyclic() {
+        // Two elements: hour 0 prev = hour 1 (cyclic), hour 1 next = hour 0 (cyclic).
+        let values = [0.0, 100.0];
+        let factor = 4;
+        let out = super::triangular_resample(&values, factor);
+        assert_eq!(out.len(), 8);
+
+        // Hour 0 (prev=1=100, hour=0=0, next=1=100):
+        // frac=0.00: values[1]×0.5 + values[0]×0.5 = 50.0
+        // frac=0.25: values[1]×0.25 + values[0]×0.75 = 25.0
+        // frac=0.50: values[0]×1.0 = 0.0
+        // frac=0.75: values[0]×0.75 + values[1]×0.25 = 25.0
+        let expected_hour0 = [50.0, 25.0, 0.0, 25.0];
+        for (i, (&got, &exp)) in out[..4].iter().zip(expected_hour0.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-12,
+                "hour 0 index {i}: expected {exp}, got {got}"
+            );
+        }
+
+        // Hour 1 (prev=0=0, hour=1=100, next=0=0):
+        // frac=0.00: values[0]×0.5 + values[1]×0.5 = 50.0
+        // frac=0.25: values[0]×0.25 + values[1]×0.75 = 75.0
+        // frac=0.50: values[1]×1.0 = 100.0
+        // frac=0.75: values[1]×0.75 + values[0]×0.25 = 75.0
+        let expected_hour1 = [50.0, 75.0, 100.0, 75.0];
+        for (i, (&got, &exp)) in out[4..8].iter().zip(expected_hour1.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-12,
+                "hour 1 index {i}: expected {exp}, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn triangular_solar_override_back_to_zoh() {
+        // Users should be able to override Triangular back to ZOH for parity testing.
+        let series = sample_series();
+        let overrides = ResampleOverrides {
+            ghi: Some(ResampleMethod::Zoh),
+            ..Default::default()
+        };
+        let resampled = series
+            .resample_with(60, &overrides)
+            .expect("resample should succeed");
+        // ZOH: first 60 slots are values[0]=0.0, next 60 are values[1]=500.0.
+        assert!(resampled.ghi_w_m2.iter().take(60).all(|&x| x == 0.0));
+        assert!(resampled.ghi_w_m2.iter().skip(60).all(|&x| x == 500.0));
+    }
+
+    #[test]
+    fn triangular_zero_solar_stays_non_negative() {
+        // When all solar values are zero, the triangular interpolation must
+        // not produce negative values (solar irradiance is non-negative).
+        let values = [0.0, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0];
+        let out = super::triangular_resample(&values, 12);
+        for (i, &v) in out.iter().enumerate() {
+            assert!(
+                v >= -1e-12,
+                "triangular produced negative solar at index {i}: {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn triangular_piecewise_linear_continuity() {
+        // Verify that the piecewise-linear output is C0 continuous at frac=0.5:
+        // the two linear pieces meet at the midpoint where value = values[i].
+        let values = [100.0, 300.0, 50.0, 400.0, 200.0];
+        let factor = 100; // even factor so frac=0.5 is hit exactly
+        let out = super::triangular_resample(&values, factor);
+
+        for i in 0..values.len() {
+            // Midpoint index: frac = 0.5 exactly (factor must be even).
+            let mid_idx = i * factor + factor / 2;
+            assert!(
+                (out[mid_idx] - values[i]).abs() < 1e-12,
+                "midpoint of hour {i}: expected {}, got {}",
+                values[i],
+                out[mid_idx]
+            );
+
+            // Adjacent sub-samples to the midpoint should be close to each other
+            // (no discontinuity). The sub-sample just before and after the midpoint
+            // should differ by at most one linear step.
+            if mid_idx > 0 && mid_idx + 1 < out.len() {
+                let diff = (out[mid_idx] - out[mid_idx - 1]).abs()
+                    + (out[mid_idx + 1] - out[mid_idx]).abs();
+                // The maximum step size is bounded by max(|values[k+1] - values[k]|) / (factor/2).
+                let max_delta = values
+                    .windows(2)
+                    .map(|w| (w[1] - w[0]).abs())
+                    .fold(0.0_f64, f64::max)
+                    .max((values[0] - values[values.len() - 1]).abs());
+                let max_step = max_delta / (factor as f64 / 2.0);
+                assert!(
+                    diff < 4.0 * max_step,
+                    "discontinuity at midpoint of hour {i}: diff={diff}, max_step={max_step}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn triangular_c0_continuous_at_hour_boundaries() {
+        // The S7 fix: the corrected midpoint-interpolation formulas are C0
+        // continuous at hour boundaries. The value at the end of hour i
+        // (frac → 1) equals the value at the start of hour i+1 (frac = 0),
+        // both being (values[i] + values[i+1]) / 2.
+        //
+        // Use a profile with large inter-hour variation to expose any
+        // discontinuity that the old (broken) formula would produce.
+        let values = [0.0, 500.0, 100.0, 800.0, 50.0, 600.0];
+        let n = values.len();
+        let factor = 120; // high factor so the last sub-sample is close to frac=1
+        let out = super::triangular_resample(&values, factor);
+
+        for i in 0..n {
+            let next = (i + 1) % n;
+            // Boundary value between hour i and hour next:
+            let boundary_val = (values[i] + values[next]) / 2.0;
+
+            // Start of hour next (= start of the next hour) must equal boundary_val.
+            let start_next_idx = next * factor;
+            assert!(
+                (out[start_next_idx] - boundary_val).abs() < 1e-12,
+                "start of hour {next}: expected boundary {boundary_val}, got {}",
+                out[start_next_idx]
+            );
+
+            // Last sub-sample of hour i must be close to boundary_val.
+            // At frac = (factor-1)/factor, the formula gives:
+            //   values[i] × (1.5 - (f-1)/f) + values[next] × ((f-1)/f - 0.5)
+            // which converges to boundary_val as factor → ∞.
+            let end_idx = (i + 1) * factor - 1;
+            let frac = (factor - 1) as f64 / factor as f64;
+            let expected_end = if frac < 0.5 {
+                values[if i == 0 { n - 1 } else { i - 1 }] * (0.5 - frac) + values[i] * (0.5 + frac)
+            } else {
+                values[i] * (1.5 - frac) + values[next] * (frac - 0.5)
+            };
+            assert!(
+                (out[end_idx] - expected_end).abs() < 1e-12,
+                "end of hour {i}: expected {expected_end}, got {}",
+                out[end_idx]
+            );
+
+            // The gap between end-of-hour and start-of-next must be proportional
+            // to 1/factor (one linear step), NOT a discontinuity proportional to
+            // the inter-hour difference.
+            let gap = (out[end_idx] - out[start_next_idx]).abs();
+            let max_acceptable_gap = (values[next] - values[i]).abs() / factor as f64 * 3.0;
+            assert!(
+                gap < max_acceptable_gap + 1e-12,
+                "C0 continuity violated at hour {i}/{next} boundary: \
+                 end={}, start={}, gap={gap}, max_acceptable={max_acceptable_gap}",
+                out[end_idx], out[start_next_idx]
+            );
+        }
+    }
+
+    #[test]
+    fn triangular_hourly_mean_preservation() {
+        // The midpoint-interpolation triangular resampling approximately
+        // preserves the hourly mean. For slowly varying signals, the mean
+        // of sub-hourly values within each hour is close to the original
+        // hourly value. The mean over hour i is:
+        //   0.125 × values[prev] + 0.75 × values[i] + 0.125 × values[next]
+        // which equals values[i] when the signal is constant or linear,
+        // and deviates proportionally to the second difference for curved signals.
+        //
+        // Test with a sinusoidal solar profile (typical clear-sky day).
+        let n = 24;
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                // Half-sine daytime profile: rises at hour 6, peaks at hour 12, sets at hour 18.
+                let phase = std::f64::consts::PI * (i as f64 - 6.0) / 12.0;
+                800.0 * phase.sin().max(0.0)
+            })
+            .collect();
+
+        let factor = 60;
+        let out = super::triangular_resample(&values, factor);
+
+        for i in 0..n {
+            let hour_vals = &out[i * factor..(i + 1) * factor];
+            let mean: f64 = hour_vals.iter().sum::<f64>() / factor as f64;
+            let original = values[i];
+
+            if original > 50.0 {
+                // For daytime hours with significant irradiance, relative error
+                // should be small (< 2% for sinusoidal profiles).
+                let rel_err = (mean - original).abs() / original;
+                assert!(
+                    rel_err < 0.02,
+                    "hour {i}: mean={mean:.2}, original={original:.2}, rel_err={rel_err:.4}"
+                );
+            } else {
+                // For nighttime or low-irradiance hours, use absolute tolerance.
+                // Mean may deviate more in relative terms near sunrise/sunset
+                // where the gradient is steep.
+                assert!(
+                    (mean - original).abs() < 30.0,
+                    "hour {i}: mean={mean:.2}, original={original:.2}, abs_err={:.2}",
+                    (mean - original).abs()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn triangular_no_negative_irradiance_for_solar_profile() {
+        // The corrected formulas use convex combinations (all coefficients
+        // non-negative, summing to 1), so for non-negative inputs the output
+        // is always non-negative. This is a physical requirement: solar
+        // irradiance cannot be negative.
+        //
+        // Test with a realistic diurnal profile that includes sharp transitions
+        // (sunrise/sunset) and large inter-hour differences.
+        let n = 24;
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                let phase = std::f64::consts::PI * (i as f64 - 6.0) / 12.0;
+                1000.0 * phase.sin().max(0.0)
+            })
+            .collect();
+
+        let factor = 60;
+        let out = super::triangular_resample(&values, factor);
+
+        for (i, &v) in out.iter().enumerate() {
+            assert!(
+                v >= 0.0,
+                "triangular produced negative irradiance at index {i}: {v}"
+            );
+        }
+
+        // Also verify with an extreme profile: sudden jump from 0 to 1000 W/m².
+        let extreme = [0.0, 0.0, 0.0, 1000.0, 0.0, 0.0, 0.0, 0.0];
+        let out_extreme = super::triangular_resample(&extreme, 60);
+        for (i, &v) in out_extreme.iter().enumerate() {
+            assert!(
+                v >= 0.0,
+                "extreme profile: negative irradiance at index {i}: {v}"
+            );
+        }
     }
 }

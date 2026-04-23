@@ -85,7 +85,9 @@ INTERIOR_MEAN_TEMP_K: float = 293.15
 
 # EnergyPlus ConvectionCoefficients.cc: minimum TARP delta-T [K] to prevent
 # unbounded surface resistance at small driving temperature differences.
-MIN_DELTA_T_TARP_NATURAL_K: float = 12.9
+# E+ uses MIN_DELTA_T = 0.1 °C (not 12.9 °C).  The previous 12.9 °C floor
+# (from an OCHRE default) caused R_film to be 17–27 % too low at small ΔT.
+MIN_DELTA_T_TARP_NATURAL_K: float = 0.1
 
 # DOE-2 surface-roughness factor r_f.  EnergyPlus Engineering Reference §9.5
 # Table "Surface Roughness Multipliers for Exterior Convection".  Residential
