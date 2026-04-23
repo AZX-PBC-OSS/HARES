@@ -420,10 +420,10 @@ impl PyDwellingConfig {
                     ))
                 })?;
                 let value_str = value.extract::<String>()?;
-                let valid_methods = ["pchip", "zoh", "linear"];
+                let valid_methods = ["pchip", "pchip_cyclic", "zoh", "linear", "circular_linear"];
                 if !valid_methods.contains(&value_str.as_str()) {
                     return Err(PyValueError::new_err(format!(
-                        "invalid resample method '{}'. Expected one of: pchip, zoh, linear",
+                        "invalid resample method '{}'. Expected one of: pchip, pchip_cyclic, zoh, linear, circular_linear",
                         value_str
                     )));
                 }
@@ -630,8 +630,9 @@ fn parse_resample_method(s: &str) -> PyResult<ResampleMethod> {
         "pchip_cyclic" => Ok(ResampleMethod::PchipCyclic),
         "zoh" => Ok(ResampleMethod::Zoh),
         "linear" => Ok(ResampleMethod::Linear),
+        "circular_linear" => Ok(ResampleMethod::CircularLinear),
         _ => Err(PyValueError::new_err(format!(
-            "invalid resample method: '{}'. Expected pchip, pchip_cyclic, zoh, or linear",
+            "invalid resample method: '{}'. Expected pchip, pchip_cyclic, zoh, linear, or circular_linear",
             s
         ))),
     }

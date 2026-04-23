@@ -1660,9 +1660,10 @@ fn build_config(
                     "pchip" => Ok(hares_io::ResampleMethod::Pchip),
                     "pchip_cyclic" => Ok(hares_io::ResampleMethod::PchipCyclic),
                     "linear" => Ok(hares_io::ResampleMethod::Linear),
+                    "circular_linear" => Ok(hares_io::ResampleMethod::CircularLinear),
                     other => Err(PyValueError::new_err(format!(
                         "unknown resample method '{other}' for field '{field}'; \
-                         valid methods: zoh, pchip, pchip_cyclic, linear"
+                         valid methods: zoh, pchip, pchip_cyclic, linear, circular_linear"
                     ))),
                 }
             }
