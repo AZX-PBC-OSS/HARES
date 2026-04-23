@@ -425,18 +425,18 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         "Refrigerator must draw positive electrical power; got {electric_kw} kW"
     );
 
-    // Refrigerators have 100% sensible gain fraction, so sensible_gain_w == electric_w.
+    // Refrigerators have 100% sensible gain fraction, so total_sensible_gain_w == electric_w.
     let sensible_w = eq
         .telemetry()
-        .get("sensible_gain_w")
-        .expect("sensible_gain_w telemetry field must be present");
+        .get("total_sensible_gain_w")
+        .expect("total_sensible_gain_w telemetry field must be present");
     assert!(
         sensible_w > 0.0,
         "Refrigerator must produce positive sensible heat gain; got {sensible_w} W"
     );
     assert!(
         (sensible_w - electric_kw * 1000.0).abs() < 1e-6,
-        "Refrigerator sensible_gain_w ({sensible_w} W) should equal electric_w ({} W)",
+        "Refrigerator total_sensible_gain_w ({sensible_w} W) should equal electric_w ({} W)",
         electric_kw * 1000.0
     );
 }
