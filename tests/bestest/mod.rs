@@ -428,7 +428,7 @@ fn debug_600ff_heat_balance_at_peak() {
         peak_gains.exterior_lwr_w
     );
     eprintln!(
-        "[heat_balance] interior_lwr_w={:.1}",
+        "[heat_balance] interior_lwr_exchange_w={:.1}",
         peak_gains.interior_lwr_w
     );
     eprintln!(
@@ -639,7 +639,7 @@ fn debug_900ff_min_temp_heat_balance() {
                     .fold(f64::NEG_INFINITY, f64::max);
                 let gains = dwelling2.thermal_solver.component_gains().clone();
                 eprintln!(
-                    "[900ff_step] step={} t_zone={:.3} t_out={:.1} window_solar={:.1} opaque_lwr={:.1} ext_lwr={:.1} infiltration={:.1} internal={:.1} int_lwr={:.1}",
+                    "[900ff_step] step={} t_zone={:.3} t_out={:.1} window_solar={:.1} opaque_lwr={:.1} ext_lwr={:.1} infiltration={:.1} internal={:.1} int_lwr_exchange={:.1}",
                     step + 1,
                     temp,
                     gains.driving_outdoor_temp_c,

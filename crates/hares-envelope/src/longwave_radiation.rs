@@ -60,11 +60,20 @@ pub const EMISSIVITY_WINDOW: f64 = 0.84;
 /// products (aluminium facing), which have measured emissivities of 0.03–0.07.
 pub const EMISSIVITY_RADIANT_BARRIER: f64 = 0.05;
 
-/// Default solar absorptance for opaque building surfaces.
+/// Default solar absorptance for opaque building surfaces (exterior side).
 ///
 /// EnergyPlus Material IDD default is 0.70 (the authoritative source).
 /// OCHRE `Envelope.py:222` uses 0.60; we follow EnergyPlus here.
 pub const SOLAR_ABSORPTANCE_DEFAULT: f64 = 0.70;
+
+/// Default solar absorptance for interior-facing opaque surfaces.
+///
+/// EnergyPlus Material IDD default for `Solar_Absorptance` is 0.70
+/// (the same value applies to both exterior and interior side).
+/// Previously hardcoded to 0.6, which caused a 17% under-absorption of
+/// interior solar for general HPXML simulations. BESTEST fixtures
+/// explicitly set 0.6 so they are unaffected by this default change.
+pub const INTERIOR_SOLAR_ABSORPTANCE_DEFAULT: f64 = 0.70;
 
 /// Solar absorptance for attic radiant barriers.
 ///

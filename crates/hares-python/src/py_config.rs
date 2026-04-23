@@ -627,10 +627,11 @@ impl PyDwellingConfig {
 fn parse_resample_method(s: &str) -> PyResult<ResampleMethod> {
     match s {
         "pchip" => Ok(ResampleMethod::Pchip),
+        "pchip_cyclic" => Ok(ResampleMethod::PchipCyclic),
         "zoh" => Ok(ResampleMethod::Zoh),
         "linear" => Ok(ResampleMethod::Linear),
         _ => Err(PyValueError::new_err(format!(
-            "invalid resample method: '{}'. Expected pchip, zoh, or linear",
+            "invalid resample method: '{}'. Expected pchip, pchip_cyclic, zoh, or linear",
             s
         ))),
     }

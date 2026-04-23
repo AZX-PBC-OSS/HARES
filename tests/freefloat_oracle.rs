@@ -580,9 +580,9 @@ mod tests {
                     o("Internal Heat Gain - Indoor (W)"),
                 );
                 row(
-                    "Interior LWR - Indoor (W)",
+                    "Interior LWR Exchange - Indoor (W)",
                     g.interior_lwr_w,
-                    o("Radiation Heat Gain - Indoor (W)"),
+                    o("Interior LWR Exchange - Indoor (W)"),
                 );
                 row("Opaque Solar (W)", g.opaque_solar_w, f64::NAN);
                 row("Exterior LWR (W)", g.exterior_lwr_w, f64::NAN);
@@ -621,13 +621,13 @@ mod tests {
                     o("Internal Mass Heat Gain - Indoor (W)"),
                 );
 
-                // Net sensible
+                // Net sensible (interior_lwr_w excluded — it's a gross exchange
+                // metric Σ|q_i|/2, not a net gain; by conservation, Σ q_i ≈ 0)
                 let hares_net = g.window_solar_w
                     + g.infiltration_w
                     + g.ventilation_w
                     + g.natural_ventilation_w
                     + g.internal_gain_w
-                    + g.interior_lwr_w
                     + g.wall_heat_gain_w
                     + g.floor_heat_gain_w
                     + g.roof_heat_gain_w
@@ -884,13 +884,11 @@ mod tests {
         ));
 
         // Definition mismatch between HARES and OCHRE on the interior LWR
-        // channel: HARES reports the total LWR exchange summed across surfaces,
-        // which is zero by conservation (sigma * eps * (T_i^4 - T_j^4) sums to
-        // zero on a closed enclosure per ASHRAE HoF Ch. 4). OCHRE reports only
-        // the convective-to-zone-air fraction of the net LWR. Comparing these
-        // two quantities with a percentage band is physically meaningless, so
-        // the channel is inspected diagnostically (the OCHRE mean is printed
-        // in the summary block above) and no numeric assertion is made here.
+        // channel: HARES now reports Σ|q_i|/2 (total exchange activity, always ≥ 0),
+        // while OCHRE reports the net convective-to-zone-air fraction. These are
+        // fundamentally different quantities, so no percentage-band comparison is
+        // meaningful. The OCHRE mean is printed in the summary block above for
+        // diagnostic reference only.
         let _ = ochre_interior_lwr_mean;
 
         // Exterior opaque solar absorption + LWR combined. HARES and OCHRE
@@ -1026,7 +1024,7 @@ mod tests {
             finite_mean(&hares_opaque_solar_lwr).unwrap_or(f64::NAN),
         );
         eprintln!(
-            "  Interior LWR -- HARES mean: {:.1} W   OCHRE mean: {:.1} W",
+            "  Interior LWR exchange -- HARES mean: {:.1} W   OCHRE radiation gain mean: {:.1} W",
             finite_mean(&hares_interior_lwr).unwrap_or(f64::NAN),
             ochre_interior_lwr_mean,
         );

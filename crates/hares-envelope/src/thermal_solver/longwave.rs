@@ -352,13 +352,22 @@ impl ThermalSolver {
                 .zone_sensible_input_indices
                 .get(&zone_cfg.zone_id)
                 .copied();
-            let mut zone_total = 0.0_f64;
+            // Accumulate Σ|q_i|/2 as the total LWR exchange diagnostic.
+            // By energy conservation, Σ q_i = 0 (net is always zero), so the
+            // sum of signed fluxes is useless as a diagnostic. Instead, summing
+            // absolute values and dividing by 2 (to avoid double-counting each
+            // radiative pair) yields the total LWR energy being exchanged between
+            // surfaces — a physically meaningful, non-zero indicator of how active
+            // the interior radiation exchange is.
+            let mut zone_exchange = 0.0_f64;
             for (_j, (info, &q)) in zone_cfg
                 .surfaces
                 .iter()
                 .zip(self.lwr_net_flux_buf.iter())
                 .enumerate()
             {
+                zone_exchange += q.abs();
+
                 if info.driving_temp.is_none() && info.input_index < u.len() {
                     // Opaque surfaces (with RC nodes): R_film is convection-only.
                     // Full ScriptF T⁴ LWR flux injected via radiation_frac split.
@@ -371,7 +380,6 @@ impl ThermalSolver {
                             u[ai] += q * (1.0 - info.radiation_frac);
                         }
                     }
-                    zone_total += q;
                 } else if info.driving_temp.is_some() {
                     // Window surfaces (no RC node, t_idx=None): OCHRE skips
                     // lwr_gain * radiation_frac injection (no h_idx to inject to).
@@ -387,7 +395,6 @@ impl ThermalSolver {
                             u[ai] += q_inject;
                         }
                     }
-                    zone_total += q_inject;
                 }
                 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
                 self.int_surface_diag_buf
@@ -396,7 +403,8 @@ impl ThermalSolver {
                         lwr_flux_w: q,
                     });
             }
-            self.lwr_by_zone_buf.push((zone_cfg.zone_id, zone_total));
+            self.lwr_by_zone_buf
+                .push((zone_cfg.zone_id, zone_exchange / 2.0));
         }
     }
 }

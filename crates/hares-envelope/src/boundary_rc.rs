@@ -40,9 +40,6 @@ pub const GROUND_NODE_ID: u32 = u32::MAX;
 /// First NodeId used for material-layer nodes (above zone air node range).
 const LAYER_NODE_BASE: u32 = 1_000;
 
-/// Conservative default timestep [s] for Fourier stability splitting.
-const DEFAULT_DT_S: f64 = 3600.0;
-
 /// Minimum density [kg/m³] to qualify a layer for automatic splitting.
 /// Insulation and air gaps are excluded.
 const SPLIT_MIN_DENSITY: f64 = 100.0;
@@ -50,30 +47,45 @@ const SPLIT_MIN_DENSITY: f64 = 100.0;
 /// Minimum conductivity [W/(m·K)] to qualify a layer for automatic splitting.
 const SPLIT_MIN_CONDUCTIVITY: f64 = 0.1;
 
-/// Compute the number of RC sub-layers needed for numerical stability.
+/// Diurnal period [s] — one full day (24 × 3600).
+const DIURNAL_PERIOD_S: f64 = 86_400.0;
+
+/// Compute the number of RC sub-layers needed to resolve the diurnal
+/// temperature wave.
 ///
-/// Ensures the Fourier number Fo = alpha * dt / dx² <= 0.5 by choosing
-/// dx_max = sqrt(2 * alpha * dt) and splitting accordingly.
+/// Uses half the diurnal penetration depth to ensure adequate spatial
+/// resolution of the diurnal wave:
+///   Λ = ½ · √(α · P / π) = √(α · P / (4π))
+/// where P = 86 400 s (one day) and α = k / (ρ·cₚ).  The full penetration
+/// depth δ_p = √(α·P/π) is where the diurnal wave decays to 1/e of its
+/// surface amplitude (Incropera & DeWitt §5.8).  Using Λ = δ_p/2 ensures at
+/// least two sub-layers per penetration depth for adequate wave-shape
+/// resolution.  The layer is discretised into n = ceil(thickness / Λ).
+///
+/// Cite:
+/// - Incropera & DeWitt, *Fundamentals of Heat and Mass Transfer* §5.8,
+///   "Penetration depth" for semi-infinite solid with periodic surface
+///   temperature.
+/// - ISO 13786:2007 §6.2, dynamic thermal characteristics — uses the
+///   same diffusion-length criterion for periodic heat flow.
+/// - The HARES solver is an implicit ZOH state-space solver, which is
+///   unconditionally stable; spatial accuracy is decoupled from temporal
+///   stability, so the discretisation depends on the physical length scale
+///   (diurnal penetration depth), not the simulation timestep.
 fn split_layer_count(
     thickness_m: f64,
     conductivity: f64,
     density: f64,
     specific_heat: f64,
-    dt_s: f64,
 ) -> usize {
     if density <= 0.0 || specific_heat <= 0.0 || conductivity <= 0.0 || thickness_m <= 0.0 {
         return 1;
     }
     let alpha = conductivity / (density * specific_heat);
-    // EnergyPlus CondFD uses space discretization constant C=3 (Fo = 1/C ≈ 0.33):
-    //   dx = sqrt(C × α × Δt)
-    // Reference: EnergyPlus Engineering Reference §3.3.10 "Conduction Finite
-    // Difference Solution Algorithm" -- default C=3, inverse of Fourier number.
-    // Our ZOH state-space solver is implicit and unconditionally stable, so this
-    // is a spatial accuracy criterion, not a stability requirement.
-    let c_discretization = 3.0;
-    let dx_max = (c_discretization * alpha * dt_s).sqrt();
-    let n = (thickness_m / dx_max).ceil() as usize;
+    // Diurnal penetration depth Λ = √(α · P / (4π)).
+    // ISO 13786:2007 §6.2; Incropera & DeWitt §5.8.
+    let lambda = (alpha * DIURNAL_PERIOD_S / (4.0 * std::f64::consts::PI)).sqrt();
+    let n = (thickness_m / lambda).ceil() as usize;
     n.max(1)
 }
 
@@ -1056,20 +1068,25 @@ impl RcGraphState {
         layers: &[&LayerInput],
         params: &BoundaryParams,
     ) -> Option<(NodeId, NodeId, Option<NodeId>, f64, f64)> {
-        // Split thick dense layers into sub-layers for Fourier stability.
+        // Split thick dense layers into sub-layers for diurnal wave resolution.
         let split_layers: Vec<LayerInput> = layers
             .iter()
             .flat_map(|layer| {
                 let needs_split = layer.density_kg_m3 > SPLIT_MIN_DENSITY
                     && layer.conductivity_w_m_k > SPLIT_MIN_CONDUCTIVITY;
                 let n = if needs_split {
+                    // Minimum 2 nodes for any qualifying layer (front and back)
+                    // to represent the thermal gradient. A single node would
+                    // collapse the entire layer to one temperature (lumped
+                    // capacitance), which is inconsistent with the decision to
+                    // split the layer.
                     split_layer_count(
                         layer.thickness_m,
                         layer.conductivity_w_m_k,
                         layer.density_kg_m3,
                         layer.specific_heat_j_kg_k,
-                        DEFAULT_DT_S,
                     )
+                    .max(2)
                 } else {
                     1
                 };
@@ -1561,15 +1578,17 @@ mod tests {
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
         let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
-        // 1 zone air + 3 layer nodes (layer0 splits into 2, layer1 stays 1) = 4 states.
-        assert_eq!(rc.a_c.nrows(), 4);
+        // 1 zone air + 4 layer nodes (layer0 splits into 2, layer1 splits into 2) = 5 states.
+        // Layer1 (50mm, ρ=2000) qualifies for splitting and gets min(2) nodes
+        // even though ceil(0.05/Λ) = 1, because qualifying layers need front+back nodes.
+        assert_eq!(rc.a_c.nrows(), 5);
 
-        // Diagnostics: single material-layer boundary with 3 RC nodes after splitting.
+        // Diagnostics: single material-layer boundary with 4 RC nodes after splitting.
         assert_eq!(diag.boundaries.len(), 1);
         assert_eq!(diag.boundaries[0].path, RCPath::MaterialLayer);
-        assert_eq!(diag.boundaries[0].n_rc_nodes, 3);
+        assert_eq!(diag.boundaries[0].n_rc_nodes, 4);
         assert!(diag.boundaries[0].capacitance_j_k > 0.0);
-        assert_eq!(rc.a_c.ncols(), 4);
+        assert_eq!(rc.a_c.ncols(), 5);
         // Layer info present for boundary 0.
         assert!(rc.layer_info.contains_key(&0));
         let info = &rc.layer_info[&0];
@@ -1658,11 +1677,12 @@ mod tests {
             make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
             make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
         ];
-        // Same-zone boundary with 4 layers → after splitting: 1+2+1+2=6 sub-layers → halved to 3 internal mass nodes.
+        // Same-zone boundary with 4 layers → after splitting: 2+2+2+2=8 sub-layers → halved to 4 internal mass nodes.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
-        // 1 zone air node + 3 layer nodes (inner half of 6 split sub-layers).
-        assert_eq!(rc.a_c.nrows(), 4);
+        // 8 sub-layers (2+2+2+2) halved to 4 internal mass nodes + 1 zone air = 5 states.
+        // Each qualifying layer gets min(2) sub-layers (front+back nodes).
+        assert_eq!(rc.a_c.nrows(), 5);
     }
 
     // ── Same-zone boundary with odd layers halves middle cap ──────────
@@ -1736,11 +1756,11 @@ mod tests {
         }];
         let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
 
-        // 20 boundaries, each with 3 layers. After auto-splitting (C=3, dt=3600):
-        // layer0 (0.05m, k=0.5, ρ=1000, cp=800): α=6.25e-7, dx=0.082 → 1
-        // layer1 (0.10m, k=1.0, ρ=2000, cp=900): α=5.56e-7, dx=0.077 → 2
-        // layer2 (0.02m, k=0.3, ρ=800,  cp=700): α=5.36e-7, dx=0.076 → 1
-        // = 4 sub-layers per boundary = 80 layer nodes total.
+        // 20 boundaries, each with 3 layers. After diurnal-criterion splitting:
+        // layer0 (0.05m, k=0.5, ρ=1000, cp=800): Λ=0.066 → ceil(0.05/0.066)=1, min(2)=2
+        // layer1 (0.10m, k=1.0, ρ=2000, cp=900): Λ=0.062 → ceil(0.10/0.062)=2
+        // layer2 (0.02m, k=0.3, ρ=800,  cp=700): Λ=0.061 → ceil(0.02/0.061)=1, min(2)=2
+        // = 6 sub-layers per boundary = 120 layer nodes total.
         let layers = vec![
             make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
             make_layer(0.1, 1.0, 2000.0, 900.0, 0.0),
@@ -1751,8 +1771,8 @@ mod tests {
             .collect();
 
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
-        // 1 zone + 80 layer nodes = 81 internal nodes.
-        assert_eq!(rc.a_c.nrows(), 81);
+        // 1 zone + 120 layer nodes = 121 internal nodes.
+        assert_eq!(rc.a_c.nrows(), 121);
         // All node IDs should be distinct from OUTDOOR_NODE_ID and GROUND_NODE_ID.
         for &nid in rc.node_index.keys() {
             assert_ne!(nid, NodeId(OUTDOOR_NODE_ID));
@@ -2283,48 +2303,74 @@ mod tests {
     }
 
     #[test]
-    fn split_layer_count_concrete_100mm_hourly() {
+    fn split_layer_count_concrete_100mm_diurnal() {
         // 100mm concrete: k=0.51, rho=1400, cp=1000 → alpha=3.64e-7 m²/s
-        // dx_max = sqrt(2 * 3.64e-7 * 3600) ≈ 0.0512m → n = ceil(0.1/0.0512) = 2
-        let n = split_layer_count(0.100, 0.51, 1400.0, 1000.0, 3600.0);
+        // Diurnal penetration depth Λ = √(α·86400/(4π)) ≈ 0.050 m
+        // n = ceil(0.100 / 0.050) = 2
+        let n = split_layer_count(0.100, 0.51, 1400.0, 1000.0);
         assert!(
             n >= 2,
-            "100mm concrete at dt=3600s should need >=2 nodes, got {n}"
+            "100mm concrete should need ≥2 nodes (diurnal criterion), got {n}"
         );
     }
 
     #[test]
     fn split_layer_count_thick_concrete_200mm() {
         // 200mm concrete slab should need more splits
-        let n = split_layer_count(0.200, 1.13, 1400.0, 1000.0, 3600.0);
+        let n = split_layer_count(0.200, 1.13, 1400.0, 1000.0);
         assert!(
             n >= 3,
-            "200mm concrete at dt=3600s should need >=3 nodes, got {n}"
+            "200mm concrete should need ≥3 nodes (diurnal criterion), got {n}"
         );
     }
 
     #[test]
     fn split_layer_count_insulation_no_split() {
         // Fiberglass insulation: k=0.04, rho=12, cp=840
-        // Low density and low conductivity -- should NOT be split even by the function
-        // (caller guards on density/conductivity thresholds, but function itself returns 1).
-        let n = split_layer_count(0.066, 0.04, 12.0, 840.0, 3600.0);
-        assert_eq!(n, 1, "insulation should not be split");
+        // The function returns 1 (thin relative to Λ); the caller guards on
+        // density/conductivity thresholds so this function is never reached
+        // for insulation in production code.
+        let n = split_layer_count(0.066, 0.04, 12.0, 840.0);
+        assert_eq!(n, 1, "insulation is thin relative to Λ, should not be split");
     }
 
     #[test]
     fn split_layer_count_thin_wood_no_split() {
-        // 9mm wood: k=0.14, rho=530, cp=900
-        let n = split_layer_count(0.009, 0.14, 530.0, 900.0, 3600.0);
-        assert_eq!(n, 1, "thin wood should not need splitting");
+        // 9mm wood: k=0.14, rho=530, cp=900 → Λ ≈ 0.045 m
+        // Thickness (9mm) << Λ (45mm) → 1 node suffices.
+        // Note: the caller qualifies this layer for splitting (ρ > 100, k > 0.1)
+        // and applies .max(2), yielding 2 nodes in production. Here we test
+        // the pure physics computation.
+        let n = split_layer_count(0.009, 0.14, 530.0, 900.0);
+        assert_eq!(n, 1, "9mm wood is thin relative to Λ, 1 node suffices");
+    }
+
+    #[test]
+    fn split_layer_count_diurnal_criterion_thick_concrete() {
+        // 300mm concrete slab: k=1.13, rho=1400, cp=1000 → α=8.07e-7
+        // Λ = √(8.07e-7 × 86400 / (4π)) ≈ 0.0745 m
+        // n = ceil(0.300 / 0.0745) = 5
+        let n = split_layer_count(0.300, 1.13, 1400.0, 1000.0);
+        assert_eq!(n, 5, "300mm concrete should need 5 nodes (diurnal criterion)");
+    }
+
+    #[test]
+    fn split_layer_count_timestep_independent() {
+        // The diurnal criterion is independent of timestep: calling the
+        // function with the same material properties always gives the same n.
+        // (This was not true for the old Fourier criterion which took dt_s.)
+        let n1 = split_layer_count(0.100, 0.51, 1400.0, 1000.0);
+        // Same result regardless of what timestep the simulation uses.
+        assert_eq!(n1, 2, "100mm concrete always needs 2 nodes (diurnal criterion)");
     }
 
     // ── r_zone_to_inner picks correct (last) layer ──────────────────────
     //
     // BESTEST 900FF floor: exterior→interior = [insulation, concrete]
-    // r_zone_to_inner = r_film_interior + concrete_thickness / (2 * k_concrete)
-    //                 = 0.16 + 0.080 / (2 * 1.130) ≈ 0.195 m²·K/W
-    // radiation_frac  = r_film_interior / r_zone_to_inner ≈ 0.82
+    // With diurnal criterion, 80mm concrete (k=1.13, α=8.07e-7) splits into
+    // 2 sub-layers of 40mm each.  r_zone_to_inner uses the post-split
+    // innermost sub-layer half-R:
+    //   r_zone_to_inner = r_film_interior + 0.040 / (2 × 1.130) ≈ 0.178 m²·K/W
 
     #[test]
     fn r_zone_to_inner_uses_innermost_layer() {
@@ -2359,7 +2405,8 @@ mod tests {
             .r_zone_to_inner_m2_k_w
             .expect("floor boundary should have r_zone_to_inner");
 
-        let expected_r = r_film_int + 0.080 / (2.0 * 1.130);
+        // 80mm concrete splits into 2 × 40mm; innermost sub-layer half-R = 0.040/(2×1.130)
+        let expected_r = r_film_int + 0.040 / (2.0 * 1.130);
         assert!(
             (r_zone_to_inner - expected_r).abs() < 1e-4,
             "r_zone_to_inner={r_zone_to_inner:.4}, expected {expected_r:.4}"
@@ -2378,7 +2425,7 @@ mod tests {
         // 120mm concrete splits into 2 sub-layers of 60mm each.
         let concrete = make_layer(0.120, 1.130, 1400.0, 1000.0, 48.0);
         assert_eq!(
-            split_layer_count(0.120, 1.130, 1400.0, 1000.0, DEFAULT_DT_S),
+            split_layer_count(0.120, 1.130, 1400.0, 1000.0),
             2,
             "120mm concrete should split into 2 sub-layers"
         );
@@ -2461,7 +2508,7 @@ mod tests {
         }], hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let concrete = make_layer(0.100, 0.51, 1400.0, 840.0, 20.0);
         assert_eq!(
-            split_layer_count(0.100, 0.51, 1400.0, 840.0, DEFAULT_DT_S),
+            split_layer_count(0.100, 0.51, 1400.0, 840.0),
             2,
             "100mm concrete should split into 2 sub-layers"
         );
@@ -2499,7 +2546,7 @@ mod tests {
         let insulation = make_layer(0.089, 0.04, 12.0, 840.0, 20.0);
         let concrete_inner = make_layer(0.100, 0.51, 1400.0, 840.0, 20.0);
         assert_eq!(
-            split_layer_count(0.100, 0.51, 1400.0, 840.0, DEFAULT_DT_S),
+            split_layer_count(0.100, 0.51, 1400.0, 840.0),
             2,
             "100mm concrete should split into 2 sub-layers"
         );

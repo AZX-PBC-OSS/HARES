@@ -218,7 +218,8 @@ pub struct InteriorSurfaceInfo {
     /// Solar absorptance [-] for interior solar distribution.
     ///
     /// Fraction of incident solar radiation absorbed by this surface.
-    /// Default: 0.6 for floors (darker), 0.5 for walls/ceilings per EnergyPlus.
+    /// Per-surface value from HPXML `SolarAbsorptance`, or
+    /// `INTERIOR_SOLAR_ABSORPTANCE_DEFAULT` (0.70, EnergyPlus Material IDD default).
     /// `0.0` means the surface is excluded from solar distribution.
     pub solar_absorptance: f64,
     /// Whether this surface is a floor (receives beam solar preferentially).
@@ -479,7 +480,14 @@ pub struct EnvelopeComponentGains {
     /// Opaque exterior surface solar + LWR combined injection [W].
     /// Includes surfaces routed through both iterative and non-iterative paths.
     pub opaque_solar_lwr_w: f64,
-    /// Interior longwave radiation exchange net to indoor zone [W].
+    /// Total interior longwave radiation exchange activity [W].
+    /// Computed as Σ|q_i|/2 over all surfaces in the zone, where q_i is the
+    /// net LWR flux into surface i. By energy conservation, Σ q_i = 0, so the
+    /// signed sum is always zero and useless. The absolute-value sum divided
+    /// by 2 (avoiding double-counting each radiative pair) indicates how much
+    /// radiation energy is actively being exchanged between surfaces.
+    /// For StarMesh mode this is always 0 (radiation is baked into the A-matrix
+    /// at construction time and no per-timestep injection occurs).
     pub interior_lwr_w: f64,
     /// Infiltration sensible heat gain (indoor zone only) [W].
     /// After unbalanced ventilation scaling: `raw_inf × nat_flow_ratio`.
@@ -516,7 +524,8 @@ pub struct EnvelopeComponentGains {
     /// Per-zone infiltration sensible heat gains [W].
     /// `infiltration_w` is the indoor-zone alias for backward compatibility.
     pub infiltration_by_zone: Vec<(ZoneId, f64)>,
-    /// Per-zone interior LWR net heat gains [W].
+    /// Per-zone interior LWR total exchange activity [W] (Σ|q_i|/2 per zone).
+    /// See [`interior_lwr_w`] for the physical meaning.
     pub interior_lwr_by_zone: Vec<(ZoneId, f64)>,
     /// Heat gain through wall boundaries (conduction + solar + LWR) [W].
     pub wall_heat_gain_w: f64,

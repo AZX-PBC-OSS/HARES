@@ -568,12 +568,16 @@ mod tests {
             "schedule parsing, occupant gains",
         ));
 
+        // Interior LWR: HARES reports Σ|q_i|/2 (exchange activity), OCHRE
+        // reports net convective-to-zone-air fraction — fundamentally different
+        // quantities. The 100% band is a placeholder; this check is primarily
+        // diagnostic (non-zero values confirm the exchange is active).
         checks.push(Check::compare_mean(
-            "Interior LWR (indoor)",
+            "Interior LWR exchange (indoor)",
             &OCHRE_RADIATION_INDOOR,
-            col_mean(&hares, "Radiation Heat Gain - Indoor (W)"),
+            col_mean(&hares, "Interior LWR Exchange - Indoor (W)"),
             100.0,
-            "interior surface LWR exchange, emissivity",
+            "interior surface LWR exchange activity vs OCHRE convective fraction (definition mismatch)",
         ));
 
         // ── Exterior surface solar (per-surface type) ───────────────────
@@ -629,11 +633,11 @@ mod tests {
         ));
 
         checks.push(Check::compare_mean(
-            "Interior LWR (attic)",
+            "Interior LWR exchange (attic)",
             &OCHRE_RADIATION_ATTIC,
-            col_mean(&hares, "Radiation Heat Gain - Attic (W)"),
+            col_mean(&hares, "Interior LWR Exchange - Attic (W)"),
             100.0,
-            "attic interior surface LWR exchange",
+            "attic interior surface LWR exchange activity vs OCHRE convective fraction (definition mismatch)",
         ));
 
         // ── HVAC comparison ─────────────────────────────────────────────

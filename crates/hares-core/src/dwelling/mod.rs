@@ -32,7 +32,7 @@ use hares_io::{
 };
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
-    OCCUPANT_SENSIBLE_GAIN_W,
+    OCCUPANT_RADIATIVE_FRACTION, OCCUPANT_SENSIBLE_GAIN_W,
 };
 use hares_physics::pv_sizing::RoofInfo;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
@@ -243,7 +243,7 @@ fn build_zone_column_caches(
                 infiltration_columns.insert(zone_id, idx);
             }
         }
-        let lwr_key = format!("Radiation Heat Gain - {label} (W)");
+        let lwr_key = format!("Interior LWR Exchange - {label} (W)");
         if let Some(&idx) = column_index.get(&lwr_key) {
             lwr_columns.insert(zone_id, idx);
         }
@@ -1880,6 +1880,7 @@ impl Dwelling {
     /// Reads the current occupancy count from the schedule payload carried in
     /// `latest_env.custom_domains`, then for every declared thermal zone injects:
     ///   - sensible convective: `n_occupants × OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_CONVECTIVE_FRACTION`
+    ///   - sensible radiative:  `n_occupants × OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_RADIATIVE_FRACTION`
     ///   - latent:              `n_occupants × OCCUPANT_LATENT_GAIN_W`
     ///
     /// If no occupancy column is present in the schedule the method returns without
@@ -1905,10 +1906,11 @@ impl Dwelling {
         }
 
         let sensible_w = n_occupants * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_CONVECTIVE_FRACTION;
+        let radiant_w = n_occupants * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_RADIATIVE_FRACTION;
         let latent_w = n_occupants * OCCUPANT_LATENT_GAIN_W;
 
         for thermal in &mut self.ports.thermal {
-            thermal.add(sensible_w, 0.0, latent_w, ThermalCategory::InternalGain);
+            thermal.add(sensible_w, radiant_w, latent_w, ThermalCategory::InternalGain);
         }
     }
 
@@ -2598,7 +2600,9 @@ impl Dwelling {
             + gains.jacket_loss_w
             + gains.duct_loss_w
             + gains.opaque_solar_lwr_w
-            + gains.interior_lwr_w
+            // interior_lwr_w is excluded: it reports Σ|q_i|/2 (gross exchange
+            // activity), not a net gain. By conservation, Σ q_i ≈ 0, so the
+            // net contribution was always ~0 anyway.
             + gains.hvac_heating_w.max(0.0)
             - gains.hvac_cooling_w.abs();
         let envelope_cols: &[(&str, f64)] = &[
@@ -2614,7 +2618,7 @@ impl Dwelling {
             ),
             ("Net Sensible Heat Gain - Indoor (W)", net_sensible_indoor_w),
             ("Internal Heat Gain - Indoor (W)", gains.internal_gain_w),
-            ("Radiation Heat Gain - Indoor (W)", gains.interior_lwr_w),
+            ("Interior LWR Exchange - Indoor (W)", gains.interior_lwr_w),
             (
                 "Opaque Surface Heat Gain - Indoor (W)",
                 gains.opaque_solar_lwr_w,
@@ -5297,7 +5301,11 @@ occupancy = 1.0
         dwelling.apply_occupancy_gains();
 
         // Expected n_occupants = 0.5 * 4.0 = 2.0
+        // Convective sensible = 2.0 × 66.0 × 0.70 = 92.4 W
+        // Radiative sensible  = 2.0 × 66.0 × 0.30 = 39.6 W
+        // Latent              = 2.0 × 51.2 = 102.4 W
         let expected_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_CONVECTIVE_FRACTION;
+        let expected_radiant = 2.0 * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_RADIATIVE_FRACTION;
         let expected_latent = 2.0 * OCCUPANT_LATENT_GAIN_W;
 
         assert!(
@@ -5307,8 +5315,13 @@ occupancy = 1.0
         for thermal in &dwelling.ports.thermal {
             assert!(
                 (thermal.sensible_gain_w - expected_sensible).abs() < 1e-9,
-                "sensible gain: expected {expected_sensible}, got {}",
+                "convective sensible gain: expected {expected_sensible}, got {}",
                 thermal.sensible_gain_w
+            );
+            assert!(
+                (thermal.radiant_gain_w - expected_radiant).abs() < 1e-9,
+                "radiant sensible gain: expected {expected_radiant}, got {}",
+                thermal.radiant_gain_w
             );
             assert!(
                 (thermal.latent_gain_w - expected_latent).abs() < 1e-9,

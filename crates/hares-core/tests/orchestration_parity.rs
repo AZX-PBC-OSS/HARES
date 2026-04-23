@@ -333,17 +333,19 @@ fn port_slots_are_zeroed_between_steps() {
 // temperature.  The occupancy schedule column is read by
 // `environment.rs::occupancy_column_idx()` and dispatched through
 // `dwelling/mod.rs::apply_occupancy_gains`, which deposits
-// OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_CONVECTIVE_FRACTION = 66 W of sensible
-// convective gain (plus latent) into the conditioned zone's thermal port
-// every timestep; the thermal solver integrates this into the zone state.
+// OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_CONVECTIVE_FRACTION = 46.2 W of sensible
+// convective gain plus OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_RADIATIVE_FRACTION = 19.8 W
+// of radiant gain (total sensible = 66 W) and latent gain into the conditioned
+// zone's thermal port every timestep; the thermal solver integrates this into the
+// zone state.
 //
 // To make the 66 W gain dominate the zone-temp signal we:
 //   - size the Furnace below the envelope heat loss (4 kbtu/h ≈ 1170 W at
 //     -30 C outdoor) so both dwellings' furnaces run continuously at the same
 //     capacity -- no bang-bang cycle phase noise, identical HVAC thermal
 //     output in A and B each step.
-//   - run 360 × 60 s = 6 h so the 66 W offset integrates into a clean mean
-//     zone-temperature gap.
+// - run 360 × 60 s = 6 h so the 66 W total sensible gain (46.2 W convective +
+//   19.8 W radiant) offset integrates into a clean mean zone-temperature gap.
 //
 // We assert on *mean* zone temperature rather than cumulative kWh because the
 // bang-bang Furnace in the original design executed an identical integer
@@ -459,10 +461,12 @@ master_seed = 0
     const SANITY_HIGH_C: f64 = 50.0;
     // Physics-grounded bounds on the mean-zone-temperature gap introduced by
     // the occupancy sensible gain routed through apply_occupancy_gains.  See
-    // OCCUPANT_SENSIBLE_GAIN_W and OCCUPANT_CONVECTIVE_FRACTION in
-    // `crates/hares-physics/src/constants.rs`:
+    // OCCUPANT_SENSIBLE_GAIN_W and OCCUPANT_CONVECTIVE_FRACTION /
+    // OCCUPANT_RADIATIVE_FRACTION in `crates/hares-physics/src/constants.rs`:
     //
-    //   sensible gain      = 66 W × 1.0 = 66 W (one occupant)
+    //   total sensible gain = 66 W (one occupant)
+    //     convective        = 66 × 0.70 = 46.2 W (to zone air)
+    //     radiative          = 66 × 0.30 = 19.8 W (to surfaces, then zone air)
     //   total energy / 6 h = 66 W × 21 600 s ≈ 1.43 MJ
     //   zone air C (ρ·cp·V) = 1.2 × 1005 × 120 ≈ 1.45 × 10^5 J/K
     //                        ≈ 1 MJ/K after interior-mass multiplier (~7×)
@@ -473,8 +477,9 @@ master_seed = 0
     //
     // The furnace is sized below the envelope loss (4 kBtu/h ≈ 1170 W) so it
     // runs continuously in both dwellings and contributes no differential;
-    // the mean-temp gap is set entirely by the 66 W occupancy offset against
-    // envelope conduction.  Observed transient mean over 6 h ≈ 0.17 K.
+    // the mean-temp gap is set entirely by the 66 W total occupancy sensible
+    // gain offset against envelope conduction.  Observed transient mean over
+    // 6 h ≈ 0.17 K.
     //
     // Floor 0.1 K rejects a stale/frozen env (observed 0.17, ~1.7× margin).
     // Ceiling 1.0 K = ~0.2 K expected transient × 5× margin; well below the
@@ -712,13 +717,13 @@ master_seed = 0
     let delta_kwh = heating_kwh_b - heating_kwh_a;
 
     // IdealHVAC delivers exactly the solver-computed load each step.  The
-    // 66 W occupancy sensible gain offsets an equal amount of heating
-    // delivery, so over the STEPS × 300 s = 18 000 s window the cumulative
-    // heating energy in A must sit strictly below B by (MIN_DELTA_KWH,
-    // MAX_DELTA_KWH).  Below the floor: occupancy is not reaching the
-    // solver.  Above the ceiling: the 66 W sensible gain is physically
-    // capped at ~0.33 kWh over this window, so any larger reduction indicates
-    // double-counting or a unit-conversion bug.
+    // 66 W total occupancy sensible gain (46.2 W convective + 19.8 W radiant)
+    // offsets an equal amount of heating delivery, so over the STEPS × 300 s =
+    // 18 000 s window the cumulative heating energy in A must sit strictly
+    // below B by (MIN_DELTA_KWH, MAX_DELTA_KWH).  Below the floor: occupancy
+    // is not reaching the solver.  Above the ceiling: the 66 W sensible gain
+    // is physically capped at ~0.33 kWh over this window, so any larger
+    // reduction indicates double-counting or a unit-conversion bug.
     assert!(
         delta_kwh > MIN_DELTA_KWH && delta_kwh < MAX_DELTA_KWH,
         "IdealHVAC occupancy-gain ΔE = {delta_kwh:.4} kWh (A={heating_kwh_a:.4}, \

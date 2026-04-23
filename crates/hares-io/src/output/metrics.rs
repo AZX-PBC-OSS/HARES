@@ -96,7 +96,10 @@ pub struct EnvelopeComponentLoadsKwh {
     pub window_solar_kwh: f64,
     /// Opaque surface solar + exterior LWR.
     pub opaque_solar_lwr_kwh: f64,
-    /// Interior longwave radiation exchange.
+    /// Interior longwave radiation exchange activity (Σ|q_i|/2, see
+    /// `EnvelopeComponentGains::interior_lwr_w`). This is a gross exchange
+    /// metric, not a net energy gain; summing it into a net-sensible balance
+    /// would double-count energy.
     pub interior_lwr_kwh: f64,
     /// Infiltration sensible load.
     pub infiltration_kwh: f64,
@@ -373,7 +376,7 @@ impl MetricsCalculator {
         let infiltration_w_idx =
             optional_float64_column(schema, &["Infiltration Heat Gain - Indoor (W)"])?;
         let interior_lwr_w_idx =
-            optional_float64_column(schema, &["Radiation Heat Gain - Indoor (W)"])?;
+            optional_float64_column(schema, &["Interior LWR Exchange - Indoor (W)"])?;
         let internal_gains_w_idx =
             optional_float64_column(schema, &["Internal Heat Gain - Indoor (W)"])?;
         let opaque_solar_lwr_w_idx =
@@ -1391,7 +1394,7 @@ mod tests {
             TOTAL_ELECTRIC_POWER_KW,
             "Window Transmitted Solar Gain (W)",
             "Opaque Surface Heat Gain - Indoor (W)",
-            "Radiation Heat Gain - Indoor (W)",
+            "Interior LWR Exchange - Indoor (W)",
             "Infiltration Heat Gain - Indoor (W)",
             "Forced Ventilation Heat Gain - Indoor (W)",
             "Internal Heat Gain - Indoor (W)",
@@ -1405,7 +1408,7 @@ mod tests {
             (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
             ("Window Transmitted Solar Gain (W)", vec![1000.0]),
             ("Opaque Surface Heat Gain - Indoor (W)", vec![200.0]),
-            ("Radiation Heat Gain - Indoor (W)", vec![50.0]),
+            ("Interior LWR Exchange - Indoor (W)", vec![50.0]),
             ("Infiltration Heat Gain - Indoor (W)", vec![-100.0]),
             ("Forced Ventilation Heat Gain - Indoor (W)", vec![-50.0]),
             ("Internal Heat Gain - Indoor (W)", vec![300.0]),

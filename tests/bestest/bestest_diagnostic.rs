@@ -93,7 +93,7 @@ fn print_component_gains_at(case_id: &str, target_step: usize) {
         gains.exterior_lwr_w
     );
     eprintln!(
-        "  interior_lwr_w          = {:>10.1} W",
+        "  interior_lwr_exchange_w = {:>10.1} W",
         gains.interior_lwr_w
     );
     eprintln!(

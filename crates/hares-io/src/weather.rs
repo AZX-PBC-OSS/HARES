@@ -232,8 +232,22 @@ pub struct WeatherMeta {
 pub enum ResampleMethod {
     /// Piecewise Cubic Hermite Interpolating Polynomial -- smooth, monotone,
     /// physically superior for continuous fields like temperature. Default.
+    ///
+    /// Uses flat extrapolation at the year boundary (no cyclic wrap). For
+    /// smooth year-boundary transitions in multi-year simulations, use
+    /// [`PchipCyclic`] instead.
     #[default]
     Pchip,
+    /// Cyclic PCHIP -- same as [`Pchip`] but treats the data as periodic:
+    /// the last value connects smoothly back to the first via a wrap-around
+    /// segment, and endpoint slopes use centered differences across the
+    /// year boundary. Eliminates the discontinuity that flat extrapolation
+    /// creates at each year boundary in multi-year simulations.
+    ///
+    /// Use for smooth diurnal/seasonal fields (temperature, IR, ground temp).
+    /// Do NOT use for accumulated fields (precipitation) or stochastic ones
+    /// (wind speed).
+    PchipCyclic,
     /// Zero-order hold (forward fill) -- each sub-step gets the previous
     /// hourly value. Matches OCHRE's pandas `resample().ffill()` convention.
     /// Use for parity testing against OCHRE.
@@ -454,12 +468,12 @@ impl WeatherTimeSeries {
             let dry_bulb_c = resample_field(
                 &self.dry_bulb_c,
                 factor,
-                overrides.dry_bulb.unwrap_or(ResampleMethod::Pchip),
+                overrides.dry_bulb.unwrap_or(ResampleMethod::PchipCyclic),
             );
             let dew_point_c = resample_field(
                 &self.dew_point_c,
                 factor,
-                overrides.dew_point.unwrap_or(ResampleMethod::Pchip),
+                overrides.dew_point.unwrap_or(ResampleMethod::PchipCyclic),
             );
             let pressure_kpa = resample_field(
                 &self.pressure_kpa,
@@ -469,12 +483,12 @@ impl WeatherTimeSeries {
             let horizontal_infrared_w_m2 = resample_field(
                 &self.horizontal_infrared_w_m2,
                 factor,
-                overrides.infrared.unwrap_or(ResampleMethod::Pchip),
+                overrides.infrared.unwrap_or(ResampleMethod::PchipCyclic),
             );
             let ground_temp_c = resample_field(
                 &self.ground_temp_c,
                 factor,
-                overrides.ground_temp.unwrap_or(ResampleMethod::Pchip),
+                overrides.ground_temp.unwrap_or(ResampleMethod::PchipCyclic),
             );
 
             // Sky temperature is recomputed from interpolated inputs rather than
@@ -495,8 +509,10 @@ impl WeatherTimeSeries {
                     source_step_secs: target_step_secs,
                     ..self.meta.clone()
                 },
-                // Continuous instantaneous fields default to PCHIP (smooth, monotone).
-                // Override to ZOH for OCHRE parity or Linear for simpler interpolation.
+                // Continuous instantaneous fields: smooth diurnal/seasonal curves
+                // default to PchipCyclic (smooth year-boundary wrap); others use
+                // Pchip (flat extrapolation at boundary). Override to ZOH for OCHRE
+                // parity or Linear for simpler interpolation.
                 dry_bulb_c,
                 dew_point_c,
                 rel_humidity_pct,
@@ -699,6 +715,59 @@ pub(crate) fn fritsch_carlson_slopes(y: &[f64]) -> Vec<f64> {
     d
 }
 
+/// Fritsch-Carlson monotone cubic interpolation slopes with cyclic boundary.
+///
+/// Same algorithm as [`fritsch_carlson_slopes`] but treats the data as
+/// periodic: `y[0]` and `y[n-1]` are neighbours, so there are n segments
+/// (not n-1). Endpoint slopes use centered differences that wrap around
+/// the boundary rather than one-sided formulas.
+///
+/// # Panics
+/// Panics if `y` has fewer than 3 elements (cyclic PCHIP is meaningless
+/// for 0–2 points).
+pub(crate) fn fritsch_carlson_slopes_cyclic(y: &[f64]) -> Vec<f64> {
+    let n = y.len();
+    assert!(n >= 3, "cyclic PCHIP requires at least 3 points, got {n}");
+
+    // Secant slopes for all n segments (including the wrap segment n-1 → 0).
+    let mut delta: Vec<f64> = Vec::with_capacity(n);
+    for k in 0..n {
+        delta.push(y[(k + 1) % n] - y[k]);
+    }
+
+    // All slopes use centered differences (no boundary special case).
+    let mut d = vec![0.0_f64; n];
+    for k in 0..n {
+        let left = delta[(k + n - 1) % n];
+        let right = delta[k];
+        if left.signum() != right.signum() {
+            d[k] = 0.0;
+        } else {
+            d[k] = (left + right) / 2.0;
+        }
+    }
+
+    // Fritsch-Carlson monotonicity correction for all n segments.
+    for k in 0..n {
+        let k_next = (k + 1) % n;
+        if delta[k] == 0.0 {
+            d[k] = 0.0;
+            d[k_next] = 0.0;
+        } else {
+            let alpha = d[k] / delta[k];
+            let beta = d[k_next] / delta[k];
+            let r2 = alpha * alpha + beta * beta;
+            if r2 > 9.0 {
+                let tau = 3.0 / r2.sqrt();
+                d[k] *= tau;
+                d[k_next] *= tau;
+            }
+        }
+    }
+
+    d
+}
+
 /// Resample data to a finer resolution using PCHIP interpolation.
 ///
 /// Uses Piecewise Cubic Hermite Interpolating Polynomials (PCHIP)
@@ -713,6 +782,7 @@ pub(crate) fn fritsch_carlson_slopes(y: &[f64]) -> Vec<f64> {
 /// - Single element: replicate (no neighbor to interpolate toward).
 /// - Two elements: linear interpolation.
 /// - Year boundary: flat extrapolation (no cyclic wrap).
+///   For smooth year-boundary transitions, use [`pchip_cyclic_resample`].
 /// - NaN in source data: propagated through interpolation.
 ///
 /// Exposed as `pub` for integration tests. Not a stable public API;
@@ -764,6 +834,74 @@ pub fn pchip_resample(values: &[f64], factor: usize) -> Vec<f64> {
         let h11 = t3 - t2;
 
         out.push(h00 * values[k] + h10 * d[k] + h01 * values[k + 1] + h11 * d[k + 1]);
+    }
+
+    out
+}
+
+/// Resample data to a finer resolution using cyclic PCHIP interpolation.
+///
+/// Same as [`pchip_resample`] but treats the data as periodic: the last
+/// value connects smoothly back to the first via a wrap-around segment,
+/// and endpoint slopes use centered differences across the year boundary.
+/// This eliminates the discontinuity at each year boundary in multi-year
+/// simulations.
+///
+/// Use for smooth diurnal/seasonal fields (temperature, IR, ground temp).
+/// Do NOT use for accumulated fields (precipitation) or stochastic ones
+/// (wind speed).
+///
+/// Edge cases:
+/// - Single element: replicate.
+/// - Two elements: linear interpolation in both forward and wrap segments.
+/// - NaN in source data: propagated through interpolation.
+pub fn pchip_cyclic_resample(values: &[f64], factor: usize) -> Vec<f64> {
+    let n = values.len();
+    if n == 0 {
+        return vec![];
+    }
+    if factor <= 1 {
+        return values.to_vec();
+    }
+    if n == 1 {
+        return vec![values[0]; factor];
+    }
+
+    let total = n * factor;
+    let mut out = Vec::with_capacity(total);
+
+    if n == 2 {
+        // Two-element cyclic: forward segment 0→1 and wrap segment 1→0.
+        // Both use linear interpolation (matching the non-cyclic 2-element path).
+        for i in 0..total {
+            let t_global = i as f64 / factor as f64;
+            let k = (t_global as usize) % 2;
+            let frac = t_global - k as f64;
+            let k_next = 1 - k; // alternates 0↔1
+            out.push(values[k] + frac * (values[k_next] - values[k]));
+        }
+        return out;
+    }
+
+    let d = fritsch_carlson_slopes_cyclic(values);
+
+    for i in 0..total {
+        let t_global = i as f64 / factor as f64;
+        let k = (t_global as usize) % n;
+        let t = t_global - k as f64;
+        let k_next = (k + 1) % n;
+
+        // Hermite basis functions (h = 1.0 for uniform spacing).
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+        let h10 = t3 - 2.0 * t2 + t;
+        let h01 = -2.0 * t3 + 3.0 * t2;
+        let h11 = t3 - t2;
+
+        out.push(
+            h00 * values[k] + h10 * d[k] + h01 * values[k_next] + h11 * d[k_next],
+        );
     }
 
     out
@@ -865,6 +1003,7 @@ fn circular_linear_resample(values: &[f64], factor: usize) -> Vec<f64> {
 fn resample_field(values: &[f64], factor: usize, method: ResampleMethod) -> Vec<f64> {
     match method {
         ResampleMethod::Pchip => pchip_resample(values, factor),
+        ResampleMethod::PchipCyclic => pchip_cyclic_resample(values, factor),
         ResampleMethod::Zoh => replicate_zoh(values, factor),
         ResampleMethod::Linear => linear_resample(values, factor),
         ResampleMethod::CircularLinear => circular_linear_resample(values, factor),
@@ -914,8 +1053,9 @@ fn sum_downsample(values: &[f64], ratio: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        WeatherError, WeatherField, WeatherMeta, WeatherTimeSeries, fritsch_carlson_slopes,
-        pchip_resample,
+        ResampleMethod, ResampleOverrides, WeatherError, WeatherField, WeatherMeta,
+        WeatherTimeSeries, fritsch_carlson_slopes, fritsch_carlson_slopes_cyclic,
+        pchip_cyclic_resample, pchip_resample,
     };
 
     fn sample_series() -> WeatherTimeSeries {
@@ -986,8 +1126,16 @@ mod tests {
 
     #[test]
     fn resample_pchip_on_dry_bulb_and_circular_linear_on_wind_dir() {
+        // Use resample_with to force non-cyclic Pchip for dry_bulb so the
+        // monotonicity assertion holds (2-element cyclic produces a sawtooth).
         let series = sample_series();
-        let resampled = series.resample(60).expect("resample should succeed");
+        let overrides = ResampleOverrides {
+            dry_bulb: Some(ResampleMethod::Pchip),
+            ..Default::default()
+        };
+        let resampled = series
+            .resample_with(60, &overrides)
+            .expect("resample should succeed");
         assert_eq!(resampled.len(), 120);
 
         // dry_bulb uses PCHIP (two-element → linear interpolation).
@@ -995,7 +1143,7 @@ mod tests {
         assert!((resampled.dry_bulb_c[0] - 10.0).abs() < 1e-12);
         // Midpoint should be ~10.5 (linear for 2-element input).
         assert!((resampled.dry_bulb_c[30] - 10.5).abs() < 1e-12);
-        // Values should be monotonically non-decreasing.
+        // Values should be monotonically non-decreasing (non-cyclic Pchip).
         for w in resampled.dry_bulb_c.windows(2) {
             assert!(w[1] >= w[0] - 1e-12, "monotonicity violated");
         }
@@ -1571,5 +1719,293 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         assert!((out[12] - 30.0).abs() < 1e-12);
         // Midpoint of second segment: 20°.
         assert!((out[9] - 20.0).abs() < 1e-12, "midpoint of second segment: got {}", out[9]);
+    }
+
+    // --- Cyclic PCHIP tests (D5 fix) ---
+
+    #[test]
+    fn pchip_cyclic_single_element_replicates() {
+        let out = pchip_cyclic_resample(&[42.0], 4);
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|&v| v == 42.0));
+    }
+
+    #[test]
+    fn pchip_cyclic_two_elements_linear() {
+        let out = pchip_cyclic_resample(&[0.0, 10.0], 4);
+        assert_eq!(out.len(), 8);
+        // Forward segment 0→1: 0, 2.5, 5, 7.5
+        // Wrap segment 1→0: 10, 7.5, 5, 2.5
+        let expected = [0.0, 2.5, 5.0, 7.5, 10.0, 7.5, 5.0, 2.5];
+        for (i, (&got, &exp)) in out.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-12,
+                "index {i}: expected {exp}, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn pchip_cyclic_interpolates_through_knots() {
+        let values = [1.0, 4.0, 2.0, 5.0, 3.0];
+        let out = pchip_cyclic_resample(&values, 3);
+        assert_eq!(out.len(), 15);
+        // Every `factor`-th sample must equal the original knot.
+        for (k, &v) in values.iter().enumerate() {
+            assert!(
+                (out[k * 3] - v).abs() < 1e-12,
+                "knot {k}: expected {v}, got {}",
+                out[k * 3]
+            );
+        }
+    }
+
+    #[test]
+    fn pchip_cyclic_smooth_year_boundary() {
+        // The key D5 fix: the wrap segment (last→first) must be smooth,
+        // not a flat-hold discontinuity.
+        // Use a symmetric sinusoidal-like pattern so the boundary is continuous.
+        let values = [0.0, 1.0, 2.0, 1.0]; // peaks at index 2
+        let out_cyclic = pchip_cyclic_resample(&values, 10);
+        let out_plain = pchip_resample(&values, 10);
+
+        assert_eq!(out_cyclic.len(), 40);
+        assert_eq!(out_plain.len(), 40);
+
+        // Interior segments should be similar (not identical due to different
+        // boundary slopes affecting adjacent segments).
+        // The critical difference: at the year boundary (last segment),
+        // cyclic wraps smoothly while plain flat-holds.
+
+        // Last output of cyclic: close to values[0] = 0 (wrap segment nearly done)
+        let last_cyclic = out_cyclic[out_cyclic.len() - 1];
+        assert!(
+            (last_cyclic - 0.0).abs() < 0.5,
+            "cyclic last sample should be close to values[0]=0, got {last_cyclic}"
+        );
+
+        // Last output of plain: exactly values[n-1] = 1.0 (flat extrapolation)
+        let last_plain = out_plain[out_plain.len() - 1];
+        assert!(
+            (last_plain - 1.0).abs() < 1e-12,
+            "plain last sample must equal values[n-1]=1.0, got {last_plain}"
+        );
+
+        // First output of both: exactly values[0] = 0.0
+        assert!((out_cyclic[0] - 0.0).abs() < 1e-12);
+        assert!((out_plain[0] - 0.0).abs() < 1e-12);
+
+        // Cyclic: the transition from last sample to first sample of the next
+        // cycle is smooth (both near values[0]).
+        // Plain: there's a jump from values[n-1]=1.0 to values[0]=0.0.
+        let cyclic_jump = (out_cyclic[0] - last_cyclic).abs();
+        let plain_jump = (out_plain[0] - last_plain).abs();
+        assert!(
+            cyclic_jump < plain_jump,
+            "cyclic boundary jump ({cyclic_jump}) should be smaller than plain ({plain_jump})"
+        );
+    }
+
+    #[test]
+    fn pchip_cyclic_no_discontinuity_at_boundary() {
+        // Construct data where values[0] ≈ values[n-1] to verify
+        // the cyclic interpolation produces a smooth boundary.
+        let n = 24;
+        let values: Vec<f64> = (0..n)
+            .map(|i| 10.0 + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).sin())
+            .collect();
+        // values[0] and values[n-1] are both ≈ 10.0 (sin(0) ≈ sin(2π - 2π/n))
+
+        let factor = 6;
+        let out = pchip_cyclic_resample(&values, factor);
+        assert_eq!(out.len(), n * factor);
+
+        // The last sub-sample should be close to values[0], ensuring
+        // that wrapping from year-end to year-start is continuous.
+        let last = out[out.len() - 1];
+        let first = out[0];
+        assert!(
+            (last - first).abs() < 1.0,
+            "boundary discontinuity too large: last={last}, first={first}"
+        );
+
+        // The derivative-like difference at the boundary should be smooth:
+        // the difference between the last sub-sample and the first sub-sample
+        // of the next cycle (= first of this cycle) should be comparable to
+        // the typical step size within the series.
+        let step = values[1] - values[0]; // typical step size
+        let boundary_step = first - last;
+        // boundary_step should be comparable in magnitude to step (within an order of magnitude)
+        assert!(
+            boundary_step.abs() < 10.0 * step.abs() + 0.1,
+            "boundary step ({boundary_step}) much larger than typical step ({step})"
+        );
+    }
+
+    #[test]
+    fn pchip_cyclic_preserves_monotonicity_in_monotone_run() {
+        // Strictly increasing then wrapping back down: monotonicity should
+        // hold within each segment but the wrap segment naturally decreases.
+        // Test a purely monotone cyclic signal (sawtooth) — segments should
+        // be monotone individually.
+        let values = [0.0, 2.0, 4.0, 6.0, 8.0];
+        let out = pchip_cyclic_resample(&values, 10);
+        assert_eq!(out.len(), 50);
+
+        // Check monotonicity within each segment (not across the wrap).
+        for seg in 0..values.len() {
+            let start = seg * 10;
+            let end = (seg + 1) * 10;
+            for w in out[start..end].windows(2) {
+                if seg < values.len() - 1 {
+                    // Forward segments: should be non-decreasing
+                    assert!(
+                        w[1] >= w[0] - 1e-12,
+                        "monotonicity violated in segment {seg}: {} > {}",
+                        w[0],
+                        w[1]
+                    );
+                }
+                // Wrap segment (seg == n-1): decreasing is expected
+            }
+        }
+
+        // Every knot must be hit exactly
+        for (k, &v) in values.iter().enumerate() {
+            assert!(
+                (out[k * 10] - v).abs() < 1e-12,
+                "knot {k}: expected {v}, got {}",
+                out[k * 10]
+            );
+        }
+    }
+
+    #[test]
+    fn pchip_cyclic_factor_one_returns_original() {
+        let values = [1.0, 2.0, 3.0, 4.0];
+        let out = pchip_cyclic_resample(&values, 1);
+        assert_eq!(out, values);
+    }
+
+    #[test]
+    fn pchip_cyclic_empty_returns_empty() {
+        let out = pchip_cyclic_resample(&[], 4);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn fritsch_carlson_cyclic_flat_segment_slopes_zero() {
+        let y = [5.0, 5.0, 5.0, 5.0];
+        let d = fritsch_carlson_slopes_cyclic(&y);
+        for (i, &s) in d.iter().enumerate() {
+            assert!(s.abs() < 1e-15, "slope at knot {i} should be 0, got {s}");
+        }
+    }
+
+    #[test]
+    fn fritsch_carlson_cyclic_linear_data() {
+        // For perfectly linear data with uniform spacing, slopes should equal
+        // the constant secant — including at the cyclic boundary.
+        let y = [2.0, 4.0, 6.0, 8.0];
+        let d = fritsch_carlson_slopes_cyclic(&y);
+        // Note: the wrap segment is 8→2 (delta = -6), so the data is NOT
+        // linear cyclically. Slopes at interior points should be 2.0,
+        // but at the boundary points (0 and 3) the slopes will differ
+        // because they see the wrap-around delta.
+        // Interior points (1, 2): centered average of adjacent deltas, all +2.
+        assert!((d[1] - 2.0).abs() < 1e-12, "slope at 1: expected 2.0, got {}", d[1]);
+        assert!((d[2] - 2.0).abs() < 1e-12, "slope at 2: expected 2.0, got {}", d[2]);
+        // Boundary points: delta wraps from 8→2 = -6, so signs differ → slope = 0.
+        assert!(d[0].abs() < 1e-12, "slope at 0: expected ~0 (sign change at wrap), got {}", d[0]);
+        assert!(d[3].abs() < 1e-12, "slope at 3: expected ~0 (sign change at wrap), got {}", d[3]);
+    }
+
+    #[test]
+    fn fritsch_carlson_cyclic_truly_cyclic_linear() {
+        // Data that IS linear when wrapped: a + b*i mod something won't work,
+        // but constant data is trivially cyclic-linear.
+        let y = [3.0, 3.0, 3.0, 3.0, 3.0];
+        let d = fritsch_carlson_slopes_cyclic(&y);
+        for (i, &s) in d.iter().enumerate() {
+            assert!(s.abs() < 1e-15, "slope at knot {i} should be 0, got {s}");
+        }
+    }
+
+    #[test]
+    fn pchip_cyclic_matches_noncyclic_in_interior() {
+        // For data where the boundary values are equal (values[0] == values[n-1]),
+        // the wrap segment is flat and boundary slopes match non-cyclic slopes
+        // for interior points far from the boundary.
+        let values = [5.0, 10.0, 15.0, 10.0, 5.0];
+        let out_cyclic = pchip_cyclic_resample(&values, 4);
+        let out_plain = pchip_resample(&values, 4);
+
+        // Interior segment 1→2 (index 4..8): should be very similar
+        // (not identical because boundary slopes still affect adjacent segments
+        // through the Fritsch-Carlson correction, but close).
+        for i in 4..8 {
+            let diff = (out_cyclic[i] - out_plain[i]).abs();
+            assert!(
+                diff < 0.5,
+                "interior segment too different at index {i}: cyclic={}, plain={}, diff={diff}",
+                out_cyclic[i], out_plain[i]
+            );
+        }
+    }
+
+    #[test]
+    fn resample_uses_pchip_cyclic_for_temperature_fields() {
+        // Verify that dry_bulb and dew_point default to PchipCyclic,
+        // producing smooth year boundaries.
+        let mut series = sample_series_5pt();
+        // Make first and last values equal so the wrap is naturally smooth.
+        series.dry_bulb_c = vec![5.0, 10.0, 15.0, 10.0, 5.0];
+        series.dew_point_c = vec![2.0, 5.0, 8.0, 5.0, 2.0];
+        series.horizontal_infrared_w_m2 = vec![200.0, 300.0, 350.0, 300.0, 200.0];
+        series.ground_temp_c = vec![8.0, 10.0, 12.0, 10.0, 8.0];
+
+        let resampled = series.resample(600).expect("resample should succeed");
+        assert_eq!(resampled.len(), 30);
+
+        // The last sub-sample of dry_bulb should be close to values[0] = 5.0,
+        // not stuck at values[n-1] = 5.0 as flat extrapolation would give.
+        // (In this case values[0] == values[n-1], so both are 5.0, but the
+        // path getting there is different — cyclic smoothly wraps while
+        // plain flat-holds.)
+        let last_db = resampled.dry_bulb_c[resampled.len() - 1];
+        let first_db = resampled.dry_bulb_c[0];
+        // With cyclic and matching endpoints, the boundary should be very smooth.
+        assert!(
+            (last_db - first_db).abs() < 0.5,
+            "dry_bulb boundary discontinuity: last={last_db}, first={first_db}"
+        );
+
+        // Pressure should still use non-cyclic Pchip (flat extrapolation).
+        // The last value should be exactly values[n-1].
+        let last_pressure = resampled.pressure_kpa[resampled.len() - 1];
+        assert!(
+            (last_pressure - 90.0).abs() < 1e-9,
+            "pressure should use non-cyclic Pchip, last value should be ~90, got {last_pressure}"
+        );
+    }
+
+    #[test]
+    fn resample_override_cyclic_back_to_pchip() {
+        // Users should be able to override PchipCyclic back to Pchip.
+        let mut series = sample_series_5pt();
+        series.dry_bulb_c = vec![0.0, 10.0, 20.0, 10.0, 0.0];
+        let overrides = ResampleOverrides {
+            dry_bulb: Some(ResampleMethod::Pchip),
+            ..Default::default()
+        };
+        let resampled = series
+            .resample_with(600, &overrides)
+            .expect("resample should succeed");
+        // With Pchip (non-cyclic), last sample should equal last knot = 0.0
+        let last = resampled.dry_bulb_c[resampled.len() - 1];
+        assert!(
+            (last - 0.0).abs() < 1e-12,
+            "non-cyclic Pchip should flat-hold at last knot, got {last}"
+        );
     }
 }

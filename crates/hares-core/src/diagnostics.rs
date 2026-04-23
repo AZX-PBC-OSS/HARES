@@ -30,6 +30,7 @@ pub struct StepDiagnostics {
 pub struct EnvelopeDiag {
     pub window_solar_w: f64,
     pub opaque_solar_lwr_w: f64,
+    /// Total interior LWR exchange activity [W] (Σ|q_i|/2).
     pub interior_lwr_w: f64,
     /// Per-zone infiltration+ventilation sensible [W].
     pub infiltration_by_zone: Vec<(ZoneId, f64)>,

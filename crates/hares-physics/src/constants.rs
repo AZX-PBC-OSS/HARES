@@ -116,12 +116,14 @@ pub const KW_TO_W: f64 = 1_000.0;
 
 // --- Occupant Internal Gains ---
 
-/// Sensible heat gain per occupant delivered to zone air [W/person].
+/// Total sensible heat gain per occupant [W/person].
 ///
 /// OCHRE Envelope.py:904-907: total gain = 400 BTU/h per person; sensible fraction = 0.563
 /// (convective only -- radiative fraction is 0 by default in OCHRE residential model).
 /// 400 BTU/h × (1055.055_852_62 J / BTU) / 3600 s = 117.228 W; × 0.563 ≈ 66.0 W.
 /// Value kept as the OCHRE-matched rounded constant.
+/// Split into convective (70%) and radiative (30%) via OCCUPANT_CONVECTIVE_FRACTION and
+/// OCCUPANT_RADIATIVE_FRACTION per ASHRAE HoF 2021 Ch.18 Table 1.
 pub const OCCUPANT_SENSIBLE_GAIN_W: f64 = 66.0;
 
 /// Latent heat gain per occupant [W/person].
@@ -130,10 +132,17 @@ pub const OCCUPANT_SENSIBLE_GAIN_W: f64 = 66.0;
 /// 117.228 W × 0.437 ≈ 51.2 W.
 pub const OCCUPANT_LATENT_GAIN_W: f64 = 51.2;
 
+/// Fraction of occupant sensible gain delivered as longwave radiation to surrounding
+/// surfaces [-]. ASHRAE Handbook of Fundamentals 2021, Chapter 18, Table 1 specifies
+/// approximately 30% radiative for typical residential occupancy (seated, light activity).
+/// Applied to the sensible portion only; latent gain is entirely convective (moisture to air).
+pub const OCCUPANT_RADIATIVE_FRACTION: f64 = 0.30;
+
 /// Fraction of occupant sensible gain delivered as convection to the zone air node [-].
-/// Not a separate multiplier in OCHRE -- the OCHRE sensible gain already represents
-/// the convective component only (radiative = 0 by default). Kept for documentation.
-pub const OCCUPANT_CONVECTIVE_FRACTION: f64 = 1.0;
+/// Complement of OCCUPANT_RADIATIVE_FRACTION: 1.0 − 0.30 = 0.70.
+/// OCHRE treats the sensible gain as entirely convective (radiative = 0 by default);
+/// this constant overrides that assumption to match ASHRAE HoF 2021 Ch.18 Table 1.
+pub const OCCUPANT_CONVECTIVE_FRACTION: f64 = 0.70;
 
 /// Stefan-Boltzmann constant [W/(m²·K⁴)].
 /// NIST CODATA 2018: σ = 5.670374419 × 10⁻⁸ W·m⁻²·K⁻⁴.

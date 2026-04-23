@@ -97,8 +97,8 @@ pub struct Boundary {
     pub has_radiant_barrier: bool,
     /// Solar absorptance [-] from HPXML `<SolarAbsorptance>`.
     ///
-    /// `None` means use the default: 0.60 for most surfaces, 0.05 for attic
-    /// radiant barriers.  Ref: OCHRE `Envelope.py:222`.
+    /// `None` means use the default: 0.70 (EnergyPlus Material IDD default)
+    /// for both exterior and interior sides, 0.05 for attic radiant barriers.
     /// Valid range: 0.0–1.0.
     pub solar_absorptance: Option<f64>,
     /// Longwave emittance [-] from HPXML `<Emittance>`.

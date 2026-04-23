@@ -484,11 +484,9 @@ impl ThermalSolver {
         if self.config.interior_lwr_method == crate::boundary_rc::InteriorLwrMethod::ScriptF {
             self.apply_interior_longwave_inputs(&mut u, env);
         }
-        // Interior LWR: per-zone net LWR to zone air [W]. For opaque surfaces,
-        // the convective fraction q × (1 − radiation_frac) goes to zone air. For
-        // windows, only q × (1 − radiation_frac) is injected (the remainder flows
-        // to outdoors via the U-factor conduction path, already in the RC network).
-        // E+ Eng.Ref "Inside Surface Heat Balance".
+        // Interior LWR: per-zone total LWR exchange activity Σ|q_i|/2 [W].
+        // For StarMesh mode this is always 0 (radiation is in the A-matrix).
+        // For ScriptF mode this indicates how much radiation exchange is active.
         let interior_lwr_w = self
             .lwr_by_zone_buf
             .iter()

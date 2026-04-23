@@ -7,10 +7,10 @@ use hares_envelope::{
     DrivingTemp, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW,
     ElectricalSolver, ElectricalSolverConfig, EnvelopeDiagnostics, ExteriorSurfaceInfo,
     ExteriorTarget, FluidSolver, FluidSolverConfig, HumiditySolver, HumiditySolverConfig, NodeId,
-    SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring,
-    SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
-    InteriorSolarSurfaceInfo, InteriorSolarZoneConfig,
-    assemble_building_rc, derive_zone_capacitances,
+    INTERIOR_SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_DEFAULT,
+    SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring, SurfaceLayerInfo, ThermalSolver,
+    ThermalSolverConfig, WindowSolarProperties, InteriorSolarSurfaceInfo,
+    InteriorSolarZoneConfig, assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
@@ -61,10 +61,12 @@ struct SolverBoundary {
     exterior_emissivity: f64,
     exterior_solar_absorptance: f64,
     attic_emissivity: f64,
-    /// Attic interior solar absorptance (0.05 with radiant barrier, 0.5 default).
-    /// Stored for future use when attic-zone interior solar distribution is implemented.
-    /// Currently attic solar gain enters only via conduction through the roof exterior.
-    _attic_solar_absorptance: f64,
+    /// Interior solar absorptance for this surface.
+    ///
+    /// For attic surfaces with radiant barrier: 0.05.
+    /// Otherwise: per-surface value from HPXML `SolarAbsorptance`, or
+    /// `INTERIOR_SOLAR_ABSORPTANCE_DEFAULT` (0.70, EnergyPlus Material IDD default).
+    interior_solar_absorptance: f64,
     outer_wiring: Option<NodeWiring>,
     inner_wiring: Option<NodeWiring>,
     exterior_rad_frac: f64,
@@ -219,7 +221,7 @@ fn build_solver_boundaries(
         let exterior_emissivity = exterior_emissivity(boundary);
         let exterior_solar_absorptance = exterior_solar_absorptance(boundary);
         let attic_emissivity = attic_interior_emissivity(boundary);
-        let attic_solar_absorptance = attic_interior_solar_absorptance(boundary);
+        let interior_solar_abs = interior_solar_absorptance(boundary);
 
         let bd_input = &boundary_inputs[surface_idx];
         let r_film_ext = bd_input.r_film_exterior_m2_k_w;
@@ -326,7 +328,7 @@ fn build_solver_boundaries(
             exterior_emissivity,
             exterior_solar_absorptance,
             attic_emissivity,
-            _attic_solar_absorptance: attic_solar_absorptance,
+            interior_solar_absorptance: interior_solar_abs,
             outer_wiring,
             inner_wiring,
             exterior_rad_frac,
@@ -366,13 +368,18 @@ fn exterior_solar_absorptance(boundary: &hares_io::hpxml::Boundary) -> f64 {
         .unwrap_or(SOLAR_ABSORPTANCE_DEFAULT)
 }
 
-fn attic_interior_solar_absorptance(boundary: &hares_io::hpxml::Boundary) -> f64 {
+fn interior_solar_absorptance(boundary: &hares_io::hpxml::Boundary) -> f64 {
+    // Radiant barrier in attic zone: very low absorptance (high reflectivity).
     if boundary.has_radiant_barrier
         && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic)
     {
         SOLAR_ABSORPTANCE_RADIANT_BARRIER
     } else {
-        exterior_solar_absorptance(boundary)
+        // Use per-surface value from HPXML SolarAbsorptance, or default to
+        // EnergyPlus Material IDD default 0.70.
+        boundary
+            .solar_absorptance
+            .unwrap_or(INTERIOR_SOLAR_ABSORPTANCE_DEFAULT)
     }
 }
 
@@ -739,7 +746,7 @@ pub(crate) fn build_default_solvers(
                     // (OCHRE "full" mode: R_film = 1/h_conv, no parallel R_rad).
                     (
                         sb.attic_emissivity,
-                        0.6,
+                        sb.interior_solar_absorptance,
                         sb.interior_rad_frac,
                         sb.r_film_int_m2_k_w / sb.area_m2.max(1e-9),
                         None,
@@ -1224,11 +1231,12 @@ fn foundation_height_m(zone: &hares_io::hpxml::Zone) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        attic_infiltration_method, attic_interior_emissivity, attic_interior_solar_absorptance,
-        exterior_emissivity, exterior_solar_absorptance, foundation_height_m,
-        foundation_infiltration_method, include_interior_lwr, natural_ventilation_coefficients,
+        attic_infiltration_method, attic_interior_emissivity, exterior_emissivity,
+        exterior_solar_absorptance, foundation_height_m, foundation_infiltration_method,
+        include_interior_lwr, interior_solar_absorptance, natural_ventilation_coefficients,
     };
     use hares_envelope::InfiltrationMethod;
+    use hares_envelope::INTERIOR_SOLAR_ABSORPTANCE_DEFAULT;
     use hares_envelope::ThermalSolverConfig;
     use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
     use hares_physics::infiltration::{
@@ -1379,7 +1387,7 @@ mod tests {
         let boundary = attic_roof_boundary(None, None, true);
 
         assert_eq!(exterior_solar_absorptance(&boundary), 0.70);
-        assert_eq!(attic_interior_solar_absorptance(&boundary), 0.05);
+        assert_eq!(interior_solar_absorptance(&boundary), 0.05);
         assert_eq!(exterior_emissivity(&boundary), 0.90);
         assert_eq!(attic_interior_emissivity(&boundary), 0.05);
     }
@@ -1389,9 +1397,74 @@ mod tests {
         let boundary = attic_roof_boundary(Some(0.72), Some(0.88), true);
 
         assert_eq!(exterior_solar_absorptance(&boundary), 0.72);
-        assert_eq!(attic_interior_solar_absorptance(&boundary), 0.05);
+        assert_eq!(interior_solar_absorptance(&boundary), 0.05);
         assert_eq!(exterior_emissivity(&boundary), 0.88);
         assert_eq!(attic_interior_emissivity(&boundary), 0.05);
+    }
+
+    /// Interior solar absorptance for a conditioned surface without explicit
+    /// `solar_absorptance` must default to 0.70 (EnergyPlus Material IDD default),
+    /// not the old hardcoded 0.6.
+    #[test]
+    fn conditioned_interior_solar_absorptance_defaults_to_ep_value() {
+        let boundary = Boundary {
+            id: "Wall1".to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: 20.0,
+            azimuth_deg: Some(180.0),
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: Vec::new(),
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            tilt_deg: Some(90.0),
+            framing_factor: None,
+        };
+        assert_eq!(
+            interior_solar_absorptance(&boundary),
+            INTERIOR_SOLAR_ABSORPTANCE_DEFAULT,
+            "interior solar absorptance without explicit HPXML value must default to E+ 0.70"
+        );
+    }
+
+    /// BESTEST fixtures set `solar_absorptance = 0.6` explicitly; that value must
+    /// flow through to the interior side unchanged.
+    #[test]
+    fn explicit_solar_absorptance_flows_to_interior_side() {
+        let boundary = Boundary {
+            id: "Wall1".to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: 20.0,
+            azimuth_deg: Some(180.0),
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: Vec::new(),
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: Some(0.6),
+            emittance: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            tilt_deg: Some(90.0),
+            framing_factor: None,
+        };
+        assert_eq!(
+            interior_solar_absorptance(&boundary),
+            0.6,
+            "BESTEST 0.6 must pass through to interior solar absorptance"
+        );
     }
 
     #[test]

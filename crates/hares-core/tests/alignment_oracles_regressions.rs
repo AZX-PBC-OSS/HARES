@@ -300,7 +300,7 @@ fn ochre_ashp_fixture_envelope_routes_and_boundary_observability_align() {
             "Forced Ventilation Heat Gain - Indoor (W)",
             "Natural Ventilation Heat Gain - Indoor (W)",
             "Internal Heat Gain - Indoor (W)",
-            "Radiation Heat Gain - Indoor (W)",
+            "Interior LWR Exchange - Indoor (W)",
             "Opaque Surface Heat Gain - Indoor (W)",
             "Duct Loss Heat Gain - Indoor (W)",
             "Roof Heat Gain - Indoor (W)",
