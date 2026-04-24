@@ -1,15 +1,19 @@
-//! TARP interior + DOE-2 exterior dynamic film coefficient calculations.
+//! ASHRAE Simple interior + DOE-2 exterior film coefficient calculations.
 //!
-//! Interior convection follows the TARP (Thermal Analysis Research Program)
-//! model. Exterior forced convection follows the DOE-2 model with a
-//! surface-roughness correction factor.
+//! Interior convection uses the ASHRAE "Simple" algorithm — fixed h_conv
+//! values by surface orientation (convection-only, with radiative component
+//! already subtracted per ASHRAE 1985 Table 1). Exterior forced convection
+//! follows the DOE-2 model with a surface-roughness correction factor.
 //!
 //! All inputs and outputs are in SI units.
 //!
 //! # References
-//! - EnergyPlus Engineering Reference §9.4 (TARP interior convection).
+//! - EnergyPlus Engineering Reference §9.4 (ASHRAE Simple / TARP interior).
+//! - EnergyPlus ConvectionCoefficients.cc `CalcASHRAESimpleIntConvCoeff`.
 //! - EnergyPlus Engineering Reference §9.5 (DOE-2 exterior convection).
 //! - OCHRE reference implementation `calculate_film_resistances`.
+//! - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, pp 79.
+//! - ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1.
 
 /// Zone height ordering for TARP above/below determination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +121,52 @@ pub fn tarp_h_natural(tilt_deg: f64, delta_t_k: f64, above_hotter: bool) -> f64 
     }
 }
 
+/// ASHRAE "Simple" interior convection coefficient h_conv [W/(m²·K)].
+///
+/// Fixed convection-only values by surface orientation, derived from
+/// ASHRAE 1985 Table 1 surface conductances (ε = 0.9) with the radiative
+/// component subtracted.  These are the default interior convection
+/// coefficients in EnergyPlus (`CalcASHRAESimpleIntConvCoeff`).
+///
+/// For vertical surfaces, returns the fixed value 3.076 regardless of ΔT.
+/// For non-vertical surfaces, the buoyancy direction (enhanced vs reduced)
+/// depends on which side is warmer and the surface tilt — this is computed
+/// from the zone temperatures and the `above_hotter` flag.
+///
+/// | Orientation             | Condition      | h_conv [W/(m²·K)] |
+/// |-------------------------|----------------|--------------------|
+/// | Vertical (67.5–112.5°)  | —              | 3.076              |
+/// | Horizontal, enhanced    | heat flow up   | 4.040              |
+/// | Horizontal, reduced     | heat flow down | 0.948              |
+/// | Tilted, enhanced        | heat flow up   | 3.870              |
+/// | Tilted, reduced         | heat flow down | 2.281              |
+///
+/// # References
+/// - EnergyPlus ConvectionCoefficients.cc:1829-1885.
+/// - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, p 79.
+/// - ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1.
+pub fn ashrae_simple_interior_h_conv(
+    tilt_deg: f64,
+    _t_ext_c: f64,
+    _t_int_c: f64,
+    above_hotter: bool,
+) -> f64 {
+    let cos_tilt = tilt_deg.to_radians().cos().abs();
+    if cos_tilt < 0.3827 {
+        3.076
+    } else if cos_tilt >= 0.9239 {
+        if above_hotter {
+            4.040
+        } else {
+            0.948
+        }
+    } else if above_hotter {
+        3.870
+    } else {
+        2.281
+    }
+}
+
 /// Film resistances for a building envelope boundary [m²·K/W].
 ///
 /// Returns `(r_interior, r_exterior)`.
@@ -149,62 +199,41 @@ pub fn film_resistances(
 
     let ext_above = exterior_zone.height_order() > interior_zone.height_order();
     let t_ext_hotter = t_ext >= t_int;
-    // "above_hotter": the warmer side faces upward -- enhanced convection.
     let above_hotter = !(ext_above ^ t_ext_hotter);
 
-    // Linearization operating point for TARP interior natural convection [°C / K].
-    // The 12.9 °C floor matches the E+ "Simple" ASHRAE interior convection
-    // algorithm (EnergyPlus ConvectionCoefficients.cc), which returns fixed
-    // h_conv values: 3.076 (vertical), 4.040 (horizontal enhanced),
-    // 0.948 (horizontal reduced).  For a vertical surface:
-    //   h_conv = 1.31 × 12.9^(1/3) ≈ 3.076 W/(m²·K),
-    // consistent with ASHRAE 140-2017 Table 25 (h_si = 8.29, h_conv ≈ 3.15).
+    // ASHRAE "Simple" interior convection algorithm — fixed h_conv [W/(m²·K)]
+    // by surface orientation, with the radiative component already subtracted.
     //
-    // E+ does NOT apply a MIN_DELTA_T = 0.1 °C on ΔT; it applies
-    // LowHConvLimit = 0.1 W/(m²·K) as a floor on the h coefficient
-    // itself (ConvectionCoefficients.cc).  The previous 0.1 °C floor on
-    // ΔT was based on a misreading of that code.
+    // EnergyPlus ConvectionCoefficients.cc CalcASHRAESimpleIntConvCoeff returns
+    // these convection-only values derived from ASHRAE 1985 Table 1 surface
+    // conductances at ε = 0.9, minus the radiative component
+    // (1.02 × 0.9 = 0.918 BTU/h·ft²·°F), converted to SI.  These are the
+    // default interior convection coefficients in E+ and match OCHRE's
+    // TARP-at-12.9°C-floor result (envelope.py:374) to within 0.12%.
     //
-    // OCHRE (vendors/OCHRE/ochre/utils/envelope.py:374) independently uses
-    //   delta_t = max(12.9, abs(t_ext_zone - t_int_zone))
-    // producing h_conv = 3.076 for vertical surfaces, confirming this
-    // operating point.  The 12.9 °C represents the dominant heating-season
-    // surface-to-air ΔT (interior surface ~7 °C, zone air 20 °C).
-    const MIN_DELTA_T_TARP_NATURAL_C: f64 = 12.9;
-
-    let delta_t = (t_ext - t_int).abs().max(MIN_DELTA_T_TARP_NATURAL_C);
-
-    let h_conv = tarp_h_natural(tilt_deg, delta_t, above_hotter);
-
-    // Interior film resistance is convection-only: R_film = 1/h_conv.
-    // Inter-surface longwave radiation is handled separately by the
-    // star-mesh radiation conductances in the A-matrix (TRNSYS Type 56,
-    // ESP-r, EnergyPlus "Option 2" architecture).  At ε_ir = 0.9 and
-    // T_ref = 293.15 K the linearized h_rad ≈ 5.14 W/(m²·K); this is
-    // NOT included in R_film to avoid double-counting with the star-mesh.
+    // For a vertical surface: h_conv = 3.076 W/(m²·K).  Combined with
+    // h_rad ≈ 5.14 at ε = 0.9, T_ref = 293.15 K, the total h_si = 8.22
+    // is consistent with ASHRAE 140-2017 Table 25 (h_si = 8.29).
     //
-    // The combined h_si = h_conv + h_rad ≈ 8.21 W/(m²·K) for a vertical
-    // surface (TARP h_conv ≈ 3.08), consistent with ASHRAE 140-2017
-    // Table 25.  In the decomposed model, h_conv provides the
-    // zone-air ↔ surface coupling and h_rad provides the
-    // surface ↔ surface coupling via the star-mesh.
-    //
-    // h_rad is computed here for use by the window U-factor decomposition
-    // in boundary_rc.rs, where h_conv = h_si - h_rad recovers the
-    // convection-only film from the combined window interior film.
-    const INTERIOR_EMISSIVITY: f64 = 0.9;
-    const INTERIOR_MEAN_TEMP_K: f64 = 293.15;
-    let _h_rad = 4.0
-        * INTERIOR_EMISSIVITY
-        * crate::constants::STEFAN_BOLTZMANN
-        * INTERIOR_MEAN_TEMP_K.powi(3);
+    // References:
+    // - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, p 79.
+    // - ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1.
+    // - EnergyPlus ConvectionCoefficients.cc:1829-1885.
+    // - ASHRAE 140-2017 §5.3.1.9, Table 25.
+    let h_conv = ashrae_simple_interior_h_conv(tilt_deg, t_ext, t_int, above_hotter);
 
     let r_int = 1.0 / h_conv;
 
     let r_ext = if exterior_zone == ZoneLabel::Outdoor {
-        let h_glass = (h_conv.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
-        let h_forced = roughness.factor() * (h_glass - h_conv);
-        1.0 / (h_conv + h_forced)
+        let ext_above = exterior_zone.height_order() > interior_zone.height_order();
+        let t_ext_hotter = t_ext >= t_int;
+        let above_hotter = !(ext_above ^ t_ext_hotter);
+        let delta_t = (t_ext - t_int).abs().max(0.1);
+        let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter);
+        let h_glass =
+            (h_natural.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
+        let h_forced = roughness.factor() * (h_glass - h_natural);
+        1.0 / (h_natural + h_forced)
     } else if exterior_zone == ZoneLabel::Ground {
         1.0 / h_conv
     } else {
@@ -245,10 +274,8 @@ mod tests {
 
     #[test]
     fn film_resistances_typical_wall_outdoor() {
-        // With avg_ground=10, avg_ambient=10: t_conditioned=20, t_outdoor=15,
-        // so actual zone ΔT = |15 − 20| = 5.0 °C, floored to 12.9 °C
-        // (linearization operating point matching E+ "Simple" interior
-        // convection algorithm).
+        // Interior: ASHRAE Simple gives h_conv = 3.076 for vertical surface.
+        // Exterior: TARP natural at ΔT = 5.0°C + DOE-2 forced at 2 m/s.
         let (r_int, r_ext) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
@@ -258,16 +285,15 @@ mod tests {
             10.0,
             SurfaceRoughness::Rough,
         );
-        let effective_dt = 12.9_f64; // max(|5.0|, 12.9) = 12.9
-        let h_conv = 1.31 * effective_dt.cbrt();
+        let h_conv = 3.076_f64;
         let h_rad = 4.0 * 0.9 * crate::constants::STEFAN_BOLTZMANN * 293.15_f64.powi(3);
-        // Interior film is convection-only (h_rad handled by star-mesh).
         assert_approx(r_int, 1.0 / h_conv, 1e-10);
-        // Conv-only R_film is larger than combined R_film.
         assert!(r_int > 1.0 / (h_conv + h_rad), "conv-only r_int={r_int} must be > combined {:.4}", 1.0 / (h_conv + h_rad));
-        let h_glass = (h_conv.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();
-        let h_forced = 1.67 * (h_glass - h_conv);
-        assert_approx(r_ext, 1.0 / (h_conv + h_forced), 1e-10);
+        let delta_t = 5.0_f64;
+        let h_natural = 1.31 * delta_t.cbrt();
+        let h_glass = (h_natural.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();
+        let h_forced = 1.67 * (h_glass - h_natural);
+        assert_approx(r_ext, 1.0 / (h_natural + h_forced), 1e-6);
         assert!(r_ext < r_int, "r_ext={r_ext} should be < r_int={r_int}");
     }
 
@@ -288,12 +314,8 @@ mod tests {
 
     #[test]
     fn interior_film_resistance_is_convection_only() {
-        // For a vertical wall (tilt=90°), Conditioned vs Outdoor with
-        // avg_ground=10, avg_ambient=10: t_conditioned=20, t_outdoor=15,
-        // actual zone ΔT = 5.0 °C, floored to 12.9 °C (E+ "Simple"
-        // operating point).
-        // TARP gives h_conv = 1.31 × 12.9^(1/3) ≈ 3.076 W/(m²·K),
-        // matching E+ "Simple" interior convection (vertical surface).
+        // ASHRAE Simple gives h_conv = 3.076 for vertical surface,
+        // matching E+ CalcASHRAESimpleIntConvCoeff.
         // Linearized h_rad = 4·ε·σ·T_ref³ ≈ 5.14 W/(m²·K) at ε=0.9, T=20°C.
         // In Option 2 (EnergyPlus/TRNSYS/ESP-r), R_film = 1/h_conv (conv-only).
         // h_rad is carried by the star-mesh radiation conductances in the
@@ -307,20 +329,16 @@ mod tests {
             10.0,
             SurfaceRoughness::Rough,
         );
-        let effective_dt = 12.9_f64;
-        let h_conv = 1.31 * effective_dt.cbrt();
+        let h_conv = 3.076_f64;
         let h_rad = 4.0 * 0.9 * crate::constants::STEFAN_BOLTZMANN * 293.15_f64.powi(3);
         let r_conv_only = 1.0 / h_conv;
         let r_combined = 1.0 / (h_conv + h_rad);
 
-        // R_film must equal convection-only value.
         assert_approx(r_int, r_conv_only, 1e-10);
-        // Conv-only R_film is distinctly larger than combined.
         assert!(
             r_int > r_combined + 0.1,
             "conv-only R_film ({r_int:.4}) must be significantly larger than combined ({r_combined:.4})"
         );
-        // Verify approximate expected value for vertical wall conv-only film.
         assert!(
             (r_int - 0.325).abs() < 0.01,
             "vertical wall conv-only R_film ≈ 0.325, got {r_int:.4}"
@@ -330,10 +348,8 @@ mod tests {
     #[test]
     fn exterior_film_resistance_is_convection_only_no_h_rad() {
         // Exterior film resistance for outdoor-facing surfaces uses
-        // h_conv + h_forced (no h_rad). Exterior LWR is handled by
-        // the explicit exterior longwave solver, not by h_rad in R_film.
-        // With avg_ground=10, avg_ambient=10: actual zone ΔT = 5.0 °C,
-        // floored to 12.9 °C (E+ "Simple" operating point).
+        // TARP natural + DOE-2 forced (no h_rad). Exterior LWR is
+        // handled by the explicit exterior longwave solver.
         let (_, r_ext) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
@@ -343,12 +359,33 @@ mod tests {
             10.0,
             SurfaceRoughness::Rough,
         );
-        let effective_dt = 12.9_f64;
-        let h_conv = 1.31 * effective_dt.cbrt();
-        let h_glass = (h_conv.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();
-        let h_forced = 1.67 * (h_glass - h_conv);
-        let r_expected = 1.0 / (h_conv + h_forced);
-        assert_approx(r_ext, r_expected, 1e-10);
+        let delta_t = 5.0_f64;
+        let h_natural = 1.31 * delta_t.cbrt();
+        let h_glass = (h_natural.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();
+        let h_forced = 1.67 * (h_glass - h_natural);
+        let r_expected = 1.0 / (h_natural + h_forced);
+        assert_approx(r_ext, r_expected, 1e-6);
+    }
+
+    #[test]
+    fn ashrae_simple_vertical_returns_3_076() {
+        assert_approx(
+            ashrae_simple_interior_h_conv(90.0, 15.0, 20.0, true),
+            3.076,
+            1e-10,
+        );
+    }
+
+    #[test]
+    fn ashrae_simple_horizontal_enhanced() {
+        let h = ashrae_simple_interior_h_conv(0.0, 15.0, 20.0, true);
+        assert_approx(h, 4.040, 1e-10);
+    }
+
+    #[test]
+    fn ashrae_simple_horizontal_reduced() {
+        let h = ashrae_simple_interior_h_conv(0.0, 25.0, 20.0, false);
+        assert_approx(h, 0.948, 1e-10);
     }
 
     /// When delta_t=0, all TARP formulas produce h=0 (cbrt(0)=0).

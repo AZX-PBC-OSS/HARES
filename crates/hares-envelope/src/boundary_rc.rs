@@ -672,7 +672,7 @@ pub fn assemble_building_rc(
                 //
                 // For windows: r_film_interior comes from E+ window U-factor
                 // decomposition and includes combined h_si = h_conv + h_rad.
-                // We decompose: h_conv = h_si - h_rad_linearized.
+                // We decompose: h_conv = h_si - h_rad(ε_glass).
                 // R_conv = 1/h_conv provides the zone-air ↔ window convection path
                 // (the ONLY zone-air coupling; air is transparent to LWR).
                 // Inter-surface radiation is handled by the star-mesh edge
@@ -685,20 +685,28 @@ pub fn assemble_building_rc(
                 // decomposition needed.
                 const T_REF_K: f64 = 293.15; // 20°C (OCHRE, TRNSYS, ESP-r)
                 const SIGMA: f64 = crate::longwave_radiation::STEFAN_BOLTZMANN;
-                // ASHRAE 140-2017 §5.3.1.9, Table 24: ε_ir = 0.9 for ALL
-                // interior surfaces including windows. The 0.84 value is the
-                // glass thermal emissivity for U-factor rating (NFRC); for
-                // interior LWR exchange ASHRAE 140 specifies 0.9.
-                const INTERIOR_LWR_EMISSIVITY: f64 = 0.9;
+                // Glass thermal emissivity ε = 0.84 (NFRC). The E+ Simple Window
+                // Step 1 polynomial (E+ Eng.Ref §Window Heat Transfer Calculations)
+                // was derived at this emissivity, so h_si implicitly contains
+                // h_rad at ε = 0.84. The decomposition h_conv = h_si − h_rad
+                // must subtract h_rad at the same ε that was implicit in h_si.
+                //
+                // The star-mesh radiation conductance also uses ε = 0.84 for
+                // windows (via bd.interior_emissivity, set in conversions.rs),
+                // ensuring total interior coupling = h_si exactly. Using ε = 0.9
+                // for the star-mesh would over-couple by
+                // h_rad(0.9) − h_rad(0.84) ≈ 0.34 W/(m²·K).
+                const GLASS_THERMAL_EMISSIVITY: f64 =
+                    crate::longwave_radiation::EMISSIVITY_WINDOW;
 
                 let a = bd.area_m2;
                 let h_si = 1.0 / bd.r_film_interior_m2_k_w;
-                let h_rad_linearized =
-                    4.0 * INTERIOR_LWR_EMISSIVITY * SIGMA * T_REF_K.powi(3);
+                let h_rad_glass =
+                    4.0 * GLASS_THERMAL_EMISSIVITY * SIGMA * T_REF_K.powi(3);
 
-                if h_si > h_rad_linearized {
+                if h_si > h_rad_glass {
                     // Film includes h_rad (window case): decompose into conv + rad.
-                    let h_conv = (h_si - h_rad_linearized).max(0.1);
+                    let h_conv = (h_si - h_rad_glass).max(0.1);
                     let r_film_conv = 1.0 / h_conv;
 
                     // Create floating window node for radiation topology.

@@ -6,7 +6,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
-use hares_envelope::longwave_radiation::{EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER};
+use hares_envelope::longwave_radiation::{EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW};
 use hares_equipment::{ConfigPayload, EquipmentConfig, config::ConfigValue};
 use hares_io::hpxml::ZoneType;
 use hares_io::{Building, DefaultsStore, SimulationConfig};
@@ -232,16 +232,24 @@ pub fn building_to_boundary_inputs(
             };
 
             // Interior-facing longwave emissivity for star-mesh LWR conductance.
-            // ASHRAE 140-2017 §5.3.1.9, Table 24: ε_ir = 0.9 for ALL interior
-            // surfaces including windows. The 0.84 value is the glass thermal
-            // emissivity for U-factor rating (NFRC); for interior LWR exchange
-            // ASHRAE 140 specifies 0.9. This field is used for the star-mesh
-            // radiation conductance G = 4·ε·σ·A·T_ref³, not for the ScriptF
-            // interior LWR solver (which uses its own WINDOW_EMISSIVITY = 0.84).
-            // Attic radiant barriers: 0.05 (reflective aluminium foil).
-            // Reference: ASHRAE 140-2017 §5.3.1.9; OCHRE Envelope.py:1048-1061.
+            // The E+ Simple Window Model Step 1 polynomial (E+ Eng.Ref
+            // §Window Heat Transfer Calculations) was derived at glass thermal
+            // emissivity ε = 0.84 (NFRC rating value). For total interior
+            // coupling = h_si exactly, both the R_conv decomposition
+            // (boundary_rc.rs) and the star-mesh radiation conductance
+            // must use the same ε that was implicit in h_si. Using ε = 0.9
+            // for the star-mesh would over-couple the window by
+            // h_rad(0.9) − h_rad(0.84) ≈ 0.34 W/(m²·K).
+            //
+            // ASHRAE 140-2017 §5.3.1.9 specifies ε_ir = 0.9 for ALL interior
+            // surfaces, but this applies to opaque surfaces with ε = 0.9.
+            // Glass has a physical infrared emissivity of 0.84; specifying
+            // 0.9 for glass LWR exchange is inconsistent with the U-factor
+            // model that underlies the window boundary.
+            // Reference: E+ Eng.Ref §Window Heat Transfer Calculations;
+            // OCHRE Envelope.py uses ε = 0.84 for window radiation_frac.
             let interior_emissivity = if bd.boundary_type == BoundaryType::Window {
-                EMISSIVITY_DEFAULT // 0.9 per ASHRAE 140 §5.3.1.9 (NOT 0.84)
+                EMISSIVITY_WINDOW // 0.84 glass thermal emissivity (NFRC)
             } else if bd.has_radiant_barrier
                 && bd.interior_zone.as_ref() == Some(&ZoneType::Attic)
             {
