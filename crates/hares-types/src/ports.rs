@@ -176,6 +176,10 @@ impl PortDeclaration {
 /// per-category subtotals indexed by `ThermalCategory::index()`. Invariants:
 /// `sum(sensible_by_category) == sensible_gain_w` (convective-only total);
 /// `sum(latent_by_category) == latent_gain_w`.
+/// `sensible_by_category[HvacCooling]` includes the fan heat offset — the
+/// positive fan waste heat is folded into the negative coil cooling. For
+/// coil-only cooling output (without fan heat), use equipment telemetry
+/// fields `coil_sensible_cooling_w` and `coil_latent_cooling_w`.
 /// Use fixed-size arrays to avoid HashMap allocation in the hot timestep loop.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThermalAccumulator {

@@ -750,6 +750,17 @@ impl Equipment for IdealHvac {
         };
 
         self.telemetry.set(tk::THERMAL_OUTPUT_W, capacity_w);
+        // COIL_SENSIBLE_COOLING_W is a positive magnitude (same convention as
+        // AirConditioner) so cross-equipment diagnostics can sum without sign
+        // correction. THERMAL_OUTPUT_W carries the signed value for callers that
+        // need sign-aware net output.
+        if capacity_w < 0.0 {
+            self.telemetry
+                .set(tk::COIL_SENSIBLE_COOLING_W, (capacity_w * self.shr).abs());
+        } else {
+            self.telemetry.set(tk::COIL_SENSIBLE_COOLING_W, 0.0);
+        }
+        self.telemetry.set(tk::FAN_HEAT_W, fan_power_w);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(operating_mode));
         self.telemetry
@@ -898,12 +909,14 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn ideal_hvac_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(9);
+    let mut telemetry = Telemetry::with_capacity(11);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::IDEAL_CAPACITY_W, 0.0);
     telemetry.insert(tk::CURRENT_TARGET_C, 0.0);
     telemetry.insert(tk::FAN_KW, 0.0);
+    telemetry.insert(tk::COIL_SENSIBLE_COOLING_W, 0.0);
+    telemetry.insert(tk::FAN_HEAT_W, 0.0);
     telemetry.insert(tk::HVAC_HEATING_CAPACITY_W, 0.0);
     telemetry.insert(tk::HVAC_COOLING_CAPACITY_W, 0.0);
     telemetry.insert(tk::CAP_RATIO, 1.0);
@@ -939,6 +952,16 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::FAN_KW.to_string(),
             unit: "kW".to_string(),
             description: "Fan electrical consumption".to_string(),
+        },
+        TelemetryField {
+            name: tk::COIL_SENSIBLE_COOLING_W.to_string(),
+            unit: "W".to_string(),
+            description: "Gross sensible cooling at the coil (positive magnitude, non-zero only during cooling); distinguishes coil output from fan waste heat".to_string(),
+        },
+        TelemetryField {
+            name: tk::FAN_HEAT_W.to_string(),
+            unit: "W".to_string(),
+            description: "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream".to_string(),
         },
         TelemetryField {
             name: tk::HVAC_HEATING_CAPACITY_W.to_string(),

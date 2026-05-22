@@ -13,10 +13,11 @@ use chrono::{FixedOffset, TimeZone};
 use hares_equipment::{
     CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, EquipmentConfig,
     EquipmentRegistry, GasFurnaceConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
+    IdealHvacConfig,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, HumidityAccumulator, OperatingMode,
-    PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+    PortSlots, ThermalAccumulator, ThermalCategory, WeatherState, ZoneId, ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -176,6 +177,32 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+            },
+        ),
+        "Ideal HVAC" => EquipmentConfig::from_typed(
+            name.to_string(),
+            class.to_string(),
+            IdealHvacConfig {
+                equipment_id: None,
+                zone_id: get("zone_id").map(|v| v as u16),
+                heating_setpoint_c: get("heating_setpoint_c"),
+                cooling_setpoint_c: get("cooling_setpoint_c"),
+                deadband_c: None,
+                n_speeds: None,
+                ideal_capacity_mode: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                heating_capacity_w: get("heating_capacity_w"),
+                cooling_capacity_w: get("cooling_capacity_w"),
+                shr: get("shr"),
+                fraction_heating_load_served: None,
+                fraction_cooling_load_served: None,
+                rated_fan_power_w: get("rated_fan_power_w"),
+                rated_eir: None,
+                capacity_min_w: None,
+                fuel_type: None,
+                capacity_biquadratic_coeffs: None,
+                eir_biquadratic_coeffs: None,
             },
         ),
         _ => panic!("unsupported class in hvac_parity cfg helper: {class}"),
@@ -1198,22 +1225,12 @@ fn ashp_cop_drops_with_defrost() {
 }
 
 // ---------------------------------------------------------------------------
-// Ticket 005 — regression: coil-level telemetry keys must be present
-//
-// AirConditioner and IdealHvac should expose `coil_sensible_cooling_w` and
-// `fan_heat_w` as separate telemetry fields so diagnostics can distinguish
-// gross coil output from fan waste heat. Without them, the only observable
-// value is the net `sensible_cooling_w` (coil × DSE minus none of the fan
-// offset), making it impossible to recover true coil output.
-//
-// This test is currently FAILING because neither key is emitted. Once
-// ticket 005 is implemented both assertions must pass.
+// Coil-level telemetry keys: AirConditioner must expose coil_sensible_cooling_w
+// and fan_heat_w so diagnostics can distinguish gross coil output from fan
+// waste heat. sensible_cooling_w (post-DSE) ≠ coil_sensible_cooling_w (pre-DSE)
+// when duct losses exist.
 // ---------------------------------------------------------------------------
-/// Fix pending on ticket 001 — will stop panicking when humidity port
-/// Fix pending on ticket 005 — will stop panicking when coil_sensible_cooling_w
-/// and fan_heat_w telemetry keys are added to AirConditioner.
 #[test]
-#[should_panic(expected = "ticket-005: coil_sensible_cooling_w")]
 fn ac_coil_sensible_and_fan_heat_telemetry_present() {
     let c = cfg(
         "ac",
@@ -1240,10 +1257,10 @@ fn ac_coil_sensible_and_fan_heat_telemetry_present() {
     // These keys must exist (ticket 005 requirement). Currently absent → test fails.
     let coil_sens = tel
         .get("coil_sensible_cooling_w")
-        .expect("ticket-005: coil_sensible_cooling_w telemetry key missing from AirConditioner");
+        .expect("coil_sensible_cooling_w telemetry key missing from AirConditioner");
     let fan_heat = tel
         .get("fan_heat_w")
-        .expect("ticket-005: fan_heat_w telemetry key missing from AirConditioner");
+        .expect("fan_heat_w telemetry key missing from AirConditioner");
 
     // Invariant 1: sensible_cooling_w == coil_sensible_cooling_w * duct_dse.
     // Default test config has no duct loss → dse == 1.0 → they should be equal.
@@ -1261,12 +1278,73 @@ fn ac_coil_sensible_and_fan_heat_telemetry_present() {
     );
 
     // Invariant 3: coil_sensible * dse + fan_heat == |HvacCooling port| (dse=1 here).
-    let port_cooling = ports.thermal[0].sensible_by_category[1]; // HvacCooling index=1
+    let port_cooling = ports.thermal[0].sensible_for_category(ThermalCategory::HvacCooling);
     let expected_port = -(coil_sens - fan_heat); // port is negative
     assert!(
         (port_cooling - expected_port).abs() < 1.0,
         "HvacCooling port ({port_cooling:.2} W) should equal \
          -(coil_sens - fan_heat) = {expected_port:.2} W"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// IdealHvac coil-level telemetry: coil_sensible_cooling_w and fan_heat_w
+// must be exposed separately so diagnostics can distinguish gross coil
+// output from fan waste heat during cooling.
+// ---------------------------------------------------------------------------
+#[test]
+fn ideal_hvac_coil_sensible_and_fan_heat_telemetry_present() {
+    let c = cfg(
+        "ideal",
+        "Ideal HVAC",
+        &[
+            ("zone_id", 1.0),
+            ("heating_capacity_w", 10_000.0),
+            ("cooling_capacity_w", 8_000.0),
+            ("cooling_setpoint_c", 24.0),
+            ("heating_setpoint_c", 18.0),
+            ("rated_fan_power_w", 200.0),
+            ("shr", 0.75),
+        ],
+    );
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Ideal HVAC", c.clone()).unwrap();
+    let env = make_env(28.0, 35.0, 19.0);
+    eq.init(&c, &env).unwrap();
+    eq.update_control(&env);
+
+    let mut ports = make_ports();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let tel = eq.telemetry();
+
+    let coil_sens = tel
+        .get("coil_sensible_cooling_w")
+        .expect("coil_sensible_cooling_w telemetry key missing from IdealHvac");
+    let fan_heat = tel
+        .get("fan_heat_w")
+        .expect("fan_heat_w telemetry key missing from IdealHvac");
+
+    // IdealHvac has no duct (dse=1). With shr=0.75:
+    // coil_sensible_cooling_w = (capacity_w * shr).abs() (positive magnitude).
+    // fan_heat_w is positive.
+    // Port HvacCooling sensible = -coil_sensible + fan_heat (negative, cooling offsets fan heat).
+    assert!(
+        coil_sens > 0.0,
+        "coil_sensible_cooling_w must be a positive magnitude during cooling; got {coil_sens:.2} W"
+    );
+    assert!(
+        fan_heat > 0.0,
+        "fan_heat_w must be positive during cooling; got {fan_heat:.2} W"
+    );
+
+    // Invariant: port HvacCooling == -coil_sensible + fan_heat
+    let port_cooling = ports.thermal[0].sensible_for_category(ThermalCategory::HvacCooling);
+    let expected_port = -coil_sens + fan_heat;
+    assert!(
+        (port_cooling - expected_port).abs() < 1.0,
+        "HvacCooling port ({port_cooling:.2} W) should equal \
+         -coil_sensible + fan_heat = {expected_port:.2} W"
     );
 }
 

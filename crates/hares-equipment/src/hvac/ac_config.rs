@@ -20,10 +20,13 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
     [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub(super) fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(16);
+    let mut telemetry = Telemetry::with_capacity(19);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::LATENT_COOLING_W, 0.0);
+    telemetry.insert(tk::COIL_SENSIBLE_COOLING_W, 0.0);
+    telemetry.insert(tk::COIL_LATENT_COOLING_W, 0.0);
+    telemetry.insert(tk::FAN_HEAT_W, 0.0);
     telemetry.insert(tk::SHR, 1.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::SPEED_INDEX, 0.0);
@@ -56,6 +59,21 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::LATENT_COOLING_W.to_string(),
             unit: "W".to_string(),
             description: "Delivered latent cooling magnitude".to_string(),
+        },
+        TelemetryField {
+            name: tk::COIL_SENSIBLE_COOLING_W.to_string(),
+            unit: "W".to_string(),
+            description: "Gross sensible cooling at the coil (positive magnitude, pre-DSE); distinguishes coil output from fan waste heat".to_string(),
+        },
+        TelemetryField {
+            name: tk::COIL_LATENT_COOLING_W.to_string(),
+            unit: "W".to_string(),
+            description: "Gross latent cooling at the coil (pre-DSE)".to_string(),
+        },
+        TelemetryField {
+            name: tk::FAN_HEAT_W.to_string(),
+            unit: "W".to_string(),
+            description: "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream".to_string(),
         },
         TelemetryField {
             name: tk::SHR.to_string(),

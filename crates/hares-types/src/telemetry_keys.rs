@@ -23,6 +23,9 @@ pub const TOTAL_SENSIBLE_GAIN_W: &str = "total_sensible_gain_w";
 pub const LATENT_GAIN_W: &str = "latent_gain_w";
 pub const SENSIBLE_COOLING_W: &str = "sensible_cooling_w";
 pub const LATENT_COOLING_W: &str = "latent_cooling_w";
+pub const COIL_SENSIBLE_COOLING_W: &str = "coil_sensible_cooling_w";
+pub const COIL_LATENT_COOLING_W: &str = "coil_latent_cooling_w";
+pub const FAN_HEAT_W: &str = "fan_heat_w";
 pub const IDEAL_CAPACITY_W: &str = "ideal_capacity_w";
 
 // ── Simulation context (available at all output verbosity levels) ────────────

@@ -854,11 +854,17 @@ impl CoolingCore {
 
         // Telemetry reports delivered (post-DSE) values for the conditioned zone.
         let dse = self.hvac.duct_dse.clamp(0.0, 1.0);
+        let fan_heat_w = fan_kw * 1000.0;
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
         self.telemetry
             .set(tk::SENSIBLE_COOLING_W, sensible_cooling_w * dse);
         self.telemetry
             .set(tk::LATENT_COOLING_W, latent_cooling_w * dse);
+        self.telemetry
+            .set(tk::COIL_SENSIBLE_COOLING_W, sensible_cooling_w);
+        self.telemetry
+            .set(tk::COIL_LATENT_COOLING_W, latent_cooling_w);
+        self.telemetry.set(tk::FAN_HEAT_W, fan_heat_w);
         self.telemetry.set(tk::SHR, self.hvac.shr);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
