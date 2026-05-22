@@ -360,7 +360,7 @@ impl ThermalSolver {
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
-            custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 2),
+            custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 4),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -656,8 +656,19 @@ impl ThermalSolver {
 
         self.custom_payload_buf.clear();
         for &(zone, latent) in &self.latent_pairs_buf {
+            let (m_dot_inf_kg_s, w_outdoor) = self
+                .infiltration_buf
+                .iter()
+                .find(|c| c.zone == zone)
+                .map(|c| (c.m_dot_lat_kg_s, c.w_outdoor))
+                .unwrap_or((0.0, 0.0));
+            // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor]
+            // per zone, extending the original 2-float format to carry moisture coupling
+            // data for semi-implicit humidity solver treatment.
             self.custom_payload_buf.push(f64::from(zone.0));
             self.custom_payload_buf.push(latent);
+            self.custom_payload_buf.push(m_dot_inf_kg_s);
+            self.custom_payload_buf.push(w_outdoor);
         }
 
         self.latent_buf = latent_by_zone;
@@ -3889,11 +3900,11 @@ mod tests {
         };
         let vent_flow = 0.05;
 
-        // Extract latent gain for zone 1 from custom_payload [zone_id, value, ...]
+        // Extract latent gain for zone 1 from custom_payload [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor]
         let extract_latent = |update: &DomainUpdate| -> f64 {
             let payload = update.custom_payload.as_ref().expect("must have latent");
             payload
-                .chunks(2)
+                .chunks(4)
                 .find(|chunk| chunk[0] as u16 == 1)
                 .map(|chunk| chunk[1])
                 .unwrap_or(0.0)

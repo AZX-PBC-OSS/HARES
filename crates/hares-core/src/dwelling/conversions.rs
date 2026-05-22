@@ -394,11 +394,16 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
     let Some(payload) = &update.custom_payload else {
         return;
     };
-    for chunk in payload.chunks_exact(4) {
+    let mut alpha_telemetry = env
+        .equipment_telemetry
+        .remove(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
+        .unwrap_or_default();
+    for chunk in payload.chunks_exact(5) {
         let zone_raw = chunk[0];
         let humidity_ratio = chunk[1];
         let relative_humidity = chunk[2];
         let wet_bulb_c = chunk[3];
+        let alpha = chunk[4];
 
         if !zone_raw.is_finite() || zone_raw < 0.0 || zone_raw > f64::from(u16::MAX) {
             continue;
@@ -409,7 +414,17 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
             zone.relative_humidity = relative_humidity;
             zone.wet_bulb_c = wet_bulb_c;
         }
+        let alpha_key = format!(
+            "{}_zone_{}",
+            hares_types::telemetry_keys::HUMIDITY_SEMI_IMPLICIT_ALPHA,
+            zone_id.0
+        );
+        alpha_telemetry.insert(alpha_key, alpha);
     }
+    env.equipment_telemetry.insert(
+        hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY.to_string(),
+        alpha_telemetry,
+    );
 }
 
 pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> EquipmentConfig {
@@ -957,5 +972,159 @@ mod tests {
 
         assert!((cfg.afue - 0.96).abs() < 1e-12);
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
+    }
+
+    // ── apply_humidity_update_to_zones telemetry tests ──────────────────
+
+    fn env_with_humidity_zone(zone_id: u16, humidity_ratio: f64) -> hares_types::EnvironmentState {
+        use chrono::{FixedOffset, TimeZone};
+        use hares_types::{
+            ElectricalSummary, GridState, PriceSignal, SurfaceIrradiance, WeatherState, ZoneState,
+        };
+        hares_types::EnvironmentState {
+            zones: vec![ZoneState {
+                id: hares_types::ZoneId(zone_id),
+                temperature_c: 22.0,
+                humidity_ratio,
+                relative_humidity: 0.45,
+                wet_bulb_c: 19.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 180.0,
+                ground_temp_c: 10.0,
+                sky_temp_c: 5.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![SurfaceIrradiance {
+                    surface_id: 1,
+                    direct_w_m2: 0.0,
+                    diffuse_w_m2: 0.0,
+                    reflected_w_m2: 0.0,
+                    angle_of_incidence_rad: 0.0,
+                }],
+                outdoor_wet_bulb_c: 0.0,
+                outdoor_enthalpy_j_kg: 0.0,
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 180.0,
+                mains_temp_c: 15.0,
+                rainfall_m: 0.0,
+                ground_albedo: 0.2,
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: Default::default(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid time"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: PriceSignal::default(),
+            electrical: ElectricalSummary::default(),
+        }
+    }
+
+    #[test]
+    fn humidity_update_emits_semi_implicit_alpha_to_telemetry() {
+        let zone_id: u16 = 1;
+        let alpha = 0.333;
+        let mut env = env_with_humidity_zone(zone_id, 0.008);
+        let update = hares_types::DomainUpdate {
+            domain_id: hares_types::HUMIDITY,
+            zone_temperatures_c: vec![(hares_types::ZoneId(zone_id), 22.0)],
+            custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, alpha]),
+        };
+
+        super::apply_humidity_update_to_zones(&mut env, &update);
+
+        let telem = env
+            .equipment_telemetry
+            .get(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
+            .expect("HumiditySolver entry must exist in equipment_telemetry");
+        let expected_key = format!(
+            "{}_zone_{}",
+            hares_types::telemetry_keys::HUMIDITY_SEMI_IMPLICIT_ALPHA,
+            zone_id
+        );
+        let actual_alpha = telem.get(&expected_key).unwrap_or_else(|| {
+            panic!("key '{expected_key}' must be present in HumiditySolver telemetry")
+        });
+        assert!(
+            (actual_alpha - alpha).abs() < 1e-12,
+            "alpha: expected {alpha}, got {actual_alpha}"
+        );
+    }
+
+    #[test]
+    fn humidity_update_emits_zero_alpha_when_no_infiltration() {
+        let zone_id: u16 = 1;
+        let mut env = env_with_humidity_zone(zone_id, 0.008);
+        let update = hares_types::DomainUpdate {
+            domain_id: hares_types::HUMIDITY,
+            zone_temperatures_c: vec![(hares_types::ZoneId(zone_id), 22.0)],
+            custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, 0.0]),
+        };
+
+        super::apply_humidity_update_to_zones(&mut env, &update);
+
+        let telem = env
+            .equipment_telemetry
+            .get(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
+            .expect("HumiditySolver entry must exist in equipment_telemetry");
+        let expected_key = format!(
+            "{}_zone_{}",
+            hares_types::telemetry_keys::HUMIDITY_SEMI_IMPLICIT_ALPHA,
+            zone_id
+        );
+        let actual_alpha = telem.get(&expected_key).unwrap_or_else(|| {
+            panic!("key '{expected_key}' must be present in HumiditySolver telemetry")
+        });
+        assert!(
+            actual_alpha.abs() < 1e-12,
+            "alpha must be 0.0 when no infiltration, got {actual_alpha}"
+        );
+    }
+
+    #[test]
+    fn humidity_update_preserves_existing_humiditysolver_telemetry() {
+        let zone_id: u16 = 1;
+        let mut env = env_with_humidity_zone(zone_id, 0.008);
+        let mut existing = hares_types::Telemetry::new();
+        existing.insert("humidity_semi_implicit_alpha_zone_1".to_string(), 0.1);
+        env.equipment_telemetry.insert(
+            hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY.to_string(),
+            existing,
+        );
+
+        let alpha = 0.5;
+        let update = hares_types::DomainUpdate {
+            domain_id: hares_types::HUMIDITY,
+            zone_temperatures_c: vec![(hares_types::ZoneId(zone_id), 22.0)],
+            custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, alpha]),
+        };
+
+        super::apply_humidity_update_to_zones(&mut env, &update);
+
+        let telem = env
+            .equipment_telemetry
+            .get(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
+            .unwrap();
+        let updated_alpha = telem
+            .get("humidity_semi_implicit_alpha_zone_1")
+            .expect("existing key must still be present");
+        assert!(
+            (updated_alpha - alpha).abs() < 1e-12,
+            "alpha should be updated from 0.1 to {alpha}, got {updated_alpha}"
+        );
     }
 }

@@ -496,3 +496,38 @@ fn priority_inversion_safety_wins_over_later_low_priority_signal() {
         "Scenario B: Safety emitted by actor must beat earlier Schedule (observed {observed_b:.6} kW, expected ~0)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BLOCKER 5: HumiditySolver telemetry survives the equipment_telemetry retain.
+//
+// `apply_humidity_update_to_zones` writes the per-zone semi-implicit alpha
+// under a synthetic "HumiditySolver" key. The `retain` that keeps only
+// registered equipment names previously evicted this entry, making the alpha
+// unobservable. The retain now exempts "HumiditySolver".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn humidity_solver_telemetry_survives_step_retain() {
+    let mut dwelling = build_dwelling("blocker5");
+
+    dwelling.step().expect("step must succeed");
+
+    let env = dwelling.latest_env();
+    assert!(
+        env.equipment_telemetry
+            .contains_key(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY),
+        "HumiditySolver entry must survive the equipment_telemetry retain after step"
+    );
+
+    let telem = env
+        .equipment_telemetry
+        .get(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
+        .expect("HumiditySolver telemetry must be present");
+
+    let alpha_key_prefix = hares_types::telemetry_keys::HUMIDITY_SEMI_IMPLICIT_ALPHA;
+    let has_alpha_keys = telem.0.keys().any(|k| k.starts_with(alpha_key_prefix));
+    assert!(
+        has_alpha_keys,
+        "HumiditySolver telemetry must contain per-zone alpha keys (prefix: {alpha_key_prefix})"
+    );
+}

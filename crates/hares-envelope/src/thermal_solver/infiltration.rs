@@ -17,10 +17,16 @@ use super::config::{InfiltrationMethod, ThermalSolverConfig};
 ///   - Implicit part: `-h_inf * T_zone` added to the A-matrix diagonal
 ///   - Explicit part: `h_inf * T_out` added as forcing
 ///
-/// This makes infiltration unconditionally stable regardless of ACH or timestep,
-/// following the EnergyPlus zone air heat balance (Engineering Reference §13.3,
-/// Predictor-Corrector algorithm: `C_z dT/dt = ... + m_inf*cp*(T_out - T_z)`
-/// where `m_inf*cp` enters the implicit denominator coefficient).
+/// The latent infiltration load `q_latent = m_dot_lat * h_fg * (W_out - W_zone)` is
+/// split analogously for the humidity solver:
+///   - Implicit part: `m_dot_lat * h_fg * W_{n+1}` moves to the denominator
+///   - Explicit part: `m_dot_lat * h_fg * W_out` remains as forcing
+///
+/// Both paths use semi-implicit coupling, following the EnergyPlus zone air
+/// moisture balance (Engineering Reference, "Moisture Predictor-Corrector":
+/// `C_z dW/dt = ... + m_inf*(W_out - W_z)` where `m_inf` enters the implicit
+/// denominator coefficient, just as `m_inf*cp` does for sensible heat in the
+/// "Basis for the Zone and Air System Integration" section).
 #[derive(Debug, Clone)]
 pub(crate) struct InfiltrationCoupling {
     pub zone: ZoneId,
@@ -28,12 +34,12 @@ pub(crate) struct InfiltrationCoupling {
     pub h_inf_w_k: f64,
     /// Outdoor temperature driving the sensible forcing [°C].
     pub t_forcing_c: f64,
-    /// Latent gain [W] -- stays fully explicit (not temperature-dependent).
+    /// Latent gain [W] computed from current-step humidity ratio (explicit value).
     /// Retained for diagnostic parity with q_sensible_diagnostic_w.
     #[allow(dead_code)]
     pub q_latent_w: f64,
     /// Diagnostic sensible gain [W] = h_inf * (T_out - T_zone) for reporting.
-    #[allow(dead_code)]
+    /// Accessed in thermal_solver/mod.rs for component_gains.
     pub q_sensible_diagnostic_w: f64,
     /// Pure infiltration sensible gain [W] -- excludes ventilation components.
     pub q_infiltration_w: f64,
@@ -43,6 +49,18 @@ pub(crate) struct InfiltrationCoupling {
     pub q_natural_vent_w: f64,
     /// Combined sensible flow [m³/s] -- infiltration + ventilation after quadrature.
     pub combined_flow_m3_s: f64,
+    /// Latent flow [m³/s] -- may differ from sensible flow when balanced ventilation
+    /// has different sensible/latent recovery efficiencies. Retained for diagnostic
+    /// inspection; the humidity solver uses m_dot_lat_kg_s directly.
+    #[allow(dead_code)]
+    pub latent_flow_m3_s: f64,
+    /// Latent mass flow rate [kg/s] = rho * latent_flow_m3_s.
+    /// Stored directly (not re-derived from volume flow × density) to avoid
+    /// recomputing density in format_domain_update, which lacks env access.
+    pub m_dot_lat_kg_s: f64,
+    /// Outdoor humidity ratio driving the latent forcing [kg/kg].
+    /// Passed to the humidity solver for semi-implicit moisture coupling.
+    pub w_outdoor: f64,
     /// Raw AIM-2 infiltration flow before ventilation interaction [m³/s].
     pub raw_inf_m3_s: f64,
     /// Forced ventilation flow [m³/s].
@@ -237,6 +255,9 @@ pub(crate) fn apply_infiltration_and_ventilation(
             q_forced_vent_w: q_forced_vent_w_scaled,
             q_natural_vent_w: q_natural_vent_w_scaled,
             combined_flow_m3_s: sensible_flow_m3_s,
+            latent_flow_m3_s,
+            m_dot_lat_kg_s: m_dot_lat,
+            w_outdoor: w_out,
             raw_inf_m3_s: q_inf_m3_s,
             forced_flow_m3_s,
             nat_flow_m3_s: q_nat_m3_s,

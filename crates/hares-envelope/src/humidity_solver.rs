@@ -44,6 +44,10 @@ pub struct HumiditySolver {
     // Reusable per-step buffers; cleared at the start of each resolve call.
     zone_temp_buf: HashMap<ZoneId, f64>,
     latent_buf: HashMap<ZoneId, f64>,
+    /// Per-zone infiltration mass flow rate [kg/s] from thermal domain payload.
+    m_dot_inf_buf: HashMap<ZoneId, f64>,
+    /// Per-zone outdoor humidity ratio [kg/kg] from thermal domain payload.
+    w_outdoor_buf: HashMap<ZoneId, f64>,
 }
 
 impl HumiditySolver {
@@ -60,6 +64,8 @@ impl HumiditySolver {
             humidity_ratios,
             zone_temp_buf: HashMap::with_capacity(n_zones),
             latent_buf: HashMap::with_capacity(n_zones),
+            m_dot_inf_buf: HashMap::with_capacity(n_zones),
+            w_outdoor_buf: HashMap::with_capacity(n_zones),
         }
     }
 
@@ -90,17 +96,31 @@ impl DomainSolver for HumiditySolver {
         }
 
         self.latent_buf.clear();
+        self.m_dot_inf_buf.clear();
+        self.w_outdoor_buf.clear();
         if let Some(thermal_update) = env.custom_domains.iter().find(|u| u.domain_id == THERMAL) {
             for &(zone_id, t_c) in &thermal_update.zone_temperatures_c {
                 self.zone_temp_buf.insert(zone_id, t_c);
             }
             if let Some(payload) = &thermal_update.custom_payload {
-                for pair in payload.chunks_exact(2) {
-                    let zone_raw = pair[0];
-                    let latent = pair[1];
+                // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor]
+                // per zone. The 4-float format carries moisture coupling data for
+                // semi-implicit humidity treatment. Zones without infiltration have
+                // m_dot_inf_kg_s = 0.0 and w_outdoor = 0.0.
+                for quad in payload.chunks_exact(4) {
+                    let zone_raw = quad[0];
+                    let latent = quad[1];
+                    let m_dot_inf = quad[2];
+                    let w_outdoor = quad[3];
                     if zone_raw.is_finite() && zone_raw >= 0.0 && zone_raw <= f64::from(u16::MAX) {
                         let zone = ZoneId(zone_raw as u16);
                         *self.latent_buf.entry(zone).or_insert(0.0) += latent;
+                        if m_dot_inf > 0.0 {
+                            self.m_dot_inf_buf.insert(zone, m_dot_inf);
+                        }
+                        if w_outdoor > 0.0 {
+                            self.w_outdoor_buf.insert(zone, w_outdoor);
+                        }
                     }
                 }
             }
@@ -147,44 +167,94 @@ impl DomainSolver for HumiditySolver {
                 .unwrap_or(zone.volume_m3);
             let rho_air = moist_air_density_kg_m3(p_pa, t_zone_c, w_old);
 
-            let d_w = if moisture_mass_flow_kg_s.abs() > 0.0 {
+            // Semi-implicit infiltration latent coupling.
+            // When infiltration mass flow data is available from the thermal domain,
+            // the infiltration moisture exchange is treated semi-implicitly:
+            //   C_eff * dW/dt = m_dot_inf * h_fg * (W_out - W) + Q_other
+            // with W_{n+1} on both sides → unconditional stability.
+            // EnergyPlus Engineering Reference, "Moisture Predictor-Corrector":
+            // ṁ_inf enters the implicit denominator coefficient A, just as
+            // ṁ_inf*Cp does for sensible heat in "Basis for the Zone and Air
+            // System Integration".
+            let m_dot_inf_kg_s = self.m_dot_inf_buf.get(&zone_id).copied().unwrap_or(0.0);
+            let w_outdoor = self.w_outdoor_buf.get(&zone_id).copied().unwrap_or(0.0);
+            let has_infiltration_coupling = m_dot_inf_kg_s > 0.0;
+
+            let (w_new, alpha) = if has_infiltration_coupling {
+                // Semi-implicit infiltration latent coupling.
+                // Moisture balance: C_eff * dW/dt = Q_other + m_dot * h_fg * (W_out - W)
+                // where C_eff = h_fg * rho * V * M.
+                // Discretized: W_{n+1} * (1 + alpha) = W_n + dt/C_eff * (Q_other + m_dot*h_fg*W_out)
+                // where alpha = m_dot * h_fg * dt / C_eff = m_dot * dt / (rho * V * M)
+                // (h_fg cancels between the numerator and C_eff in the denominator).
+                let m_eff = rho_air
+                    * volume_m3
+                    * self.config.moisture_buffering_multiplier.max(f64::EPSILON);
+                let c_eff = self.config.h_fg_j_kg * m_eff;
+                let alpha = m_dot_inf_kg_s * dt_s / m_eff;
+
+                // Split latent gain into infiltration (semi-implicit) and other (explicit).
+                let q_inf_latent = m_dot_inf_kg_s * self.config.h_fg_j_kg * (w_outdoor - w_old);
+                let q_other = latent_gain_w - q_inf_latent;
+
+                // Semi-implicit update:
+                //   numerator = W_old + alpha * W_out + dt/C_eff * Q_other
+                //   denominator = 1 + alpha
+                let numerator = w_old + alpha * w_outdoor + dt_s / c_eff * q_other;
+                let denominator = 1.0 + alpha;
+
+                tracing::debug!(
+                    zone = zone_id.0,
+                    alpha,
+                    m_dot_inf_kg_s,
+                    w_outdoor,
+                    q_other,
+                    "humidity solver semi-implicit infiltration coupling"
+                );
+
+                (numerator / denominator, alpha)
+            } else if moisture_mass_flow_kg_s.abs() > 0.0 {
                 tracing::debug!(
                     zone = zone_id.0,
                     moisture_mass_flow_kg_s,
                     "humidity solver using explicit moisture_mass_flow_kg_s"
                 );
-                humidity_ratio_increment_from_mass_flow(
+                let d_w = humidity_ratio_increment_from_mass_flow(
                     moisture_mass_flow_kg_s,
                     dt_s,
                     rho_air,
                     volume_m3,
                     self.config.moisture_buffering_multiplier,
-                )
+                );
+                (w_old + d_w, 0.0)
             } else {
                 tracing::debug!(
                     zone = zone_id.0,
                     latent_gain_w,
                     "humidity solver falling back to latent_gain_w / h_fg"
                 );
-                humidity_ratio_increment(
+                let d_w = humidity_ratio_increment(
                     latent_gain_w,
                     dt_s,
                     self.config.h_fg_j_kg,
                     rho_air,
                     volume_m3,
                     self.config.moisture_buffering_multiplier,
-                )
+                );
+                (w_old + d_w, 0.0)
             };
 
             let w_sat = humidity_ratio_from_tdp(t_zone_c, p_pa);
-            let w_new = (w_old + d_w).clamp(0.0, w_sat);
+            let w_new = w_new.clamp(0.0, w_sat);
             self.humidity_ratios.insert(zone_id, w_new);
 
             let rh = relative_humidity(t_zone_c, w_new, p_pa);
             let wet_bulb_c = wet_bulb_from_humidity_ratio(t_zone_c, w_new, p_pa);
 
             out.zone_temperatures_c.push((zone_id, t_zone_c));
-            payload.extend_from_slice(&[f64::from(zone_id.0), w_new, rh, wet_bulb_c]);
+            // Humidity custom_payload format: [zone_id, w_new, rh, wet_bulb_c, alpha]
+            // alpha is the semi-implicit infiltration coupling coefficient (0.0 when no infiltration).
+            payload.extend_from_slice(&[f64::from(zone_id.0), w_new, rh, wet_bulb_c, alpha]);
         }
         out.zone_temperatures_c.sort_by_key(|(zone_id, _)| *zone_id);
     }
@@ -409,7 +479,7 @@ mod tests {
         env.custom_domains.push(DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone_id, 22.0)],
-            custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w]),
+            custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, 0.0, 0.0]),
         });
 
         // Use multiplier=1.0 so the full latent energy maps directly to moisture mass,
@@ -1071,24 +1141,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Ticket 004 regression: semi-implicit vs explicit infiltration latent
+    // Semi-implicit infiltration latent coupling
     // -----------------------------------------------------------------------
 
-    /// Demonstrates the asymmetry between the sensible path (semi-implicit) and the
-    /// latent path (explicit) described in ticket 004.
-    ///
     /// At coarse timestep (600 s) and high infiltration (2 ACH) with no moisture
-    /// buffering (M=1), the explicit update and the analytical steady-state disagree
-    /// by a measurable amount. A correctly implemented semi-implicit formula produces
-    /// a result that is closer to the analytical solution than the explicit formula,
-    /// demonstrating the consistency gap between the two paths.
-    ///
-    /// This test is intentionally a FAILING test in the sense that it documents the
-    /// current explicit behaviour and asserts the numerical difference against the
-    /// semi-implicit target. Once ticket 004 is implemented the semi-implicit path
-    /// assertion should pass and the explicit path can be removed.
+    /// buffering (M=1), the semi-implicit formula is more accurate than the
+    /// explicit forward-Euler method compared to the analytical exponential-decay
+    /// solution. This validates that the semi-implicit discretization chosen for
+    /// the humidity solver is the better numerical method, consistent with how
+    /// the sensible path treats infiltration semi-implicitly.
     #[test]
-    fn ticket_004_explicit_latent_diverges_from_semi_implicit_at_coarse_dt() {
+    fn semi_implicit_infiltration_more_accurate_than_explicit_at_coarse_dt() {
         // High-infiltration scenario: 2 ACH, 200 m³ zone, M=1.
         let volume_m3 = 200.0_f64;
         let ach = 2.0_f64;
@@ -1119,16 +1182,10 @@ mod tests {
             humidity_ratio_increment(q_latent_explicit, dt_s, h_fg, rho, volume_m3, 1.0);
         let w_explicit = w_initial + dw_explicit;
 
-        // Semi-implicit update (target behaviour per ticket 004):
-        //   C_eff = h_fg * rho * V * M
-        //   alpha = m_dot * dt / C_eff  (= m_dot * dt / (h_fg * rho * V))
-        //
-        // The m_dot*h_fg factor from "q_latent = m_dot*h_fg*(w_out - w_new)" cancels
-        // the h_fg in C_eff, so the effective coupling alpha = m_dot*dt/(rho*V):
-        //   numerator = w_old + dt/C_eff * m_dot*h_fg*w_out
-        //             = w_old + m_dot*dt/(rho*V) * w_out
-        //   denominator = 1 + m_dot*dt/(rho*V)
-        let alpha = m_dot * dt_s / (rho * volume_m3); // after h_fg cancels
+        // Semi-implicit update:
+        //   alpha = m_dot * dt / (rho * V)   (h_fg cancels between numerator and C_eff)
+        //   W_{n+1} = (W_old + alpha * W_out) / (1 + alpha)
+        let alpha = m_dot * dt_s / (rho * volume_m3);
         let w_semi_implicit = (w_initial + alpha * w_outdoor) / (1.0 + alpha);
 
         // The amplification factor for the explicit method: A = 1 - m_dot*dt/(rho*V)
@@ -1152,7 +1209,7 @@ mod tests {
         assert!(
             err_semi_implicit < err_explicit,
             "semi-implicit error {err_semi_implicit:.6e} must be smaller than \
-             explicit error {err_explicit:.6e} at coarse dt={dt_s}s, ACH={ach} (ticket 004)"
+             explicit error {err_explicit:.6e} at coarse dt={dt_s}s, ACH={ach}"
         );
 
         // The explicit error should be non-trivial (>1% of the humidity ratio change)
@@ -1161,7 +1218,7 @@ mod tests {
         assert!(
             err_explicit > 0.01 * dw_total,
             "explicit error {err_explicit:.6e} must be >1% of Δw={dw_total:.6e} \
-             to demonstrate meaningful divergence at coarse dt (ticket 004)"
+             to demonstrate meaningful divergence at coarse dt"
         );
     }
 
@@ -1322,6 +1379,184 @@ mod tests {
             (w_mass_flow - w_wrong).abs() > 1e-8,
             "solver must NOT use the wrong-h_fg latent path: \
              mass_flow_result={w_mass_flow:.12e}, wrong_latent_result={w_wrong:.12e}"
+        );
+    }
+
+    /// Integration test: the humidity solver's semi-implicit path with infiltration
+    /// coupling data from the thermal domain payload produces a stable, non-oscillatory
+    /// convergence to outdoor humidity under high ACH (2), coarse dt (600s), and
+    /// M=1 (no moisture buffering).
+    #[test]
+    fn semi_implicit_infiltration_stable_convergence_at_high_ach_coarse_dt() {
+        let zone_id = ZoneId(1);
+        let volume_m3 = 200.0;
+        let ach = 2.0;
+        let t_c = 22.0;
+        let p_pa = 101_325.0;
+        let w_outdoor = 0.012;
+        let w_initial = 0.005;
+        let dt_s = 600.0;
+        let h_fg = HumiditySolverConfig::default().h_fg_j_kg;
+
+        let rho = hares_physics::air_properties::moist_air_density_kg_m3(p_pa, t_c, w_initial);
+        let q_m3_s = ach * volume_m3 / 3600.0;
+        let m_dot = rho * q_m3_s;
+
+        let env = env_with_zone(t_c, w_initial);
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+        let mut solver = HumiditySolver::new(config, &env);
+
+        let n_steps = 100;
+        for step in 0..n_steps {
+            let w_old = solver.humidity_ratio(zone_id);
+            let q_latent_step = m_dot * h_fg * (w_outdoor - w_old);
+            let mut env_step = env_with_zone(t_c, w_old);
+            env_step.custom_domains.push(DomainUpdate {
+                domain_id: THERMAL,
+                zone_temperatures_c: vec![(zone_id, t_c)],
+                custom_payload: Some(vec![f64::from(zone_id.0), q_latent_step, m_dot, w_outdoor]),
+            });
+            let ports = PortSlots::default();
+            let _ = solver.resolve_new(&ports, &env_step, Duration::from_secs(dt_s as u64));
+            let w_new = solver.humidity_ratio(zone_id);
+
+            if w_old < w_outdoor {
+                assert!(
+                    w_new <= w_outdoor + 1e-12,
+                    "step {step}: humidity overshot outdoor (w_new={w_new:.6e} > w_out={w_outdoor:.6e})"
+                );
+            } else if w_old > w_outdoor {
+                assert!(
+                    w_new >= w_outdoor - 1e-12,
+                    "step {step}: humidity undershot outdoor (w_new={w_new:.6e} < w_out={w_outdoor:.6e})"
+                );
+            }
+        }
+
+        let w_final = solver.humidity_ratio(zone_id);
+        let rel_error = (w_final - w_outdoor).abs() / w_outdoor;
+        assert!(
+            rel_error < 0.01,
+            "after {n_steps} steps, relative error {rel_error:.4e} must be <1% of w_outdoor={w_outdoor}"
+        );
+    }
+
+    /// At fine timestep (dt=60s), the semi-implicit and explicit methods should agree
+    /// to within 0.1% because both converge to the same steady-state.
+    #[test]
+    fn semi_implicit_and_explicit_agree_at_fine_timestep() {
+        let zone_id = ZoneId(1);
+        let volume_m3 = 200.0;
+        let ach = 2.0;
+        let t_c = 22.0;
+        let p_pa = 101_325.0;
+        let w_outdoor = 0.012;
+        let w_initial = 0.005;
+        let dt_s = 60.0;
+        let h_fg = HumiditySolverConfig::default().h_fg_j_kg;
+
+        let rho = hares_physics::air_properties::moist_air_density_kg_m3(p_pa, t_c, w_initial);
+        let q_m3_s = ach * volume_m3 / 3600.0;
+        let m_dot = rho * q_m3_s;
+
+        let q_latent_w = m_dot * h_fg * (w_outdoor - w_initial);
+
+        let env = env_with_zone(t_c, w_initial);
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+
+        let mut solver_semi = HumiditySolver::new(config.clone(), &env);
+        let mut env_semi = env_with_zone(t_c, w_initial);
+        env_semi.custom_domains.push(DomainUpdate {
+            domain_id: THERMAL,
+            zone_temperatures_c: vec![(zone_id, t_c)],
+            custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, m_dot, w_outdoor]),
+        });
+        let ports = PortSlots::default();
+        let _ = solver_semi.resolve_new(&ports, &env_semi, Duration::from_secs(dt_s as u64));
+        let w_semi = solver_semi.humidity_ratio(zone_id);
+
+        let mut env_explicit = env_with_zone(t_c, w_initial);
+        env_explicit.custom_domains.push(DomainUpdate {
+            domain_id: THERMAL,
+            zone_temperatures_c: vec![(zone_id, t_c)],
+            custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, 0.0, 0.0]),
+        });
+        let mut solver_explicit = HumiditySolver::new(config, &env);
+        let _ =
+            solver_explicit.resolve_new(&ports, &env_explicit, Duration::from_secs(dt_s as u64));
+        let w_explicit = solver_explicit.humidity_ratio(zone_id);
+
+        let dw = (w_outdoor - w_initial).abs();
+        let rel_diff = (w_semi - w_explicit).abs() / dw;
+        assert!(
+            rel_diff < 0.002,
+            "semi-implicit ({w_semi:.8e}) and explicit ({w_explicit:.8e}) must agree \
+             within 0.2% of Δw at fine dt; rel_diff={rel_diff:.6e}"
+        );
+    }
+
+    /// Moisture mass balance holds under semi-implicit infiltration coupling.
+    #[test]
+    fn semi_implicit_infiltration_moisture_mass_balance_holds() {
+        let zone_id = ZoneId(1);
+        let volume_m3 = 200.0;
+        let ach = 2.0;
+        let t_c = 22.0;
+        let p_pa = 101_325.0;
+        let w_outdoor = 0.012;
+        let w_initial = 0.005;
+        let dt_s = 300.0;
+        let h_fg = HumiditySolverConfig::default().h_fg_j_kg;
+        let q_other_w = 50.0;
+
+        let rho = hares_physics::air_properties::moist_air_density_kg_m3(p_pa, t_c, w_initial);
+        let q_m3_s = ach * volume_m3 / 3600.0;
+        let m_dot = rho * q_m3_s;
+
+        let q_inf_latent_w = m_dot * h_fg * (w_outdoor - w_initial);
+
+        let env = env_with_zone(t_c, w_initial);
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+        let mut solver = HumiditySolver::new(config, &env);
+        let w_old = solver.humidity_ratio(zone_id);
+
+        let mut env_step = env_with_zone(t_c, w_initial);
+        env_step.custom_domains.push(DomainUpdate {
+            domain_id: THERMAL,
+            zone_temperatures_c: vec![(zone_id, t_c)],
+            custom_payload: Some(vec![f64::from(zone_id.0), q_inf_latent_w, m_dot, w_outdoor]),
+        });
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: zone_id,
+                sensible_gain_w: 0.0,
+                latent_gain_w: q_other_w,
+                ..ThermalAccumulator::new(zone_id)
+            }],
+            ..Default::default()
+        };
+        let _ = solver.resolve_new(&ports, &env_step, Duration::from_secs(dt_s as u64));
+        let w_new = solver.humidity_ratio(zone_id);
+
+        let delta_m = (w_new - w_old) * rho * volume_m3;
+        let m_from_other = q_other_w * dt_s / h_fg;
+        let m_from_infiltration = m_dot * (w_outdoor - w_new) * dt_s;
+        let source_m = m_from_other + m_from_infiltration;
+
+        assert!(
+            (delta_m - source_m).abs() < 1e-6,
+            "moisture mass balance: delta_m={delta_m:.9e} kg, source={source_m:.9e} kg, \
+             diff={:.9e} kg",
+            (delta_m - source_m).abs()
         );
     }
 }

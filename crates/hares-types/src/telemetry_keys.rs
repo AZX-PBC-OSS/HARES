@@ -150,6 +150,15 @@ pub const TARGET_RH: &str = "target_rh";
 pub const MIN_RH: &str = "min_rh";
 pub const MAX_RH: &str = "max_rh";
 pub const MOISTURE_MASS_FLOW_KG_S: &str = "moisture_mass_flow_kg_s";
+pub const HUMIDITY_SEMI_IMPLICIT_ALPHA: &str = "humidity_semi_implicit_alpha";
+
+/// Synthetic `equipment_telemetry` key for solver-level per-zone humidity data.
+///
+/// The humidity solver is not an `Equipment` instance and has no entry in
+/// `equipment_id_by_name`, so the standard `retain` that keeps only
+/// registered equipment names would evict this entry. Code that filters
+/// `equipment_telemetry` by equipment name must exempt this key.
+pub const HUMIDITY_SOLVER_TELEMETRY_KEY: &str = "HumiditySolver";
 
 // ── Loads ───────────────────────────────────────────────────────────────────
 

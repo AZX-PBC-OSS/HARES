@@ -688,6 +688,9 @@ pub struct Dwelling {
     tank_node_keys: Vec<String>,
     /// Pre-allocated scratch buffer for infiltration latent by zone in check_invariants.
     invariant_infiltration_latent: Vec<(ZoneId, f64)>,
+    /// Pre-allocated scratch maps for semi-implicit infiltration coupling data.
+    invariant_infiltration_m_dot: HashMap<ZoneId, f64>,
+    invariant_infiltration_w_outdoor: HashMap<ZoneId, f64>,
     /// Per-zone conditioning status, aligned with `latest_env.zones` order.
     /// `true` = conditioned (HVAC-served), `false` = unconditioned (attic, garage, etc.).
     zone_is_conditioned: Vec<bool>,
@@ -1149,6 +1152,8 @@ impl Dwelling {
             invariant_tank_temps: Vec::new(),
             tank_node_keys: (0..24).map(tk::tank_node_key).collect(),
             invariant_infiltration_latent: Vec::new(),
+            invariant_infiltration_m_dot: HashMap::new(),
+            invariant_infiltration_w_outdoor: HashMap::new(),
             zone_is_conditioned: if building.zones.is_empty() {
                 vec![true]
             } else {
@@ -2363,9 +2368,10 @@ impl Dwelling {
             .equipment_core
             .retain(|id, _| active_equipment_ids.contains(id));
         self.latest_env.equipment_core.reserve(self.equipment.len());
-        self.latest_env
-            .equipment_telemetry
-            .retain(|name, _| self.equipment_id_by_name.contains_key(name));
+        self.latest_env.equipment_telemetry.retain(|name, _| {
+            name == hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY
+                || self.equipment_id_by_name.contains_key(name)
+        });
         self.latest_env
             .equipment_telemetry
             .reserve(self.equipment.len());
@@ -2807,6 +2813,8 @@ impl Dwelling {
             let p_pa = self.latest_env.weather.pressure_pa();
             let moisture_mult = self.humidity_solver.config.moisture_buffering_multiplier;
             self.invariant_infiltration_latent.clear();
+            self.invariant_infiltration_m_dot.clear();
+            self.invariant_infiltration_w_outdoor.clear();
             if let Some(thermal_update) = self
                 .latest_env
                 .custom_domains
@@ -2814,12 +2822,20 @@ impl Dwelling {
                 .find(|u| u.domain_id == hares_types::THERMAL)
                 && let Some(payload) = &thermal_update.custom_payload
             {
-                for pair in payload.chunks_exact(2) {
-                    let zone_raw = pair[0];
-                    let latent = pair[1];
+                // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor]
+                for quad in payload.chunks_exact(4) {
+                    let zone_raw = quad[0];
+                    let latent = quad[1];
+                    let m_dot_inf = quad[2];
+                    let w_outdoor = quad[3];
                     if zone_raw.is_finite() && zone_raw >= 0.0 {
-                        self.invariant_infiltration_latent
-                            .push((ZoneId(zone_raw as u16), latent));
+                        let zone_id = ZoneId(zone_raw as u16);
+                        self.invariant_infiltration_latent.push((zone_id, latent));
+                        if m_dot_inf > 0.0 {
+                            self.invariant_infiltration_m_dot.insert(zone_id, m_dot_inf);
+                            self.invariant_infiltration_w_outdoor
+                                .insert(zone_id, w_outdoor);
+                        }
                     }
                 }
             }
@@ -2866,8 +2882,33 @@ impl Dwelling {
                     .filter(|(z, _)| *z == zone.id)
                     .map(|(_, l)| *l)
                     .sum();
-                let total_latent = latent_from_ports + latent_from_infiltration;
-                checker.check_moisture(delta_m, &[(total_latent, dt_s)])?;
+                let m_dot_inf = self
+                    .invariant_infiltration_m_dot
+                    .get(&zone.id)
+                    .copied()
+                    .unwrap_or(0.0);
+                if m_dot_inf > 0.0 {
+                    // Semi-implicit infiltration: the actual moisture mass entering
+                    // the zone uses W_{n+1} (not W_n) in the infiltration term.
+                    // source_m = Q_other * dt / h_fg + m_dot * (W_out - W_{n+1}) * dt
+                    // The explicit q_latent = Q_other + m_dot * h_fg * (W_out - W_n)
+                    // so Q_other = q_total - m_dot * h_fg * (W_out - W_n).
+                    let w_outdoor = self
+                        .invariant_infiltration_w_outdoor
+                        .get(&zone.id)
+                        .copied()
+                        .unwrap_or(0.0);
+                    let q_total = latent_from_ports + latent_from_infiltration;
+                    let q_other = q_total - m_dot_inf * 2_501_000.0 * (w_outdoor - w_old);
+                    let m_from_q_other = q_other * dt_s / 2_501_000.0;
+                    let m_from_infiltration = m_dot_inf * (w_outdoor - w_new) * dt_s;
+                    let actual_source = m_from_q_other + m_from_infiltration;
+                    checker
+                        .check_moisture(delta_m, &[(actual_source * 2_501_000.0 / dt_s, dt_s)])?;
+                } else {
+                    let total_latent = latent_from_ports + latent_from_infiltration;
+                    checker.check_moisture(delta_m, &[(total_latent, dt_s)])?;
+                }
             }
         }
 
@@ -3438,10 +3479,11 @@ mod tests {
             .solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&dwelling.equipment));
         dwelling.latest_env.equipment_telemetry.retain(|name, _| {
-            dwelling
-                .equipment
-                .iter()
-                .any(|eq| eq.descriptor().name == *name)
+            name == hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY
+                || dwelling
+                    .equipment
+                    .iter()
+                    .any(|eq| eq.descriptor().name == *name)
         });
         dwelling.latest_env.equipment_core.retain(|id, _| {
             dwelling
