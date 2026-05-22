@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
+use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
@@ -18,15 +19,67 @@ use hares_types::telemetry_keys as tk;
 use crate::hvac::heating_config::{IdealCapacityModeConfig, IdealHvacConfig};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
-use super::hvac_core::IDEAL_CAPACITY_TIME_RES_THRESHOLD_S;
+use super::hvac_core::{DEFAULT_BIQUADRATIC_COEFFS, IDEAL_CAPACITY_TIME_RES_THRESHOLD_S};
 use super::thermostat::{
     ThermostatConfig, ThermostatMode, is_cycle_change_allowed, lookup_zone_temp,
 };
 use super::{
     RuntimeSetpointOverride, ScheduleSetpoints, ThermalSetpoints,
-    core_config::{build_setpoint_source, extract_numeric, extract_text},
+    core_config::{
+        build_setpoint_source, extract_numeric, extract_text, load_bounds_pair,
+        parse_biquadratic_list,
+    },
     helpers::{equipment_id_from_config, operating_mode_code, zone_id_from_config},
 };
+
+/// Biquadratic curve pair (capacity + EIR) with shared input bounds.
+/// Encapsulates the temperature-correction curves used by the non-ideal
+/// fallback path in [`IdealHvac`].
+///
+/// EnergyPlus Engineering Reference, DX Heating Coil / DX Cooling Coil:
+/// `Q_corrected = Q_rated × CAP_FT(T_indoor, T_outdoor)`
+/// `EIR_corrected = EIR_rated × EIR_FT(T_indoor, T_outdoor)`
+/// where CAP_FT and EIR_FT are biquadratic correction functions normalised
+/// to 1.0 at rating-point conditions.
+#[derive(Clone, Debug)]
+struct BiquadraticCurveSet {
+    capacity_coeffs: [f64; 6],
+    eir_coeffs: [f64; 6],
+    x1_bounds: (f64, f64),
+    x2_bounds: (f64, f64),
+}
+
+impl BiquadraticCurveSet {
+    const DEFAULT_X1_BOUNDS: (f64, f64) = (-100.0, 100.0);
+    const DEFAULT_X2_BOUNDS: (f64, f64) = (-100.0, 100.0);
+
+    fn identity() -> Self {
+        Self {
+            capacity_coeffs: DEFAULT_BIQUADRATIC_COEFFS,
+            eir_coeffs: DEFAULT_BIQUADRATIC_COEFFS,
+            x1_bounds: Self::DEFAULT_X1_BOUNDS,
+            x2_bounds: Self::DEFAULT_X2_BOUNDS,
+        }
+    }
+
+    fn evaluate_capacity(&self, x1: f64, x2: f64) -> f64 {
+        BiquadraticCurve {
+            coeffs: self.capacity_coeffs,
+            x1_bounds: self.x1_bounds,
+            x2_bounds: self.x2_bounds,
+        }
+        .evaluate(x1, x2)
+    }
+
+    fn evaluate_eir(&self, x1: f64, x2: f64) -> f64 {
+        BiquadraticCurve {
+            coeffs: self.eir_coeffs,
+            x1_bounds: self.x1_bounds,
+            x2_bounds: self.x2_bounds,
+        }
+        .evaluate(x1, x2)
+    }
+}
 
 pub struct IdealHvac {
     descriptor: EquipmentDescriptor,
@@ -67,6 +120,9 @@ pub struct IdealHvac {
     fan_power_ratio: f64,
     /// Minimum capacity [W]. Below this the unit turns off.
     capacity_min_w: f64,
+    /// Biquadratic temperature-correction curves for the non-ideal fallback path.
+    /// Default identity coefficients produce no correction (cap_ratio = eir_ratio = 1.0).
+    curves: BiquadraticCurveSet,
 }
 
 /// Serializable snapshot of [`IdealHvac`] mutable fields.
@@ -146,6 +202,7 @@ impl IdealHvac {
             rated_eir: 1.0,
             fan_power_ratio: 0.0,
             capacity_min_w: 0.0,
+            curves: BiquadraticCurveSet::identity(),
         }
     }
 
@@ -431,6 +488,22 @@ impl Equipment for IdealHvac {
             self.descriptor.fuel = fuel;
         }
 
+        // Load biquadratic temperature-correction curves from typed config.
+        // Parse errors propagate via ? rather than silently falling back to identity,
+        // per the constitution: "Parse/init boundaries must fail loudly on invalid input."
+        if let Some(raw) = &typed.capacity_biquadratic_coeffs {
+            let curves = parse_biquadratic_list(raw)?;
+            if let Some(first) = curves.first() {
+                self.curves.capacity_coeffs = *first;
+            }
+        }
+        if let Some(raw) = &typed.eir_biquadratic_coeffs {
+            let curves = parse_biquadratic_list(raw)?;
+            if let Some(first) = curves.first() {
+                self.curves.eir_coeffs = *first;
+            }
+        }
+
         if let Some(zone) = extract_numeric(config, "zone_id") {
             let zone = ZoneId(zone as u16);
             self.zone_id = zone;
@@ -482,6 +555,34 @@ impl Equipment for IdealHvac {
             self.cooling_setpoint_source = Some(source);
         }
 
+        // Load biquadratic curves from raw config extras (overrides typed config
+        // if both are present). Parse errors propagate via ? matching hvac_core.rs:415-422
+        // which uses .transpose()? to propagate parse errors rather than silently swallowing.
+        if let Some(raw) = extract_text(config, "capacity_biquadratic_coeffs") {
+            let curves = parse_biquadratic_list(raw)?;
+            if let Some(first) = curves.first() {
+                self.curves.capacity_coeffs = *first;
+            }
+        }
+        if let Some(raw) = extract_text(config, "eir_biquadratic_coeffs") {
+            let curves = parse_biquadratic_list(raw)?;
+            if let Some(first) = curves.first() {
+                self.curves.eir_coeffs = *first;
+            }
+        }
+        self.curves.x1_bounds = load_bounds_pair(
+            config,
+            "biquadratic_x1_min",
+            "biquadratic_x1_max",
+            BiquadraticCurveSet::DEFAULT_X1_BOUNDS,
+        );
+        self.curves.x2_bounds = load_bounds_pair(
+            config,
+            "biquadratic_x2_min",
+            "biquadratic_x2_max",
+            BiquadraticCurveSet::DEFAULT_X2_BOUNDS,
+        );
+
         // Compute fan_power_ratio per OCHRE: fan_power_max / (capacity_max * eir_max).
         let max_capacity = self.rated_capacity_w.max(self.cooling_capacity_w);
         let denom = max_capacity * self.rated_eir;
@@ -513,10 +614,47 @@ impl Equipment for IdealHvac {
 
     fn step(
         &mut self,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        let (t_indoor_c, t_outdoor_c) = if !self.use_ideal_cached {
+            let t_out = env.weather.outdoor_temp_c;
+            // zone_id is validated at init so this always finds the zone in
+            // production; 21.0 °C (≈70 °F) is a safe fallback for unit tests
+            // that construct minimal environment state without zone entries.
+            let t_in = lookup_zone_temp(env, self.zone_id).unwrap_or(21.0);
+            (t_in, t_out)
+        } else {
+            (0.0, 0.0)
+        };
+
+        // EnergyPlus Engineering Reference, DX Coil:
+        // Q_corrected = Q_rated × CAP_FT(T_indoor, T_outdoor)
+        // COP_corrected = COP_rated / EIR_FT(T_indoor, T_outdoor)
+        // Identity curves [1,0,0,0,0,0] produce cap_ratio = eir_ratio = 1.0,
+        // yielding rated capacity unchanged (no regression).
+        let (cap_ratio, eir_ratio) = if !self.use_ideal_cached {
+            let cap = self
+                .curves
+                .evaluate_capacity(t_indoor_c, t_outdoor_c)
+                .max(0.0);
+            let eir = self
+                .curves
+                .evaluate_eir(t_indoor_c, t_outdoor_c)
+                .max(f64::EPSILON);
+            tracing::debug!(
+                cap_ratio = cap,
+                eir_ratio = eir,
+                t_indoor = t_indoor_c,
+                t_outdoor = t_outdoor_c,
+                "IdealHvac non-ideal fallback: biquadratic curve evaluation"
+            );
+            (cap, eir)
+        } else {
+            (1.0, 1.0)
+        };
+
         let mut capacity_w = match self.mode {
             ThermostatMode::Deadband => 0.0,
             ThermostatMode::Heating if self.use_ideal_cached => {
@@ -525,8 +663,12 @@ impl Equipment for IdealHvac {
             ThermostatMode::Cooling if self.use_ideal_cached => {
                 (self.ideal_capacity_w * self.load_fraction).min(0.0)
             }
-            ThermostatMode::Heating => self.rated_capacity_w * self.load_fraction,
-            ThermostatMode::Cooling => -self.cooling_capacity_w * self.load_fraction,
+            ThermostatMode::Heating => {
+                (self.rated_capacity_w * cap_ratio * self.load_fraction).max(0.0)
+            }
+            ThermostatMode::Cooling => {
+                (-self.cooling_capacity_w * cap_ratio * self.load_fraction).min(0.0)
+            }
         };
 
         // R3: Minimum capacity -- if operating below threshold, force off.
@@ -544,8 +686,15 @@ impl Equipment for IdealHvac {
         };
 
         // Fan power per OCHRE: fan_power = |capacity| * eir * fan_power_ratio.
+        // In non-ideal mode, apply EIR temperature correction so electrical
+        // consumption reflects degraded COP at extreme conditions.
+        let effective_eir = if !self.use_ideal_cached {
+            self.rated_eir * eir_ratio
+        } else {
+            self.rated_eir
+        };
         let fan_power_w = if capacity_w.abs() > 0.0 {
-            capacity_w.abs() * self.rated_eir * self.fan_power_ratio
+            capacity_w.abs() * effective_eir * self.fan_power_ratio
         } else {
             0.0
         };
@@ -610,6 +759,8 @@ impl Equipment for IdealHvac {
             .set(tk::HVAC_HEATING_CAPACITY_W, self.rated_capacity_w);
         self.telemetry
             .set(tk::HVAC_COOLING_CAPACITY_W, self.cooling_capacity_w);
+        self.telemetry.set(tk::CAP_RATIO, cap_ratio);
+        self.telemetry.set(tk::EIR_RATIO, eir_ratio);
 
         self.core_output = CoreOutput {
             flows: CoreFlows {
@@ -745,7 +896,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn ideal_hvac_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(7);
+    let mut telemetry = Telemetry::with_capacity(9);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::IDEAL_CAPACITY_W, 0.0);
@@ -753,6 +904,8 @@ fn ideal_hvac_default_telemetry() -> Telemetry {
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::HVAC_HEATING_CAPACITY_W, 0.0);
     telemetry.insert(tk::HVAC_COOLING_CAPACITY_W, 0.0);
+    telemetry.insert(tk::CAP_RATIO, 1.0);
+    telemetry.insert(tk::EIR_RATIO, 1.0);
     telemetry
 }
 
@@ -794,6 +947,16 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::HVAC_COOLING_CAPACITY_W.to_string(),
             unit: "W".to_string(),
             description: "Rated cooling capacity".to_string(),
+        },
+        TelemetryField {
+            name: tk::CAP_RATIO.to_string(),
+            unit: "ratio".to_string(),
+            description: "Biquadratic capacity correction factor (1.0 = rated)".to_string(),
+        },
+        TelemetryField {
+            name: tk::EIR_RATIO.to_string(),
+            unit: "ratio".to_string(),
+            description: "Biquadratic EIR correction factor (1.0 = rated)".to_string(),
         },
     ]
 }
@@ -2200,30 +2363,16 @@ mod tests {
         );
     }
 
-    // Regression test for ticket 002-ideal-hvac-biquadratic-fallback.
-    //
-    // When use_ideal_cached == false (IdealCapacityMode::Off or Auto at fine timestep),
-    // IdealHvac::step() currently returns exactly rated_capacity_w regardless of outdoor
-    // temperature.  A physically correct implementation must apply a biquadratic capacity
-    // correction curve so that heating capacity at AHRI H3 (−8.3 °C / 17 °F) is
-    // significantly less than rated capacity (which is specified at H1: 8.3 °C / 47 °F).
-    //
-    // AHRI 210/240-2023 Table 9: H1 = 8.3 °C (47 °F), H3 = −8.3 °C (17 °F).
+    // AHRI 210/240-2023 Table 9: H1 = 8.3°C (47°F), H3 = −8.3°C (17°F).
     // Empirical data (learnmetrics.com, NREL OCHRE studies) show typical ASHP heating
-    // capacity at H3 is ~60–70 % of H1 rated capacity.
-    //
-    // This test will FAIL until IdealHvac stores and evaluates biquadratic correction
-    // curves in the non-ideal path (ticket 002 fix).
+    // capacity at H3 is ~60–70% of H1 rated capacity.
     #[test]
-    #[ignore = "ticket-002: IdealHvac non-ideal path must apply biquadratic capacity correction"]
     fn non_ideal_heating_capacity_degrades_at_ahri_h3_condition() {
         const RATED_CAPACITY_W: f64 = 10_000.0;
-        // Approximate single-speed ASHP heating capacity curve coefficients.
-        // Normalized at H1 (indoor=21.1°C, outdoor=8.3°C): CAP_FT ≈ 1.0.
-        // At H3 (indoor=21.1°C, outdoor=−8.3°C): CAP_FT ≈ 0.668
-        // (per ticket linearization: 1.0 + 0.02*(−8.3 − 8.3) = 0.668).
-        // These coefficients must be loaded into IdealHvac once ticket 002 adds the field.
-        // For now the test body exercises the bug: the non-ideal path ignores them.
+        // Linearised ASHP capacity curve: CAP_FT = 0.834 + 0.02*T_outdoor.
+        // At H1 (outdoor=8.3°C): 0.834 + 0.02*8.3 = 1.0 (rated)
+        // At H3 (outdoor=−8.3°C): 0.834 + 0.02*(−8.3) = 0.668
+        // AHRI 210/240-2023 Table 9: typical ASHP at H3 delivers 60–70% of H1 rated.
 
         let mut cfg = config("IH-002");
         cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
@@ -2235,12 +2384,9 @@ mod tests {
             .insert("cooling_setpoint_c".into(), 26.0.into());
         cfg.test_extras_mut()
             .insert("capacity_w".into(), RATED_CAPACITY_W.into());
-        // Ticket 002 adds these config keys; they are ignored until the fix lands.
-        // Linearised ASHP capacity curve: a=1.332, b=0.0, c=0.0, d=0.02, e=0.0, f=0.0
-        // (i.e. CAP_FT = 1.332 + 0.02*T_outdoor, which gives 1.0 at 8.3°C H1 and 0.668 at −8.3°C H3)
         cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".into(),
-            "1.332,0,0,0.02,0,0".into(),
+            "0.834,0,0,0.02,0,0".into(),
         );
         cfg.test_extras_mut()
             .insert("biquadratic_x1_min".into(), (-30.0f64).into());
@@ -2251,9 +2397,7 @@ mod tests {
         cfg.test_extras_mut()
             .insert("biquadratic_x2_max".into(), 50.0f64.into());
 
-        // Build env with outdoor temperature = −8.3°C (AHRI H3 condition).
-        // Zone at 18.0°C (below heating setpoint of 20°C) so unit enters Heating mode.
-        let mut h3_env = env(18.0, 60, 0); // fine timestep → non-ideal path
+        let mut h3_env = env(18.0, 60, 0);
         h3_env.weather.outdoor_temp_c = -8.3;
 
         let mut eq = IdealHvac::new(cfg.clone());
@@ -2270,23 +2414,12 @@ mod tests {
 
         let actual_w = ports.thermal[0].sensible_gain_w;
 
-        // After the fix: capacity should be in the 60–70 % range of rated.
-        // With the linearised curve above: CAP_FT(21.1, −8.3) = 1.332 + 0.02*(−8.3) = 1.166
-        // Wait — that curve is wrong for this test. Use correct ASHP coefficients that
-        // give ~1.0 at H1 and ~0.668 at H3. With d=0.02 and a=1.332-0.02*8.3=1.166:
-        // a=1.166 + 0.02*8.3 = 1.166 means CAP_FT(T_out) = 1.166 + 0.02*T_out
-        // At T_out=8.3: 1.166 + 0.166 = 1.332 — that's not 1.0.
-        // Correct: for CAP_FT(8.3)=1.0: a = 1.0 - 0.02*8.3 = 0.834
-        // Then CAP_FT(−8.3) = 0.834 + 0.02*(−8.3) = 0.834 − 0.166 = 0.668. ✓
-        //
-        // Expected: 10000 * 0.668 = 6680 W.
-        // The test asserts capacity is between 60 % and 75 % of rated.
-        // Currently FAILS: actual_w == rated_capacity_w (10000 W) because no curve is applied.
+        // CAP_FT(18.0, −8.3) = 0.834 + 0.02*(−8.3) = 0.668
+        // Expected: 10000 * 0.668 = 6680 W (no fan heat: fan_power_ratio = 0).
         assert!(
             actual_w < RATED_CAPACITY_W * 0.75,
             "at AHRI H3 (−8.3°C) the biquadratic-corrected capacity must be < 75% of rated; \
-             got {actual_w:.1} W (rated = {RATED_CAPACITY_W:.0} W). \
-             Bug: non-ideal path uses full rated_capacity_w regardless of outdoor temperature."
+             got {actual_w:.1} W (rated = {RATED_CAPACITY_W:.0} W)"
         );
         assert!(
             actual_w >= RATED_CAPACITY_W * 0.55,
@@ -2297,7 +2430,6 @@ mod tests {
 
     // Companion to the above: verify that identity biquadratic coefficients produce
     // exactly rated capacity in the non-ideal path (no regression for configs without curves).
-    // This test PASSES today and must continue to pass after the ticket 002 fix.
     #[test]
     fn non_ideal_heating_identity_curve_produces_rated_capacity() {
         const RATED_CAPACITY_W: f64 = 10_000.0;
@@ -2312,11 +2444,10 @@ mod tests {
             .insert("cooling_setpoint_c".into(), 26.0.into());
         cfg.test_extras_mut()
             .insert("capacity_w".into(), RATED_CAPACITY_W.into());
-        // Identity coefficients: [1.0, 0, 0, 0, 0, 0] → CAP_FT always = 1.0.
         cfg.test_extras_mut()
             .insert("capacity_biquadratic_coeffs".into(), "1,0,0,0,0,0".into());
 
-        let mut h3_env = env(18.0, 60, 0); // zone below heating setpoint → Heating mode
+        let mut h3_env = env(18.0, 60, 0);
         h3_env.weather.outdoor_temp_c = -8.3;
 
         let mut eq = IdealHvac::new(cfg.clone());
@@ -2335,6 +2466,157 @@ mod tests {
             (ports.thermal[0].sensible_gain_w - RATED_CAPACITY_W).abs() < 1.0,
             "identity curve must produce exactly rated capacity; got {} W",
             ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    // Cooling capacity must degrade at high outdoor temperature with a realistic curve.
+    // EnergyPlus Engineering Reference, DX Cooling Coil: CAP_FT normalised to 1.0 at
+    // AHRI rating (indoor WB=19.44°C, outdoor DB=35°C). At 46°C outdoor, capacity drops.
+    #[test]
+    fn non_ideal_cooling_capacity_degrades_at_high_outdoor_temp() {
+        const RATED_COOLING_W: f64 = 10_000.0;
+        // Simplified cooling capacity curve: CAP_FT = 1.3 − 0.01*T_outdoor.
+        // At rated (35°C): 1.3 − 0.01*35 = 0.95 (near unity, typical).
+        // At 46°C: 1.3 − 0.01*46 = 0.84 — reduced capacity.
+        let mut cfg = config("IH-002-cooling");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("ideal_capacity_mode".into(), "off".into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 24.0.into());
+        cfg.test_extras_mut()
+            .insert("capacity_w".into(), RATED_COOLING_W.into());
+        cfg.test_extras_mut().insert(
+            "capacity_biquadratic_coeffs".into(),
+            "1.3,0,0,-0.01,0,0".into(),
+        );
+        cfg.test_extras_mut()
+            .insert("biquadratic_x1_min".into(), (-30.0f64).into());
+        cfg.test_extras_mut()
+            .insert("biquadratic_x1_max".into(), 35.0f64.into());
+        cfg.test_extras_mut()
+            .insert("biquadratic_x2_min".into(), (-30.0f64).into());
+        cfg.test_extras_mut()
+            .insert("biquadratic_x2_max".into(), 50.0f64.into());
+
+        let mut hot_env = env(28.0, 60, 0); // zone above cooling setpoint → Cooling mode
+        hot_env.weather.outdoor_temp_c = 46.0;
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &hot_env).unwrap();
+        eq.update_control(&hot_env);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&hot_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let actual_w = ports.thermal[0].sensible_gain_w;
+        // CAP_FT(28.0, 46.0) = 1.3 − 0.01*46 = 0.84
+        // Expected magnitude: 10000 * 0.84 = 8400 W (negative, cooling).
+        // Actual sensible includes fan heat (0 here), so |sensible| ≈ 8400.
+        assert!(
+            actual_w.abs() < RATED_COOLING_W,
+            "at 46°C outdoor the biquadratic-corrected cooling capacity must be less than rated; \
+             got {actual_w:.1} W (rated = {RATED_COOLING_W:.0} W)"
+        );
+        assert!(
+            actual_w < 0.0,
+            "cooling capacity must be negative; got {actual_w:.1} W"
+        );
+    }
+
+    // Numerical verification: linearised ASHP curve CAP_FT = 0.834 + 0.02*T_outdoor.
+    // At T_outdoor = −8.3°C (AHRI H3): CAP_FT = 0.668 exactly.
+    // AHRI 210/240-2023 Table 9: H3 condition at −8.3°C (17°F).
+    #[test]
+    fn non_ideal_heating_biquadratic_matches_analytical_value() {
+        const RATED_CAPACITY_W: f64 = 10_000.0;
+
+        let mut cfg = config("IH-002-numerical");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("ideal_capacity_mode".into(), "off".into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.test_extras_mut()
+            .insert("capacity_w".into(), RATED_CAPACITY_W.into());
+        cfg.test_extras_mut().insert(
+            "capacity_biquadratic_coeffs".into(),
+            "0.834,0,0,0.02,0,0".into(),
+        );
+        cfg.test_extras_mut()
+            .insert("biquadratic_x1_min".into(), (-30.0f64).into());
+        cfg.test_extras_mut()
+            .insert("biquadratic_x1_max".into(), 35.0f64.into());
+        cfg.test_extras_mut()
+            .insert("biquadratic_x2_min".into(), (-30.0f64).into());
+        cfg.test_extras_mut()
+            .insert("biquadratic_x2_max".into(), 50.0f64.into());
+
+        let mut h3_env = env(18.0, 60, 0);
+        h3_env.weather.outdoor_temp_c = -8.3;
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &h3_env).unwrap();
+        eq.update_control(&h3_env);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&h3_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let actual_w = ports.thermal[0].sensible_gain_w;
+        let expected = RATED_CAPACITY_W * 0.668; // 6680 W
+        assert!(
+            (actual_w - expected).abs() < 1.0,
+            "CAP_FT(18.0, −8.3) = 0.834 + 0.02*(−8.3) = 0.668; \
+             expected {expected:.1} W, got {actual_w:.1} W"
+        );
+    }
+
+    // Constitution: "Parse/init boundaries must fail loudly on invalid input."
+    // If a user configures unparseable biquadratic coefficients, init() must
+    // return Err, not silently fall back to identity curves.
+    #[test]
+    fn invalid_biquadratic_coeffs_rejected_at_init() {
+        let mut cfg = config("IH-002-bad-coeffs");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("capacity_biquadratic_coeffs".into(), "not_a_number".into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(18.0, 60, 0);
+        let result = eq.init(&cfg, &env);
+        assert!(
+            result.is_err(),
+            "init must reject unparseable biquadratic coefficients, not silently fall back to identity"
+        );
+    }
+
+    #[test]
+    fn wrong_arity_biquadratic_coeffs_rejected_at_init() {
+        let mut cfg = config("IH-002-wrong-arity");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("eir_biquadratic_coeffs".into(), "1.0,0.0,0.0".into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(18.0, 60, 0);
+        let result = eq.init(&cfg, &env);
+        assert!(
+            result.is_err(),
+            "init must reject biquadratic coefficients with wrong number of terms"
         );
     }
 }

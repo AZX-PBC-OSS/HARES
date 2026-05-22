@@ -70,6 +70,8 @@ pub const SHR: &str = "shr";
 pub const CAP_MULT: &str = "cap_mult";
 pub const ETA_ELECTRIC: &str = "eta_electric";
 pub const INVERTER_EFFICIENCY: &str = "inverter_efficiency";
+pub const CAP_RATIO: &str = "cap_ratio";
+pub const EIR_RATIO: &str = "eir_ratio";
 
 // ── Battery / EV / storage ──────────────────────────────────────────────────
 pub const SOC: &str = "soc";

@@ -134,6 +134,8 @@ fn sample_ideal_hvac_config() -> IdealHvacConfig {
         rated_eir: Some(1.0),
         capacity_min_w: None,
         fuel_type: None,
+        capacity_biquadratic_coeffs: None,
+        eir_biquadratic_coeffs: None,
     }
 }
 

@@ -297,6 +297,16 @@ pub struct IdealHvacConfig {
     /// Override fuel type for the equipment descriptor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fuel_type: Option<FuelType>,
+    /// Biquadratic capacity correction curve coefficients [a,b,c,d,e,f].
+    /// Default identity: CAP_FT = 1.0 (no correction).
+    /// EnergyPlus: `Q_corrected = Q_rated × CAP_FT(T_indoor, T_outdoor)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_biquadratic_coeffs: Option<String>,
+    /// Biquadratic EIR correction curve coefficients [a,b,c,d,e,f].
+    /// Default identity: EIR_FT = 1.0 (no correction).
+    /// EnergyPlus: `EIR_corrected = EIR_rated × EIR_FT(T_indoor, T_outdoor)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eir_biquadratic_coeffs: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

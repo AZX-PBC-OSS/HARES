@@ -257,6 +257,8 @@ fn oracle_ideal_hvac_24h_50pct_load() {
             rated_eir: None,
             capacity_min_w: None,
             fuel_type: None,
+            capacity_biquadratic_coeffs: None,
+            eir_biquadratic_coeffs: None,
         },
     );
 

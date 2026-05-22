@@ -765,6 +765,8 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
         rated_eir,
         capacity_min_w: None,
         fuel_type: None,
+        capacity_biquadratic_coeffs: None,
+        eir_biquadratic_coeffs: None,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
