@@ -1697,6 +1697,124 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // ticket-013: MSHP minimum compressor speed — regression tests
+    //
+    // These tests have direct struct access so they can verify stage values.
+    // -----------------------------------------------------------------------
+
+    fn mshp_typed_config(rated_w: f64) -> HeatPumpHeaterConfig {
+        HeatPumpHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(rated_w),
+            heating_eir: Some(0.25),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: None,
+            backup_eir: None,
+            fraction_heating_load_served: None,
+            cooling_capacity_w: None,
+            cooling_eir: None,
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            fraction_cooling_load_served: None,
+            number_of_speeds: 1,
+            is_mini_split: true,
+            shr: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            duct: Default::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        }
+    }
+
+    #[test]
+    fn ticket_013_mshp_speed_stages_hardcoded_at_25_50_75_100pct() {
+        // ticket-013: MSHP stage generation hardcodes 0.25/0.50/0.75/1.00 of rated.
+        // OCHRE "HVAC Multispeed Parameters.csv" uses Capacity Ratio 1 = 0.40 for
+        // MSHP Heater — a 15 percentage-point divergence at the minimum stage.
+        // This test pins the current (buggy) behavior.
+        // After ticket-013 is implemented with default min_compressor_fraction=0.25,
+        // this test must still pass (backward-compatible default).
+        const RATED_W: f64 = 10_000.0;
+
+        let typed = mshp_typed_config(RATED_W);
+        let cfg =
+            EquipmentConfig::from_typed("mshp_stages".to_string(), "MSHP Heater".to_string(), typed);
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let e = env(18.0, 5.0, 0.004);
+        eq.init(&cfg, &e).unwrap();
+
+        let stages = &eq.core.hvac.heating_capacities_w;
+        assert_eq!(stages.len(), 4, "MSHP must generate exactly 4 speed stages");
+
+        // Current hardcoded fractions: [0.25, 0.50, 0.75, 1.00].
+        // OCHRE diverges at stage 1: Capacity Ratio 1 = 0.40, not 0.25.
+        let expected = [RATED_W * 0.25, RATED_W * 0.50, RATED_W * 0.75, RATED_W];
+        for (i, (&actual, &exp)) in stages.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 1.0,
+                "ticket-013: stage {} capacity = {:.1} W, expected {:.1} W \
+                 (hardcoded {:.0}% of rated). OCHRE uses {:.0}% for stage 1.",
+                i + 1,
+                actual,
+                exp,
+                expected[i] / RATED_W * 100.0,
+                40.0,
+            );
+        }
+    }
+
+    #[test]
+    fn ticket_013_mshp_eir_identical_across_all_stages() {
+        // ticket-013: eir_by_stage = vec![base_eir; 4] — no part-load EIR benefit.
+        // OCHRE loads per-stage COP from CSV (COP 1 ≠ COP 4 for MSHP Heater).
+        // This test pins the current flat-EIR behavior.
+        const RATED_W: f64 = 10_000.0;
+        const BASE_EIR: f64 = 0.25;
+
+        let typed = mshp_typed_config(RATED_W);
+        let cfg =
+            EquipmentConfig::from_typed("mshp_eir".to_string(), "MSHP Heater".to_string(), typed);
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let e = env(18.0, 5.0, 0.004);
+        eq.init(&cfg, &e).unwrap();
+
+        let eirs = &eq.core.hvac.eir_by_stage;
+        assert_eq!(eirs.len(), 4, "MSHP must generate 4 EIR values");
+
+        for (i, &eir) in eirs.iter().enumerate() {
+            assert!(
+                (eir - BASE_EIR).abs() < 1e-9,
+                "ticket-013: stage {} EIR = {:.6}, expected base EIR {:.4} (flat — no part-load benefit). \
+                 OCHRE uses per-stage COP values.",
+                i + 1,
+                eir,
+                BASE_EIR,
+            );
+        }
+    }
+
     fn add_identity_biquadratic_curves(cfg: &mut EquipmentConfig) {
         cfg.test_extras_mut().insert(
             "biquadratic_coeffs".to_string(),
@@ -2032,6 +2150,76 @@ mod tests {
             full_strip_plus_fan_kw,
         );
         assert!(electric_kw > 0.0, "ER must draw some power");
+    }
+
+    // Regression (ticket-015): ER backup must be binary on/off in non-ideal mode,
+    // not modulated by PLR. When `er_on` is true in the non-ideal path,
+    // `er_capacity_w` must equal `backup_capacity_w` (full rated), not
+    // `backup_capacity_w * plr`.
+    //
+    // The bug manifests when the HP thermostat is in Heating mode AND PLR < 1.0.
+    // PLR = hvac.duty_cycle = speed.part_load_ratio, which comes from load_ratio
+    // = (setpoint - zone) / deadband divided by the low-speed capacity fraction
+    // in TwoSpeedSetpoint mode.
+    //
+    // Scenario:
+    //   - Two-speed HP, er_setpoint_offset_c=0, setpoint=21°C, deadband=1°C.
+    //   - Step 1: zone=19°C → heat_turn_on = 21-1 = 20°C → thermostat triggers Heating.
+    //     load_ratio = 2/1 = 2.0, clamped to 1.0. Thermostat is now Heating.
+    //   - Step 2: zone=20.55°C (zone warmed) → thermostat remains Heating (turn-off=21+0.8=21.8°C).
+    //     load_ratio = (21 - 20.55) / 1.0 = 0.45.
+    //     TwoSpeedSetpoint: 0.45 < low_cap(0.72) → speed_index=0, PLR = 0.45/0.72 ≈ 0.625.
+    //     ER on (zone < er_turn_on=21°C). Bug: er_capacity_w = 4000 * 0.625 = 2500 W.
+    //     Fix: er_capacity_w = 4000 W.
+    //
+    // This test FAILS with the current implementation and must PASS after the fix.
+    #[test]
+    fn er_non_ideal_mode_is_binary_full_rated_when_on() {
+        let backup_capacity_w = 4_000.0_f64;
+        let cfg = heater_config_with(|typed| {
+            typed.er_setpoint_offset_c = Some(0.0); // ER fires whenever zone < setpoint
+            typed.backup_capacity_w = Some(backup_capacity_w);
+            typed.backup_eir = Some(1.0);
+            typed.fan_power_w = Some(0.0); // zero fan so backup_er_kw == er_capacity_w exactly
+            typed.number_of_speeds = 2;    // TwoSpeedSetpoint → PLR can be < 1.0
+            typed.stage_heating_capacities_w = Some(vec![4_000.0, 8_000.0]);
+            typed.stage_heating_eirs = Some(vec![0.33, 0.33]);
+            typed.heating_capacity_w = None;
+            typed.hysteresis_c = Some(1.0);
+            // ER is allowed when OAT < er_lockout_temp_c; set lockout high so ER always allowed.
+            typed.er_lockout_temp_c = Some(100.0); // ER allowed at all OATs (lockout = 100°C)
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+
+        // Step 1: zone=19°C → thermostat cold-start triggers Heating (load_ratio=1.0).
+        let env_cold = env(19.0, 5.0, 0.003);
+        eq.init(&cfg, &env_cold).unwrap();
+        eq.update_control(&env_cold);
+        eq.step(&env_cold, Duration::from_secs(60), &mut ports).unwrap();
+
+        // Step 2: zone has warmed to 20.55°C; thermostat stays in Heating mode because
+        // turn-off = setpoint + hysteresis * cutout = 21 + 0.8 = 21.8°C (default cutout=0.8).
+        // load_ratio = (21 - 20.55) / 1.0 = 0.45 → PLR = 0.45/0.72 ≈ 0.625.
+        // ER is on (zone=20.55 < er_turn_on=21.0).
+        ports.zero();
+        let env_partial = env(20.55, 5.0, 0.003);
+        eq.update_control(&env_partial);
+        eq.step(&env_partial, Duration::from_secs(60), &mut ports).unwrap();
+
+        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        // Binary on/off: must draw exactly full rated power (4.0 kW).
+        // With PLR modulation (bug): backup_er_kw ≈ 4.0 * 0.625 = 2.5 kW.
+        assert!(
+            (backup_er_kw - backup_capacity_w / 1000.0).abs() < 1e-6,
+            "ticket-015: non-ideal ER must draw full rated {:.3} kW when on, \
+             got {backup_er_kw:.6} kW (PLR modulation bug: ER incorrectly scaled by HP PLR ≈0.625)",
+            backup_capacity_w / 1000.0,
+        );
     }
 
     // Regression: ER-only mode must still include blower fan power.

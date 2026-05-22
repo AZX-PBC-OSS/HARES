@@ -765,7 +765,8 @@ mod tests {
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
         DrivingTemp, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
-        InteriorSurfaceInfo, MechanicalVentilationParams, NaturalVentilationConfig,
+        InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
+        MechanicalVentilationParams, NaturalVentilationConfig,
         StateSpaceWiring, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
     };
 
@@ -2022,6 +2023,74 @@ mod tests {
             (t_after - target_c).abs() < 0.05,
             "zone should reach explicit target: t={t_after:.4}, target={target_c}"
         );
+    }
+
+    /// Regression test for ticket #129: when `solve_ideal_capacity_for_target` encounters a
+    /// singular/zero-gain condition (failure path), it silently returns 0.0 and currently
+    /// logs at `debug!`. This test documents the failure path returns 0 and verifies the
+    /// bug is present (no `warn!` is emitted). When the ticket fix is applied, the log
+    /// level should be promoted to `warn!` and this test should be accompanied by a
+    /// `tracing-test` assertion.
+    ///
+    /// To trigger `ZeroEffectiveGain`: use a B matrix where the HVAC sensible-input column
+    /// (column 1) has zero contribution to the zone output (C row × B_eff[:, 1] ≈ 0).
+    /// We achieve this by setting the HVAC column of B_c to zero.
+    #[test]
+    fn solve_ideal_capacity_failure_returns_zero_without_warn() {
+        let zone_temp = 20.0;
+        let outdoor_temp = 10.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+
+        // B_c: two inputs [T_out, H_hvac]. Column 1 (HVAC) is zero → zero effective gain.
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (2.0 * 50_000.0)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (2.0 * 50_000.0), 0.0]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+        };
+        let mut solver =
+            ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+
+        // The HVAC input has zero gain → solve_for_scalar_input returns ZeroEffectiveGain.
+        // Current behaviour: silently returns 0.0 and logs at debug! (bug).
+        // Expected behaviour after fix: returns 0.0 AND logs at warn!.
+        let q = solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
+        assert_eq!(
+            q, 0.0,
+            "failure path must return 0.0 (silent fallback — ticket #129: log level should be warn)"
+        );
+        // NOTE: this test intentionally does NOT assert a warn! is captured, because
+        // `tracing-test` is not yet a dev-dependency. Once ticket #129 is fixed, add
+        // `tracing-test` to [dev-dependencies] and add:
+        //   #[traced_test] and assert!(logs_contain("solve_ideal_capacity_for_target failed"))
     }
 
     /// Non-zero solar irradiance routed through solar_input_indices must raise
@@ -4683,6 +4752,132 @@ mod tests {
         assert!(
             (total_injected + window_to_cond - sum_flux).abs() < 1e-9,
             "total injected ({total_injected:.6}) + window-to-cond ({window_to_cond:.6}) must equal Σq ({sum_flux:.6}) — no energy destroyed"
+        );
+    }
+
+    // Regression test for ticket #117:
+    // The comment at ports.rs:135-136 says "Windows (input_index=None)" but
+    // solver_builder always sets input_index: Some(zone_air_idx) for every surface,
+    // including windows. Windows are excluded from the solar radiant distribution
+    // because solar_absorptance = 0.0 produces zero weight — NOT because
+    // input_index is None (which never occurs in production).
+    #[test]
+    fn ticket_117_window_excluded_via_zero_solar_absorptance_not_none_input_index() {
+        use hares_types::{THERMAL_CATEGORY_COUNT, ThermalAccumulator};
+
+        let env = env_for_temp(20.0, 10.0);
+
+        // 3-state, 4-input model: states 0-2, inputs 0 (outdoor temp), 1 (wall RC node),
+        // 2 (window input — input_index is Some(2), never None), 3 (zone air sensible).
+        let a_c = DMatrix::from_row_slice(
+            3,
+            3,
+            &[
+                -1.0 / 50_000.0, 0.0, 0.0,
+                0.0, -1.0 / 40_000.0, 0.0,
+                0.0, 0.0, -1.0 / 30_000.0,
+            ],
+        );
+        let b_c = DMatrix::zeros(3, 4);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 3)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+
+        // Use the solar-surface (StarMesh) path: no interior_lwr_zones, only interior_solar_zones.
+        // Window has input_index: Some(2) — never None — and solar_absorptance = 0.0.
+        // Opaque wall has input_index: Some(1) and solar_absorptance = 0.7.
+        let solar_zone = InteriorSolarZoneConfig {
+            zone_id: ZoneId(1),
+            surfaces: vec![
+                InteriorSolarSurfaceInfo {
+                    input_index: Some(1),
+                    area_m2: 20.0,
+                    solar_absorptance: 0.7,
+                    radiation_frac: 0.5,
+                    is_floor: false,
+                },
+                // Window: input_index is Some (not None), excluded by zero solar_absorptance.
+                InteriorSolarSurfaceInfo {
+                    input_index: Some(2),
+                    area_m2: 5.0,
+                    solar_absorptance: 0.0,
+                    radiation_frac: 0.1,
+                    is_floor: false,
+                },
+            ],
+        };
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: vec![solar_zone],
+            boundary_diagnostics: Vec::new(),
+        };
+
+        let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
+
+        let zone = ZoneId(1);
+        let radiant_w = 100.0;
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone,
+                sensible_gain_w: 0.0,
+                radiant_gain_w: radiant_w,
+                latent_gain_w: 0.0,
+                sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0],
+            }],
+            ..Default::default()
+        };
+
+        let mut u = DVector::zeros(4);
+        solver.apply_port_radiant_inputs(&mut u, &ports);
+
+        // Window input (index 2) must receive zero — it is excluded by solar_absorptance=0.0,
+        // not by input_index=None (which is never set in production).
+        assert_eq!(u[2], 0.0, "window (input_index=Some(2), solar_absorptance=0.0) must receive zero radiant gain");
+
+        // Wall RC node (index 1) receives radiation_frac of the 100 W.
+        let expected_wall_rc = radiant_w * 0.5;
+        assert!(
+            (u[1] - expected_wall_rc).abs() < 1e-9,
+            "wall RC node should receive {expected_wall_rc:.6}, got {:.6}", u[1]
+        );
+
+        // Zone air (index 3) receives (1 - radiation_frac) of the 100 W.
+        let expected_air = radiant_w * 0.5;
+        assert!(
+            (u[3] - expected_air).abs() < 1e-9,
+            "zone air should receive {expected_air:.6}, got {:.6}", u[3]
+        );
+
+        // Energy conservation.
+        let total: f64 = u.iter().sum();
+        assert!(
+            (total - radiant_w).abs() < 1e-9,
+            "energy conservation: total={total:.6}, expected={radiant_w:.6}"
         );
     }
 }

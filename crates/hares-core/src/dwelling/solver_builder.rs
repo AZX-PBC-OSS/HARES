@@ -1701,6 +1701,36 @@ mod tests {
         );
     }
 
+    // Regression tests for ticket 039: vented attic with no SLA/ACH must produce
+    // an actionable error that names <VentilationRate> and SLA.
+    #[test]
+    fn attic_vented_no_sla_error_names_ventilation_rate_element() {
+        let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
+        let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("VentilationRate"),
+            "error message must name <VentilationRate>: {msg}"
+        );
+    }
+
+    #[test]
+    fn attic_vented_no_sla_error_names_sla_unit() {
+        let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
+        let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SLA"),
+            "error message must mention SLA: {msg}"
+        );
+    }
+
+    #[test]
+    fn attic_vented_with_sla_builds_successfully() {
+        let zone = attic_zone(Some(100.0), Some(120.0), true, None, Some(0.003));
+        attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect("vented attic with SLA=0.003 must succeed");
+    }
+
     #[test]
     fn attic_unvented_default_is_minimal_ach() {
         let zone = attic_zone(Some(100.0), Some(120.0), false, None, None);

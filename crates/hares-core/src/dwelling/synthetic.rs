@@ -1060,4 +1060,105 @@ dew_point_c = 5.0
              expected {sky_temp_c_check} from Stefan-Boltzmann inversion",
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Ticket 050 regression tests: ground temperature in synthetic weather
+    // -------------------------------------------------------------------------
+
+    /// Ticket 050 – Case A: constant-temperature profile.
+    ///
+    /// For a constant synthetic dry-bulb series the temporal mean equals the
+    /// per-record value, so ground_temp_c should equal outdoor_temp_c. This
+    /// confirms the fix introduces no regression for existing callers.
+    ///
+    /// This test passes against the *current* (buggy) code because when
+    /// outdoor_temp_c is constant, `ground_temp_c = outdoor_temp_c` happens
+    /// to equal the temporal mean. It should continue to pass after the fix.
+    #[test]
+    fn synthetic_ground_temp_equals_outdoor_temp_for_constant_profile() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = -20.0
+dew_point_c = -25.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        // For a constant dry-bulb series, temporal mean == outdoor_temp_c.
+        // ground_temp_c must equal that mean (= -20.0), not diverge from it.
+        for (i, &gt) in weather.ground_temp_c.iter().enumerate() {
+            assert!(
+                (gt - (-20.0_f64)).abs() < 0.01,
+                "step {i}: ground_temp_c ({gt}) should equal temporal mean (-20.0) \
+                 for a constant-temperature profile",
+            );
+        }
+    }
+
+    /// Ticket 050 – Case B: explicit ground_temp_c override in config.
+    ///
+    /// When `ground_temp_c = 8.0` is set in [weather], the weather series must
+    /// carry 8.0 regardless of outdoor_temp_c (-20.0).
+    ///
+    /// This test FAILS against the current implementation because
+    /// `SyntheticWeatherConfig` has no `ground_temp_c` field — the TOML parse
+    /// either rejects the key or ignores it, and the code always uses
+    /// `outdoor_temp_c`. After the fix it should pass.
+    #[test]
+    fn synthetic_ground_temp_override_takes_precedence_over_outdoor_temp() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = -20.0
+dew_point_c = -25.0
+ground_temp_c = 8.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        // After the fix, config.weather.ground_temp_c should be Some(8.0).
+        assert_eq!(
+            config.weather.ground_temp_c,
+            Some(8.0),
+            "ground_temp_c field in SyntheticWeatherConfig should deserialize to Some(8.0)"
+        );
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        for (i, &gt) in weather.ground_temp_c.iter().enumerate() {
+            assert!(
+                (gt - 8.0_f64).abs() < 0.01,
+                "step {i}: ground_temp_c ({gt}) should equal the explicit override (8.0), \
+                 not outdoor_temp_c (-20.0)",
+            );
+        }
+    }
 }

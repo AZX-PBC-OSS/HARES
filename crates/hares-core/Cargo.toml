@@ -40,6 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 criterion = { workspace = true }
 hares-fleet = { workspace = true }
 rayon = { workspace = true }
+tempfile = { workspace = true }
 
 [[bench]]
 name = "single_building"

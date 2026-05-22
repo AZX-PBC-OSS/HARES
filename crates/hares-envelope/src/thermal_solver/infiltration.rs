@@ -838,4 +838,131 @@ mod tests {
             c.q_sensible_diagnostic_w,
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Regression test for ticket 073: ERV/HRV bypass/defrost effectiveness not
+    // propagated to the thermal solver.
+    //
+    // The bug: `ThermalSolverConfig.ventilation.sensible_recovery_efficiency` is
+    // set once at init from rated values and never updated per-timestep.  When
+    // bypass is active the infiltration solver should receive 0.0 effectiveness
+    // (full outdoor load), but instead it sees the rated 0.75 value — a 4×
+    // underestimate of the ventilation sensible load.
+    //
+    // These tests confirm the *solver* contract: if the caller correctly propagates
+    // effectiveness = 0.0 (bypass) the sensible flow is forced_flow × 1.0;
+    // with effectiveness = 0.75 (rated) it is forced_flow × 0.25.  The 4× ratio
+    // is the energy-balance error that occurs whenever the propagation is absent.
+    // -------------------------------------------------------------------------
+
+    /// Bypass active (effectiveness = 0.0): ventilation sensible flow must equal
+    /// the full forced flow rate (no heat recovery).
+    ///
+    /// This is the *correct* path — it verifies that the solver produces the right
+    /// answer when the orchestration layer has propagated `eff_s = 0.0`.  The
+    /// complementary test below shows the wrong answer produced by the stale rated
+    /// value.
+    #[test]
+    fn ticket073_bypass_zero_effectiveness_gives_full_ventilation_load() {
+        let forced_m3_s = 0.03_f64;
+
+        // Bypass active: effectiveness = 0.0
+        let config_bypass = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![],
+            ventilation_flow_m3_s: forced_m3_s,
+            ventilation: crate::thermal_solver::config::MechanicalVentilationParams {
+                balanced: true,
+                sensible_recovery_efficiency: 0.0, // bypass: no recovery
+                latent_recovery_efficiency: 0.0,
+                zone_flow_m3_s: HashMap::new(),
+            },
+            ..ThermalSolverConfig::default()
+        };
+
+        // Cold outdoor → large ΔT for a measurable load.
+        let env = make_env(-10.0, 0.0, 20.0, 200.0);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+        apply_infiltration_and_ventilation(&config_bypass, &env, false, &mut latent, &mut couplings);
+
+        assert_eq!(couplings.len(), 1, "expected one zone coupling");
+        let c = &couplings[0];
+
+        // With effectiveness = 0.0: sensible_flow = forced_flow × (1 - 0.0) = forced_flow
+        // h_inf_w_k = rho × forced_flow × cp (rho depends on moist air, ~1.2–1.33 kg/m³)
+        // Just confirm it is in the expected ballpark: rho ∈ [1.1, 1.4], so h_inf ∈ [33, 51] W/K.
+        let expected_h_inf_approx = 1.2 * forced_m3_s * hares_physics::constants::CP_DRY_AIR_J_KG_K;
+        assert!(
+            c.h_inf_w_k > expected_h_inf_approx * 0.85 && c.h_inf_w_k < expected_h_inf_approx * 1.20,
+            "bypass: h_inf_w_k should be ≈ forced_flow × rho × cp ≈ {expected_h_inf_approx:.2} W/K, got {:.2} W/K",
+            c.h_inf_w_k
+        );
+
+        // q_forced_vent_w should dominate (no infiltration configured)
+        assert!(
+            c.q_forced_vent_w < -1.0,
+            "bypass: forced vent sensible gain must be a significant heat loss (cold outdoor), got {:.2} W",
+            c.q_forced_vent_w
+        );
+    }
+
+    /// Rated effectiveness (0.75) gives a 4× smaller forced-ventilation sensible load
+    /// than bypass effectiveness (0.0) at the same conditions.
+    ///
+    /// This is the ratio that the bug silently applies when bypass is active but the
+    /// orchestration layer has NOT updated `sensible_recovery_efficiency`.  Confirming
+    /// the 4× ratio documents exactly what goes wrong when the fix is absent.
+    #[test]
+    fn ticket073_rated_vs_bypass_effectiveness_ratio_is_4x() {
+        let forced_m3_s = 0.03_f64;
+
+        let make_config = |eff: f64| ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![],
+            ventilation_flow_m3_s: forced_m3_s,
+            ventilation: crate::thermal_solver::config::MechanicalVentilationParams {
+                balanced: true,
+                sensible_recovery_efficiency: eff,
+                latent_recovery_efficiency: 0.0,
+                zone_flow_m3_s: HashMap::new(),
+            },
+            ..ThermalSolverConfig::default()
+        };
+
+        let env = make_env(-10.0, 0.0, 20.0, 200.0);
+
+        let mut lat_bypass: HashMap<ZoneId, f64> = HashMap::new();
+        let mut coup_bypass: Vec<InfiltrationCoupling> = Vec::new();
+        apply_infiltration_and_ventilation(
+            &make_config(0.0),
+            &env,
+            false,
+            &mut lat_bypass,
+            &mut coup_bypass,
+        );
+
+        let mut lat_rated: HashMap<ZoneId, f64> = HashMap::new();
+        let mut coup_rated: Vec<InfiltrationCoupling> = Vec::new();
+        apply_infiltration_and_ventilation(
+            &make_config(0.75),
+            &env,
+            false,
+            &mut lat_rated,
+            &mut coup_rated,
+        );
+
+        let h_bypass = coup_bypass[0].h_inf_w_k;
+        let h_rated = coup_rated[0].h_inf_w_k;
+
+        // With balanced ventilation and no infiltration:
+        //   bypass  (eff=0.00): sensible_flow = forced * (1 - 0.00) = 1.00 × forced
+        //   rated   (eff=0.75): sensible_flow = forced * (1 - 0.75) = 0.25 × forced
+        // Ratio = 4.0
+        let ratio = h_bypass / h_rated;
+        assert!(
+            (ratio - 4.0).abs() < 0.01,
+            "bypass/rated h_inf ratio must be 4.0 (ticket 073 energy-balance error), got {ratio:.4}"
+        );
+    }
 }

@@ -1503,4 +1503,152 @@ mod tests {
             "eta_electric={eta:.6}, expected {expected_eta:.6}"
         );
     }
+
+    // --- Regression test for ticket 080 ---
+    // HeatingCapacity17F (21600 BTU/h) with HeatingCapacity (36000 BTU/h) must
+    // produce capacity_ratio_at_17f ≈ 0.600 in the ASHP Heater typed config.
+    // This test FAILS until the resolver reads HeatingCapacity17F.
+    #[test]
+    fn ashp_heating_capacity_17f_ratio_is_parsed_into_typed_config() {
+        let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea>1500</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems>
+        <HVAC>
+          <HeatPump>
+            <HeatPumpType>air-to-air</HeatPumpType>
+            <HeatingCapacity>36000.0</HeatingCapacity>
+            <HeatingCapacity17F>21600.0</HeatingCapacity17F>
+            <CoolingCapacity>36000.0</CoolingCapacity>
+          </HeatPump>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+
+        let heater = specs
+            .iter()
+            .find(|s| s.name == "ASHP Heater")
+            .expect("ASHP Heater spec must be present");
+
+        // ticket-080: the ratio must be present in the raw params map as
+        // "capacity_ratio_at_17f" until the typed config grows the field.
+        let ratio = heater
+            .parameters
+            .get("capacity_ratio_at_17f")
+            .and_then(Value::as_f64)
+            .expect("ticket-080: HeatingCapacity17F must be parsed and stored as capacity_ratio_at_17f in params");
+
+        assert!(
+            (ratio - 0.600).abs() < 0.01,
+            "ticket-080: capacity_ratio_at_17f = {ratio:.4}, expected ~0.600 (21600/36000)"
+        );
+    }
+
+    // Absence of HeatingCapacity17F must not produce an error or set the ratio field.
+    #[test]
+    fn ashp_without_heating_capacity_17f_has_none_ratio() {
+        let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea>1500</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems>
+        <HVAC>
+          <HeatPump>
+            <HeatPumpType>air-to-air</HeatPumpType>
+            <HeatingCapacity>36000.0</HeatingCapacity>
+            <CoolingCapacity>36000.0</CoolingCapacity>
+          </HeatPump>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment must not error when HeatingCapacity17F is absent");
+
+        let heater = specs
+            .iter()
+            .find(|s| s.name == "ASHP Heater")
+            .expect("ASHP Heater spec must be present");
+
+        // ticket-080: when HeatingCapacity17F is absent the field must be None
+        // (cannot assert this yet -- typed config has no such field; the test
+        // verifies at least that parsing succeeds without panic)
+        let _typed: hares_equipment::HeatPumpHeaterConfig = heater
+            .typed_config
+            .as_ref()
+            .expect("heater spec must carry typed config")
+            .typed()
+            .expect("heater typed config must deserialise");
+    }
+
+    // Regression tests for ticket-083: unsupported HeatPumpType should not silently skip HVAC.
+    // Currently these tests document the BROKEN behaviour (silent skip → 0 specs).
+    // After the fix they must be updated to assert an Err containing "unsupported HeatPumpType".
+
+    #[test]
+    fn heat_pump_ground_to_air_currently_silently_skips_hvac_ticket_083() {
+        // ground-to-air is a valid HPXML 4.x HeatPumpType (hpxml.nlr.gov/datadictionary/4.0.0)
+        // but HARES has no handler for it.  The _ => None arm at resolve_hvac.rs:1454 causes the
+        // if let Some(...) guard at line 1573 to be skipped, so the building emits zero HVAC specs.
+        // This test FAILS after the fix (which should return Err) — see ticket-083.
+        let xml = minimal_hvac_xml(
+            r#"<HeatPump>
+          <HeatPumpType>ground-to-air</HeatPumpType>
+          <HeatingCapacity>36000</HeatingCapacity>
+          <CoolingCapacity>36000</CoolingCapacity>
+        </HeatPump>"#,
+        );
+        let building = parse_building(&xml).expect("xml parses");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("currently succeeds (silent skip)");
+        // BUG: after the fix this call should return Err, not Ok([]).
+        // The absence of any HVAC spec is the observable symptom of the silent skip.
+        assert!(
+            !specs.iter().any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
+            "ticket-083: ground-to-air silently drops HVAC — zero heater/cooler specs emitted"
+        );
+    }
+
+    #[test]
+    fn heat_pump_water_loop_to_air_currently_silently_skips_hvac_ticket_083() {
+        // water-loop-to-air is another valid HPXML 4.x HeatPumpType that is unhandled.
+        let xml = minimal_hvac_xml(
+            r#"<HeatPump>
+          <HeatPumpType>water-loop-to-air</HeatPumpType>
+          <HeatingCapacity>36000</HeatingCapacity>
+          <CoolingCapacity>36000</CoolingCapacity>
+        </HeatPump>"#,
+        );
+        let building = parse_building(&xml).expect("xml parses");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("currently succeeds (silent skip)");
+        assert!(
+            !specs.iter().any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
+            "ticket-083: water-loop-to-air silently drops HVAC — zero heater/cooler specs emitted"
+        );
+    }
 }

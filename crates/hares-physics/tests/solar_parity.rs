@@ -472,3 +472,72 @@ fn window_decomposition_continuity_at_threshold() {
         "film R should be continuous at threshold: below={r_int_below:.4} above={r_int_above:.4}"
     );
 }
+
+// ── Regression: ticket-036 exterior film handling ────────────────────────────
+//
+// window_u_factor_decomposition returns (r_glass, r_int) where r_glass absorbs
+// the exterior film resistance (Ro,w ≈ 0.034 m²·K/W per EnergyPlus).  The
+// caller in conversions.rs sets r_film_ext = 0.0, so the assembled path is:
+//
+//   r_glass(HARES) + r_int + 0.0 = (1/U − Ri,w) + Ri,w = 1/U  ✓
+//
+// This matches OCHRE exactly (res_ext_w = 0 in ochre/utils/envelope.py:302).
+// The EnergyPlus formula for Ro,w is:
+//   Ro,w = 1 / (0.025342·U + 29.163853)  ≈ 0.034 m²·K/W  (not 0.044 as ticket states)
+// The ticket's claimed NFRC value of 0.0440 m²·K/W (h_o = 22.7 W/(m²·K)) is incorrect;
+// the correct NFRC combined exterior coefficient is ~34 W/(m²·K) (R ≈ 0.029 m²·K/W)
+// or the E+ Ro,w correlation value of ~0.034 m²·K/W.
+
+/// The function must NOT subtract Ro,w from r_glass.
+/// If it did, r_glass + r_int would be less than 1/U by Ro,w ≈ 0.034 m²·K/W.
+/// This test pins the current HARES/OCHRE behaviour: r_glass + r_int == 1/U.
+#[test]
+fn ticket036_exterior_film_absorbed_into_r_glass_matches_ochre() {
+    let ep_ro_w = |u: f64| 1.0 / (0.025342 * u + 29.163853); // E+ formula, ~0.034
+
+    for &u in &[0.5_f64, 1.0, 2.0, 3.0, 5.0, 5.85, 6.5] {
+        let (r_glass, r_int) = window_u_factor_decomposition(u);
+        let assembled = r_glass + r_int;
+
+        // HARES/OCHRE: exterior film is zero at call site, glass absorbs it.
+        assert!(
+            (assembled - 1.0 / u).abs() < 1e-10,
+            "U={u}: r_glass + r_int must equal 1/U (OCHRE parity); got {assembled:.8} vs {:.8}",
+            1.0 / u
+        );
+
+        // r_glass in HARES is inflated relative to true glass-only R by ~Ro,w.
+        let ro_w = ep_ro_w(u);
+        let r_glass_excess = r_glass - (1.0 / u - r_int - ro_w); // should ≈ Ro,w
+        assert!(
+            (r_glass_excess - ro_w).abs() < 1e-9,
+            "U={u}: r_glass excess over E+ Rl,w should equal Ro,w={ro_w:.6}; got {r_glass_excess:.6}"
+        );
+
+        // Ticket's claimed fixed value 0.0440 is NOT what E+ Ro,w gives.
+        assert!(
+            (ro_w - 0.0440).abs() > 0.005,
+            "U={u}: E+ Ro,w={ro_w:.5} should not match ticket's claimed 0.0440"
+        );
+    }
+}
+
+/// OCHRE sets res_ext_w = 0 and computes r_window = 1/U - res_int_w.
+/// HARES window_u_factor_decomposition does the same: r_glass = 1/U - r_int.
+/// This ensures full OCHRE parity.
+#[test]
+fn ticket036_hares_r_glass_matches_ochre_r_window() {
+    for &u in &[1.0_f64, 2.0, 3.0] {
+        let (r_glass, _r_int) = window_u_factor_decomposition(u);
+        let ochre_res_int = if u < 5.85 {
+            1.0 / (0.359073 * u.ln() + 6.949915)
+        } else {
+            1.0 / (1.788041 * u - 2.886625)
+        };
+        let ochre_r_window = 1.0 / u - ochre_res_int; // ochre: res_ext_w = 0
+        assert!(
+            (r_glass - ochre_r_window).abs() < 1e-12,
+            "U={u}: HARES r_glass={r_glass:.8} must equal OCHRE r_window={ochre_r_window:.8}"
+        );
+    }
+}

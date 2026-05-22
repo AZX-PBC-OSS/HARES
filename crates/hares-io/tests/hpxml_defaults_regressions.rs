@@ -8,6 +8,7 @@ use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
 use hares_io::hpxml::validation::validate_hpxml_schema;
 use hares_io::hpxml::{BoundaryType, HpxmlError, ZoneType, parse_hpxml_str};
+use hares_equipment::hvac::cooling_config::DehumidifierConfig;
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/hpxml/ochre_samples")
@@ -265,5 +266,48 @@ fn base_fixture_resolves_expected_typed_specs_with_repo_defaults() {
     assert!(
         water_heater.typed_config.is_some(),
         "water heater should resolve to a typed config with defaults applied"
+    );
+}
+
+// Regression test for ticket 082: HPXML <Capacity> is in US liquid pints/day and must be
+// converted to L/day using exactly 0.473176473 (1 US liquid pint = 0.473176473 L).
+// The fixture has <Capacity>40.0</Capacity> → expected 40 × 0.473176473 = 18.92705892 L/day.
+#[test]
+fn dehumidifier_capacity_pints_to_liters_conversion_uses_correct_factor() {
+    let mut building =
+        parse_hpxml_str(&read_fixture("base-appliances-dehumidifier.xml"))
+            .expect("dehumidifier fixture should parse");
+    building.site.latitude_deg = Some(39.75);
+    building.site.longitude_deg = Some(-104.99);
+
+    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}))
+        .expect("dehumidifier fixture equipment should resolve");
+
+    let dehumidifier_spec = specs
+        .iter()
+        .find(|s| s.name == "Dehumidifier")
+        .expect("Dehumidifier spec should be present in resolved equipment");
+
+    let typed_config = dehumidifier_spec
+        .typed_config
+        .as_ref()
+        .expect("Dehumidifier should resolve to a typed config");
+
+    let cfg: DehumidifierConfig = typed_config
+        .typed()
+        .expect("typed config should downcast to DehumidifierConfig");
+
+    // HPXML fixture has <Capacity>40.0</Capacity> (pints/day, per HPXML schema annotation).
+    // Correct conversion: 40.0 × 0.473_176_473 = 18.92705892 L/day.
+    // If the factor were accidentally changed (e.g. swapped with gallons: 3.785), this fails.
+    let expected_l_day = 40.0 * 0.473_176_473;
+    let actual_l_day = cfg
+        .capacity_liters_per_day
+        .expect("capacity_liters_per_day must be populated from HPXML Capacity");
+
+    assert!(
+        (actual_l_day - expected_l_day).abs() < 1e-6,
+        "Dehumidifier capacity pints→liters conversion is wrong: \
+         expected {expected_l_day:.6} L/day (40 pints × 0.473176473), got {actual_l_day:.6} L/day"
     );
 }

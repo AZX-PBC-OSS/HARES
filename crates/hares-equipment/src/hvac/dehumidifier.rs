@@ -570,7 +570,10 @@ mod tests {
         ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
-    use super::{Dehumidifier, LATENT_HEAT_VAPORIZATION_J_KG, SECONDS_PER_DAY, WATTS_PER_KILOWATT};
+    use super::{
+        Dehumidifier, KG_PER_LITER_WATER, LATENT_HEAT_VAPORIZATION_J_KG, SECONDS_PER_DAY,
+        WATTS_PER_KILOWATT,
+    };
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     const TOLERANCE_REL: f64 = 1e-9;
@@ -585,10 +588,14 @@ mod tests {
     }
 
     fn env(relative_humidity: f64) -> EnvironmentState {
+        env_with_temp(26.666_666_666_7, relative_humidity)
+    }
+
+    fn env_with_temp(temperature_c: f64, relative_humidity: f64) -> EnvironmentState {
         EnvironmentState {
             zones: vec![ZoneState {
                 id: ZoneId(1),
-                temperature_c: 26.666_666_666_7,
+                temperature_c,
                 humidity_ratio: 0.010,
                 relative_humidity,
                 wet_bulb_c: 20.0,
@@ -863,5 +870,157 @@ mod tests {
             .unwrap();
         assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
         assert_eq!(slots.electrical.load_power_kw, 0.0);
+    }
+
+    /// Regression test for ticket 001: the dehumidifier must use the same h_fg constant
+    /// as the humidity solver so that moisture mass round-trips without systematic error.
+    ///
+    /// The dehumidifier writes `latent_gain_w = -water_removal_kg_s * h_fg_dehumidifier`
+    /// to the thermal port. The humidity solver converts back via:
+    ///   delta_w = latent_gain_w * dt / (h_fg_solver * rho * V)
+    /// For the moisture mass to round-trip (delta_w * rho * V == water_removal_kg_s * dt)
+    /// both h_fg values must be identical. With the current bug, h_fg_dehumidifier = 2_454_000
+    /// but h_fg_solver = 2_501_000, creating a ~1.9% systematic error.
+    ///
+    /// This test FAILS until the fix in ticket 001 (Phase 1) is applied.
+    #[test]
+    fn dehumidifier_h_fg_matches_physics_constant() {
+        use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
+
+        // The h_fg used inside the dehumidifier's performance_snapshot is exposed
+        // indirectly: for a known water_removal_kg_s, latent_removal_w / water_removal_kg_s
+        // must equal LATENT_HEAT_VAPORISATION_0C_J_KG (2_501_000 J/kg).
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.60)).unwrap();
+
+        eq.update_control(&env(0.60));
+        let mut slots = ports();
+        eq.step(&env(0.60), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        let water_l_day = eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+        let latent_removal_w = eq.telemetry().get(tk::LATENT_REMOVAL_W).unwrap();
+
+        // Recover the h_fg the dehumidifier actually used: h_fg = W / (kg/s)
+        let water_removal_kg_s = water_l_day * KG_PER_LITER_WATER / SECONDS_PER_DAY;
+        let implied_h_fg = latent_removal_w / water_removal_kg_s;
+
+        assert!(
+            (implied_h_fg - LATENT_HEAT_VAPORISATION_0C_J_KG).abs() < 1.0,
+            "dehumidifier uses h_fg = {implied_h_fg:.0} J/kg but humidity solver uses \
+             LATENT_HEAT_VAPORISATION_0C_J_KG = {LATENT_HEAT_VAPORISATION_0C_J_KG:.0} J/kg; \
+             this creates a {:.2}% moisture mass balance error (ticket 001)",
+            ((implied_h_fg - LATENT_HEAT_VAPORISATION_0C_J_KG).abs()
+                / LATENT_HEAT_VAPORISATION_0C_J_KG)
+                * 100.0
+        );
+    }
+
+    /// Regression test for ticket 071: the dehumidifier must write its thermal
+    /// contribution under `ThermalCategory::HvacDehumidification`, not
+    /// `ThermalCategory::InternalGain`.
+    ///
+    /// This test FAILS until the fix in ticket 071 is applied.
+    #[test]
+    fn dehumidifier_thermal_category_is_hvac_not_internal_gain() {
+        use hares_types::ThermalCategory;
+
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.60)).unwrap();
+        eq.update_control(&env(0.60));
+
+        let mut slots = ports();
+        eq.step(&env(0.60), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        // The dehumidifier must be running and contributing sensible heat.
+        let sensible = eq.telemetry().get(tk::SENSIBLE_GAIN_W).unwrap();
+        assert!(
+            sensible > 0.0,
+            "expected non-zero sensible gain but got {sensible}"
+        );
+
+        // After the fix: InternalGain bucket must be zero; the dehumidifier's
+        // contribution must appear only under HvacDehumidification (index 5).
+        let internal_gain_bucket =
+            slots.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
+        assert_eq!(
+            internal_gain_bucket, 0.0,
+            "dehumidifier wrote {internal_gain_bucket} W to InternalGain bucket; \
+             expected 0.0 — fix ticket 071 by changing category to HvacDehumidification"
+        );
+    }
+
+    /// Regression test for ticket 086: identity curves (`[1,0,0,0,0,0]`) make
+    /// water removal identical at all temperatures.  A physically correct
+    /// biquadratic curve must produce strictly less water removal at 10°C than
+    /// at 26.7°C (the EnergyPlus rated condition of 26.7°C / 60% RH).
+    ///
+    /// This test FAILS until the fix in ticket 086 is applied (i.e. the
+    /// identity coefficients are replaced with real EnergyPlus default
+    /// biquadratic coefficients that decrease with falling temperature).
+    #[test]
+    fn water_removal_decreases_below_rated_temperature() {
+        // Rated condition: 26.7°C / 60% RH — should give full capacity.
+        let cfg = config();
+        let mut eq_rated = Dehumidifier::new(cfg.clone());
+        eq_rated.init(&cfg, &env(0.60)).unwrap();
+        eq_rated.update_control(&env_with_temp(26.666_666_666_7, 0.60));
+        let mut slots_rated = ports();
+        eq_rated
+            .step(&env_with_temp(26.666_666_666_7, 0.60), Duration::from_secs(60), &mut slots_rated)
+            .unwrap();
+        let wr_rated = eq_rated.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+
+        // Cold condition: 10°C / 60% RH — refrigerant cycle is less effective,
+        // so water removal must be strictly less than at rated conditions.
+        let mut eq_cold = Dehumidifier::new(cfg.clone());
+        eq_cold.init(&cfg, &env(0.60)).unwrap();
+        eq_cold.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Cooling,
+        }).unwrap();
+        eq_cold.update_control(&env_with_temp(10.0, 0.60));
+        let mut slots_cold = ports();
+        eq_cold
+            .step(&env_with_temp(10.0, 0.60), Duration::from_secs(60), &mut slots_cold)
+            .unwrap();
+        let wr_cold = eq_cold.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+
+        assert!(
+            wr_cold < wr_rated,
+            "ticket 086: at 10°C water removal ({wr_cold:.4} L/day) must be less than at \
+             26.7°C ({wr_rated:.4} L/day); identity curves mask all temperature dependence — \
+             replace DEFAULT_NORMALIZED_CURVE with EnergyPlus default dehumidifier biquadratic coefficients"
+        );
+    }
+
+    /// Regression test for ticket 086: at the EnergyPlus rated condition
+    /// (26.7°C / 60% RH), the curve output normalised by `rated_value` must
+    /// equal exactly 1.0 so that `rated_capacity_liters_per_day` passes through
+    /// unchanged.
+    ///
+    /// This test PASSES with identity curves (trivially), but the companion test
+    /// `water_removal_decreases_below_rated_temperature` will FAIL until the fix
+    /// is applied.  Both tests must pass together after the fix.
+    #[test]
+    fn water_removal_at_rated_condition_equals_rated_capacity() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.60)).unwrap();
+        eq.update_control(&env_with_temp(26.666_666_666_7, 0.60));
+        let mut slots = ports();
+        eq.step(&env_with_temp(26.666_666_666_7, 0.60), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        let wr = eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+        let rated = 70.0 * 0.473_176_5;
+        let rel_err = (wr - rated).abs() / rated;
+        assert!(
+            rel_err < 1e-9,
+            "ticket 086: water removal at rated condition must equal rated capacity \
+             ({rated:.4} L/day) but got {wr:.4} L/day (rel_err={rel_err:.2e})"
+        );
     }
 }

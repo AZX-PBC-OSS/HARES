@@ -45,3 +45,9 @@ dwelling_*.parquet
 # Compiled binaries
 conditioned_oracle
 .codex
+
+.shipwright
+
+docs/eplus/
+
+.verify*

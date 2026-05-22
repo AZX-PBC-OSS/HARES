@@ -1156,4 +1156,103 @@ mod tests {
             cfg.performance_adjustment
         );
     }
+
+    // ===========================================================================
+    // Regression: ticket 121 — combi boiler + indirect tank triggers parse error
+    //
+    // HPXML v4 enumerates "space-heating boiler with storage tank" as a valid
+    // WaterHeaterType (confirmed at hpxml.nlr.gov/datadictionary/4.0.0/…).
+    // canonical_water_heater_name() falls through to the wildcard `_` arm and
+    // returns HpxmlError::Parse, rejecting the input entirely.
+    //
+    // These tests document the current (broken) behaviour and MUST be updated or
+    // deleted once ticket 121 is resolved — either by implementing the indirect
+    // tank or by returning a clear "unsupported" error rather than a generic
+    // parse error.
+    // ===========================================================================
+
+    #[test]
+    fn combi_boiler_with_storage_tank_type_currently_rejects_with_parse_error() {
+        // BUG (ticket 121): HPXML v4 "space-heating boiler with storage tank" is a
+        // valid WaterHeaterType but canonical_water_heater_name() returns
+        // HpxmlError::Parse instead of handling it.
+        let err = canonical_water_heater_name(
+            "space-heating boiler with storage tank",
+            FuelType::Gas,
+        )
+        .expect_err(
+            "BUG (ticket 121): combi boiler type must currently produce an error \
+             (not silently accepted with wrong behaviour)",
+        );
+        assert!(
+            err.to_string().contains("unsupported HPXML water heater type"),
+            "error should be a parse error naming the unsupported type, got: {err}"
+        );
+    }
+
+    #[test]
+    fn combi_boiler_with_tankless_coil_type_currently_rejects_with_parse_error() {
+        // BUG (ticket 121): companion type — "space-heating boiler with tankless coil"
+        // is also a valid HPXML v4 WaterHeaterType and is equally unhandled.
+        let err = canonical_water_heater_name(
+            "space-heating boiler with tankless coil",
+            FuelType::Gas,
+        )
+        .expect_err(
+            "BUG (ticket 121): combi tankless-coil type must currently produce an error",
+        );
+        assert!(
+            err.to_string().contains("unsupported HPXML water heater type"),
+            "error should be a parse error naming the unsupported type, got: {err}"
+        );
+    }
+
+    #[test]
+    fn combi_boiler_full_xml_round_trip_currently_errors() {
+        // End-to-end test: feeding a minimal HPXML document with the combi boiler
+        // WaterHeaterType through resolve_water_heaters() must produce an Err today.
+        // Once ticket 121 is implemented (path A), this test must be rewritten to
+        // assert the resolved IndirectTank spec is present and correct.
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <TankVolume>40</TankVolume>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut specs = Vec::new();
+        let result = resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs);
+        assert!(
+            result.is_err(),
+            "BUG (ticket 121): resolve_water_heaters must return Err for \
+             'space-heating boiler with storage tank' until the combi boiler \
+             configuration is implemented"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported HPXML water heater type"),
+            "the error should clearly identify the unsupported type, got: {err}"
+        );
+    }
 }

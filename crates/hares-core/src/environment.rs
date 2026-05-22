@@ -1916,6 +1916,209 @@ mod tests {
         );
     }
 
+    // ---- Regression tests for ticket 034: Kusuda amplitude derivation ----
+
+    /// Regression for ticket 034, Defect 1: leap-year weather (8784 hourly records)
+    /// must use 29-day February when computing monthly means for the Kusuda amplitude.
+    ///
+    /// The bug: `month_days` is hardcoded to `[31, 28, ...]` so February consumes only
+    /// 672 samples instead of 696.  This means the February mean is computed from 28
+    /// days of data, and the extra 24 hours are silently prepended to March's slice,
+    /// corrupting both month means.
+    ///
+    /// Fixture: 8784-record series where the first 31 days are 0°C (January), the
+    /// next 29 days alternate between +1°C and -1°C (February mean = 0°C regardless
+    /// of day count), then March has a constant +10°C.  With the bug the 29th February
+    /// day leaks into March, raising the observed March mean slightly above 10°C and
+    /// causing the overall range to widen.  With the fix, February has exactly 29 days
+    /// and the range is derived purely from monthly means.
+    ///
+    /// The test asserts the property that is violated by the bug: the annual range of
+    /// monthly means must equal the difference between the maximum monthly mean and
+    /// the minimum monthly mean when each month is assigned its correct day count.
+    ///
+    /// NOTE: this test FAILS with the current (buggy) code because `month_days` uses
+    /// 28 for February even when `temps.len() == 8784`.
+    #[test]
+    fn leap_year_february_uses_29_days_for_monthly_mean() {
+        // 8784 hours in a leap year (366 days × 24).
+        let n = 8784usize;
+        let step_secs = 3600u32; // hourly
+
+        // Build dry_bulb_c: set each month to a distinct constant temperature so
+        // we can detect which month's slice a given hour falls into.
+        //   Jan (31 days): 0.0°C
+        //   Feb (29 days): 100.0°C   ← large value: easy to detect if day-count is wrong
+        //   Mar (31 days): 0.0°C
+        //   Apr–Dec:       0.0°C
+        let mut dry_bulb_c = vec![0.0f64; n];
+        let jan_hours = 31 * 24; // 744
+        let feb_hours_correct = 29 * 24; // 696
+        // Mark February hours with 100.0°C.
+        for h in jan_hours..(jan_hours + feb_hours_correct) {
+            dry_bulb_c[h] = 100.0;
+        }
+
+        let weather = WeatherTimeSeries {
+            meta: WeatherMeta {
+                location: "Leap-034".to_string(),
+                latitude: 40.0,
+                longitude: 0.0,
+                timezone_offset_h: 0.0,
+                elevation_m: 0.0,
+                source_step_secs: step_secs,
+                midpoint_offset_secs: 0,
+            },
+            dry_bulb_c,
+            dew_point_c: vec![0.0; n],
+            rel_humidity_pct: vec![50.0; n],
+            pressure_kpa: vec![101.325; n],
+            ghi_w_m2: vec![0.0; n],
+            dni_w_m2: vec![0.0; n],
+            dhi_w_m2: vec![0.0; n],
+            wind_speed_m_s: vec![1.0; n],
+            wind_dir_deg: vec![180.0; n],
+            opaque_sky_cover: vec![0.0; n],
+            horizontal_infrared_w_m2: vec![250.0; n],
+            sky_temp_c: vec![0.0; n],
+            ground_temp_c: vec![0.0; n],
+            liquid_precip_m: vec![0.0; n],
+            surface_albedo: None,
+        };
+
+        let (_avg, range) = compute_mains_inputs(&weather, step_secs);
+
+        // With a correct 29-day February:
+        //   February mean = 100.0°C, all other months = 0.0°C
+        //   monthly_range = 100.0 - 0.0 = 100.0°C
+        //
+        // With the buggy 28-day February:
+        //   Feb slice = hours 744..1416 (28 days) — mean = 100.0°C (pure February OK)
+        //   BUT the 29th February day (hours 1416..1440) is prepended to March's slice,
+        //   making March's mean = (24*100 + 30*24*0) / (31*24) ≈ 3.23°C instead of 0°C.
+        //   The range is still 100.0 (Feb max vs 0 min), so the range passes in this
+        //   particular fixture.  However, if we instead verify the March mean indirectly
+        //   (the returned range must equal exactly 100.0 even with the leak), this test
+        //   alone does not discriminate.
+        //
+        // A better discriminating fixture: set February to 0.0 and March to 100.0.
+        // With the bug the leaked Feb-29 day (0°C) lowers the March mean below 100°C,
+        // so the detected range < 100.0.  That is the assertion below.
+        // (We rebuild the fixture here rather than above for clarity.)
+        let _ = range; // discard first result
+
+        let mut dry_bulb2 = vec![0.0f64; n];
+        let mar_start = jan_hours + feb_hours_correct; // correct Mar start with 29-day Feb
+        let mar_end = mar_start + 31 * 24;
+        for h in mar_start..mar_end {
+            dry_bulb2[h] = 100.0;
+        }
+        let weather2 = WeatherTimeSeries {
+            meta: WeatherMeta {
+                location: "Leap-034-B".to_string(),
+                latitude: 40.0,
+                longitude: 0.0,
+                timezone_offset_h: 0.0,
+                elevation_m: 0.0,
+                source_step_secs: step_secs,
+                midpoint_offset_secs: 0,
+            },
+            dry_bulb_c: dry_bulb2,
+            dew_point_c: vec![0.0; n],
+            rel_humidity_pct: vec![50.0; n],
+            pressure_kpa: vec![101.325; n],
+            ghi_w_m2: vec![0.0; n],
+            dni_w_m2: vec![0.0; n],
+            dhi_w_m2: vec![0.0; n],
+            wind_speed_m_s: vec![1.0; n],
+            wind_dir_deg: vec![180.0; n],
+            opaque_sky_cover: vec![0.0; n],
+            horizontal_infrared_w_m2: vec![250.0; n],
+            sky_temp_c: vec![0.0; n],
+            ground_temp_c: vec![0.0; n],
+            liquid_precip_m: vec![0.0; n],
+            surface_albedo: None,
+        };
+
+        let (_avg2, range2) = compute_mains_inputs(&weather2, step_secs);
+
+        // With correct 29-day February, March mean = 100.0°C exactly, range = 100.0.
+        // With buggy 28-day February, March slice starts 24 hours early, absorbing one
+        // day of the gap between Feb and Mar (all-zero hour 1416..1440 lands in March),
+        // so March mean = (30*24 * 100 + 1*24 * 0) / (31*24) ≈ 96.77°C, range ≈ 96.77.
+        // The correct code must return range = 100.0.
+        assert!(
+            (range2 - 100.0).abs() < 0.01,
+            "ticket-034 Defect 1: expected monthly range = 100.0°C when March is \
+             100°C and all other months 0°C in a leap-year (8784-hour) series, \
+             but got {range2:.4} — indicates February is not using 29-day slice"
+        );
+    }
+
+    /// Regression for ticket 034, Defect 2: when weather has fewer than 8760 hourly
+    /// records, the fallback must derive the amplitude from whatever monthly means are
+    /// available, NOT from the instantaneous min/max of the raw hourly series.
+    ///
+    /// Fixture: 48-hour series (2 days) where values alternate between -20°C and
+    /// +20°C, giving `simple_range(temps) = 40°C`.  No full calendar month can be
+    /// assembled (31 days minimum), so the correct behaviour is to return amplitude = 0.0
+    /// (constant ground temperature equal to annual mean, the physically conservative
+    /// choice per the ticket).  The buggy code returns 40°C.
+    ///
+    /// NOTE: this test FAILS with the current (buggy) code.
+    #[test]
+    fn short_weather_fallback_uses_monthly_means_not_instantaneous_extremes() {
+        let step_secs = 3600u32;
+        let n = 48usize; // 2 days — far less than one full calendar month
+
+        // Alternating -20°C / +20°C: instantaneous range = 40°C.
+        let dry_bulb_c: Vec<f64> = (0..n)
+            .map(|i| if i % 2 == 0 { -20.0 } else { 20.0 })
+            .collect();
+
+        let weather = WeatherTimeSeries {
+            meta: WeatherMeta {
+                location: "Short-034".to_string(),
+                latitude: 40.0,
+                longitude: 0.0,
+                timezone_offset_h: 0.0,
+                elevation_m: 0.0,
+                source_step_secs: step_secs,
+                midpoint_offset_secs: 0,
+            },
+            dry_bulb_c,
+            dew_point_c: vec![0.0; n],
+            rel_humidity_pct: vec![50.0; n],
+            pressure_kpa: vec![101.325; n],
+            ghi_w_m2: vec![0.0; n],
+            dni_w_m2: vec![0.0; n],
+            dhi_w_m2: vec![0.0; n],
+            wind_speed_m_s: vec![1.0; n],
+            wind_dir_deg: vec![180.0; n],
+            opaque_sky_cover: vec![0.0; n],
+            horizontal_infrared_w_m2: vec![250.0; n],
+            sky_temp_c: vec![0.0; n],
+            ground_temp_c: vec![0.0; n],
+            liquid_precip_m: vec![0.0; n],
+            surface_albedo: None,
+        };
+
+        let (_avg, range) = compute_mains_inputs(&weather, step_secs);
+
+        // The Burch-Christensen model requires the monthly-mean range.  When fewer
+        // than 2 full months are available, the amplitude should be 0.0 (constant
+        // ground temperature = annual mean), not the instantaneous 40°C range.
+        // Buggy code: simple_range(temps) = 40.0.
+        // Fixed code: no full months available → amplitude = 0.0.
+        assert!(
+            range < 5.0,
+            "ticket-034 Defect 2: expected amplitude ≈ 0.0 for 48-hour weather \
+             (fewer than one full calendar month), but got {range:.4} — \
+             indicates fallback is using instantaneous hourly extremes (simple_range) \
+             instead of monthly means"
+        );
+    }
+
     // ---- DST-aware schedule tests (require `dst` feature) ----
 
     #[cfg(feature = "dst")]

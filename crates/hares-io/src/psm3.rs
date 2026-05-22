@@ -693,4 +693,101 @@ mod tests {
             albedo[june_idx]
         );
     }
+
+    // ── Regression tests for ticket 025 ─────────────────────────────────────
+
+    /// When IR = 0.0 (no column present), sky temp from compute_sky_temp_c must
+    /// be numerically identical to the current clark_allen_sky_temp_c result.
+    ///
+    /// This test currently PASSES because both code-paths produce the same
+    /// number.  It is here to guard that the fix (routing through
+    /// compute_sky_temp_c) does not change the value when IR is absent.
+    #[test]
+    fn psm3_sky_temp_zero_ir_matches_clark_allen() {
+        use crate::epw::compute_sky_temp_c;
+        let csv = make_psm3_csv(60, false);
+        let ts = parse_psm3_str(&csv).expect("should parse");
+        let via_clark_allen = clark_allen_sky_temp_c(20.0, 10.0);
+        let via_compute = compute_sky_temp_c(0.0, 20.0, 10.0, 0.0);
+        assert!(
+            (via_clark_allen - via_compute).abs() < 1e-12,
+            "clark_allen and compute_sky_temp_c(0.0,…,0.0) must be identical: \
+             clark_allen={via_clark_allen}, compute={via_compute}"
+        );
+        // The parsed sky_temp_c should equal clark_allen today; after the fix
+        // it must still equal this value.
+        assert!(
+            (ts.sky_temp_c[0] - via_clark_allen).abs() < 1e-6,
+            "psm3 sky_temp_c should equal clark_allen result: \
+             got {}, expected {via_clark_allen}",
+            ts.sky_temp_c[0]
+        );
+    }
+
+    /// A PSM3 file with a synthetic `Lwdown` column must produce sky
+    /// temperatures derived from the Stefan-Boltzmann inversion, not
+    /// Clark-Allen.
+    ///
+    /// This test FAILS on current code (the parser ignores the Lwdown column
+    /// and always calls clark_allen_sky_temp_c).  It will pass once the fix
+    /// from ticket 025 is applied.
+    #[test]
+    fn psm3_lwdown_column_activates_stefan_boltzmann_path() {
+        use crate::epw::compute_sky_temp_c;
+
+        let day_counts = monthly_day_counts(false);
+        let total_records: usize = day_counts.iter().sum::<usize>() * 24;
+        let mut lines = Vec::with_capacity(total_records + 3);
+
+        lines.push(
+            "Source,Location ID,City,State,Country,Latitude,Longitude,Time Zone,Elevation,Local Time Zone"
+                .to_string(),
+        );
+        lines.push("NSRDB,12345,TestCity,-,-,39.74,-104.99,-7,1609.0,-7".to_string());
+        // Include the optional Lwdown column.
+        lines.push(
+            "Year,Month,Day,Hour,Minute,GHI,DNI,DHI,Temperature,Pressure,Dew Point,Relative Humidity,Wind Speed,Wind Direction,Lwdown"
+                .to_string(),
+        );
+
+        // Use a plausible downwelling IR value (300 W/m²) that exceeds the
+        // 50 W/m² Stefan-Boltzmann threshold.
+        let lwdown = 300.0_f64;
+        for (mi, &days) in day_counts.iter().enumerate() {
+            let month = mi as u32 + 1;
+            for day in 1..=days as u32 {
+                for hour in 0..24u32 {
+                    lines.push(format!(
+                        "2021,{month},{day},{hour},0,\
+                         100,200,50,20.0,1013.25,10.0,50.0,3.0,180,{lwdown}"
+                    ));
+                }
+            }
+        }
+
+        let csv = lines.join("\n");
+        // Currently this will succeed as a parse (no format error), but sky
+        // temp will equal clark_allen result, not the Stefan-Boltzmann value.
+        let ts = parse_psm3_str(&csv).expect("should parse PSM3 with Lwdown column");
+
+        let stefan_boltzmann_expected = compute_sky_temp_c(lwdown, 20.0, 10.0, 0.0);
+        let clark_allen_fallback = clark_allen_sky_temp_c(20.0, 10.0);
+
+        // After the fix: sky_temp_c must equal the Stefan-Boltzmann inversion.
+        assert!(
+            (ts.sky_temp_c[0] - stefan_boltzmann_expected).abs() < 1e-6,
+            "ticket-025: PSM3 with Lwdown column must use Stefan-Boltzmann inversion \
+             (expected {stefan_boltzmann_expected:.4} °C) but got {:.4} °C \
+             (Clark-Allen fallback would give {clark_allen_fallback:.4} °C)",
+            ts.sky_temp_c[0]
+        );
+
+        // After the fix: horizontal_infrared_w_m2 must be populated from the column.
+        assert!(
+            (ts.horizontal_infrared_w_m2[0] - lwdown).abs() < 1e-6,
+            "ticket-025: PSM3 Lwdown column must populate horizontal_infrared_w_m2 \
+             (expected {lwdown}) but got {}",
+            ts.horizontal_infrared_w_m2[0]
+        );
+    }
 }

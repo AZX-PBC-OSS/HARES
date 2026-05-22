@@ -928,3 +928,410 @@ fn pv_inverter_max_power_output_w_converted_to_kw() {
         "inverter_efficiency should be 0.97, got {eff}"
     );
 }
+
+// ===========================================================================
+// Regression: ticket 037 — stud-geometry framing fraction includes only stud
+// faces, omitting plates, headers, and corner assemblies.
+//
+// The bug: parse_framing_factor returns width_in / spacing_in (e.g.
+// 1.5 / 16 = 0.094) when <StudSpacing> and <StudWidth> are present.
+// The correct assembly-level framing fraction per ASHRAE HOF is ~0.23 for
+// 2×4 at 16" OC, covering studs + plates + headers + corners.
+//
+// This test will FAIL until the stud-geometry branch is replaced with the
+// assembly formula (see ticket 037).
+// ===========================================================================
+
+fn wall_xml_with_stud_geometry(spacing_in: f64, width_in: f64) -> String {
+    format!(
+        r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id='Wall1'/>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <InteriorAdjacentTo>living space</InteriorAdjacentTo>
+            <WallType><WoodStud/></WallType>
+            <Area units="ft2">240.0</Area>
+            <StudSpacing>{spacing_in}</StudSpacing>
+            <StudWidth>{width_in}</StudWidth>
+            <Insulation>
+              <SystemIdentifier id='Wall1Ins'/>
+              <AssemblyEffectiveRValue>11.0</AssemblyEffectiveRValue>
+            </Insulation>
+          </Wall>
+        </Walls>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#
+    )
+}
+
+#[test]
+fn stud_geometry_framing_fraction_2x4_16oc_includes_plates_and_headers() {
+    // 2×4 at 16" OC: stud face alone = 1.5/16 = 0.094 (the current buggy value).
+    // Assembly-level per ASHRAE HOF = ~0.23. This test asserts the correct
+    // range; it should fail until ticket 037 is fixed.
+    let xml = wall_xml_with_stud_geometry(16.0, 1.5);
+    let building = parse_building(&xml).expect("should parse");
+    let wall = building
+        .boundaries
+        .iter()
+        .find(|b| b.id == "Wall1")
+        .expect("Wall1 should be present");
+    let ff = wall
+        .framing_factor
+        .expect("framing_factor should be set from StudSpacing+StudWidth");
+
+    assert!(
+        ff >= 0.21 && ff <= 0.25,
+        "2×4 at 16\" OC assembly framing fraction should be in [0.21, 0.25] per ASHRAE HOF \
+         (studs + plates + headers + corners), got {ff:.4} — \
+         current code returns stud-face-only value {:.4}",
+        1.5_f64 / 16.0
+    );
+}
+
+#[test]
+fn stud_geometry_framing_fraction_2x4_24oc_advanced_framing() {
+    // 2×4 at 24" OC advanced framing: stud face alone = 1.5/24 = 0.0625.
+    // Assembly-level per ASHRAE HOF = ~0.15 (advanced framing).
+    // This test will fail until ticket 037 is fixed.
+    let xml = wall_xml_with_stud_geometry(24.0, 1.5);
+    let building = parse_building(&xml).expect("should parse");
+    let wall = building
+        .boundaries
+        .iter()
+        .find(|b| b.id == "Wall1")
+        .expect("Wall1 should be present");
+    let ff = wall
+        .framing_factor
+        .expect("framing_factor should be set from StudSpacing+StudWidth");
+
+    assert!(
+        ff >= 0.13 && ff <= 0.17,
+        "2×4 at 24\" OC assembly framing fraction should be in [0.13, 0.17] per ASHRAE HOF \
+         (advanced framing — studs + plates + headers), got {ff:.4} — \
+         current code returns stud-face-only value {:.4}",
+        1.5_f64 / 24.0
+    );
+}
+
+// ===========================================================================
+// Regression: ticket 051 — SteelFrame default uses softwood conductivity
+//
+// Defect: parse_framing_factor returns Some(0.25) for SteelFrame, which is
+// then passed to parallel_path_conductivity(). That function mixes the
+// framing factor with SOFTWOOD_CONDUCTIVITY_W_M_K (0.144 W/m·K) — a value
+// appropriate for wood, not steel (~50 W/m·K). The result silently
+// under-corrects the steel thermal bridge by orders of magnitude.
+//
+// Note: Defect 1 (WoodStud 0.25 → 0.23) is NOT a real defect. ASHRAE HoF
+// Ch. 27 (F17/F21 Examples) gives framing = 0.21 + 0.04 = 0.25 for 16" OC.
+// The existing 0.25 value is correct. This test therefore asserts the current
+// WoodStud default is 0.25, not 0.23, as the ticket claims.
+//
+// These tests will PASS once ticket 051 Defect 2 is fixed (SteelFrame must
+// not silently return a wood-based default).
+// ===========================================================================
+
+fn wall_xml_with_construction_type(construction_type_element: &str) -> String {
+    format!(
+        r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id='Wall1'/>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <InteriorAdjacentTo>living space</InteriorAdjacentTo>
+            <WallType>{construction_type_element}</WallType>
+            <Area units="ft2">240.0</Area>
+            <Insulation>
+              <SystemIdentifier id='Wall1Ins'/>
+              <AssemblyEffectiveRValue>11.0</AssemblyEffectiveRValue>
+            </Insulation>
+          </Wall>
+        </Walls>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#
+    )
+}
+
+#[test]
+fn wood_stud_default_framing_factor_is_0_25_per_ashrae() {
+    // ASHRAE HoF 2017/2021, Ch. 27 Examples: for 16" OC,
+    // studs+plates+sills = 0.21, headers = 0.04 → total = 0.25.
+    // Ticket 051 incorrectly claims this should be 0.23.
+    let xml = wall_xml_with_construction_type("<WoodStud/>");
+    let building = parse_building(&xml).expect("should parse");
+    let wall = building
+        .boundaries
+        .iter()
+        .find(|b| b.id == "Wall1")
+        .expect("Wall1 should be present");
+    let ff = wall
+        .framing_factor
+        .expect("WoodStud default should set framing_factor");
+
+    assert!(
+        (ff - 0.25).abs() < 1e-10,
+        "WoodStud default framing factor should be 0.25 per ASHRAE HoF (16\" OC assembly), got {ff}"
+    );
+}
+
+#[test]
+fn steel_frame_default_silently_applies_softwood_conductivity() {
+    // Regression for ticket 051 Defect 2: SteelFrame falls through to the
+    // same Some(0.25) path as WoodStud, which then calls
+    // parallel_path_conductivity() using SOFTWOOD_CONDUCTIVITY_W_M_K
+    // (0.144 W/m·K). Steel conductivity is ~50 W/m·K, so this
+    // under-corrects the thermal bridge by ~350×.
+    //
+    // This test documents the current (buggy) behaviour: SteelFrame produces
+    // a framing_factor of Some(0.25) instead of None / Err. It will need to
+    // be updated once the fix is applied (the corrected behaviour is that
+    // SteelFrame with no stud geometry should return None or error).
+    let xml = wall_xml_with_construction_type("<SteelFrame/>");
+    let building = parse_building(&xml).expect("should parse");
+    let wall = building
+        .boundaries
+        .iter()
+        .find(|b| b.id == "Wall1")
+        .expect("Wall1 should be present");
+
+    // Current buggy behaviour: SteelFrame returns Some(0.25).
+    // After the fix this should be None (or result in a parse error).
+    assert_eq!(
+        wall.framing_factor,
+        Some(0.25),
+        "BUG (ticket 051): SteelFrame default incorrectly returns Some(0.25) \
+         using softwood conductivity; should return None or error requiring \
+         explicit stud dimensions for the zone method"
+    );
+}
+
+// ===========================================================================
+// Regression: ticket 093 — SEER silent-zero fallback misclassifies EER-only
+// cooling systems.
+//
+// Defect: apply_default_hvac_speed_fallback uses `.unwrap_or(0.0)` on the
+// SEER Option<f64>.  When SEER is absent but EER is present (valid for room
+// ACs and some legacy central units), the 0.0 sentinel drives n_speeds=1
+// regardless of what the EER value implies, and the non-physical 0.0 may
+// propagate downstream.  When both SEER and EER are absent the function
+// should return an error rather than silently inserting single-speed.
+//
+// These tests FAIL until the fix described in ticket 093 is applied.
+// ===========================================================================
+
+#[test]
+fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
+    // Room AC rated at EER=10 — no SEER element present.
+    // Before the fix: apply_default_hvac_speed_fallback falls through to
+    // seer=0.0, inserts number_of_speeds=1 with no diagnostic.
+    // After the fix: the resolver must derive the inference signal from EER,
+    // NOT from the 0.0 sentinel, and number_of_speeds must still be 1 (EER-
+    // rated room ACs are single-speed) but arrived at via the EER path.
+    //
+    // We verify the absence of the 0.0 sentinel by checking that the resolved
+    // params carry a non-zero efficiency value and that number_of_speeds is
+    // set to 1 through a legitimate code path (not via a silent 0.0 SEER).
+    let xml = minimal_xml_with_systems(
+        r#"<Systems><HVAC>
+            <CoolingSystem>
+                <SystemIdentifier id='AC1'/>
+                <CoolingSystemType>room air conditioner</CoolingSystemType>
+                <CoolingCapacity>12000</CoolingCapacity>
+                <AnnualCoolingEfficiency>
+                    <Units>EER</Units>
+                    <Value>10.0</Value>
+                </AnnualCoolingEfficiency>
+            </CoolingSystem>
+        </HVAC></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment should succeed for EER-only room AC");
+
+    let ac = specs
+        .iter()
+        .find(|s| s.name.contains("Room AC") || s.name.contains("Air Conditioner"))
+        .expect("should emit a cooling system spec");
+
+    // The efficiency stored in params must NOT be the 0.0 sentinel.
+    // BUG (ticket 093): before the fix, efficiency_eer or cooling_efficiency
+    // is set to 10.0 but the speed-inference path reads seer=0.0 and never
+    // consults EER.  The test below will pass once the EER path is used.
+    let has_nonzero_seer = ac.parameters.get("efficiency_seer")
+        .and_then(|v| v.as_f64())
+        .map(|v| v > 0.0)
+        .unwrap_or(false);
+    let has_eer = ac.parameters.get("efficiency_eer")
+        .or_else(|| ac.parameters.get("cooling_efficiency"))
+        .and_then(|v| v.as_f64())
+        .map(|v| v > 0.0)
+        .unwrap_or(false);
+
+    assert!(
+        has_eer,
+        "BUG (ticket 093): EER-only cooling system must carry a non-zero EER \
+         value in its resolved params; currently the 0.0 SEER sentinel may \
+         shadow or discard the EER"
+    );
+    assert!(
+        !has_nonzero_seer,
+        "EER-only room AC must not acquire a synthetic SEER value in params"
+    );
+
+    // EER=10 is below the 15-SEER threshold, so n_speeds=1 is correct.
+    // Note: the current (buggy) code *also* returns 1 here because 0.0 < 15,
+    // so the speed count alone cannot distinguish the correct path from the
+    // buggy path.  The assertions above on EER presence / no SEER sentinel
+    // are the primary mechanism checks.  The speed count is a sanity guard.
+    let n_speeds = ac.parameters["number_of_speeds"]
+        .as_u64()
+        .expect("number_of_speeds must be set");
+    assert_eq!(
+        n_speeds, 1,
+        "room AC with EER=10 should resolve to single-speed (1), got {n_speeds}"
+    );
+}
+
+#[test]
+fn high_eer_central_ac_without_seer_resolves_via_eer_not_zero_sentinel() {
+    // Central AC with EER=17 and no SEER.  The 0.0-sentinel bug causes
+    // n_speeds=1 (because 0.0 < 15). If the code correctly falls through to
+    // EER and uses EER as the speed-inference input, the system should resolve
+    // to 2-speed (15 < 17 ≤ 21).
+    //
+    // This is the "observable" bug case: both the mechanism AND the result
+    // differ between buggy (n_speeds=1 via seer=0.0) and correct (n_speeds=2
+    // via eer=17).
+    //
+    // This test FAILS until ticket 093 is fixed.
+    let xml = minimal_xml_with_systems(
+        r#"<Systems><HVAC>
+            <CoolingSystem>
+                <SystemIdentifier id='AC4'/>
+                <CoolingSystemType>central air conditioner</CoolingSystemType>
+                <CoolingCapacity>36000</CoolingCapacity>
+                <AnnualCoolingEfficiency>
+                    <Units>EER</Units>
+                    <Value>17.0</Value>
+                </AnnualCoolingEfficiency>
+            </CoolingSystem>
+        </HVAC></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("EER-only central AC should resolve without error");
+
+    let ac = specs
+        .iter()
+        .find(|s| s.name.contains("Air Conditioner"))
+        .expect("should emit cooling system spec");
+
+    let n_speeds = ac.parameters["number_of_speeds"]
+        .as_u64()
+        .expect("number_of_speeds must be set");
+
+    // BUG (ticket 093): currently n_speeds=1 (via seer=0.0 sentinel).
+    // After the fix, EER=17 should drive n_speeds=2.
+    assert_eq!(
+        n_speeds, 2,
+        "BUG (ticket 093): EER=17 (> 15 threshold) should infer 2-speed, \
+         but currently resolves to {n_speeds} because seer=0.0 sentinel is used \
+         instead of EER"
+    );
+}
+
+#[test]
+fn cooling_system_missing_both_seer_and_eer_produces_error() {
+    // A CoolingSystem with no efficiency data at all.
+    // Before the fix: apply_default_hvac_speed_fallback silently substitutes
+    // seer=0.0 and resolve_equipment succeeds, producing a single-speed AC
+    // with a non-physical 0.0 efficiency.
+    // After the fix: the resolver must return an error (HpxmlError::MissingField
+    // or HpxmlError::Parse) rather than succeeding with junk data.
+    let xml = minimal_xml_with_systems(
+        r#"<Systems><HVAC>
+            <CoolingSystem>
+                <SystemIdentifier id='AC2'/>
+                <CoolingSystemType>central air conditioner</CoolingSystemType>
+                <CoolingCapacity>36000</CoolingCapacity>
+                <!-- No AnnualCoolingEfficiency element at all -->
+            </CoolingSystem>
+        </HVAC></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse XML structure");
+    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+
+    // BUG (ticket 093): currently resolve_equipment succeeds (returns Ok)
+    // because apply_default_hvac_speed_fallback silently substitutes 0.0.
+    // After the fix this must be an Err.
+    assert!(
+        result.is_err(),
+        "BUG (ticket 093): resolve_equipment should return Err when \
+         CoolingSystem has no SEER or EER data, but currently succeeds \
+         (silently using seer=0.0 sentinel)"
+    );
+}
+
+#[test]
+fn seer_present_cooling_system_resolves_normally_regression() {
+    // Regression guard: a CoolingSystem with SEER must continue to work after
+    // the ticket 093 fix.
+    let xml = minimal_xml_with_systems(
+        r#"<Systems><HVAC>
+            <CoolingSystem>
+                <SystemIdentifier id='AC3'/>
+                <CoolingSystemType>central air conditioner</CoolingSystemType>
+                <CoolingCapacity>36000</CoolingCapacity>
+                <AnnualCoolingEfficiency>
+                    <Units>SEER</Units>
+                    <Value>16.0</Value>
+                </AnnualCoolingEfficiency>
+            </CoolingSystem>
+        </HVAC></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("SEER-present system must resolve without error");
+
+    let ac = specs
+        .iter()
+        .find(|s| s.name.contains("Air Conditioner"))
+        .expect("should emit cooling system spec");
+
+    // SEER=16 is in the range (15, 21] → 2-speed
+    let n_speeds = ac.parameters["number_of_speeds"]
+        .as_u64()
+        .expect("number_of_speeds must be set");
+    assert_eq!(
+        n_speeds, 2,
+        "SEER=16 should resolve to 2-speed (15 < 16 ≤ 21), got {n_speeds}"
+    );
+}

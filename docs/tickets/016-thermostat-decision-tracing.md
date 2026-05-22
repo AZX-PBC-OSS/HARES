@@ -183,3 +183,66 @@ The implementer of this ticket must NOT add any persistent telemetry keys. Conve
 - #019 — Expose speed_frac, PLR, PLF, startup_multiplier as telemetry keys (complements tracing with persistent data)
 - #020 — Setpoint chain visibility (persistent telemetry; see coordination note above)
 - #006 — Extract thermostat FSM (infrastructure for cleaner tracing insertion points)
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-20
+
+### Code Confirmation
+
+- [x] Referenced line numbers still match:
+  - `update_mode()` — `hvac_core.rs:654-734` (ticket says 654-733; off by 1 on the closing brace; function body is correct)
+  - `is_cycle_change_allowed()` — `thermostat.rs:171-184` ✓ exact match
+  - `can_transition_mode()` — `hvac_core.rs:790-809` ✓ exact match
+  - `select_speed_with_zone_temp()` — `staging.rs:75-119` (ticket says 69-119; function signature starts at 75, outer wrapper `select_speed` at 69; both are present)
+  - `apply_startup_capacity_degradation()` — `staging.rs:315-323` ✓ exact match
+  - `capacity_multiplier()` — `speed_control.rs:71-97` ✓ exact match
+  - `tracing::debug!` in staging — `staging.rs:287` ✓ exact match
+  - `tracing::warn!` calls — `hvac_core.rs:530`, `ac_config.rs:185`, `staging.rs:301`, `duct_distribution.rs:27` ✓ all confirmed
+  - `use tracing::warn` import in `duct_distribution.rs` — line 9 ✓ exact match
+- [x] Described logic matches current implementation — the ticket correctly describes each function's guard conditions and the absence of any logging.
+- [x] Bug confirmed: grep of `crates/hares-equipment/src/hvac/` for `tracing::debug!` or `tracing::warn!` returns exactly 5 hits: 1 `debug!` (staging.rs:287) and 4 `warn!` (hvac_core.rs:530, ac_config.rs:185, staging.rs:301, duct_distribution.rs:27). Zero are in `update_mode()`, `is_cycle_change_allowed()`, `can_transition_mode()`, `select_speed_with_zone_temp()`, or `apply_startup_capacity_degradation()`.
+- [x] OCHRE cross-check: **OCHRE has no equivalent logging** — the Python files `HVAC.py` and `Equipment.py` contain no `import logging` or `logger.*` calls in their thermostat/HVAC mode-transition paths. The HARES gap mirrors (and even slightly exceeds) OCHRE's own lack of diagnostics. No divergence — both are silent.
+- [x] EnergyPlus cross-check: **N/A for this ticket** — the ticket concerns diagnostic instrumentation (`tracing::debug!`), not physics or algorithms. EnergyPlus source code and engineering reference are not relevant to whether log calls are present.
+
+### Web-Verified Citations
+
+This ticket contains one reference: the `tracing` crate documentation at `https://docs.rs/tracing`.
+
+- **Citation**: "`tracing` crate documentation: https://docs.rs/tracing — structured diagnostic events"
+- **Source found**: [https://docs.rs/tracing/latest/tracing/](https://docs.rs/tracing/latest/tracing/) and [https://docs.rs/tracing/latest/tracing/level_filters/index.html](https://docs.rs/tracing/latest/tracing/level_filters/index.html)
+- **Quoted passage** (from level_filters module): *"Trace instrumentation at disabled levels will be skipped and will not even be present in the resulting binary unless the verbosity level is specified dynamically."* and *"A crate can disable trace level instrumentation in debug builds and trace, debug, and info level instrumentation in release builds with features like `'max_level_debug'` and `'release_max_level_warn'`."*
+- **Verdict**: Confirmed. The `tracing` crate provides both runtime filtering (no event construction when no subscriber expresses interest) and compile-time static filtering via feature flags (`max_level_*`, `release_max_level_*`).
+
+**Nuance on the ticket's claim**: The ticket states "tracing macros are compiled out at build time when no subscriber enables the DEBUG level." This is a slight overstatement. Tracing macros are compiled out at build time **only when the `max_level_debug` or similar feature flag is explicitly set** in `Cargo.toml`. Without those flags (the current state — workspace `Cargo.toml` only sets `release_max_level_info`), the runtime path takes a fast subscriber-interest check that avoids constructing the event when no subscriber is active, but the call sites themselves remain in the binary. The performance claim is still substantially correct: the overhead is negligible when no subscriber is active. The feature flag `release_max_level_info` in the workspace confirms that in release builds, `debug!` calls are fully eliminated at compile time. In debug builds they use runtime filtering.
+
+- **Citation (implicit)**: The approach of not logging inside `can_transition_mode()` itself (ticket §Step 3 rationale) is a design choice without an external citation — correctly attributed to the principle of "single responsibility."
+- **Verdict**: No citation to verify; the design rationale is sound.
+
+### Legitimacy
+
+- **Verdict**: **Legitimate**
+- **Rationale**: All five code locations cited by the ticket are confirmed to have zero diagnostic logging. The tracing-call inventory (1 debug + 4 warn, none in thermostat paths) matches exactly. The `tracing` crate reference is confirmed: `docs.rs/tracing` is the authoritative source and it supports both runtime and compile-time performance guarantees. The ticket's proposal to log at `tracing::debug!` level using structured fields is idiomatic Rust and correct for the problem described. The coordination note with ticket-020 (persistent telemetry vs transient tracing) is a sound architectural distinction. The only minor inaccuracy is "compiled out at build time when no subscriber enables the DEBUG level" — the compile-out only happens when the `max_level_*` feature flag is set; otherwise it is runtime-filtered. In release builds, the workspace `release_max_level_info` feature does compile out `debug!` calls, so the claim is correct for release builds.
+
+### Proposed Fix Summary
+
+Add `tracing::debug!` calls at six locations in `crates/hares-equipment/src/hvac/`:
+
+1. **`hvac_core.rs` — `update_mode()` entry** (~line 657): log `zone_temp`, `heating_setpoint`, `cooling_setpoint`, `current_mode` before any guard check.
+2. **`hvac_core.rs` — `update_mode()` after computing `next_mode`** (~line 722): log `current_mode`, `next_mode`, `offset`, `hysteresis_c`.
+3. **`thermostat.rs` — `is_cycle_change_allowed()`** (line 182): when returning `false`, log `elapsed_s`, `min_cycle_time_s`.
+4. **`hvac_core.rs` — `update_mode()` call site of `can_transition_mode()`** (line 728): when the guard returns `false`, log `current_mode`, `proposed_mode`, `elapsed_s`, `min_on_time_s`, `min_off_time_s`.
+5. **`staging.rs` — `select_speed_with_zone_temp()`** (~line 116): when `speed_index` or `speed_frac` changes, log `old_speed_index`, `new_speed_index`, `speed_frac`, `part_load_ratio`.
+6. **`staging.rs` — `apply_startup_capacity_degradation()`** (~line 321): when `mult < 1.0`, log `startup_multiplier`, `c_d`, `time_since_start_min`, `steady_capacity_w`, `degraded_capacity_w`.
+
+Modules that don't already have `use tracing::debug;` will need the import added. No production logic changes; no new telemetry keys. `thermostat.rs` and `staging.rs` will each need `use tracing::debug;` added.
+
+### Test Written
+
+- **File**: `crates/hares-equipment/tests/hvac_tests.rs` (appended after line 2382)
+- **Functions added**:
+  - `ticket_016_update_mode_heating_to_deadband_transition` — exercises the full `update_mode()` path (Deadband→Heating→Deadband) via the public Equipment API with a Gas Furnace. Passes before and after the ticket is implemented.
+  - `ticket_016_update_mode_cooling_transition` — exercises the Cooling branch of `update_mode()` (Deadband→Cooling→Deadband) via the public Equipment API with an Air Conditioner. Passes before and after the ticket is implemented.
+- **Note on min_on_time / min_cycle_time paths**: These are already comprehensively covered by internal unit tests in `hvac_core.rs` (`can_transition_mode_allows_when_disabled`, `min_on_time_blocks_early_shutdown`, `min_off_time_blocks_early_restart`, `grid_emergency_off_blocked_until_min_on_time_elapses`) and `thermostat.rs`. The startup degradation path is covered by unit tests in `speed_control.rs` (`startup_ramp_below_one_at_first_step`, `startup_ramp_reaches_one_at_t_full`). These internal tests cannot be easily supplemented from external test binaries without access to `#[cfg(test)] test_extras_mut`.
+- **Why these tests don't "fail" before the ticket**: Ticket-016 adds purely additive `tracing::debug!` calls that have no effect on return values or observable state. There are no correctness bugs to surface. The regression tests document and protect the behavioural contracts of the code paths being instrumented, ensuring that adding tracing does not accidentally break mode-transition logic.

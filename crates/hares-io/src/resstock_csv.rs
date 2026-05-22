@@ -753,4 +753,102 @@ Diffuse Horizontal Radiation [W/m2]
             "ResStock CSV has no albedo column; surface_albedo should be None"
         );
     }
+
+    /// Build a synthetic ResStock CSV with a given interval (minutes) starting
+    /// from a leap-year base date.  Used to expose the leap-year step-inference bug.
+    fn build_test_csv_leap_year(interval_minutes: u32) -> String {
+        use chrono::{NaiveDate, TimeDelta};
+
+        // 2004 is a leap year: 366 days × (60/interval_minutes) rows/day
+        let rows_per_day = (60 * 24 / interval_minutes) as usize;
+        let total_rows = 366 * rows_per_day;
+
+        let mut lines = Vec::with_capacity(total_rows + 1);
+        lines.push(
+            "date_time,Dry Bulb Temperature [°C],Relative Humidity [%],\
+             Wind Speed [m/s],Wind Direction [Deg],\
+             Global Horizontal Radiation [W/m2],\
+             Direct Normal Radiation [W/m2],\
+             Diffuse Horizontal Radiation [W/m2]"
+                .to_string(),
+        );
+
+        let base = NaiveDate::from_ymd_opt(2004, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+
+        for i in 0..total_rows {
+            // End-of-interval: first row is at base + 1 interval.
+            let dt = base + TimeDelta::minutes((i as i64 + 1) * interval_minutes as i64);
+            lines.push(format!(
+                "{},10.0,60.0,3.0,180.0,0.0,0.0,0.0",
+                dt.format("%Y-%m-%d %H:%M:%S")
+            ));
+        }
+
+        lines.join("\n")
+    }
+
+    // Regression test for the leap-year timestep inference bug (ticket #029).
+    // A 30-minute sub-hourly leap-year file has 17568 rows.
+    // The buggy code uses `8760 * 3600` as the year length, so
+    // `31536000 % 17568 == 1440 != 0` and it falls back to 3600 s.
+    // The correct answer is 8784 * 3600 / 17568 = 1800 s.
+    // This test FAILS until the fix in ticket #029 is applied.
+    #[test]
+    fn leap_year_30min_step_inferred_correctly() {
+        let csv = build_test_csv_leap_year(30);
+        let result = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0)
+            .expect("should parse 17568-row leap-year CSV");
+        assert_eq!(result.len(), 17568);
+        assert_eq!(
+            result.meta.source_step_secs, 1800,
+            "30-min sub-hourly leap-year file should infer 1800 s step, \
+             got {} s (leap-year fix not applied)",
+            result.meta.source_step_secs
+        );
+    }
+
+    // Regression test: hourly leap-year file (8784 rows) should still
+    // infer 3600 s even though the fix changes how the year length is computed.
+    // With the fix applied this must also pass.
+    #[test]
+    fn leap_year_hourly_step_inferred_correctly() {
+        let csv = build_test_csv_leap_year(60);
+        let result = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0)
+            .expect("should parse 8784-row leap-year CSV");
+        assert_eq!(result.len(), 8784);
+        assert_eq!(
+            result.meta.source_step_secs, 3600,
+            "hourly leap-year file should infer 3600 s step, got {} s",
+            result.meta.source_step_secs
+        );
+    }
+
+    /// Regression test — ticket 099: ResStock CSV timestamps are end-of-interval
+    /// (first row = 01:00:00, representing the period 00:00–01:00), identical to
+    /// the TMY3 and EPW convention. The midpoint of each hourly record therefore
+    /// lies 1800 s (30 min) before the timestamp, so `midpoint_offset_secs` must
+    /// be 1800, not 0.
+    ///
+    /// Evidence: real NREL ResStock AMY 2018 CSV files
+    /// (e.g. G0100630_2018.csv) start at `2018-01-01 01:00:00`, confirming the
+    /// end-of-interval convention. The TMY3 path was corrected to 1800 (B4 fix at
+    /// `tmy3.rs`); this test guards the equivalent fix for the ResStock CSV path.
+    ///
+    /// This test FAILS until `midpoint_offset_secs: 0` is changed to
+    /// `midpoint_offset_secs: 1800` in `parse_resstock_csv_str`.
+    #[test]
+    fn resstock_midpoint_offset_is_1800_seconds() {
+        let csv = build_test_csv(8760);
+        let result = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0)
+            .expect("should parse 8760-row CSV");
+        assert_eq!(
+            result.meta.midpoint_offset_secs, 1800,
+            "ResStock CSV uses end-of-interval timestamps: midpoint_offset_secs \
+             must be 1800 s (30 min), not {}",
+            result.meta.midpoint_offset_secs
+        );
+    }
 }

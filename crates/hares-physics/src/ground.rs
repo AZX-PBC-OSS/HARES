@@ -253,4 +253,43 @@ mod tests {
         let t = kusuda_achenbach_temp(1.0, 100.0, 12.0, 10.0, 35.0, 0.0);
         assert_eq!(t, 12.0, "zero diffusivity should return annual mean");
     }
+
+    /// Regression test for ticket 035: verifies the ticket's Definition-of-Done
+    /// numerical example (140 m² slab, P=50 m, uninsulated F2≈1.17, ΔT=15°C → ~878 W).
+    ///
+    /// This test exercises slab_perimeter_loss_w and f2_coefficient in isolation.
+    /// It will keep passing regardless of whether those functions are wired into
+    /// the solver — use it to confirm the physics is correct, not that the
+    /// integration is done.
+    #[test]
+    fn ticket_035_slab_140m2_p50_uninsulated_15k_delta_approx_878w() {
+        let perimeter_m = 50.0;
+        let f2 = f2_coefficient(0.0); // uninsulated → 1.17 W/(m·K)
+        let t_indoor_c = 20.0;
+        let t_ground_c = 5.0; // ΔT = 15 K
+        let q = slab_perimeter_loss_w(perimeter_m, f2, t_indoor_c, t_ground_c);
+        // Expected: 1.17 × 50 × 15 = 877.5 W (ticket states ~878 W, ±5%)
+        let expected = 877.5;
+        let tolerance = expected * 0.05;
+        assert!(
+            (q - expected).abs() <= tolerance,
+            "expected {expected} ± {tolerance} W, got {q} W"
+        );
+    }
+
+    /// Regression test for ticket 035: insulated slab (R-5 perimeter) must
+    /// produce strictly lower heat loss than uninsulated at the same ΔT.
+    #[test]
+    fn ticket_035_r5_perimeter_slab_lower_loss_than_uninsulated() {
+        let perimeter_m = 50.0;
+        let delta_t = 15.0;
+        let t_indoor = 20.0;
+        let t_ground = t_indoor - delta_t;
+        let q_unins = slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.0), t_indoor, t_ground);
+        let q_r5 = slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.88), t_indoor, t_ground);
+        assert!(
+            q_r5 < q_unins,
+            "R-5 perimeter insulation should reduce loss: unins={q_unins} W, R-5={q_r5} W"
+        );
+    }
 }

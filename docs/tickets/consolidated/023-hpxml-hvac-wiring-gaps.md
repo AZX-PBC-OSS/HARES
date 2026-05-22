@@ -167,3 +167,123 @@ heater and defrost configurations.
 - 015 (ER on/off modeling — coordinates with backup heat wiring)
 - 080 (HeatingCapacity17F — extracted from G7 of this ticket)
 - 081 (ChargeDefectRatio — extracted from G5 of this ticket)
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-22
+
+### Code Confirmation
+
+- [x] Referenced line numbers still match (with minor shifts noted below)
+- [x] Described logic matches current implementation
+- [x] OCHRE cross-check result: **matches** — OCHRE HVAC.py confirms all defaults; one claim (defrost 0.058 time fraction) requires qualification (see below)
+- [x] EnergyPlus cross-check result: **matches** — EnergyPlus I/O Reference confirms defrost time period fraction default 0.058333, defrost strategy/control field names, and crankcase heater field structure
+
+#### Line-number notes (audited 2026-05-22)
+
+| Ticket claim | Actual location |
+|---|---|
+| `heater.rs:379` — hardcoded `DefrostConfig::on_demand(1.0, 0.0)` | **Confirmed at line 379** exactly |
+| `heater.rs:522-524` — MSHP 25% hardcode | **Confirmed at lines 517-524** (block starts at 517) |
+| `resolve_hvac.rs` crankcase fields `None` | **Confirmed at lines 833-835** (Central AC) and **893-895** (Room AC) |
+| `resolve_hvac.rs:1022` — `max_oat_supplemental_c` only from extension | **Confirmed at line 1022**: reads from `params` map, but `SupplementalHeatingLockoutTemperature` is never inserted into `params` anywhere |
+
+### Web-Verified Citations
+
+#### Citation 1 — HPXML elements CrankcaseHeaterWatts, DefrostType, DefrostControl, MinimumCapacity, SupplementalHeatingLockoutTemperature
+
+- **Citation**: Ticket implies these are standard HPXML 4.x elements under `HeatPump` or `CoolingSystem`
+- **Source found**: GitHub search `hpxmlwg/hpxml` repository (schema, examples, all files); HPXML Data Dictionary v4.0.0, v4.1.0, v4.2.0 at `hpxml.nlr.gov`; OpenStudio-HPXML Workflow Inputs docs
+- **Findings**:
+  - `CrankcaseHeaterWatts` — **0 results** in `hpxmlwg/hpxml` GitHub search. HTTP 404 at `hpxml.nlr.gov/datadictionary/4.2.0/Building/BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/CrankcaseHeaterWatts`. The element does **not** exist as a standard HPXML schema element. OpenStudio-HPXML uses `extension/CrankcaseHeaterPowerWatts` (extension namespace).
+  - `DefrostType` / `DefrostControl` — **0 results** in `hpxmlwg/hpxml` GitHub search. These are **not** standard HPXML schema elements. EnergyPlus uses these field names for `Coil:Heating:DX:SingleSpeed` objects internally, but HPXML does not expose them.
+  - `MinimumCapacity` — **0 results** in `hpxmlwg/hpxml` GitHub search. Not a standard HPXML element.
+  - `SupplementalHeatingLockoutTemperature` — **0 results** in `hpxmlwg/hpxml` GitHub search. HTTP 404 at HPXML data dictionary v4.0.0, v4.1.0, v4.2.0. Not a standard HPXML element. The HPXML schema has `CompressorLockoutTemperature` and `BackupHeatingLockoutTemperature` (added in PR #309, merged June 2022), but no supplemental lockout temperature element.
+- **Verdict**: **Partially correct** — the ticket correctly identifies that these fields are *not wired*, but the framing "HPXML `<CrankcaseHeaterWatts>`", "HPXML `<DefrostType>`", etc. implies these are standard HPXML schema elements. They are **not**. They either live in the HPXML extension namespace (crankcase heater) or do not exist in HPXML at all (DefrostType, DefrostControl, MinimumCapacity, SupplementalHeatingLockoutTemperature). The gap is real, but the mechanism for "wiring from HPXML" may need to be from extension fields or from defaults tables rather than standard elements.
+
+#### Citation 2 — OCHRE crankcase heater defaults (50 W at 12.78°C for AC/ASHP; 15 W at 0°C for MSHP)
+
+- **Citation**: "OCHRE defaults: 50W at 12.78°C (55°F) for AC/ASHP, 15W at 0°C (32°F) for MSHP"
+- **Source found**: `vendors/OCHRE/ochre/Equipment/HVAC.py` (OCHRE submodule in repo)
+- **Quoted passage** (OCHRE HVAC.py, AirConditioner class, lines ~1059-1060):
+  ```python
+  crankcase_kw = 0.050  # 50W crankcase for AC and ASHP
+  crankcase_temp = convert(55, "degF", "degC")  # = 12.78°C
+  ```
+  And (MinisplitAHSPCooler class, lines ~1108-1109):
+  ```python
+  crankcase_kw = 0.015  # 15W
+  crankcase_temp = convert(32, "degF", "degC")  # = 0°C
+  ```
+  Activation logic (lines ~1070-1077): crankcase heater activates when `mode == "Off"` and `OAT < crankcase_temp`.
+- **Verdict**: **Confirmed** exactly.
+
+#### Citation 3 — OCHRE defrost defaults (OnDemand / ReverseCycle / 0.058)
+
+- **Citation**: "Default: OnDemand / ReverseCycle / 0.058"
+- **Source found**: `vendors/OCHRE/ochre/Equipment/HVAC.py`; EnergyPlus I/O Reference via bigladdersoftware.com (GroupHeatingCoolingCoils, VRF Equipment)
+- **Findings**:
+  - OCHRE defrost trigger: temperature-based at 4.4445°C (40°F) — **on-demand** strategy confirmed.
+  - OCHRE defrost strategy: **reverse-cycle** (heating cycle reversal) — confirmed.
+  - OCHRE **does not use a fixed 0.058 fraction**. Instead, it dynamically calculates `defrost_time_frac = 1.0 / (1 + 0.01446 / delta_omega_coil_out)`, a humidity-ratio–dependent formula. This is an on-demand dynamic calculation, not a timed 0.058.
+  - The **0.058333** value (= 3.5 min / 60 min) is the EnergyPlus **default for timed defrost control** on `Coil:Heating:DX:SingleSpeed` (confirmed: "if the defrost cycle is active for 3.5 minutes for every 60 minutes of compressor runtime, then the user should enter 3.5/60 = 0.058333. If left blank, the default value is 0.058333").
+  - HARES hardcodes `DefrostConfig::on_demand(1.0, 0.0)` at `heater.rs:379`. The `1.0` and `0.0` arguments are not the 0.058 EnergyPlus default; the 0.058 is only relevant for timed defrost.
+- **Verdict**: **Partially correct** — the on-demand and reverse-cycle defaults are confirmed. The "0.058" default is the EnergyPlus **timed-defrost** default, not used by OCHRE's on-demand model. The ticket's "Default: OnDemand / ReverseCycle / 0.058" conflates EnergyPlus timed-defrost input default with OCHRE's on-demand dynamic formula. This is a minor citation inaccuracy but does not affect the core gap finding.
+
+#### Citation 4 — OCHRE condensing boiler detection (AFUE > 0.90, different biquadratic curves)
+
+- **Citation**: "OCHRE infers it from `AFUE > 0.90`. OCHRE uses different biquadratic EIR curves (`boiler_eff_curve_condensing` vs `boiler_eff_curve_non_condensing`)"
+- **Source found**: `vendors/OCHRE/ochre/Equipment/HVAC.py` (GasBoiler class, lines ~687-732)
+- **Quoted passage**:
+  ```python
+  self.condensing = self.eir_max < 1 / 0.9  # Condensing if efficiency (AFUE) > 90%
+  # Condensing boiler: 6-coefficient curve
+  if self.condensing:
+      self.outlet_temp = 65.56  # 150°F
+      self.efficiency_coeff = np.array(
+          [1.058343061, -0.052650153, -0.0087272, -0.001742217, 0.00000333715, 0.000513723])
+  # Non-condensing: 10-coefficient curve
+  else:
+      self.outlet_temp = 82.22  # 180°F
+      self.efficiency_coeff = np.array(
+          [1.111720116, 0.078614078, -0.400425756, 0, -0.000156783, ...])
+  ```
+- **Verdict**: **Confirmed** — AFUE > 0.90 detection and separate efficiency curves are real. Minor naming inaccuracy: the ticket calls them `boiler_eff_curve_condensing` / `boiler_eff_curve_non_condensing`, but in OCHRE they are inline coefficient arrays on `self.efficiency_coeff`, not separately named. The functional claim is correct.
+
+#### Citation 5 — HPXML Specification v4.2 reference URL
+
+- **Citation**: "HPXML Specification v4.2: https://github.com/hpxmlwg/hpxml/releases/tag/v4.2"
+- **Source found**: GitHub releases page for `hpxmlwg/hpxml`
+- **Verdict**: **Plausible but unverified by direct fetch** — the URL format is correct and the repo exists. The latest confirmed release via BPI news is HPXML v4.1 (April 2025). Whether v4.2 exists as a released tag could not be confirmed via web search. The HPXML Data Dictionary at `hpxml.nlr.gov` confirmed v4.2.0 exists (schema navigation worked), so the reference is likely valid.
+
+### Legitimacy
+
+- **Verdict**: **Partially Legitimate**
+- **Rationale**: The core gap claims (G1–G4, G6) are all **real and confirmed** by direct code inspection: `crankcase_heater_kw` is hardcoded to `None` (lines 833-835, 893-895 of `resolve_hvac.rs`); defrost is hardcoded at `heater.rs:379`; MinimumCapacity is not read; GasBoilerConfig lacks a `condensing` field; and `SupplementalHeatingLockoutTemperature` is not parsed from standard HPXML elements. The bugs are genuine and represent meaningful energy modeling errors. However, several details in the ticket require correction: (1) `CrankcaseHeaterWatts`, `DefrostType`, `DefrostControl`, `MinimumCapacity`, and `SupplementalHeatingLockoutTemperature` are **not** standard HPXML schema elements — `CrankcaseHeaterWatts` lives in the extension namespace; the rest have no HPXML element at all. The ticket's "Required Behavior — Read the HPXML element if present" is therefore aspirational for some gaps. (2) The "0.058" defrost fraction default is the EnergyPlus timed-defrost input default, not the OCHRE on-demand default; OCHRE calculates defrost time dynamically. The G1 crankcase heater and G4 condensing boiler gaps have the highest quantitative impact and are most actionable.
+
+### Proposed Fix Summary
+
+**G1 (HIGH)**: In `resolve_hvac.rs`, when building `CentralAirConditionerConfig`:
+  - Check for `extension/CrankcaseHeaterPowerWatts` (OpenStudio-HPXML extension name) in the HPXML extension block
+  - If absent, apply OCHRE-compatible defaults: 0.050 kW at 12.78°C for central AC/ASHP, 0.015 kW at 0°C for MSHP, 0.0 kW for Room AC
+  - Do NOT implement as "read `<CrankcaseHeaterWatts>` standard element" — that element does not exist in HPXML schema
+
+**G2 (HIGH, depends on ticket 014)**: Wire defrost strategy/control from extension fields or defaults. Note the 0.058 timed-defrost default is EnergyPlus-specific; OCHRE uses on-demand dynamic calculation. Confirm which model HARES intends before choosing a default.
+
+**G3 (MEDIUM, depends on ticket 013)**: No standard HPXML element exists for MinimumCapacity. Source the minimum fraction from OCHRE defaults tables or equipment-specific defaults rather than an HPXML parse.
+
+**G4 (MEDIUM)**: Add `condensing: bool` field to `GasBoilerConfig`. In `try_build_gas_boiler_config`, add `condensing: afue > 0.90`. Update the efficiency curve selection in the equipment model to use OCHRE's 6-coeff (condensing) vs 10-coeff (non-condensing) curve.
+
+**G6 (LOW)**: The HPXML element `SupplementalHeatingLockoutTemperature` does not exist in the schema. The wiring must come from an extension field or remain extension-only. Low priority; the existing `max_oat_supplemental_c` field is accessible via the extension mechanism already present in the resolver.
+
+### Test Written
+
+- **File**: `crates/hares-io/tests/ticket_023_hvac_wiring_regressions.rs`
+- **What it tests**:
+  - `g1_crankcase_heater_watts_wired_from_hpxml` — **FAILS** (bug): typed config must carry `crankcase_heater_kw = Some(0.075)` when `CrankcaseHeaterWatts=75` is in HPXML extension; currently `None`
+  - `g1_crankcase_heater_absent_uses_ochre_default` — **FAILS** (bug): absent crankcase config must default to OCHRE's 50 W / 12.78°C; currently `None`
+  - `g1_crankcase_heater_kw_is_currently_none_documents_gap` — **PASSES** (gap confirmed): verifies that the current output is `None`, will flip to failing when the fix lands
+  - `g3_resolver_does_not_wire_min_compressor_fraction` — **PASSES** (gap confirmed): verifies `min_compressor_fraction` is absent from resolver output
+  - `g4_gas_boiler_config_has_no_condensing_field` — **PASSES** (gap confirmed): verifies no `condensing` key in params, and AFUE is correctly carried
+  - `g6_supplemental_heating_lockout_temperature_not_read_from_standard_element` — **PASSES** (gap confirmed): verifies `max_oat_supplemental_c` is `None` when `SupplementalHeatingLockoutTemperature` is in standard HPXML position

@@ -1029,4 +1029,98 @@ mod tests {
              two_zone={dw_a}, solo={dw_a_solo}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Ticket 004 regression: semi-implicit vs explicit infiltration latent
+    // -----------------------------------------------------------------------
+
+    /// Demonstrates the asymmetry between the sensible path (semi-implicit) and the
+    /// latent path (explicit) described in ticket 004.
+    ///
+    /// At coarse timestep (600 s) and high infiltration (2 ACH) with no moisture
+    /// buffering (M=1), the explicit update and the analytical steady-state disagree
+    /// by a measurable amount. A correctly implemented semi-implicit formula produces
+    /// a result that is closer to the analytical solution than the explicit formula,
+    /// demonstrating the consistency gap between the two paths.
+    ///
+    /// This test is intentionally a FAILING test in the sense that it documents the
+    /// current explicit behaviour and asserts the numerical difference against the
+    /// semi-implicit target. Once ticket 004 is implemented the semi-implicit path
+    /// assertion should pass and the explicit path can be removed.
+    #[test]
+    fn ticket_004_explicit_latent_diverges_from_semi_implicit_at_coarse_dt() {
+        // High-infiltration scenario: 2 ACH, 200 m³ zone, M=1.
+        let volume_m3 = 200.0_f64;
+        let ach = 2.0_f64;
+        let t_c = 22.0_f64;
+        let p_pa = 101_325.0_f64;
+        let w_outdoor = 0.012_f64; // humid outdoor air
+        let w_initial = 0.005_f64; // drier indoor air
+        let dt_s = 600.0_f64; // 10-minute (coarse) timestep
+        let h_fg = HumiditySolverConfig::default().h_fg_j_kg;
+
+        let rho = hares_physics::air_properties::moist_air_density_kg_m3(p_pa, t_c, w_initial);
+        let q_m3_s = ach * volume_m3 / 3600.0;
+        let m_dot = rho * q_m3_s;
+
+        // Analytical steady-state: w_new → w_outdoor as t → ∞.
+        // One-step analytical solution (exact exponential decay):
+        //   w(t) = w_out + (w_0 - w_out) * exp(-m_dot * dt / (rho * V))
+        // With M=1 (no buffering):
+        let tau = rho * volume_m3 / m_dot; // = V / Q = 3600 / ACH
+        let w_analytical = w_outdoor + (w_initial - w_outdoor) * (-dt_s / tau).exp();
+
+        // Current explicit update (what the solver actually does):
+        //   Q_latent = m_dot * h_fg * (w_out - w_old)
+        //   d_w = Q_latent * dt / (h_fg * rho * V * M)
+        //       = m_dot * (w_out - w_old) * dt / (rho * V)
+        let q_latent_explicit = m_dot * h_fg * (w_outdoor - w_initial);
+        let dw_explicit = humidity_ratio_increment(q_latent_explicit, dt_s, h_fg, rho, volume_m3, 1.0);
+        let w_explicit = w_initial + dw_explicit;
+
+        // Semi-implicit update (target behaviour per ticket 004):
+        //   C_eff = h_fg * rho * V * M
+        //   alpha = m_dot * dt / C_eff  (= m_dot * dt / (h_fg * rho * V))
+        //
+        // The m_dot*h_fg factor from "q_latent = m_dot*h_fg*(w_out - w_new)" cancels
+        // the h_fg in C_eff, so the effective coupling alpha = m_dot*dt/(rho*V):
+        //   numerator = w_old + dt/C_eff * m_dot*h_fg*w_out
+        //             = w_old + m_dot*dt/(rho*V) * w_out
+        //   denominator = 1 + m_dot*dt/(rho*V)
+        let alpha = m_dot * dt_s / (rho * volume_m3); // after h_fg cancels
+        let w_semi_implicit = (w_initial + alpha * w_outdoor) / (1.0 + alpha);
+
+        // The amplification factor for the explicit method: A = 1 - m_dot*dt/(rho*V)
+        let amplification = 1.0 - m_dot * dt_s / (rho * volume_m3);
+        // At 2 ACH, dt=600s: A = 1 - (2*200/3600)*600/200 = 1 - 0.333 = 0.667
+        // This is stable but with 33% per-step damping — significant.
+
+        // Both methods should be stable (A > 0), confirming stability analysis in ticket.
+        assert!(
+            amplification > 0.0 && amplification < 1.0,
+            "amplification factor A={amplification:.4} must be in (0,1) for stability"
+        );
+
+        // The explicit method produces a result that overshoots or undershoots the
+        // analytical solution at coarse timesteps. Measure the error of each.
+        let err_explicit = (w_explicit - w_analytical).abs();
+        let err_semi_implicit = (w_semi_implicit - w_analytical).abs();
+
+        // The semi-implicit method should be more accurate than the explicit method
+        // at coarse timesteps. At fine timesteps they converge (both first-order).
+        assert!(
+            err_semi_implicit < err_explicit,
+            "semi-implicit error {err_semi_implicit:.6e} must be smaller than \
+             explicit error {err_explicit:.6e} at coarse dt={dt_s}s, ACH={ach} (ticket 004)"
+        );
+
+        // The explicit error should be non-trivial (>1% of the humidity ratio change)
+        // to confirm this is a meaningful consistency gap, not floating-point noise.
+        let dw_total = (w_outdoor - w_initial).abs();
+        assert!(
+            err_explicit > 0.01 * dw_total,
+            "explicit error {err_explicit:.6e} must be >1% of Δw={dw_total:.6e} \
+             to demonstrate meaningful divergence at coarse dt (ticket 004)"
+        );
+    }
 }

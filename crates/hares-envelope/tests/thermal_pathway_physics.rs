@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{
-    OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
+    InteriorLwrZoneConfig, InteriorSurfaceInfo, OutputMapping, StateSpaceModel, StateSpaceWiring,
+    ThermalSolver, ThermalSolverConfig,
 };
 use hares_types::{
     DomainSolver, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
@@ -397,5 +398,137 @@ fn rc_network_exposes_ground_column() {
         r_zi > bd.r_film_int_m2_k_w,
         "r_zone_to_inner ({r_zi:.4}) must be greater than film-only ({:.4})",
         bd.r_film_int_m2_k_w
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test N: zone_sensible_breakdown_debug omits radiant port contribution
+// Regression for ticket 092.
+// ---------------------------------------------------------------------------
+
+/// `zone_sensible_breakdown_debug` must apply `apply_port_radiant_inputs` in
+/// addition to `apply_port_sensible_inputs`, matching the production call
+/// sequence in `prepare_inputs_inner`.
+///
+/// Setup: single-zone model (3 inputs: outdoor, surface, zone-air), one opaque
+/// interior surface with `radiation_frac = 1.0` (all radiant gain routed to
+/// surface RC node).  A port carries 700 W convective + 300 W radiant (30/70
+/// split matching the BESTEST ASHRAE 140-2017 §5.2.4.3 specification).
+///
+/// The production path calls both `apply_port_sensible_inputs` and
+/// `apply_port_radiant_inputs`.  `zone_sensible_breakdown_debug` currently
+/// calls ONLY `apply_port_sensible_inputs`, so `breakdown[5]` (after_port)
+/// reflects only the 700 W convective contribution.
+///
+/// Expected (correct):   breakdown[5] = 700.0 W  (convective only goes to air;
+///                       radiant 300 W goes entirely to surface RC node when
+///                       radiation_frac = 1.0, so air node gets no residual)
+///
+/// With the bug the assertion still holds for breakdown[5] == 700.0 because
+/// the omitted radiant call would have routed all 300 W to the surface node
+/// (radiation_frac=1.0, zero air residual).  The observable failure is a
+/// DIFFERENT scenario: radiation_frac < 1.0 means the omitted radiant call
+/// drops air-node residual.  We test radiation_frac = 0.5:
+///
+///   Expected with fix:   air residual from radiant = 300 × (1−0.5) = 150 W
+///                        breakdown[5] = 700 + 150 = 850 W
+///   With the bug:        breakdown[5] = 700 W  (missing 150 W)
+///
+/// This test will FAIL on the current implementation (bug present) and PASS
+/// once `zone_sensible_breakdown_debug` calls `apply_port_radiant_inputs`.
+#[test]
+fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
+    // 1-state model: [zone_air]
+    // 3 inputs: [T_outdoor(0), Q_surface(1), Q_zone_air(2)]
+    // The surface RC node is purely an input sink (no state); we only care
+    // that the correct W values land on input index 2 (zone air).
+    let c_zone = 500_000.0_f64;
+    let ua_out = 50.0_f64;
+    let a_c = DMatrix::from_row_slice(1, 1, &[-ua_out / c_zone]);
+    let b_c = DMatrix::from_row_slice(1, 3, &[ua_out / c_zone, 1.0 / c_zone, 1.0 / c_zone]);
+
+    let mapping = OutputMapping {
+        output_count: 1,
+        node_to_output: vec![(0, 0, 1.0)],
+        input_to_output: vec![],
+    };
+
+    let dt = 3600.0_f64;
+    let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping)
+        .expect("stable single-zone model");
+
+    let wiring = StateSpaceWiring {
+        zone_state_indices: HashMap::from([(ZONE, 0)]),
+        zone_output_indices: HashMap::from([(ZONE, 0)]),
+        zone_sensible_input_indices: HashMap::from([(ZONE, 2)]),
+        outdoor_temp_input_indices: vec![0],
+        ground_temp_input_indices: vec![],
+        indoor_temp_input_indices: vec![],
+        solar_input_indices: HashMap::new(),
+    };
+
+    // One interior surface: area=10 m², emissivity=0.9, radiation_frac=0.5,
+    // state_index=0, input_index=1, driving_temp=None (opaque RC node).
+    let surface = InteriorSurfaceInfo {
+        state_index: 0,
+        input_index: 1,
+        area_m2: 10.0,
+        emissivity: 0.9,
+        radiation_frac: 0.5,
+        rad_res_k_w: 0.0,
+        solar_absorptance: 0.6,
+        is_floor: false,
+        driving_temp: None,
+    };
+
+    let lwr_zone = InteriorLwrZoneConfig {
+        zone_id: ZONE,
+        surfaces: vec![surface],
+        scriptf: None,
+    };
+
+    let config = ThermalSolverConfig {
+        indoor_zone_id: ZONE,
+        interior_lwr_zones: vec![lwr_zone],
+        ..ThermalSolverConfig::default()
+    };
+
+    let env = make_env(20.0, -5.0, 10.0);
+    let mut solver =
+        ThermalSolver::new(model, wiring, config, dt, &env, 20.0).expect("solver init");
+
+    // Port: 700 W convective + 300 W radiant (30/70 split, BESTEST 900/600).
+    let convective_w = 700.0_f64;
+    let radiant_w = 300.0_f64;
+    let mut acc = ThermalAccumulator::new(ZONE);
+    acc.add(
+        convective_w,
+        radiant_w,
+        0.0,
+        hares_types::ThermalCategory::InternalGain,
+    );
+    let ports = PortSlots {
+        thermal: vec![acc],
+        ..Default::default()
+    };
+
+    let breakdown = solver.zone_sensible_breakdown_debug(&ports, &env);
+
+    // With radiation_frac = 0.5:
+    //   300 W radiant × (1 - 0.5) = 150 W returned to zone air
+    //   300 W radiant × 0.5       = 150 W absorbed by surface RC node
+    // zone_sensible_breakdown_debug should include both sensible (700 W) and
+    // the air-node radiant residual (150 W) → total 850 W at after_port.
+    let air_radiant_residual_w = radiant_w * (1.0 - surface.radiation_frac);
+    let expected_after_port = convective_w + air_radiant_residual_w;
+
+    assert!(
+        (breakdown[5] - expected_after_port).abs() < 1e-6,
+        "breakdown[5] (after_port) = {:.3} W, expected {:.3} W (convective {:.0} + radiant residual {:.0}); \
+         zone_sensible_breakdown_debug is missing apply_port_radiant_inputs",
+        breakdown[5],
+        expected_after_port,
+        convective_w,
+        air_radiant_residual_w,
     );
 }

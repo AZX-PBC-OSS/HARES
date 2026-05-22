@@ -726,4 +726,78 @@ mod tests {
         };
         assert!(cfg.validate().is_err());
     }
+
+    // --- Regression tests for ticket 009 ---
+
+    // Issue 1: `default_one()` is defined in both cooling_config.rs and heat_pump_config.rs.
+    // This test documents the expected serde default behaviour so that refactoring to a
+    // shared `core_config::default_one` does not silently change the default value.
+    #[test]
+    fn regression_009_number_of_speeds_defaults_to_one_heater() {
+        let json = serde_json::json!({ "cooling_capacity_w": 10_000.0, "cooling_eir": 16.0 });
+        let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            cfg.number_of_speeds, 1,
+            "ticket-009: default_one() must return 1 for number_of_speeds"
+        );
+    }
+
+    #[test]
+    fn regression_009_number_of_speeds_defaults_to_one_cooler() {
+        let json = serde_json::json!({ "cooling_capacity_w": 10_000.0, "cooling_eir": 16.0 });
+        let cfg: HeatPumpCoolerConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            cfg.number_of_speeds, 1,
+            "ticket-009: default_one() must return 1 for number_of_speeds (cooler)"
+        );
+    }
+
+    // Issue 2: HeatPumpHeaterConfig and HeatPumpCoolerConfig share fields without a common base.
+    // Verify the field sets are as described: heater has 5 heater-only fields, cooler has 1 cooler-only field.
+    #[test]
+    fn regression_009_heater_only_fields_missing_from_cooler_json() {
+        // stage_shrs is Cooler-only; the heater struct should reject it.
+        let json = serde_json::json!({
+            "cooling_capacity_w": 10_000.0,
+            "cooling_eir": 16.0,
+            "stage_shrs": [0.75, 0.72],
+        });
+        let result: Result<HeatPumpHeaterConfig, _> = serde_json::from_value(json);
+        assert!(
+            result.is_err(),
+            "ticket-009: HeatPumpHeaterConfig (deny_unknown_fields) must reject cooler-only field stage_shrs"
+        );
+    }
+
+    #[test]
+    fn regression_009_cooler_only_field_missing_from_heater_json() {
+        // hp_lockout_temp_c is Heater-only; the cooler struct should reject it.
+        let json = serde_json::json!({
+            "cooling_capacity_w": 10_000.0,
+            "cooling_eir": 16.0,
+            "hp_lockout_temp_c": -17.8,
+        });
+        let result: Result<HeatPumpCoolerConfig, _> = serde_json::from_value(json);
+        assert!(
+            result.is_err(),
+            "ticket-009: HeatPumpCoolerConfig (deny_unknown_fields) must reject heater-only field hp_lockout_temp_c"
+        );
+    }
+
+    // Issue 3: Equipment type name string literals have no compile-time safety.
+    // This test verifies the current literal values so a typo introduced during
+    // refactoring to constants would be caught immediately.
+    #[test]
+    fn regression_009_equipment_type_name_literals() {
+        assert_eq!(
+            HeatPumpHeaterConfig::equipment_type_name(),
+            "ASHP Heater",
+            "ticket-009: HeatPumpHeaterConfig equipment_type_name must be 'ASHP Heater'"
+        );
+        assert_eq!(
+            HeatPumpCoolerConfig::equipment_type_name(),
+            "ASHP Cooler",
+            "ticket-009: HeatPumpCoolerConfig equipment_type_name must be 'ASHP Cooler'"
+        );
+    }
 }

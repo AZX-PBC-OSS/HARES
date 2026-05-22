@@ -106,6 +106,124 @@ mod tests {
         );
     }
 
+    // --- Regression tests for ticket 003-tighten-biquadratic-default-bounds ---
+    // These tests FAIL with the current ±100°C defaults and PASS only after the fix.
+
+    /// Demonstrates that the current DEFAULT_BIQUADRATIC_X2_BOUNDS = (-100, 100) does NOT
+    /// clamp -60°C outdoor input — so evaluating at -60°C and -50°C produces DIFFERENT results.
+    /// After the fix (x2_bounds = (-50, 60)), both should produce the SAME result.
+    #[test]
+    fn default_x2_lower_bound_clamps_at_neg50_not_neg100() {
+        // Identity-ish coefficients: result ≈ x2 term dominates at extreme inputs.
+        // coeffs = [a, b, c, d, e, f] => a + b*x1 + c*x1² + d*x2 + e*x2² + f*x1*x2
+        let coeffs = [1.0, 0.0, 0.0, 0.1, 0.0, 0.0]; // result = 1.0 + 0.1*x2
+        let proposed_x2_lower = -50.0_f64;
+
+        // Curve with the PROPOSED tighter x2 lower bound of -50°C.
+        let curve_tight = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-10.0, 50.0),  // proposed x1 bounds
+            x2_bounds: (-50.0, 60.0),  // proposed x2 bounds
+        };
+
+        // With tight bounds, evaluating at -60°C outdoor must clamp to -50°C.
+        let at_neg60 = curve_tight.evaluate(20.0, -60.0);
+        let at_neg50 = curve_tight.evaluate(20.0, proposed_x2_lower);
+        assert_eq!(
+            at_neg60, at_neg50,
+            "With proposed x2_bounds=(-50,60): evaluate at -60°C must clamp to -50°C, \
+             but got at_neg60={at_neg60} vs at_neg50={at_neg50}"
+        );
+
+        // Curve with the CURRENT default bounds of ±100°C — does NOT clamp at -50°C.
+        let curve_current = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-100.0, 100.0),  // current default
+            x2_bounds: (-100.0, 100.0),  // current default
+        };
+        let current_at_neg60 = curve_current.evaluate(20.0, -60.0);
+        let current_at_neg50 = curve_current.evaluate(20.0, proposed_x2_lower);
+
+        // This assertion documents the BUG: with ±100 bounds the two values differ.
+        // After the fix is applied to hvac_core.rs DEFAULT_BIQUADRATIC_X2_BOUNDS,
+        // all callers that relied on the default will use (-50, 60) instead.
+        assert_ne!(
+            current_at_neg60, current_at_neg50,
+            "BUG present: with current x2_bounds=(-100,100), -60°C is NOT clamped to -50°C \
+             (got {current_at_neg60} vs {current_at_neg50}) — the bounds are too wide"
+        );
+    }
+
+    /// Demonstrates that the current DEFAULT_BIQUADRATIC_X2_BOUNDS = (-100, 100) does NOT
+    /// clamp +70°C outdoor input — so evaluating at +70°C and +60°C produces DIFFERENT results.
+    #[test]
+    fn default_x2_upper_bound_clamps_at_pos60_not_pos100() {
+        let coeffs = [1.0, 0.0, 0.0, 0.1, 0.0, 0.0]; // result = 1.0 + 0.1*x2
+        let proposed_x2_upper = 60.0_f64;
+
+        let curve_tight = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-10.0, 50.0),
+            x2_bounds: (-50.0, 60.0),
+        };
+        let at_pos70 = curve_tight.evaluate(20.0, 70.0);
+        let at_pos60 = curve_tight.evaluate(20.0, proposed_x2_upper);
+        assert_eq!(
+            at_pos70, at_pos60,
+            "With proposed x2_bounds=(-50,60): evaluate at +70°C must clamp to +60°C, \
+             but got at_pos70={at_pos70} vs at_pos60={at_pos60}"
+        );
+
+        let curve_current = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-100.0, 100.0),
+            x2_bounds: (-100.0, 100.0),
+        };
+        let current_at_pos70 = curve_current.evaluate(20.0, 70.0);
+        let current_at_pos60 = curve_current.evaluate(20.0, proposed_x2_upper);
+        assert_ne!(
+            current_at_pos70, current_at_pos60,
+            "BUG present: with current x2_bounds=(-100,100), +70°C is NOT clamped to +60°C \
+             (got {current_at_pos70} vs {current_at_pos60}) — the bounds are too wide"
+        );
+    }
+
+    /// Demonstrates that the current DEFAULT_BIQUADRATIC_X1_BOUNDS = (-100, 100) does NOT
+    /// clamp -20°C indoor input — so evaluating at -20°C and -10°C produces DIFFERENT results.
+    #[test]
+    fn default_x1_lower_bound_clamps_at_neg10_not_neg100() {
+        let coeffs = [1.0, 0.1, 0.0, 0.0, 0.0, 0.0]; // result = 1.0 + 0.1*x1
+        let proposed_x1_lower = -10.0_f64;
+
+        let curve_tight = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-10.0, 50.0),
+            x2_bounds: (-50.0, 60.0),
+        };
+        let at_neg20 = curve_tight.evaluate(-20.0, 35.0);
+        let at_neg10 = curve_tight.evaluate(proposed_x1_lower, 35.0);
+        assert_eq!(
+            at_neg20, at_neg10,
+            "With proposed x1_bounds=(-10,50): evaluate at -20°C indoor must clamp to -10°C, \
+             but got at_neg20={at_neg20} vs at_neg10={at_neg10}"
+        );
+
+        let curve_current = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-100.0, 100.0),
+            x2_bounds: (-100.0, 100.0),
+        };
+        let current_at_neg20 = curve_current.evaluate(-20.0, 35.0);
+        let current_at_neg10 = curve_current.evaluate(proposed_x1_lower, 35.0);
+        assert_ne!(
+            current_at_neg20, current_at_neg10,
+            "BUG present: with current x1_bounds=(-100,100), -20°C indoor is NOT clamped to \
+             -10°C (got {current_at_neg20} vs {current_at_neg10}) — the bounds are too wide"
+        );
+    }
+
+    // --- End regression tests for ticket 003 ---
+
     #[test]
     fn ochre_single_speed_ac_capacity_curve_matches_reference() {
         // Coefficients from vendors/OCHRE/defaults/HVAC Cooling/Biquadratic Air Conditioner.csv (Single_1)

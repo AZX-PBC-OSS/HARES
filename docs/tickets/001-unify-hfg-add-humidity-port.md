@@ -182,3 +182,202 @@ configs in `resolve_hvac.rs`.
 - 002-ideal-hvac-biquadratic-fallback.md (ideal HVAC also writes latent_gain_w without moisture_mass_flow_kg_s)
 - 004-semi-implicit-infiltration-latent.md (humidity solver stability at coarse timesteps)
 - 005-fan-heat-diagnostic-category.md (cooling diagnostics also depend on correct latent/sensible split)
+
+---
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-20
+
+### Code Confirmation
+
+- [x] **Line 35 (dehumidifier.rs)** — matches exactly:
+  ```rust
+  const LATENT_HEAT_VAPORIZATION_J_KG: f64 = 2_454_000.0;
+  ```
+  Confirmed present at `crates/hares-equipment/src/hvac/dehumidifier.rs:35`.
+
+- [x] **Line 185 (dehumidifier.rs)** — confirmed:
+  ```rust
+  let latent_removal_w = water_removal_kg_s * LATENT_HEAT_VAPORIZATION_J_KG;
+  ```
+  The local constant (2,454,000 J/kg) is used here, not any import from `hares-physics`.
+
+- [x] **Line 573 (dehumidifier.rs test import)** — confirmed:
+  ```rust
+  use super::{Dehumidifier, LATENT_HEAT_VAPORIZATION_J_KG, SECONDS_PER_DAY, WATTS_PER_KILOWATT};
+  ```
+  The test module references the local outlier constant by name.
+
+- [x] **Line 339 (dehumidifier.rs port write)** — confirmed at lines 332-339:
+  ```rust
+  ports.accumulate(&PortContribution::Thermal {
+      zone: self.zone_id,
+      sensible_gain_w: snapshot.sensible_gain_w,
+      radiant_gain_w: 0.0,
+      latent_gain_w: -snapshot.latent_removal_w,
+      category: ThermalCategory::InternalGain,
+  })?;
+  ```
+  The negative `latent_removal_w` (computed with 2,454,000) is what the humidity solver receives.
+
+- [x] **Humidity solver (humidity_solver.rs:24-26,35)** — confirmed. Default:
+  ```rust
+  h_fg_j_kg: LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J, // = 2_501_000.0
+  ```
+  And the `humidity_ratio_increment` function at lines 163–175 uses this value in the denominator.
+
+- [x] **Thermal solver (thermal_solver/mod.rs:35)** — confirmed:
+  ```rust
+  const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
+  ```
+  Uses the 0°C constant (2,501,000), consistent with the humidity solver.
+
+- [x] **PortContribution (ports.rs:51-81)** — confirmed. No `Humidity` variant. Only:
+  `Thermal`, `Electrical`, `Fuel`, `Fluid`, `Custom`.
+
+- [x] **`grep -rn "2_454_000" crates/`** — returns exactly two hits, both in `dehumidifier.rs`:
+  - Line 35: constant definition
+  - Line 875: comment in the regression test doc-string
+  No other equipment file uses 2,454,000.
+
+- [x] **`grep -rn "2_450_000" crates/`** — one hit:
+  - `hares-physics/src/constants.rs:56`: `pub const LATENT_HEAT_VAPORISATION_J_KG: f64 = 2_450_000.0;`
+  This constant is not imported anywhere in the moisture balance path (confirmed by absence in grep for its name across equipment/envelope crates).
+
+- [x] **OCHRE cross-check**: OCHRE's `Humidity.py` line 9 uses `h_vap = 2454  # kJ/kg` for its humidity update step (latent-gains-to-humidity-ratio conversion). This means OCHRE's humidity model also uses 2,454 kJ/kg, **not** 2,501 kJ/kg. However, OCHRE's psychrolib_jit.py (line 92) uses 2501 kJ/kg exclusively for enthalpy calculations. OCHRE therefore has the same internal inconsistency that HARES is trying to correct: 2,454 for moisture-removal integration, 2,501 for enthalpy. HARES has an **intentional divergence** from OCHRE's humidity model by choosing 2,501 throughout (humidity_solver uses 2,501) — but this intention is violated by the dehumidifier still using 2,454. The ticket correctly identifies this as a bug, not an intentional design choice.
+
+- [x] **Regression test `dehumidifier_h_fg_matches_physics_constant`** (lines 879–911) — Already existed in the codebase. Had a compile error: `KG_PER_LITER_WATER` was not imported in the test module. **Fixed**: added `KG_PER_LITER_WATER` to the `use super::` import at line 573. After fix, the test **FAILS** with:
+  > `dehumidifier uses h_fg = 2454000 J/kg but humidity solver uses LATENT_HEAT_VAPORISATION_0C_J_KG = 2501000 J/kg; this creates a 1.88% moisture mass balance error (ticket 001)`
+  This confirms the bug is present and the test correctly diagnoses it.
+
+- [x] **All 1189 previously-passing tests still pass** (`cargo test -p hares-equipment --lib`). The import fix introduced no regressions.
+
+- [x] **`thermal_and_humidity_solvers_share_latent_heat_constant` (humidity_solver.rs:484)** — passes (`cargo test -p hares-envelope --lib`).
+
+### Web-Verified Citations
+
+**Citation 1**: ASHRAE HoF 2021 Ch. 1 — h_fg at 0°C = 2,501 kJ/kg; at 20°C = 2,454 kJ/kg
+
+- **Source found**: Wikipedia "Water (data page)" steam table section; Engineering Toolbox water
+  properties; ASHRAE Handbook Fundamentals 2017 SI references via secondary sources
+- **Quoted passage** (Wikipedia Water data page, steam table, retrieved 2026-05-20):
+  > At 0°C: enthalpy of vaporization = **2496.5 J/g** (≈ 2,497 kJ/kg);
+  > At 20°C: enthalpy of vaporization = **2450.9 J/g** (≈ 2,451 kJ/kg)
+  These are IAPWS-IF97 saturation-curve values at 0°C and 20°C respectively.
+- **ASHRAE convention note**: ASHRAE Handbook of Fundamentals psychrometrics chapter uses the
+  approximation **2,501 kJ/kg at 0°C** (rounded from ~2,501 kJ/kg IAPWS value at 0.01°C triple
+  point) and **2,454 kJ/kg at 20°C** (interpolated/rounded). The moist air enthalpy equation
+  `h = 1.006·T + W·(2501 + 1.86·T)` with the 2,501 constant is independently confirmed by
+  multiple secondary sources citing ASHRAE Fundamentals Chapter 1 (e.g., Engineering Toolbox,
+  energy-models.com, psychrolib overview referencing ASHRAE HoF 2017 Ch. 1).
+- **Verdict**: **Confirmed** — 2,501 kJ/kg at 0°C and approximately 2,454 kJ/kg at 20°C are
+  well-established ASHRAE/IAPWS standard values. The table reference (Ch. 1, Table 2) is
+  consistent with known ASHRAE chapter structure but cannot be independently verified without
+  paywall access to the 2021 edition. The numerical values themselves are correct.
+
+**Citation 2**: ASHRAE HoF 2021 Ch.1 Eq.30: `h = 1.006·T + W·(2501 + 1.86·T)`
+
+- **Source found**: Multiple secondary sources citing ASHRAE Fundamentals Chapter 1 (psychrometrics
+  chapter), confirmed by: psychrolib GitHub docs (references "2017 ASHRAE Handbook — Fundamentals,
+  Chapter 1"); Engineering Toolbox; academic papers (EPJ Conferences 2017 EFM paper cites the same
+  form with 2501).
+- **Quoted passage** (psychrolib overview.md, referencing ASHRAE HoF 2017 Ch. 1):
+  > "formulae to calculate the psychrometric properties of air are widely available in the
+  > literature … [references] 2017 ASHRAE Handbook — Fundamentals, Chapter 1"
+  The formula `h = 1.006·T + W·(2501 + 1.86·T)` in SI units (kJ/kg) is the standard ASHRAE
+  moist-air enthalpy equation. The coefficient 2,501 kJ/kg is the latent heat of vaporization
+  at 0°C; the coefficient 1.86 kJ/(kg·°C) is the specific heat of water vapour (also confirmed
+  by `hares-physics/constants.rs:60: CP_WATER_VAPOUR_KJ_KG_K = 1.86`).
+- **Verdict**: **Confirmed**. The equation number "Eq.30" cannot be independently verified
+  without paywall access, but the formula itself and its coefficients are well-established.
+
+**Citation 3**: EnergyPlus Psychrometrics.hh — temperature-dependent h_fg formula
+
+- **Ticket claim**: `h_fg = h_fg_0 * (1 - 0.00094815 * (T - 273.15))`
+- **Source found**: EnergyPlus GitHub — `NREL/EnergyPlus` blob `3f2759c`, `src/EnergyPlus/Psychrometrics.hh`, lines 437–458. Fetched directly.
+- **Actual EnergyPlus code** (quoted):
+  ```cpp
+  inline Real64 PsyHfgAirFnWTdb(Real64 const EP_UNUSED(w), Real64 const T)
+  {
+      Real64 const Temperature(max(T, 0.0));
+      return (2500940.0 + 1858.95 * Temperature) - (4180.0 * Temperature);
+  }
+  ```
+  This simplifies to: `h_fg(T) = 2500940.0 - 2321.05 * T` (J/kg, T in °C, clamped to T≥0).
+- **Verdict**: **Incorrect as stated**. EnergyPlus does NOT use the multiplicative form
+  `h_fg = h_fg_0 * (1 - 0.00094815 * (T - 273.15))`. It uses a **linear subtraction** of the
+  difference in specific heats of vapour and liquid water: `h_fg = (h_g0 + cp_v*T) - cp_l*T`
+  where `h_g0 = 2,500,940 J/kg`, `cp_v = 1858.95 J/(kg·°C)`, `cp_l = 4180.0 J/(kg·°C)`.
+  The baseline constant is 2,500,940 J/kg (not 2,501,000), and the base temperature is 0°C.
+  At 20°C: `h_fg = 2500940 - 2321.05 × 20 = 2,454,519 J/kg ≈ 2,454.5 kJ/kg` — consistent with
+  the ASHRAE 20°C value of ~2,454 kJ/kg. The multiplicative coefficient form cited in the ticket
+  appears to be a reformulation that is numerically approximately correct but **not the actual
+  EnergyPlus formula**. Note: 0.00094815 × 2501000 ≈ 2371, which is not equal to 2321, so the
+  multiplicative form also gives a slightly different numerical result. The spirit of the citation
+  (EnergyPlus uses a temperature-dependent form with 0°C baseline near 2,501,000 J/kg) is correct.
+
+**Citation 4**: OCHRE uses psychrolib's 2,501 kJ/kg at 0°C for enthalpy consistency
+
+- **Source found**: `vendors/OCHRE/ochre/Models/Humidity.py` and
+  `vendors/OCHRE/ochre/utils/psychrolib_jit.py` — read directly.
+- **Quoted passage** (Humidity.py line 9):
+  ```python
+  h_vap = 2454  # kJ/kg
+  ```
+  (psychrolib_jit.py line 92, used for moist air enthalpy):
+  ```python
+  return (1.006 * t_dry_bulb + bounded_hum_ratio * (2501.0 + 1.86 * t_dry_bulb)) * 1000.0
+  ```
+- **Verdict**: **Partially correct**. OCHRE uses 2,501 kJ/kg **only** in its enthalpy/wet-bulb
+  calculations (via psychrolib). Its humidity update model (`HumidityModel.update_humidity`) uses
+  **2,454 kJ/kg** (`h_vap = 2454`) for the latent-gains-to-humidity-ratio conversion — the same
+  path that HARES's humidity_solver covers. The ticket's claim that "OCHRE uses psychrolib's 2,501
+  kJ/kg for enthalpy consistency" is correct for the enthalpy path but omits the fact that OCHRE's
+  humidity removal model uses 2,454. HARES intentionally diverges from OCHRE's humidity model by
+  using 2,501 throughout, which is the correct choice for internal consistency.
+
+### Legitimacy
+
+- **Verdict**: **Legitimate**
+
+- **Rationale**: The core defect described in Problem A is real and confirmed by direct code
+  inspection. `dehumidifier.rs:35` declares `const LATENT_HEAT_VAPORIZATION_J_KG: f64 = 2_454_000.0`
+  and uses it at line 185 to compute `latent_removal_w`. The humidity solver's default `h_fg_j_kg`
+  is 2,501,000 J/kg (derived from `LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J`). The round-trip
+  error is confirmed by the failing regression test: **1.88% systematic moisture mass balance error**.
+  The ASHRAE values (2,501 kJ/kg at 0°C, ~2,454 kJ/kg at 20°C) are independently verified via
+  Wikipedia steam tables and multiple secondary sources. The EnergyPlus citation is directionally
+  correct (temperature-dependent, 0°C baseline ≈ 2,501,000 J/kg) though the specific formula
+  quoted is not the actual EnergyPlus code. The OCHRE citation is partially correct.
+  Problem B (missing `Humidity` port variant) is a legitimate architectural deficiency — confirmed
+  by reading `ports.rs:51-81`, which has no `Humidity` variant. The proposed fix is sound:
+  normalising on the 0°C reference (2,501,000 J/kg) throughout the moisture balance chain, and
+  adding an explicit `moisture_mass_flow_kg_s` port to eliminate the implicit h_fg coupling.
+
+### Proposed Fix Summary
+
+**Phase 1 (minimal, eliminates 1.88% error immediately)**:
+Delete `const LATENT_HEAT_VAPORIZATION_J_KG: f64 = 2_454_000.0;` from `dehumidifier.rs:35`.
+Add `use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;`. Replace all uses of the
+local constant with `LATENT_HEAT_VAPORISATION_0C_J_KG` (lines 185 and 705 in tests). Update the
+`use super::` import in the test module (line 573) to remove `LATENT_HEAT_VAPORIZATION_J_KG`.
+Do NOT modify any other production code.
+
+**Phase 2 & 3** (structural, eliminates latent→moisture coupling): As described in the ticket.
+No change needed to existing constants — use `LATENT_HEAT_VAPORISATION_0C_J_KG` everywhere.
+
+### Test Written
+
+- **File**: `crates/hares-equipment/src/hvac/dehumidifier.rs` (within existing `#[cfg(test)]`
+  module, lines 879–911)
+- **Status**: Test already existed in the codebase (written as part of a prior audit pass).
+  It had a **compile error** (`KG_PER_LITER_WATER` not imported in the test module scope).
+  **Fixed** by adding `KG_PER_LITER_WATER` to the `use super::` import at line 573.
+- **What it tests**: For a dehumidifier operating at conditions that trigger moisture removal,
+  recovers the implied h_fg (`latent_removal_w / water_removal_kg_s`) and asserts it equals
+  `LATENT_HEAT_VAPORISATION_0C_J_KG` (2,501,000 J/kg) within 1 J/kg. Currently **FAILS** with
+  the current code (implied h_fg = 2,454,000), demonstrating the bug. Will pass after Phase 1 fix.
+- **No new test code was written** — the existing test was complete and correct once the import
+  compile error was fixed. All 1189 previously-passing tests continue to pass.

@@ -208,3 +208,90 @@ No additional HPXML wiring needed beyond ticket 010's default curve infrastructu
 - 001-unify-hfg-add-humidity-port.md (IdealHvac also writes latent without humidity_ratio_delta — the humidity port addition belongs to 001; implementers of 002 must not duplicate that work)
 - 003-tighten-biquadratic-default-bounds.md (curve bounds affect the correction factor evaluation)
 - 005-fan-heat-diagnostic-category.md (EIR curve also affects reported COP)
+
+---
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-20
+
+### Code Confirmation
+
+- [x] **Referenced line numbers still match** — `ideal_hvac.rs:518-528` is confirmed correct as of this audit. The `capacity_w` match block is at lines 518-528; the non-ideal arms are at lines 526-527 exactly as cited.
+- [x] **Described logic matches current implementation** — `IdealHvac::step()` (line 512) receives `_env: &EnvironmentState` (underscore-prefixed, unused). Lines 526-527 confirm `ThermostatMode::Heating => self.rated_capacity_w * self.load_fraction` and `ThermostatMode::Cooling => -self.cooling_capacity_w * self.load_fraction` with no biquadratic evaluation. The `IdealHvac` struct (lines 30-68) has no biquadratic coefficient fields. The bug is present and unaddressed.
+- [x] **OCHRE cross-check: partially matches the ticket's claim, with an important nuance**
+  - The base `HVAC.update_capacity()` (HVAC.py:431-456): In `use_ideal_capacity=True` mode, calls `solve_ideal_capacity()` (envelope solver) and clips to `capacity_max`. It does **not** call `_biquadratic()` for capacity in this path. In `use_ideal_capacity=False` mode it returns `self.capacity_list[self.speed_idx]` — a static rated value — also no biquadratic.
+  - `DynamicHVAC.update_capacity()` (HVAC.py:990-1027) overrides the base: it calls `calculate_biquadratic_param('cap', speed_idx=max_speed)` to compute `capacity_max` **always** (line 993), and in the ideal path (line 995-1020) evaluates biquadratic for each speed to set `speed_idx`. In the non-ideal path (line 1021-1027) it evaluates biquadratic for `speed_idx`. So `DynamicHVAC` (which covers AC, HP, etc.) **always** evaluates biquadratic curves.
+  - **Verdict**: The ticket's claim "OCHRE `_biquadratic()` method: always evaluates curves regardless of ideal/non-ideal mode" is correct for `DynamicHVAC` (the class that models ASHP, AC) but is inaccurate for the base `HVAC` class. HARES `IdealHvac` is modelled closer to the base `HVAC` class, which makes the omission analogous to what OCHRE would do for single-speed `DynamicHVAC` equipment in non-ideal mode — which **does** apply biquadratic corrections. The divergence is **accidental** (not intentional).
+  - File+line evidence: `vendors/OCHRE/ochre/Equipment/HVAC.py:990-1027` (DynamicHVAC), `:431-456` (base HVAC), `:24-60` (`_biquadratic()` function).
+- [x] **EnergyPlus cross-check: confirmed**
+  - Source: DesignBuilder v7.2 DX Heating Coil documentation (mirrors EnergyPlus I/O Reference for `Coil:Heating:DX:SingleSpeed`), fetched from `https://designbuilder.co.uk/helpv7.2/Content/HeatingCoilDX.htm`
+  - Quoted passage — **Capacity curve**: *"The Bi-quadratic, Quadratic or Cubic performance curve that parameterises the variation of the total heating capacity as a function of the both the indoor and outdoor air dry-bulb temperature or just the outdoor air dry-bulb temperature depending on the type of curve selected. The output of this curve is multiplied by the rated total heating capacity to give the total heating capacity at specific temperature operating conditions (i.e., at an indoor air dry-bulb temperature or outdoor air dry-bulb temperature different from the rating point temperature). The curve is normalised to have the value of 1.0 at the rating point."*
+  - Quoted passage — **EIR curve**: *"The Bi-quadratic, Quadratic or Cubic performance curve that parameterises the variation of the energy input ratio (EIR) as a function of the both the indoor and outdoor air dry-bulb temperature or just the outdoor air dry-bulb temperature depending on the type of curve selected. The output of this curve is multiplied by the rated EIR (inverse of rated COP) to give the EIR at specific temperature operating conditions (i.e., at an indoor air dry-bulb temperature or outdoor air dry-bulb temperature different from the rating point temperature). The curve is normalised to have the value of 1.0 at the rating point."*
+  - The biquadratic form `z = a + b*x1 + c*x1² + d*x2 + e*x2² + f*x1*x2` is confirmed by EnergyPlus 9.0 Engineering Reference, Performance Curves section.
+  - HARES `BiquadraticCurve::evaluate()` (`hares-physics/src/biquadratic.rs:27-31`) implements exactly this form and is already used by `HvacEquipment::evaluate_biquadratic_with_flow()` for the dynamic paths.
+
+### Web-Verified Citations
+
+**Citation 1: AHRI 210/240-2023 H3 condition = −8.3°C (17°F)**
+- **Source found**: ANSI/AHRI Standard 210/240-2008 (with addenda), referenced in search results from `ahrinet.org` and `bsesc.energy.gov`; confirmed by multiple secondary sources.
+- **Quoted passage**: From web search result (ahrinet.org/bsesc.energy.gov): "H3 Test is a required, steady heating test with indoor conditions of 70.0°F dry bulb (21.1°C) and 60.0°F maximum (15.6°C maximum) wet bulb, outdoor temperature of 17.0°F (−8.33°C)." The AHRI certificate lists ratings at 47°F (H1) and 17°F (H3). The 2023 revision uses the same temperature ladder.
+- **Verdict**: **Confirmed**. H3 = −8.3°C (17°F), H1 = 8.3°C (47°F). Direct PDF access to AHRI 210/240-2023 was blocked (HTTP 403); the temperatures are confirmed through multiple secondary sources including DOE and NEEP documentation.
+
+**Citation 2: AHRI H3 capacity = 60-70% of H1 rated**
+- **Source found**: `learnmetrics.com/heat-pump-efficiency-vs-temperature-graph/` (independently fetched); NREL OSTI documents; NEEP cold-climate ASHP specification v4.0.
+- **Quoted passage**: From learnmetrics.com fetch: "At 17°F: the article calculates approximately 15,568 BTU output, representing a reduction to roughly 65% of rated capacity (or a 35% loss from the 47°F baseline)." NREL search results confirm "approximately 32% capacity degradation from 47°F to 17°F" for standard ASHP, placing H3 capacity at ~68% of H1.
+- **Verdict**: **Confirmed as an approximate range for standard (non-cold-climate) ASHP**. The 60-70% figure is physically plausible and consistent with independently retrieved data. The exact range depends on specific equipment; cold-climate ASHP can maintain higher capacity at H3. For standard ASHP the ticket's claim is correct.
+
+**Citation 3: EnergyPlus Engineering Reference — DX Coil biquadratic equations**
+- **Source found**: `https://designbuilder.co.uk/helpv7.2/Content/HeatingCoilDX.htm` (mirrors EnergyPlus I/O Reference); `https://bigladdersoftware.com/epx/docs/9-0/engineering-reference/performance-curves.html`
+- **Quoted passage**: See Code Confirmation → EnergyPlus cross-check above. The formulas `Q_corrected = Q_rated × CAP_FT(T_indoor, T_outdoor)` and `EIR_corrected = EIR_rated × EIR_FT(T_indoor, T_outdoor)` match EnergyPlus documentation exactly.
+- **Verdict**: **Confirmed**. The mathematical form stated in the ticket is correct.
+
+**Citation 4: OCHRE `HVAC.py` `_biquadratic()` always evaluates curves**
+- **Source found**: `vendors/OCHRE/ochre/Equipment/HVAC.py` (local submodule, read directly)
+- **Quoted passage**: `_biquadratic()` at HVAC.py:24-60 is the core evaluation function. `DynamicHVAC.update_capacity()` at HVAC.py:993 calls `calculate_biquadratic_param(param='cap', speed_idx=max_speed)` unconditionally to compute `capacity_max`, and the non-ideal branch at HVAC.py:1021-1027 calls `calculate_biquadratic_param(param='cap', speed_idx=self.speed_idx)` to get the operating capacity.
+- **Verdict**: **Partially correct**. For `DynamicHVAC` (the class that models ASHP, AC, HP), biquadratic is always evaluated. The base `HVAC` class does not call biquadratic in either path. The ticket's claim is accurate for the equipment types relevant to `IdealHvac`.
+
+**Citation 5: Dynamic equipment paths — `air_conditioner.rs:968-1027` and `heater.rs:866-883`**
+- **Source found**: `crates/hares-equipment/src/hvac/air_conditioner.rs` and `crates/hares-equipment/src/hvac/heat_pump/heater.rs` (read directly)
+- **Quoted passage**: `air_conditioner.rs:968-1027` defines the `curve_inputs()` closure which calls `hvac.evaluate_biquadratic_with_flow()` twice (cap + EIR). `heater.rs:866-883` calls `self.hvac.evaluate_biquadratic_with_flow(speed_index * 2, zone.temperature_c, env.weather.outdoor_temp_c, 1.0)`.
+- **Verdict**: **Confirmed**. Line numbers are accurate; both dynamic paths correctly evaluate biquadratic curves.
+
+**Citation 6: `hvac_core.rs:849-867` — `evaluate_biquadratic_with_flow()`**
+- **Source found**: `crates/hares-equipment/src/hvac/hvac_core.rs` (read directly)
+- **Quoted passage**: Method `evaluate_biquadratic_with_flow` at lines 849-867 returns `(raw, flow_adjusted)` from the biquadratic curve.
+- **Verdict**: **Confirmed**. Line numbers match.
+
+**Citation 7: `hvac_core.rs:23` — `DEFAULT_BIQUADRATIC_COEFFS`**
+- **Source found**: `crates/hares-equipment/src/hvac/hvac_core.rs:23` (read directly)
+- **Quoted passage**: `pub(super) const DEFAULT_BIQUADRATIC_COEFFS: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];`
+- **Verdict**: **Confirmed**. Identity coefficients match the ticket's specification.
+
+**Citation 8: `hares-types/src/environment.rs:82` — `ZoneState::temperature_c`**
+- **Source found**: Not individually read (not cited with a claim that could be wrong). The field exists and is used in numerous tests and the air_conditioner curve_inputs closure. Accepted as correct.
+- **Verdict**: **Plausible, not independently verified at line level** — but inconsequential to the core bug claim.
+
+### Legitimacy
+
+- **Verdict**: **Legitimate**
+
+- **Rationale**: The bug is real and confirmed by direct code inspection. `IdealHvac::step()` at lines 526-527 returns `rated_capacity_w * load_fraction` (heating) and `-cooling_capacity_w * load_fraction` (cooling) with no reference to outdoor temperature or any biquadratic curve. The `IdealHvac` struct has no biquadratic coefficient fields. This is physically wrong: a heat pump's capacity degrades significantly at cold outdoor temperatures, and both OCHRE's `DynamicHVAC` and EnergyPlus's `Coil:Heating:DX:SingleSpeed` model this via temperature-dependent biquadratic correction curves. The EnergyPlus formula is confirmed from the DesignBuilder/EnergyPlus I/O Reference: "The output of this curve is multiplied by the rated total heating capacity." The AHRI H3/H1 temperature claims (−8.3°C / 8.3°C) are confirmed from standard secondary sources. The 60-70% capacity ratio at H3 vs H1 is consistent with independently retrieved empirical data (~65% per learnmetrics; ~68% per NREL search results). All cited HARES file locations are accurate. One minor inaccuracy: the OCHRE claim "always evaluates curves regardless of ideal/non-ideal mode" is technically true for `DynamicHVAC` but not for the base `HVAC` class; this does not affect the legitimacy of the ticket.
+
+### Proposed Fix Summary
+
+1. Add `capacity_biquadratic_coeffs: [f64; 6]`, `eir_biquadratic_coeffs: [f64; 6]`, `biquadratic_x1_bounds: (f64, f64)`, and `biquadratic_x2_bounds: (f64, f64)` fields to `IdealHvac` (or a `BiquadraticCurveSet` sub-struct as the ticket suggests). Default to identity coefficients `[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]`.
+2. Load the curves from config in `IdealHvac::init()` using the existing `load_biquadratic_coeffs()` helper from `core_config.rs`.
+3. In `step()`, rename `_env` to `env`. Extract `t_outdoor_c = env.weather.outdoor_temp_c` and `t_indoor_c` from the zone (reusing `lookup_zone_temp` already called in `update_mode()`).
+4. Replace lines 526-527 to evaluate `BiquadraticCurve::evaluate(t_indoor_c, t_outdoor_c)` for the capacity correction, and apply it: `rated_capacity_w * cap_ratio * load_fraction`.
+5. Apply EIR correction to fan power calculation at lines 544-548.
+6. When coefficients are identity, the correction factor is 1.0 and the output is unchanged (no regression).
+
+**Do NOT implement this fix** — this audit section only.
+
+### Test Written
+
+- **File**: `crates/hares-equipment/src/hvac/ideal_hvac.rs` (in-module `#[cfg(test)]` block, near end of file)
+- **Test 1** (`non_ideal_heating_capacity_degrades_at_ahri_h3_condition`, marked `#[ignore]`): Configures `IdealHvac` with `ideal_capacity_mode = off`, a linearised ASHP capacity curve (`a=0.834, d=0.02`), outdoor temp −8.3°C (H3), and asserts that the thermal output is between 55% and 75% of rated capacity. Currently **ignored** because the required config fields do not exist yet; must be enabled (remove `#[ignore]`) as part of the ticket 002 fix.
+- **Test 2** (`non_ideal_heating_identity_curve_produces_rated_capacity`): Configures the same setup with identity coefficients and asserts the output equals `rated_capacity_w` exactly. This test **passes today** and must continue to pass after the fix (no-regression guard).

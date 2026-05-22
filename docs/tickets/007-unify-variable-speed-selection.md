@@ -180,3 +180,44 @@ cargo test -p hares-equipment
 ## Related Tickets
 
 - 008-decompose-hvacequipment-struct — if `capacity_fractions_for` moves to a shared location, this reduces the method count on `HvacEquipment`
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-20
+
+### Code Confirmation
+
+- [x] Referenced line numbers still match — `select_variable_speed_cooling` at `air_conditioner.rs:335–397`; `select_multi_speed` at `staging.rs:202–249`; `capacity_fractions_for` at `staging.rs:372–378`; `SpeedSelection` at `speed_control.rs:100–110`. All confirmed by direct file read.
+- [x] Described logic matches current implementation — both functions implement the same three-branch algorithm: (1) early-return zero for empty/zero-load, (2) PLR-only at or below first stage, (3) full-capacity clamp at or above last stage, (4) `partition_point` binary search → linear interpolation between brackets. Diff verified by inspection.
+- [x] OCHRE cross-check: **matches** — OCHRE `HVAC.py:1005–1018` uses `np.searchsorted(capacities, capacity)` and then `frac_high = (capacity - capacities[speed_low]) / (capacities[speed_high] - capacities[speed_low])`, which is algorithmically identical to HARES's `partition_point` + `(lf - cap_fracs[lo]) / span`. OCHRE's below-minimum branch is `speed_idx = capacity / capacities[1]` (a fractional scalar, not PLR), whereas HARES keeps `speed_index=0` and stores the fraction as `part_load_ratio` — this structural difference is intentional and already documented in `SpeedSelection`'s doc-comments.
+- [x] EnergyPlus cross-check: **matches** — EnergyPlus Engineering Reference (v8.3 Air System Compound Component Groups) defines SpeedRatio for "Higher Speed Operation" as:
+  > `SpeedRatio = ABS(UnitarySystemCoolingLoad − AddedFanHeat − FullCoolOutputSpeed_{n−1}) / ABS(FullCoolOutputSpeed_n − FullCoolOutputSpeed_{n−1})`
+  This is the same linear interpolation `(Q_required − Q_low) / (Q_high − Q_low)` that both HARES functions implement. No divergence.
+
+### Web-Verified Citations
+
+The ticket contains **no explicit standards citations** (no ASHRAE, NFRC, DOE, ISO, or EnergyPlus section numbers are cited). The ticket is a pure code-structure/refactoring ticket. The underlying algorithm is validated against EnergyPlus and OCHRE above.
+
+**EnergyPlus speed-ratio formula (cross-reference, not a ticket citation):**
+- **Source found**: EnergyPlus 8.3 Engineering Reference — Air System Compound Component Groups (`bigladdersoftware.com/epx/docs/8-3/engineering-reference/air-system-compound-component-groups.html`)
+- **Quoted passage**: *"SpeedRatio = ABS(UnitarySystemCoolingLoad − AddedFanHeat − FullCoolOutputSpeed_{n−1}) / ABS(FullCoolOutputSpeed_n − FullCoolOutputSpeed_{n−1})"* — linear capacity interpolation between adjacent speed stages.
+- **Verdict**: confirmed — HARES implements this correctly in both duplicated locations.
+
+### Legitimacy
+
+- **Verdict**: Legitimate
+- **Rationale**: Direct inspection of `air_conditioner.rs:335–397` and `staging.rs:202–249` confirms that the bracket-interpolation algorithm (`partition_point` → `lo/hi` → span → `speed_frac`) appears verbatim in both functions. The five substantive differences catalogued in the ticket (input clamping, capacity source, empty/single-stage handling, `f64::MIN_POSITIVE` guards, side-effect writes) are real and correctly described. OCHRE uses the same mathematical algorithm (`np.searchsorted` + fractional interpolation). EnergyPlus documents the same linear SpeedRatio formula. The duplication risk is genuine: a future bug fix in one copy will silently leave the other copy broken. No part of the ticket's description is inaccurate.
+
+### Proposed Fix Summary
+
+Add a free function `interpolate_speed_stages(load_fraction: f64, capacity_fractions: &[f64], clamp_input: bool) -> Option<SpeedSelection>` to `speed_control.rs`. Both `select_multi_speed` (passing `clamp_input: false`) and `select_variable_speed_cooling` (passing `clamp_input: true`) replace their inline bracket logic with a call to this shared function. The `capacity_fractions_for` normalization helper and the side-effect writes (`last_speed_index`/`last_speed_frac`) remain in their existing call-sites. No behavioral change.
+
+### Test Written
+
+- **File**: `crates/hares-equipment/src/hvac/air_conditioner.rs` — new `mod speed_selection_parity_tests` at end of file (3 tests added, all passing)
+- **What it tests**:
+  1. `variable_speed_and_multi_speed_agree_on_bracket_interpolation` — probes three interior brackets (load 0.5, 0.7, 0.9 against 4-stage fractions [0.4, 0.6, 0.8, 1.0]); asserts `speed_index`, `speed_frac`, and `part_load_ratio` are identical between `select_variable_speed_cooling` and `select_multi_speed`.
+  2. `variable_speed_and_multi_speed_agree_below_lowest_stage` — load=0.3 < cap_frac[0]=0.4; asserts PLR=0.75 from both paths.
+  3. `variable_speed_and_multi_speed_agree_at_full_load` — load=1.0; asserts both return `speed_index=3`, `speed_frac=0.0`, `part_load_ratio=1.0`.
+- If the two implementations ever diverge (e.g. a one-sided bug fix), these tests will fail and expose the divergence immediately.

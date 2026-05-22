@@ -846,4 +846,48 @@ mod tests {
             "first on-step after off cycle must be below steady-state: got {w_restart} W"
         );
     }
+
+    // ---- ticket 008: disabled_speeds is Vec<bool> and calls Vec::resize on every
+    // set_disabled_speeds invocation, allocating on the heap in the control-signal path.
+    // When ticket 008 is implemented these tests must be updated: disabled_speeds should
+    // become [bool; MAX_SPEEDS] with a speed_count: u8 field and no heap allocation.
+
+    /// Demonstrates that disabled_speeds is currently Vec<bool> (heap-allocated).
+    /// After ticket 008 this should be [bool; MAX_SPEEDS] (stack-allocated).
+    #[test]
+    fn disabled_speeds_is_vec_not_fixed_array() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.cooling_capacities_w = vec![5_000.0, 10_000.0];
+
+        // Initially empty (new() sets vec![]).
+        assert_eq!(hvac.disabled_speeds.len(), 0, "ticket-008: disabled_speeds starts empty Vec");
+
+        // set_disabled_speeds calls Vec::resize, which heap-allocates.
+        hvac.set_disabled_speeds(&[false, true]);
+        assert_eq!(hvac.disabled_speeds.len(), 2, "ticket-008: Vec::resize set length to n_speed_stages");
+        assert_eq!(hvac.disabled_speeds[0], false);
+        assert_eq!(hvac.disabled_speeds[1], true);
+
+        // A second call re-calls Vec::resize (potential reallocation).
+        hvac.set_disabled_speeds(&[false, false]);
+        assert_eq!(hvac.disabled_speeds.len(), 2, "ticket-008: second call still heap-backed Vec");
+    }
+
+    /// Demonstrates that MAX_SPEEDS is absent from the codebase (ticket 008 must define it).
+    /// This test documents the absence; it would fail to compile after ticket 008 introduces the
+    /// constant.  For now it is a no-op compile-time check via the type system.
+    #[test]
+    fn max_speeds_constant_not_yet_defined() {
+        // ticket-008: after implementation, `const MAX_SPEEDS: usize = 8` must exist
+        // and disabled_speeds must be typed [bool; MAX_SPEEDS].
+        // This assertion documents the current state where no MAX_SPEEDS constant exists.
+        let hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        // Verify the type is currently Vec — size_of::<Vec<bool>>() == 3 * usize (ptr+len+cap).
+        assert_eq!(
+            std::mem::size_of_val(&hvac.disabled_speeds),
+            3 * std::mem::size_of::<usize>(),
+            "ticket-008: disabled_speeds must be Vec<bool> (24 bytes on 64-bit) until ticket 008 fixes it"
+        );
+    }
 }

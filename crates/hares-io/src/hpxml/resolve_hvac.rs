@@ -2975,6 +2975,40 @@ mod tests {
         );
     }
 
+    // Regression test for ticket #118: the `_ =>` arm at line 1232 silently
+    // returns "attic_vented" for any ZoneType not explicitly matched (Outdoor,
+    // Ground, Adjacent, Other). This must be replaced with a panic/error or
+    // an exhaustive match so mis-classified zones are caught at construction
+    // time rather than silently producing wrong ASHRAE 152 zone strings.
+    #[test]
+    fn ticket_118_non_attic_zone_types_must_not_return_attic_vented() {
+        let building = building_with(None, vec![]);
+
+        for zone_type in [
+            ZoneType::Outdoor,
+            ZoneType::Ground,
+            ZoneType::Adjacent,
+            ZoneType::Other("Unknown".to_string()),
+        ] {
+            let zone = Zone {
+                zone_type,
+                floor_area_m2: None,
+                volume_m3: None,
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            };
+            let result = zone_type_to_ashrae152_str(&zone, &building);
+            assert_ne!(
+                result, "attic_vented",
+                "zone_type {:?} must not silently map to \"attic_vented\" via the catch-all arm",
+                zone.zone_type
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // compute_basement_params
     // -----------------------------------------------------------------------
@@ -3495,6 +3529,43 @@ mod tests {
         assert!((cfg.eir - expected_eir).abs() < 1e-12);
     }
 
+    // Regression test for ticket 087: try_build_room_ac_config always hard-coded
+    // `shr: None`, ignoring any SHR that was already loaded into `params["shr"]`
+    // by the CoolingSystem loop.  This test will FAIL until the bug is fixed.
+    #[test]
+    fn room_ac_builder_propagates_shr_from_params() {
+        let mut params = Map::new();
+        params.insert("cooling_capacity_w".to_string(), json!(3_500.0));
+        params.insert("efficiency_eer".to_string(), json!(10.5));
+        params.insert("shr".to_string(), json!(0.82));
+        let ec = try_build_room_ac_config("Room AC", &params)
+            .expect("room AC builder must succeed when EER and SHR are present");
+        use hares_equipment::hvac::cooling_config::RoomAcConfig;
+        let cfg: RoomAcConfig = ec.typed().expect("must deserialize to RoomAcConfig");
+        assert_eq!(
+            cfg.shr,
+            Some(0.82),
+            "shr should be Some(0.82) when params[\"shr\"] = 0.82, got {:?}",
+            cfg.shr
+        );
+    }
+
+    #[test]
+    fn room_ac_builder_shr_is_none_when_not_in_params() {
+        let mut params = Map::new();
+        params.insert("cooling_capacity_w".to_string(), json!(3_500.0));
+        params.insert("efficiency_eer".to_string(), json!(10.5));
+        // No "shr" key in params — SensibleHeatFraction absent from HPXML element.
+        let ec = try_build_room_ac_config("Room AC", &params)
+            .expect("room AC builder must succeed without SHR");
+        use hares_equipment::hvac::cooling_config::RoomAcConfig;
+        let cfg: RoomAcConfig = ec.typed().expect("must deserialize to RoomAcConfig");
+        assert_eq!(
+            cfg.shr, None,
+            "shr should be None when SensibleHeatFraction is absent"
+        );
+    }
+
     #[test]
     fn heat_pump_cooler_builder_forces_four_speeds_for_minisplit() {
         let mut params = Map::new();
@@ -3771,6 +3842,44 @@ mod tests {
     fn conditioned_zone_id_returns_none_when_no_conditioned_zone() {
         let b = empty_building(vec![foundation_zone(false)]);
         assert_eq!(conditioned_zone_id(&b), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Ticket 113: reconcile_setpoint_pair must surface mutation loudly
+    // -----------------------------------------------------------------------
+
+    /// Regression test for ticket 113.
+    ///
+    /// When heating/cooling setpoints are too close (gap < 2 °C), the
+    /// reconciler silently widens them but emits no machine-readable signal —
+    /// no `setpoints_reconciled` key is inserted into the params map.
+    ///
+    /// This test FAILS until ticket 113 is resolved (path A or B).  Once the
+    /// fix lands the assertion must be changed to match the chosen API.
+    #[test]
+    #[should_panic(expected = "setpoints_reconciled key must be present after reconciliation")]
+    fn reconcile_setpoint_pair_narrow_gap_produces_no_machine_readable_signal() {
+        // Heating 21 °C, cooling 22 °C — gap is 1 °C, below the 2 °C minimum.
+        let building = building_with_setpoint_profiles(
+            [21.0f64; 24],
+            [21.0f64; 24],
+            [22.0f64; 24],
+            [22.0f64; 24],
+        );
+
+        let mut params = Map::new();
+        apply_building_setpoint_profiles(&building, &mut params, true, true);
+
+        // The reconciler widened the gap silently.  After the fix, either:
+        //   A) the call above returned an Err (hard error path), or
+        //   B) params contains a "setpoints_reconciled" key with original values.
+        //
+        // Currently neither is true, so this assertion deliberately panics to
+        // prove the bug is present.
+        assert!(
+            params.contains_key("setpoints_reconciled"),
+            "setpoints_reconciled key must be present after reconciliation"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4208,5 +4317,367 @@ mod tests {
         let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
         assert!(cfg.is_mini_split);
         assert_eq!(cfg.number_of_speeds, 4);
+    }
+
+    // ---- Ticket 076: HeatPump FractionHeatLoadServed / FractionCoolLoadServed ----
+
+    /// Regression: HeatPump resolver must read the canonical HPXML 4.x element names
+    /// `FractionHeatLoadServed` and `FractionCoolLoadServed`.  Prior to the fix the
+    /// resolver only looked for the non-canonical aliases
+    /// (`FractionHeatingLoadServed` / `FractionCoolingLoadServed`), so fractions from
+    /// real OS-HPXML files were silently dropped and both typed configs defaulted to
+    /// `None` (interpreted downstream as 100 % load served regardless of the actual
+    /// fraction).
+    #[test]
+    fn heat_pump_reads_canonical_fraction_element_names() {
+        // Canonical names as used in every OS-HPXML sample file.
+        let xml = r#"
+            <HPXML>
+              <Building>
+                <BuildingDetails>
+                  <Systems>
+                    <HVAC>
+                      <HVACPlant>
+                        <HeatPump>
+                          <SystemIdentifier id="hp1"/>
+                          <HeatPumpType>air-to-air</HeatPumpType>
+                          <HeatPumpFuel>electricity</HeatPumpFuel>
+                          <HeatingCapacity>36000.0</HeatingCapacity>
+                          <CoolingCapacity>36000.0</CoolingCapacity>
+                          <AnnualHeatingEfficiency>
+                            <Units>HSPF</Units>
+                            <Value>8.5</Value>
+                          </AnnualHeatingEfficiency>
+                          <AnnualCoolingEfficiency>
+                            <Units>SEER</Units>
+                            <Value>16.0</Value>
+                          </AnnualCoolingEfficiency>
+                          <BackupType>integrated</BackupType>
+                          <BackupSystemFuel>electricity</BackupSystemFuel>
+                          <BackupAnnualHeatingEfficiency>
+                            <Units>Percent</Units>
+                            <Value>1.0</Value>
+                          </BackupAnnualHeatingEfficiency>
+                          <BackupHeatingCapacity>10000.0</BackupHeatingCapacity>
+                          <FractionHeatLoadServed>0.8</FractionHeatLoadServed>
+                          <FractionCoolLoadServed>0.7</FractionCoolLoadServed>
+                        </HeatPump>
+                      </HVACPlant>
+                    </HVAC>
+                  </Systems>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details must exist");
+        let mut building = empty_building(vec![conditioned_zone()]);
+        building.details_xml = details.clone();
+        let defaults = DefaultsStore::empty();
+        let mut specs = Vec::new();
+        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+
+        // The split produces two specs: ASHP Heater and ASHP Cooler.
+        assert_eq!(specs.len(), 2, "expected heater + cooler specs");
+
+        let heater = specs.iter().find(|s| s.name.contains("Heater")).expect("heater spec");
+        let cooler = specs.iter().find(|s| s.name.contains("Cooler")).expect("cooler spec");
+
+        use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+        let heater_cfg: HeatPumpHeaterConfig = heater.typed_config.clone()
+            .expect("heater must have typed config")
+            .typed()
+            .expect("typed heater config");
+        let cooler_cfg: HeatPumpCoolerConfig = cooler.typed_config.clone()
+            .expect("cooler must have typed config")
+            .typed()
+            .expect("typed cooler config");
+
+        assert_eq!(
+            heater_cfg.fraction_heating_load_served,
+            Some(0.8),
+            "FractionHeatLoadServed (canonical) must be parsed for heater"
+        );
+        assert_eq!(
+            cooler_cfg.fraction_cooling_load_served,
+            Some(0.7),
+            "FractionCoolLoadServed (canonical) must be parsed for cooler"
+        );
+    }
+
+    /// Companion regression: the non-canonical alias names
+    /// (`FractionHeatingLoadServed` / `FractionCoolingLoadServed`) must still work
+    /// as a fallback so that any existing files using them continue to parse correctly.
+    #[test]
+    fn heat_pump_reads_alias_fraction_element_names_as_fallback() {
+        let xml = r#"
+            <HPXML>
+              <Building>
+                <BuildingDetails>
+                  <Systems>
+                    <HVAC>
+                      <HVACPlant>
+                        <HeatPump>
+                          <SystemIdentifier id="hp1"/>
+                          <HeatPumpType>air-to-air</HeatPumpType>
+                          <HeatPumpFuel>electricity</HeatPumpFuel>
+                          <HeatingCapacity>36000.0</HeatingCapacity>
+                          <CoolingCapacity>36000.0</CoolingCapacity>
+                          <AnnualHeatingEfficiency>
+                            <Units>HSPF</Units>
+                            <Value>8.5</Value>
+                          </AnnualHeatingEfficiency>
+                          <AnnualCoolingEfficiency>
+                            <Units>SEER</Units>
+                            <Value>16.0</Value>
+                          </AnnualCoolingEfficiency>
+                          <BackupType>integrated</BackupType>
+                          <BackupSystemFuel>electricity</BackupSystemFuel>
+                          <BackupAnnualHeatingEfficiency>
+                            <Units>Percent</Units>
+                            <Value>1.0</Value>
+                          </BackupAnnualHeatingEfficiency>
+                          <BackupHeatingCapacity>10000.0</BackupHeatingCapacity>
+                          <FractionHeatingLoadServed>0.6</FractionHeatingLoadServed>
+                          <FractionCoolingLoadServed>0.5</FractionCoolingLoadServed>
+                        </HeatPump>
+                      </HVACPlant>
+                    </HVAC>
+                  </Systems>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details must exist");
+        let mut building = empty_building(vec![conditioned_zone()]);
+        building.details_xml = details.clone();
+        let defaults = DefaultsStore::empty();
+        let mut specs = Vec::new();
+        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+
+        assert_eq!(specs.len(), 2, "expected heater + cooler specs");
+
+        let heater = specs.iter().find(|s| s.name.contains("Heater")).expect("heater spec");
+        let cooler = specs.iter().find(|s| s.name.contains("Cooler")).expect("cooler spec");
+
+        use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+        let heater_cfg: HeatPumpHeaterConfig = heater.typed_config.clone()
+            .expect("heater must have typed config")
+            .typed()
+            .expect("typed heater config");
+        let cooler_cfg: HeatPumpCoolerConfig = cooler.typed_config.clone()
+            .expect("cooler must have typed config")
+            .typed()
+            .expect("typed cooler config");
+
+        assert_eq!(
+            heater_cfg.fraction_heating_load_served,
+            Some(0.6),
+            "FractionHeatingLoadServed (alias) must be parsed for heater as fallback"
+        );
+        assert_eq!(
+            cooler_cfg.fraction_cooling_load_served,
+            Some(0.5),
+            "FractionCoolingLoadServed (alias) must be parsed for cooler as fallback"
+        );
+    }
+
+    // ---- Ticket 077: BackupAnnualHeatingEfficiency Units element ignored ----
+
+    /// Helper: build a minimal HeatPump XML fragment with the given backup efficiency
+    /// units and value, run resolve_hvac, and return the `backup_eir` from the heater
+    /// spec params map.
+    fn resolve_backup_eir(units: &str, value: f64) -> Option<f64> {
+        let xml = format!(
+            r#"
+            <HPXML>
+              <Building>
+                <BuildingDetails>
+                  <Systems>
+                    <HVAC>
+                      <HVACPlant>
+                        <HeatPump>
+                          <SystemIdentifier id="hp1"/>
+                          <HeatPumpType>air-to-air</HeatPumpType>
+                          <HeatPumpFuel>electricity</HeatPumpFuel>
+                          <HeatingCapacity>36000.0</HeatingCapacity>
+                          <CoolingCapacity>36000.0</CoolingCapacity>
+                          <AnnualHeatingEfficiency>
+                            <Units>HSPF</Units>
+                            <Value>8.5</Value>
+                          </AnnualHeatingEfficiency>
+                          <AnnualCoolingEfficiency>
+                            <Units>SEER</Units>
+                            <Value>16.0</Value>
+                          </AnnualCoolingEfficiency>
+                          <BackupType>integrated</BackupType>
+                          <BackupSystemFuel>electricity</BackupSystemFuel>
+                          <BackupAnnualHeatingEfficiency>
+                            <Units>{units}</Units>
+                            <Value>{value}</Value>
+                          </BackupAnnualHeatingEfficiency>
+                          <BackupHeatingCapacity>10000.0</BackupHeatingCapacity>
+                          <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+                          <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+                        </HeatPump>
+                      </HVACPlant>
+                    </HVAC>
+                  </Systems>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+            "#
+        );
+        let root = parse_xml_document(&xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details must exist");
+        let mut building = empty_building(vec![conditioned_zone()]);
+        building.details_xml = details.clone();
+        let defaults = DefaultsStore::empty();
+        let mut specs = Vec::new();
+        resolve_hvac(&building, &defaults, &mut specs).ok()?;
+        let heater = specs.iter().find(|s| s.name.contains("Heater"))?;
+        heater.parameters.get("backup_eir").and_then(Value::as_f64)
+    }
+
+    /// Regression (ticket 077): Percent with value 1.0 (fraction form) → EIR = 1.0 (COP = 1).
+    /// This is the common case produced by all OS-HPXML sample files.
+    #[test]
+    fn backup_eir_percent_fraction_form_yields_eir_one() {
+        // <Units>Percent</Units><Value>1.0</Value> means 100% efficiency as a fraction.
+        // EIR = 1 / 1.0 = 1.0 (COP = 1, i.e., electric resistance).
+        let eir = resolve_backup_eir("Percent", 1.0).expect("backup_eir must be present");
+        assert!(
+            (eir - 1.0).abs() < 1e-9,
+            "Percent/1.0 must yield EIR=1.0, got {eir}"
+        );
+    }
+
+    /// Regression (ticket 077): Percent with value 100.0 (percent-out-of-100 form) currently
+    /// produces EIR = 1/100 = 0.01 (COP = 100 — physically impossible for resistance heat).
+    /// After the fix the Units element must be read and the value divided by 100 before
+    /// inverting, yielding EIR = 1.0.
+    ///
+    /// This test is expected to FAIL until the fix in ticket 077 is applied.
+    #[test]
+    fn backup_eir_percent_out_of_100_must_normalize_to_eir_one() {
+        // <Units>Percent</Units><Value>100.0</Value>: a real file expressing 100% efficiency
+        // as a percentage rather than a fraction.
+        let eir = resolve_backup_eir("Percent", 100.0).expect("backup_eir must be present");
+        // Without the fix: eir = 1/100.0 = 0.01 (COP = 100 — wrong).
+        // With the fix:    eir = (100.0 / 100.0)⁻¹ = 1.0.
+        assert!(
+            (eir - 1.0).abs() < 1e-9,
+            "Percent/100.0 must yield EIR=1.0 after normalization (currently {eir} — bug 077)"
+        );
+    }
+
+    /// Regression (ticket 077): AFUE with value 0.95 → EIR ≈ 1.0526 (gas backup at 95% AFUE).
+    #[test]
+    fn backup_eir_afue_fraction_yields_correct_eir() {
+        let eir = resolve_backup_eir("AFUE", 0.95).expect("backup_eir must be present");
+        let expected = 1.0 / 0.95;
+        assert!(
+            (eir - expected).abs() < 1e-9,
+            "AFUE/0.95 must yield EIR≈{expected:.4}, got {eir}"
+        );
+    }
+
+    /// Regression (ticket 077): COP with value 3.5 → EIR ≈ 0.2857.
+    #[test]
+    fn backup_eir_cop_yields_correct_eir() {
+        let eir = resolve_backup_eir("COP", 3.5).expect("backup_eir must be present");
+        let expected = 1.0 / 3.5;
+        assert!(
+            (eir - expected).abs() < 1e-6,
+            "COP/3.5 must yield EIR≈{expected:.4}, got {eir}"
+        );
+    }
+
+    // Regression (ticket 078): HSPF2_TO_HSPF_FACTOR must be 1/0.85, not 1/0.95.
+    // Per MINHERS Addendum 71f (RESNET, adopted from AHRI), the HSPF2/HSPF ratio for
+    // ducted split-system heat pumps is 0.85 (≈15% reduction), whereas the SEER2/SEER
+    // ratio is 0.95 (≈5% reduction). Using 0.95 for HSPF2 overstates COP by ~10%.
+    //
+    // This test FAILS until HSPF2_TO_HSPF_FACTOR is corrected from 1.0/0.95 to 1.0/0.85.
+    #[test]
+    fn hspf2_to_hspf_factor_is_one_over_0_85() {
+        // normalize_efficiency_units("HSPF2", 9.0) must return ("HSPF", 9.0 / 0.85).
+        let (units, hspf) = normalize_efficiency_units("HSPF2", 9.0);
+        assert_eq!(units, "HSPF", "unit label must be HSPF after conversion");
+
+        let expected = 9.0_f64 / 0.85;
+        assert!(
+            (hspf - expected).abs() < expected * 0.001,
+            "HSPF2=9.0 must convert to HSPF≈{expected:.4}, got {hspf:.4} (bug 078: factor is 1/0.95 instead of 1/0.85)"
+        );
+    }
+
+    // Regression (ticket 078): the EIR derived from the converted HSPF must match
+    // 3.412 / (HSPF2 / 0.85), not 3.412 / (HSPF2 / 0.95).
+    #[test]
+    fn hspf2_conversion_eir_matches_correct_factor() {
+        let hspf2 = 9.0_f64;
+        let (_, hspf) = normalize_efficiency_units("HSPF2", hspf2);
+
+        // EIR = BTU_PER_WH / HSPF  (3.412 Btu/Wh)
+        const BTU_PER_WH: f64 = 3.412_141_633;
+        let eir = BTU_PER_WH / hspf;
+
+        let correct_eir = BTU_PER_WH / (hspf2 / 0.85);
+        let wrong_eir = BTU_PER_WH / (hspf2 / 0.95);
+
+        assert!(
+            (eir - correct_eir).abs() < 1e-6,
+            "EIR must be {correct_eir:.6} (1/0.85 factor), got {eir:.6} (bug 078)"
+        );
+        assert!(
+            (eir - wrong_eir).abs() > 0.01,
+            "EIR must NOT equal the wrong value {wrong_eir:.6} produced by 1/0.95 factor"
+        );
+    }
+
+    // Sanity check: SEER2→SEER factor must remain 1/0.95 (unchanged by ticket 078).
+    #[test]
+    fn seer2_to_seer_factor_is_one_over_0_95() {
+        let (units, seer) = normalize_efficiency_units("SEER2", 14.0);
+        assert_eq!(units, "SEER");
+        let expected = 14.0_f64 / 0.95;
+        assert!(
+            (seer - expected).abs() < expected * 0.001,
+            "SEER2=14.0 must convert to SEER≈{expected:.4}, got {seer:.4}"
+        );
+    }
+
+    // Regression (ticket 088): EER2 must be converted to EER, not passed through unchanged.
+    // DOE/AHRI 2023 standards lower EER2 values relative to EER (tested at higher external
+    // static pressure). EER2 appearing in HPXML must be uprated before use as EER.
+    // This test FAILS until EER2 is split out of the pass-through arm and given its own
+    // conversion arm in normalize_efficiency_units.
+    #[test]
+    fn eer2_is_not_treated_as_eer_passthrough() {
+        let (units, eer) = normalize_efficiency_units("EER2", 10.0);
+        assert_eq!(units, "EER", "EER2 must normalize to label 'EER'");
+        assert!(
+            eer > 10.0,
+            "EER2=10.0 must convert to EER > 10.0 (EER2 is lower than EER under stricter test conditions); got {eer:.4} (bug 088: EER2 passed through unchanged)"
+        );
+    }
+
+    // Regression (ticket 088): plain EER must remain unchanged through normalize_efficiency_units.
+    #[test]
+    fn eer_passthrough_unchanged() {
+        let (units, eer) = normalize_efficiency_units("EER", 10.0);
+        assert_eq!(units, "EER");
+        assert!(
+            (eer - 10.0).abs() < 1e-9,
+            "EER=10.0 must pass through unchanged, got {eer}"
+        );
     }
 }

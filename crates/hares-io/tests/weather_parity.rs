@@ -789,6 +789,130 @@ fn wind_speed_uses_zoh_wind_dir_uses_circular_linear() {
 }
 
 // ---------------------------------------------------------------------------
+// Ticket 030 regression tests — solar upsampling energy conservation
+// ---------------------------------------------------------------------------
+
+/// Regression guard: triangular resampling at a sunset boundary DOES produce
+/// nonzero sub-hourly values in the nighttime hour.
+///
+/// Sequence: last sunlit hour (400 W/m²) followed by two nighttime hours (0).
+/// At 15-minute resolution (factor=4), the first nighttime hour receives
+/// sub-hourly values [200, 100, 0, 0] from the triangular formula, giving a
+/// mean of 75 W/m² — confirming the energy conservation violation in #030.
+/// (The ticket incorrectly states [100,0,0,0] / 25 W/m²; the correct values
+/// are [200,100,0,0] / 75 W/m² from the formula prev*(0.5-frac)+i*(0.5+frac).)
+#[test]
+fn triangular_sunset_boundary_bleeds_into_nighttime_hour() {
+    let values = vec![400.0_f64, 0.0, 0.0];
+    let n = values.len();
+    let series = make_series_full(
+        n,
+        vec![50.0; n],
+        vec![5.0; n],
+        vec![101.325; n],
+        values.clone(), // ghi
+        values.clone(), // dni
+        values.clone(), // dhi
+        vec![3.0; n],
+        vec![180.0; n],
+    );
+    let factor: usize = 4; // 15-minute sub-steps
+    let resampled = series.resample(3600 / factor as u32).expect("resample should succeed");
+    // Default method for GHI is Triangular.
+
+    for (field_name, resampled_field) in [
+        ("GHI", &resampled.ghi_w_m2),
+        ("DNI", &resampled.dni_w_m2),
+        ("DHI", &resampled.dhi_w_m2),
+    ] {
+        let night_hour = &resampled_field[factor..2 * factor]; // hour index 1
+        let night_mean: f64 = night_hour.iter().sum::<f64>() / factor as f64;
+
+        // The mean is nonzero — triangular leaks energy across the day/night boundary.
+        // Exact expected: 75 W/m² = 400 * (0.5+0.25+0+0) / 4 = 400 * 3/16.
+        assert!(
+            night_mean > 1.0,
+            "{field_name} nighttime hour mean should be nonzero (energy leak), got {night_mean:.4}"
+        );
+
+        // Verify specific sub-hourly values:
+        // frac=0.00: prev(400)*0.5 + i(0)*0.5 = 200
+        // frac=0.25: prev(400)*0.25 + i(0)*0.75 = 100
+        // frac=0.50: i(0)*1.0 = 0
+        // frac=0.75: i(0)*0.75 + next(0)*0.25 = 0
+        let expected_night = [200.0_f64, 100.0, 0.0, 0.0];
+        for (j, (&got, &exp)) in night_hour.iter().zip(expected_night.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-10,
+                "{field_name} nighttime sub-step {j}: expected {exp}, got {got}"
+            );
+        }
+
+        // Confirm mean = 75, not 25 as the ticket incorrectly states
+        assert!(
+            (night_mean - 75.0).abs() < 1e-9,
+            "{field_name} nighttime mean expected 75.0 W/m² (= 400 × 3/16), got {night_mean}"
+        );
+    }
+}
+
+/// ZOH resampling preserves the hourly energy integral exactly.
+///
+/// Sequence: [400, 0, 0] W/m² at 15-minute resolution (factor=4).
+/// Every sub-hourly value in each hour must equal the source value exactly,
+/// so the mean of each hour equals the source value.
+#[test]
+fn zoh_preserves_hourly_energy_integral_at_sunset_boundary() {
+    let values = vec![400.0_f64, 0.0, 0.0];
+    let n = values.len();
+    let series = make_series_full(
+        n,
+        vec![50.0; n],
+        vec![5.0; n],
+        vec![101.325; n],
+        values.clone(), // ghi
+        values.clone(), // dni
+        values.clone(), // dhi
+        vec![3.0; n],
+        vec![180.0; n],
+    );
+
+    use hares_io::{ResampleMethod, ResampleOverrides};
+    let overrides = ResampleOverrides {
+        ghi: Some(ResampleMethod::Zoh),
+        dni: Some(ResampleMethod::Zoh),
+        dhi: Some(ResampleMethod::Zoh),
+        ..Default::default()
+    };
+    let factor: usize = 4; // 15-minute sub-steps
+    let resampled = series
+        .resample_with(3600 / factor as u32, &overrides)
+        .expect("resample_with should succeed");
+
+    for (field_name, src, resampled_field) in [
+        ("GHI", &values, &resampled.ghi_w_m2),
+        ("DNI", &values, &resampled.dni_w_m2),
+        ("DHI", &values, &resampled.dhi_w_m2),
+    ] {
+        for (k, &src_val) in src.iter().enumerate() {
+            let hour_slice = &resampled_field[k * factor..(k + 1) * factor];
+            let mean = hour_slice.iter().sum::<f64>() / factor as f64;
+            assert!(
+                (mean - src_val).abs() < 1e-9,
+                "{field_name} hour {k}: ZOH mean {mean} != source {src_val} (error > 1e-9)"
+            );
+            // Every sub-step must equal the source value exactly for ZOH.
+            for (j, &v) in hour_slice.iter().enumerate() {
+                assert!(
+                    (v - src_val).abs() < 1e-12,
+                    "{field_name} hour {k}, sub-step {j}: expected {src_val}, got {v}"
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Year boundary test
 // ---------------------------------------------------------------------------
 

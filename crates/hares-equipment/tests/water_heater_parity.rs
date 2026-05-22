@@ -1069,3 +1069,90 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
         (sens50 - skin_loss_w) * 0.5
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: HPWH compressor zone heat must NOT be reported as InternalGain
+//
+// Ticket 074: heat_pump_wh.rs:746 writes ThermalCategory::InternalGain for
+// HP compressor waste heat / evaporator zone interaction. HP-cycle effects are
+// mechanical conditioning, not passive gains. After ticket 071 lands and
+// ThermalCategory::HvacDehumidification exists, line 746 must be changed to
+// that category. Until then this test documents the current bug:
+// InternalGain bucket is non-zero when the HP compressor is running.
+//
+// This test FAILS when the bug is fixed (InternalGain becomes zero), which is
+// the intended failing state for driving the fix.
+// ---------------------------------------------------------------------------
+#[test]
+#[should_panic(expected = "HPWH compressor zone heat must not appear in InternalGain")]
+fn hpwh_compressor_zone_heat_not_reported_as_internal_gain() {
+    use hares_equipment::water_heater::heat_pump_wh::HeatPumpWH;
+
+    // Cold tank below deadband floor to guarantee compressor runs this step.
+    let env = make_env(21.0);
+    let cfg = EquipmentConfig::from_typed(
+        "HPWH".to_string(),
+        "Heat Pump Water Heater".to_string(),
+        HeatPumpWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: Some(3.45),
+            backup_element_power_w: None,
+            ua_w_per_k: Some(2.0),
+            setpoint_c: Some(51.7),
+            deadband_c: Some(5.556),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(40.0),
+            tank_nodes: None,
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            compressor_power_w: Some(1_200.0),
+            backup_enable_offset_c: None,
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: None,
+            min_off_time_s: None,
+            hp_only_mode: Some(true),
+            element_hp_control_mode: None,
+            fan_power_w: Some(0.0),
+            parasitic_power_w: Some(0.0),
+            backup_efficiency: None,
+            shr: None,
+            lost_heat_fraction: Some(0.0),
+            wall_heat_fraction: Some(0.0),
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
+            performance_adjustment: None,
+            zone_type: Some("conditioned".to_string()),
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+        },
+    );
+
+    let mut wh = HeatPumpWH::new(cfg.clone());
+    wh.init(&cfg, &env).unwrap();
+    let mut ports = PortSlots::from_declarations(wh.ports());
+    step_wh(&mut wh, &env, &mut ports);
+
+    let compressor_power_w = wh.telemetry().get("compressor_power_w").unwrap_or(0.0);
+    assert!(
+        compressor_power_w > 0.0,
+        "compressor must be running for this test to be meaningful"
+    );
+
+    let internal_gain_w = ports.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
+    // After ticket 074 fix: InternalGain must be 0.0 because HP zone heat
+    // is reclassified to HvacDehumidification. This assertion documents the
+    // required post-fix state. The #[should_panic] above ensures the test
+    // panics with the CURRENT (buggy) code where InternalGain is non-zero.
+    assert!(
+        internal_gain_w.abs() < 1e-6,
+        "HPWH compressor zone heat must not appear in InternalGain \
+         (got {internal_gain_w:.2} W); should be in HvacDehumidification after ticket 074 fix"
+    );
+}

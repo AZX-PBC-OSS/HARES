@@ -199,3 +199,139 @@ Add validation rules for the new capability bits and fields. Non-HVAC equipment 
 - #017 — Missing output columns v7: **018 must be completed and merged before 017 begins**. Ticket 017's output columns route from `CoreOutput` fields; if 017 is implemented before 018, its column wiring targets telemetry and then must be re-wired when 018 lands. Implementing in order (018 → 017) avoids double-wiring.
 - #019 — Telemetry key gaps (some keys like COP already exist; this ticket makes them redundant for output)
 - #020 — Setpoint chain visibility (setpoint_c in CoreOutput becomes the effective value; schedule/runtime setpoints stay in telemetry)
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-20
+
+### Code Confirmation
+
+- [x] Referenced line numbers still match (confirmed exact location):
+  - `equipment.rs:882-905` → confirmed `CoreFlows`, `CoreState`, `CoreOutput` at
+    `/Users/rich/source/HARES/crates/hares-types/src/equipment.rs:882-905` — exact match.
+  - `equipment.rs:1005-1015` → confirmed `CoreCapabilities` bitflags at lines 1005-1015 — exact match.
+  - `equipment.rs:907-1003` → confirmed `validate_core_contract()` at lines 907-1003 — exact match.
+  - `dwelling/mod.rs:1720-1726` → confirmed at lines 1720-1728 in
+    `/Users/rich/source/HARES/crates/hares-core/src/dwelling/mod.rs` — lines 1720 and 1724 are the
+    `telemetry.get(tk::HEATING_SETPOINT_C)` / `telemetry.get(tk::COOLING_SETPOINT_C)` reads
+    (ticket cited 1720 and 1724; comments are on 1721/1725 — off by one in the "allowed" line
+    numbering, but the code block is correct).
+  - `dwelling/mod.rs:2496-2560` → confirmed. Setpoint escape at 2530-2537, capacity at 2542-2550,
+    COP at 2552-2554 (ticket cited 2529-2533/2541-2546/2550-2551; actual lines shifted by ~1-3
+    from the ticket's estimates, but all three logical escapes are present and intact).
+  - `air_conditioner.rs:877-888` → confirmed `CoreOutput` construction at lines 877-887 — exact match.
+  - `furnace.rs:200-210` → electric furnace `CoreOutput` at lines 200-211 — close match.
+  - `furnace.rs:429-442` → gas furnace `CoreOutput` at lines 428-443 — close match.
+
+- [x] Described logic matches current implementation:
+  - `CoreFlows` has only `electric_kw`, `reactive_power_kvar`, `fuel_w` — no thermal fields. ✓
+  - `CoreState` has only `operating_mode`, `soc` — no `speed_index` or `setpoint_c`. ✓
+  - `CoreOutput` has only `flows` and `state` — no `performance` sub-struct. ✓
+  - `CoreCapabilities` is a `u8` bitflag with only 5 bits defined (`ELECTRIC`, `REACTIVE`, `FUEL`,
+    `HAS_SOC`, `HAS_MODE`) — no `THERMAL`, `HAS_SPEED`, `HAS_SETPOINT`, `HAS_COP`. ✓
+  - All three logical telemetry escapes in `record_step()` are present and marked with `// allowed:`
+    comments (11 raw comment lines total confirmed by grep). ✓
+  - HVAC equipment (`air_conditioner.rs`, `furnace.rs`) populates only `electric_kw` and
+    `operating_mode` in `CoreOutput`; thermal output/COP/setpoint go only to telemetry. ✓
+
+- [x] OCHRE cross-check result: **OCHRE diverges intentionally — flat dict approach is OCHRE's
+  design, not a bug**. OCHRE uses a flat Python dictionary (the `current_results = {}` dict in
+  `Simulator.py:259-265`) to collect all equipment output each step. Per-equipment fields like COP
+  (`"{end_use} COP (-)"`, `HVAC.py:577`), setpoint (`"{end_use} Setpoint (C)"`, `HVAC.py:573`),
+  thermal output (`"{end_use} Delivered (W)"`, `HVAC.py:572`), and speed (`"{end_use} Speed (-)"`,
+  `HVAC.py:597`) are string-keyed entries in this dict — no typed struct equivalent to `CoreOutput`
+  exists. HARES has deliberately introduced `CoreOutput` as a typed, validated, compiler-checked
+  alternative to OCHRE's flat dict. The ticket's proposed promotion of HVAC-specific fields into
+  `CoreOutput` is an *intentional divergence from OCHRE* and a design improvement — it does not
+  regress parity since the underlying values are the same.
+
+- [x] EnergyPlus cross-check result: **N/A for this ticket's primary concern** — the ticket is
+  about *output data plumbing* (how HARES routes data from equipment to the output layer), not
+  about physics formulas or coefficients. EnergyPlus itself reports HVAC outputs as named variables
+  (e.g., `"Cooling Coil Total Cooling Rate [W]"`, `"Cooling Coil Sensible Cooling Rate [W]"`,
+  `"Cooling Coil Upper Speed Level []"` per the EnergyPlus 24.1 I/O Reference) via its output
+  variable subsystem, which is analogous to HARES telemetry. EnergyPlus does NOT expose COP as a
+  direct output variable for DX coils (confirmed via WebFetch of
+  https://bigladdersoftware.com/epx/docs/24-1/input-output-reference/group-coil-cooling-dx.html);
+  COP is an *input* parameter (`Gross Cooling COP`) and is derived from EIR outputs. HARES computing
+  COP from EIR and reporting it as a telemetry key is therefore an extension beyond EnergyPlus
+  conventions — there is no EnergyPlus precedent that would conflict with promoting COP to
+  `CoreOutput`. No divergence or conflict.
+
+### Web-Verified Citations
+
+This ticket contains **no external standards citations** (no ASHRAE, NFRC, DOE, ISO, or EnergyPlus
+formula references). It is a pure code-architecture / refactoring ticket. The only externally
+verifiable claims are structural (what fields exist in `CoreOutput`, how many escape hatches exist),
+all of which were verified by direct code reading above.
+
+The EnergyPlus documentation was consulted to establish that:
+- EnergyPlus uses a named-variable output system analogous to telemetry (not typed structs), so
+  the ticket's proposed typed-struct promotion has no EnergyPlus precedent that would make it wrong.
+- COP is not a standard DX coil output variable in EnergyPlus; HARES computing and surfacing it is
+  additive.
+
+**No formal citation verification table is required** because the ticket makes no standards claims.
+
+### Legitimacy
+
+- **Verdict**: Legitimate
+
+- **Rationale**: Every structural claim in the ticket was confirmed by direct code inspection.
+  `CoreOutput` at `equipment.rs:882-905` carries only `electric_kw`, `reactive_power_kvar`,
+  `fuel_w`, `operating_mode`, and `soc` — no thermal output, no COP, no setpoint, no speed.
+  All three logical telemetry escapes in `record_step()` are present and active (confirmed: 9 raw
+  `// allowed:` comment lines in lines 2532-2554, plus 2 more at lines 1721/1725, totalling 11).
+  HVAC equipment (`air_conditioner.rs:877-887`, `furnace.rs:200-211`, `furnace.rs:428-443`)
+  constructs a minimal `CoreOutput` that leaves thermal fields exclusively in telemetry. The OCHRE
+  comparison confirms the divergence is intentional (OCHRE uses a flat dict, HARES uses typed
+  structs — the ticket extends the typed approach consistently). EnergyPlus precedent raises no
+  objection. The minor discrepancies found (exact line numbers off by 1-3 in some references, and
+  the ticket using "6" and "5" and "3" interchangeably for the logical escape count) are editorial
+  inconsistencies, not factual errors. The core problem description and proposed solution are
+  accurate.
+
+  **One factual note**: The ticket's Required Behavior section item 6 says "All 6 'allowed:
+  telemetry-only' hacks in `record_step()`" but there are only 3 logical escapes in `record_step()`
+  (setpoint, capacity, COP). The Definition of Done correctly uses "3 logical escapes" and "9
+  raw comment lines." The "6" in Required Behavior likely counts the 3 `record_step()` escapes plus
+  the 2 `DwellingTelemetry` escapes plus 1 mis-count — this wording should be corrected to "3" (or
+  "5 total across both sites") when implementing. This does not affect legitimacy.
+
+  **One serialization note**: The ticket warns about `u8` → `u16` widening of `CoreCapabilities`.
+  This concern is **real but already mitigated** by the existing serde format. `bitflags` v2 with
+  the `serde` feature serializes as a named-flag string (e.g., `"ELECTRIC"`) rather than an integer
+  (confirmed by the pinned test at `equipment.rs:2394-2399`). Widening from `u8` to `u16` does not
+  change the JSON wire format since strings are used, not integers. The "search for fixture JSON
+  files" step found **zero** external JSON fixture files containing `CoreCapabilities` values (no
+  `*.json` files exist in `crates/` — confirmed by `Glob("**/*.json", "crates/")`). The `u8` → `u16`
+  change is safe.
+
+### Proposed Fix Summary
+
+1. In `hares-types/src/equipment.rs`: Add `speed_index: Option<u8>` and `setpoint_c: Option<f64>`
+   to `CoreState`; add `thermal_output_w: Option<f64>`, `sensible_cooling_w: Option<f64>`,
+   `latent_cooling_w: Option<f64>` to `CoreFlows`; add a new `CorePerformance { cop, main_power_kw
+   }` struct and embed it as `CoreOutput.performance`; widen `CoreCapabilities` to `u16` and add
+   `THERMAL`, `HAS_SPEED`, `HAS_SETPOINT`, `HAS_COP` bits.
+2. In each HVAC equipment's `step()`: populate the new fields in `CoreOutput`.
+3. In `dwelling/mod.rs`: replace all 11 `// allowed:` telemetry reads with `CoreOutput` field
+   reads in both `record_step()` and `DwellingTelemetry` construction.
+4. Update `validate_core_contract()` to check the new capability/field pairs.
+5. Update existing `CoreOutput` serialization tests to cover the new fields.
+
+### Test Written
+
+- **File**: `crates/hares-equipment/tests/hvac_tests.rs` (appended at end of file)
+- **Functions**:
+  - `ticket_018_furnace_core_output_lacks_thermal_field` — confirms a running furnace writes
+    `THERMAL_OUTPUT_W` to telemetry but that no `thermal_output_w` field exists on `CoreOutput`
+    (the field's absence is the structural fact; the telemetry value confirms the equipment ran).
+  - `ticket_018_ac_core_output_lacks_cop_field` — confirms a running AC writes `COP` to telemetry
+    but that no `cop` field exists on `CoreOutput`.
+  - `ticket_018_furnace_core_output_lacks_setpoint_field` — confirms a running furnace writes
+    `HEATING_SETPOINT_C` to telemetry but that no `setpoint_c` field exists on `CoreState`.
+- **Status**: All three tests compile and pass against the current (pre-fix) code.
+  Each test includes a `REGRESSION SENTINEL` comment describing the assertion that must be added
+  (or substituted) after ticket-018 is implemented to verify the fix.

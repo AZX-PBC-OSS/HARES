@@ -4699,4 +4699,74 @@ mod tests {
             "CFM25 cannot be converted to fraction; must be None"
         );
     }
+
+    // Regression tests for ticket 052: infiltration_ach50 must reject CFM50 values.
+    // These tests FAIL before the fix is applied and PASS afterwards.
+
+    #[test]
+    fn ticket_052_cfm50_inline_attr_does_not_poison_ach50() {
+        // <AirLeakage units="CFM50">750.0</AirLeakage> appears directly under
+        // AirInfiltrationMeasurement (HPXML 4.x form).  The ACH50 field must be
+        // None; the CFM50 field must hold 750.0.
+        let xml = SAMPLE_XML.replace(
+            "<AirLeakage>5.0</AirLeakage>",
+            "<AirLeakage units=\"CFM50\">750.0</AirLeakage>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(
+            building.infiltration_cfm50,
+            Some(750.0),
+            "CFM50 should be captured in infiltration_cfm50"
+        );
+        assert_eq!(
+            building.infiltration_ach50,
+            None,
+            "CFM50 input must not be stored as ACH50 (ticket 052 bug: 750 CFM50 stored as 750 ACH50)"
+        );
+    }
+
+    #[test]
+    fn ticket_052_ach50_inline_attr_is_accepted() {
+        // <AirLeakage units="ACH50">5.0</AirLeakage> — a valid ACH50 measurement
+        // expressed via the HPXML 4.x inline-attribute form.
+        let xml = SAMPLE_XML.replace(
+            "<AirLeakage>5.0</AirLeakage>",
+            "<AirLeakage units=\"ACH50\">5.0</AirLeakage>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(
+            building.infiltration_ach50,
+            Some(5.0),
+            "ACH50 inline-attribute form must be accepted into infiltration_ach50"
+        );
+        assert!(
+            building.infiltration_cfm50.is_none(),
+            "ACH50 input must not be stored as CFM50"
+        );
+    }
+
+    #[test]
+    fn ticket_052_unitofmeasure_cfm_wrapper_does_not_set_ach50() {
+        // HPXML 3.x wrapper form: <BuildingAirLeakage><UnitofMeasure>CFM</UnitofMeasure>
+        // <AirLeakage>850.0</AirLeakage></BuildingAirLeakage>.
+        // ACH50 must be None; CFM50 must be 850.0.
+        let xml = SAMPLE_XML.replace(
+            "<AirLeakage>5.0</AirLeakage>",
+            "<BuildingAirLeakage>\
+               <UnitofMeasure>CFM</UnitofMeasure>\
+               <AirLeakage>850.0</AirLeakage>\
+             </BuildingAirLeakage>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(
+            building.infiltration_cfm50,
+            Some(850.0),
+            "CFM wrapper form should be captured in infiltration_cfm50"
+        );
+        assert_eq!(
+            building.infiltration_ach50,
+            None,
+            "CFM wrapper form must not pollute infiltration_ach50 (ticket 052)"
+        );
+    }
 }

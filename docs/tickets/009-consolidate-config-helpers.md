@@ -404,3 +404,119 @@ parent). Test round-trip serialization of HPXML-derived configs.
 
 - 006-extract-thermostat-fsm — config setpoint fields will move to `ThermostatFsm`; coordinate on which fields remain in `HeatPumpCommonConfig`
 - 008-decompose-hvacequipment-struct — `HvacConfig` sub-struct (from that ticket) will consume fields from these typed configs; coordinate on field ownership
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-20
+
+### Code Confirmation
+
+- [x] Referenced line numbers still match (with corrections noted below)
+- [x] Described logic matches current implementation
+- [x] OCHRE cross-check result: partially matches — see §OCHRE below
+- [x] EnergyPlus cross-check result: N/A — this ticket is a pure Rust refactoring concern with no EnergyPlus formula citations
+
+#### Line number corrections
+
+| Ticket claim | Actual location (2026-05-20) |
+|---|---|
+| `cooling_config.rs:10–12` — `default_one()` | ✓ lines 10–12 |
+| `cooling_config.rs:108–112` — `"Central AC"` | Actual: line 110 (impl spans 108–112) |
+| `cooling_config.rs:341` — `"Room AC"` | Actual: line 342 |
+| `cooling_config.rs:428` — `"Dehumidifier"` | Actual: line 430 |
+| `heat_pump_config.rs:10–12` — `default_one()` | ✓ lines 10–12 |
+| `heat_pump_config.rs:20–139` — `HeatPumpHeaterConfig` (39 fields) | Actual: lines 20–139; field count = **40** (39 named fields + 1 `duct: DuctConfig` which is flattened, counted as 1 field slot) |
+| `heat_pump_config.rs:188–192` — `"ASHP Heater"` | Actual: line 190 |
+| `heat_pump_config.rs:302–393` — `HeatPumpCoolerConfig` (35 fields) | Actual: lines 308–393; field count = **37** (36 fields + duct) |
+| `heat_pump_config.rs:395–399` — `"ASHP Cooler"` | Actual: line 397 |
+| `hvac_core.rs:396–515` — Cd cascade | ✓ exact lines confirmed: 396–398 (PLF Cd), 399–406 (startup Cd), 491–515 (derived override) |
+
+A third file was also found with `default_one()`: **`heating_config.rs:316`**. The ticket does not mention this instance. The fix must also address this file.
+
+#### Issue 1 — `default_one()` duplication: **CONFIRMED**
+
+`fn default_one() -> u8 { 1 }` is defined independently in:
+- `cooling_config.rs:10–12`
+- `heat_pump_config.rs:10–12`
+- `heating_config.rs:316–318` ← **not mentioned in ticket**
+
+All three are identical and used as a serde default for `number_of_speeds`.
+
+#### Issue 2 — `HeatPumpHeaterConfig` / `HeatPumpCoolerConfig` field overlap: **CONFIRMED**
+
+Heater has 40 fields (struct lines 20–139); cooler has 37 fields (lines 308–393). Shared fields confirmed by direct inspection:
+
+- 27 fields are identical in both structs with the same types and serde attributes.
+- Heater-only fields (5): `hp_lockout_temp_c`, `er_lockout_temp_c`, `max_oat_supplemental_c`, `er_setpoint_offset_c`, `er_hard_lockout_time_s`.
+- Cooler-only fields (1): `stage_shrs`.
+- The ticket's table of 31 shared fields **contains minor inaccuracies** in its line-number column (off by a few lines in each case) but the field names are accurate.
+
+#### Issue 3 — Equipment type name string literals: **CONFIRMED**
+
+Bare string literals confirmed at: `cooling_config.rs:110` (`"Central AC"`), `cooling_config.rs:342` (`"Room AC"`), `cooling_config.rs:430` (`"Dehumidifier"`), `heat_pump_config.rs:190` (`"ASHP Heater"`), `heat_pump_config.rs:397` (`"ASHP Cooler"`). There is no central registry or compile-time check.
+
+#### Issue 4 — Cd cascade (three overlapping key chains): **CONFIRMED**
+
+The key chain `"startup_cd" → "cooling_cd" → "cd"` appears at **three sites** in `hvac_core.rs`:
+
+- **Lines 396–398** (PLF Cd assignment): reads only `"cooling_cd" | "cd"` — `"startup_cd"` is NOT in this chain.
+- **Lines 399–402** (startup Cd assignment): reads `"startup_cd" | "cooling_cd" | "cd"`.
+- **Lines 491–493** (explicit-cd guard): reads `"startup_cd" | "cooling_cd" | "cd"` — if none found, derived defaults overwrite both fields.
+
+Additional observation not fully captured in the ticket: the first block (lines 396–398) does **not** include `"startup_cd"` in its key chain. This means if a user provides only `"startup_cd"`, `startup.c_d` is set explicitly (via the second block) but `plf_cooling_degradation_coeff` gets `DEFAULT_PLF_DEGRADATION_COEFF` (0.25) from the first block, not the user's value. The third block then detects `explicit_cd.is_some()` (because `startup_cd` is found) and skips the derived path — leaving the PLF Cd at 0.25 even though the user likely intended to override it. This asymmetry is a real bug. The `resolve_cd` function proposed in the ticket would unify both fields, but it must also be applied to the first assignment block.
+
+#### OCHRE Cross-Check
+
+OCHRE's `calc_c_d` (vendors/OCHRE/ochre/utils/equipment.py:470–500) uses the identical decision table:
+- Single-speed heater: HSPF < 7.0 → 0.20, else → 0.11
+- Two-speed heater/cooler: 0.11
+- Multi-speed/variable: 0.0
+- Single-speed cooler: SEER < 13.0 → 0.20, else → 0.07
+
+HARES matches OCHRE exactly for all derived Cd values. The divergence is purely structural (OCHRE computes Cd once during HPXML parsing and stores it; HARES re-derives it inline on every `init()` call with three separate blocks).
+
+### Web-Verified Citations
+
+This ticket contains **one implicit standards reference** (the serde flatten + deny_unknown_fields limitation) and **no explicit ASHRAE/EnergyPlus/DOE citations**. All web verification was performed on the serde documentation.
+
+- **Citation**: "use of `deny_unknown_fields` on the struct being flattened into is not supported" — ticket §Step 2, first bullet under "Required design decision"
+- **Source found**: [Struct flattening · Serde](https://serde.rs/attr-flatten.html)
+- **Quoted passage**: "flatten is not supported in combination with structs that use deny_unknown_fields. Neither the outer nor inner flattened struct should use that attribute."
+- **Verdict**: **Confirmed**. The serde documentation explicitly prohibits `deny_unknown_fields` on either the outer or inner struct when `flatten` is used. The ticket's advice to omit `deny_unknown_fields` from `HeatPumpCommonConfig` is correct.
+
+  Additional context from [serde issue #2384](https://github.com/serde-rs/serde/issues/2384): a reporter demonstrated that simple cases of `flatten + deny_unknown_fields` can work in practice, and the documentation note was raised. The serde maintainers have not changed the documented guidance — it remains "not supported". The ticket is correct to treat this as a soundness restriction to respect.
+
+### Legitimacy
+
+- **Verdict**: **Legitimate** (with minor line-number corrections and one omission)
+- **Rationale**: All four issues are confirmed by direct code inspection. Issue 1 (`default_one()` duplication) exists in three files, not two — `heating_config.rs:316` was not mentioned but must also be fixed. Issue 2 (field overlap) is confirmed with minor field-count differences (40/37 actual vs. 39/35 claimed, depending on how `duct` is counted). Issue 3 (bare string literals) is confirmed. Issue 4 (Cd cascade) is confirmed and is more nuanced than described: the first block (lines 396–398) omits `"startup_cd"` from its key chain, creating a real asymmetry where `startup_cd`-only config silently leaves `plf_cooling_degradation_coeff` at the global default. The `resolve_cd` fix as proposed will correctly unify both fields. The serde `deny_unknown_fields` + `flatten` guidance is web-verified as accurate per official documentation.
+
+### Proposed Fix Summary
+
+**Phase A**: (1) Move `default_one()` to `core_config.rs` as `pub(super) fn default_one() -> u8 { 1 }` and remove the three private copies from `cooling_config.rs`, `heat_pump_config.rs`, and `heating_config.rs`. (2) Replace the three Cd blocks in `hvac_core::init` (lines 396–515) with a single `resolve_cd` call that applies the unified key chain `"startup_cd" | "cooling_cd" | "cd"` to **both** `plf_cooling_degradation_coeff` and `startup.c_d`, then falls through to equipment-type/SEER/HSPF derived defaults, then to `DEFAULT_PLF_DEGRADATION_COEFF`.
+
+**Phase B**: Extract `HeatPumpCommonConfig` with `#[serde(flatten)]` on each outer struct (`HeatPumpHeaterConfig`, `HeatPumpCoolerConfig`). Do NOT add `deny_unknown_fields` to `HeatPumpCommonConfig`; retain it only on the outer structs. Add `equipment_type_name` constants module and update all `EquipmentTypedConfig` impls to reference them.
+
+**Do NOT implement** — audit only.
+
+### Tests Written
+
+- **File**: `crates/hares-equipment/src/hvac/heat_pump_config.rs` (in `#[cfg(test)] mod tests`)
+  - `regression_009_number_of_speeds_defaults_to_one_heater` — documents `default_one()` == 1 for `HeatPumpHeaterConfig`
+  - `regression_009_number_of_speeds_defaults_to_one_cooler` — same for `HeatPumpCoolerConfig`
+  - `regression_009_heater_only_fields_missing_from_cooler_json` — verifies `stage_shrs` rejected by heater struct
+  - `regression_009_cooler_only_field_missing_from_heater_json` — verifies `hp_lockout_temp_c` rejected by cooler struct
+  - `regression_009_equipment_type_name_literals` — pins current string literal values
+
+- **File**: `crates/hares-equipment/src/hvac/cooling_config.rs` (in `#[cfg(test)] mod tests`)
+  - `regression_009_central_ac_number_of_speeds_defaults_to_one` — documents `default_one()` == 1 for `CentralAirConditionerConfig`
+  - `regression_009_equipment_type_name_literals` — pins `"Central AC"`, `"Room AC"`, `"Dehumidifier"` literals
+
+- **File**: `crates/hares-equipment/src/hvac/hvac_core.rs` (in `#[cfg(test)] mod tests`)
+  - `regression_009_cooling_cd_sets_both_plf_and_startup_cd` — pins that `cooling_cd` sets both fields to same value
+  - `regression_009_startup_cd_overrides_only_startup_not_plf` — documents the `startup_cd`-only asymmetry bug: `plf_cooling_degradation_coeff` stays at DEFAULT (0.25), not the user value
+  - `regression_009_variable_speed_derived_cd_is_zero` — pins derived Cd = 0.0 for `VariableSpeedIdeal`
+  - `regression_009_cd_key_chain_priority` — pins that `startup_cd` wins over `cooling_cd` for `startup.c_d`, while `cooling_cd` sets `plf_cooling_degradation_coeff`
+
+All 11 tests pass: `cargo test -p hares-equipment regression_009` → 11 passed, 0 failed.

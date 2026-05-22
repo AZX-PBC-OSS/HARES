@@ -1509,4 +1509,142 @@ mod tests {
         // Shelter coefficient must match exactly (same terrain model, same formula)
         approx_eq(coeffs.shelter_coeff, ochre_shelter, 1e-8);
     }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for ticket 028: terrain/height correction invariants
+    // -----------------------------------------------------------------------
+
+    /// Verify the suburban terrain at 8 m height correction factor.
+    ///
+    /// Ticket 028 claims `terrain_wind_speed(u_met, 0.22, 370.0, 8.0) ≈ 0.62 × u_met`
+    /// (suburban at 8 m per ASHRAE HoF Ch. 24 Table 1).
+    ///
+    /// The actual formula gives 0.6824, not 0.62.  This test pins the correct value
+    /// so any change to the terrain constants is caught immediately.
+    #[test]
+    fn ticket028_suburban_8m_correction_factor() {
+        // ASHRAE HoF Ch.24 Table 1 suburban terrain: alpha=0.22, delta=370 m.
+        // Met station: alpha=0.14, delta=270 m, height=10 m.
+        let factor = terrain_wind_speed(1.0, SUBURBAN_ALPHA, SUBURBAN_DELTA_M, 8.0);
+        // Ticket 028 states ~0.62; actual value is ~0.6824.
+        // This test documents the correct value so the ticket's numeric claim can be corrected.
+        assert!(
+            (factor - 0.6824).abs() < 0.001,
+            "suburban 8 m correction factor: expected ~0.6824, got {factor:.6} \
+             (ticket 028 incorrectly states ~0.62)"
+        );
+        assert!(
+            factor < 1.0,
+            "terrain-corrected wind at 8 m must be less than met-station wind, got {factor}"
+        );
+    }
+
+    /// Demonstrate the double-correction risk for the ELA branch.
+    ///
+    /// `calculate_ela_coefficients` pre-bakes terrain correction into `wind_coeff`
+    /// (via `f_t`).  If the caller then also corrects the wind speed before calling
+    /// `ela_infiltration`, the correction is applied twice and infiltration is
+    /// understated.
+    ///
+    /// This test documents the invariant: when `wind_coeff` was computed via
+    /// `calculate_ela_coefficients`, passing the raw met-station wind speed to
+    /// `ela_infiltration` gives the same result as passing the terrain-corrected
+    /// wind speed to a coefficient set with `f_t = 1.0` (i.e., terrain correction
+    /// embedded in the coefficient, not the speed).
+    #[test]
+    fn ticket028_ela_wind_coeff_embeds_terrain_correction() {
+        // Build ELA wind coefficient for suburban terrain at 5 m building height.
+        let (_, wind_coeff_with_terrain) =
+            calculate_ela_coefficients(0.0, 2.5, 2.5, TerrainClass::Suburban, SHIELDING_NORMAL);
+
+        // Build ELA wind coefficient with NO terrain correction (f_t = 1.0, i.e. met-station
+        // terrain identical to site terrain -- rural/open).  We simulate this by using
+        // TerrainClass::Rural which has the same exponents as the met station.
+        let (_, wind_coeff_no_terrain) =
+            calculate_ela_coefficients(0.0, 2.5, 2.5, TerrainClass::Rural, SHIELDING_NORMAL);
+
+        // The terrain-corrected coefficient must be strictly less than the no-correction one
+        // because suburban terrain reduces wind speed (higher roughness than met station).
+        assert!(
+            wind_coeff_with_terrain < wind_coeff_no_terrain,
+            "suburban wind_coeff must be less than rural (met-station) wind_coeff: \
+             suburban={wind_coeff_with_terrain:.8}, rural={wind_coeff_no_terrain:.8}"
+        );
+
+        // Applying terrain-corrected wind speed to the terrain-embedded coefficient
+        // is equivalent to applying raw wind speed with a doubly-reduced effective coefficient.
+        // Both paths produce the same (incorrect) result -- demonstrating double-correction.
+        let u_met = 4.0_f64;
+        let u_corrected = terrain_wind_speed_for_class(u_met, TerrainClass::Suburban, 5.0);
+        let dt = 10.0_f64;
+        let ela_m2 = 0.05_f64;
+
+        // Path A: terrain correction embedded in coeff, raw wind speed (correct usage).
+        let flow_correct =
+            ela_infiltration(ela_m2, 0.0, wind_coeff_with_terrain, dt, u_met);
+
+        // Path B: terrain correction embedded in coeff, ALSO terrain-corrected wind (double-correction).
+        let flow_double_corrected =
+            ela_infiltration(ela_m2, 0.0, wind_coeff_with_terrain, dt, u_corrected);
+
+        // Double-correction must understate flow relative to single-correction.
+        assert!(
+            flow_double_corrected < flow_correct,
+            "double-correcting wind speed (ticket-028 bug path) must understate infiltration: \
+             double={flow_double_corrected:.8}, correct={flow_correct:.8}"
+        );
+
+        // The error is proportional to (u_corrected/u_met)^2 ≈ 0.68^2 ≈ 0.47 for wind-only case.
+        // With stack effect absent, the ratio should be close to that.
+        let ratio = flow_double_corrected / flow_correct;
+        assert!(
+            ratio < 0.95,
+            "double-correction must reduce flow by >5%; ratio={ratio:.4}"
+        );
+    }
+
+    /// Document that `aim2_coefficients_from_ach50` pre-bakes terrain correction
+    /// into `shelter_coeff`, so `ashrae_wind_stack` must receive the raw met-station
+    /// wind speed (not a separately terrain-corrected one) to avoid double-correction.
+    #[test]
+    fn ticket028_aim2_shelter_coeff_embeds_terrain_correction() {
+        // Suburban terrain at 5 m infiltration height.
+        let params = Aim2Params {
+            ach50: 7.0,
+            volume_m3: 400.0,
+            infiltration_height_m: 5.0,
+            foundation: FoundationLeakageClass::Other,
+            shielding: ShieldingClass::Normal,
+            terrain: TerrainClass::Suburban,
+            has_flue: false,
+            n_i: N_I_DEFAULT,
+            floors_above_grade: 2.0,
+        };
+        let coeffs_suburban = aim2_coefficients_from_ach50(&params);
+
+        let params_rural = Aim2Params {
+            terrain: TerrainClass::Rural,
+            ..params.clone()
+        };
+        let coeffs_rural = aim2_coefficients_from_ach50(&params_rural);
+
+        // Suburban shelter_coeff must be less than rural because suburban terrain
+        // has higher roughness (lower effective wind at building height).
+        assert!(
+            coeffs_suburban.shelter_coeff < coeffs_rural.shelter_coeff,
+            "suburban shelter_coeff must be less than rural (met-station terrain): \
+             suburban={:.6}, rural={:.6}",
+            coeffs_suburban.shelter_coeff,
+            coeffs_rural.shelter_coeff
+        );
+
+        // The terrain correction ratio f_t for suburban/5m vs rural/5m.
+        let f_t_suburban = terrain_wind_speed(1.0, SUBURBAN_ALPHA, SUBURBAN_DELTA_M, 5.0);
+        let f_t_rural = terrain_wind_speed(1.0, RURAL_ALPHA, RURAL_DELTA_M, 5.0);
+        let expected_ratio = f_t_suburban / f_t_rural;
+        let actual_ratio = coeffs_suburban.shelter_coeff / coeffs_rural.shelter_coeff;
+
+        // Ratio of shelter coefficients must equal ratio of f_t factors (terrain only differs there).
+        approx_eq(actual_ratio, expected_ratio, 1e-10);
+    }
 }

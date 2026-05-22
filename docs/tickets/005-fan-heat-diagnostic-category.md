@@ -232,3 +232,94 @@ The `PortContribution::Thermal` writes must remain unchanged. Fan heat still ent
 
 - 001-unify-hfg-add-humidity-port.md (latency cooling split also depends on correct sensible/latent separation)
 - 002-ideal-hvac-biquadratic-fallback.md (capacity curves affect the coil cooling values reported here)
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-20
+
+### Code Confirmation
+
+- [x] Referenced line numbers still match (with minor shifts noted below)
+- [x] Described logic matches current implementation
+- [x] OCHRE cross-check result: **matches** — `vendors/OCHRE/ochre/Equipment/HVAC.py:543` confirms `self.delivered_heat = heat_gain * self.shr + self.fan_power  # SHR=1 for fan`. Fan power is reported separately only at verbosity ≥ 7 (`Fan Power (kW)` key at line 593); the `delivered_heat` output (line 582) always includes it combined.
+- [x] EnergyPlus cross-check result: **partially matches** — see Web-Verified Citations below. E+ does expose a separate `Cooling Coil Sensible Cooling Rate [W]` output variable (coil-only, no fan heat) and a separate `Fan Electric Power [W]` variable, consistent with the ticket's claim that E+ separates these diagnostically. However, the specific section reference "§16.7 Fan Heat Modeling" does not exist.
+
+**Line number corrections**:
+- `ideal_hvac.rs:552-571` ticket description: actual code at lines 551–571 (off by one in the `if` guard, functionally equivalent). The critical `sensible_gain_w: sensible_w + fan_power_w` is at line **567** ✓.
+- `ideal_hvac.rs:562-571` (Step 3 of approach): code block starts at 552, not 562. The telemetry `tk::THERMAL_OUTPUT_W` is set at line **589** ✓.
+- `air_conditioner.rs:800-806`: **confirmed** — `fan_heat_w = fan_kw * 1000.0` at line 800; `write_zone_thermal_contributions` call at lines 801–806 ✓.
+- `hares-types/src/ports.rs:17-29`: **confirmed** — `ThermalCategory` enum at lines 17–29, five variants, no fan heat sub-category ✓.
+
+**Architecture note**: `write_zone_thermal_contributions` receives the pre-DSE gross value. DSE is embedded in `zone_heat_fractions` (conditioned zone fraction = `duct_dse`, set in `update_zone_heat_fractions()`). This means the conditioned zone port receives `(-sensible_cooling_w + fan_heat_w) * duct_dse`, not `(-sensible_cooling_w + fan_heat_w)` directly. This is correct physics but affects the second invariant formula stated in the ticket (see Invariant Correction below).
+
+### Web-Verified Citations
+
+**Citation 1: EnergyPlus Engineering Reference §16.7 "Fan Heat Modeling"**
+
+- **Source searched**: bigladdersoftware.com EnergyPlus Engineering Reference (versions 8.0–24.1), EnergyPlus 9.0 Air System Fans page, EnergyPlus 9.4 Table of Contents
+- **Quoted passage from Air System Fans (EnergyPlus 9.4)**: "The user also needs to specify the fraction of the fan motor's waste heat that will enter the air stream (usually 0 or 1). If the fan is indoors, the name of a Zone and a fraction for the split between thermal radiation and convection can be entered so that the portion of fan motor waste heat that does not enter the air stream can be added to the thermal zone surrounding the fan."
+- **Quoted passage from I/O Reference cooling coil output variables**: "Cooling Coil Sensible Cooling Rate is the Rate of Sensible heat transfer taking place in the coil at the operating conditions" — this is the coil-only value, separately from fan electrical output.
+- **Verdict**: **Incorrect section reference**. The EnergyPlus Engineering Reference does not have a section numbered "§16.7" in any version reviewed (8.0 through 24.1). The document uses unnumbered subsections (e.g., "Air System Fans > Model > Simulation > Simple (Single Speed) Fan Model"). There is no section titled "Fan Heat Modeling" at any level. The *substance* of the citation is correct — E+ does model supply fan heat as a positive sensible zone load and does expose `Cooling Coil Sensible Cooling Rate` and `Fan Electric Power` as separate diagnostic variables — but the section number "§16.7" is fabricated and does not appear in EnergyPlus documentation.
+
+**Citation 2: OCHRE `HVAC.py` line 543**
+
+- **Source found**: `vendors/OCHRE/ochre/Equipment/HVAC.py` (read directly from submodule)
+- **Quoted passage**: `self.delivered_heat = heat_gain * self.shr + self.fan_power  # SHR=1 for fan` (line 543). Context: `heat_gain = self.hvac_mult * self.capacity` (line 540); `self.sensible_gain = self.delivered_heat` (line 544); `self.latent_gain = heat_gain * (1 - self.shr)  # no latent gains from fan` (line 545).
+- **Verdict**: **Confirmed**. The formula is exact. Fan power is added to the sensible delivery with SHR=1. OCHRE does report `Fan Power (kW)` separately at verbosity ≥ 7 (line 593) but does not expose a `coil_sensible_cooling` field distinct from `delivered_heat`.
+
+**Citation 3: Code locations (`ideal_hvac.rs:562-571`, `air_conditioner.rs:800-806`, `ports.rs:17-29`)**
+
+- **Source found**: Direct file reads of all three files.
+- **Verdict**: **Confirmed with minor line-number shift** (ideal_hvac block starts at 551, not 562 as cited in Step 3; the 552-571 range in the Problem description is correct). All described logic is present and unmodified.
+
+### Legitimacy
+
+- **Verdict**: **Partially Legitimate**
+
+- **Rationale**: The core diagnostic gap is real and confirmed by code inspection: neither `AirConditioner` nor `IdealHvac` emits `coil_sensible_cooling_w` or `fan_heat_w` as separate telemetry keys, making it impossible for downstream analysis to recover the true coil gross output or isolate fan waste heat. The OCHRE cross-check (line 543) confirms the physics match. The EnergyPlus parallel — that E+ exposes `Cooling Coil Sensible Cooling Rate` separately from fan electrical — is substantively correct and independently confirmed via the I/O Reference documentation. The fix approach (add telemetry-only keys, leave port physics unchanged) is sound.
+
+  Two issues lower the rating to "Partially Legitimate":
+  1. **Fabricated section reference**: EnergyPlus Engineering Reference §16.7 "Fan Heat Modeling" does not exist in any version of the document. The correct citation is the EnergyPlus Input/Output Reference, output variable `Cooling Coil Sensible Cooling Rate [W]` for DX coil objects, plus the Air System Fans engineering reference section on motor-in-airstream fraction. This is a citation integrity problem, not a physics error.
+  2. **Invariant 2 formula error (DSE ≠ 1 case)**: The ticket states `COIL_SENSIBLE_COOLING_W * dse + FAN_HEAT_W == |accumulator.sensible_for_category(HvacCooling)|`. This is only correct when `dse = 1.0`. In the general case, `write_zone_thermal_contributions` passes the gross value `(-sensible_cooling_w + fan_heat_w)` and the zone receives it scaled by `zone_heat_fractions[conditioned] = duct_dse`. So the actual port = `(-sensible_cooling_w + fan_heat_w) * duct_dse`, and the correct invariant is: `(COIL_SENSIBLE_COOLING_W - FAN_HEAT_W) * dse == |accumulator.sensible_for_category(HvacCooling)|`. The ticket's formula conflates the `dse` scaling of fan heat with the unscaled `FAN_HEAT_W` telemetry value.
+
+### Proposed Fix Summary
+
+Add three string constants to `hares-types/src/telemetry_keys.rs`:
+```rust
+pub const COIL_SENSIBLE_COOLING_W: &str = "coil_sensible_cooling_w";
+pub const COIL_LATENT_COOLING_W: &str = "coil_latent_cooling_w";
+pub const FAN_HEAT_W: &str = "fan_heat_w";
+```
+
+In `AirConditioner::step()` (after the existing `SENSIBLE_COOLING_W` and `LATENT_COOLING_W` lines ~845–847), emit:
+```rust
+self.telemetry.set(tk::COIL_SENSIBLE_COOLING_W, sensible_cooling_w); // pre-DSE
+self.telemetry.set(tk::COIL_LATENT_COOLING_W, latent_cooling_w);    // pre-DSE
+self.telemetry.set(tk::FAN_HEAT_W, fan_heat_w);
+```
+
+In `IdealHvac::step()` (after line 589, the existing `tk::THERMAL_OUTPUT_W` set), emit:
+```rust
+self.telemetry.set(tk::COIL_SENSIBLE_COOLING_W, capacity_w * self.shr);
+self.telemetry.set(tk::FAN_HEAT_W, fan_power_w);
+```
+
+Update `ThermalAccumulator` doc comment in `ports.rs:155–163` to clarify that `sensible_by_category[HvacCooling]` includes fan heat offset.
+
+The correct invariant to test (replacing the erroneous formula in the ticket) is:
+```
+(COIL_SENSIBLE_COOLING_W - FAN_HEAT_W) * dse == |accumulator.sensible_by_category[HvacCooling]|
+```
+which reduces to the simpler form when `dse=1`:
+```
+COIL_SENSIBLE_COOLING_W - FAN_HEAT_W == |accumulator.sensible_by_category[HvacCooling]|
+```
+
+No physics change is required. `PortContribution::Thermal` writes remain identical.
+
+### Test Written
+
+- **File**: `crates/hares-equipment/tests/hvac_parity.rs` (new function `ac_coil_sensible_and_fan_heat_telemetry_present`, inserted before test 13)
+- **What it tests**: Asserts that `coil_sensible_cooling_w` and `fan_heat_w` are present in `AirConditioner` telemetry after a cooling step, and verifies three invariants: (1) with dse=1, `coil_sensible_cooling_w == sensible_cooling_w`; (2) `fan_heat_w ≥ 0`; (3) the port's `HvacCooling` bucket equals `-(coil_sens - fan_heat)` (the correct dse=1 invariant).
+- **Status**: Currently **failing** (`coil_sensible_cooling_w telemetry key missing from AirConditioner`), confirming the bug is present and not yet fixed.

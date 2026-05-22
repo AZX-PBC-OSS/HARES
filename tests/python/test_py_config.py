@@ -145,6 +145,33 @@ class TestDwellingConfig:
         assert cfg.resample_overrides is not None
         assert cfg.resample_overrides.get("dry_bulb") == "zoh"
 
+    def test_resample_overrides_typo_raises_value_error(self):
+        """Regression test for ticket #100: typo in resample method must raise ValueError,
+        not silently fall back to a default (feedback_no_silent_defaults policy).
+
+        Currently FAILS if the silent-discard path in to_dwelling_config() is reached
+        before the constructor validates the method name."""
+        with pytest.raises(ValueError, match="tringular"):
+            DwellingConfig(
+                hpxml="path/to/building.xml",
+                schedule="path/to/schedules.csv",
+                weather="path/to/weather.epw",
+                resample_overrides={"dry_bulb": "tringular"},
+            )
+
+    def test_resample_overrides_all_valid_methods_accepted(self):
+        """Regression guard: each valid method name must be accepted without error."""
+        valid_methods = ["zoh", "pchip", "pchip_cyclic", "linear", "circular_linear", "triangular"]
+        for method in valid_methods:
+            cfg = DwellingConfig(
+                hpxml="path/to/building.xml",
+                schedule="path/to/schedules.csv",
+                weather="path/to/weather.epw",
+                resample_overrides={"dry_bulb": method},
+            )
+            assert cfg.resample_overrides is not None
+            assert cfg.resample_overrides.get("dry_bulb") == method
+
     def test_with_simulation_config_round_trips(self):
         """Verify DwellingConfig with config parameter round-trips."""
         sim_cfg = SimulationConfig()

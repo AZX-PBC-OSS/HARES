@@ -159,3 +159,107 @@ Heat Pump Systems*. NREL/TP-5500-57501. National Renewable Energy Laboratory.
 - [003-tighten-biquadratic-default-bounds.md](003-tighten-biquadratic-default-bounds.md) — see Dependencies above; must ship together
 - [011-discrete-defrost-cycle.md](011-discrete-defrost-cycle.md) — defrost capacity/EIR model
 - [012-heating-side-shr.md](012-heating-side-shr.md) — see Dependencies above; 012 verification requires this ticket
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-20
+
+### Code Confirmation
+
+- [x] **`hvac_core.rs:23`** — `DEFAULT_BIQUADRATIC_COEFFS: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]` — confirmed, identity coefficients exactly as described.
+- [x] **`hvac_core.rs:294`** — `biquadratic_coeffs: vec![DEFAULT_BIQUADRATIC_COEFFS]` — confirmed in `HvacEquipment::new()`.
+- [x] **`hvac_core.rs:811-829`** — `evaluate_biquadratic` falls back through `.get()` → `.last()` → `DEFAULT_BIQUADRATIC_COEFFS` — confirmed, logic matches ticket description exactly.
+- [x] **`heater.rs:866-883` and `917-934`** — `evaluate_biquadratic_with_flow` called for `cap_ratio` (curve index `speed*2`) and `eir_ratio_base` (curve index `speed*2+1`) — confirmed at those line ranges.
+- [x] **`heater.rs:1700-1704`** — `add_identity_biquadratic_curves` defined and called from `heater_config_with` at line 1716 — confirmed, all tests use identity curves.
+- [x] **OCHRE cross-check** — `vendors/OCHRE/ochre/Equipment/HVAC.py:804-846` `initialize_biquad_params` loads per-speed CSV curves and raises `OCHREException` if params are not found (no silent fallback to identity). HARES diverges: it silently uses `DEFAULT_BIQUADRATIC_COEFFS` when no curves are configured.
+- [x] **HARES defaults CSVs** — `/Users/rich/source/HARES/defaults/hvac_heating/ASHP Heater.csv`, `MSHP Heater.csv`, `Heat Pump Heater.csv` all exist with correct coefficients. They are NOT auto-loaded during equipment init.
+
+### Coefficient Verification (hand-computed)
+
+ASHP Single_1 `cap_t` from CSV: `[0.878143655, -0.002914855, -0.00003337, 0.022386661, 0.000163944, -0.00002187]`
+
+| Condition | x1 (indoor DB) | x2 (outdoor DB) | cap_ratio |
+|-----------|---------------|-----------------|-----------|
+| AHRI H1   | 21.1°C        | 8.3°C           | **0.9951** (≈ 1.0 ✓) |
+| AHRI H3   | 21.1°C        | −8.3°C          | **0.6311** (< 0.8 ✓) |
+| Identity  | any           | any             | **1.0000** (BUG) |
+
+ASHP EIR at H1: 0.9939; at H3: 1.3459 (H3 > H1 → worse efficiency at low OAT ✓)
+
+MSHP Variable_1 `cap_t` from CSV: `[1.002928121, -0.010386676, 0.0, 0.025961538, 0.0, 0.0]`
+
+| Condition | cap_ratio |
+|-----------|-----------|
+| AHRI H1   | **0.9993** (≈ 1.0 ✓) |
+| AHRI H3   | **0.5683** (< 0.8 ✓) |
+
+The OCHRE-sourced coefficients in HARES defaults are **identical** to those in `vendors/OCHRE/ochre/defaults/HVAC Heating/Biquadratic ASHP Heater.csv` (cross-verified by byte-for-byte comparison).
+
+### Web-Verified Citations
+
+**Citation 1: EnergyPlus `Coil:Heating:DX:SingleSpeed` biquadratic curve**
+
+- **Ticket claims**: EnergyPlus uses biquadratic curves for heating capacity and EIR as functions of temperature for `Coil:Heating:DX:SingleSpeed`.
+- **Source found**: DesignBuilder EnergyPlus help (HeatingCoilDX.htm); building-simulation-data.com IDD explorer for `COIL:HEATING:DX:SINGLESPEED`; BigLadder EnergyPlus docs.
+- **Quoted passage** (from DesignBuilder `HeatingCoilDX.htm`): *"The curve 'parameterises the variation of the total heating capacity as a function of both the indoor and outdoor air dry-bulb temperature' for bi-quadratic curves. The curve is 'normalised to have the value of 1.0 at the rating point,' which corresponds to: outdoor air dry-bulb of 8.33°C, outdoor wet-bulb of 6.11°C, coil entering air dry-bulb of 21.11°C."*
+- **Quoted passage** (from building-simulation-data.com IDD): The biquadratic equation is `a + b*iat + c*iat**2 + d*oat + e*oat**2 + f*iat*oat` where `iat = indoor air dry-bulb (°C)` and `oat = outdoor air dry-bulb (°C)`.
+- **Verdict**: **Confirmed**. The ticket's formula description (`c0 + c1*x1 + c2*x1² + c3*x2 + c4*x2² + c5*x1*x2` with x1=indoor DB, x2=outdoor DB for heating) matches EnergyPlus exactly. The normalization point (8.33°C outdoor / 21.11°C indoor) matches the ticket's H1 claim.
+
+**Citation 2: AHRI Standard 210/240-2023, Table 9, H1 condition**
+
+- **Ticket claims**: AHRI 210/240-2023 Table 9 specifies H1 as 8.3°C DB outdoor / 21.1°C DB indoor; H3 at −8.3°C outdoor. Rated capacity defined at H1.
+- **Source found**: Multiple AHRI 210/240 standard documents retrieved (2003, 2017 versions; 2023 version returned 403 Forbidden). U.S. DOE rulemaking document (EERE-2022-BT-TP-0028-0017) returned 403 Forbidden. AHRI Search Standards page confirmed H1/H2/H3 test structure.
+- **Quoted passage** (from web search aggregate): *"Three tests must be conducted: the high temperature (H1) test, the frost accumulation (H2) test, and the low temperature (H3) test. The H1 test specifies air entering the outdoor unit at 47.0°F (8.33°C) dry-bulb and air entering the indoor unit at 70.0°F (21.1°C) dry-bulb."* (ANSI/AHRI 210/240-2008 consistent with all versions checked).
+- **Quoted passage** (from DesignBuilder EnergyPlus, confirming normalization): *"normalised to have the value of 1.0 at the rating point … outdoor air dry-bulb of 8.33°C … coil entering air dry-bulb of 21.11°C"* — confirming this is the H1 point.
+- **Verdict**: **Confirmed**. H1 at 8.3°C outdoor / 21.1°C indoor is consistent with all AHRI 210/240 versions reviewed. Table 9 is cited as the table number in the 2023 edition, which cannot be verified (document access blocked); the conditions themselves are confirmed correct across versions. The specific claim that H2 is "frost accumulation" and H3 is "low temperature (17°F / −8.3°C)" is consistent with industry documentation.
+- **Minor note**: The ticket's citation says "Table 9" which is the 2023-edition table number. The 2017 edition uses different table numbering. The table number itself is plausible but could not be independently verified against the paywalled 2023 PDF. The temperature values are correct.
+
+**Citation 3: NREL/TP-5500-57501 (Cutler et al. 2013)**
+
+- **Ticket claims**: Cutler, B., et al. (2013). *Improved Control Strategies for Residential Heat Pump Systems*. NREL/TP-5500-57501.
+- **Source found**: OSTI.GOV biblio/1219902; docs.nrel.gov/docs/fy13osti/56354.pdf
+- **Quoted passage** (from OSTI): The 2013 NREL paper by Cutler et al. has report number **NREL/TP-5500-56354**, not 57501. Title is *"Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations."* Authors are Cutler, D.; Winkler, J.; Kruis, N.; Christensen, C.; Brandemuehl, M.
+- **Verdict**: **Incorrect on multiple points**. (a) The report number is NREL/TP-5500-**56354**, not 57501. (b) The title is "Improved *Modeling*…" not "Improved *Control Strategies*…". (c) The first author is "Cutler, D." not "Cutler, B." The ticket's citation has three independent errors. No NREL document with number TP-5500-57501 was found in any search. This citation should be corrected to: *Cutler, D., et al. (2013). Improved Modeling of Residential Air Conditioners and Heat Pumps for Energy Calculations. NREL/TP-5500-56354.* Note: this citation is informational background; it does not affect the correctness of the bug description or proposed fix.
+
+**Citation 4: OCHRE `HVAC.py:804-846` `initialize_biquad_params`**
+
+- **Ticket claims**: `vendors/OCHRE/ochre/Equipment/HVAC.py:804-846` loads per-speed curves from CSV.
+- **Source found**: Direct file read at `/Users/rich/source/HARES/vendors/OCHRE/ochre/Equipment/HVAC.py`.
+- **Quoted passage**: Lines 804–846 are confirmed to contain `def initialize_biquad_params(self, **kwargs)`. The function loads from `f"Biquadratic {self.name}.csv"` and raises `OCHREException` if no params found: `if not biquad_params: raise OCHREException(...)`.
+- **Verdict**: **Confirmed** (line numbers accurate, logic matches description).
+
+**Citation 5: OCHRE `ochre/defaults/HVAC Heating/Biquadratic Heat Pump Heater.csv`**
+
+- **Ticket claims**: OCHRE CSV is the source for curve data.
+- **Source found**: Direct file read. The relevant OCHRE CSV is actually at `vendors/OCHRE/ochre/defaults/HVAC Heating/Biquadratic ASHP Heater.csv` (not the generic `Biquadratic Heat Pump Heater.csv`). Both exist.
+- **Verdict**: **Confirmed** (minor filename discrepancy — ticket names the generic file; the ASHP-specific file is the more direct source for the coefficients cited in the ticket's Required Behavior section).
+
+### Legitimacy
+
+- **Verdict**: **Legitimate**
+
+**Rationale**: All core claims in the ticket are confirmed by direct code inspection and web-verified standards. (1) `DEFAULT_BIQUADRATIC_COEFFS = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]` is demonstrably identity — confirmed at `hvac_core.rs:23`. (2) Equipment initialization unconditionally uses identity regardless of type — confirmed at `hvac_core.rs:294`. (3) The identity coefficients produce `cap_ratio = 1.0` at all temperatures — confirmed analytically. (4) OCHRE-derived default coefficients for ASHP Single_1 and MSHP Variable_1 exist in HARES's own `defaults/` directory but are not auto-loaded — confirmed by Glob. (5) With the OCHRE coefficients, cap_ratio at AHRI H3 is 0.631 (ASHP) and 0.568 (MSHP), both satisfying the `< 0.8` criterion. (6) EnergyPlus independently confirms the biquadratic formula structure and H1 normalization point. (7) Four new failing regression tests were written and confirmed to fail with the present identity defaults, proving the bug is live.
+
+The one inaccurate reference (NREL/TP-5500-57501) is an informational citation that does not affect the bug description, proposed fix, or verification criteria.
+
+### Proposed Fix Summary
+
+In `HvacEquipment::new()` (`hvac_core.rs:294`), instead of unconditionally assigning `vec![DEFAULT_BIQUADRATIC_COEFFS]`, branch on `equipment_type` to load the OCHRE-derived defaults:
+
+- `AshpHeatPumpOnly` / `AshpHeatPumpAux` → ASHP Single_1 cap and EIR coefficients (from `defaults/hvac_heating/ASHP Heater.csv`)
+- `MiniSplitHeat` → MSHP Variable_1 cap and EIR coefficients (from `defaults/hvac_heating/MSHP Heater.csv`)
+- All others → continue using `DEFAULT_BIQUADRATIC_COEFFS` (gas furnace, baseboard, etc. do not use biquadratic curves in the heating path)
+
+The coefficients should be embedded as `const` arrays in a new `default_curves.rs` helper, not loaded at runtime from CSV, to avoid I/O in the constructor. The `add_identity_biquadratic_curves` test helper in `heater.rs` should be retained (tests that explicitly want identity behavior should continue to override). The config-loading path that reads `biquadratic_coeffs` from `test_extras` or user config should take precedence over the new defaults (i.e., defaults are applied in `new()`, overridden by `init()`).
+
+### Test Written
+
+- **File**: `crates/hares-equipment/src/hvac/hvac_core.rs` (inside `#[cfg(test)]` module, lines ~3107–3215)
+- **Tests added** (4):
+  1. `ticket_010_ashp_default_cap_curve_unity_at_ahri_h1` — asserts `AshpHeatPumpOnly` default cap curve produces `cap_ratio ≈ 1.0 ± 5%` at AHRI H1 (8.3°C OAT / 21.1°C indoor). **Currently FAILS** (identity coefficients ≠ non-identity).
+  2. `ticket_010_ashp_default_cap_curve_below_08_at_ahri_h3` — asserts cap_ratio < 0.8 at −8.3°C OAT. **Currently FAILS** (identity returns 1.0).
+  3. `ticket_010_ashp_default_eir_curve_increases_at_low_oat` — asserts EIR at H3 > EIR at H1 and EIR at H3 > 1.0. **Currently FAILS**.
+  4. `ticket_010_mshp_default_cap_curve_below_08_at_ahri_h3` — asserts `MiniSplitHeat` cap_ratio < 0.8 at −8.3°C OAT. **Currently FAILS**.
+
+Confirmed: `cargo test -p hares-equipment --lib -- ticket_010` → 0 passed, 4 failed, 102 other hvac_core tests unaffected.

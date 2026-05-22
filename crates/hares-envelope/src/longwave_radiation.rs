@@ -772,6 +772,57 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Ticket #115 regression: σ consistency and linearised_h_r correctness
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Regression for ticket #115: verifies that the σ constant used by
+    /// `linearised_h_r` matches NIST CODATA 2018 (5.670374419×10⁻⁸ W·m⁻²·K⁻⁴)
+    /// and that the formula produces the correct value at the canonical test
+    /// point (ε=0.9, T=293.15 K / 20°C → h_r ≈ 5.143 W/(m²·K)).
+    ///
+    /// The ticket incorrectly claimed ~5.79 W/(m²·K) at T=295 K; the correct
+    /// value at that point is 5.241 W/(m²·K). This test uses the corrected
+    /// expected value.
+    #[test]
+    fn ticket_115_linearised_h_r_value_and_sigma_correctness() {
+        // Canonical NIST CODATA 2018 value (also in hares_physics::constants::STEFAN_BOLTZMANN)
+        let sigma_nist: f64 = 5.670_374_419e-8;
+        assert!(
+            (STEFAN_BOLTZMANN - sigma_nist).abs() < 1e-18,
+            "STEFAN_BOLTZMANN constant ({STEFAN_BOLTZMANN:e}) diverges from NIST CODATA 2018 ({sigma_nist:e})"
+        );
+
+        // At ε=0.9, T=20°C (293.15 K): h_r = 4·0.9·σ·293.15³ = 5.1426 W/(m²·K)
+        let h_at_20c = linearised_h_r(0.90, 20.0);
+        let expected_at_20c = 4.0 * 0.90 * sigma_nist * 293.15_f64.powi(3);
+        assert!(
+            (h_at_20c - expected_at_20c).abs() < 1e-6,
+            "linearised_h_r(0.9, 20°C) = {h_at_20c:.6}, expected {expected_at_20c:.6}"
+        );
+
+        // At ε=0.9, T=295 K (21.85°C): correct value is 5.241, NOT ~5.79 as ticket claims.
+        let h_at_295k = linearised_h_r(0.90, 295.0 - 273.15);
+        let expected_at_295k = 4.0 * 0.90 * sigma_nist * 295.0_f64.powi(3);
+        assert!(
+            (h_at_295k - expected_at_295k).abs() < 1e-6,
+            "linearised_h_r(0.9, 21.85°C) = {h_at_295k:.6}, expected {expected_at_295k:.6}"
+        );
+        assert!(
+            (h_at_295k - 5.241).abs() < 0.001,
+            "h_r at T=295K, ε=0.9 should be ~5.241 W/(m²·K), got {h_at_295k:.4}"
+        );
+
+        // Confirm the truncated sigma used in rc_network.rs tests (5.670374e-8) is within
+        // 1 ppm of NIST, so the existing inline computations are numerically equivalent.
+        let sigma_truncated: f64 = 5.670374e-8;
+        let rel_diff = (sigma_truncated - sigma_nist).abs() / sigma_nist;
+        assert!(
+            rel_diff < 1e-6,
+            "rc_network.rs inline σ={sigma_truncated:e} differs from NIST by {rel_diff:.2e} (>1 ppm)"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Interior longwave radiation (exact)
     // ─────────────────────────────────────────────────────────────────────────
 

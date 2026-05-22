@@ -3644,6 +3644,238 @@ mod ideal_capacity_tests {
              got {capped_cooling_w:.1}W vs full {full_cooling_w:.1}W (limit={limit:.1}W)"
         );
     }
+
+    // Regression test for ticket #022: RoomAC missing ideal_target() implementation.
+    //
+    // At a coarse timestep (>= 5 min), use_ideal_capacity() returns true for AcCooler
+    // equipment types (which RoomAC uses). AirConditioner wires ideal_target() through
+    // to CoolingCore; RoomAC does not — it falls through to the Equipment trait default
+    // which always returns None.
+    //
+    // This test must FAIL until RoomAC's Equipment impl adds:
+    //   fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+    //       self.core.ideal_target()
+    //   }
+    #[test]
+    fn room_ac_ideal_target_returns_some_at_coarse_timestep() {
+        use super::RoomAC;
+        use crate::RoomAcConfig;
+
+        // Build a RoomAC: zone_id=1, cooling_setpoint=24°C, hysteresis=1°C.
+        let cfg = EquipmentConfig::from_typed(
+            "rac".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 0.33,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                cooling_setpoint_source: None,
+                heating_setpoint_source: None,
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
+                shr: None,
+                startup_cd: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+
+        let mut eq = RoomAC::new(cfg.clone());
+        // Zone above cooling turn-on threshold: 26°C > setpoint+hysteresis = 25°C.
+        // Coarse timestep (900 s >= 300 s threshold) → use_ideal = true.
+        let env = make_env(26.0, 900);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+
+        // After update_control with a hot zone and coarse timestep, ideal_target() must
+        // return Some((ZoneId(1), ~24.0)) — the zone id and cooling setpoint.
+        // This FAILS until RoomAC delegates to self.core.ideal_target().
+        let target = eq.ideal_target();
+        assert!(
+            target.is_some(),
+            "RoomAC ideal_target() must return Some at coarse timestep (900 s) when zone \
+             (26°C) is above cooling turn-on threshold; got None (ticket #022)"
+        );
+        let (zone_id, setpoint_c) = target.unwrap();
+        assert_eq!(
+            zone_id,
+            ZoneId(1),
+            "RoomAC ideal_target zone must match configured zone_id"
+        );
+        assert!(
+            (setpoint_c - 24.0).abs() < 0.5,
+            "RoomAC ideal_target setpoint must reflect cooling setpoint (~24°C); got {setpoint_c:.2}°C"
+        );
+    }
+
+    // Companion: at a fine timestep (60 s), use_ideal is false and ideal_target() must
+    // return None — same behavior as AirConditioner (parity check).
+    #[test]
+    fn room_ac_ideal_target_returns_none_at_fine_timestep() {
+        use super::RoomAC;
+        use crate::RoomAcConfig;
+
+        let cfg = EquipmentConfig::from_typed(
+            "rac_fine".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 0.33,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                cooling_setpoint_source: None,
+                heating_setpoint_source: None,
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
+                shr: None,
+                startup_cd: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+
+        let mut eq = RoomAC::new(cfg.clone());
+        // Fine timestep (60 s < 300 s threshold) → use_ideal = false.
+        let env = make_env(26.0, 60);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+
+        assert!(
+            eq.ideal_target().is_none(),
+            "RoomAC ideal_target() must return None at fine timestep (60 s); \
+             use_ideal=false so solver should not query this unit"
+        );
+    }
+
+    // Parity: AirConditioner and RoomAC must return the same ideal_target() result
+    // for identical inputs at a coarse timestep.
+    #[test]
+    fn room_ac_ideal_target_matches_air_conditioner_parity() {
+        use crate::{CentralAirConditionerConfig, DuctConfig, RoomAcConfig};
+
+        let ac_cfg = EquipmentConfig::from_typed(
+            "ac_par".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 0.33,
+                shr: None,
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                cooling_setpoint_source: None,
+                heating_setpoint_source: None,
+                airflow_m3_s_per_w: None,
+                fraction_load_served: Some(1.0),
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+
+        let rac_cfg = EquipmentConfig::from_typed(
+            "rac_par".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 0.33,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                cooling_setpoint_source: None,
+                heating_setpoint_source: None,
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
+                shr: None,
+                startup_cd: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+
+        let env = make_env(26.0, 900);
+
+        let mut ac = AirConditioner::new(ac_cfg.clone());
+        ac.init(&ac_cfg, &env).unwrap();
+        ac.update_control(&env);
+
+        let mut rac = super::RoomAC::new(rac_cfg.clone());
+        rac.init(&rac_cfg, &env).unwrap();
+        rac.update_control(&env);
+
+        let ac_target = ac.ideal_target();
+        let rac_target = rac.ideal_target();
+
+        // Both must return Some with the same zone and setpoint.
+        // This fails until RoomAC implements ideal_target() (ticket #022).
+        assert!(
+            ac_target.is_some(),
+            "AirConditioner must return Some ideal_target at coarse timestep"
+        );
+        assert!(
+            rac_target.is_some(),
+            "RoomAC must return Some ideal_target at coarse timestep (ticket #022: currently returns None)"
+        );
+        let (ac_zone, ac_sp) = ac_target.unwrap();
+        let (rac_zone, rac_sp) = rac_target.unwrap();
+        assert_eq!(ac_zone, rac_zone, "zone IDs must match");
+        assert!(
+            (ac_sp - rac_sp).abs() < 0.01,
+            "AirConditioner setpoint ({ac_sp:.3}°C) and RoomAC setpoint ({rac_sp:.3}°C) must match"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3894,5 +4126,198 @@ mod defaults_tests {
             !eq.core.latent_degradation.is_active(),
             "Room AC must not have latent degradation active after init"
         );
+    }
+}
+
+// Regression tests for ticket 007: select_variable_speed_cooling duplicates the
+// bracket-interpolation logic of HvacEquipment::select_multi_speed.  These tests
+// verify that both paths produce identical SpeedSelection values for the same
+// normalised load fractions and capacity stages, making a latent divergence
+// visible as a test failure before the refactor unifies them.
+//
+// The tests exercise select_variable_speed_cooling directly by constructing a
+// minimal CoolingCore and overriding cooling_capacities_w after init.
+#[cfg(test)]
+mod speed_selection_parity_tests {
+    use super::CoolingCore;
+    use crate::hvac::{HvacEquipment, HvacEquipmentType, SpeedControlMode, ThermostatMode};
+    use crate::{CentralAirConditionerConfig, DuctConfig, EquipmentConfig};
+    use hares_types::{EnvironmentState, GridState, WeatherState, ZoneId, ZoneState};
+
+    fn minimal_env() -> EnvironmentState {
+        use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 26.0,
+                humidity_ratio: 0.010,
+                relative_humidity: 0.45,
+                wet_bulb_c: 19.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 35.0,
+                outdoor_humidity_ratio: 0.012,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// Build a CoolingCore with the given capacity stages and then override
+    /// cooling_capacities_w directly so both sides use the same stage values.
+    fn make_cooling_core(capacities_w: Vec<f64>) -> CoolingCore {
+        let typed = CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: *capacities_w.last().unwrap_or(&10_000.0),
+            eir: 3.412_141_633 / 14.0,
+            shr: Some(0.75),
+            number_of_speeds: capacities_w.len() as u8,
+            stage_capacities_w: Some(capacities_w.clone()),
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            cooling_setpoint_c: Some(24.0),
+            heating_setpoint_c: Some(18.0),
+            hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+            fraction_load_served: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: Some(0.0),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        };
+        let mut cfg = EquipmentConfig::from_typed(
+            "AC".to_string(),
+            "Air Conditioner".to_string(),
+            typed,
+        );
+        cfg.test_extras_mut()
+            .insert("capacity_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        cfg.test_extras_mut()
+            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        let env = minimal_env();
+        let mut core = CoolingCore::new(cfg.clone(), false);
+        core.init(&cfg, &env).unwrap();
+        // Override capacities so the test controls the exact stage values.
+        core.hvac.cooling_capacities_w = capacities_w;
+        core
+    }
+
+    /// Build an HvacEquipment in MultiSpeedInterpolated/Cooling mode with the
+    /// same capacity stages so we can call select_speed() (→ select_multi_speed).
+    fn make_hvac_cooling(capacities_w: Vec<f64>) -> HvacEquipment {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        hvac.cooling_capacities_w = capacities_w;
+        hvac.mode = ThermostatMode::Cooling;
+        hvac
+    }
+
+    // Ticket-007 regression: select_variable_speed_cooling must produce the same
+    // speed_index and speed_frac as select_multi_speed for every interior bracket.
+    // If the two duplicate implementations diverge this test will catch it.
+    #[test]
+    fn variable_speed_and_multi_speed_agree_on_bracket_interpolation() {
+        // 4-stage: fractions [0.4, 0.6, 0.8, 1.0]
+        let caps = vec![4_000.0, 6_000.0, 8_000.0, 10_000.0];
+        let mut core = make_cooling_core(caps.clone());
+        let mut hvac = make_hvac_cooling(caps);
+
+        let probes: &[(f64, &str)] = &[
+            (0.5, "between stage 0-1"),
+            (0.7, "between stage 1-2"),
+            (0.9, "between stage 2-3"),
+        ];
+        for &(frac, label) in probes {
+            let vs = core.select_variable_speed_cooling(frac);
+            let ms = hvac.select_speed(frac);
+            assert_eq!(
+                vs.speed_index, ms.speed_index,
+                "{label}: speed_index mismatch — variable_speed={} multi_speed={}",
+                vs.speed_index, ms.speed_index
+            );
+            assert!(
+                (vs.speed_frac - ms.speed_frac).abs() < 1e-12,
+                "{label}: speed_frac mismatch — variable_speed={} multi_speed={}",
+                vs.speed_frac, ms.speed_frac
+            );
+            assert_eq!(
+                vs.part_load_ratio, ms.part_load_ratio,
+                "{label}: part_load_ratio mismatch — variable_speed={} multi_speed={}",
+                vs.part_load_ratio, ms.part_load_ratio
+            );
+        }
+    }
+
+    // Ticket-007 regression: below the lowest stage, PLR computation must agree.
+    #[test]
+    fn variable_speed_and_multi_speed_agree_below_lowest_stage() {
+        let caps = vec![4_000.0, 6_000.0, 8_000.0, 10_000.0];
+        let mut core = make_cooling_core(caps.clone());
+        let mut hvac = make_hvac_cooling(caps);
+
+        let load = 0.3; // below cap_frac[0]=0.4
+        let vs = core.select_variable_speed_cooling(load);
+        let ms = hvac.select_speed(load);
+
+        assert_eq!(vs.speed_index, 0);
+        assert_eq!(vs.speed_frac, 0.0);
+        // PLR = 0.3 / 0.4 = 0.75 for both paths.
+        assert!(
+            (vs.part_load_ratio - ms.part_load_ratio).abs() < 1e-12,
+            "PLR below lowest stage must agree: variable_speed={} multi_speed={}",
+            vs.part_load_ratio, ms.part_load_ratio
+        );
+    }
+
+    // Ticket-007 regression: at full load both paths must return the last index.
+    #[test]
+    fn variable_speed_and_multi_speed_agree_at_full_load() {
+        let caps = vec![4_000.0, 6_000.0, 8_000.0, 10_000.0];
+        let mut core = make_cooling_core(caps.clone());
+        let mut hvac = make_hvac_cooling(caps);
+
+        let vs = core.select_variable_speed_cooling(1.0);
+        let ms = hvac.select_speed(1.0);
+
+        assert_eq!(vs.speed_index, ms.speed_index, "top-speed index must agree");
+        assert_eq!(vs.speed_frac, 0.0);
+        assert_eq!(vs.part_load_ratio, 1.0);
+        assert_eq!(ms.part_load_ratio, 1.0);
     }
 }

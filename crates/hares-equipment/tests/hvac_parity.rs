@@ -1193,6 +1193,75 @@ fn ashp_cop_drops_with_defrost() {
 }
 
 // ---------------------------------------------------------------------------
+// Ticket 005 — regression: coil-level telemetry keys must be present
+//
+// AirConditioner and IdealHvac should expose `coil_sensible_cooling_w` and
+// `fan_heat_w` as separate telemetry fields so diagnostics can distinguish
+// gross coil output from fan waste heat. Without them, the only observable
+// value is the net `sensible_cooling_w` (coil × DSE minus none of the fan
+// offset), making it impossible to recover true coil output.
+//
+// This test is currently FAILING because neither key is emitted. Once
+// ticket 005 is implemented both assertions must pass.
+// ---------------------------------------------------------------------------
+#[test]
+fn ac_coil_sensible_and_fan_heat_telemetry_present() {
+    let c = cfg(
+        "ac",
+        "Air Conditioner",
+        &[
+            ("zone_id", 1.0),
+            ("capacity_w", 8_000.0),
+            ("cooling_setpoint_c", 24.0),
+            ("heating_setpoint_c", 18.0),
+            ("startup_cd", 0.0),
+        ],
+    );
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Air Conditioner", c.clone()).unwrap();
+    let env = make_env(28.0, 35.0, 19.0);
+    eq.init(&c, &env).unwrap();
+    eq.update_control(&env);
+
+    let mut ports = make_ports();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let tel = eq.telemetry();
+
+    // These keys must exist (ticket 005 requirement). Currently absent → test fails.
+    let coil_sens = tel
+        .get("coil_sensible_cooling_w")
+        .expect("ticket-005: coil_sensible_cooling_w telemetry key missing from AirConditioner");
+    let fan_heat = tel
+        .get("fan_heat_w")
+        .expect("ticket-005: fan_heat_w telemetry key missing from AirConditioner");
+
+    // Invariant 1: sensible_cooling_w == coil_sensible_cooling_w * duct_dse.
+    // Default test config has no duct loss → dse == 1.0 → they should be equal.
+    let sens_net = tel.get("sensible_cooling_w").expect("sensible_cooling_w");
+    assert!(
+        (coil_sens - sens_net).abs() < 1.0,
+        "With dse=1.0: coil_sensible_cooling_w ({coil_sens:.2} W) should equal \
+         sensible_cooling_w ({sens_net:.2} W)"
+    );
+
+    // Invariant 2: fan heat is positive (it adds heat to the zone).
+    assert!(
+        fan_heat >= 0.0,
+        "fan_heat_w must be non-negative; got {fan_heat:.2} W"
+    );
+
+    // Invariant 3: coil_sensible * dse + fan_heat == |HvacCooling port| (dse=1 here).
+    let port_cooling = ports.thermal[0].sensible_by_category[1]; // HvacCooling index=1
+    let expected_port = -(coil_sens - fan_heat); // port is negative
+    assert!(
+        (port_cooling - expected_port).abs() < 1.0,
+        "HvacCooling port ({port_cooling:.2} W) should equal \
+         -(coil_sens - fan_heat) = {expected_port:.2} W"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 13. AC first law: sensible + latent = total cooling
 //
 // When an AC dehumidifies air, total heat removed equals sensible heat

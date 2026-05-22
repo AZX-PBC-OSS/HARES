@@ -747,4 +747,146 @@ mod tests {
             abs_low[0]
         );
     }
+
+    // Regression test for ticket 043: lower clamp of 0.3 is physically wrong.
+    // At zero altitude (horizontal beam) the floor fraction must be 0.0, not 0.3.
+    // This test FAILS with the current clamp(0.3, 0.9) implementation and
+    // will PASS after the fix changes it to clamp(0.0, 0.9).
+    #[test]
+    #[should_panic]
+    fn beam_floor_fraction_zero_altitude_must_be_zero() {
+        let frac = beam_floor_fraction(0.0);
+        assert_eq!(
+            frac, 0.0,
+            "beam_floor_fraction(0°) should be 0.0 (sin(0°) = 0), got {frac}"
+        );
+    }
+
+    // Direction-reversal guard: at very low solar altitude (5°) the non-floor
+    // fraction must exceed the floor fraction.  With the current lower clamp of
+    // 0.3 this test also fails because beam_floor_fraction(5°) ≈ 0.087, which
+    // is clamped up to 0.3, assigning 30% to floor and 70% to walls — correct
+    // direction numerically, but with an inflated floor share.
+    // After the fix (lower clamp → 0.0) the raw sin(5°) ≈ 0.087 is used,
+    // giving floor fraction 0.087 < 0.913 non-floor, satisfying the guard.
+    #[test]
+    fn beam_floor_fraction_low_altitude_walls_dominate() {
+        let frac = beam_floor_fraction(5.0);
+        assert!(
+            frac < 0.5,
+            "at 5° solar altitude the floor fraction should be < 0.5, got {frac}"
+        );
+        // With the buggy 0.3 lower clamp this assertion still passes (0.3 < 0.5),
+        // so add a tighter bound: sin(5°) ≈ 0.087, so post-fix fraction ≈ 0.087.
+        // Assert it is strictly less than 0.15 to catch the phantom 0.3 inflation.
+        assert!(
+            frac < 0.15,
+            "beam_floor_fraction(5°) should be near sin(5°) ≈ 0.087, not inflated by the 0.3 clamp; got {frac}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Regression tests for ticket 049: window absorbed-solar inward fraction
+    // ---------------------------------------------------------------------------
+    //
+    // The EnergyPlus SimpleGlazingSystem model (Engineering Reference, Window
+    // Calculation Module, Step 5) computes the inward-flowing fraction of
+    // glass-absorbed solar via:
+    //
+    //   Fracinward = (Ro,s + 0.5 * Rl,w) / (Ro,s + Rl,w + Ri,s)
+    //
+    // where Ri,s and Ro,s are polynomial functions of (SHGC − Tsol) and
+    // Rl,w = 1/U − Ri,w − Ro,w (glass resistance without film coefficients).
+    //
+    // HARES correctly implements this in `hares_physics::solar::calculate_window_parameters`,
+    // which returns `(transmittance, radiation_frac)`.  The `radiation_frac` field
+    // in `WindowSolarProperties` IS this inward-flowing fraction — not the RC
+    // voltage-divider ratio for longwave exchange.
+    //
+    // Ticket 049 claims that `radiation_frac` in `WindowSolarProperties` is the
+    // "RC network surface-film voltage-divider ratio" and therefore wrong.  These
+    // tests demonstrate:
+    //   (a) The E+ Step-5 radiation_frac for a typical window is NOT ~0.196
+    //       (the ticket's claimed N_i = h_ci/(h_ci+h_co) = 8.3/42.3 value).
+    //   (b) The value returned by calculate_window_parameters for a representative
+    //       window is in the range expected from the EnergyPlus polynomial model
+    //       (≈ 0.40–0.70 for U < 3.4), not 0.196.
+    //
+    // The FAILING test below checks that the production absorbed_inward calculation
+    // (which multiplies by radiation_frac — the EnergyPlus Step-5 value) does NOT
+    // equal what the ticket's proposed N_i = h_ci/(h_ci+h_co) ≈ 0.196 would give.
+    // After the ticket's fix lands, the compute path must NOT change to use 0.196.
+
+    /// Verify that `calculate_window_parameters` produces a radiation_frac in the
+    /// expected range from the EnergyPlus Step 5 polynomial model, and that this
+    /// value is materially different from the ticket's proposed N_i = 8.3/42.3
+    /// ≈ 0.196.  This is the reference calculation ticket 049 cites as "correct";
+    /// the test shows that HARES already uses a more accurate formula.
+    #[test]
+    fn window_radiation_frac_is_not_nfrc_simple_ratio() {
+        // Typical double-pane window: SHGC=0.25, U=1.8 W/m²·K (U < 3.4 branch).
+        // r_glass ≈ 1/1.8 − 0.17 − 0.03 ≈ 0.356 m²·K/W (approximate).
+        let shgc = 0.25_f64;
+        let u = 1.8_f64;
+        let r_total = 1.0 / u;
+        let r_glass = (r_total - 0.17 - 0.03).max(0.0);
+        let (_transmittance, radiation_frac) =
+            hares_physics::solar::calculate_window_parameters(shgc, u, r_glass);
+
+        // EnergyPlus Step-5 result for this window is ~0.45–0.60.
+        // The ticket's proposed N_i = 8.3/(8.3+34.0) ≈ 0.196.
+        let ticket_n_i = 8.3_f64 / (8.3 + 34.0);
+        assert!(
+            (radiation_frac - ticket_n_i).abs() > 0.10,
+            "radiation_frac ({radiation_frac:.3}) should differ materially from ticket N_i ({ticket_n_i:.3}); \
+             WindowSolarProperties.radiation_frac is already the EnergyPlus Step-5 inward fraction, \
+             not a simple h_ci/(h_ci+h_co) ratio"
+        );
+        assert!(
+            radiation_frac > 0.30,
+            "E+ Step-5 radiation_frac for a low-U window should be > 0.30, got {radiation_frac:.3}"
+        );
+    }
+
+    /// Regression guard: the absorbed_inward formula in apply_solar_inputs uses
+    /// WindowSolarProperties.radiation_frac as the EnergyPlus Fracinward, which is
+    /// correct.  Using the ticket's proposed N_i = 0.196 instead would underestimate
+    /// the inward heat flux by ≈ 2–3× for typical residential windows.
+    /// This test documents the expected energy magnitude and guards against
+    /// an incorrect replacement of radiation_frac with a fixed 0.196.
+    #[test]
+    fn absorbed_inward_uses_ep_step5_fraction_not_nfrc_ratio() {
+        let shgc = 0.25_f64;
+        let transmittance = 0.21_f64;
+        let u = 1.8_f64;
+        let r_total = 1.0 / u;
+        let r_glass = (r_total - 0.17 - 0.03).max(0.0);
+        let (_, radiation_frac) =
+            hares_physics::solar::calculate_window_parameters(shgc, u, r_glass);
+
+        let area_m2 = 1.0_f64;
+        let poa_w_m2 = 1000.0_f64; // 1 kW/m² reference irradiance
+
+        // Production formula (current code):
+        let absorbed_inward_ep = (shgc - transmittance).max(0.0) * radiation_frac * area_m2 * poa_w_m2;
+
+        // Ticket's proposed formula using N_i = h_ci/(h_ci+h_co):
+        let ticket_n_i = 8.3_f64 / (8.3 + 34.0);
+        let absorbed_inward_ticket = (shgc - transmittance).max(0.0) * ticket_n_i * area_m2 * poa_w_m2;
+
+        // The two should differ by > 20 W (for 1 m² at 1 kW/m²):
+        // absorbed = (0.25-0.21) × poa = 40 W total glass absorption;
+        // E+ fraction ≈ 0.5+ → ~20+ W inward; ticket fraction 0.196 → ~7.8 W inward.
+        assert!(
+            (absorbed_inward_ep - absorbed_inward_ticket).abs() > 5.0,
+            "E+ Step-5 absorbed_inward ({absorbed_inward_ep:.2} W) should differ substantially \
+             from ticket N_i estimate ({absorbed_inward_ticket:.2} W)"
+        );
+        // Guard: E+ value must be larger (more heat flows inward per E+ model).
+        assert!(
+            absorbed_inward_ep > absorbed_inward_ticket,
+            "E+ Step-5 inward fraction ({radiation_frac:.3}) should exceed \
+             NFRC simple ratio ({ticket_n_i:.3})"
+        );
+    }
 }

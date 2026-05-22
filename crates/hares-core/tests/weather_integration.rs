@@ -531,6 +531,187 @@ fn solar_irradiance_physical_bounds() {
 }
 
 // ---------------------------------------------------------------------------
+// Regression test for ticket 026: leap-year weather row indexing
+// ---------------------------------------------------------------------------
+
+/// Regression for ticket 026: `compute_annual_offset` hardcodes 365 days, so a
+/// leap-year (8784-row) weather file has its rows misindexed for any `start_time`
+/// after February 28.
+///
+/// The fixture: a sequential weather series where row `i` has dry-bulb = i as f64.
+/// For a non-leap year starting at Jan 1 00:00 (offset = 0), step 0 should read
+/// row 0 (temp = 0.0).  For a leap year starting at Jan 1 00:00, step 0 should
+/// also read row 0 (temp = 0.0) — same expectation, different row count.
+///
+/// The bug surfaces on Mar 1 (hourly row 1416 in a leap year):
+///   - Correct offset: (59 days Jan+Feb-leap) * 86400 = ordinal0=59, row 1416
+///   - Buggy offset (365-day modulus): ordinal0=59 → same row 1416 (coincidentally
+///     correct here because Feb 29 hasn't been skipped yet at Mar 1 00:00).
+///
+/// The real divergence manifests on Dec 31: ordinal0=365 in a leap year should map
+/// to row 8760 (Dec 31 00:00 in a 8784-row file), but the 365-day modulus wraps
+/// 365*86400 % (365*86400) = 0, so it reads row 0 (Jan 1) instead — a full-year
+/// displacement.  This test pins that failure.
+#[test]
+fn leap_year_dec31_weather_index_bug_026() {
+    // 8784-row leap-year weather: row i has dry_bulb = i as f64.
+    let n = 8784usize;
+    let seq: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+    let weather = WeatherTimeSeries {
+        meta: WeatherMeta {
+            location: "Leap regression".to_string(),
+            latitude: 40.0,
+            longitude: -105.0,
+            timezone_offset_h: 0.0,
+            elevation_m: 0.0,
+            source_step_secs: 3600,
+            midpoint_offset_secs: 0,
+        },
+        dry_bulb_c: seq.clone(),
+        dew_point_c: vec![0.0; n],
+        rel_humidity_pct: vec![50.0; n],
+        pressure_kpa: vec![101.325; n],
+        ghi_w_m2: vec![0.0; n],
+        dni_w_m2: vec![0.0; n],
+        dhi_w_m2: vec![0.0; n],
+        wind_speed_m_s: vec![1.0; n],
+        wind_dir_deg: vec![180.0; n],
+        opaque_sky_cover: vec![0.0; n],
+        horizontal_infrared_w_m2: vec![250.0; n],
+        sky_temp_c: vec![0.0; n],
+        ground_temp_c: vec![10.0; n],
+        liquid_precip_m: vec![0.0; n],
+        surface_albedo: None,
+    };
+
+    let schedule = {
+        let mut index = HashMap::new();
+        index.insert("occupancy".to_string(), 0);
+        ScheduleTimeSeries {
+            timestamps: (0..n)
+                .map(|h| {
+                    FixedOffset::east_opt(0)
+                        .unwrap()
+                        .with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+                        .unwrap()
+                        + Duration::hours(h as i64)
+                })
+                .collect(),
+            column_names: vec!["occupancy".to_string()],
+            columns: vec![vec![1.0; n]],
+            column_index: index,
+            source_step_secs: 3600,
+            column_aggregations: vec![ColumnAggregation::Mean],
+        }
+    };
+
+    let building = {
+        let details_xml = XmlNode {
+            name: "BuildingDetails".to_string(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![XmlNode {
+                name: "IndoorTemperature".to_string(),
+                attrs: HashMap::new(),
+                text: "21.0".to_string(),
+                children: Vec::new(),
+            }],
+        };
+        hares_io::Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: Some(40.0),
+                longitude_deg: Some(-105.0),
+            },
+            zones: vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: None,
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            boundaries: vec![Boundary {
+                id: "wall".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 20.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+            }],
+            windows: Vec::<Window>::new(),
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml,
+        }
+    };
+
+    // Start on Dec 31 00:00 of leap year 2020 (ordinal0 = 365 in a 366-day year).
+    // Expected: row 365 * 24 = 8760 → dry_bulb = 8760.0
+    // Buggy behaviour (365-day modulus): ordinal0=365 → 365*86400 % (365*86400) = 0 → row 0.
+    let start = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2020, 12, 31, 0, 0, 0)
+        .unwrap();
+
+    let mut mgr =
+        EnvironmentManager::new(weather, schedule, &building, StdDuration::from_secs(3600), start, None)
+            .expect("EnvironmentManager::new failed");
+
+    let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(1));
+    let env = mgr.update(&clock, &[]);
+    let observed = env.weather.outdoor_temp_c;
+
+    // Row 8760 → expected dry_bulb = 8760.0
+    assert_eq!(
+        observed, 8760.0,
+        "leap-year Dec 31 should read row 8760 (dry_bulb=8760.0) \
+         but got {observed}; the 365-day modulus bug causes row 0 (dry_bulb=0.0)"
+    );
+
+    let _ = clock.next();
+}
+
+// ---------------------------------------------------------------------------
 // Test 3: Resampled weather produces smooth environment
 // ---------------------------------------------------------------------------
 
@@ -606,4 +787,218 @@ fn resampled_weather_produces_smooth_environment() {
 
         let _ = clock.next();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests: ticket 033 — missing surface azimuth silent default
+// ---------------------------------------------------------------------------
+//
+// These tests document the EXPECTED behavior after the fix is implemented.
+// `wall_missing_azimuth_causes_error` FAILS with current code because
+// `EnvironmentManager::new` does not yet return Err for a wall with
+// `azimuth_deg: None`.  Remove the #[should_panic] annotation when the
+// fix lands and the test passes normally.
+
+/// A wall boundary with `azimuth_deg: None` should cause
+/// `EnvironmentManager::new` to return `Err(MissingAzimuth{..})`.
+///
+/// Currently fails: `build_surface_geometry` silently substitutes 180°.
+#[test]
+#[should_panic(expected = "EnvironmentManager::new must fail")]
+fn wall_missing_azimuth_causes_error() {
+    let weather = synthetic_weather();
+    let schedule = minimal_schedule();
+
+    let details_xml = hares_io::hpxml::building::XmlNode {
+        name: "BuildingDetails".to_string(),
+        attrs: std::collections::HashMap::new(),
+        text: String::new(),
+        children: vec![],
+    };
+    let building = hares_io::Building {
+        site: Site {
+            elevation_m: None,
+            site_type: None,
+            shielding_of_home: None,
+            latitude_deg: Some(40.0),
+            longitude_deg: Some(-105.0),
+        },
+        zones: vec![Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        }],
+        // azimuth_deg is None — exterior wall with unknown orientation.
+        boundaries: vec![Boundary {
+            id: "wall-no-azimuth".to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: 20.0,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: vec![],
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: vec![],
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(90.0),
+            framing_factor: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+        }],
+        windows: Vec::<Window>::new(),
+        infiltration_ach50: None,
+        infiltration_cfm50: None,
+        infiltration_ela_cm2: None,
+        infiltration_constant_ach: None,
+        hvac_capacity_w: None,
+        seer2: None,
+        hspf2: None,
+        water_heater_setpoint_c: None,
+        heating_weekday_setpoints_c: None,
+        heating_weekend_setpoints_c: None,
+        cooling_weekday_setpoints_c: None,
+        cooling_weekend_setpoints_c: None,
+        battery_round_trip_efficiency: None,
+        pv_tilt_deg: None,
+        conditioned_volume_m3: None,
+        ceiling_height_m: None,
+        infiltration_height_m: None,
+        floors_above_grade: None,
+        has_flue_or_chimney: None,
+        foundation_name: None,
+        residential_facility_type: None,
+        mass_multiplier_override: None,
+        hvac_deadband_c: None,
+        details_xml,
+    };
+
+    let start = ts(0);
+    let result = EnvironmentManager::new(
+        weather,
+        schedule,
+        &building,
+        StdDuration::from_secs(3600),
+        start,
+        None,
+    );
+
+    // After fix: result must be Err containing a message about missing azimuth.
+    // Currently the test panics here because `EnvironmentManager::new` returns Ok.
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("azimuth") || msg.contains("Azimuth"),
+                "error message must mention azimuth, got: {msg}"
+            );
+        }
+        Ok(_) => panic!("EnvironmentManager::new must fail when wall has no azimuth"),
+    }
+}
+
+/// A roof boundary with `azimuth_deg: None` should allow
+/// `EnvironmentManager::new` to succeed (with a warning), because hip and
+/// flat roofs have no single orientation.
+///
+/// This test should pass both before and after the fix: with current code
+/// the silent-default path accepts it, and after the fix the roof-exemption
+/// path explicitly permits it.
+#[test]
+fn roof_missing_azimuth_constructs_successfully() {
+    let weather = synthetic_weather();
+    let schedule = minimal_schedule();
+
+    let details_xml = hares_io::hpxml::building::XmlNode {
+        name: "BuildingDetails".to_string(),
+        attrs: std::collections::HashMap::new(),
+        text: String::new(),
+        children: vec![],
+    };
+    let building = hares_io::Building {
+        site: Site {
+            elevation_m: None,
+            site_type: None,
+            shielding_of_home: None,
+            latitude_deg: Some(40.0),
+            longitude_deg: Some(-105.0),
+        },
+        zones: vec![Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        }],
+        // Roof with no azimuth: valid HPXML for hip/flat roofs.
+        boundaries: vec![Boundary {
+            id: "hip-roof-no-azimuth".to_string(),
+            boundary_type: BoundaryType::Roof,
+            area_m2: 80.0,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: vec![],
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: vec![],
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(30.0),
+            framing_factor: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+        }],
+        windows: Vec::<Window>::new(),
+        infiltration_ach50: None,
+        infiltration_cfm50: None,
+        infiltration_ela_cm2: None,
+        infiltration_constant_ach: None,
+        hvac_capacity_w: None,
+        seer2: None,
+        hspf2: None,
+        water_heater_setpoint_c: None,
+        heating_weekday_setpoints_c: None,
+        heating_weekend_setpoints_c: None,
+        cooling_weekday_setpoints_c: None,
+        cooling_weekend_setpoints_c: None,
+        battery_round_trip_efficiency: None,
+        pv_tilt_deg: None,
+        conditioned_volume_m3: None,
+        ceiling_height_m: None,
+        infiltration_height_m: None,
+        floors_above_grade: None,
+        has_flue_or_chimney: None,
+        foundation_name: None,
+        residential_facility_type: None,
+        mass_multiplier_override: None,
+        hvac_deadband_c: None,
+        details_xml,
+    };
+
+    let start = ts(0);
+    EnvironmentManager::new(
+        weather,
+        schedule,
+        &building,
+        StdDuration::from_secs(3600),
+        start,
+        None,
+    )
+    .expect("roof with no azimuth must construct successfully");
 }

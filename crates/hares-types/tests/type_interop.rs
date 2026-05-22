@@ -417,3 +417,103 @@ fn mixed_category_totals_are_consistent() {
         "sum of category subtotals must equal total sensible",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests for ticket 072: latent_by_category missing
+// These tests FAIL TO COMPILE until latent_by_category is added to
+// ThermalAccumulator (per ticket 072). They demonstrate the bug.
+// ---------------------------------------------------------------------------
+
+/// sum(latent_by_category) must equal latent_gain_w after a sequence of
+/// mixed-category add() calls.  This is the invariant stated in ticket 072.
+#[test]
+fn latent_category_sum_matches_total() {
+    let zone = ZoneId(3);
+    let decls = [PortDeclaration::thermal(zone)];
+    let mut slots = PortSlots::from_declarations(&decls);
+
+    slots
+        .accumulate(&PortContribution::Thermal {
+            zone,
+            sensible_gain_w: 0.0,
+            radiant_gain_w: 0.0,
+            latent_gain_w: -500.0, // AC latent extraction
+            category: ThermalCategory::HvacCooling,
+        })
+        .expect("hvac cooling latent");
+    slots
+        .accumulate(&PortContribution::Thermal {
+            zone,
+            sensible_gain_w: 0.0,
+            radiant_gain_w: 0.0,
+            latent_gain_w: 175.0, // occupant latent addition
+            category: ThermalCategory::InternalGain,
+        })
+        .expect("occupant latent");
+
+    let acc = &slots.thermal[0];
+
+    // Aggregate total must reflect the net.
+    approx_eq(acc.latent_gain_w, -325.0, "net latent (-500+175)");
+
+    // Per-category subtotals must match each individual contribution.
+    approx_eq(
+        acc.latent_for_category(ThermalCategory::HvacCooling),
+        -500.0,
+        "HvacCooling latent subtotal",
+    );
+    approx_eq(
+        acc.latent_for_category(ThermalCategory::InternalGain),
+        175.0,
+        "InternalGain latent subtotal",
+    );
+    approx_eq(
+        acc.latent_for_category(ThermalCategory::HvacHeating),
+        0.0,
+        "HvacHeating latent must be zero",
+    );
+
+    // Invariant: sum of all per-category latent values equals latent_gain_w.
+    let categories = [
+        ThermalCategory::HvacHeating,
+        ThermalCategory::HvacCooling,
+        ThermalCategory::InternalGain,
+        ThermalCategory::JacketLoss,
+        ThermalCategory::DuctLoss,
+    ];
+    let cat_sum: f64 = categories.iter().map(|&c| acc.latent_for_category(c)).sum();
+    approx_eq(
+        cat_sum,
+        acc.latent_gain_w,
+        "sum of latent category subtotals must equal latent_gain_w",
+    );
+}
+
+/// zero() must reset latent_by_category -- every element must be 0.0.
+#[test]
+fn zero_resets_latent_by_category() {
+    let zone = ZoneId(4);
+    let mut acc = ThermalAccumulator::new(zone);
+
+    acc.add(0.0, 0.0, 300.0, ThermalCategory::InternalGain);
+    acc.add(0.0, 0.0, -200.0, ThermalCategory::HvacCooling);
+
+    acc.zero();
+
+    assert_eq!(acc.latent_gain_w, 0.0, "latent_gain_w must be zero after zero()");
+
+    let categories = [
+        ThermalCategory::HvacHeating,
+        ThermalCategory::HvacCooling,
+        ThermalCategory::InternalGain,
+        ThermalCategory::JacketLoss,
+        ThermalCategory::DuctLoss,
+    ];
+    for cat in categories {
+        assert_eq!(
+            acc.latent_for_category(cat),
+            0.0,
+            "latent_by_category[{cat:?}] must be 0.0 after zero()",
+        );
+    }
+}

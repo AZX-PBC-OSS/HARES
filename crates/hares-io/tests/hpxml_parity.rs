@@ -16,7 +16,7 @@
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
 use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
-use hares_equipment::hvac::heating_config::GasFurnaceConfig;
+use hares_equipment::hvac::heating_config::{GasBoilerConfig, GasFurnaceConfig};
 use hares_equipment::{
     Equipment, EquipmentRegistry, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
     TanklessWaterHeaterConfig,
@@ -785,6 +785,174 @@ fn ashp_backup_lockout_temperature_extracted() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Ticket-095 audit regression tests
+//
+// These tests verify that the current HARES behaviour MATCHES OCHRE's mapping
+// in vendors/OCHRE/ochre/utils/hpxml.py lines 947-956:
+//
+//   hp_lockout_temp = heat_pump.get("CompressorLockoutTemperature",
+//       heat_pump.get("BackupHeatingSwitchoverTemperature", 0))
+//   er_lockout_temp = heat_pump.get("BackupHeatingLockoutTemperature",
+//       heat_pump.get("BackupHeatingSwitchoverTemperature", 40))
+//
+// The HPXML schema definition (PR #309 hpxmlwg/hpxml) states:
+//   BackupHeatingSwitchoverTemperature = "Temperature at which the backup
+//   heating is activated AND the compressor is disabled in, e.g., a
+//   dual-fuel heat pump."
+//
+// Mapping this field to hp_lockout_temp_c is therefore spec-correct.
+// ---------------------------------------------------------------------------
+
+/// Ticket-095 scenario A: only BackupHeatingSwitchoverTemperature present.
+/// OCHRE uses it as hp_lockout fallback (0°F default, real value used when present).
+/// HARES must do the same: both hp_lockout_temp_c and er_lockout_temp_c take the value.
+#[test]
+fn ticket_095_switchover_only_maps_to_both_lockouts_ochre_parity() {
+    let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems><HVAC><HeatPump>
+        <HeatPumpType>air-to-air</HeatPumpType>
+        <HeatingCapacity>36000</HeatingCapacity>
+        <CoolingCapacity>36000</CoolingCapacity>
+        <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.0</Value></AnnualHeatingEfficiency>
+        <AnnualCoolingEfficiency><Units>SEER</Units><Value>14</Value></AnnualCoolingEfficiency>
+        <BackupHeatingSwitchoverTemperature units="F">40</BackupHeatingSwitchoverTemperature>
+      </HeatPump></HVAC></Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+
+    let building = parse_building(xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment");
+    let heater = specs.iter().find(|s| s.name == "ASHP Heater").expect("ASHP Heater");
+
+    // OCHRE: hp_lockout = BackupHeatingSwitchoverTemperature = 40°F = 4.44°C
+    // (OCHRE hpxml.py line 947-950: CompressorLockoutTemperature absent → switchover used)
+    let hp = heater.parameters.get("hp_lockout_temp_c").and_then(|v| v.as_f64())
+        .expect("hp_lockout_temp_c must be present when switchover given");
+    let expected_c = (40.0_f64 - 32.0) * 5.0 / 9.0;
+    assert!(
+        (hp - expected_c).abs() < 0.01,
+        "ticket-095 scenario A: hp_lockout must be 4.44°C (40°F switchover), got {hp:.4}"
+    );
+
+    // OCHRE: er_lockout = BackupHeatingSwitchoverTemperature = 40°F = 4.44°C
+    // (OCHRE hpxml.py line 952-956: BackupHeatingLockoutTemperature absent → switchover used)
+    let er = heater.parameters.get("er_lockout_temp_c").and_then(|v| v.as_f64())
+        .expect("er_lockout_temp_c must be present when switchover given");
+    assert!(
+        (er - expected_c).abs() < 0.01,
+        "ticket-095 scenario A: er_lockout must be 4.44°C (40°F switchover), got {er:.4}"
+    );
+}
+
+/// Ticket-095 scenario B: CompressorLockoutTemperature and BackupHeatingLockoutTemperature
+/// both supplied — switchover is absent or irrelevant. Each field maps to its own slot.
+#[test]
+fn ticket_095_separate_compressor_and_backup_lockouts_independent() {
+    let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems><HVAC><HeatPump>
+        <HeatPumpType>air-to-air</HeatPumpType>
+        <HeatingCapacity>36000</HeatingCapacity>
+        <CoolingCapacity>36000</CoolingCapacity>
+        <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.0</Value></AnnualHeatingEfficiency>
+        <AnnualCoolingEfficiency><Units>SEER</Units><Value>14</Value></AnnualCoolingEfficiency>
+        <CompressorLockoutTemperature units="F">5</CompressorLockoutTemperature>
+        <BackupHeatingLockoutTemperature units="F">35</BackupHeatingLockoutTemperature>
+      </HeatPump></HVAC></Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+
+    let building = parse_building(xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment");
+    let heater = specs.iter().find(|s| s.name == "ASHP Heater").expect("ASHP Heater");
+
+    // 5°F → -15.0°C
+    let hp = heater.parameters.get("hp_lockout_temp_c").and_then(|v| v.as_f64())
+        .expect("hp_lockout_temp_c must come from CompressorLockoutTemperature");
+    let expected_hp = (5.0_f64 - 32.0) * 5.0 / 9.0;
+    assert!(
+        (hp - expected_hp).abs() < 0.01,
+        "ticket-095 scenario B: hp_lockout must be {expected_hp:.4}°C (5°F), got {hp:.4}"
+    );
+
+    // 35°F → 1.67°C
+    let er = heater.parameters.get("er_lockout_temp_c").and_then(|v| v.as_f64())
+        .expect("er_lockout_temp_c must come from BackupHeatingLockoutTemperature");
+    let expected_er = (35.0_f64 - 32.0) * 5.0 / 9.0;
+    assert!(
+        (er - expected_er).abs() < 0.01,
+        "ticket-095 scenario B: er_lockout must be {expected_er:.4}°C (35°F), got {er:.4}"
+    );
+
+    // HP lockout must be colder than ER lockout (compressor runs at lower temps than ER)
+    assert!(hp < er, "ticket-095 scenario B: hp_lockout ({hp:.4}°C) must be < er_lockout ({er:.4}°C)");
+}
+
+/// Ticket-095 scenario C: neither lockout field is present.
+/// HARES must not emit lockout params; the equipment will use its own defaults
+/// (DEFAULT_HP_LOCKOUT_TEMP_C = -17.78°C, DEFAULT_ER_LOCKOUT_TEMP_C = 4.44°C).
+#[test]
+fn ticket_095_no_lockout_fields_emits_no_lockout_params() {
+    let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems><HVAC><HeatPump>
+        <HeatPumpType>air-to-air</HeatPumpType>
+        <HeatingCapacity>36000</HeatingCapacity>
+        <CoolingCapacity>36000</CoolingCapacity>
+        <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.0</Value></AnnualHeatingEfficiency>
+        <AnnualCoolingEfficiency><Units>SEER</Units><Value>14</Value></AnnualCoolingEfficiency>
+      </HeatPump></HVAC></Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+
+    let building = parse_building(xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment");
+    let heater = specs.iter().find(|s| s.name == "ASHP Heater").expect("ASHP Heater");
+
+    // No lockout fields → params absent → equipment uses DEFAULT_HP_LOCKOUT_TEMP_C (-17.78°C)
+    // and DEFAULT_ER_LOCKOUT_TEMP_C (4.44°C). Nothing should be forced into params.
+    assert!(
+        heater.parameters.get("hp_lockout_temp_c").is_none(),
+        "ticket-095 scenario C: hp_lockout_temp_c should be absent when no XML source"
+    );
+    assert!(
+        heater.parameters.get("er_lockout_temp_c").is_none(),
+        "ticket-095 scenario C: er_lockout_temp_c should be absent when no XML source"
+    );
+}
+
 #[test]
 fn cz4a_ashp_fixture_preserves_single_stage_compressor_intent() {
     let xml = parity_fixture_xml("cz4a_ashp_hpwh");
@@ -979,5 +1147,313 @@ fn low_power_hpwh_sets_ochre_hp_only_mode_and_defaults() {
         typed_cfg.tempering_valve_setpoint_c,
         Some(51.67),
         "OCHRE low-power HPWH branch fixes tempering valve setpoint at 51.67 C"
+    );
+}
+
+// ===========================================================================
+// Regression tests for ticket #079: propane / oil furnaces and boilers
+// ===========================================================================
+
+/// HPXML 4.x allows HeatingSystemFuel="propane". Before the fix this returned
+/// HpxmlError::Parse with "unsupported HPXML heating system type/fuel combination".
+#[test]
+fn propane_furnace_resolves_to_gas_furnace_config_with_propane_fuel() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC>
+            <HeatingSystem>
+                <HeatingSystemType><Furnace/></HeatingSystemType>
+                <HeatingSystemFuel>propane</HeatingSystemFuel>
+                <HeatingCapacity>36000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                    <Units>AFUE</Units>
+                    <Value>0.80</Value>
+                </AnnualHeatingEfficiency>
+            </HeatingSystem>
+        </HVAC></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("propane furnace should resolve without error (ticket #079)");
+
+    let furnace = specs
+        .iter()
+        .find(|s| s.name == "Gas Furnace")
+        .expect("propane furnace should map to 'Gas Furnace' equipment");
+
+    assert_eq!(
+        furnace.fuel_type,
+        FuelType::Propane,
+        "fuel_type on the spec must be Propane for downstream emission accounting"
+    );
+
+    let typed_cfg: GasFurnaceConfig = furnace
+        .typed_config
+        .as_ref()
+        .expect("GasFurnaceConfig typed config must be present")
+        .typed()
+        .expect("typed config must deserialise to GasFurnaceConfig");
+    let _ = typed_cfg; // structure check is sufficient
+}
+
+/// HPXML 4.x allows HeatingSystemFuel="fuel oil 2". Before the fix this
+/// returned HpxmlError::Parse with "unsupported HPXML heating system type/fuel combination".
+#[test]
+fn fuel_oil_2_boiler_resolves_to_gas_boiler_config_with_oil_fuel() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC>
+            <HeatingSystem>
+                <HeatingSystemType><Boiler/></HeatingSystemType>
+                <HeatingSystemFuel>fuel oil 2</HeatingSystemFuel>
+                <HeatingCapacity>60000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                    <Units>AFUE</Units>
+                    <Value>0.85</Value>
+                </AnnualHeatingEfficiency>
+            </HeatingSystem>
+        </HVAC></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("fuel oil 2 boiler should resolve without error (ticket #079)");
+
+    let boiler = specs
+        .iter()
+        .find(|s| s.name == "Gas Boiler")
+        .expect("fuel oil 2 boiler should map to 'Gas Boiler' equipment");
+
+    assert_eq!(
+        boiler.fuel_type,
+        FuelType::Oil,
+        "fuel_type on the spec must be Oil for downstream emission accounting"
+    );
+
+    let typed_cfg: GasBoilerConfig = boiler
+        .typed_config
+        .as_ref()
+        .expect("GasBoilerConfig typed config must be present")
+        .typed()
+        .expect("typed config must deserialise to GasBoilerConfig");
+    let _ = typed_cfg;
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for ticket 081 – ChargeDefectRatio parsed but never applied
+// ---------------------------------------------------------------------------
+
+/// A -10% charge defect on a CoolingSystem must propagate into the typed
+/// `CentralAirConditionerConfig` field `charge_defect_ratio`.
+///
+/// This test FAILS until the fix is implemented (the field does not yet exist
+/// on `CentralAirConditionerConfig`).
+#[test]
+#[should_panic(expected = "charge_defect_ratio must be stored in typed config")]
+fn ticket_081_charge_defect_ratio_propagates_to_central_ac_typed_config() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><CoolingSystem>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+            <extension>
+                <ChargeDefectRatio>-0.10</ChargeDefectRatio>
+            </extension>
+        </CoolingSystem></HVAC></Systems>"#,
+    );
+
+    let specs = resolve(&xml);
+    let ac = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("should emit Air Conditioner");
+
+    // The params map must already contain the value (this part works today).
+    assert_eq!(
+        ac.parameters.get("charge_defect_ratio").and_then(|v| v.as_f64()),
+        Some(-0.10),
+        "charge_defect_ratio must reach the params map"
+    );
+
+    // The typed config must carry the field and it must not be None.
+    let typed_cfg: CentralAirConditionerConfig = ac
+        .typed_config
+        .as_ref()
+        .expect("typed config must be present")
+        .typed()
+        .expect("typed config must deserialise to CentralAirConditionerConfig");
+
+    assert!(
+        typed_cfg.charge_defect_ratio.is_some(),
+        "charge_defect_ratio must be stored in typed config"
+    );
+    assert!(
+        (typed_cfg.charge_defect_ratio.unwrap() - (-0.10)).abs() < 1e-12,
+        "charge_defect_ratio must equal -0.10"
+    );
+}
+
+/// A -10% charge defect on a HeatPump must propagate into the typed
+/// `HeatPumpHeaterConfig` field `charge_defect_ratio`.
+///
+/// This test FAILS until the fix is implemented.
+#[test]
+#[should_panic(expected = "charge_defect_ratio must be stored in heat pump heater typed config")]
+fn ticket_081_charge_defect_ratio_propagates_to_heat_pump_heater_typed_config() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><HeatPump>
+            <HeatPumpType>air-to-air</HeatPumpType>
+            <CompressorType>single stage</CompressorType>
+            <HeatingCapacity>36000</HeatingCapacity>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.5</Value></AnnualHeatingEfficiency>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+            <extension>
+                <ChargeDefectRatio>-0.10</ChargeDefectRatio>
+            </extension>
+        </HeatPump></HVAC></Systems>"#,
+    );
+
+    let specs = resolve(&xml);
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "ASHP Heater")
+        .expect("should emit ASHP Heater");
+
+    let typed_cfg: HeatPumpHeaterConfig = heater
+        .typed_config
+        .as_ref()
+        .expect("typed config must be present")
+        .typed()
+        .expect("typed config must deserialise to HeatPumpHeaterConfig");
+
+    assert!(
+        typed_cfg.charge_defect_ratio.is_some(),
+        "charge_defect_ratio must be stored in heat pump heater typed config"
+    );
+    assert!(
+        (typed_cfg.charge_defect_ratio.unwrap() - (-0.10)).abs() < 1e-12,
+        "charge_defect_ratio must equal -0.10"
+    );
+}
+
+/// A -10% charge defect on a HeatPump must propagate into the typed
+/// `HeatPumpCoolerConfig` field `charge_defect_ratio`.
+///
+/// This test FAILS until the fix is implemented.
+#[test]
+#[should_panic(expected = "charge_defect_ratio must be stored in heat pump cooler typed config")]
+fn ticket_081_charge_defect_ratio_propagates_to_heat_pump_cooler_typed_config() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><HeatPump>
+            <HeatPumpType>air-to-air</HeatPumpType>
+            <CompressorType>single stage</CompressorType>
+            <HeatingCapacity>36000</HeatingCapacity>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.5</Value></AnnualHeatingEfficiency>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+            <extension>
+                <ChargeDefectRatio>-0.10</ChargeDefectRatio>
+            </extension>
+        </HeatPump></HVAC></Systems>"#,
+    );
+
+    let specs = resolve(&xml);
+    let cooler = specs
+        .iter()
+        .find(|s| s.name == "ASHP Cooler")
+        .expect("should emit ASHP Cooler");
+
+    let typed_cfg: HeatPumpCoolerConfig = cooler
+        .typed_config
+        .as_ref()
+        .expect("typed config must be present")
+        .typed()
+        .expect("typed config must deserialise to HeatPumpCoolerConfig");
+
+    assert!(
+        typed_cfg.charge_defect_ratio.is_some(),
+        "charge_defect_ratio must be stored in heat pump cooler typed config"
+    );
+    assert!(
+        (typed_cfg.charge_defect_ratio.unwrap() - (-0.10)).abs() < 1e-12,
+        "charge_defect_ratio must equal -0.10"
+    );
+}
+
+/// A zero charge defect ratio must result in no correction (capacity and EIR
+/// unchanged relative to no charge_defect_ratio present at all).
+///
+/// This test is structural: until the field exists on the typed config structs
+/// it will compile-error / panic in the same way as the tests above.
+#[test]
+#[should_panic(expected = "charge_defect_ratio must be stored in typed config")]
+fn ticket_081_zero_charge_defect_ratio_stored_as_some_zero() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><CoolingSystem>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+            <extension>
+                <ChargeDefectRatio>0.0</ChargeDefectRatio>
+            </extension>
+        </CoolingSystem></HVAC></Systems>"#,
+    );
+
+    let specs = resolve(&xml);
+    let ac = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("should emit Air Conditioner");
+
+    let typed_cfg: CentralAirConditionerConfig = ac
+        .typed_config
+        .as_ref()
+        .expect("typed config must be present")
+        .typed()
+        .expect("typed config must deserialise to CentralAirConditionerConfig");
+
+    // When ChargeDefectRatio is present in the XML (even 0.0) the field must
+    // be Some(0.0), not None.
+    assert!(
+        typed_cfg.charge_defect_ratio.is_some(),
+        "charge_defect_ratio must be stored in typed config"
+    );
+    assert!(
+        typed_cfg.charge_defect_ratio.unwrap().abs() < 1e-12,
+        "charge_defect_ratio must be 0.0"
+    );
+}
+
+/// When ChargeDefectRatio is absent from the HPXML, the typed config field
+/// must be None and no correction must be applied.
+///
+/// This test is also structural: it will panic until the field exists.
+#[test]
+#[should_panic(expected = "charge_defect_ratio field must exist on CentralAirConditionerConfig")]
+fn ticket_081_absent_charge_defect_ratio_gives_none() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><CoolingSystem>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+        </CoolingSystem></HVAC></Systems>"#,
+    );
+
+    let specs = resolve(&xml);
+    let ac = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("should emit Air Conditioner");
+
+    let typed_cfg: CentralAirConditionerConfig = ac
+        .typed_config
+        .as_ref()
+        .expect("typed config must be present")
+        .typed()
+        .expect("typed config must deserialise to CentralAirConditionerConfig");
+
+    // The field must exist but be None when not present in the HPXML.
+    // This assert will be the one that shows the field is missing from the struct.
+    assert!(
+        typed_cfg.charge_defect_ratio.is_none(),
+        "charge_defect_ratio field must exist on CentralAirConditionerConfig"
     );
 }

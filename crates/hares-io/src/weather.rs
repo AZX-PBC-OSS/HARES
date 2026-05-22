@@ -2535,4 +2535,66 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             );
         }
     }
+
+    // --- Ticket 098 regression: docstring claims "hourly mean preservation" ---
+    //
+    // The triangular resampler does NOT preserve the hourly mean. The actual
+    // mean over hour i (continuous-limit integral) is:
+    //   0.125 * values[prev] + 0.75 * values[i] + 0.125 * values[next]
+    //
+    // This test locks in the documented behaviour so that any future change to
+    // the algorithm that accidentally achieves true mean preservation (or any
+    // change that makes the error *worse*) triggers a test failure and forces
+    // the docstring to be updated in sync.
+    #[test]
+    fn triangular_mean_is_not_preserved_at_sharp_transitions() {
+        // Sunrise step: [0, 800, 800]. The hour-1 mean should be
+        // 0.125*0 + 0.75*800 + 0.125*800 = 700, NOT 800.
+        // This demonstrates the 12.5 % shortfall described in ticket 098.
+        let values = [0.0_f64, 800.0, 800.0];
+        let factor = 600; // large factor → close to continuous-limit value
+
+        let out = super::triangular_resample(&values, factor);
+
+        // Hour 0: prev=values[2]=800, cur=0, next=800 → formula = 0.125*800 + 0.75*0 + 0.125*800 = 200
+        let mean_h0: f64 = out[..factor].iter().sum::<f64>() / factor as f64;
+        let expected_h0 = 0.125 * values[2] + 0.75 * values[0] + 0.125 * values[1];
+        assert!(
+            (mean_h0 - expected_h0).abs() < 1.0,
+            "hour 0: mean={mean_h0:.3}, expected blend formula={expected_h0:.3}"
+        );
+        // Explicitly confirm mean_h0 ≠ values[0] (= 0.0).
+        // The formula yields 200, not 0 — confirming non-preservation even
+        // when cur is 0.
+        assert!(
+            (mean_h0 - values[0]).abs() > 100.0,
+            "hour 0 mean should differ significantly from the hourly value ({}) — got {mean_h0:.3}",
+            values[0]
+        );
+
+        // Hour 1: prev=0, cur=800, next=800 → formula = 0.125*0 + 0.75*800 + 0.125*800 = 700
+        let mean_h1: f64 = out[factor..2 * factor].iter().sum::<f64>() / factor as f64;
+        let expected_h1 = 0.125 * values[0] + 0.75 * values[1] + 0.125 * values[2];
+        assert!(
+            (mean_h1 - expected_h1).abs() < 1.0,
+            "hour 1: mean={mean_h1:.3}, expected blend formula={expected_h1:.3}"
+        );
+        // Explicitly confirm mean_h1 ≠ values[1] (= 800).
+        assert!(
+            (mean_h1 - values[1]).abs() > 50.0,
+            "hour 1 mean should differ from the hourly value (800) — got {mean_h1:.3} (expected ~700)"
+        );
+
+        // Hour 2: prev=800, cur=800, next=0 → formula = 0.125*800 + 0.75*800 + 0.125*0 = 700
+        let mean_h2: f64 = out[2 * factor..].iter().sum::<f64>() / factor as f64;
+        let expected_h2 = 0.125 * values[1] + 0.75 * values[2] + 0.125 * values[0];
+        assert!(
+            (mean_h2 - expected_h2).abs() < 1.0,
+            "hour 2: mean={mean_h2:.3}, expected blend formula={expected_h2:.3}"
+        );
+        assert!(
+            (mean_h2 - values[2]).abs() > 50.0,
+            "hour 2 mean should differ from the hourly value (800) — got {mean_h2:.3} (expected ~700)"
+        );
+    }
 }

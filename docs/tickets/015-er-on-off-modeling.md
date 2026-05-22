@@ -171,3 +171,56 @@ sequenced by an outdoor thermostat.
 
 - [014-defrost-typed-config.md](014-defrost-typed-config.md) — config struct improvements
 - [011-discrete-defrost-cycle.md](011-discrete-defrost-cycle.md) — defrost ER behavior for resistive strategy
+
+## Verification Audit
+
+**Auditor**: claude-cli (automated)
+**Date**: 2026-05-20
+
+### Code Confirmation
+- [x] Referenced line numbers still match (corrected: ticket cites `heater.rs:1993-2035` but test `er_backup_capacity_modulated_by_plr` is actually at line 2112; the bug at `heater.rs:1034-1042` and load-fraction comment at `heater.rs:1078-1095` are correct)
+- [x] Described logic matches current implementation — `self.backup_capacity_w * plr` confirmed at `heater.rs:1039`
+- [x] OCHRE cross-check result: **diverges** — `vendors/OCHRE/ochre/Equipment/HVAC.py:1404-1405` (`ASHPHeater.update_er_capacity`): in non-ideal mode OCHRE uses `er_capacity = self.er_capacity_rated` (full rated, no PLR), matching the ticket's proposed fix. In ideal mode OCHRE uses `er_capacity = capacity_ideal - hp_capacity` (continuous modulation). HARES non-ideal mode applies `backup_capacity_w * plr`, which diverges from OCHRE.
+- [x] EnergyPlus cross-check result: **ticket claim is incorrect** — see Web-Verified Citations below.
+
+### Web-Verified Citations
+
+**Citation 1**: "EnergyPlus `Coil:Heating:Electric` has no PLR modulation; it is either on at rated capacity or off."
+
+- **Source found**: `https://raw.githubusercontent.com/NREL/EnergyPlus/develop/doc/input-output-reference/src/overview/group-heating-and-cooling-coils.tex` (NREL/EnergyPlus GitHub, develop branch, 2026)
+- **Quoted passage**: *"This controlled coil will only provide the needed capacity to meet the control criteria whether it is temperature or capacity controlled."*
+- **Further evidence**: The `Coil:Heating:Electric` output variables list in the I/O Reference contains only `Heating Coil Heating Energy [J]`, `Heating Coil Heating Rate [W]`, `Heating Coil Electricity Energy [J]`, and `Heating Coil Electricity Rate [W]`. There is **no** `Heating Coil Runtime Fraction` output. Gas coils (`Coil:Heating:Fuel`) and the `Coil:Heating:Desuperheater` do have runtime fraction outputs, confirming that those coils cycle. The absence of a runtime fraction on `Coil:Heating:Electric` and the "only provide the needed capacity" language indicate the coil is **modulating**, not binary on/off.
+- **Verdict**: **Incorrect** — EnergyPlus `Coil:Heating:Electric` is a modulating (capacity-controlled) coil that outputs exactly what the controller requests, not a strictly binary on/off device. The ticket's characterization of EnergyPlus behavior is wrong. The physical argument (that real resistive elements cannot modulate) is correct, but the EnergyPlus citation supporting it is not.
+
+**Citation 2**: "ASHRAE Handbook — Fundamentals Ch.33: residential electric strip heat is typically a single element or 2-stage sequenced by an outdoor thermostat."
+
+- **Source found**: `https://www.ashrae.org/technical-resources/ashrae-handbook/table-of-contents-2021-ashrae-handbook-fundamentals` (ASHRAE official, 2021)
+- **Quoted passage**: The 2021 ASHRAE Handbook — Fundamentals Chapter 33 is titled **"Physical Properties of Materials"**. Chapters covering residential heating include Chapter 17 ("Residential Cooling and Heating Load Calculations") and the HVAC Systems and Equipment volume. There is no chapter 33 content about electric strip heat or heat pump backup.
+- **Verdict**: **Incorrect** — the chapter number is wrong. Ch. 33 of the Fundamentals volume covers materials properties, not heating equipment. The underlying claim that residential ER backup is typically single-element or 2-stage may be accurate (this is general industry knowledge), but it cannot be verified at this chapter reference. The correct source would be the **ASHRAE Handbook — HVAC Systems and Equipment**, e.g., the heat pump chapter (Ch. 9 of the 2020 edition).
+
+**Citation 3**: "AHRI Standard 210/240 — ER backup is rated at full capacity, not modulated"
+
+- **Source found**: `https://www.ahrinet.org/search-standards/ahri-210240-i-p-performance-rating-unitary-air-conditioning-and-air-source-heat-pump-equipment` and AHRI Standard 210/240-2024 I-P.
+- **Quoted passage**: From search result content: "For heating COP2 calculations in the standard, supplemental resistance heat is excluded." AHRI 210/240 defines a "Heat Comfort Controller" as a device that "regulates the operation of the electric resistance elements." The standard rates the supplemental ER at its nominal capacity and explicitly excludes it from heat-pump efficiency calculations, implying it is treated as a discrete on/off load at rated capacity.
+- **Verdict**: **Partially correct** — AHRI 210/240 does treat ER backup at rated capacity for performance rating purposes (not modulated), consistent with the ticket's claim. However, the standard does not explicitly state "backup is not modulated"; it simply rates equipment at fixed test conditions. The ticket's interpretation is directionally right but overstates the specificity of the citation.
+
+### Legitimacy
+- **Verdict**: **Partially Legitimate**
+- **Rationale**: The core bug is real and confirmed by code inspection and regression testing: `heater.rs:1039` applies `self.backup_capacity_w * plr`, which scales ER output by the HP compressor's PLR when both HP and ER are on simultaneously (demonstrated by regression test `er_non_ideal_mode_is_binary_full_rated_when_on`, which fails with ER drawing 2.5 kW instead of 4.0 kW when PLR≈0.625). The OCHRE reference model (`HVAC.py:1404-1405`) confirms that in non-ideal mode ER uses full rated capacity, validating the proposed fix. However, two of the three ticket citations contain errors: (1) EnergyPlus `Coil:Heating:Electric` is actually a modulating coil ("provides the needed capacity to meet the control criteria"), not the strictly binary on/off device claimed; (2) ASHRAE Fundamentals Ch. 33 covers "Physical Properties of Materials", not residential heat pump backup equipment. The ticket's test line-number reference (`heater.rs:1993-2035`) is also wrong (actual location: line 2112). The proposed fix — replacing PLR modulation with binary full-rated ER when on — is physically correct and aligned with OCHRE even if the EnergyPlus and ASHRAE citations do not support the specific claim as stated.
+
+### Proposed Fix Summary
+In `heater.rs`, replace the `else if er_on` branch at line 1039:
+```rust
+// Before (bug):
+self.backup_capacity_w * plr
+
+// After (fix):
+self.backup_capacity_w  // ER is binary: full rated when on, regardless of HP PLR
+```
+The ideal-capacity branch (lines 1034-1037) should also be updated: instead of `(self.ideal_capacity_w - hp_capacity_w).max(0.0).min(self.backup_capacity_w)` (which allows fractional ER), implement the per-stage rounding formula from the ticket's "Required Behavior §2" for `er_stages > 1`. For `er_stages = 1` (the default), ideal mode should also use full rated capacity unless the residual is zero (ER either fills the gap at full rated, or stays off). The `HeatPumpHeaterConfig` requires a new `er_stages: u8` field (default 1, validated 1–4). No changes to the load-fraction scaling block (lines 1078–1095) are needed since its "ER is not modulatable" comment is already correct.
+
+### Test Written
+- **File**: `crates/hares-equipment/src/hvac/heat_pump/heater.rs` (within `#[cfg(test)] mod tests`)
+- **Test name**: `er_non_ideal_mode_is_binary_full_rated_when_on`
+- **What it tests**: Two-speed HP (TwoSpeedSetpoint) in HeatingHPAndER mode with zone=20.55°C (setpoint=21°C, deadband=1°C) produces PLR≈0.625. Asserts `backup_er_kw` equals full rated 4.0 kW. Currently FAILS with `backup_er_kw = 2.500 kW` (= 4.0 × 0.625), proving the PLR-modulation bug. Must PASS after the fix is applied.
+- **Status**: Written and confirmed FAILING.

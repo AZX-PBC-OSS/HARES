@@ -972,4 +972,37 @@ mod tests {
         let result: crate::Result<DehumidifierConfig> = ec.typed();
         assert!(result.is_err());
     }
+
+    // --- Regression tests for ticket 009 ---
+
+    // Issue 1: default_one() duplicated in cooling_config.rs and heat_pump_config.rs.
+    #[test]
+    fn regression_009_central_ac_number_of_speeds_defaults_to_one() {
+        let json = serde_json::json!({ "capacity_w": 10_000.0, "eir": 0.25 });
+        let cfg: CentralAirConditionerConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            cfg.number_of_speeds, 1,
+            "ticket-009: default_one() must return 1 for CentralAirConditionerConfig.number_of_speeds"
+        );
+    }
+
+    // Issue 3: equipment type name string literals.
+    #[test]
+    fn regression_009_equipment_type_name_literals() {
+        assert_eq!(
+            CentralAirConditionerConfig::equipment_type_name(),
+            "Central AC",
+            "ticket-009: CentralAirConditionerConfig type name must be 'Central AC'"
+        );
+        assert_eq!(
+            RoomAcConfig::equipment_type_name(),
+            "Room AC",
+            "ticket-009: RoomAcConfig type name must be 'Room AC'"
+        );
+        assert_eq!(
+            DehumidifierConfig::equipment_type_name(),
+            "Dehumidifier",
+            "ticket-009: DehumidifierConfig type name must be 'Dehumidifier'"
+        );
+    }
 }

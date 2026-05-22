@@ -1536,6 +1536,62 @@ mod tests {
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 
+    // ── Ticket 103 regression: zero/negative pressure must error, not silently
+    // substitute AIR_DENSITY_KG_M3. These tests document the BUG: currently
+    // `derive_zone_capacitances` accepts non-positive pressure and silently uses
+    // sea-level density (1.2041 kg/m³), masking misconfigured weather data.
+    //
+    // After the fix (return Err(BoundaryRcError::InvalidSitePressure)), these
+    // tests must be rewritten to assert the new `Result`-returning signature.
+    // The fix also makes `zone_capacitance_zero_pressure_uses_fallback` above
+    // obsolete; that test should be removed or replaced.
+    //
+    // Ref: docs/tickets/103-zone-capacitance-air-density-loud-error.md
+
+    /// BUG (ticket 103): passing 0.0 Pa silently returns a capacitance using
+    /// sea-level density instead of propagating an error.  At a 1500 m site
+    /// the correct rho_air is ~1.05 kg/m³ vs the fallback 1.2041 kg/m³ — a
+    /// ~14 % bias in zone thermal capacitance.
+    #[test]
+    fn ticket_103_zero_pressure_silently_uses_sea_level_density_not_an_error() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        // Bug: this call should error but currently succeeds and returns a
+        // capacitance computed from AIR_DENSITY_KG_M3 = 1.2041.
+        let caps = derive_zone_capacitances(&zones, 0.0);
+        let sea_level_cap = AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * 250.0 * INTERIOR_MASS_MULTIPLIER;
+        // The following assertion currently passes — it demonstrates the bug.
+        assert!(
+            (caps[0] - sea_level_cap).abs() < 1e-6,
+            "BUG: zero pressure should error, not silently produce sea-level capacitance \
+             ({} J/K); see ticket 103",
+            caps[0]
+        );
+    }
+
+    /// BUG (ticket 103): same silent substitution for negative pressure.
+    #[test]
+    fn ticket_103_negative_pressure_silently_uses_sea_level_density_not_an_error() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        // Bug: -1.0 Pa is unphysical; function should error but currently
+        // succeeds and uses the sea-level constant.
+        let caps = derive_zone_capacitances(&zones, -1.0);
+        let sea_level_cap = AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * 250.0 * INTERIOR_MASS_MULTIPLIER;
+        assert!(
+            (caps[0] - sea_level_cap).abs() < 1e-6,
+            "BUG: negative pressure should error, not silently produce sea-level capacitance \
+             ({} J/K); see ticket 103",
+            caps[0]
+        );
+    }
+
     // ── Single zone, single boundary (no layers) ───────────────────────
 
     #[test]
@@ -2778,6 +2834,156 @@ mod tests {
                 "at T={t_c:.0}°C: linearization error {error_pct:.1}% exceeds {max_err:.1}% threshold"
             );
         }
+    }
+
+    // ── Ticket 116 regression ───────────────────────────────────────────
+    //
+    // Verify that layer_info.inner_node (SurfaceLayerInfo) does not collide
+    // with OUTDOOR_NODE_ID or GROUND_NODE_ID.  Also verifies the diagnostic
+    // inner_node (BoundaryDiagnostic) for both material-layer and precomputed
+    // paths.
+    //
+    // Node IDs are laid out as:
+    //   Zone air nodes:  1 ..= n_zones
+    //   Layer nodes:     LAYER_NODE_BASE (1000) .. next_layer_id
+    //   OUTDOOR_NODE_ID: u32::MAX - 1
+    //   GROUND_NODE_ID:  u32::MAX
+    //
+    // Any call to alloc_node / alloc_node_no_cap increments next_layer_id from
+    // LAYER_NODE_BASE upward.  Reaching u32::MAX - 1 would require allocating
+    // u32::MAX - 1 - 1000 ≈ 4 294 966 295 nodes — physically impossible.
+    // This test documents and enforces the invariant, analogous to the existing
+    // many_boundaries_no_node_id_collision test but scoped to inner_node
+    // specifically, per ticket 116.
+
+    #[test]
+    fn ticket_116_inner_node_does_not_collide_with_reserved_ids_material_path() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let layers = vec![
+            make_layer(0.1, 0.5, 1000.0, 800.0, 50.0),
+            make_layer(0.05, 1.0, 2000.0, 900.0, 50.0),
+        ];
+        let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
+        let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF)
+            .unwrap();
+
+        // SurfaceLayerInfo.inner_node must not alias a reserved driving node.
+        let info = &rc.layer_info[&0];
+        assert_ne!(
+            info.inner_node,
+            NodeId(OUTDOOR_NODE_ID),
+            "material-path inner_node must not collide with OUTDOOR_NODE_ID"
+        );
+        assert_ne!(
+            info.inner_node,
+            NodeId(GROUND_NODE_ID),
+            "material-path inner_node must not collide with GROUND_NODE_ID"
+        );
+
+        // BoundaryDiagnostic.inner_node (Option) must also be free of collisions.
+        if let Some(diag_inner) = diag.boundaries[0].inner_node {
+            assert_ne!(
+                diag_inner,
+                NodeId(OUTDOOR_NODE_ID),
+                "diagnostic inner_node must not collide with OUTDOOR_NODE_ID"
+            );
+            assert_ne!(
+                diag_inner,
+                NodeId(GROUND_NODE_ID),
+                "diagnostic inner_node must not collide with GROUND_NODE_ID"
+            );
+        }
+    }
+
+    #[test]
+    fn ticket_116_inner_node_does_not_collide_with_reserved_ids_precomputed_path() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let precomputed = vec![
+            PrecomputedRCLayer { resistance_m2_k_w: 1.0, capacitance_kj_m2_k: 30.0 },
+            PrecomputedRCLayer { resistance_m2_k_w: 0.5, capacitance_kj_m2_k: 80.0 },
+        ];
+        let boundaries = vec![make_precomputed_boundary(
+            20.0, 0, ExteriorTarget::Outdoor, precomputed, 2.5,
+        )];
+        let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF)
+            .unwrap();
+
+        let info = &rc.layer_info[&0];
+        assert_ne!(
+            info.inner_node,
+            NodeId(OUTDOOR_NODE_ID),
+            "precomputed-path inner_node must not collide with OUTDOOR_NODE_ID"
+        );
+        assert_ne!(
+            info.inner_node,
+            NodeId(GROUND_NODE_ID),
+            "precomputed-path inner_node must not collide with GROUND_NODE_ID"
+        );
+
+        if let Some(diag_inner) = diag.boundaries[0].inner_node {
+            assert_ne!(
+                diag_inner,
+                NodeId(OUTDOOR_NODE_ID),
+                "diagnostic inner_node must not collide with OUTDOOR_NODE_ID"
+            );
+            assert_ne!(
+                diag_inner,
+                NodeId(GROUND_NODE_ID),
+                "diagnostic inner_node must not collide with GROUND_NODE_ID"
+            );
+        }
+    }
+
+    // ── Ticket 104 regression ───────────────────────────────────────────
+    //
+    // R_FILM_INTERIOR_M2_K_W = 0.12 is a combined (convection + radiation)
+    // surface resistance sourced from ASHRAE 90.1 / ISO 6946 conventions.
+    // Production film_resistances() returns ASHRAE Simple convection-only
+    // coefficients (~0.325 m²·K/W for vertical walls) — a ~2.7× mismatch.
+    //
+    // This test documents the mismatch and will fail if R_FILM_INTERIOR_M2_K_W
+    // is ever silently used in a production UA calculation where
+    // film_resistances() should be called instead.
+
+    #[test]
+    fn r_film_interior_constant_is_not_production_convection_only_value() {
+        // Production value for a vertical conditioned-to-outdoor wall comes
+        // from ASHRAE Simple interior convection: h = 3.076 W/(m²·K).
+        let h_ashrae_simple_vertical = hares_physics::film_coefficients::ashrae_simple_interior_h_conv(
+            90.0,  // vertical
+            0.0,   // t_ext_c (unused for vertical)
+            20.0,  // t_int_c (unused for vertical)
+            true,
+        );
+        let r_production = 1.0 / h_ashrae_simple_vertical;
+
+        // The constant 0.12 is a COMBINED (conv+rad) reference value, not
+        // the convection-only value used in production.
+        assert!(
+            (R_FILM_INTERIOR_M2_K_W - 0.12).abs() < 1e-10,
+            "constant value changed from 0.12 — update ticket 104"
+        );
+
+        // Production r_film_int is ~2.7× larger than the constant.
+        // If this assertion fails it means either:
+        //   (a) production now uses the constant directly (regression of S1), or
+        //   (b) the ASHRAE Simple coefficient was changed without updating this test.
+        assert!(
+            r_production > R_FILM_INTERIOR_M2_K_W * 2.0,
+            "production convection-only r_film_int={r_production:.4} should be \
+             >2× the combined constant {R_FILM_INTERIOR_M2_K_W} — \
+             see ticket 104 for context"
+        );
     }
 
 }

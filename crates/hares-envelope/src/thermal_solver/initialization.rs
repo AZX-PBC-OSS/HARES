@@ -318,6 +318,53 @@ mod tests {
         );
     }
 
+    /// Regression for ticket #102: when `indoor_zone_id` is absent from
+    /// `zone_state_indices`, `initialize_steady_state` should NOT silently
+    /// return a flat-temperature vector — it should return an error.
+    ///
+    /// Currently this test FAILS because the code at lines 79-83 silently
+    /// falls through to `model.steady_state(&u)` when `zone_fixes` is empty
+    /// (the `filter_map` drops the missing zone ID without error).
+    #[test]
+    fn missing_indoor_zone_id_in_zone_state_indices_errors() {
+        // 2-state model; the conditioned zone is ZoneId(2), but the wiring
+        // only contains ZoneId(1) — so indoor_zone_id is not registered.
+        let a_d = DMatrix::from_row_slice(2, 2, &[0.8, 0.0, 0.1, 0.9]);
+        let b_d = DMatrix::from_row_slice(2, 1, &[0.2, 0.1]);
+        let c = DMatrix::identity(2, 2);
+        let d = DMatrix::zeros(2, 1);
+
+        use crate::state_space::StateSpaceModel;
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
+
+        let mut zone_state_indices = HashMap::new();
+        zone_state_indices.insert(ZoneId(1), 0_usize); // ZoneId(2) intentionally absent
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices,
+            zone_output_indices: HashMap::from([(ZoneId(2), 1)]),
+            zone_sensible_input_indices: HashMap::new(),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+
+        let indoor = 21.0;
+        let env = minimal_env(indoor, -5.0);
+
+        // Pass ZoneId(2) as the pinned zone — it is not in zone_state_indices.
+        // This should return an error, not silently proceed with a flat vector.
+        let result = initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(2)]);
+
+        assert!(
+            result.is_err(),
+            "expected Err when indoor_zone_id is absent from zone_state_indices, \
+             but got Ok({:?})",
+            result.ok()
+        );
+    }
+
     #[test]
     fn singular_matrix_fallback() {
         // A_d = identity => (I - A_d) = 0 => singular, should fall back to uniform indoor temp.

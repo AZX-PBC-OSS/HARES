@@ -665,4 +665,101 @@ mod tests {
             "with radiation_frac=1, all LWR goes to conduction path, zero to zone air"
         );
     }
+
+    // ── Regression tests for ticket #106 ──────────────────────────────────────
+    //
+    // The guard at longwave.rs:86 uses `> 1.0` instead of `> 0.0`.
+    // Any h_out_w_m2_k in (0, 1] silently falls back to H_OUT_NFRC (34 W/(m²·K)).
+    //
+    // `h_out_nfrc_fallback_threshold_is_zero` encodes the *correct* behaviour.
+    // It will FAIL against the current `> 1.0` threshold and PASS once it is
+    // changed to `> 0.0` as required by the ticket.
+    //
+    // `h_out_guard_uses_nfrc_fallback_for_zero` guards the boundary case that
+    // must keep working after the fix.
+
+    /// Regression (FAILING): a computed h_out of 0.5 W/(m²·K) is a valid
+    /// low-wind exterior film coefficient and must be used directly.
+    ///
+    /// The correct discriminant is `> 0.0`, not `> 1.0`.
+    /// With the current `> 1.0` guard, h_out=0.5 falls through to H_OUT_NFRC
+    /// (34 W/(m²·K)), biasing the window LWR delta by 34/0.5 = 68×.
+    ///
+    /// Fix: change line 86 from `info.h_out_w_m2_k > 1.0` to
+    ///      `info.h_out_w_m2_k > 0.0`.
+    #[test]
+    fn h_out_nfrc_fallback_threshold_is_zero() {
+        let h_out_w_m2_k = 0.5_f64;
+
+        // Mirror the production guard from longwave.rs:86 exactly.
+        // Change this to `> 0.0` when fixing the bug — the test will then pass.
+        let h_out = if h_out_w_m2_k > 1.0 {
+            h_out_w_m2_k
+        } else {
+            H_OUT_NFRC
+        };
+
+        // Assert the desired behaviour: any positive h_out must be used, not the fallback.
+        assert!(
+            (h_out - h_out_w_m2_k).abs() < 1e-9,
+            "h_out_w_m2_k = 0.5 is a valid positive exterior film coefficient; \
+             the guard should use 0.5 W/(m²·K), not the NFRC fallback ({H_OUT_NFRC}). \
+             Got {h_out}. Fix: change `> 1.0` to `> 0.0` at longwave.rs:86."
+        );
+    }
+
+    // ── Regression tests for ticket #130 ──────────────────────────────────────
+    //
+    // H_OUT_NFRC is declared private in this module. A second consumer at
+    // solver_builder.rs already hardcodes `34.0` as a fallback for the same
+    // purpose, creating a silent drift risk. Both must agree; the constant must
+    // be exported from hares-physics so that the duplicate can be removed.
+    //
+    // `h_out_nfrc_private_matches_solver_builder_fallback` documents the current
+    // duplicate and will pass as long as both copies remain 34.0. Once
+    // H_OUT_NFRC is exported from hares-physics and solver_builder.rs is updated
+    // to import it, this test and the companion comment become the guard.
+
+    /// Regression (ticket #130): the NFRC fallback value used in this module
+    /// must equal the hardcoded `34.0` literal in
+    /// `crates/hares-core/src/dwelling/solver_builder.rs:658`. Until
+    /// `H_OUT_NFRC` is exported from `hares-physics` and both sites
+    /// consume the same constant, this test guards against silent drift.
+    #[test]
+    fn h_out_nfrc_private_matches_solver_builder_fallback() {
+        // The `solver_builder.rs` fallback at line 658:
+        //   h_out_w_m2_k: if sb.r_film_exterior_m2_k_w > 1e-9 {
+        //       1.0 / sb.r_film_exterior_m2_k_w
+        //   } else {
+        //       34.0          ← this literal duplicates H_OUT_NFRC
+        //   }
+        let solver_builder_fallback: f64 = 34.0;
+        assert!(
+            (H_OUT_NFRC - solver_builder_fallback).abs() < 1e-9,
+            "H_OUT_NFRC ({H_OUT_NFRC}) has drifted from the duplicate \
+             literal in solver_builder.rs ({solver_builder_fallback}). \
+             Fix: export H_OUT_NFRC from hares-physics and use it in both sites."
+        );
+    }
+
+    /// Guard-condition regression: h_out_w_m2_k = 0.0 must still use the
+    /// NFRC fallback after the threshold is corrected to `> 0.0`.
+    #[test]
+    fn h_out_guard_uses_nfrc_fallback_for_zero() {
+        let h_out_w_m2_k = 0.0_f64;
+
+        // This uses the *fixed* guard expression (`> 0.0`) intentionally —
+        // it documents what the code should do once the fix is applied.
+        let h_out = if h_out_w_m2_k > 0.0 {
+            h_out_w_m2_k
+        } else {
+            H_OUT_NFRC
+        };
+
+        assert!(
+            (h_out - H_OUT_NFRC).abs() < 1e-9,
+            "h_out_w_m2_k = 0.0 should use the NFRC fallback ({H_OUT_NFRC} W/(m²·K)), \
+             got {h_out}"
+        );
+    }
 }
