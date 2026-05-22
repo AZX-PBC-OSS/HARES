@@ -11,7 +11,9 @@ use hares_envelope::{
     OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
     interior_longwave_net_w,
 };
-use hares_types::{EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState};
+use hares_types::{
+    EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+};
 use nalgebra::DMatrix;
 
 // ---------------------------------------------------------------------------
@@ -50,12 +52,30 @@ fn ticket047_stale_zone_temp_linearised_lwr_error_is_sub_watt() {
     use hares_envelope::{InteriorSurface, interior_longwave_linearised_w};
 
     let surfaces = vec![
-        InteriorSurface { area_m2: 5.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 5.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 5.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 5.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 5.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 5.0, emissivity: 0.90 },
+        InteriorSurface {
+            area_m2: 5.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 5.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 5.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 5.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 5.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 5.0,
+            emissivity: 0.90,
+        },
     ];
 
     // Surface temperatures spread across ~3.5°C — a plausible residential zone.
@@ -69,7 +89,8 @@ fn ticket047_stale_zone_temp_linearised_lwr_error_is_sub_watt() {
     let q_stale = interior_longwave_linearised_w(&surfaces, &t_surfaces, t_zone_stale);
     let q_predicted = interior_longwave_linearised_w(&surfaces, &t_surfaces, t_zone_predicted);
 
-    let max_err_w: f64 = q_stale.iter()
+    let max_err_w: f64 = q_stale
+        .iter()
         .zip(q_predicted.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f64, f64::max);
@@ -292,8 +313,10 @@ fn env_20c() -> EnvironmentState {
 /// accepts this configuration and falls through to the linearised h_r path;
 /// this test will fail until the solver-construction guard is implemented.
 ///
-/// NOTE: this test is expected to FAIL until ticket 044 is resolved.
+/// Fix pending on ticket 044 — will stop panicking when ThermalSolver::new
+/// returns Err for zones with scriptf == None.
 #[test]
+#[should_panic(expected = "ThermalSolver::new must return Err when interior_lwr_zones contains")]
 fn lwr_zone_without_scriptf_must_error_at_construction() {
     let env = env_20c();
 

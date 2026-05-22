@@ -789,13 +789,12 @@ impl WetAppliance {
                 self.phase_index = 0;
                 self.elapsed_in_phase_s = 0.0;
             }
-            Some(ForcedMode::Active) => {
-                if !self.active {
-                    self.active = true;
-                    self.phase_index = 0;
-                    self.elapsed_in_phase_s = 0.0;
-                }
+            Some(ForcedMode::Active) if !self.active => {
+                self.active = true;
+                self.phase_index = 0;
+                self.elapsed_in_phase_s = 0.0;
             }
+            Some(ForcedMode::Active) => {}
             None => {}
         }
     }

@@ -1220,10 +1220,7 @@ mod tests {
     /// Build a synthetic GROUND TEMPERATURES header line with the given depths
     /// and their monthly averages. Each element of `entries` is (depth_m, [12 temps]).
     fn ground_temp_header(entries: &[(f64, [f64; 12])]) -> String {
-        let mut parts = vec![
-            "GROUND TEMPERATURES".to_string(),
-            entries.len().to_string(),
-        ];
+        let mut parts = vec!["GROUND TEMPERATURES".to_string(), entries.len().to_string()];
         for (depth_m, monthly) in entries {
             parts.push(depth_m.to_string());
             parts.push(String::new()); // soil conductivity (blank)
@@ -1259,11 +1256,8 @@ mod tests {
         let monthly_half: [f64; 12] = [1.0; 12];
         let monthly_two: [f64; 12] = [2.0; 12];
         let monthly_four: [f64; 12] = [3.0; 12];
-        let gt_line = ground_temp_header(&[
-            (0.5, monthly_half),
-            (2.0, monthly_two),
-            (4.0, monthly_four),
-        ]);
+        let gt_line =
+            ground_temp_header(&[(0.5, monthly_half), (2.0, monthly_two), (4.0, monthly_four)]);
         let epw = epw_with_ground_header(8760, &gt_line);
         let parsed = parse_epw_str(&epw).expect("EPW should parse");
 
@@ -1289,11 +1283,8 @@ mod tests {
         let monthly_0_1: [f64; 12] = [10.0; 12];
         let monthly_0_5: [f64; 12] = [5.0; 12];
         let monthly_2_0: [f64; 12] = [2.0; 12];
-        let gt_line = ground_temp_header(&[
-            (0.1, monthly_0_1),
-            (0.5, monthly_0_5),
-            (2.0, monthly_2_0),
-        ]);
+        let gt_line =
+            ground_temp_header(&[(0.1, monthly_0_1), (0.5, monthly_0_5), (2.0, monthly_2_0)]);
         let epw = epw_with_ground_header(8760, &gt_line);
         let parsed = parse_epw_str(&epw).expect("EPW should parse");
 
@@ -1335,16 +1326,16 @@ mod tests {
         let monthly_means: [f64; 12] = [
             -8.0, -5.0, 0.0, 6.0, 12.0, 18.0, 22.0, 20.0, 14.0, 7.0, 1.0, -4.0,
         ];
-        let monthly_amplitude = (monthly_means.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        let monthly_amplitude = (monthly_means
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
             - monthly_means.iter().copied().fold(f64::INFINITY, f64::min))
             / 2.0; // 15.0 °C
 
         let ground_10m = doe2_ground_temp_from_monthly_avg(&monthly_means);
         let g10_min = ground_10m.iter().copied().fold(f64::INFINITY, f64::min);
-        let g10_max = ground_10m
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
+        let g10_max = ground_10m.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let amp_10m = (g10_max - g10_min) / 2.0;
 
         // Manually compute what the formula produces at 0.5 m depth using the

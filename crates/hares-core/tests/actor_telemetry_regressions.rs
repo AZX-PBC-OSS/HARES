@@ -18,9 +18,7 @@
 
 use hares_control::DispatchRequest;
 use hares_core::actor::{Actor, ActorInterest, testing::test_env};
-use hares_core::actors::{
-    BatteryManagementActor, DrCompliance, IdealThermostat, Occupant,
-};
+use hares_core::actors::{BatteryManagementActor, DrCompliance, IdealThermostat, Occupant};
 use hares_types::{BmsMode, EnvironmentState, GridExportRule};
 
 // ---------------------------------------------------------------------------
@@ -74,8 +72,7 @@ fn occupant_actor_missing_telemetry_ticket_096() {
     use hares_core::actors::Presence;
 
     let schedule = vec![Presence::Away, Presence::Home, Presence::Away];
-    let mut occupant = Occupant::new("Resident")
-        .with_presence_schedule(schedule);
+    let mut occupant = Occupant::new("Resident").with_presence_schedule(schedule);
 
     let env = test_env().build();
     let mut out = Vec::new();
@@ -95,19 +92,21 @@ fn occupant_actor_missing_telemetry_ticket_096() {
 fn ideal_thermostat_actor_missing_telemetry_ticket_096() {
     use hares_core::actors::OverrideState;
 
-    let mut thermostat = IdealThermostat::new("HVAC")
-        .with_override(OverrideState {
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: None,
-            deadband_c: None,
-        });
+    let mut thermostat = IdealThermostat::new("HVAC").with_override(OverrideState {
+        heating_setpoint_c: Some(20.0),
+        cooling_setpoint_c: None,
+        deadband_c: None,
+    });
 
     let env = test_env().build();
     let mut out = Vec::new();
     thermostat.decide(&env, &mut out);
 
     // Decision was dispatched — we can observe it via `out`, but not via telemetry.
-    assert!(!out.is_empty(), "IdealThermostat should have dispatched a setpoint override");
+    assert!(
+        !out.is_empty(),
+        "IdealThermostat should have dispatched a setpoint override"
+    );
 
     // After ticket 096 is implemented, add:
     //

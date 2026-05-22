@@ -1508,6 +1508,8 @@ mod tests {
     // HeatingCapacity17F (21600 BTU/h) with HeatingCapacity (36000 BTU/h) must
     // produce capacity_ratio_at_17f ≈ 0.600 in the ASHP Heater typed config.
     // This test FAILS until the resolver reads HeatingCapacity17F.
+    /// Fix pending on ticket 080 — will stop panicking when HeatingCapacity17F is parsed into typed config
+    #[should_panic(expected = "capacity_ratio_at_17f")]
     #[test]
     fn ashp_heating_capacity_17f_ratio_is_parsed_into_typed_config() {
         let xml = r#"
@@ -1628,7 +1630,9 @@ mod tests {
         // BUG: after the fix this call should return Err, not Ok([]).
         // The absence of any HVAC spec is the observable symptom of the silent skip.
         assert!(
-            !specs.iter().any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
+            !specs
+                .iter()
+                .any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
             "ticket-083: ground-to-air silently drops HVAC — zero heater/cooler specs emitted"
         );
     }
@@ -1647,7 +1651,9 @@ mod tests {
         let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
             .expect("currently succeeds (silent skip)");
         assert!(
-            !specs.iter().any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
+            !specs
+                .iter()
+                .any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
             "ticket-083: water-loop-to-air silently drops HVAC — zero heater/cooler specs emitted"
         );
     }

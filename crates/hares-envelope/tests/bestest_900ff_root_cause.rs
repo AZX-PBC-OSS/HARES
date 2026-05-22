@@ -97,10 +97,8 @@ fn derive_zone_capacitances_uses_altitude_corrected_density() {
     let caps_sea = derive_zone_capacitances(&zones, p_sea_level);
     let caps_denver = derive_zone_capacitances(&zones, p_denver);
 
-    let expected_sea_level =
-        dry_air_density_kg_m3(p_sea_level, 20.0) * AIR_CP_J_KG_K * 129.6 * 1.0;
-    let expected_denver =
-        dry_air_density_kg_m3(p_denver, 20.0) * AIR_CP_J_KG_K * 129.6 * 1.0;
+    let expected_sea_level = dry_air_density_kg_m3(p_sea_level, 20.0) * AIR_CP_J_KG_K * 129.6 * 1.0;
+    let expected_denver = dry_air_density_kg_m3(p_denver, 20.0) * AIR_CP_J_KG_K * 129.6 * 1.0;
 
     // Sea-level capacitance matches formula-derived value
     assert!(
@@ -182,7 +180,8 @@ fn heavyweight_concrete_wall_produces_two_rc_sub_layers() {
         interior_emissivity: 0.9,
     }];
 
-    let (_, diag) = assemble_building_rc(&boundaries, 1, &zone_caps, InteriorLwrMethod::StarMesh).unwrap();
+    let (_, diag) =
+        assemble_building_rc(&boundaries, 1, &zone_caps, InteriorLwrMethod::StarMesh).unwrap();
     let n_nodes = diag.boundaries[0].n_rc_nodes;
 
     // Concrete is split into 2 sub-layers: total nodes = 1 (wood) + 1 (ins) + 2 (concrete) = 4

@@ -147,6 +147,7 @@ pub const LATENT_REMOVAL_W: &str = "latent_removal_w";
 pub const TARGET_RH: &str = "target_rh";
 pub const MIN_RH: &str = "min_rh";
 pub const MAX_RH: &str = "max_rh";
+pub const MOISTURE_MASS_FLOW_KG_S: &str = "moisture_mass_flow_kg_s";
 
 // ── Loads ───────────────────────────────────────────────────────────────────
 

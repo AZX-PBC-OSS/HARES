@@ -609,8 +609,7 @@ impl WeatherTimeSeries {
             let dew_point_c = mean_downsample(&self.dew_point_c, ratio);
             let rel_humidity_pct = mean_downsample(&self.rel_humidity_pct, ratio);
             let pressure_kpa = mean_downsample(&self.pressure_kpa, ratio);
-            let horizontal_infrared_w_m2 =
-                mean_downsample(&self.horizontal_infrared_w_m2, ratio);
+            let horizontal_infrared_w_m2 = mean_downsample(&self.horizontal_infrared_w_m2, ratio);
             let ground_temp_c = mean_downsample(&self.ground_temp_c, ratio);
             let opaque_sky_cover = mean_downsample(&self.opaque_sky_cover, ratio);
 
@@ -931,9 +930,7 @@ pub fn pchip_cyclic_resample(values: &[f64], factor: usize) -> Vec<f64> {
         let h01 = -2.0 * t3 + 3.0 * t2;
         let h11 = t3 - t2;
 
-        out.push(
-            h00 * values[k] + h10 * d[k] + h01 * values[k_next] + h11 * d[k_next],
-        );
+        out.push(h00 * values[k] + h10 * d[k] + h01 * values[k_next] + h11 * d[k_next]);
     }
 
     out
@@ -1511,7 +1508,10 @@ mod tests {
         // within each hour (triangular produces variation within the hour).
         let first_hour: Vec<f64> = resampled.ghi_w_m2.iter().take(60).copied().collect();
         let all_same = first_hour.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
-        assert!(!all_same, "triangular should produce varying sub-hourly values, not constant ZOH");
+        assert!(
+            !all_same,
+            "triangular should produce varying sub-hourly values, not constant ZOH"
+        );
     }
 
     #[test]
@@ -1705,7 +1705,11 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         // First sample: 350°.
         assert!((out[0] - 350.0).abs() < 1e-12);
         // Midpoint: 350 + 0.5 * 20 = 360 → 360 % 360 = 0°.
-        assert!((out[3] - 0.0).abs() < 1e-12, "midpoint should be 0°, got {}", out[3]);
+        assert!(
+            (out[3] - 0.0).abs() < 1e-12,
+            "midpoint should be 0°, got {}",
+            out[3]
+        );
         // Second knot: 10°.
         assert!((out[6] - 10.0).abs() < 1e-12);
         // Verify all values stay in [0, 360).
@@ -1721,7 +1725,8 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             assert!(
                 circ_delta >= -1e-9,
                 "non-monotonic along short arc: {} → {}, circular delta = {circ_delta}",
-                w[0], w[1]
+                w[0],
+                w[1]
             );
         }
     }
@@ -1734,7 +1739,11 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         // First sample: 10°.
         assert!((out[0] - 10.0).abs() < 1e-12);
         // Midpoint: 10 + 0.5 * (-20) = 0 → 0°.
-        assert!((out[3] - 0.0).abs() < 1e-12, "midpoint should be 0°, got {}", out[3]);
+        assert!(
+            (out[3] - 0.0).abs() < 1e-12,
+            "midpoint should be 0°, got {}",
+            out[3]
+        );
         // Second knot: 350°.
         assert!((out[6] - 350.0).abs() < 1e-12);
         // Verify monotonic decrease along the short arc.
@@ -1743,7 +1752,8 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             assert!(
                 circ_delta <= 1e-9,
                 "non-monotonic along short arc: {} → {}, circular delta = {circ_delta}",
-                w[0], w[1]
+                w[0],
+                w[1]
             );
         }
     }
@@ -1788,8 +1798,14 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         assert!((out[0] - 180.0).abs() < 1e-12);
         assert!((out[1] - 180.0).abs() < 1e-12);
         // Interval [-9999, 200]: ZOH from -9999 (propagates sentinel).
-        assert!((out[2] - (-9999.0)).abs() < 1e-12, "expected -9999 at index 2");
-        assert!((out[3] - (-9999.0)).abs() < 1e-12, "expected -9999 at index 3");
+        assert!(
+            (out[2] - (-9999.0)).abs() < 1e-12,
+            "expected -9999 at index 2"
+        );
+        assert!(
+            (out[3] - (-9999.0)).abs() < 1e-12,
+            "expected -9999 at index 3"
+        );
     }
 
     #[test]
@@ -1829,12 +1845,20 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         assert_eq!(out.len(), 18);
         // First segment: 350 → 10 through 0.
         assert!((out[0] - 350.0).abs() < 1e-12);
-        assert!((out[3] - 0.0).abs() < 1e-12, "midpoint of first segment: got {}", out[3]);
+        assert!(
+            (out[3] - 0.0).abs() < 1e-12,
+            "midpoint of first segment: got {}",
+            out[3]
+        );
         assert!((out[6] - 10.0).abs() < 1e-12);
         // Second segment: 10 → 30 (normal, delta = +20).
         assert!((out[12] - 30.0).abs() < 1e-12);
         // Midpoint of second segment: 20°.
-        assert!((out[9] - 20.0).abs() < 1e-12, "midpoint of second segment: got {}", out[9]);
+        assert!(
+            (out[9] - 20.0).abs() < 1e-12,
+            "midpoint of second segment: got {}",
+            out[9]
+        );
     }
 
     // --- Cyclic PCHIP tests (D5 fix) ---
@@ -2029,11 +2053,27 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         // but at the boundary points (0 and 3) the slopes will differ
         // because they see the wrap-around delta.
         // Interior points (1, 2): centered average of adjacent deltas, all +2.
-        assert!((d[1] - 2.0).abs() < 1e-12, "slope at 1: expected 2.0, got {}", d[1]);
-        assert!((d[2] - 2.0).abs() < 1e-12, "slope at 2: expected 2.0, got {}", d[2]);
+        assert!(
+            (d[1] - 2.0).abs() < 1e-12,
+            "slope at 1: expected 2.0, got {}",
+            d[1]
+        );
+        assert!(
+            (d[2] - 2.0).abs() < 1e-12,
+            "slope at 2: expected 2.0, got {}",
+            d[2]
+        );
         // Boundary points: delta wraps from 8→2 = -6, so signs differ → slope = 0.
-        assert!(d[0].abs() < 1e-12, "slope at 0: expected ~0 (sign change at wrap), got {}", d[0]);
-        assert!(d[3].abs() < 1e-12, "slope at 3: expected ~0 (sign change at wrap), got {}", d[3]);
+        assert!(
+            d[0].abs() < 1e-12,
+            "slope at 0: expected ~0 (sign change at wrap), got {}",
+            d[0]
+        );
+        assert!(
+            d[3].abs() < 1e-12,
+            "slope at 3: expected ~0 (sign change at wrap), got {}",
+            d[3]
+        );
     }
 
     #[test]
@@ -2064,7 +2104,8 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             assert!(
                 diff < 0.5,
                 "interior segment too different at index {i}: cyclic={}, plain={}, diff={diff}",
-                out_cyclic[i], out_plain[i]
+                out_cyclic[i],
+                out_plain[i]
             );
         }
     }
@@ -2210,17 +2251,20 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             // The first sub-sample of hour i+1 is exactly (values[i] + values[i+1]) / 2.
             // The gap should be on the order of 1/factor.
             let boundary_val = (values[i] + values[i + 1]) / 2.0;
-            let gap = (out[end_idx] - boundary_val).abs()
-                + (out[start_next] - boundary_val).abs();
+            let gap = (out[end_idx] - boundary_val).abs() + (out[start_next] - boundary_val).abs();
             // Both should be close to the boundary value; the gap from the boundary
             // is at most ~max_delta / factor (one linear step).
-            let max_delta = (values.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0_f64, f64::max))
-                .max((values[0] - values[n - 1]).abs());
+            let max_delta = (values
+                .windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0_f64, f64::max))
+            .max((values[0] - values[n - 1]).abs());
             assert!(
                 gap < max_delta / factor as f64 * 2.0 + 1e-12,
                 "C0 continuity gap at hour {i}/{} boundary: end={}, start={}, boundary={boundary_val}",
                 i + 1,
-                out[end_idx], out[start_next]
+                out[end_idx],
+                out[start_next]
             );
         }
 
@@ -2229,7 +2273,8 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         let last_end = n * factor - 1;
         let cyclic_boundary = (values[n - 1] + values[0]) / 2.0;
         assert!(
-            (out[last_end] - cyclic_boundary).abs() < (values[n - 1] - values[0]).abs() / factor as f64 + 1e-12,
+            (out[last_end] - cyclic_boundary).abs()
+                < (values[n - 1] - values[0]).abs() / factor as f64 + 1e-12,
             "cyclic boundary: end of last hour should approach (values[n-1]+values[0])/2={cyclic_boundary}, got {}",
             out[last_end]
         );
@@ -2444,7 +2489,8 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
                 gap < max_acceptable_gap + 1e-12,
                 "C0 continuity violated at hour {i}/{next} boundary: \
                  end={}, start={}, gap={gap}, max_acceptable={max_acceptable_gap}",
-                out[end_idx], out[start_next_idx]
+                out[end_idx],
+                out[start_next_idx]
             );
         }
     }

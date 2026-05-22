@@ -132,9 +132,10 @@ impl HvacEquipment {
     /// so that the port list matches the zones that will receive contributions.
     pub fn rebuild_thermal_ports(&self, ports: &mut Vec<PortDeclaration>) {
         use hares_types::PortType;
-        ports.retain(|p| p.port_type != PortType::Thermal);
+        ports.retain(|p| p.port_type != PortType::Thermal && p.port_type != PortType::Humidity);
         for &(zone, _) in &self.zone_heat_fractions {
             ports.push(PortDeclaration::thermal(zone));
+            ports.push(PortDeclaration::humidity(zone));
         }
     }
 }

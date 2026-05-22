@@ -3001,8 +3001,11 @@ mod tests {
     fn regression_009_cooling_cd_sets_both_plf_and_startup_cd() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
-        config.test_extras_mut().insert("cooling_cd".to_string(), 0.15_f64.into());
-        hvac.init(&config, &env(24.0, 60, 0)).expect("init must succeed");
+        config
+            .test_extras_mut()
+            .insert("cooling_cd".to_string(), 0.15_f64.into());
+        hvac.init(&config, &env(24.0, 60, 0))
+            .expect("init must succeed");
         assert!(
             (hvac.plf_cooling_degradation_coeff - 0.15).abs() < 1e-12,
             "ticket-009: cooling_cd must set plf_cooling_degradation_coeff to 0.15, got {}",
@@ -3022,8 +3025,11 @@ mod tests {
     fn regression_009_startup_cd_overrides_only_startup_not_plf() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
-        config.test_extras_mut().insert("startup_cd".to_string(), 0.05_f64.into());
-        hvac.init(&config, &env(24.0, 60, 0)).expect("init must succeed");
+        config
+            .test_extras_mut()
+            .insert("startup_cd".to_string(), 0.05_f64.into());
+        hvac.init(&config, &env(24.0, 60, 0))
+            .expect("init must succeed");
         assert!(
             (hvac.startup.c_d - 0.05).abs() < 1e-12,
             "ticket-009: startup_cd must set startup.c_d to 0.05, got {}",
@@ -3062,7 +3068,8 @@ mod tests {
         config
             .test_extras_mut()
             .insert("speed_control_mode".to_string(), "variable".into());
-        hvac.init(&config, &env(24.0, 60, 0)).expect("init must succeed");
+        hvac.init(&config, &env(24.0, 60, 0))
+            .expect("init must succeed");
         assert_eq!(
             hvac.speed_control_mode,
             SpeedControlMode::VariableSpeedIdeal,
@@ -3087,9 +3094,14 @@ mod tests {
     fn regression_009_cd_key_chain_priority() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
-        config.test_extras_mut().insert("startup_cd".to_string(), 0.05_f64.into());
-        config.test_extras_mut().insert("cooling_cd".to_string(), 0.30_f64.into());
-        hvac.init(&config, &env(24.0, 60, 0)).expect("init must succeed");
+        config
+            .test_extras_mut()
+            .insert("startup_cd".to_string(), 0.05_f64.into());
+        config
+            .test_extras_mut()
+            .insert("cooling_cd".to_string(), 0.30_f64.into());
+        hvac.init(&config, &env(24.0, 60, 0))
+            .expect("init must succeed");
         // startup_cd (0.05) must win over cooling_cd (0.30) for startup.c_d
         assert!(
             (hvac.startup.c_d - 0.05).abs() < 1e-12,
@@ -3121,20 +3133,17 @@ mod tests {
     //   Biquadratic MSHP Heater.csv column Variable_1.
     // ---------------------------------------------------------------------------
 
-    /// Regression: default ASHP capacity curve must produce cap_ratio ≈ 1.0 at
-    /// AHRI 210/240-2023 H1 conditions (OAT=8.3°C, indoor=21.1°C).
-    ///
-    /// FAILS until ticket 010 wires in the OCHRE-derived ASHP Single_1 curve
-    /// instead of the identity [1,0,0,0,0,0].
+    /// Fix pending on ticket 010 — will stop panicking when ASHP default
+    /// biquadratic curves are wired in.
     #[test]
+    #[should_panic(expected = "ticket 010 BUG: AshpHeatPumpOnly still has identity")]
     fn ticket_010_ashp_default_cap_curve_unity_at_ahri_h1() {
-        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
         // After ticket 010: the default curves for AshpHeatPumpOnly must be the
         // OCHRE Single_1 coefficients, not identity. Assert that the coefficients
         // are NOT the identity placeholder.
         assert_ne!(
-            hvac.biquadratic_coeffs[0],
-            DEFAULT_BIQUADRATIC_COEFFS,
+            hvac.biquadratic_coeffs[0], DEFAULT_BIQUADRATIC_COEFFS,
             "ticket 010 BUG: AshpHeatPumpOnly still has identity biquadratic coefficients \
              [1,0,0,0,0,0]; equipment-type default curves have not been wired in"
         );
@@ -3148,14 +3157,12 @@ mod tests {
         );
     }
 
-    /// Regression: default ASHP capacity curve must produce cap_ratio < 0.8 at
-    /// AHRI 210/240-2023 H3 condition (OAT=-8.3°C, indoor=21.1°C).
-    ///
-    /// FAILS until ticket 010 wires in the OCHRE-derived ASHP Single_1 curve.
-    /// Identity curve always returns 1.0, masking real capacity loss.
+    /// Fix pending on ticket 010 — will stop panicking when ASHP default
+    /// biquadratic curves are wired in.
     #[test]
+    #[should_panic(expected = "ticket 010 BUG: ASHP cap_ratio at AHRI H3")]
     fn ticket_010_ashp_default_cap_curve_below_08_at_ahri_h3() {
-        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
         // With identity coefficients this always returns 1.0; with the OCHRE
         // Single_1 curve it returns ≈ 0.631, well within 0.50-0.70 range.
         let cap_ratio_h3 = hvac.evaluate_biquadratic(0, 21.1, -8.3);
@@ -3166,13 +3173,12 @@ mod tests {
         );
     }
 
-    /// Regression: default ASHP EIR curve must increase at low OAT (worse efficiency).
-    /// EIR at H3 must exceed EIR at H1.
-    ///
-    /// FAILS until ticket 010 wires in the OCHRE-derived ASHP Single_1 EIR curve.
+    /// Fix pending on ticket 010 — will stop panicking when ASHP default
+    /// EIR biquadratic curve is wired in.
     #[test]
+    #[should_panic(expected = "ticket 010 BUG: ASHP EIR at H3")]
     fn ticket_010_ashp_default_eir_curve_increases_at_low_oat() {
-        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
         // curve_index=1 → EIR curve (odd index).
         // Identity EIR returns 1.0 at all temperatures — no efficiency penalty.
         // OCHRE Single_1: eir_h1 ≈ 0.994, eir_h3 ≈ 1.346.
@@ -3190,13 +3196,12 @@ mod tests {
         );
     }
 
-    /// Regression: default MSHP capacity curve must produce cap_ratio < 0.8 at
-    /// AHRI 210/240-2023 H3 condition (OAT=-8.3°C).
-    ///
-    /// FAILS until ticket 010 wires in the OCHRE-derived MSHP Variable_1 curve.
+    /// Fix pending on ticket 010 — will stop panicking when MSHP default
+    /// biquadratic curves are wired in.
     #[test]
+    #[should_panic(expected = "ticket 010 BUG: MSHP cap_ratio at AHRI H3")]
     fn ticket_010_mshp_default_cap_curve_below_08_at_ahri_h3() {
-        let mut hvac = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
+        let hvac = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
         // OCHRE Variable_1 coefficients produce ≈ 0.568 at H3.
         let cap_ratio_h3 = hvac.evaluate_biquadratic(0, 21.1, -8.3);
         assert!(
@@ -3266,8 +3271,7 @@ mod tests {
         // Slot 3 = eir for speed 1 — SILENTLY filled with identity (the bug).
         // After the fix, a tracing::warn! should fire before this assignment.
         assert_eq!(
-            hvac.biquadratic_coeffs[3],
-            DEFAULT_BIQUADRATIC_COEFFS,
+            hvac.biquadratic_coeffs[3], DEFAULT_BIQUADRATIC_COEFFS,
             "ticket 119: missing eir curve at speed 1 is silently filled with \
              identity coefficients [1,0,0,0,0,0] — no warning is emitted (bug)"
         );

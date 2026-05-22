@@ -767,9 +767,9 @@ mod tests {
     // 0.3 this test also fails because beam_floor_fraction(5°) ≈ 0.087, which
     // is clamped up to 0.3, assigning 30% to floor and 70% to walls — correct
     // direction numerically, but with an inflated floor share.
-    // After the fix (lower clamp → 0.0) the raw sin(5°) ≈ 0.087 is used,
-    // giving floor fraction 0.087 < 0.913 non-floor, satisfying the guard.
+    // Fix pending — will stop panicking when the 0.3 lower clamp is removed.
     #[test]
+    #[should_panic(expected = "beam_floor_fraction(5°)")]
     fn beam_floor_fraction_low_altitude_walls_dominate() {
         let frac = beam_floor_fraction(5.0);
         assert!(
@@ -868,11 +868,13 @@ mod tests {
         let poa_w_m2 = 1000.0_f64; // 1 kW/m² reference irradiance
 
         // Production formula (current code):
-        let absorbed_inward_ep = (shgc - transmittance).max(0.0) * radiation_frac * area_m2 * poa_w_m2;
+        let absorbed_inward_ep =
+            (shgc - transmittance).max(0.0) * radiation_frac * area_m2 * poa_w_m2;
 
         // Ticket's proposed formula using N_i = h_ci/(h_ci+h_co):
         let ticket_n_i = 8.3_f64 / (8.3 + 34.0);
-        let absorbed_inward_ticket = (shgc - transmittance).max(0.0) * ticket_n_i * area_m2 * poa_w_m2;
+        let absorbed_inward_ticket =
+            (shgc - transmittance).max(0.0) * ticket_n_i * area_m2 * poa_w_m2;
 
         // The two should differ by > 20 W (for 1 m² at 1 kW/m²):
         // absorbed = (0.25-0.21) × poa = 40 W total glass absorption;

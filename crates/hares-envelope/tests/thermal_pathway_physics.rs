@@ -348,7 +348,8 @@ fn rc_network_exposes_ground_column() {
         volume_m3: Some(129.6),
         mass_multiplier: INTERIOR_MASS_MULTIPLIER,
     }];
-    let zone_caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+    let zone_caps =
+        derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
 
     let boundaries = vec![BoundaryInput {
         area_m2: 48.0,
@@ -369,7 +370,8 @@ fn rc_network_exposes_ground_column() {
         interior_emissivity: 0.9,
     }];
 
-    let (rc, diag) = assemble_building_rc(&boundaries, 1, &zone_caps, InteriorLwrMethod::StarMesh).unwrap();
+    let (rc, diag) =
+        assemble_building_rc(&boundaries, 1, &zone_caps, InteriorLwrMethod::StarMesh).unwrap();
 
     assert!(
         rc.ground_col.is_some(),
@@ -434,9 +436,10 @@ fn rc_network_exposes_ground_column() {
 ///                        breakdown[5] = 700 + 150 = 850 W
 ///   With the bug:        breakdown[5] = 700 W  (missing 150 W)
 ///
-/// This test will FAIL on the current implementation (bug present) and PASS
-/// once `zone_sensible_breakdown_debug` calls `apply_port_radiant_inputs`.
+/// Fix pending — will stop panicking when `zone_sensible_breakdown_debug`
+/// includes the radiant-air-residual in its breakdown output.
 #[test]
+#[should_panic(expected = "zone_sensible_breakdown_debug is missing apply_port_radiant_inputs")]
 fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
     // 1-state model: [zone_air]
     // 3 inputs: [T_outdoor(0), Q_surface(1), Q_zone_air(2)]

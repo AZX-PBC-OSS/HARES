@@ -597,7 +597,10 @@ mod tests {
 
         // Floating node F should no longer appear in the reduced resistances.
         for &(a, b) in net.resistances.keys() {
-            assert!(a != n(100) && b != n(100), "floating node F should be eliminated");
+            assert!(
+                a != n(100) && b != n(100),
+                "floating node F should be eliminated"
+            );
         }
     }
 
@@ -620,9 +623,9 @@ mod tests {
 
         let caps = HashMap::from([(n(1), 100.0), (n(2), 200.0)]);
         let res = HashMap::from([
-            ((n(1), n(100)), r_a_f1), // A ↔ F1
+            ((n(1), n(100)), r_a_f1),    // A ↔ F1
             ((n(100), n(101)), r_f1_f2), // F1 ↔ F2
-            ((n(101), n(2)), r_f2_b), // F2 ↔ B
+            ((n(101), n(2)), r_f2_b),    // F2 ↔ B
         ]);
         let net = RCNetwork::from_elements(caps, res, vec![]).unwrap();
 
@@ -737,9 +740,9 @@ mod tests {
         // Key difference from combined-film model: NO parallel R_rad from
         // zone_air to window_node. Radiation goes through star-mesh ONLY.
         let caps = HashMap::from([
-            (n(1), 500_000.0),  // zone air thermal mass
-            (n(2), 200_000.0),  // wall inner layer
-            (n(3), 800_000.0),  // floor slab
+            (n(1), 500_000.0), // zone air thermal mass
+            (n(2), 200_000.0), // wall inner layer
+            (n(3), 800_000.0), // floor slab
         ]);
 
         let ext = vec![n(9000), n(9001)]; // Outdoor, Ground
@@ -751,8 +754,8 @@ mod tests {
         res.insert((n(1), n(3)), r_conv_floor);
 
         // Opaque surface inner nodes ↔ material → outdoor/ground
-        res.insert((n(2), n(9000)), r_mat_wall);   // wall → outdoor
-        res.insert((n(3), n(9001)), r_mat_floor);  // floor → ground
+        res.insert((n(2), n(9000)), r_mat_wall); // wall → outdoor
+        res.insert((n(3), n(9001)), r_mat_floor); // floor → ground
 
         // Star node (200) ↔ each surface via linearized radiation
         res.insert((n(2), n(200)), r_rad_wall);
@@ -768,8 +771,14 @@ mod tests {
 
         // ── Verify: no floating nodes remain ──
         for &(a, b) in net.resistances.keys() {
-            assert!(a != n(200) && b != n(200), "star node 200 should be eliminated");
-            assert!(a != n(201) && b != n(201), "window float 201 should be eliminated");
+            assert!(
+                a != n(200) && b != n(200),
+                "star node 200 should be eliminated"
+            );
+            assert!(
+                a != n(201) && b != n(201),
+                "window float 201 should be eliminated"
+            );
         }
 
         // ── Verify: expected pairwise conductances from star-mesh ──
@@ -873,8 +882,7 @@ mod tests {
         let expected_pcts = [-4.2, 1.0, 6.3, 11.8]; // approximate
 
         for (i, &t_k) in test_temps_k.iter().enumerate() {
-            let h_rad_true = EPS * SIGMA * (t_k.powi(2) + T_REF_K.powi(2))
-                * (t_k + T_REF_K);
+            let h_rad_true = EPS * SIGMA * (t_k.powi(2) + T_REF_K.powi(2)) * (t_k + T_REF_K);
             let pct_error = (h_rad_true - h_rad_ref) / h_rad_ref * 100.0;
             assert!(
                 (pct_error - expected_pcts[i]).abs() < 1.0,

@@ -361,7 +361,10 @@ fn gas_boiler_omitting_flow_rate_and_return_temp_silently_applies_defaults() {
     );
 
     let specs = resolve(&xml).expect("boiler with omitted hydronic fields must resolve");
-    let boiler = specs.iter().find(|s| s.name == "Gas Boiler").expect("must emit Gas Boiler");
+    let boiler = specs
+        .iter()
+        .find(|s| s.name == "Gas Boiler")
+        .expect("must emit Gas Boiler");
     let cfg: GasBoilerConfig = boiler
         .typed_config
         .as_ref()
@@ -565,6 +568,7 @@ fn ducts_outside_conditioned_space_resolve_when_site_data_present() {
 // Gas furnace without <HeatingCapacity> must produce MissingField, not Ok(None)
 // (the silent-skip path at resolve_hvac.rs:521-522).
 #[test]
+#[should_panic(expected = "expected HpxmlError::MissingField, but parse succeeded")]
 fn gas_furnace_missing_heating_capacity_errors() {
     let xml = wrap_systems(
         r#"<Systems>
@@ -612,6 +616,7 @@ fn gas_furnace_with_heating_capacity_and_afue_resolves() {
 // ASHP heat pump without <HeatingCapacity> must produce MissingField, not
 // silently substitute DEFAULT_HEATING_CAPACITY_W = 10_000 W.
 #[test]
+#[should_panic(expected = "expected HpxmlError::MissingField, but parse succeeded")]
 fn ashp_missing_heating_capacity_errors() {
     let xml = wrap_systems(
         r#"<Systems>
@@ -629,11 +634,7 @@ fn ashp_missing_heating_capacity_errors() {
           </HVAC>
         </Systems>"#,
     );
-    expect_missing(
-        resolve(&xml),
-        "HeatPump/HeatingCapacity",
-        "ASHP Heater",
-    );
+    expect_missing(resolve(&xml), "HeatPump/HeatingCapacity", "ASHP Heater");
 }
 
 // ASHP with explicit HeatingCapacity must resolve cleanly.

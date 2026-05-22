@@ -22,9 +22,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hares_core::Dwelling;
 use hares_equipment::{Equipment, EquipmentConfig};
 use hares_types::{
-    ControlCapabilities, CoreCapabilities, CoreOutput, EndUse,
-    EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError,
-    OperatingMode, PortDeclaration, PortSlots, Telemetry,
+    ControlCapabilities, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortDeclaration, PortSlots, Telemetry,
 };
 
 // ---------------------------------------------------------------------------
@@ -141,7 +141,11 @@ impl Equipment for ZoneTemperatureSniffer {
     fn ports(&self) -> &[PortDeclaration] {
         &[]
     }
-    fn init(&mut self, _config: &EquipmentConfig, _env: &EnvironmentState) -> Result<(), HaresError> {
+    fn init(
+        &mut self,
+        _config: &EquipmentConfig,
+        _env: &EnvironmentState,
+    ) -> Result<(), HaresError> {
         Ok(())
     }
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
@@ -175,7 +179,10 @@ impl Equipment for ZoneTemperatureSniffer {
     fn load_state(&mut self, _state: &[u8]) -> Result<(), HaresError> {
         Ok(())
     }
-    fn apply_control_unchecked(&mut self, _signal: &hares_types::ControlSignal) -> Result<(), HaresError> {
+    fn apply_control_unchecked(
+        &mut self,
+        _signal: &hares_types::ControlSignal,
+    ) -> Result<(), HaresError> {
         Ok(())
     }
 }
@@ -255,7 +262,10 @@ fn ticket_045_defect1_ordering_claim_is_factually_incorrect() {
     //
     // This test passes unconditionally; it serves as a permanent regression
     // marker that the ordering was audited on 2026-05-21 and found correct.
-    assert!(2168 < 2240, "non-thermal step line must precede apply_thermal_update line");
+    assert!(
+        2168 < 2240,
+        "non-thermal step line must precede apply_thermal_update line"
+    );
 }
 
 /// Defect 2 (mitigated): The humidity solver w_old fallback at

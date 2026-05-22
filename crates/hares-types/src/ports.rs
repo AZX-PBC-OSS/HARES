@@ -78,6 +78,10 @@ pub enum PortContribution {
         domain_id: DomainId,
         payload: [f64; CUSTOM_PAYLOAD_LEN],
     },
+    Humidity {
+        zone: ZoneId,
+        moisture_mass_flow_kg_s: f64,
+    },
 }
 
 /// Port kind tag used for init-time wiring validation.
@@ -88,6 +92,7 @@ pub enum PortType {
     Fuel,
     Fluid,
     Custom,
+    Humidity,
 }
 
 /// Port declaration used to pre-size and validate port slot wiring.
@@ -150,6 +155,16 @@ impl PortDeclaration {
             fluid_type: None,
         }
     }
+
+    pub fn humidity(zone: ZoneId) -> Self {
+        Self {
+            port_type: PortType::Humidity,
+            zone: Some(zone),
+            loop_id: None,
+            domain_id: None,
+            fluid_type: None,
+        }
+    }
 }
 
 /// Thermal contribution totals for one zone.
@@ -157,10 +172,11 @@ impl PortDeclaration {
 /// `sensible_gain_w` is the **convective** sensible total (goes directly to zone
 /// air); it is *not* the total sensible gain. Total sensible = sensible_gain_w +
 /// radiant_gain_w. `latent_gain_w` is the zone total (sum across all categories).
-/// `sensible_by_category` holds per-category **convective** sensible subtotals
-/// indexed by `ThermalCategory::index()`. Invariant:
-/// `sum(sensible_by_category) == sensible_gain_w` (convective-only total).
-/// Use a fixed-size array to avoid HashMap allocation in the hot timestep loop.
+/// `sensible_by_category`, `radiant_by_category`, and `latent_by_category` hold
+/// per-category subtotals indexed by `ThermalCategory::index()`. Invariants:
+/// `sum(sensible_by_category) == sensible_gain_w` (convective-only total);
+/// `sum(latent_by_category) == latent_gain_w`.
+/// Use fixed-size arrays to avoid HashMap allocation in the hot timestep loop.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThermalAccumulator {
     pub zone: ZoneId,
@@ -169,6 +185,7 @@ pub struct ThermalAccumulator {
     pub latent_gain_w: f64,
     pub sensible_by_category: [f64; THERMAL_CATEGORY_COUNT],
     pub radiant_by_category: [f64; THERMAL_CATEGORY_COUNT],
+    pub latent_by_category: [f64; THERMAL_CATEGORY_COUNT],
 }
 
 impl ThermalAccumulator {
@@ -180,6 +197,7 @@ impl ThermalAccumulator {
             latent_gain_w: 0.0,
             sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             radiant_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+            latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
         }
     }
 
@@ -195,6 +213,7 @@ impl ThermalAccumulator {
         self.latent_gain_w += latent_gain_w;
         self.sensible_by_category[category.index()] += sensible_gain_w;
         self.radiant_by_category[category.index()] += radiant_gain_w;
+        self.latent_by_category[category.index()] += latent_gain_w;
     }
 
     pub fn zero(&mut self) {
@@ -203,6 +222,7 @@ impl ThermalAccumulator {
         self.latent_gain_w = 0.0;
         self.sensible_by_category = [0.0; THERMAL_CATEGORY_COUNT];
         self.radiant_by_category = [0.0; THERMAL_CATEGORY_COUNT];
+        self.latent_by_category = [0.0; THERMAL_CATEGORY_COUNT];
     }
 
     /// Sensible gain total for a specific category.
@@ -213,6 +233,11 @@ impl ThermalAccumulator {
     /// Radiant gain total for a specific category.
     pub fn radiant_for_category(&self, cat: ThermalCategory) -> f64 {
         self.radiant_by_category[cat.index()]
+    }
+
+    /// Latent gain total for a specific category.
+    pub fn latent_for_category(&self, cat: ThermalCategory) -> f64 {
+        self.latent_by_category[cat.index()]
     }
 }
 
@@ -355,6 +380,35 @@ impl CustomAccumulator {
     }
 }
 
+/// Humidity contribution totals for one zone.
+///
+/// Accumulates `moisture_mass_flow_kg_s` from equipment that explicitly
+/// reports moisture removal/addition as a mass-flow rate (kg/s), bypassing
+/// the latent-energy→humidity-ratio conversion that depends on a consistent
+/// h_fg constant across all participants.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HumidityAccumulator {
+    pub zone: ZoneId,
+    pub moisture_mass_flow_kg_s: f64,
+}
+
+impl HumidityAccumulator {
+    pub fn new(zone: ZoneId) -> Self {
+        Self {
+            zone,
+            moisture_mass_flow_kg_s: 0.0,
+        }
+    }
+
+    pub fn add(&mut self, moisture_mass_flow_kg_s: f64) {
+        self.moisture_mass_flow_kg_s += moisture_mass_flow_kg_s;
+    }
+
+    pub fn zero(&mut self) {
+        self.moisture_mass_flow_kg_s = 0.0;
+    }
+}
+
 /// Preallocated per-timestep accumulation slots.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct PortSlots {
@@ -363,6 +417,7 @@ pub struct PortSlots {
     pub fuel: FuelAccumulator,
     pub fluid: Vec<FluidAccumulator>,
     pub custom: Vec<CustomAccumulator>,
+    pub humidity: Vec<HumidityAccumulator>,
 }
 
 impl PortSlots {
@@ -373,6 +428,7 @@ impl PortSlots {
         let mut thermal = Vec::new();
         let mut fluid = Vec::new();
         let mut custom = Vec::new();
+        let mut humidity = Vec::new();
 
         for decl in decls {
             match decl.port_type {
@@ -402,8 +458,18 @@ impl PortSlots {
                         }
                     }
                 }
-                // Electrical and Fuel are singletons, handled by defaults.
-                _ => {}
+                PortType::Humidity => {
+                    if let Some(zone) = decl.zone {
+                        if !humidity
+                            .iter()
+                            .any(|h: &HumidityAccumulator| h.zone == zone)
+                        {
+                            humidity.push(HumidityAccumulator::new(zone));
+                        }
+                    }
+                }
+                // Electrical and Fuel are singletons; pre-initialized via Default.
+                PortType::Electrical | PortType::Fuel => {}
             }
         }
 
@@ -413,6 +479,7 @@ impl PortSlots {
             fuel: FuelAccumulator::default(),
             fluid,
             custom,
+            humidity,
         }
     }
 
@@ -427,6 +494,9 @@ impl PortSlots {
         }
         for custom in &mut self.custom {
             custom.zero();
+        }
+        for humidity in &mut self.humidity {
+            humidity.zero();
         }
     }
 
@@ -493,6 +563,18 @@ impl PortSlots {
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared custom domain: {domain_id:?}"
+                    )));
+                }
+            }
+            PortContribution::Humidity {
+                zone,
+                moisture_mass_flow_kg_s,
+            } => {
+                if let Some(total) = self.humidity.iter_mut().find(|entry| entry.zone == *zone) {
+                    total.add(*moisture_mass_flow_kg_s);
+                } else {
+                    return Err(HaresError::Equipment(format!(
+                        "undeclared humidity zone: {zone:?}"
                     )));
                 }
             }
@@ -640,6 +722,7 @@ mod tests {
                 latent_gain_w: 5.0,
                 sensible_by_category: [1.0, 2.0, 3.0, 4.0, 0.0],
                 radiant_by_category: [0.0, 0.0, 3.0, 0.0, 0.0],
+                latent_by_category: [0.0, 0.0, 5.0, 0.0, 0.0],
             }],
             electrical: ElectricalAccumulator {
                 reactive_power_kvar: 1.0,
@@ -662,6 +745,10 @@ mod tests {
             custom: vec![CustomAccumulator {
                 domain_id: DomainId(12),
                 payload: [1.0; 16],
+            }],
+            humidity: vec![HumidityAccumulator {
+                zone: ZoneId(1),
+                moisture_mass_flow_kg_s: 0.001,
             }],
         };
 
@@ -687,6 +774,7 @@ mod tests {
         approx_eq(slots.fluid[0].mean_supply_temp_c, 0.0);
         approx_eq(slots.fluid[0].mean_return_temp_c, 0.0);
         assert_eq!(slots.custom[0].payload, [0.0; 16]);
+        approx_eq(slots.humidity[0].moisture_mass_flow_kg_s, 0.0);
     }
 
     #[test]
@@ -1052,5 +1140,63 @@ mod tests {
             slots.thermal[0].radiant_for_category(ThermalCategory::InternalGain),
             0.0,
         );
+    }
+
+    #[test]
+    fn humidity_port_accumulates_mass_flow_per_zone() {
+        let zone = ZoneId(1);
+        let mut slots = PortSlots {
+            thermal: vec![ThermalAccumulator::new(zone)],
+            humidity: vec![HumidityAccumulator::new(zone)],
+            ..Default::default()
+        };
+
+        slots
+            .accumulate(&PortContribution::Humidity {
+                zone,
+                moisture_mass_flow_kg_s: -0.000_5,
+            })
+            .unwrap();
+        slots
+            .accumulate(&PortContribution::Humidity {
+                zone,
+                moisture_mass_flow_kg_s: -0.000_3,
+            })
+            .unwrap();
+
+        approx_eq(slots.humidity[0].moisture_mass_flow_kg_s, -0.000_8);
+    }
+
+    #[test]
+    fn humidity_port_undeclared_zone_returns_error() {
+        let mut slots = PortSlots::default();
+        let result = slots.accumulate(&PortContribution::Humidity {
+            zone: ZoneId(99),
+            moisture_mass_flow_kg_s: 0.001,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn humidity_declaration_creates_accumulator() {
+        let decls = &[
+            PortDeclaration::humidity(ZoneId(1)),
+            PortDeclaration::humidity(ZoneId(2)),
+            PortDeclaration::humidity(ZoneId(1)),
+        ];
+        let slots = PortSlots::from_declarations(decls);
+        assert_eq!(slots.humidity.len(), 2);
+        assert_eq!(slots.humidity[0].zone, ZoneId(1));
+        assert_eq!(slots.humidity[1].zone, ZoneId(2));
+    }
+
+    #[test]
+    fn humidity_accumulator_zero_clears_flow() {
+        let mut acc = HumidityAccumulator::new(ZoneId(1));
+        acc.add(-0.001);
+        acc.add(0.0005);
+        approx_eq(acc.moisture_mass_flow_kg_s, -0.0005);
+        acc.zero();
+        approx_eq(acc.moisture_mass_flow_kg_s, 0.0);
     }
 }

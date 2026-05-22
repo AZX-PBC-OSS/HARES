@@ -276,32 +276,29 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
                         }
                     }
-                    "CookingRange" => {
-                        // Default annual energy when HPXML doesn't provide it
-                        // (OCHRE hpxml.py parse_cooking_range:1451-1461).
+                    "CookingRange"
                         if !params.contains_key("annual_electric_kwh")
-                            && !params.contains_key("annual_gas_therms")
-                        {
-                            let is_induction = child_text(node, "IsInduction")
-                                .map(|v| v.eq_ignore_ascii_case("true"))
-                                .unwrap_or(false);
-                            let multiplier = node
-                                .child("extension")
-                                .and_then(|e| child_f64(e, "UsageMultiplier"))
-                                .unwrap_or(1.0);
-                            let burner_ef = if is_induction { 0.91_f64 } else { 1.0_f64 };
-                            // IsConvection lives on the sibling Oven node; default to false.
-                            let oven_ef = 1.0_f64;
-                            if fuel == FuelType::Electric {
-                                let annual_kwh =
-                                    burner_ef * oven_ef * (331.0 + 39.0 * n_bedrooms) * multiplier;
-                                params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
-                            } else {
-                                let annual_kwh = (22.6 + 2.7 * n_bedrooms) * multiplier;
-                                let annual_therm = oven_ef * (22.6 + 2.7 * n_bedrooms) * multiplier;
-                                params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
-                                params.insert("annual_gas_therms".to_string(), json!(annual_therm));
-                            }
+                            && !params.contains_key("annual_gas_therms") =>
+                    {
+                        // OCHRE hpxml.py parse_cooking_range:1451-1461.
+                        let is_induction = child_text(node, "IsInduction")
+                            .map(|v| v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+                        let multiplier = node
+                            .child("extension")
+                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .unwrap_or(1.0);
+                        let burner_ef = if is_induction { 0.91_f64 } else { 1.0_f64 };
+                        let oven_ef = 1.0_f64;
+                        if fuel == FuelType::Electric {
+                            let annual_kwh =
+                                burner_ef * oven_ef * (331.0 + 39.0 * n_bedrooms) * multiplier;
+                            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
+                        } else {
+                            let annual_kwh = (22.6 + 2.7 * n_bedrooms) * multiplier;
+                            let annual_therm = oven_ef * (22.6 + 2.7 * n_bedrooms) * multiplier;
+                            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
+                            params.insert("annual_gas_therms".to_string(), json!(annual_therm));
                         }
                     }
                     "Dehumidifier" => {

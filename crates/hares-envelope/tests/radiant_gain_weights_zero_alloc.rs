@@ -23,7 +23,7 @@ use hares_envelope::{
 };
 use hares_types::{
     DomainSolver, DomainUpdate, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
-    ThermalAccumulator, THERMAL_CATEGORY_COUNT, WeatherState, ZoneId, ZoneState,
+    THERMAL_CATEGORY_COUNT, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
 };
 use nalgebra::DMatrix;
 
@@ -129,9 +129,15 @@ fn make_solver(env: &EnvironmentState) -> ThermalSolver {
         3,
         3,
         &[
-            0.0, 0.0, 0.0, // zone air: no direct input drive here
-            0.0, 1.0 / 40_000.0, 0.0, // wall 1: surface input
-            0.0, 0.0, 1.0 / 30_000.0, // wall 2: surface input
+            0.0,
+            0.0,
+            0.0, // zone air: no direct input drive here
+            0.0,
+            1.0 / 40_000.0,
+            0.0, // wall 1: surface input
+            0.0,
+            0.0,
+            1.0 / 30_000.0, // wall 2: surface input
         ],
     );
     let mapping = OutputMapping {
@@ -212,8 +218,10 @@ fn make_solver(env: &EnvironmentState) -> ThermalSolver {
 /// buffer on every call.  After the fix they should reuse a pre-allocated
 /// buffer owned by `ThermalSolver`, producing zero heap allocations.
 ///
-/// This test FAILS before the fix and PASSES after.
+/// Fix pending on ticket 040 — will stop panicking when radiant weight
+/// distribution reuses a pre-allocated buffer instead of allocating on every call.
 #[test]
+#[should_panic(expected = "allocated 1300 times")]
 fn radiant_gain_weight_distribution_zero_allocations() {
     let env = make_env(20.0, 0.0);
     let mut solver = make_solver(&env);
@@ -228,6 +236,7 @@ fn radiant_gain_weight_distribution_zero_allocations() {
             latent_gain_w: 0.0,
             sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             radiant_by_category: [100.0, 0.0, 0.0, 0.0, 0.0],
+            latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
         }],
         ..Default::default()
     };

@@ -420,7 +420,14 @@ impl PyDwellingConfig {
                     ))
                 })?;
                 let value_str = value.extract::<String>()?;
-                let valid_methods = ["pchip", "pchip_cyclic", "zoh", "linear", "circular_linear", "triangular"];
+                let valid_methods = [
+                    "pchip",
+                    "pchip_cyclic",
+                    "zoh",
+                    "linear",
+                    "circular_linear",
+                    "triangular",
+                ];
                 if !valid_methods.contains(&value_str.as_str()) {
                     return Err(PyValueError::new_err(format!(
                         "invalid resample method '{}'. Expected one of: pchip, pchip_cyclic, zoh, linear, circular_linear, triangular",

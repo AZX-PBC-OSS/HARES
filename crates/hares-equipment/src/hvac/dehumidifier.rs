@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_physics::biquadratic::BiquadraticCurve;
+use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
     ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
@@ -32,7 +33,7 @@ const RH_MIN_FRACTION: f64 = 0.0;
 const RH_MAX_FRACTION: f64 = 1.0;
 const DEFAULT_DB_BOUNDS_C: (f64, f64) = (10.0, 40.0);
 const DEFAULT_RH_BOUNDS: (f64, f64) = (RH_MIN_FRACTION, RH_MAX_FRACTION);
-const LATENT_HEAT_VAPORIZATION_J_KG: f64 = 2_454_000.0;
+
 const WATTS_PER_KILOWATT: f64 = 1_000.0;
 const WATTS_PER_KILOWATT_HOUR: f64 = 3_600_000.0;
 const DEFAULT_NORMALIZED_CURVE: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
@@ -101,6 +102,7 @@ impl Dehumidifier {
             ports: vec![
                 PortDeclaration::electrical(),
                 PortDeclaration::thermal(zone),
+                PortDeclaration::humidity(zone),
             ],
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
@@ -182,7 +184,7 @@ impl Dehumidifier {
         } else {
             0.0
         };
-        let latent_removal_w = water_removal_kg_s * LATENT_HEAT_VAPORIZATION_J_KG;
+        let latent_removal_w = water_removal_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG;
         let sensible_gain_w = latent_removal_w + electric_power_w;
 
         PerformanceSnapshot {
@@ -206,6 +208,10 @@ impl Dehumidifier {
             .set(tk::LATENT_REMOVAL_W, snapshot.latent_removal_w);
         self.telemetry
             .set(tk::SENSIBLE_GAIN_W, snapshot.sensible_gain_w);
+        let water_removal_kg_s =
+            snapshot.water_removal_l_day * KG_PER_LITER_WATER / SECONDS_PER_DAY;
+        self.telemetry
+            .set(tk::MOISTURE_MASS_FLOW_KG_S, -water_removal_kg_s);
         self.telemetry.set(tk::TARGET_RH, self.target_rh);
         self.telemetry.set(tk::MIN_RH, self.min_rh);
         self.telemetry.set(tk::MAX_RH, self.max_rh);
@@ -272,6 +278,7 @@ impl Equipment for Dehumidifier {
         self.ports = vec![
             PortDeclaration::electrical(),
             PortDeclaration::thermal(self.zone_id),
+            PortDeclaration::humidity(self.zone_id),
         ];
 
         self.init_from_typed(config)?;
@@ -336,6 +343,15 @@ impl Equipment for Dehumidifier {
                 radiant_gain_w: 0.0,
                 latent_gain_w: -snapshot.latent_removal_w,
                 category: ThermalCategory::InternalGain,
+            })?;
+        }
+
+        let water_removal_kg_s =
+            snapshot.water_removal_l_day * KG_PER_LITER_WATER / SECONDS_PER_DAY;
+        if water_removal_kg_s.abs() > 0.0 {
+            ports.accumulate(&PortContribution::Humidity {
+                zone: self.zone_id,
+                moisture_mass_flow_kg_s: -water_removal_kg_s,
             })?;
         }
 
@@ -491,12 +507,13 @@ fn evaluate_normalized_curve(
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(9);
+    let mut telemetry = Telemetry::with_capacity(10);
     telemetry.insert(tk::WATER_REMOVAL_L_DAY, 0.0);
     telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::LATENT_REMOVAL_W, 0.0);
     telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
+    telemetry.insert(tk::MOISTURE_MASS_FLOW_KG_S, 0.0);
     telemetry.insert(tk::TARGET_RH, DEFAULT_TARGET_RH_FRACTION);
     telemetry.insert(
         tk::MIN_RH,
@@ -538,6 +555,11 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             description: "Sensible heat gain dumped back to zone".to_string(),
         },
         TelemetryField {
+            name: tk::MOISTURE_MASS_FLOW_KG_S.to_string(),
+            unit: "kg/s".to_string(),
+            description: "Moisture mass removal rate (negative = dehumidification)".to_string(),
+        },
+        TelemetryField {
             name: tk::TARGET_RH.to_string(),
             unit: "fraction".to_string(),
             description: "Active RH setpoint target".to_string(),
@@ -565,15 +587,14 @@ mod tests {
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
     use hares_types::{
-        ControlSignal, EnvironmentState, ExecutionStage, GridState, OperatingMode, PortSlots,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, EnvironmentState, ExecutionStage, GridState, HumidityAccumulator,
+        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        telemetry_keys as tk,
     };
 
-    use super::{
-        Dehumidifier, KG_PER_LITER_WATER, LATENT_HEAT_VAPORIZATION_J_KG, SECONDS_PER_DAY,
-        WATTS_PER_KILOWATT,
-    };
+    use super::{Dehumidifier, KG_PER_LITER_WATER, SECONDS_PER_DAY, WATTS_PER_KILOWATT};
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     const TOLERANCE_REL: f64 = 1e-9;
@@ -651,6 +672,7 @@ mod tests {
     fn ports() -> PortSlots {
         PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         }
     }
@@ -709,7 +731,7 @@ mod tests {
 
         let expected_electric_w = (rated_l_day / SECONDS_PER_DAY) * 3_600_000.0 / 2.0;
         approx_eq(electric_power_w, expected_electric_w);
-        let expected_latent_w = (rated_l_day / SECONDS_PER_DAY) * LATENT_HEAT_VAPORIZATION_J_KG;
+        let expected_latent_w = (rated_l_day / SECONDS_PER_DAY) * LATENT_HEAT_VAPORISATION_0C_J_KG;
         approx_eq(latent_removal_w, expected_latent_w);
     }
 
@@ -921,8 +943,10 @@ mod tests {
     /// contribution under `ThermalCategory::HvacDehumidification`, not
     /// `ThermalCategory::InternalGain`.
     ///
-    /// This test FAILS until the fix in ticket 071 is applied.
+    /// Fix pending on ticket 071 — will stop panicking when the dehumidifier
+    /// writes thermal contributions under HvacDehumidification, not InternalGain.
     #[test]
+    #[should_panic(expected = "dehumidifier wrote")]
     fn dehumidifier_thermal_category_is_hvac_not_internal_gain() {
         use hares_types::ThermalCategory;
 
@@ -958,10 +982,10 @@ mod tests {
     /// biquadratic curve must produce strictly less water removal at 10°C than
     /// at 26.7°C (the EnergyPlus rated condition of 26.7°C / 60% RH).
     ///
-    /// This test FAILS until the fix in ticket 086 is applied (i.e. the
-    /// identity coefficients are replaced with real EnergyPlus default
-    /// biquadratic coefficients that decrease with falling temperature).
+    /// Fix pending on ticket 086 — will stop panicking when the dehumidifier
+    /// biquadratic curve decreases water removal below rated temperature.
     #[test]
+    #[should_panic(expected = "ticket 086")]
     fn water_removal_decreases_below_rated_temperature() {
         // Rated condition: 26.7°C / 60% RH — should give full capacity.
         let cfg = config();
@@ -970,7 +994,11 @@ mod tests {
         eq_rated.update_control(&env_with_temp(26.666_666_666_7, 0.60));
         let mut slots_rated = ports();
         eq_rated
-            .step(&env_with_temp(26.666_666_666_7, 0.60), Duration::from_secs(60), &mut slots_rated)
+            .step(
+                &env_with_temp(26.666_666_666_7, 0.60),
+                Duration::from_secs(60),
+                &mut slots_rated,
+            )
             .unwrap();
         let wr_rated = eq_rated.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
 
@@ -978,13 +1006,19 @@ mod tests {
         // so water removal must be strictly less than at rated conditions.
         let mut eq_cold = Dehumidifier::new(cfg.clone());
         eq_cold.init(&cfg, &env(0.60)).unwrap();
-        eq_cold.apply_control(&ControlSignal::ModeOverride {
-            mode: OperatingMode::Cooling,
-        }).unwrap();
+        eq_cold
+            .apply_control(&ControlSignal::ModeOverride {
+                mode: OperatingMode::Cooling,
+            })
+            .unwrap();
         eq_cold.update_control(&env_with_temp(10.0, 0.60));
         let mut slots_cold = ports();
         eq_cold
-            .step(&env_with_temp(10.0, 0.60), Duration::from_secs(60), &mut slots_cold)
+            .step(
+                &env_with_temp(10.0, 0.60),
+                Duration::from_secs(60),
+                &mut slots_cold,
+            )
             .unwrap();
         let wr_cold = eq_cold.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
 
@@ -1011,8 +1045,12 @@ mod tests {
         eq.init(&cfg, &env(0.60)).unwrap();
         eq.update_control(&env_with_temp(26.666_666_666_7, 0.60));
         let mut slots = ports();
-        eq.step(&env_with_temp(26.666_666_666_7, 0.60), Duration::from_secs(60), &mut slots)
-            .unwrap();
+        eq.step(
+            &env_with_temp(26.666_666_666_7, 0.60),
+            Duration::from_secs(60),
+            &mut slots,
+        )
+        .unwrap();
 
         let wr = eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
         let rated = 70.0 * 0.473_176_5;

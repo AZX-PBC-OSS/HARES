@@ -991,6 +991,7 @@ mod tests {
                 hares_types::FluidType::Water,
             )],
             custom: vec![],
+            humidity: vec![],
         }
     }
 
@@ -1703,6 +1704,7 @@ mod element_priority_tests {
                 hares_types::FluidType::Water,
             )],
             custom: vec![],
+            humidity: vec![],
         }
     }
 

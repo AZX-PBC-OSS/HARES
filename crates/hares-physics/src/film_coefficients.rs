@@ -155,11 +155,7 @@ pub fn ashrae_simple_interior_h_conv(
     if cos_tilt < 0.3827 {
         3.076
     } else if cos_tilt >= 0.9239 {
-        if above_hotter {
-            4.040
-        } else {
-            0.948
-        }
+        if above_hotter { 4.040 } else { 0.948 }
     } else if above_hotter {
         3.870
     } else {
@@ -230,8 +226,7 @@ pub fn film_resistances(
         let above_hotter = !(ext_above ^ t_ext_hotter);
         let delta_t = (t_ext - t_int).abs().max(0.1);
         let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter);
-        let h_glass =
-            (h_natural.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
+        let h_glass = (h_natural.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
         let h_forced = roughness.factor() * (h_glass - h_natural);
         1.0 / (h_natural + h_forced)
     } else if exterior_zone == ZoneLabel::Ground {
@@ -288,7 +283,11 @@ mod tests {
         let h_conv = 3.076_f64;
         let h_rad = 4.0 * 0.9 * crate::constants::STEFAN_BOLTZMANN * 293.15_f64.powi(3);
         assert_approx(r_int, 1.0 / h_conv, 1e-10);
-        assert!(r_int > 1.0 / (h_conv + h_rad), "conv-only r_int={r_int} must be > combined {:.4}", 1.0 / (h_conv + h_rad));
+        assert!(
+            r_int > 1.0 / (h_conv + h_rad),
+            "conv-only r_int={r_int} must be > combined {:.4}",
+            1.0 / (h_conv + h_rad)
+        );
         let delta_t = 5.0_f64;
         let h_natural = 1.31 * delta_t.cbrt();
         let h_glass = (h_natural.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();

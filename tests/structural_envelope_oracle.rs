@@ -15,7 +15,9 @@ mod tests {
     use hares_core::{
         building_to_boundary_inputs, building_to_zone_inputs, mass_multiplier_for_zone,
     };
-    use hares_envelope::{ExteriorTarget, InteriorLwrMethod, RCPath, assemble_building_rc, derive_zone_capacitances};
+    use hares_envelope::{
+        ExteriorTarget, InteriorLwrMethod, RCPath, assemble_building_rc, derive_zone_capacitances,
+    };
     use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use hares_io::{DefaultsStore, parse_hpxml};
@@ -386,7 +388,8 @@ mod tests {
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
-        let zone_caps = derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
+        let zone_caps =
+            derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
 
         assert_eq!(zone_caps.len(), n_zones, "zone capacitances length");
 
@@ -402,10 +405,7 @@ mod tests {
         // boundaries are present. This avoids double-counting the ~39% overstating
         // that occurs when both the 7.0 multiplier and furniture RC nodes are used.
         // See: building_to_zone_inputs (conversions.rs); E+ InputOutputRef.
-        let hares_indoor_cap = 1.2
-            * 1006.0
-            * OCHRE_INDOOR_VOLUME_M3
-            * 1.0; // furniture boundaries present → TCM = 1.0
+        let hares_indoor_cap = 1.2 * 1006.0 * OCHRE_INDOOR_VOLUME_M3 * 1.0; // furniture boundaries present → TCM = 1.0
         assert_within_pct(
             zone_caps[cond_idx],
             hares_indoor_cap,
@@ -427,8 +427,13 @@ mod tests {
         );
 
         // Assemble the RC network
-        let (rc, _diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps, InteriorLwrMethod::StarMesh)
-            .expect("assemble_building_rc must succeed");
+        let (rc, _diag) = assemble_building_rc(
+            &boundary_inputs,
+            n_zones,
+            &zone_caps,
+            InteriorLwrMethod::StarMesh,
+        )
+        .expect("assemble_building_rc must succeed");
 
         // Zone state rows
         assert_eq!(
@@ -525,10 +530,16 @@ mod tests {
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
-        let zone_caps = derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
+        let zone_caps =
+            derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
 
-        let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps, InteriorLwrMethod::StarMesh)
-            .expect("assemble_building_rc must succeed");
+        let (_rc, diag) = assemble_building_rc(
+            &boundary_inputs,
+            n_zones,
+            &zone_caps,
+            InteriorLwrMethod::StarMesh,
+        )
+        .expect("assemble_building_rc must succeed");
 
         eprintln!("\n=== Boundary-by-Boundary UA Diagnostics ===");
         eprintln!(
@@ -675,10 +686,16 @@ mod tests {
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
-        let zone_caps = derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
+        let zone_caps =
+            derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
 
-        let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps, InteriorLwrMethod::StarMesh)
-            .expect("assemble_building_rc must succeed");
+        let (_rc, diag) = assemble_building_rc(
+            &boundary_inputs,
+            n_zones,
+            &zone_caps,
+            InteriorLwrMethod::StarMesh,
+        )
+        .expect("assemble_building_rc must succeed");
 
         // Load ASHRAE-correct RC reference. Interior film R is convection-only
         // (TARP h_conv, no h_rad). Longwave radiation is handled by the
@@ -1003,10 +1020,7 @@ mod tests {
         // attic TCM = 1.0 (air only). OCHRE's uniform x7 over-counts both.
         let cond_idx = zone_index(&building, ZoneType::Conditioned);
         let attic_idx = zone_index(&building, ZoneType::Attic);
-        let hares_indoor_cap = 1.2
-            * 1006.0
-            * OCHRE_INDOOR_VOLUME_M3
-            * 1.0; // furniture boundaries present → TCM = 1.0
+        let hares_indoor_cap = 1.2 * 1006.0 * OCHRE_INDOOR_VOLUME_M3 * 1.0; // furniture boundaries present → TCM = 1.0
         assert_within_pct(
             zone_caps[cond_idx],
             hares_indoor_cap,

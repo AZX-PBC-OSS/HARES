@@ -113,6 +113,14 @@ impl DomainSolver for HumiditySolver {
 
         for zone in &env.zones {
             let zone_id = zone.id;
+
+            let moisture_mass_flow_kg_s = ports
+                .humidity
+                .iter()
+                .filter(|entry| entry.zone == zone_id)
+                .map(|entry| entry.moisture_mass_flow_kg_s)
+                .sum::<f64>();
+
             let latent_gain_w = ports
                 .thermal
                 .iter()
@@ -138,14 +146,35 @@ impl DomainSolver for HumiditySolver {
                 .copied()
                 .unwrap_or(zone.volume_m3);
             let rho_air = moist_air_density_kg_m3(p_pa, t_zone_c, w_old);
-            let d_w = humidity_ratio_increment(
-                latent_gain_w,
-                dt_s,
-                self.config.h_fg_j_kg,
-                rho_air,
-                volume_m3,
-                self.config.moisture_buffering_multiplier,
-            );
+
+            let d_w = if moisture_mass_flow_kg_s.abs() > 0.0 {
+                tracing::debug!(
+                    zone = zone_id.0,
+                    moisture_mass_flow_kg_s,
+                    "humidity solver using explicit moisture_mass_flow_kg_s"
+                );
+                humidity_ratio_increment_from_mass_flow(
+                    moisture_mass_flow_kg_s,
+                    dt_s,
+                    rho_air,
+                    volume_m3,
+                    self.config.moisture_buffering_multiplier,
+                )
+            } else {
+                tracing::debug!(
+                    zone = zone_id.0,
+                    latent_gain_w,
+                    "humidity solver falling back to latent_gain_w / h_fg"
+                );
+                humidity_ratio_increment(
+                    latent_gain_w,
+                    dt_s,
+                    self.config.h_fg_j_kg,
+                    rho_air,
+                    volume_m3,
+                    self.config.moisture_buffering_multiplier,
+                )
+            };
 
             let w_sat = humidity_ratio_from_tdp(t_zone_c, p_pa);
             let w_new = (w_old + d_w).clamp(0.0, w_sat);
@@ -174,6 +203,17 @@ fn humidity_ratio_increment(
     (latent_gain_w * dt_s) / denom
 }
 
+fn humidity_ratio_increment_from_mass_flow(
+    moisture_mass_flow_kg_s: f64,
+    dt_s: f64,
+    rho_air_kg_m3: f64,
+    volume_m3: f64,
+    moisture_buffering_multiplier: f64,
+) -> f64 {
+    let denom = rho_air_kg_m3 * volume_m3 * moisture_buffering_multiplier.max(f64::EPSILON);
+    (moisture_mass_flow_kg_s * dt_s) / denom
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -182,8 +222,8 @@ mod tests {
     use chrono::{FixedOffset, TimeZone};
     use hares_physics::psychrometrics::relative_humidity;
     use hares_types::{
-        DomainSolver, DomainUpdate, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
-        THERMAL, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        DomainSolver, DomainUpdate, EnvironmentState, GridState, HumidityAccumulator, PortSlots,
+        SurfaceIrradiance, THERMAL, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
     use crate::humidity_solver::{HumiditySolver, HumiditySolverConfig, humidity_ratio_increment};
@@ -1075,7 +1115,8 @@ mod tests {
         //   d_w = Q_latent * dt / (h_fg * rho * V * M)
         //       = m_dot * (w_out - w_old) * dt / (rho * V)
         let q_latent_explicit = m_dot * h_fg * (w_outdoor - w_initial);
-        let dw_explicit = humidity_ratio_increment(q_latent_explicit, dt_s, h_fg, rho, volume_m3, 1.0);
+        let dw_explicit =
+            humidity_ratio_increment(q_latent_explicit, dt_s, h_fg, rho, volume_m3, 1.0);
         let w_explicit = w_initial + dw_explicit;
 
         // Semi-implicit update (target behaviour per ticket 004):
@@ -1121,6 +1162,166 @@ mod tests {
             err_explicit > 0.01 * dw_total,
             "explicit error {err_explicit:.6e} must be >1% of Δw={dw_total:.6e} \
              to demonstrate meaningful divergence at coarse dt (ticket 004)"
+        );
+    }
+
+    /// Ticket 001: dehumidifier moisture mass round-trips through humidity solver.
+    ///
+    /// When the dehumidifier emits a `Humidity { moisture_mass_flow_kg_s }` port
+    /// contribution, the humidity solver integrates it directly to a humidity-ratio
+    /// delta. The moisture mass added by the solver (delta_w * rho * V) must equal
+    /// the moisture mass removed by the dehumidifier (moisture_mass_flow_kg_s * dt)
+    /// within 1e-6 kg — regardless of h_fg value, because the direct mass-flow path
+    /// bypasses the latent-energy conversion entirely.
+    #[test]
+    fn dehumidifier_moisture_mass_round_trips_via_humidity_port() {
+        let zone_id = ZoneId(1);
+        let t_c = 26.666_666_666_7;
+        let w_init = 0.010;
+        let volume_m3 = 200.0;
+        let dt_s = 60.0;
+
+        let env = env_with_zone(t_c, w_init);
+
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+        let mut solver = HumiditySolver::new(config, &env);
+        let w_old = solver.humidity_ratio(zone_id);
+
+        let water_removal_l_day = 30.0;
+        let water_removal_kg_s = water_removal_l_day / 86400.0;
+
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: zone_id,
+                sensible_gain_w: 0.0,
+                radiant_gain_w: 0.0,
+                latent_gain_w: -water_removal_kg_s * 2_501_000.0,
+                sensible_by_category: [0.0; 5],
+                radiant_by_category: [0.0; 5],
+                latent_by_category: [0.0; 5],
+            }],
+            humidity: vec![HumidityAccumulator {
+                zone: zone_id,
+                moisture_mass_flow_kg_s: -water_removal_kg_s,
+            }],
+            ..PortSlots::default()
+        };
+
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(dt_s as u64));
+        let w_new = solver.humidity_ratio(zone_id);
+
+        let rho = hares_physics::air_properties::moist_air_density_kg_m3(
+            env.weather.pressure_pa(),
+            t_c,
+            w_old,
+        );
+
+        let delta_m_actual_kg = (w_new - w_old) * rho * volume_m3;
+        let delta_m_expected_kg = -water_removal_kg_s * dt_s;
+
+        assert!(
+            (delta_m_actual_kg - delta_m_expected_kg).abs() < 1e-6,
+            "moisture mass round-trip error: actual={delta_m_actual_kg:.9} kg, \
+             expected={delta_m_expected_kg:.9} kg, \
+             diff={:.9} kg",
+            (delta_m_actual_kg - delta_m_expected_kg).abs()
+        );
+    }
+
+    /// Ticket 001: humidity solver prefers `moisture_mass_flow_kg_s` over
+    /// `latent_gain_w / h_fg` conversion.
+    ///
+    /// When both a `Humidity` contribution and a `Thermal { latent_gain_w }`
+    /// are present for the same zone, the solver must use the direct
+    /// `moisture_mass_flow_kg_s` path, not the `latent_gain_w / h_fg` fallback.
+    /// We verify this by providing a deliberately wrong `latent_gain_w` (computed
+    /// with a different h_fg) and asserting that the solver's result matches the
+    /// mass-flow path, not the latent-energy path.
+    #[test]
+    fn humidity_solver_prefers_moisture_mass_flow_over_latent_gain_w() {
+        let zone_id = ZoneId(1);
+        let t_c = 22.0;
+        let w_init = 0.008;
+        let volume_m3 = 200.0;
+        let dt_s = 60.0;
+
+        let env = env_with_zone(t_c, w_init);
+
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+        let mut solver_mass_flow = HumiditySolver::new(config.clone(), &env);
+        let mut solver_latent_only = HumiditySolver::new(config, &env);
+
+        let moisture_mass_flow_kg_s = -0.000_1;
+
+        let correct_h_fg = 2_501_000.0_f64;
+        let wrong_h_fg = 2_454_000.0_f64;
+
+        let latent_gain_w_wrong = moisture_mass_flow_kg_s * wrong_h_fg;
+
+        let ports_mass_flow = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: zone_id,
+                sensible_gain_w: 0.0,
+                radiant_gain_w: 0.0,
+                latent_gain_w: latent_gain_w_wrong,
+                sensible_by_category: [0.0; 5],
+                radiant_by_category: [0.0; 5],
+                latent_by_category: [0.0; 5],
+            }],
+            humidity: vec![HumidityAccumulator {
+                zone: zone_id,
+                moisture_mass_flow_kg_s,
+            }],
+            ..PortSlots::default()
+        };
+
+        let ports_latent_only = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: zone_id,
+                sensible_gain_w: 0.0,
+                radiant_gain_w: 0.0,
+                latent_gain_w: moisture_mass_flow_kg_s * correct_h_fg,
+                sensible_by_category: [0.0; 5],
+                radiant_by_category: [0.0; 5],
+                latent_by_category: [0.0; 5],
+            }],
+            ..PortSlots::default()
+        };
+
+        let _ =
+            solver_mass_flow.resolve_new(&ports_mass_flow, &env, Duration::from_secs(dt_s as u64));
+        let _ = solver_latent_only.resolve_new(
+            &ports_latent_only,
+            &env,
+            Duration::from_secs(dt_s as u64),
+        );
+
+        let w_mass_flow = solver_mass_flow.humidity_ratio(zone_id);
+        let w_latent_only = solver_latent_only.humidity_ratio(zone_id);
+
+        assert!(
+            (w_mass_flow - w_latent_only).abs() < 1e-12,
+            "mass-flow path result ({w_mass_flow:.12e}) must match \
+             latent-only path with correct h_fg ({w_latent_only:.12e})"
+        );
+
+        let rho = hares_physics::air_properties::moist_air_density_kg_m3(
+            env.weather.pressure_pa(),
+            t_c,
+            w_init,
+        );
+        let dw_wrong = (latent_gain_w_wrong * dt_s) / (correct_h_fg * rho * volume_m3);
+        let w_wrong = w_init + dw_wrong;
+        assert!(
+            (w_mass_flow - w_wrong).abs() > 1e-8,
+            "solver must NOT use the wrong-h_fg latent path: \
+             mass_flow_result={w_mass_flow:.12e}, wrong_latent_result={w_wrong:.12e}"
         );
     }
 }

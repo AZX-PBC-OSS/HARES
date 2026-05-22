@@ -53,8 +53,8 @@ mod tests {
     /// Write a modified 900ff TOML with a short 48-hour duration for speed, but
     /// retaining the full 21-day warmup so initial conditions are realistic.
     fn write_short_warmup_toml() -> tempfile::NamedTempFile {
-        let original = fs::read_to_string(bestest_fixture("900ff.toml"))
-            .expect("900ff.toml must be readable");
+        let original =
+            fs::read_to_string(bestest_fixture("900ff.toml")).expect("900ff.toml must be readable");
 
         // Shorten the simulation to 48 hours (172800 s) for test speed.
         let shortened = original.replace("duration_s = 31536000", "duration_s = 172800");
@@ -80,8 +80,8 @@ mod tests {
 
     /// Write a modified 900ff TOML with no warmup and a short 48-hour duration.
     fn write_short_no_warmup_toml() -> tempfile::NamedTempFile {
-        let original = fs::read_to_string(bestest_fixture("900ff.toml"))
-            .expect("900ff.toml must be readable");
+        let original =
+            fs::read_to_string(bestest_fixture("900ff.toml")).expect("900ff.toml must be readable");
 
         let shortened = original.replace("duration_s = 31536000", "duration_s = 172800");
         let stripped: String = shortened

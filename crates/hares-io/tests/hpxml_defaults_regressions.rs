@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
+use hares_equipment::hvac::cooling_config::DehumidifierConfig;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
 use hares_io::hpxml::validation::validate_hpxml_schema;
 use hares_io::hpxml::{BoundaryType, HpxmlError, ZoneType, parse_hpxml_str};
-use hares_equipment::hvac::cooling_config::DehumidifierConfig;
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/hpxml/ochre_samples")
@@ -274,9 +274,8 @@ fn base_fixture_resolves_expected_typed_specs_with_repo_defaults() {
 // The fixture has <Capacity>40.0</Capacity> → expected 40 × 0.473176473 = 18.92705892 L/day.
 #[test]
 fn dehumidifier_capacity_pints_to_liters_conversion_uses_correct_factor() {
-    let mut building =
-        parse_hpxml_str(&read_fixture("base-appliances-dehumidifier.xml"))
-            .expect("dehumidifier fixture should parse");
+    let mut building = parse_hpxml_str(&read_fixture("base-appliances-dehumidifier.xml"))
+        .expect("dehumidifier fixture should parse");
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 

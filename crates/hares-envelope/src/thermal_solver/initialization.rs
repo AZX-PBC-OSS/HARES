@@ -73,7 +73,7 @@ pub(crate) fn initialize_steady_state(
             Some((idx, t))
         })
         .collect();
-    zone_fixes.sort_by(|a, b| b.0.cmp(&a.0));
+    zone_fixes.sort_by_key(|b| std::cmp::Reverse(b.0));
     zone_fixes.dedup_by_key(|f| f.0);
 
     if zone_fixes.is_empty() {
@@ -323,9 +323,10 @@ mod tests {
     /// return a flat-temperature vector — it should return an error.
     ///
     /// Currently this test FAILS because the code at lines 79-83 silently
-    /// falls through to `model.steady_state(&u)` when `zone_fixes` is empty
-    /// (the `filter_map` drops the missing zone ID without error).
+    /// Fix pending — will stop panicking when the missing-zone-ID path returns
+    /// an error instead of silently falling through.
     #[test]
+    #[should_panic(expected = "expected Err when indoor_zone_id is absent")]
     fn missing_indoor_zone_id_in_zone_state_indices_errors() {
         // 2-state model; the conditioned zone is ZoneId(2), but the wiring
         // only contains ZoneId(1) — so indoor_zone_id is not registered.

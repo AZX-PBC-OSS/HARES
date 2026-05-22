@@ -54,7 +54,12 @@ impl ThermalSolver {
             .find(|z| z.zone_id == indoor_zone);
 
         if let Some(zone_cfg) = lwr_zone {
-            self.distribute_radiant_lwr_surfaces(u, total_radiant_w, indoor_zone, &zone_cfg.surfaces);
+            self.distribute_radiant_lwr_surfaces(
+                u,
+                total_radiant_w,
+                indoor_zone,
+                &zone_cfg.surfaces,
+            );
             return;
         }
 

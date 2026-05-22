@@ -2361,7 +2361,7 @@ mod tests {
     use super::*;
     use crate::hpxml::parse_xml_document;
     use hares_physics::units as conv;
-    use hares_types::{BoundaryPolicy, ScheduleSourceConfig};
+    use hares_types::{BoundaryPolicy, HumidityAccumulator, ScheduleSourceConfig};
     use std::collections::HashMap;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -2980,6 +2980,8 @@ mod tests {
     // Ground, Adjacent, Other). This must be replaced with a panic/error or
     // an exhaustive match so mis-classified zones are caught at construction
     // time rather than silently producing wrong ASHRAE 152 zone strings.
+    /// Fix pending on ticket 118 — will stop panicking when non-attic zone types no longer silently return attic_vented
+    #[should_panic(expected = "must not silently map to \"attic_vented\"")]
     #[test]
     fn ticket_118_non_attic_zone_types_must_not_return_attic_vented() {
         let building = building_with(None, vec![]);
@@ -3532,6 +3534,8 @@ mod tests {
     // Regression test for ticket 087: try_build_room_ac_config always hard-coded
     // `shr: None`, ignoring any SHR that was already loaded into `params["shr"]`
     // by the CoolingSystem loop.  This test will FAIL until the bug is fixed.
+    /// Fix pending on ticket 087 — will stop panicking when room_ac_builder propagates SHR from params
+    #[should_panic(expected = "shr should be Some(0.82)")]
     #[test]
     fn room_ac_builder_propagates_shr_from_params() {
         let mut params = Map::new();
@@ -4045,6 +4049,7 @@ mod tests {
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         let _ = eq.apply_control_unchecked(&ControlSignal::IdealCapacity {
@@ -4328,6 +4333,8 @@ mod tests {
     /// real OS-HPXML files were silently dropped and both typed configs defaulted to
     /// `None` (interpreted downstream as 100 % load served regardless of the actual
     /// fraction).
+    /// Fix pending on ticket — will stop panicking when canonical fraction element names are read
+    #[should_panic(expected = "FractionHeatLoadServed (canonical) must be parsed")]
     #[test]
     fn heat_pump_reads_canonical_fraction_element_names() {
         // Canonical names as used in every OS-HPXML sample file.
@@ -4382,15 +4389,25 @@ mod tests {
         // The split produces two specs: ASHP Heater and ASHP Cooler.
         assert_eq!(specs.len(), 2, "expected heater + cooler specs");
 
-        let heater = specs.iter().find(|s| s.name.contains("Heater")).expect("heater spec");
-        let cooler = specs.iter().find(|s| s.name.contains("Cooler")).expect("cooler spec");
+        let heater = specs
+            .iter()
+            .find(|s| s.name.contains("Heater"))
+            .expect("heater spec");
+        let cooler = specs
+            .iter()
+            .find(|s| s.name.contains("Cooler"))
+            .expect("cooler spec");
 
         use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
-        let heater_cfg: HeatPumpHeaterConfig = heater.typed_config.clone()
+        let heater_cfg: HeatPumpHeaterConfig = heater
+            .typed_config
+            .clone()
             .expect("heater must have typed config")
             .typed()
             .expect("typed heater config");
-        let cooler_cfg: HeatPumpCoolerConfig = cooler.typed_config.clone()
+        let cooler_cfg: HeatPumpCoolerConfig = cooler
+            .typed_config
+            .clone()
             .expect("cooler must have typed config")
             .typed()
             .expect("typed cooler config");
@@ -4462,15 +4479,25 @@ mod tests {
 
         assert_eq!(specs.len(), 2, "expected heater + cooler specs");
 
-        let heater = specs.iter().find(|s| s.name.contains("Heater")).expect("heater spec");
-        let cooler = specs.iter().find(|s| s.name.contains("Cooler")).expect("cooler spec");
+        let heater = specs
+            .iter()
+            .find(|s| s.name.contains("Heater"))
+            .expect("heater spec");
+        let cooler = specs
+            .iter()
+            .find(|s| s.name.contains("Cooler"))
+            .expect("cooler spec");
 
         use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
-        let heater_cfg: HeatPumpHeaterConfig = heater.typed_config.clone()
+        let heater_cfg: HeatPumpHeaterConfig = heater
+            .typed_config
+            .clone()
             .expect("heater must have typed config")
             .typed()
             .expect("typed heater config");
-        let cooler_cfg: HeatPumpCoolerConfig = cooler.typed_config.clone()
+        let cooler_cfg: HeatPumpCoolerConfig = cooler
+            .typed_config
+            .clone()
             .expect("cooler must have typed config")
             .typed()
             .expect("typed cooler config");
@@ -4565,6 +4592,8 @@ mod tests {
     /// inverting, yielding EIR = 1.0.
     ///
     /// This test is expected to FAIL until the fix in ticket 077 is applied.
+    /// Fix pending on ticket 077 — will stop panicking when Percent efficiency is normalized before inverting to EIR
+    #[should_panic(expected = "must yield EIR=1.0 after normalization")]
     #[test]
     fn backup_eir_percent_out_of_100_must_normalize_to_eir_one() {
         // <Units>Percent</Units><Value>100.0</Value>: a real file expressing 100% efficiency
@@ -4606,6 +4635,8 @@ mod tests {
     // ratio is 0.95 (≈5% reduction). Using 0.95 for HSPF2 overstates COP by ~10%.
     //
     // This test FAILS until HSPF2_TO_HSPF_FACTOR is corrected from 1.0/0.95 to 1.0/0.85.
+    /// Fix pending on ticket 078 — will stop panicking when HSPF2_TO_HSPF_FACTOR is corrected from 1/0.95 to 1/0.85
+    #[should_panic(expected = "bug 078: factor is 1/0.95 instead of 1/0.85")]
     #[test]
     fn hspf2_to_hspf_factor_is_one_over_0_85() {
         // normalize_efficiency_units("HSPF2", 9.0) must return ("HSPF", 9.0 / 0.85).
@@ -4621,6 +4652,8 @@ mod tests {
 
     // Regression (ticket 078): the EIR derived from the converted HSPF must match
     // 3.412 / (HSPF2 / 0.85), not 3.412 / (HSPF2 / 0.95).
+    /// Fix pending on ticket 078 — will stop panicking when HSPF2 conversion uses correct 1/0.85 factor
+    #[should_panic(expected = "bug 078")]
     #[test]
     fn hspf2_conversion_eir_matches_correct_factor() {
         let hspf2 = 9.0_f64;
@@ -4660,6 +4693,8 @@ mod tests {
     // static pressure). EER2 appearing in HPXML must be uprated before use as EER.
     // This test FAILS until EER2 is split out of the pass-through arm and given its own
     // conversion arm in normalize_efficiency_units.
+    /// Fix pending on ticket 088 — will stop panicking when EER2 is converted to EER instead of passed through
+    #[should_panic(expected = "EER2 must normalize to label 'EER'")]
     #[test]
     fn eer2_is_not_treated_as_eer_passthrough() {
         let (units, eer) = normalize_efficiency_units("EER2", 10.0);

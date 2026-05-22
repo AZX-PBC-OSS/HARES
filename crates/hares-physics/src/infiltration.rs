@@ -1580,8 +1580,7 @@ mod tests {
         let ela_m2 = 0.05_f64;
 
         // Path A: terrain correction embedded in coeff, raw wind speed (correct usage).
-        let flow_correct =
-            ela_infiltration(ela_m2, 0.0, wind_coeff_with_terrain, dt, u_met);
+        let flow_correct = ela_infiltration(ela_m2, 0.0, wind_coeff_with_terrain, dt, u_met);
 
         // Path B: terrain correction embedded in coeff, ALSO terrain-corrected wind (double-correction).
         let flow_double_corrected =

@@ -260,7 +260,7 @@ fn documents_unreasonable_single_pane_default_values_that_ticket_110_must_remove
     // (ASHRAE Table 4 row ~ID2, glass only, no frame).  The IECC 2021 permits
     // at most 0.30 Btu/(h·ft²·°F) = 1.703 W/(m²·K) for residential windows
     // in Climate Zones 5-8.
-    let silent_u_default = 5.0_f64;    // W/(m²·K) — the current unwrap_or value
+    let silent_u_default = 5.0_f64; // W/(m²·K) — the current unwrap_or value
     let iecc_2021_cz5_8_max_u_si = 0.30 * 5.678_263; // ≈ 1.703 W/(m²·K)
 
     assert!(

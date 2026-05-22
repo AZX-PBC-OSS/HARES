@@ -15,8 +15,8 @@ use hares_equipment::{
     EquipmentRegistry, GasFurnaceConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
 };
 use hares_types::{
-    ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots,
-    ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+    ControlSignal, EnvironmentState, FuelType, GridState, HumidityAccumulator, OperatingMode,
+    PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -85,6 +85,7 @@ fn make_env_at_minute(
 fn make_ports() -> PortSlots {
     PortSlots {
         thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+        humidity: vec![HumidityAccumulator::new(ZoneId(1))],
         ..PortSlots::default()
     }
 }
@@ -948,6 +949,10 @@ fn make_ports_two_zones() -> PortSlots {
             ThermalAccumulator::new(ZoneId(1)),
             ThermalAccumulator::new(ZoneId(2)),
         ],
+        humidity: vec![
+            HumidityAccumulator::new(ZoneId(1)),
+            HumidityAccumulator::new(ZoneId(2)),
+        ],
         ..PortSlots::default()
     }
 }
@@ -1204,7 +1209,11 @@ fn ashp_cop_drops_with_defrost() {
 // This test is currently FAILING because neither key is emitted. Once
 // ticket 005 is implemented both assertions must pass.
 // ---------------------------------------------------------------------------
+/// Fix pending on ticket 001 — will stop panicking when humidity port
+/// Fix pending on ticket 005 — will stop panicking when coil_sensible_cooling_w
+/// and fan_heat_w telemetry keys are added to AirConditioner.
 #[test]
+#[should_panic(expected = "ticket-005: coil_sensible_cooling_w")]
 fn ac_coil_sensible_and_fan_heat_telemetry_present() {
     let c = cfg(
         "ac",

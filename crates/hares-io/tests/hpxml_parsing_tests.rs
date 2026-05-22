@@ -979,6 +979,7 @@ fn wall_xml_with_stud_geometry(spacing_in: f64, width_in: f64) -> String {
 }
 
 #[test]
+#[should_panic(expected = "2×4 at 16\" OC assembly framing fraction should be in [0.21, 0.25]")]
 fn stud_geometry_framing_fraction_2x4_16oc_includes_plates_and_headers() {
     // 2×4 at 16" OC: stud face alone = 1.5/16 = 0.094 (the current buggy value).
     // Assembly-level per ASHRAE HOF = ~0.23. This test asserts the correct
@@ -1004,6 +1005,7 @@ fn stud_geometry_framing_fraction_2x4_16oc_includes_plates_and_headers() {
 }
 
 #[test]
+#[should_panic(expected = "2×4 at 24\" OC assembly framing fraction should be in [0.13, 0.17]")]
 fn stud_geometry_framing_fraction_2x4_24oc_advanced_framing() {
     // 2×4 at 24" OC advanced framing: stud face alone = 1.5/24 = 0.0625.
     // Assembly-level per ASHRAE HOF = ~0.15 (advanced framing).
@@ -1185,11 +1187,15 @@ fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
     // BUG (ticket 093): before the fix, efficiency_eer or cooling_efficiency
     // is set to 10.0 but the speed-inference path reads seer=0.0 and never
     // consults EER.  The test below will pass once the EER path is used.
-    let has_nonzero_seer = ac.parameters.get("efficiency_seer")
+    let has_nonzero_seer = ac
+        .parameters
+        .get("efficiency_seer")
         .and_then(|v| v.as_f64())
         .map(|v| v > 0.0)
         .unwrap_or(false);
-    let has_eer = ac.parameters.get("efficiency_eer")
+    let has_eer = ac
+        .parameters
+        .get("efficiency_eer")
         .or_else(|| ac.parameters.get("cooling_efficiency"))
         .and_then(|v| v.as_f64())
         .map(|v| v > 0.0)
@@ -1221,6 +1227,7 @@ fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
 }
 
 #[test]
+#[should_panic(expected = "BUG (ticket 093): EER=17 (> 15 threshold) should infer 2-speed")]
 fn high_eer_central_ac_without_seer_resolves_via_eer_not_zero_sentinel() {
     // Central AC with EER=17 and no SEER.  The 0.0-sentinel bug causes
     // n_speeds=1 (because 0.0 < 15). If the code correctly falls through to
@@ -1269,6 +1276,7 @@ fn high_eer_central_ac_without_seer_resolves_via_eer_not_zero_sentinel() {
 }
 
 #[test]
+#[should_panic(expected = "BUG (ticket 093): resolve_equipment should return Err")]
 fn cooling_system_missing_both_seer_and_eer_produces_error() {
     // A CoolingSystem with no efficiency data at all.
     // Before the fix: apply_default_hvac_speed_fallback silently substitutes

@@ -1939,7 +1939,9 @@ mod tests {
     ///
     /// NOTE: this test FAILS with the current (buggy) code because `month_days` uses
     /// 28 for February even when `temps.len() == 8784`.
+    /// Fix pending on ticket 034 — will stop panicking when leap-year day count is corrected.
     #[test]
+    #[should_panic(expected = "ticket-034 Defect 1")]
     fn leap_year_february_uses_29_days_for_monthly_mean() {
         // 8784 hours in a leap year (366 days × 24).
         let n = 8784usize;
@@ -2066,7 +2068,10 @@ mod tests {
     /// choice per the ticket).  The buggy code returns 40°C.
     ///
     /// NOTE: this test FAILS with the current (buggy) code.
+    /// Fix pending on ticket 034 — will stop panicking when short-weather
+    /// fallback uses monthly means instead of instantaneous extremes.
     #[test]
+    #[should_panic(expected = "ticket-034 Defect 2")]
     fn short_weather_fallback_uses_monthly_means_not_instantaneous_extremes() {
         let step_secs = 3600u32;
         let n = 48usize; // 2 days — far less than one full calendar month

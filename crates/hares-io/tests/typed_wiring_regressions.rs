@@ -3,8 +3,8 @@ use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
 use hares_equipment::water_heater::wh_config::TanklessWaterHeaterConfig;
 use hares_equipment::{DuctConfig, EquipmentConfig, EquipmentRegistry};
 use hares_types::{
-    BoundaryPolicy, EnvironmentState, FuelType, GridState, PortSlots, ScheduleSourceConfig,
-    ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+    BoundaryPolicy, EnvironmentState, FuelType, GridState, HumidityAccumulator, PortSlots,
+    ScheduleSourceConfig, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
 };
 
 fn sample_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
@@ -193,6 +193,10 @@ fn central_ac_airflow_and_duct_airflow_round_trip_without_collision() {
         thermal: vec![
             ThermalAccumulator::new(ZoneId(1)),
             ThermalAccumulator::new(ZoneId(2)),
+        ],
+        humidity: vec![
+            HumidityAccumulator::new(ZoneId(1)),
+            HumidityAccumulator::new(ZoneId(2)),
         ],
         ..PortSlots::default()
     };

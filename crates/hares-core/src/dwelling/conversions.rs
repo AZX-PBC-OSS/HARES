@@ -5,8 +5,10 @@ use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset};
+use hares_envelope::longwave_radiation::{
+    EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW,
+};
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
-use hares_envelope::longwave_radiation::{EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW};
 use hares_equipment::{ConfigPayload, EquipmentConfig, config::ConfigValue};
 use hares_io::hpxml::ZoneType;
 use hares_io::{Building, DefaultsStore, SimulationConfig};
@@ -81,7 +83,7 @@ pub fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneI
                 // must be 1.0 (air capacitance only) to avoid double-counting.
                 // Ref: E+ InputOutputRef ZoneCapacitanceMultiplier default=1.0;
                 // E+ InternalMass and ZoneCapacitanceMultiplier are mutually exclusive.
-                if zone.map_or(false, |z| zone_has_furniture_boundaries(building, &z.zone_type)) {
+                if zone.is_some_and(|z| zone_has_furniture_boundaries(building, &z.zone_type)) {
                     1.0
                 } else {
                     zone_type_mult
@@ -250,8 +252,7 @@ pub fn building_to_boundary_inputs(
             // OCHRE Envelope.py uses ε = 0.84 for window radiation_frac.
             let interior_emissivity = if bd.boundary_type == BoundaryType::Window {
                 EMISSIVITY_WINDOW // 0.84 glass thermal emissivity (NFRC)
-            } else if bd.has_radiant_barrier
-                && bd.interior_zone.as_ref() == Some(&ZoneType::Attic)
+            } else if bd.has_radiant_barrier && bd.interior_zone.as_ref() == Some(&ZoneType::Attic)
             {
                 EMISSIVITY_RADIANT_BARRIER
             } else {
@@ -650,8 +651,8 @@ mod tests {
     use hares_types::FuelType;
 
     use super::{
-        building_to_zone_inputs, mass_multiplier_for_zone, zone_has_furniture_boundaries,
-        merged_equipment_config,
+        building_to_zone_inputs, mass_multiplier_for_zone, merged_equipment_config,
+        zone_has_furniture_boundaries,
     };
 
     // ── mass_multiplier_for_zone tests ─────────────────────────────────
@@ -764,9 +765,15 @@ mod tests {
                 ventilation_ach: None,
                 ventilation_sla: None,
             }],
-            vec![furniture_boundary("conditioned_furniture", ZoneType::Conditioned)],
+            vec![furniture_boundary(
+                "conditioned_furniture",
+                ZoneType::Conditioned,
+            )],
         );
-        assert!(zone_has_furniture_boundaries(&building, &ZoneType::Conditioned));
+        assert!(zone_has_furniture_boundaries(
+            &building,
+            &ZoneType::Conditioned
+        ));
         assert!(!zone_has_furniture_boundaries(&building, &ZoneType::Attic));
     }
 
@@ -785,7 +792,10 @@ mod tests {
             }],
             Vec::new(),
         );
-        assert!(!zone_has_furniture_boundaries(&building, &ZoneType::Conditioned));
+        assert!(!zone_has_furniture_boundaries(
+            &building,
+            &ZoneType::Conditioned
+        ));
     }
 
     // ── building_to_zone_inputs furniture override tests ──────────────
@@ -803,7 +813,10 @@ mod tests {
                 ventilation_ach: None,
                 ventilation_sla: None,
             }],
-            vec![furniture_boundary("conditioned_furniture", ZoneType::Conditioned)],
+            vec![furniture_boundary(
+                "conditioned_furniture",
+                ZoneType::Conditioned,
+            )],
         );
         let zone_inputs = building_to_zone_inputs(&building, 1);
         assert!(
@@ -849,7 +862,10 @@ mod tests {
                 ventilation_ach: None,
                 ventilation_sla: None,
             }],
-            vec![furniture_boundary("conditioned_furniture", ZoneType::Conditioned)],
+            vec![furniture_boundary(
+                "conditioned_furniture",
+                ZoneType::Conditioned,
+            )],
         );
         building.mass_multiplier_override = Some(5.0);
         let zone_inputs = building_to_zone_inputs(&building, 1);

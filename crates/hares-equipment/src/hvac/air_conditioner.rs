@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
+use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
     DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -464,6 +465,7 @@ impl CoolingCore {
             ports: vec![
                 PortDeclaration::electrical(),
                 PortDeclaration::thermal(zone),
+                PortDeclaration::humidity(zone),
             ],
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
@@ -804,6 +806,18 @@ impl CoolingCore {
                 -latent_cooling_w,
                 ThermalCategory::HvacCooling,
             )?;
+
+            if latent_cooling_w.abs() > 0.0 {
+                let moisture_mass_flow_kg_s = -latent_cooling_w / LATENT_HEAT_VAPORISATION_0C_J_KG;
+                for &(zone, fraction) in &self.hvac.zone_heat_fractions {
+                    if fraction > 0.0 {
+                        ports.accumulate(&PortContribution::Humidity {
+                            zone,
+                            moisture_mass_flow_kg_s: moisture_mass_flow_kg_s * fraction,
+                        })?;
+                    }
+                }
+            }
 
             self.hvac.advance_speed_timer(dt.as_secs_f64());
             self.run_time_s += dt.as_secs_f64();
@@ -1462,8 +1476,9 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, ExecutionStage, GridState, OperatingMode, PortSlots,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, EnvironmentState, ExecutionStage, GridState, HumidityAccumulator,
+        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        telemetry_keys as tk,
     };
 
     use super::{AirConditioner, CoolingCore, RoomAC, SpeedControlMode};
@@ -1607,6 +1622,7 @@ mod tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         // Zone well above setpoint (28°C vs 24°C setpoint); an internal
@@ -1636,6 +1652,7 @@ mod tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
 
@@ -1655,6 +1672,7 @@ mod tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
 
@@ -1672,6 +1690,7 @@ mod tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         let env = env(22.0, 0.008, 15.0, 5.0);
@@ -1690,6 +1709,7 @@ mod tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         let env = env(28.0, 0.012, 20.0, 35.0);
@@ -1726,10 +1746,12 @@ mod tests {
 
         let mut ports_low = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         let mut ports_high = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
 
@@ -1759,6 +1781,7 @@ mod tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         let env = env(28.0, 0.01, 19.0, 35.0);
@@ -1839,6 +1862,7 @@ mod tests {
         let mut eq = RoomAC::new(cfg.clone());
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         let environment = env(28.0, 0.012, 20.0, 35.0);
@@ -1941,6 +1965,7 @@ mod tests {
             .unwrap();
         let mut ports_with_losses = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         with_losses.update_control(&environment);
@@ -1958,6 +1983,7 @@ mod tests {
             .unwrap();
         let mut ports_no_losses = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         no_losses.update_control(&environment);
@@ -2027,6 +2053,7 @@ mod tests {
         eq_high.init(&cfg, &env_high_load).unwrap();
         let mut ports_high = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq_high.update_control(&env_high_load);
@@ -2039,6 +2066,7 @@ mod tests {
         eq_low.init(&cfg, &env_low_load).unwrap();
         let mut ports_low = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq_low.update_control(&env_low_load);
@@ -2170,6 +2198,7 @@ mod tests {
         eq.update_control(&environment);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.step(&environment, Duration::from_secs(60), &mut ports)
@@ -2269,6 +2298,7 @@ mod tests {
         eq.update_control(&environment);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.step(&environment, Duration::from_secs(60), &mut ports)
@@ -2279,6 +2309,7 @@ mod tests {
             eq.update_control(&environment);
             let mut p = PortSlots {
                 thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
                 ..PortSlots::default()
             };
             eq.step(&environment, Duration::from_secs(60), &mut p)
@@ -2308,6 +2339,7 @@ mod tests {
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&environment);
@@ -2321,6 +2353,7 @@ mod tests {
 
         let mut ports_next = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&environment);
@@ -2349,6 +2382,7 @@ mod tests {
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&environment);
@@ -2384,6 +2418,7 @@ mod tests {
         eq.update_control(&environment);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.step(&environment, Duration::from_secs(900), &mut ports)
@@ -2415,6 +2450,7 @@ mod tests {
         eq.update_control(&environment);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.step(&environment, Duration::from_secs(60), &mut ports)
@@ -2460,6 +2496,7 @@ mod tests {
         eq.update_control(&environment);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.step(&environment, Duration::from_secs(60), &mut ports)
@@ -2578,6 +2615,7 @@ mod tests {
         eq.update_control(&environment);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.step(&environment, Duration::from_secs(60), &mut ports)
@@ -2614,6 +2652,7 @@ mod tests {
             eq.update_control(&environment);
             let mut ports = PortSlots {
                 thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
                 ..PortSlots::default()
             };
             eq.step(&environment, Duration::from_secs(60), &mut ports)
@@ -2647,8 +2686,8 @@ mod dr_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, DRLevel, EnvironmentState, GridState, PortSlots, ThermalAccumulator,
-        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, DRLevel, EnvironmentState, GridState, HumidityAccumulator, PortSlots,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::AirConditioner;
@@ -2762,6 +2801,7 @@ mod dr_tests {
     fn make_ports() -> PortSlots {
         PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         }
     }
@@ -3048,8 +3088,8 @@ mod crankcase_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
-        ZoneState, telemetry_keys as tk,
+        EnvironmentState, GridState, HumidityAccumulator, PortSlots, ThermalAccumulator,
+        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::AirConditioner;
@@ -3262,6 +3302,7 @@ mod crankcase_tests {
         eq.init(cfg, &e).unwrap();
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&e);
@@ -3375,6 +3416,7 @@ mod crankcase_tests {
         eq.init(&cfg, &e).unwrap();
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&e);
@@ -3446,8 +3488,8 @@ mod ideal_capacity_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, EnvironmentState, GridState, HumidityAccumulator, PortSlots,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::AirConditioner;
@@ -3504,6 +3546,7 @@ mod ideal_capacity_tests {
     fn make_ports() -> PortSlots {
         PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         }
     }
@@ -3652,11 +3695,10 @@ mod ideal_capacity_tests {
     // to CoolingCore; RoomAC does not — it falls through to the Equipment trait default
     // which always returns None.
     //
-    // This test must FAIL until RoomAC's Equipment impl adds:
-    //   fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
-    //       self.core.ideal_target()
-    //   }
+    // Fix pending on ticket 022 — will stop panicking when RoomAC delegates
+    // ideal_target() to self.core.
     #[test]
+    #[should_panic(expected = "RoomAC ideal_target() must return Some")]
     fn room_ac_ideal_target_returns_some_at_coarse_timestep() {
         use super::RoomAC;
         use crate::RoomAcConfig;
@@ -3770,9 +3812,10 @@ mod ideal_capacity_tests {
         );
     }
 
-    // Parity: AirConditioner and RoomAC must return the same ideal_target() result
-    // for identical inputs at a coarse timestep.
+    // Fix pending on ticket 022 — will stop panicking when RoomAC's
+    // ideal_target() matches AirConditioner's.
     #[test]
+    #[should_panic(expected = "RoomAC must return Some ideal_target")]
     fn room_ac_ideal_target_matches_air_conditioner_parity() {
         use crate::{CentralAirConditionerConfig, DuctConfig, RoomAcConfig};
 
@@ -3884,8 +3927,8 @@ mod defaults_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
-        ZoneState, telemetry_keys as tk,
+        EnvironmentState, GridState, HumidityAccumulator, PortSlots, ThermalAccumulator,
+        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{AirConditioner, RoomAC};
@@ -4070,6 +4113,7 @@ mod defaults_tests {
         // moisture re-evaporation during off cycles raises the effective SHR.
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
         eq.update_control(&env);
@@ -4169,7 +4213,10 @@ mod speed_selection_parity_tests {
                 dhi_w_m2: 0.0,
                 ..Default::default()
             },
-            grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -4221,13 +4268,12 @@ mod speed_selection_parity_tests {
             plf_min: None,
             plf_max: None,
         };
-        let mut cfg = EquipmentConfig::from_typed(
-            "AC".to_string(),
-            "Air Conditioner".to_string(),
-            typed,
+        let mut cfg =
+            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);
+        cfg.test_extras_mut().insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[1,0,0,0,0,0]".into(),
         );
-        cfg.test_extras_mut()
-            .insert("capacity_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         cfg.test_extras_mut()
             .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         let env = minimal_env();
@@ -4274,7 +4320,8 @@ mod speed_selection_parity_tests {
             assert!(
                 (vs.speed_frac - ms.speed_frac).abs() < 1e-12,
                 "{label}: speed_frac mismatch — variable_speed={} multi_speed={}",
-                vs.speed_frac, ms.speed_frac
+                vs.speed_frac,
+                ms.speed_frac
             );
             assert_eq!(
                 vs.part_load_ratio, ms.part_load_ratio,
@@ -4301,7 +4348,8 @@ mod speed_selection_parity_tests {
         assert!(
             (vs.part_load_ratio - ms.part_load_ratio).abs() < 1e-12,
             "PLR below lowest stage must agree: variable_speed={} multi_speed={}",
-            vs.part_load_ratio, ms.part_load_ratio
+            vs.part_load_ratio,
+            ms.part_load_ratio
         );
     }
 

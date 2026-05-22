@@ -30,12 +30,11 @@ pub use envelope_lut::{
     EnvelopeLookup, EnvelopeLookupResult, EnvelopeLutError, PrecomputedLayer, resolve_boundary_name,
 };
 pub use epw::{
-    compute_sky_temp_c, berdahl_martin_sky_emissivity, sky_temp_from_emissivity,
-    parse_epw,
+    berdahl_martin_sky_emissivity, compute_sky_temp_c, parse_epw, sky_temp_from_emissivity,
 };
 // Re-export canonical physical constants from hares-physics (preserving public API names).
-pub use hares_physics::constants::STEFAN_BOLTZMANN;
 pub use hares_physics::constants::CELSIUS_TO_KELVIN as KELVIN_OFFSET_C;
+pub use hares_physics::constants::STEFAN_BOLTZMANN;
 pub use hpxml::{Building, EquipmentSpec, ValidationReport, parse_hpxml, resolve_equipment};
 pub use output::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,

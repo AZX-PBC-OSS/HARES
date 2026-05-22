@@ -15,15 +15,17 @@ use hares_physics::biquadratic::{BiquadraticCurve, biquadratic, quadratic};
 use hares_physics::film_coefficients::{
     SurfaceRoughness, ZoneLabel, film_resistances, tarp_h_natural,
 };
+use hares_physics::ground::{
+    DEFAULT_PHASE_DAY_NORTHERN, DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY, kusuda_achenbach_temp,
+};
 use hares_physics::infiltration::{
-    Aim2Params, FoundationLeakageClass, ShieldingClass, TerrainClass, aim2_coefficients_from_ach50,
-    ashrae_wind_stack, ela_infiltration, garage_ela_coefficients, N_I_DEFAULT,
+    Aim2Params, FoundationLeakageClass, N_I_DEFAULT, ShieldingClass, TerrainClass,
+    aim2_coefficients_from_ach50, ashrae_wind_stack, ela_infiltration, garage_ela_coefficients,
 };
 use hares_physics::psychrometrics::{
     EPSILON, dew_point, moist_air_enthalpy, relative_humidity, saturation_pressure_pa,
     wet_bulb_from_humidity_ratio,
 };
-use hares_physics::ground::{DEFAULT_PHASE_DAY_NORTHERN, DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY, kusuda_achenbach_temp};
 use hares_physics::water_mains::{Hemisphere, water_mains_temperature_c};
 
 // ---------------------------------------------------------------------------
@@ -408,7 +410,7 @@ fn ticket_101_ashrae_simple_interior_h_conv_is_dt_independent() {
 
     // Contrast with TARP (the correct per-step model from EnergyPlus Eq. 90):
     // h_tarp = 1.31 × |ΔT|^(1/3)  (vertical surface)
-    let h_tarp_1c = tarp_h_natural(90.0, 1.0_f64, true);   // ≈ 1.31
+    let h_tarp_1c = tarp_h_natural(90.0, 1.0_f64, true); // ≈ 1.31
     let h_tarp_11c = tarp_h_natural(90.0, 11.0_f64, true); // ≈ 2.88
     let _h_tarp_20c = tarp_h_natural(90.0, 20.0_f64, true); // ≈ 3.52 (not used in assertions below)
 
@@ -763,13 +765,33 @@ fn ticket_053_aim2_flow_varies_with_climate_unlike_fixed_n20() {
     });
 
     // Cold/stack-dominated condition: large ΔT, low wind
-    let flow_cold = ashrae_wind_stack(coeffs.c_s, coeffs.c_w, coeffs.shelter_coeff, coeffs.n_i, 25.0, 1.0);
+    let flow_cold = ashrae_wind_stack(
+        coeffs.c_s,
+        coeffs.c_w,
+        coeffs.shelter_coeff,
+        coeffs.n_i,
+        25.0,
+        1.0,
+    );
     // Warm/wind-dominated condition: small ΔT, high wind
-    let flow_windy = ashrae_wind_stack(coeffs.c_s, coeffs.c_w, coeffs.shelter_coeff, coeffs.n_i, 3.0, 8.0);
+    let flow_windy = ashrae_wind_stack(
+        coeffs.c_s,
+        coeffs.c_w,
+        coeffs.shelter_coeff,
+        coeffs.n_i,
+        3.0,
+        8.0,
+    );
 
     // Both flows must be positive and finite
-    assert!(flow_cold.is_finite() && flow_cold > 0.0, "cold AIM-2 flow must be positive: {flow_cold}");
-    assert!(flow_windy.is_finite() && flow_windy > 0.0, "windy AIM-2 flow must be positive: {flow_windy}");
+    assert!(
+        flow_cold.is_finite() && flow_cold > 0.0,
+        "cold AIM-2 flow must be positive: {flow_cold}"
+    );
+    assert!(
+        flow_windy.is_finite() && flow_windy > 0.0,
+        "windy AIM-2 flow must be positive: {flow_windy}"
+    );
 
     // The two conditions must produce meaningfully different flows —
     // i.e., the ratio must deviate from 1.0 by at least 30%.
@@ -818,7 +840,10 @@ fn ticket_053_ela_model_varies_with_conditions_unlike_constant_ach() {
     let garage_floor_area_m2 = 28.0_f64;
     let ela_m2 = sla * garage_floor_area_m2;
 
-    assert!(ela_m2 > 0.0, "ELA from ASHRAE 152 default SLA must be non-zero: {ela_m2}");
+    assert!(
+        ela_m2 > 0.0,
+        "ELA from ASHRAE 152 default SLA must be non-zero: {ela_m2}"
+    );
 
     // Calm conditions: small ΔT, zero wind
     let flow_calm = ela_infiltration(ela_m2, stack_coeff, wind_coeff, 3.0, 0.0);
@@ -828,7 +853,10 @@ fn ticket_053_ela_model_varies_with_conditions_unlike_constant_ach() {
     let flow_cold = ela_infiltration(ela_m2, stack_coeff, wind_coeff, 20.0, 0.0);
 
     // All flows must be positive and finite
-    assert!(flow_calm.is_finite() && flow_calm > 0.0, "calm ELA flow must be finite and positive: {flow_calm}");
+    assert!(
+        flow_calm.is_finite() && flow_calm > 0.0,
+        "calm ELA flow must be finite and positive: {flow_calm}"
+    );
 
     // Windy flow must exceed calm flow (wind_coeff > 0 means wind adds to infiltration)
     assert!(
@@ -885,11 +913,19 @@ fn ticket_055_kusuda_depth_correction_exceeds_3c_vs_surface_in_january_minneapol
     let day_of_year = 15.0_f64;
 
     // Surface temperature (DOE-2 approximation, depth = 0 m).
-    let t_surface_c = kusuda_achenbach_temp(0.0, day_of_year, t_mean_c, t_amplitude_c, phase_day, alpha);
+    let t_surface_c =
+        kusuda_achenbach_temp(0.0, day_of_year, t_mean_c, t_amplitude_c, phase_day, alpha);
 
     // Typical basement centroid depth below grade.
     let basement_depth_m = 2.4_f64;
-    let t_basement_c = kusuda_achenbach_temp(basement_depth_m, day_of_year, t_mean_c, t_amplitude_c, phase_day, alpha);
+    let t_basement_c = kusuda_achenbach_temp(
+        basement_depth_m,
+        day_of_year,
+        t_mean_c,
+        t_amplitude_c,
+        phase_day,
+        alpha,
+    );
 
     // Surface must be significantly colder than basement in January (cold climate).
     assert!(
@@ -928,8 +964,16 @@ fn ticket_055_kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
     let day_of_year = 210.0_f64;
     let basement_depth_m = 2.4_f64;
 
-    let t_surface_c = kusuda_achenbach_temp(0.0, day_of_year, t_mean_c, t_amplitude_c, phase_day, alpha);
-    let t_basement_c = kusuda_achenbach_temp(basement_depth_m, day_of_year, t_mean_c, t_amplitude_c, phase_day, alpha);
+    let t_surface_c =
+        kusuda_achenbach_temp(0.0, day_of_year, t_mean_c, t_amplitude_c, phase_day, alpha);
+    let t_basement_c = kusuda_achenbach_temp(
+        basement_depth_m,
+        day_of_year,
+        t_mean_c,
+        t_amplitude_c,
+        phase_day,
+        alpha,
+    );
 
     // In summer the surface is warmer than the deep soil.
     assert!(
@@ -982,7 +1026,9 @@ fn ticket_055_kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
 ///   auxiliary-programs/ground-heat-transfer-in-energyplus.html)
 #[test]
 fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_january() {
-    use hares_physics::ground::{DEFAULT_PHASE_DAY_NORTHERN, DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY, kusuda_achenbach_temp};
+    use hares_physics::ground::{
+        DEFAULT_PHASE_DAY_NORTHERN, DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY, kusuda_achenbach_temp,
+    };
     use std::f64::consts::PI;
 
     // Minneapolis-like climate parameters.
@@ -1054,7 +1100,9 @@ fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_january() {
 /// error to the winter under-prediction above).
 #[test]
 fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
-    use hares_physics::ground::{DEFAULT_PHASE_DAY_NORTHERN, DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY, kusuda_achenbach_temp};
+    use hares_physics::ground::{
+        DEFAULT_PHASE_DAY_NORTHERN, DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY, kusuda_achenbach_temp,
+    };
     use std::f64::consts::PI;
 
     let t_mean_c = 7.0_f64;
@@ -1130,14 +1178,15 @@ fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
 /// Reference: U.S. Standard Atmosphere 1976 (NOAA-S/T 76-1562) §1.2.5;
 ///            Wikipedia "Barometric formula" model equations table, layer 0.
 #[test]
+#[should_panic(expected = "ticket 124: ISA_PRESSURE_EXPONENT")]
 fn ticket_124_isa_pressure_exponent_matches_ussa76_derivation() {
     use hares_physics::constants::ISA_PRESSURE_EXPONENT;
 
     // USSA 1976 primary constants (matches Wikipedia barometric formula table).
-    let g0: f64 = 9.806_65;       // m/s²
-    let m0: f64 = 0.028_964_4;    // kg/mol  (28.9644 g/mol)
-    let r_star: f64 = 8.314_32;   // J/(mol·K)  — USSA 1976 value
-    let lapse: f64 = 0.006_5;     // K/m
+    let g0: f64 = 9.806_65; // m/s²
+    let m0: f64 = 0.028_964_4; // kg/mol  (28.9644 g/mol)
+    let r_star: f64 = 8.314_32; // J/(mol·K)  — USSA 1976 value
+    let lapse: f64 = 0.006_5; // K/m
 
     let derived = g0 * m0 / (r_star * lapse); // ≈ 5.2558761133
 

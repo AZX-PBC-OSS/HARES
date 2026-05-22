@@ -817,7 +817,9 @@ fn triangular_sunset_boundary_bleeds_into_nighttime_hour() {
         vec![180.0; n],
     );
     let factor: usize = 4; // 15-minute sub-steps
-    let resampled = series.resample(3600 / factor as u32).expect("resample should succeed");
+    let resampled = series
+        .resample(3600 / factor as u32)
+        .expect("resample should succeed");
     // Default method for GHI is Triangular.
 
     for (field_name, resampled_field) in [

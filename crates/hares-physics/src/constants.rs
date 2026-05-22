@@ -2,6 +2,13 @@
 //!
 //! All values cite their primary source. Downstream crates should import
 //! from here rather than defining their own copies.
+//!
+//! ## Moisture mass balance convention
+//!
+//! All moisture mass balance computations use the 0°C ASHRAE reference
+//! (2,501 kJ/kg). The 20°C reference constant (`LATENT_HEAT_VAPORISATION_J_KG`)
+//! is retained for informational comparison only and must NOT be used in any
+//! moisture mass balance computation.
 
 // --- Dry Air ---
 
@@ -157,3 +164,25 @@ pub const FAHRENHEIT_OFFSET: f64 = 32.0;
 
 /// Fahrenheit to Celsius scale factor.
 pub const FAHRENHEIT_SCALE: f64 = 5.0 / 9.0;
+
+/// Density of liquid water as a function of temperature [kg/m³].
+///
+/// Kell (1975) rational polynomial, valid 0–80°C:
+///   ρ(T) = [999.83952 + 16.945176·T − 7.9870401e-3·T²
+///           − 46.170461e-6·T³ + 105.56302e-9·T⁴ − 280.54253e-12·T⁵]
+///           / (1 + 16.879850e-3·T)
+///
+/// Reference: Kell, G.S. (1975). "Density, thermal expansivity, and
+/// compressibility of liquid water from 0° to 150°C." J. Chem. Eng. Data,
+/// 20(1), 97–105. Matches NIST IAPWS tabulated values within ±0.05 kg/m³
+/// over 0–80°C.
+///
+/// `t_celsius`: liquid water temperature in °C; valid range 0–80°C.
+pub fn water_density_kg_m3(t_celsius: f64) -> f64 {
+    let t = t_celsius;
+    let numerator = 999.83952 + 16.945_176 * t - 7.987_040_1e-3 * t * t - 46.170_461e-6 * t * t * t
+        + 105.563_02e-9 * t * t * t * t
+        - 280.542_53e-12 * t * t * t * t * t;
+    let denominator = 1.0 + 16.879_850e-3 * t;
+    numerator / denominator
+}

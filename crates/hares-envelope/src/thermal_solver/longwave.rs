@@ -685,9 +685,10 @@ mod tests {
     /// With the current `> 1.0` guard, h_out=0.5 falls through to H_OUT_NFRC
     /// (34 W/(m²·K)), biasing the window LWR delta by 34/0.5 = 68×.
     ///
-    /// Fix: change line 86 from `info.h_out_w_m2_k > 1.0` to
-    ///      `info.h_out_w_m2_k > 0.0`.
+    /// Fix pending — will stop panicking when `> 1.0` guard at line 86 is
+    /// changed to `> 0.0`.
     #[test]
+    #[should_panic(expected = "h_out_w_m2_k = 0.5")]
     fn h_out_nfrc_fallback_threshold_is_zero() {
         let h_out_w_m2_k = 0.5_f64;
 

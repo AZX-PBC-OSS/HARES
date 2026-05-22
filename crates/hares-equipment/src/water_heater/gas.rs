@@ -687,12 +687,9 @@ impl Equipment for GasWH {
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
-                if self.burner_input_w > 0.0 {
-                    let max_fraction =
-                        (max_power_kw * 1000.0 / self.burner_input_w).clamp(0.0, 1.0);
-                    self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
-                }
+            ControlSignal::PowerLimit { max_power_kw, .. } if self.burner_input_w > 0.0 => {
+                let max_fraction = (max_power_kw * 1000.0 / self.burner_input_w).clamp(0.0, 1.0);
+                self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
                 self.apply_dr_level(*level);
@@ -1000,6 +997,7 @@ mod tests {
                 hares_types::FluidType::Water,
             )],
             custom: vec![],
+            humidity: vec![],
         }
     }
 

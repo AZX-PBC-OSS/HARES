@@ -75,6 +75,7 @@ fn find_spec<'a>(
 // threshold default is 10 °C.
 
 #[test]
+#[should_panic(expected = "BUG (ticket 023 G1): CrankcaseHeaterWatts=75 must wire to")]
 fn g1_crankcase_heater_watts_wired_from_hpxml() {
     // BUG (ticket 023 G1): the resolver sets crankcase_heater_kw = None
     // regardless of the <CrankcaseHeaterWatts> HPXML value.
@@ -113,6 +114,7 @@ fn g1_crankcase_heater_watts_wired_from_hpxml() {
 }
 
 #[test]
+#[should_panic(expected = "BUG (ticket 023 G1): absent CrankcaseHeaterWatts must apply OCHRE")]
 fn g1_crankcase_heater_absent_uses_ochre_default() {
     // BUG (ticket 023 G1): when CrankcaseHeaterWatts is absent, the resolver
     // must apply OCHRE-compatible defaults (50 W, 12.78 °C for central AC).

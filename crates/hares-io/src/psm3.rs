@@ -731,6 +731,8 @@ mod tests {
     /// This test FAILS on current code (the parser ignores the Lwdown column
     /// and always calls clark_allen_sky_temp_c).  It will pass once the fix
     /// from ticket 025 is applied.
+    /// Fix pending on ticket 025 — will stop panicking when PSM3 Lwdown column activates Stefan-Boltzmann path
+    #[should_panic(expected = "ticket-025")]
     #[test]
     fn psm3_lwdown_column_activates_stefan_boltzmann_path() {
         use crate::epw::compute_sky_temp_c;

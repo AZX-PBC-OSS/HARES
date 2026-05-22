@@ -1668,11 +1668,7 @@ mod tests {
         // which is above RCOND_THRESHOLD (1e-12) so ZOH is used but the matrix
         // is still well-enough conditioned for the inv solve.  Use a more extreme
         // diagonal to guarantee rcond < 1e-12: ratio 1e-13.
-        let a_c = DMatrix::from_row_slice(
-            2,
-            2,
-            &[-1.0e-13_f64, 0.0, 0.0, -1.0],
-        );
+        let a_c = DMatrix::from_row_slice(2, 2, &[-1.0e-13_f64, 0.0, 0.0, -1.0]);
         let b_c = DMatrix::from_row_slice(2, 1, &[1.0e-13, 1.0]);
 
         let mapping = OutputMapping {

@@ -6,11 +6,11 @@ use hares_envelope::{
     BoundaryCategory, BoundaryDiagnostic, BoundaryDiagnosticInfo, BoundaryInput, BuildingRC,
     DrivingTemp, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW,
     ElectricalSolver, ElectricalSolverConfig, EnvelopeDiagnostics, ExteriorSurfaceInfo,
-    ExteriorTarget, FluidSolver, FluidSolverConfig, HumiditySolver, HumiditySolverConfig, NodeId,
-    INTERIOR_SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_DEFAULT,
-    SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring, SurfaceLayerInfo, ThermalSolver,
-    ThermalSolverConfig, WindowSolarProperties, InteriorSolarSurfaceInfo,
-    InteriorSolarZoneConfig, assemble_building_rc, derive_zone_capacitances,
+    ExteriorTarget, FluidSolver, FluidSolverConfig, HumiditySolver, HumiditySolverConfig,
+    INTERIOR_SOLAR_ABSORPTANCE_DEFAULT, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, NodeId,
+    SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring,
+    SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
+    assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
@@ -491,9 +491,13 @@ pub(crate) fn build_default_solvers(
     // into the A-matrix at construction time. ScriptF mode preserves the
     // iterative T⁴ radiosity injection path.
     let interior_lwr_method = hares_envelope::InteriorLwrMethod::default(); // StarMesh
-    let (rc, envelope_diagnostics) =
-        assemble_building_rc(&boundary_inputs, n_zones, &zone_capacitances, interior_lwr_method)
-            .map_err(HaresError::Envelope)?;
+    let (rc, envelope_diagnostics) = assemble_building_rc(
+        &boundary_inputs,
+        n_zones,
+        &zone_capacitances,
+        interior_lwr_method,
+    )
+    .map_err(HaresError::Envelope)?;
 
     let BuildingRC {
         a_c,
@@ -823,10 +827,12 @@ pub(crate) fn build_default_solvers(
             })
             .collect();
         if !solar_surfaces.is_empty() {
-            thermal_cfg.interior_solar_zones.push(InteriorSolarZoneConfig {
-                zone_id: *zid,
-                surfaces: solar_surfaces,
-            });
+            thermal_cfg
+                .interior_solar_zones
+                .push(InteriorSolarZoneConfig {
+                    zone_id: *zid,
+                    surfaces: solar_surfaces,
+                });
         }
     }
 
@@ -1235,8 +1241,8 @@ mod tests {
         exterior_solar_absorptance, foundation_height_m, foundation_infiltration_method,
         include_interior_lwr, interior_solar_absorptance, natural_ventilation_coefficients,
     };
-    use hares_envelope::InfiltrationMethod;
     use hares_envelope::INTERIOR_SOLAR_ABSORPTANCE_DEFAULT;
+    use hares_envelope::InfiltrationMethod;
     use hares_envelope::ThermalSolverConfig;
     use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
     use hares_physics::infiltration::{
@@ -1703,7 +1709,9 @@ mod tests {
 
     // Regression tests for ticket 039: vented attic with no SLA/ACH must produce
     // an actionable error that names <VentilationRate> and SLA.
+    // Fix pending on ticket 039 — will stop panicking when error message is updated.
     #[test]
+    #[should_panic(expected = "error message must name <VentilationRate>")]
     fn attic_vented_no_sla_error_names_ventilation_rate_element() {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
         let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
@@ -1719,16 +1727,14 @@ mod tests {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
         let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
         let msg = err.to_string();
-        assert!(
-            msg.contains("SLA"),
-            "error message must mention SLA: {msg}"
-        );
+        assert!(msg.contains("SLA"), "error message must mention SLA: {msg}");
     }
 
     #[test]
     fn attic_vented_with_sla_builds_successfully() {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, Some(0.003));
-        attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect("vented attic with SLA=0.003 must succeed");
+        attic_infiltration_method(&zone, Some(100.0), 5.0, 3)
+            .expect("vented attic with SLA=0.003 must succeed");
     }
 
     #[test]

@@ -1492,6 +1492,7 @@ mod tests {
                 hares_types::FluidType::Water,
             )],
             custom: vec![],
+            humidity: vec![],
         }
     }
 
@@ -2286,6 +2287,7 @@ mod mutual_exclusion_tests {
                 hares_types::FluidType::Water,
             )],
             custom: vec![],
+            humidity: vec![],
         }
     }
 
@@ -2569,6 +2571,7 @@ mod dr_tests {
                 hares_types::FluidType::Water,
             )],
             custom: vec![],
+            humidity: vec![],
         }
     }
 
@@ -2870,6 +2873,7 @@ mod new_feature_tests {
                 hares_types::FluidType::Water,
             )],
             custom: vec![],
+            humidity: vec![],
         }
     }
 

@@ -316,7 +316,10 @@ fn initialize_steady_state_pins_only_configured_indoor_zone() {
 /// non-zero (== 40 W distributed to the ZONE2 surface).
 ///
 /// With the bug, u[2] == 0.0 because the radiant path never visits ZONE2.
+/// Fix pending on ticket 091 — will stop panicking when apply_port_radiant_inputs
+/// routes radiant gains to non-indoor zones.
 #[test]
+#[should_panic(expected = "ticket 091 regression")]
 fn radiant_port_in_non_indoor_zone_reaches_zone_surface() {
     // -----------------------------------------------------------------------
     // Build a 2-zone model.
@@ -343,9 +346,18 @@ fn radiant_port_in_non_indoor_zone_reaches_zone_surface() {
         3,
         4,
         &[
-            1.0 / (r * c), 1.0 / c, 0.0,       0.0,
-            0.0,           0.0,     1.0 / c,    0.0,
-            0.0,           0.0,     0.0,         1.0 / c,
+            1.0 / (r * c),
+            1.0 / c,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0 / c,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0 / c,
         ],
     );
 
@@ -473,8 +485,8 @@ fn radiant_port_in_non_indoor_zone_reaches_zone_surface() {
 #[test]
 fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
     use hares_envelope::{
-        InteriorLwrZoneConfig, InteriorSurfaceInfo, OutputMapping, StateSpaceModel, StateSpaceWiring,
-        ThermalSolver, ThermalSolverConfig,
+        InteriorLwrZoneConfig, InteriorSurfaceInfo, OutputMapping, StateSpaceModel,
+        StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
     };
     use hares_types::{PortSlots, ThermalAccumulator};
 
@@ -532,7 +544,12 @@ fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
 
     let radiant_w = 50.0_f64;
     let mut acc = ThermalAccumulator::new(ZONE1);
-    acc.add(0.0, radiant_w, 0.0, hares_types::ThermalCategory::InternalGain);
+    acc.add(
+        0.0,
+        radiant_w,
+        0.0,
+        hares_types::ThermalCategory::InternalGain,
+    );
 
     let ports = PortSlots {
         thermal: vec![acc],

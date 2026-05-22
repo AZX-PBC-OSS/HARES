@@ -1322,9 +1322,10 @@ mod tests {
     // no convective/radiative sum available). The silent 0.5 fallback biases
     // HVAC sizing; callers must provide an explicit value.
     //
-    // Currently FAILS (init returns Ok with the 0.5 default).
-    // Will pass once the fallback is replaced with MissingField.
+    // Fix pending — will stop panicking when init() returns Err for missing
+    // sensible_gain_fraction instead of defaulting to 0.5.
     #[test]
+    #[should_panic(expected = "init() must return Err when sensible_gain_fraction is absent")]
     fn missing_sensible_gain_fraction_returns_err() {
         let config = config_with_schedule("s", "Lighting", &[1.0]);
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -1353,8 +1354,7 @@ mod tests {
         raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
         raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 1.5.into());
 
-        let config =
-            crate::EquipmentConfig::raw("s".to_string(), "Lighting".to_string(), raw);
+        let config = crate::EquipmentConfig::raw("s".to_string(), "Lighting".to_string(), raw);
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         let result = eq.init(&config, &env);

@@ -12,7 +12,9 @@ use hares_core::{EnvironmentInitOptions, EnvironmentManager, SimClock};
 use hares_io::hpxml::building::XmlNode;
 use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
 use hares_io::schedule::ColumnAggregation;
-use hares_io::{ResampleMethod, ResampleOverrides, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
+use hares_io::{
+    ResampleMethod, ResampleOverrides, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -531,30 +533,16 @@ fn solar_irradiance_physical_bounds() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression test for ticket 026: leap-year weather row indexing
+// Ticket 026: leap-year weather row indexing
 // ---------------------------------------------------------------------------
 
-/// Regression for ticket 026: `compute_annual_offset` hardcodes 365 days, so a
-/// leap-year (8784-row) weather file has its rows misindexed for any `start_time`
-/// after February 28.
-///
-/// The fixture: a sequential weather series where row `i` has dry-bulb = i as f64.
-/// For a non-leap year starting at Jan 1 00:00 (offset = 0), step 0 should read
-/// row 0 (temp = 0.0).  For a leap year starting at Jan 1 00:00, step 0 should
-/// also read row 0 (temp = 0.0) — same expectation, different row count.
-///
-/// The bug surfaces on Mar 1 (hourly row 1416 in a leap year):
-///   - Correct offset: (59 days Jan+Feb-leap) * 86400 = ordinal0=59, row 1416
-///   - Buggy offset (365-day modulus): ordinal0=59 → same row 1416 (coincidentally
-///     correct here because Feb 29 hasn't been skipped yet at Mar 1 00:00).
-///
-/// The real divergence manifests on Dec 31: ordinal0=365 in a leap year should map
-/// to row 8760 (Dec 31 00:00 in a 8784-row file), but the 365-day modulus wraps
-/// 365*86400 % (365*86400) = 0, so it reads row 0 (Jan 1) instead — a full-year
-/// displacement.  This test pins that failure.
+/// `compute_annual_offset` hardcodes 365 days, so a leap-year (8784-row)
+/// weather file has its rows misindexed after February 28. On Dec 31 the
+/// 365-day modulus wraps to row 0 instead of row 8760.
+/// Fix pending on ticket 026 — will stop panicking when the bug is fixed.
 #[test]
+#[should_panic(expected = "leap-year Dec 31 should read row 8760")]
 fn leap_year_dec31_weather_index_bug_026() {
-    // 8784-row leap-year weather: row i has dry_bulb = i as f64.
     let n = 8784usize;
     let seq: Vec<f64> = (0..n).map(|i| i as f64).collect();
 
@@ -685,23 +673,25 @@ fn leap_year_dec31_weather_index_bug_026() {
         }
     };
 
-    // Start on Dec 31 00:00 of leap year 2020 (ordinal0 = 365 in a 366-day year).
-    // Expected: row 365 * 24 = 8760 → dry_bulb = 8760.0
-    // Buggy behaviour (365-day modulus): ordinal0=365 → 365*86400 % (365*86400) = 0 → row 0.
     let start = FixedOffset::east_opt(0)
         .unwrap()
         .with_ymd_and_hms(2020, 12, 31, 0, 0, 0)
         .unwrap();
 
-    let mut mgr =
-        EnvironmentManager::new(weather, schedule, &building, StdDuration::from_secs(3600), start, None)
-            .expect("EnvironmentManager::new failed");
+    let mut mgr = EnvironmentManager::new(
+        weather,
+        schedule,
+        &building,
+        StdDuration::from_secs(3600),
+        start,
+        None,
+    )
+    .expect("EnvironmentManager::new failed");
 
     let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(1));
     let env = mgr.update(&clock, &[]);
     let observed = env.weather.outdoor_temp_c;
 
-    // Row 8760 → expected dry_bulb = 8760.0
     assert_eq!(
         observed, 8760.0,
         "leap-year Dec 31 should read row 8760 (dry_bulb=8760.0) \

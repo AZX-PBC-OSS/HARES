@@ -500,7 +500,10 @@ fn zero_resets_latent_by_category() {
 
     acc.zero();
 
-    assert_eq!(acc.latent_gain_w, 0.0, "latent_gain_w must be zero after zero()");
+    assert_eq!(
+        acc.latent_gain_w, 0.0,
+        "latent_gain_w must be zero after zero()"
+    );
 
     let categories = [
         ThermalCategory::HvacHeating,

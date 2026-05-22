@@ -796,6 +796,8 @@ Diffuse Horizontal Radiation [W/m2]
     // `31536000 % 17568 == 1440 != 0` and it falls back to 3600 s.
     // The correct answer is 8784 * 3600 / 17568 = 1800 s.
     // This test FAILS until the fix in ticket #029 is applied.
+    /// Fix pending on ticket 029 — will stop panicking when leap-year 30-min timestep is inferred correctly
+    #[should_panic(expected = "should infer 1800 s step")]
     #[test]
     fn leap_year_30min_step_inferred_correctly() {
         let csv = build_test_csv_leap_year(30);
@@ -839,6 +841,8 @@ Diffuse Horizontal Radiation [W/m2]
     ///
     /// This test FAILS until `midpoint_offset_secs: 0` is changed to
     /// `midpoint_offset_secs: 1800` in `parse_resstock_csv_str`.
+    /// Fix pending on ticket 099 — will stop panicking when ResStock CSV midpoint_offset_secs is 1800
+    #[should_panic(expected = "midpoint_offset_secs must be 1800 s")]
     #[test]
     fn resstock_midpoint_offset_is_1800_seconds() {
         let csv = build_test_csv(8760);

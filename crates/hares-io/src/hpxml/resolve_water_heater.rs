@@ -1176,16 +1176,15 @@ mod tests {
         // BUG (ticket 121): HPXML v4 "space-heating boiler with storage tank" is a
         // valid WaterHeaterType but canonical_water_heater_name() returns
         // HpxmlError::Parse instead of handling it.
-        let err = canonical_water_heater_name(
-            "space-heating boiler with storage tank",
-            FuelType::Gas,
-        )
-        .expect_err(
-            "BUG (ticket 121): combi boiler type must currently produce an error \
+        let err =
+            canonical_water_heater_name("space-heating boiler with storage tank", FuelType::Gas)
+                .expect_err(
+                    "BUG (ticket 121): combi boiler type must currently produce an error \
              (not silently accepted with wrong behaviour)",
-        );
+                );
         assert!(
-            err.to_string().contains("unsupported HPXML water heater type"),
+            err.to_string()
+                .contains("unsupported HPXML water heater type"),
             "error should be a parse error naming the unsupported type, got: {err}"
         );
     }
@@ -1194,15 +1193,14 @@ mod tests {
     fn combi_boiler_with_tankless_coil_type_currently_rejects_with_parse_error() {
         // BUG (ticket 121): companion type — "space-heating boiler with tankless coil"
         // is also a valid HPXML v4 WaterHeaterType and is equally unhandled.
-        let err = canonical_water_heater_name(
-            "space-heating boiler with tankless coil",
-            FuelType::Gas,
-        )
-        .expect_err(
-            "BUG (ticket 121): combi tankless-coil type must currently produce an error",
-        );
+        let err =
+            canonical_water_heater_name("space-heating boiler with tankless coil", FuelType::Gas)
+                .expect_err(
+                    "BUG (ticket 121): combi tankless-coil type must currently produce an error",
+                );
         assert!(
-            err.to_string().contains("unsupported HPXML water heater type"),
+            err.to_string()
+                .contains("unsupported HPXML water heater type"),
             "error should be a parse error naming the unsupported type, got: {err}"
         );
     }
@@ -1251,7 +1249,8 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("unsupported HPXML water heater type"),
+            err.to_string()
+                .contains("unsupported HPXML water heater type"),
             "the error should clearly identify the unsupported type, got: {err}"
         );
     }

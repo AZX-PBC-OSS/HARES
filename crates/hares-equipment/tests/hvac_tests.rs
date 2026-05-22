@@ -9,8 +9,8 @@ use hares_equipment::{
 };
 use hares_types::{
     ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
-    GridState, LoopId, OperatingMode, PortSlots, ScheduleSourceConfig, ThermalAccumulator,
-    WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+    GridState, HumidityAccumulator, LoopId, OperatingMode, PortSlots, ScheduleSourceConfig,
+    ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
 };
 
 // ---------------------------------------------------------------------------
@@ -167,6 +167,7 @@ fn electric_boiler_config(name: &str) -> EquipmentConfig {
 fn ports_for_zone1() -> PortSlots {
     PortSlots {
         thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+        humidity: vec![HumidityAccumulator::new(ZoneId(1))],
         ..PortSlots::default()
     }
 }
@@ -488,6 +489,7 @@ fn hvac_port_contributions_are_correct_sign() {
 
     let mut cool_ports = PortSlots {
         thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+        humidity: vec![HumidityAccumulator::new(ZoneId(1))],
         ..PortSlots::default()
     };
     cooler.update_control(&cool_env);
@@ -1736,7 +1738,11 @@ fn fsm_both_paths_respect_min_cycle_time_lockout() {
     eq_hpx.init(&cfg_hpx, &env_cold).unwrap();
     // First tick: enter heating.
     let mode1_hpx = eq_hpx.update_control(&env_cold);
-    assert_eq!(mode1_hpx, OperatingMode::Heating, "precondition: furnace must enter Heating");
+    assert_eq!(
+        mode1_hpx,
+        OperatingMode::Heating,
+        "precondition: furnace must enter Heating"
+    );
 
     // Same simulation timestamp, but zone is now warm — min_cycle_time = 0.0 by default,
     // so without a min_cycle_time configured the mode switches freely.
@@ -1756,7 +1762,11 @@ fn fsm_both_paths_respect_min_cycle_time_lockout() {
     let mut eq_ideal = registry.create("Ideal HVAC", cfg_ideal.clone()).unwrap();
     eq_ideal.init(&cfg_ideal, &env_cold).unwrap();
     let mode1_ideal = eq_ideal.update_control(&env_cold);
-    assert_eq!(mode1_ideal, OperatingMode::Heating, "precondition: IdealHvac must enter Heating");
+    assert_eq!(
+        mode1_ideal,
+        OperatingMode::Heating,
+        "precondition: IdealHvac must enter Heating"
+    );
 
     let mode2_ideal = eq_ideal.update_control(&env_warm);
     assert_eq!(
@@ -2840,12 +2850,12 @@ fn ticket_019_single_speed_duty_cycle_equals_part_load_ratio() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let t = eq.telemetry();
-    let plr = t.get("part_load_ratio").expect(
-        "ticket-019: 'part_load_ratio' must be in telemetry"
-    );
-    let dc = t.get("duty_cycle").expect(
-        "ticket-019: 'duty_cycle' must be in telemetry"
-    );
+    let plr = t
+        .get("part_load_ratio")
+        .expect("ticket-019: 'part_load_ratio' must be in telemetry");
+    let dc = t
+        .get("duty_cycle")
+        .expect("ticket-019: 'duty_cycle' must be in telemetry");
     assert!(
         (plr - dc).abs() < 1e-9,
         "ticket-019: single-speed duty_cycle ({dc:.6}) must equal part_load_ratio ({plr:.6})"
@@ -2922,18 +2932,18 @@ fn ticket_020_schedule_setpoint_keys_absent_from_telemetry() {
 
     // schedule-stage heating setpoint must equal the static setpoint (21°C) when
     // no schedule source is present (schedule-stage = static).
-    let sched_heat = t
-        .get("schedule_heating_setpoint_c")
-        .expect("ticket-020: 'schedule_heating_setpoint_c' must be written to telemetry after step");
+    let sched_heat = t.get("schedule_heating_setpoint_c").expect(
+        "ticket-020: 'schedule_heating_setpoint_c' must be written to telemetry after step",
+    );
     assert!(
         (sched_heat - 21.0).abs() < 1e-9,
         "ticket-020: schedule_heating_setpoint_c must be 21.0 (static), got {sched_heat:.4}"
     );
 
     // schedule-stage cooling setpoint must equal the static setpoint (26°C).
-    let sched_cool = t
-        .get("schedule_cooling_setpoint_c")
-        .expect("ticket-020: 'schedule_cooling_setpoint_c' must be written to telemetry after step");
+    let sched_cool = t.get("schedule_cooling_setpoint_c").expect(
+        "ticket-020: 'schedule_cooling_setpoint_c' must be written to telemetry after step",
+    );
     assert!(
         (sched_cool - 26.0).abs() < 1e-9,
         "ticket-020: schedule_cooling_setpoint_c must be 26.0 (static), got {sched_cool:.4}"
@@ -3378,7 +3388,9 @@ fn ticket_075_ac_electrical_halved_thermal_unscaled_at_half_sf() {
     let env = env_with_zone_temp_hot(30.0);
 
     let cfg_full = make_ac_cfg(1.0);
-    let mut eq_full = registry.create("Air Conditioner", cfg_full.clone()).unwrap();
+    let mut eq_full = registry
+        .create("Air Conditioner", cfg_full.clone())
+        .unwrap();
     eq_full.init(&cfg_full, &env).unwrap();
     eq_full.update_control(&env);
     let mut ports_full = ports_for_zone1();
@@ -3387,7 +3399,9 @@ fn ticket_075_ac_electrical_halved_thermal_unscaled_at_half_sf() {
         .unwrap();
 
     let cfg_half = make_ac_cfg(0.5);
-    let mut eq_half = registry.create("Air Conditioner", cfg_half.clone()).unwrap();
+    let mut eq_half = registry
+        .create("Air Conditioner", cfg_half.clone())
+        .unwrap();
     eq_half.init(&cfg_half, &env).unwrap();
     eq_half.update_control(&env);
     let mut ports_half = ports_for_zone1();

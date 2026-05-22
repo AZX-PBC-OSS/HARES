@@ -851,19 +851,19 @@ impl Equipment for Ev {
         use hares_types::ensure_signal_supported;
         ensure_signal_supported(self.descriptor().control_capabilities, signal)?;
         match signal {
-            hares_types::ControlSignal::EvDrive { .. } => {
-                if self.connection_state != hares_types::EvConnectionState::Disconnected {
-                    return Err(hares_types::HaresError::Control(
-                        "EvDrive rejected: EV must be Disconnected to drive".to_string(),
-                    ));
-                }
+            hares_types::ControlSignal::EvDrive { .. }
+                if self.connection_state != hares_types::EvConnectionState::Disconnected =>
+            {
+                return Err(hares_types::HaresError::Control(
+                    "EvDrive rejected: EV must be Disconnected to drive".to_string(),
+                ));
             }
-            hares_types::ControlSignal::EvAwayCharge { .. } => {
-                if self.connection_state != hares_types::EvConnectionState::AwayPluggedIn {
-                    return Err(hares_types::HaresError::Control(
-                        "EvAwayCharge rejected: EV must be AwayPluggedIn".to_string(),
-                    ));
-                }
+            hares_types::ControlSignal::EvAwayCharge { .. }
+                if self.connection_state != hares_types::EvConnectionState::AwayPluggedIn =>
+            {
+                return Err(hares_types::HaresError::Control(
+                    "EvAwayCharge rejected: EV must be AwayPluggedIn".to_string(),
+                ));
             }
             _ => {}
         }

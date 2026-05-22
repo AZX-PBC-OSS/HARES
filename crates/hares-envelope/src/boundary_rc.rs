@@ -468,7 +468,8 @@ pub fn assemble_building_rc(
         // Precomputed RC path (OCHRE LUT) takes priority over raw material layers.
         if !bd.precomputed_rc.is_empty() {
             let nodes_before = graph.next_layer_id;
-            let surface_opt = graph.build_precomputed_boundary(&bd.precomputed_rc, &bp)
+            let surface_opt = graph
+                .build_precomputed_boundary(&bd.precomputed_rc, &bp)
                 .map(|(inner, outer, surf)| {
                     layer_info.insert(
                         bd_idx,
@@ -696,13 +697,11 @@ pub fn assemble_building_rc(
                 // ensuring total interior coupling = h_si exactly. Using ε = 0.9
                 // for the star-mesh would over-couple by
                 // h_rad(0.9) − h_rad(0.84) ≈ 0.34 W/(m²·K).
-                const GLASS_THERMAL_EMISSIVITY: f64 =
-                    crate::longwave_radiation::EMISSIVITY_WINDOW;
+                const GLASS_THERMAL_EMISSIVITY: f64 = crate::longwave_radiation::EMISSIVITY_WINDOW;
 
                 let a = bd.area_m2;
                 let h_si = 1.0 / bd.r_film_interior_m2_k_w;
-                let h_rad_glass =
-                    4.0 * GLASS_THERMAL_EMISSIVITY * SIGMA * T_REF_K.powi(3);
+                let h_rad_glass = 4.0 * GLASS_THERMAL_EMISSIVITY * SIGMA * T_REF_K.powi(3);
 
                 if h_si > h_rad_glass {
                     // Film includes h_rad (window case): decompose into conv + rad.
@@ -728,8 +727,7 @@ pub fn assemble_building_rc(
                     // window_node ↔ outdoor via glass + exterior film.
                     // For windows: r_film_ext is 0 (already in r_glass from
                     // U-factor decomposition), so this is just r_glass / A.
-                    let r_glass_ext_abs =
-                        (bd.fallback_r_m2_k_w + bd.r_film_exterior_m2_k_w) / a;
+                    let r_glass_ext_abs = (bd.fallback_r_m2_k_w + bd.r_film_exterior_m2_k_w) / a;
                     graph.add_resistance(window_node, exterior_node, r_glass_ext_abs.max(1e-6));
 
                     // Store for star-mesh section (window_node ↔ star_node edge).
@@ -753,8 +751,7 @@ pub fn assemble_building_rc(
                     graph.add_resistance(interior_node, surface_node, r_conv_abs.max(1e-6));
 
                     // surface_node ↔ outdoor via assembly + exterior film.
-                    let r_rest_abs =
-                        (bd.fallback_r_m2_k_w + bd.r_film_exterior_m2_k_w) / a;
+                    let r_rest_abs = (bd.fallback_r_m2_k_w + bd.r_film_exterior_m2_k_w) / a;
                     graph.add_resistance(surface_node, exterior_node, r_rest_abs.max(1e-6));
 
                     // Store for star-mesh section (surface_node ↔ star_node edge).
@@ -1311,8 +1308,8 @@ impl RcGraphState {
             res_abs[0] += params.r_film_exterior / params.boundary_area;
         }
         let r_film_int_abs = params.r_film_interior / params.boundary_area;
-        let fold_film_into_last = params.same_zone
-            || params.interior_lwr_method != InteriorLwrMethod::StarMesh;
+        let fold_film_into_last =
+            params.same_zone || params.interior_lwr_method != InteriorLwrMethod::StarMesh;
         if fold_film_into_last && !res_abs.is_empty() {
             let last = res_abs.len() - 1;
             res_abs[last] += r_film_int_abs;
@@ -1342,20 +1339,14 @@ impl RcGraphState {
         }
         let last_r_idx = n_caps - 1 + res_offset;
         if last_r_idx < res_abs.len() {
-            if !params.same_zone
-                && params.interior_lwr_method == InteriorLwrMethod::StarMesh
-            {
+            if !params.same_zone && params.interior_lwr_method == InteriorLwrMethod::StarMesh {
                 // StarMesh: split the last resistor into R_inner_half and R_film_conv
                 // with a floating surface_node between them. The surface_node
                 // participates in the star-mesh radiation network.
                 // inner_node ← R_inner_half → surface_node ← R_film_conv → zone_air
                 let r_inner_half_abs = res_abs[last_r_idx];
                 let s_node = self.alloc_node_no_cap();
-                self.add_resistance(
-                    layer_nodes[n_caps - 1],
-                    s_node,
-                    r_inner_half_abs.max(1e-6),
-                );
+                self.add_resistance(layer_nodes[n_caps - 1], s_node, r_inner_half_abs.max(1e-6));
                 self.add_resistance(s_node, params.interior_node, r_film_int_abs.max(1e-6));
                 surface_node = Some(s_node);
             } else {
@@ -1486,8 +1477,7 @@ mod tests {
         let p_pa = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
         let caps = derive_zone_capacitances(&zones, p_pa);
         let rho = p_pa / (hares_physics::constants::DRY_AIR_GAS_CONSTANT_J_KG_K * 293.15);
-        let expected =
-            rho * AIR_CP_J_KG_K * DEFAULT_VOLUME_M3 * INTERIOR_MASS_MULTIPLIER;
+        let expected = rho * AIR_CP_J_KG_K * DEFAULT_VOLUME_M3 * INTERIOR_MASS_MULTIPLIER;
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 
@@ -1499,7 +1489,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         assert!((caps[0] - MIN_CAPACITANCE_J_K).abs() < 1e-6);
     }
 
@@ -1601,9 +1592,11 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
-        let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         assert_eq!(rc.a_c.nrows(), 1);
         assert_eq!(rc.a_c.ncols(), 1);
@@ -1628,13 +1621,15 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![
             make_layer(0.1, 0.5, 1000.0, 800.0, 50.0),
             make_layer(0.05, 1.0, 2000.0, 900.0, 50.0),
         ];
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
-        let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         // Diurnal penetration depth Λ = √(α·86400/(4π)).
         // layer0 (100mm, k=0.5, ρ=1000, cp=800): α=6.25e-7 → Λ≈0.066 m → ceil(0.10/0.066)=2 nodes.
@@ -1672,12 +1667,14 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let boundaries = vec![
             make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5),
             make_boundary(30.0, 1, ExteriorTarget::Ground, vec![], 3.0),
         ];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         assert_eq!(rc.zone_state_rows.len(), 2);
         assert_eq!(rc.n_ext, 2); // outdoor + ground
@@ -1693,10 +1690,12 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Only a slab boundary connecting zone 0 to ground.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Ground, vec![], 2.5)];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         // Ground is the only external node; outdoor_col should be None.
         assert_eq!(rc.outdoor_col, None);
@@ -1712,10 +1711,12 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Same-zone boundary with no material layers -- no thermal mass to model.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), vec![], 2.5)];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         // Only the zone air node; pure-resistance self-loop is skipped.
         assert_eq!(rc.a_c.nrows(), 1);
     }
@@ -1729,7 +1730,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![
             make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
             make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
@@ -1743,7 +1745,8 @@ mod tests {
         //   layer3 same as layer1 → 2 nodes
         // Total sub-layers = 6, halved to 3 internal mass nodes + 1 zone air = 4 states.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         assert_eq!(rc.a_c.nrows(), 4);
     }
 
@@ -1756,7 +1759,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Use low-density materials (density=50 < SPLIT_MIN_DENSITY=100) to avoid auto-splitting,
         // so we can test the same-zone halving logic directly.
         // layers are exterior→interior: [thin, thick-middle, thin]
@@ -1770,7 +1774,8 @@ mod tests {
         ];
         // 3 layers (no splitting) → keep last 2 (n/2+1), with middle cap halved.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         assert_eq!(rc.a_c.nrows(), 3);
 
         // Verify middle layer (first kept, NodeId 1000) has halved capacitance.
@@ -1789,13 +1794,15 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Use low-density material (density=50 < SPLIT_MIN_DENSITY=100) to avoid auto-splitting.
         // density=50, cp=900, thickness=0.10, area=50 → full cap = 225 J/K
         let layers = vec![make_layer(0.10, 1.0, 50.0, 900.0, 0.0)];
         // 1 layer (no splitting) → keep 1 (n/2+1=1), with halved capacitance.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         assert_eq!(rc.a_c.nrows(), 2);
 
         // Verify layer node (NodeId 1000) has halved capacitance.
@@ -1816,7 +1823,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
 
         // 20 boundaries, each with 3 layers. Diurnal-criterion splitting:
         //   layer0 (0.05m, k=0.5, ρ=1000, cp=800): Λ≈0.066 m → ceil(0.05/0.066)=1
@@ -1832,7 +1840,8 @@ mod tests {
             .map(|_| make_boundary(10.0, 0, ExteriorTarget::Outdoor, layers.clone(), 2.5))
             .collect();
 
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         // 1 zone + 80 layer nodes = 81 internal nodes.
         assert_eq!(rc.a_c.nrows(), 81);
         // All node IDs should be distinct from OUTDOOR_NODE_ID and GROUND_NODE_ID.
@@ -1858,10 +1867,12 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Only zone 0 has a boundary; zone 1 is disconnected.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         assert_eq!(rc.zone_state_rows.len(), 2);
         // Both zones should appear in the network (zone 1 via fallback).
@@ -1878,7 +1889,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let (rc, _diag) = assemble_building_rc(&[], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         assert_eq!(rc.a_c.nrows(), 1);
@@ -1901,10 +1913,12 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Zone 0 ↔ Zone 1 internal boundary (no outdoor/ground).
         let boundaries = vec![make_boundary(30.0, 0, ExteriorTarget::Zone(1), vec![], 2.5)];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         // Should still succeed (zones get fallback to outdoor since
         // !outdoor_connected && !ground_connected triggers UA fallback).
@@ -1928,13 +1942,15 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![make_layer(0.1, 0.5, 1000.0, 800.0, 0.0)];
         let boundaries = vec![
             make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers.clone(), 2.5),
             make_boundary(40.0, 1, ExteriorTarget::Outdoor, layers, 2.5),
         ];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         assert_eq!(rc.layer_info[&0].interior_zone_idx, 0);
         assert_eq!(rc.layer_info[&1].interior_zone_idx, 1);
@@ -1949,10 +1965,12 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![make_layer(0.1, 0.5, 1000.0, 800.0, 50.0)];
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         for i in 0..rc.a_c.nrows() {
             assert!(
@@ -1972,10 +1990,12 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let boundaries = vec![make_boundary(0.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
         // Zone gets fallback; zero-area boundary is ignored.
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         assert_eq!(rc.a_c.nrows(), 1);
     }
 
@@ -2009,7 +2029,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let precomputed = vec![PrecomputedRCLayer {
             resistance_m2_k_w: 2.0,
             capacitance_kj_m2_k: 50.0,
@@ -2021,7 +2042,8 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         // 1 zone air + 1 precomputed layer = 2 states.
         assert_eq!(rc.a_c.nrows(), 2);
@@ -2040,7 +2062,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let precomputed = vec![
             PrecomputedRCLayer {
                 resistance_m2_k_w: 1.0,
@@ -2062,7 +2085,8 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         // 1 zone air + 3 precomputed layers = 4 states.
         assert_eq!(rc.a_c.nrows(), 4);
@@ -2076,7 +2100,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Middle layer has zero capacitance -- should be merged out.
         let precomputed = vec![
             PrecomputedRCLayer {
@@ -2099,7 +2124,8 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         // 1 zone air + 2 remaining layers (one pruned) = 3 states.
         assert_eq!(rc.a_c.nrows(), 3);
@@ -2112,7 +2138,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // 4 layers, outdoor exterior → not same-zone, all layers kept.
         let precomputed = vec![
             PrecomputedRCLayer {
@@ -2139,7 +2166,8 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         // 1 zone + 4 layers = 5 states.
         assert_eq!(rc.a_c.nrows(), 5);
     }
@@ -2158,7 +2186,8 @@ mod tests {
                 mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Zone 0 ↔ Zone 1: different zones, so same_zone=false, all layers kept.
         let precomputed = vec![
             PrecomputedRCLayer {
@@ -2185,7 +2214,8 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
         // 2 zones + 4 layers = 6 states.
         assert_eq!(rc.a_c.nrows(), 6);
     }
@@ -2197,7 +2227,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // All layers have zero capacitance → no layer nodes, just a single resistance.
         let precomputed = vec![
             PrecomputedRCLayer {
@@ -2216,7 +2247,8 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         // No layer nodes created; just zone air node.
         assert_eq!(rc.a_c.nrows(), 1);
@@ -2230,7 +2262,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Boundary has both material layers AND precomputed -- precomputed wins.
         let precomputed = vec![PrecomputedRCLayer {
             resistance_m2_k_w: 2.0,
@@ -2252,7 +2285,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
         };
-        let (rc, _diag) = assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         // 1 zone + 1 precomputed layer (not 2 raw layers).
         assert_eq!(rc.a_c.nrows(), 2);
@@ -2287,11 +2321,14 @@ mod tests {
         // Effective R reduced by ~39%
         let layer = make_layer(0.089, 0.04, 50.0, 840.0, 10.0);
         let caps = vec![
-            derive_zone_capacitances(&[ZoneInput {
-                floor_area_m2: Some(100.0),
-                volume_m3: Some(250.0),
-                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-            }], hares_physics::constants::SEA_LEVEL_PRESSURE_PA)[0],
+            derive_zone_capacitances(
+                &[ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+                }],
+                hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
+            )[0],
         ];
 
         // Without framing
@@ -2307,7 +2344,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
         };
-        let (rc_no_ff, _) = assemble_building_rc(&[bd_no_ff], 1, &caps, InteriorLwrMethod::ScriptF).expect("no ff");
+        let (rc_no_ff, _) =
+            assemble_building_rc(&[bd_no_ff], 1, &caps, InteriorLwrMethod::ScriptF).expect("no ff");
 
         // With 25% framing
         let bd_ff = BoundaryInput {
@@ -2322,7 +2360,8 @@ mod tests {
             framing_factor: Some(0.25),
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
         };
-        let (rc_ff, _) = assemble_building_rc(&[bd_ff], 1, &caps, InteriorLwrMethod::ScriptF).expect("with ff");
+        let (rc_ff, _) =
+            assemble_building_rc(&[bd_ff], 1, &caps, InteriorLwrMethod::ScriptF).expect("with ff");
 
         // The A matrix diagonal for the zone node should be more negative with framing
         // (higher conductance → faster heat loss → more negative diagonal).
@@ -2393,7 +2432,10 @@ mod tests {
         // density/conductivity thresholds so this function is never reached
         // for insulation in production code.
         let n = split_layer_count(0.066, 0.04, 12.0, 840.0);
-        assert_eq!(n, 1, "insulation is thin relative to Λ, should not be split");
+        assert_eq!(
+            n, 1,
+            "insulation is thin relative to Λ, should not be split"
+        );
     }
 
     #[test]
@@ -2411,7 +2453,10 @@ mod tests {
         // Λ = √(8.07e-7 × 86400 / (4π)) ≈ 0.0745 m
         // n = ceil(0.300 / 0.0745) = 5
         let n = split_layer_count(0.300, 1.13, 1400.0, 1000.0);
-        assert_eq!(n, 5, "300mm concrete should need 5 nodes (diurnal criterion)");
+        assert_eq!(
+            n, 5,
+            "300mm concrete should need 5 nodes (diurnal criterion)"
+        );
     }
 
     #[test]
@@ -2421,7 +2466,10 @@ mod tests {
         // (This was not true for the old Fourier criterion which took dt_s.)
         let n1 = split_layer_count(0.100, 0.51, 1400.0, 1000.0);
         // Same result regardless of what timestep the simulation uses.
-        assert_eq!(n1, 2, "100mm concrete always needs 2 nodes (diurnal criterion)");
+        assert_eq!(
+            n1, 2,
+            "100mm concrete always needs 2 nodes (diurnal criterion)"
+        );
     }
 
     // ── r_zone_to_inner picks correct (last) layer ──────────────────────
@@ -2439,7 +2487,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         // Exterior→interior: insulation first, concrete (interior-facing) last.
         let layers = vec![
             make_layer(1.007, 0.040, 0.0, 0.0, 48.0), // insulation (exterior)
@@ -2458,7 +2507,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
         };
-        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (_rc, diag) =
+            assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         let bd_diag = &diag.boundaries[0];
         let r_zone_to_inner = bd_diag
@@ -2480,7 +2530,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let r_film_int = 0.16_f64;
         // 120mm concrete splits into 2 sub-layers of 60mm each.
         let concrete = make_layer(0.120, 1.130, 1400.0, 1000.0, 48.0);
@@ -2501,7 +2552,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
         };
-        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (_rc, diag) =
+            assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         let bd_diag = &diag.boundaries[0];
         let r_zone_to_inner = bd_diag
             .r_zone_to_inner_m2_k_w
@@ -2522,7 +2574,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let precomputed = vec![
             PrecomputedRCLayer {
                 resistance_m2_k_w: 1.0,
@@ -2545,7 +2598,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
         };
-        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (_rc, diag) =
+            assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         let bd_diag = &diag.boundaries[0];
         let r_zone_to_inner = bd_diag
             .r_zone_to_inner_m2_k_w
@@ -2561,11 +2615,14 @@ mod tests {
 
     #[test]
     fn split_outer_layer_half_r_reflects_post_split_thickness() {
-        let caps = derive_zone_capacitances(&[ZoneInput {
-            floor_area_m2: Some(100.0),
-            volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }], hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps = derive_zone_capacitances(
+            &[ZoneInput {
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            }],
+            hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
+        );
         let concrete = make_layer(0.100, 0.51, 1400.0, 840.0, 20.0);
         assert_eq!(
             split_layer_count(0.100, 0.51, 1400.0, 840.0),
@@ -2584,7 +2641,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
         };
-        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (_rc, diag) =
+            assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         let bd_diag = &diag.boundaries[0];
         let r_outer = bd_diag
             .r_outer_half_m2_k_w
@@ -2598,11 +2656,14 @@ mod tests {
 
     #[test]
     fn split_inner_layer_half_r_reflects_post_split_thickness() {
-        let caps = derive_zone_capacitances(&[ZoneInput {
-            floor_area_m2: Some(100.0),
-            volume_m3: Some(250.0),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }], hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps = derive_zone_capacitances(
+            &[ZoneInput {
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            }],
+            hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
+        );
         let insulation = make_layer(0.089, 0.04, 12.0, 840.0, 20.0);
         let concrete_inner = make_layer(0.100, 0.51, 1400.0, 840.0, 20.0);
         assert_eq!(
@@ -2622,7 +2683,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
         };
-        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (_rc, diag) =
+            assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         let bd_diag = &diag.boundaries[0];
         let r_inner = bd_diag
             .r_inner_half_m2_k_w
@@ -2636,11 +2698,14 @@ mod tests {
 
     #[test]
     fn case_900_wall_exterior_rad_frac() {
-        let caps = derive_zone_capacitances(&[ZoneInput {
-            floor_area_m2: Some(48.0),
-            volume_m3: Some(129.6),
-            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
-        }], hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps = derive_zone_capacitances(
+            &[ZoneInput {
+                floor_area_m2: Some(48.0),
+                volume_m3: Some(129.6),
+                mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+            }],
+            hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
+        );
         let concrete = make_layer(0.100, 0.51, 1400.0, 840.0, 0.0);
         let insulation = make_layer(0.0615, 0.04, 12.0, 840.0, 0.0);
         let plasterboard = make_layer(0.012, 0.16, 950.0, 840.0, 0.0);
@@ -2657,7 +2722,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
         };
-        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        let (_rc, diag) =
+            assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         let bd_diag = &diag.boundaries[0];
         let r_outer = bd_diag
             .r_outer_half_m2_k_w
@@ -2697,7 +2763,8 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![make_layer(0.1, 0.5, 1000.0, 800.0, 0.0)];
 
         let boundaries: Vec<BoundaryInput> = areas
@@ -2714,10 +2781,11 @@ mod tests {
                 r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
                 framing_factor: None,
                 interior_emissivity: emissivity,
-             })
-             .collect();
+            })
+            .collect();
 
-        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::StarMesh).unwrap();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::StarMesh).unwrap();
 
         // Zone air node (NodeId 1) is row 0. The innermost layer nodes follow.
         // Conservation check: for each node i, the total conductance flowing out
@@ -2751,7 +2819,11 @@ mod tests {
         let mut inner_nodes: Vec<(NodeId, f64, f64)> = Vec::new(); // (NodeId, area, emissivity)
         for (&bd_idx, info) in &rc.layer_info {
             if info.interior_zone_idx == 0 {
-                inner_nodes.push((info.inner_node, boundaries[bd_idx].area_m2, boundaries[bd_idx].interior_emissivity));
+                inner_nodes.push((
+                    info.inner_node,
+                    boundaries[bd_idx].area_m2,
+                    boundaries[bd_idx].interior_emissivity,
+                ));
             }
         }
         inner_nodes.sort_by_key(|(nid, _, _)| *nid);
@@ -2777,7 +2849,10 @@ mod tests {
         // checking that the off-diagonal entries between inner nodes are
         // larger than they would be without radiation.
         let n_inner = inner_nodes.len();
-        assert!(n_inner >= 2, "need ≥2 surfaces for LWR exchange, got {n_inner}");
+        assert!(
+            n_inner >= 2,
+            "need ≥2 surfaces for LWR exchange, got {n_inner}"
+        );
 
         for i in 0..n_inner {
             for j in (i + 1)..n_inner {
@@ -2817,10 +2892,10 @@ mod tests {
 
         // (temperature °C, max expected error %)
         let cases: [(f64, f64); 4] = [
-            (12.0, 10.0),  // −8 K from ref → ~9% error
-            (22.0, 2.5),   // +2 K from ref → ~2% error
-            (32.0, 12.0),  // +12 K from ref → ~12% error
-            (42.0, 20.0),  // +22 K from ref → ~20% error
+            (12.0, 10.0), // −8 K from ref → ~9% error
+            (22.0, 2.5),  // +2 K from ref → ~2% error
+            (32.0, 12.0), // +12 K from ref → ~12% error
+            (42.0, 20.0), // +22 K from ref → ~20% error
         ];
 
         for (t_c, max_err) in cases {
@@ -2863,14 +2938,15 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let layers = vec![
             make_layer(0.1, 0.5, 1000.0, 800.0, 50.0),
             make_layer(0.05, 1.0, 2000.0, 900.0, 50.0),
         ];
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
-        let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF)
-            .unwrap();
+        let (rc, diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         // SurfaceLayerInfo.inner_node must not alias a reserved driving node.
         let info = &rc.layer_info[&0];
@@ -2907,16 +2983,27 @@ mod tests {
             volume_m3: None,
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
-        let caps = derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
         let precomputed = vec![
-            PrecomputedRCLayer { resistance_m2_k_w: 1.0, capacitance_kj_m2_k: 30.0 },
-            PrecomputedRCLayer { resistance_m2_k_w: 0.5, capacitance_kj_m2_k: 80.0 },
+            PrecomputedRCLayer {
+                resistance_m2_k_w: 1.0,
+                capacitance_kj_m2_k: 30.0,
+            },
+            PrecomputedRCLayer {
+                resistance_m2_k_w: 0.5,
+                capacitance_kj_m2_k: 80.0,
+            },
         ];
         let boundaries = vec![make_precomputed_boundary(
-            20.0, 0, ExteriorTarget::Outdoor, precomputed, 2.5,
+            20.0,
+            0,
+            ExteriorTarget::Outdoor,
+            precomputed,
+            2.5,
         )];
-        let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF)
-            .unwrap();
+        let (rc, diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         let info = &rc.layer_info[&0];
         assert_ne!(
@@ -2959,12 +3046,13 @@ mod tests {
     fn r_film_interior_constant_is_not_production_convection_only_value() {
         // Production value for a vertical conditioned-to-outdoor wall comes
         // from ASHRAE Simple interior convection: h = 3.076 W/(m²·K).
-        let h_ashrae_simple_vertical = hares_physics::film_coefficients::ashrae_simple_interior_h_conv(
-            90.0,  // vertical
-            0.0,   // t_ext_c (unused for vertical)
-            20.0,  // t_int_c (unused for vertical)
-            true,
-        );
+        let h_ashrae_simple_vertical =
+            hares_physics::film_coefficients::ashrae_simple_interior_h_conv(
+                90.0, // vertical
+                0.0,  // t_ext_c (unused for vertical)
+                20.0, // t_int_c (unused for vertical)
+                true,
+            );
         let r_production = 1.0 / h_ashrae_simple_vertical;
 
         // The constant 0.12 is a COMBINED (conv+rad) reference value, not
@@ -2985,5 +3073,4 @@ mod tests {
              see ticket 104 for context"
         );
     }
-
 }

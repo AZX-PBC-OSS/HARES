@@ -1912,8 +1912,18 @@ impl Dwelling {
         let latent_w = n_occupants * OCCUPANT_LATENT_GAIN_W;
 
         let indoor_zone = self.thermal_solver.config().indoor_zone_id;
-        if let Some(thermal) = self.ports.thermal.iter_mut().find(|t| t.zone == indoor_zone) {
-            thermal.add(sensible_w, radiant_w, latent_w, ThermalCategory::InternalGain);
+        if let Some(thermal) = self
+            .ports
+            .thermal
+            .iter_mut()
+            .find(|t| t.zone == indoor_zone)
+        {
+            thermal.add(
+                sensible_w,
+                radiant_w,
+                latent_w,
+                ThermalCategory::InternalGain,
+            );
         }
     }
 
@@ -5375,8 +5385,8 @@ occupancy = 1.0
     /// path must emit a `tracing::warn!` / error.
     #[test]
     fn ticket_109_absent_schedule_domain_silently_produces_zero_gains() {
-        let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/bestest/600.toml");
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
             .expect("build dwelling");
 

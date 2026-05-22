@@ -861,17 +861,29 @@ mod tests {
         hvac.cooling_capacities_w = vec![5_000.0, 10_000.0];
 
         // Initially empty (new() sets vec![]).
-        assert_eq!(hvac.disabled_speeds.len(), 0, "ticket-008: disabled_speeds starts empty Vec");
+        assert_eq!(
+            hvac.disabled_speeds.len(),
+            0,
+            "ticket-008: disabled_speeds starts empty Vec"
+        );
 
         // set_disabled_speeds calls Vec::resize, which heap-allocates.
         hvac.set_disabled_speeds(&[false, true]);
-        assert_eq!(hvac.disabled_speeds.len(), 2, "ticket-008: Vec::resize set length to n_speed_stages");
+        assert_eq!(
+            hvac.disabled_speeds.len(),
+            2,
+            "ticket-008: Vec::resize set length to n_speed_stages"
+        );
         assert_eq!(hvac.disabled_speeds[0], false);
         assert_eq!(hvac.disabled_speeds[1], true);
 
         // A second call re-calls Vec::resize (potential reallocation).
         hvac.set_disabled_speeds(&[false, false]);
-        assert_eq!(hvac.disabled_speeds.len(), 2, "ticket-008: second call still heap-backed Vec");
+        assert_eq!(
+            hvac.disabled_speeds.len(),
+            2,
+            "ticket-008: second call still heap-backed Vec"
+        );
     }
 
     /// Demonstrates that MAX_SPEEDS is absent from the codebase (ticket 008 must define it).

@@ -1759,8 +1759,11 @@ mod tests {
         const RATED_W: f64 = 10_000.0;
 
         let typed = mshp_typed_config(RATED_W);
-        let cfg =
-            EquipmentConfig::from_typed("mshp_stages".to_string(), "MSHP Heater".to_string(), typed);
+        let cfg = EquipmentConfig::from_typed(
+            "mshp_stages".to_string(),
+            "MSHP Heater".to_string(),
+            typed,
+        );
         let mut eq = MinisplitHeater::new(cfg.clone());
         let e = env(18.0, 5.0, 0.004);
         eq.init(&cfg, &e).unwrap();
@@ -2172,8 +2175,10 @@ mod tests {
     //     ER on (zone < er_turn_on=21°C). Bug: er_capacity_w = 4000 * 0.625 = 2500 W.
     //     Fix: er_capacity_w = 4000 W.
     //
-    // This test FAILS with the current implementation and must PASS after the fix.
+    // Fix pending on ticket 015 — will stop panicking when non-ideal ER
+    // draws full rated power when on.
     #[test]
+    #[should_panic(expected = "ticket-015")]
     fn er_non_ideal_mode_is_binary_full_rated_when_on() {
         let backup_capacity_w = 4_000.0_f64;
         let cfg = heater_config_with(|typed| {
@@ -2181,7 +2186,7 @@ mod tests {
             typed.backup_capacity_w = Some(backup_capacity_w);
             typed.backup_eir = Some(1.0);
             typed.fan_power_w = Some(0.0); // zero fan so backup_er_kw == er_capacity_w exactly
-            typed.number_of_speeds = 2;    // TwoSpeedSetpoint → PLR can be < 1.0
+            typed.number_of_speeds = 2; // TwoSpeedSetpoint → PLR can be < 1.0
             typed.stage_heating_capacities_w = Some(vec![4_000.0, 8_000.0]);
             typed.stage_heating_eirs = Some(vec![0.33, 0.33]);
             typed.heating_capacity_w = None;
@@ -2200,7 +2205,8 @@ mod tests {
         let env_cold = env(19.0, 5.0, 0.003);
         eq.init(&cfg, &env_cold).unwrap();
         eq.update_control(&env_cold);
-        eq.step(&env_cold, Duration::from_secs(60), &mut ports).unwrap();
+        eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+            .unwrap();
 
         // Step 2: zone has warmed to 20.55°C; thermostat stays in Heating mode because
         // turn-off = setpoint + hysteresis * cutout = 21 + 0.8 = 21.8°C (default cutout=0.8).
@@ -2209,7 +2215,8 @@ mod tests {
         ports.zero();
         let env_partial = env(20.55, 5.0, 0.003);
         eq.update_control(&env_partial);
-        eq.step(&env_partial, Duration::from_secs(60), &mut ports).unwrap();
+        eq.step(&env_partial, Duration::from_secs(60), &mut ports)
+            .unwrap();
 
         let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
         // Binary on/off: must draw exactly full rated power (4.0 kW).

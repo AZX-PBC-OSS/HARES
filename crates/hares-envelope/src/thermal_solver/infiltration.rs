@@ -884,7 +884,13 @@ mod tests {
         let env = make_env(-10.0, 0.0, 20.0, 200.0);
         let mut latent: HashMap<ZoneId, f64> = HashMap::new();
         let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
-        apply_infiltration_and_ventilation(&config_bypass, &env, false, &mut latent, &mut couplings);
+        apply_infiltration_and_ventilation(
+            &config_bypass,
+            &env,
+            false,
+            &mut latent,
+            &mut couplings,
+        );
 
         assert_eq!(couplings.len(), 1, "expected one zone coupling");
         let c = &couplings[0];
@@ -894,7 +900,8 @@ mod tests {
         // Just confirm it is in the expected ballpark: rho ∈ [1.1, 1.4], so h_inf ∈ [33, 51] W/K.
         let expected_h_inf_approx = 1.2 * forced_m3_s * hares_physics::constants::CP_DRY_AIR_J_KG_K;
         assert!(
-            c.h_inf_w_k > expected_h_inf_approx * 0.85 && c.h_inf_w_k < expected_h_inf_approx * 1.20,
+            c.h_inf_w_k > expected_h_inf_approx * 0.85
+                && c.h_inf_w_k < expected_h_inf_approx * 1.20,
             "bypass: h_inf_w_k should be ≈ forced_flow × rho × cp ≈ {expected_h_inf_approx:.2} W/K, got {:.2} W/K",
             c.h_inf_w_k
         );

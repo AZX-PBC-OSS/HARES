@@ -122,8 +122,8 @@ mod tests {
         // Curve with the PROPOSED tighter x2 lower bound of -50°C.
         let curve_tight = BiquadraticCurve {
             coeffs,
-            x1_bounds: (-10.0, 50.0),  // proposed x1 bounds
-            x2_bounds: (-50.0, 60.0),  // proposed x2 bounds
+            x1_bounds: (-10.0, 50.0), // proposed x1 bounds
+            x2_bounds: (-50.0, 60.0), // proposed x2 bounds
         };
 
         // With tight bounds, evaluating at -60°C outdoor must clamp to -50°C.
@@ -138,8 +138,8 @@ mod tests {
         // Curve with the CURRENT default bounds of ±100°C — does NOT clamp at -50°C.
         let curve_current = BiquadraticCurve {
             coeffs,
-            x1_bounds: (-100.0, 100.0),  // current default
-            x2_bounds: (-100.0, 100.0),  // current default
+            x1_bounds: (-100.0, 100.0), // current default
+            x2_bounds: (-100.0, 100.0), // current default
         };
         let current_at_neg60 = curve_current.evaluate(20.0, -60.0);
         let current_at_neg50 = curve_current.evaluate(20.0, proposed_x2_lower);
