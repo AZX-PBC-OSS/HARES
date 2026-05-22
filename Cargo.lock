@@ -971,6 +971,7 @@ dependencies = [
  "chrono",
  "hares-types",
  "thiserror",
+ "tracing",
  "uom",
 ]
 

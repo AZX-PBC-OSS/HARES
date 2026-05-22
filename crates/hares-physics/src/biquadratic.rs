@@ -15,18 +15,42 @@ pub fn biquadratic(coeffs: &[f64; 6], x1: f64, x2: f64) -> f64 {
         + coeffs[5] * x1 * x2
 }
 
-/// Biquadratic curve with input clamping.
+/// Biquadratic curve with input clamping and optional out-of-bounds warning.
+///
+/// EnergyPlus I/O Reference (Curve:Biquadratic) specifies minimum/maximum value
+/// fields for each axis; when inputs fall outside those bounds, E+ silently clamps.
+/// HARES additionally offers an optional `tracing::warn!` to surface unexpected
+/// operating conditions during validation and init-time curve checks.
+/// Hot-path callers (equipment `step()`) set `warn_on_clamp: false` for zero
+/// per-call overhead; validation/init paths set `true`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BiquadraticCurve {
     pub coeffs: [f64; 6],
     pub x1_bounds: (f64, f64),
     pub x2_bounds: (f64, f64),
+    /// When `true`, `evaluate()` emits a `tracing::warn!` if either input is
+    /// clamped. Intended for init-time and validation paths only — not the
+    /// per-timestep hot loop.
+    pub warn_on_clamp: bool,
 }
 
 impl BiquadraticCurve {
     pub fn evaluate(&self, x1: f64, x2: f64) -> f64 {
         let x1_clamped = x1.clamp(self.x1_bounds.0, self.x1_bounds.1);
         let x2_clamped = x2.clamp(self.x2_bounds.0, self.x2_bounds.1);
+        if self.warn_on_clamp
+            && ((x1 - x1_clamped).abs() > f64::EPSILON || (x2 - x2_clamped).abs() > f64::EPSILON)
+        {
+            tracing::warn!(
+                x1,
+                x2,
+                x1_lo = self.x1_bounds.0,
+                x1_hi = self.x1_bounds.1,
+                x2_lo = self.x2_bounds.0,
+                x2_hi = self.x2_bounds.1,
+                "biquadratic input outside bounds: inputs clamped to curve domain"
+            );
+        }
         biquadratic(&self.coeffs, x1_clamped, x2_clamped)
     }
 }
@@ -82,6 +106,7 @@ mod tests {
             coeffs: [1.0, 0.2, 0.01, -0.1, 0.005, 0.02],
             x1_bounds: (10.0, 20.0),
             x2_bounds: (0.0, 5.0),
+            warn_on_clamp: false,
         };
 
         let both_oob = curve.evaluate(40.0, -3.0);
@@ -106,8 +131,13 @@ mod tests {
         );
     }
 
-    // --- Regression tests for ticket 003-tighten-biquadratic-default-bounds ---
-    // These tests FAIL with the current ±100°C defaults and PASS only after the fix.
+    // --- Demonstrations of tightened bound behaviour ---
+    // These tests use locally-scoped curves with hardcoded bounds to demonstrate
+    // the mathematical clamping property. They do NOT reference the production
+    // DEFAULT_BIQUADRATIC_X1/X2_BOUNDS constants in hvac_core.rs; production-path
+    // regression coverage comes from hvac_core tests
+    // (biquadratic_clamps_extreme_inputs_to_default_bounds and
+    // biquadratic_x2_lower_bound_clamps_through_production_path).
 
     /// Demonstrates that the current DEFAULT_BIQUADRATIC_X2_BOUNDS = (-100, 100) does NOT
     /// clamp -60°C outdoor input — so evaluating at -60°C and -50°C produces DIFFERENT results.
@@ -124,6 +154,7 @@ mod tests {
             coeffs,
             x1_bounds: (-10.0, 50.0), // proposed x1 bounds
             x2_bounds: (-50.0, 60.0), // proposed x2 bounds
+            warn_on_clamp: false,
         };
 
         // With tight bounds, evaluating at -60°C outdoor must clamp to -50°C.
@@ -140,6 +171,7 @@ mod tests {
             coeffs,
             x1_bounds: (-100.0, 100.0), // current default
             x2_bounds: (-100.0, 100.0), // current default
+            warn_on_clamp: false,
         };
         let current_at_neg60 = curve_current.evaluate(20.0, -60.0);
         let current_at_neg50 = curve_current.evaluate(20.0, proposed_x2_lower);
@@ -165,6 +197,7 @@ mod tests {
             coeffs,
             x1_bounds: (-10.0, 50.0),
             x2_bounds: (-50.0, 60.0),
+            warn_on_clamp: false,
         };
         let at_pos70 = curve_tight.evaluate(20.0, 70.0);
         let at_pos60 = curve_tight.evaluate(20.0, proposed_x2_upper);
@@ -178,6 +211,7 @@ mod tests {
             coeffs,
             x1_bounds: (-100.0, 100.0),
             x2_bounds: (-100.0, 100.0),
+            warn_on_clamp: false,
         };
         let current_at_pos70 = curve_current.evaluate(20.0, 70.0);
         let current_at_pos60 = curve_current.evaluate(20.0, proposed_x2_upper);
@@ -199,6 +233,7 @@ mod tests {
             coeffs,
             x1_bounds: (-10.0, 50.0),
             x2_bounds: (-50.0, 60.0),
+            warn_on_clamp: false,
         };
         let at_neg20 = curve_tight.evaluate(-20.0, 35.0);
         let at_neg10 = curve_tight.evaluate(proposed_x1_lower, 35.0);
@@ -212,6 +247,7 @@ mod tests {
             coeffs,
             x1_bounds: (-100.0, 100.0),
             x2_bounds: (-100.0, 100.0),
+            warn_on_clamp: false,
         };
         let current_at_neg20 = curve_current.evaluate(-20.0, 35.0);
         let current_at_neg10 = curve_current.evaluate(proposed_x1_lower, 35.0);
@@ -223,6 +259,42 @@ mod tests {
     }
 
     // --- End regression tests for ticket 003 ---
+
+    #[test]
+    fn warn_on_clamp_true_still_returns_clamped_value() {
+        let curve = BiquadraticCurve {
+            coeffs: [1.0, 0.0, 0.0, 0.1, 0.0, 0.0],
+            x1_bounds: (-10.0, 50.0),
+            x2_bounds: (-50.0, 60.0),
+            warn_on_clamp: true,
+        };
+
+        // Out-of-bounds on both axes: must still return the clamped result.
+        let result = curve.evaluate(-20.0, 70.0);
+        let expected = curve.evaluate(-10.0, 60.0);
+        assert_eq!(
+            result, expected,
+            "warn_on_clamp must not alter clamping logic"
+        );
+    }
+
+    #[test]
+    fn warn_on_clamp_false_produces_no_warning_even_when_input_out_of_bounds() {
+        let curve = BiquadraticCurve {
+            coeffs: [1.0, 0.0, 0.0, 0.1, 0.0, 0.0],
+            x1_bounds: (-10.0, 50.0),
+            x2_bounds: (-50.0, 60.0),
+            warn_on_clamp: false,
+        };
+
+        let at_neg20_x1 = curve.evaluate(-20.0, 35.0);
+        let at_neg10_x1 = curve.evaluate(-10.0, 35.0);
+        assert_eq!(at_neg20_x1, at_neg10_x1, "x1=-20 must clamp to -10");
+
+        let at_pos70_x2 = curve.evaluate(20.0, 70.0);
+        let at_pos60_x2 = curve.evaluate(20.0, 60.0);
+        assert_eq!(at_pos70_x2, at_pos60_x2, "x2=70 must clamp to 60");
+    }
 
     #[test]
     fn ochre_single_speed_ac_capacity_curve_matches_reference() {
@@ -255,6 +327,7 @@ mod tests {
                 coeffs: coeffs_t,
                 x1_bounds: twb_bounds,
                 x2_bounds: tdb_bounds,
+                warn_on_clamp: false,
             };
             let got = rated
                 * curve.evaluate(t_in, t_ext)

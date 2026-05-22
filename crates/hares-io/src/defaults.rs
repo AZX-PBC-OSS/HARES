@@ -440,12 +440,14 @@ fn load_hvac_curve_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                 coeffs: v.cap_t,
                 x1_bounds: (v.twb_bounds[0], v.twb_bounds[1]),
                 x2_bounds: (v.tdb_bounds[0], v.tdb_bounds[1]),
+                warn_on_clamp: true,
             },
             cap_ff: v.cap_ff,
             eir_t: BiquadraticCurve {
                 coeffs: v.eir_t,
                 x1_bounds: (v.twb_bounds[0], v.twb_bounds[1]),
                 x2_bounds: (v.tdb_bounds[0], v.tdb_bounds[1]),
+                warn_on_clamp: true,
             },
             eir_ff: v.eir_ff,
             eir_plr: v.eir_plr,
@@ -526,10 +528,10 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                 get_row("e_cap_t")[i],
                 get_row("f_cap_t")[i],
             ];
-            let twb_min = get_row_with_default("min_Twb", -100.0)[i];
-            let twb_max = get_row_with_default("max_Twb", 100.0)[i];
-            let tdb_min = get_row_with_default("min_Tdb", -100.0)[i];
-            let tdb_max = get_row_with_default("max_Tdb", 100.0)[i];
+            let twb_min = get_row_with_default("min_Twb", -10.0)[i];
+            let twb_max = get_row_with_default("max_Twb", 50.0)[i];
+            let tdb_min = get_row_with_default("min_Tdb", -50.0)[i];
+            let tdb_max = get_row_with_default("max_Tdb", 60.0)[i];
 
             HvacCurveVariant {
                 name: variant_names[i].clone(),
@@ -537,6 +539,7 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                     coeffs: cap_t,
                     x1_bounds: (twb_min, twb_max),
                     x2_bounds: (tdb_min, tdb_max),
+                    warn_on_clamp: true,
                 },
                 cap_ff: [
                     get_row("a_cap_ff")[i],
@@ -547,6 +550,7 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                     coeffs: eir_t,
                     x1_bounds: (twb_min, twb_max),
                     x2_bounds: (tdb_min, tdb_max),
+                    warn_on_clamp: true,
                 },
                 eir_ff: [
                     get_row("a_eir_ff")[i],
@@ -898,7 +902,7 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
     }
 
     #[test]
-    fn hvac_csv_missing_temperature_bounds_defaults_to_plus_minus_100_and_reads_plf_bounds() {
+    fn hvac_csv_missing_temperature_bounds_uses_tightened_fallbacks_and_reads_plf_bounds() {
         let dir = tempfile::tempdir().unwrap();
         let csv_path = dir.path().join("mshp.csv");
         std::fs::write(
@@ -932,8 +936,8 @@ max_plf,1.0\n",
 
         let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
         let v = &set.variants[0];
-        assert_eq!(v.cap_t.x1_bounds, (-100.0, 100.0));
-        assert_eq!(v.cap_t.x2_bounds, (-100.0, 100.0));
+        assert_eq!(v.cap_t.x1_bounds, (-10.0, 50.0));
+        assert_eq!(v.cap_t.x2_bounds, (-50.0, 60.0));
         assert_eq!(v.plf_bounds, Some((0.48, 1.0)));
         assert_eq!(v.ff_bounds, None);
     }

@@ -39,11 +39,20 @@ const DEFAULT_CUTOUT_RATIO: f64 = 0.25;
 /// Default minimum on/off cycle lockout [s] when not specified in config.
 const DEFAULT_MIN_CYCLE_TIME_S: f64 = 60.0;
 
-/// OCHRE HVAC.py: biquadratic curve input bounds clamp physically impossible
-/// extrapolation. These match OCHRE's fallback defaults (`min_Twb`/`max_Twb`,
-/// `min_Tdb`/`max_Tdb`) when the biquadratic CSV does not specify bounds.
-const DEFAULT_BIQUADRATIC_X1_BOUNDS: (f64, f64) = (-100.0, 100.0);
-const DEFAULT_BIQUADRATIC_X2_BOUNDS: (f64, f64) = (-100.0, 100.0);
+/// Default biquadratic x1 (indoor) input bounds [°C].
+/// DB-based curves (heating): covers indoor DB −10 to +50°C.
+/// WB-based curves (cooling): caller should supply tighter per-curve bounds
+/// (AHRI 210/240-2023: indoor WB 19.4–26.7°C).
+/// Fallback only; per-curve explicit bounds from equipment CSV/specs must be preferred.
+/// AHRI 210/240-2023 rating envelopes plus generous margin.
+const DEFAULT_BIQUADRATIC_X1_BOUNDS: (f64, f64) = (-10.0, 50.0);
+/// Default biquadratic x2 (outdoor DB) input bounds [°C].
+/// Covers global residential outdoor conditions: −50°C (polar extreme) to
+/// +60°C (desert extreme). EnergyPlus I/O Reference (Curve:Biquadratic) expects
+/// bounded min/max fields per axis; ±100°C is not physically meaningful for
+/// residential HVAC and allows unconstrained polynomial extrapolation.
+/// Fallback only; per-curve explicit bounds from equipment CSV/specs must be preferred.
+const DEFAULT_BIQUADRATIC_X2_BOUNDS: (f64, f64) = (-50.0, 60.0);
 
 /// Equipment category for HVAC defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -824,6 +833,7 @@ impl HvacEquipment {
             coeffs,
             x1_bounds: self.biquadratic_x1_bounds,
             x2_bounds: self.biquadratic_x2_bounds,
+            warn_on_clamp: false,
         };
         curve.evaluate(t_indoor_c, t_outdoor_c)
     }
@@ -1535,16 +1545,40 @@ mod tests {
 
     #[test]
     fn biquadratic_clamps_extreme_inputs_to_default_bounds() {
-        // OCHRE HVAC.py: default bounds ±100°C clamp physically impossible inputs.
-        // At -200°C input, the curve must be evaluated as if the input were -100°C.
+        // Default bounds are (-10, 50) for x1 and (-50, 60) for x2;
+        // inputs outside these ranges must be clamped.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         // Linear curve: f(x1, x2) = x1 (coefficient on x1 = 1, rest 0)
         hvac.biquadratic_coeffs = vec![[0.0, 1.0, 0.0, 0.0, 0.0, 0.0]];
-        // Default bounds are (-100.0, 100.0); input -200°C must be clamped to -100°C.
+        // With x1_bounds = (-10, 50): input -200°C must clamp to -10°C.
         let result = hvac.evaluate_biquadratic(0, -200.0, 30.0);
         assert!(
-            (result - (-100.0)).abs() < 1e-9,
-            "input -200°C must clamp to -100°C bound; got {result}"
+            (result - (-10.0)).abs() < 1e-9,
+            "input -200°C must clamp to -10°C x1 lower bound; got {result}"
+        );
+    }
+
+    #[test]
+    fn biquadratic_x2_lower_bound_clamps_through_production_path() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.biquadratic_coeffs = vec![[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]];
+        let at_neg60 = hvac.evaluate_biquadratic(0, 20.0, -60.0);
+        let at_neg50 = hvac.evaluate_biquadratic(0, 20.0, -50.0);
+        assert_eq!(
+            at_neg60, at_neg50,
+            "DEFAULT_BIQUADRATIC_X2_BOUNDS lower bound -50°C must clamp x2=-60 to -50"
+        );
+    }
+
+    #[test]
+    fn biquadratic_x2_upper_bound_clamps_through_production_path() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.biquadratic_coeffs = vec![[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]];
+        let at_pos70 = hvac.evaluate_biquadratic(0, 20.0, 70.0);
+        let at_pos60 = hvac.evaluate_biquadratic(0, 20.0, 60.0);
+        assert_eq!(
+            at_pos70, at_pos60,
+            "DEFAULT_BIQUADRATIC_X2_BOUNDS upper bound +60°C must clamp x2=70 to +60"
         );
     }
 

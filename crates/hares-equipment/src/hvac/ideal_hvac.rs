@@ -50,8 +50,8 @@ struct BiquadraticCurveSet {
 }
 
 impl BiquadraticCurveSet {
-    const DEFAULT_X1_BOUNDS: (f64, f64) = (-100.0, 100.0);
-    const DEFAULT_X2_BOUNDS: (f64, f64) = (-100.0, 100.0);
+    const DEFAULT_X1_BOUNDS: (f64, f64) = (-10.0, 50.0);
+    const DEFAULT_X2_BOUNDS: (f64, f64) = (-50.0, 60.0);
 
     fn identity() -> Self {
         Self {
@@ -67,6 +67,7 @@ impl BiquadraticCurveSet {
             coeffs: self.capacity_coeffs,
             x1_bounds: self.x1_bounds,
             x2_bounds: self.x2_bounds,
+            warn_on_clamp: false,
         }
         .evaluate(x1, x2)
     }
@@ -76,6 +77,7 @@ impl BiquadraticCurveSet {
             coeffs: self.eir_coeffs,
             x1_bounds: self.x1_bounds,
             x2_bounds: self.x2_bounds,
+            warn_on_clamp: false,
         }
         .evaluate(x1, x2)
     }

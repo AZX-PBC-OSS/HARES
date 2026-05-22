@@ -651,6 +651,7 @@ fn biquadratic_evaluation() {
         coeffs: [1.0, 0.2, 0.01, -0.1, 0.005, 0.02],
         x1_bounds: (10.0, 20.0),
         x2_bounds: (0.0, 5.0),
+        warn_on_clamp: false,
     };
     // Both x1=100 and x2=-10 are outside bounds; result must equal evaluation at (20, 0)
     let clamped = curve.evaluate(100.0, -10.0);

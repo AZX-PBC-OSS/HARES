@@ -120,11 +120,13 @@ impl Dehumidifier {
                 coeffs: DEFAULT_NORMALIZED_CURVE,
                 x1_bounds: DEFAULT_DB_BOUNDS_C,
                 x2_bounds: DEFAULT_RH_BOUNDS,
+                warn_on_clamp: false,
             },
             energy_factor_curve: BiquadraticCurve {
                 coeffs: DEFAULT_NORMALIZED_CURVE,
                 x1_bounds: DEFAULT_DB_BOUNDS_C,
                 x2_bounds: DEFAULT_RH_BOUNDS,
+                warn_on_clamp: false,
             },
             water_removal_curve_rated_value: 1.0,
             energy_factor_curve_rated_value: 1.0,
@@ -248,11 +250,13 @@ impl Dehumidifier {
             coeffs: DEFAULT_NORMALIZED_CURVE,
             x1_bounds: DEFAULT_DB_BOUNDS_C,
             x2_bounds: DEFAULT_RH_BOUNDS,
+            warn_on_clamp: false,
         };
         self.energy_factor_curve = BiquadraticCurve {
             coeffs: DEFAULT_NORMALIZED_CURVE,
             x1_bounds: DEFAULT_DB_BOUNDS_C,
             x2_bounds: DEFAULT_RH_BOUNDS,
+            warn_on_clamp: false,
         };
         self.water_removal_curve_rated_value = 1.0;
         self.energy_factor_curve_rated_value = 1.0;

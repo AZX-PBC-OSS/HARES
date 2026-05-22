@@ -242,6 +242,7 @@ impl HeatPumpWH {
                 coeffs: DEFAULT_COP_CURVE,
                 x1_bounds: DEFAULT_ZONE_TEMP_BOUNDS_C,
                 x2_bounds: DEFAULT_TANK_TEMP_BOUNDS_C,
+                warn_on_clamp: false,
             },
             cop_scale: 1.0,
             tempering_valve_setpoint_c: None,
@@ -250,6 +251,7 @@ impl HeatPumpWH {
                 coeffs: DEFAULT_CAPACITY_CURVE,
                 x1_bounds: DEFAULT_ZONE_TEMP_BOUNDS_C,
                 x2_bounds: DEFAULT_TANK_TEMP_BOUNDS_C,
+                warn_on_clamp: false,
             },
             min_ambient_temp_c: DEFAULT_MIN_AMBIENT_TEMP_C,
             max_ambient_temp_c: DEFAULT_MAX_AMBIENT_TEMP_C,
@@ -410,6 +412,7 @@ impl HeatPumpWH {
             coeffs: c.cop_biquadratic_coeffs.unwrap_or(DEFAULT_COP_CURVE),
             x1_bounds: (DEFAULT_ZONE_TEMP_BOUNDS_C.0, DEFAULT_ZONE_TEMP_BOUNDS_C.1),
             x2_bounds: (DEFAULT_TANK_TEMP_BOUNDS_C.0, DEFAULT_TANK_TEMP_BOUNDS_C.1),
+            warn_on_clamp: false,
         };
         let ref_zone_temp = (self.cop_curve.x1_bounds.0 + self.cop_curve.x1_bounds.1) * 0.5;
         let ref_tank_temp = (self.cop_curve.x2_bounds.0 + self.cop_curve.x2_bounds.1) * 0.5;
@@ -427,6 +430,7 @@ impl HeatPumpWH {
                 .unwrap_or(DEFAULT_CAPACITY_CURVE),
             x1_bounds: self.cop_curve.x1_bounds,
             x2_bounds: self.cop_curve.x2_bounds,
+            warn_on_clamp: false,
         };
 
         self.min_ambient_temp_c = c.min_ambient_temp_c.unwrap_or(DEFAULT_MIN_AMBIENT_TEMP_C);
