@@ -118,8 +118,19 @@ impl HvacEquipment {
             SpeedControlMode::MultiSpeedInterpolated => self.select_multi_speed(load_fraction),
             SpeedControlMode::VariableSpeedIdeal => self.select_multi_speed(load_fraction),
         };
+        let old_speed_index = self.runtime.last_speed_index;
+        let old_speed_frac = self.runtime.last_speed_frac;
         self.runtime.last_speed_index = selection.speed_index;
         self.runtime.last_speed_frac = selection.speed_frac;
+        if selection.speed_index != old_speed_index || selection.speed_frac != old_speed_frac {
+            tracing::debug!(
+                old_speed_index,
+                new_speed_index = selection.speed_index,
+                speed_frac = selection.speed_frac,
+                part_load_ratio = selection.part_load_ratio,
+                "speed transition"
+            );
+        }
         selection
     }
 
@@ -291,6 +302,16 @@ impl HvacEquipment {
     ) -> f64 {
         let on_now = self.runtime.duty_cycle > 0.0;
         let mult = self.runtime.startup.capacity_multiplier(on_now, dt_min);
+        if mult < 1.0 {
+            tracing::debug!(
+                startup_multiplier = mult,
+                c_d = self.runtime.startup.c_d,
+                time_since_start_min = self.runtime.startup.time_since_start_min,
+                steady_capacity_w,
+                degraded_capacity_w = steady_capacity_w * mult,
+                "startup capacity degradation active"
+            );
+        }
         steady_capacity_w * mult
     }
 

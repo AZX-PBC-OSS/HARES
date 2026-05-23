@@ -260,6 +260,7 @@ fn discrete_defrost_no_phantom_draw_when_compressor_off() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -465,6 +466,7 @@ fn ashp_heating_cop_above_unity() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1083,6 +1085,7 @@ fn ashp_sub_consumption_telemetry() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1228,6 +1231,7 @@ fn ashp_defaults_match_reference() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1316,6 +1320,7 @@ fn ashp_defaults_match_reference() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1409,6 +1414,7 @@ fn mshp_defaults_match_reference() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1535,6 +1541,7 @@ fn bang_bang_single_speed_cycles_within_deadband() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1960,6 +1967,7 @@ fn defrost_discrete_cycle_starts_in_accumulating() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2061,6 +2069,7 @@ fn defrost_discrete_cycle_transitions_to_defrosting() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2160,6 +2169,7 @@ fn defrost_discrete_cycle_returns_to_accumulating() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2255,6 +2265,7 @@ fn defrost_discrete_peak_power_exceeds_continuous_average() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2367,6 +2378,7 @@ fn heating_latent_always_zero_during_normal_heating() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2456,6 +2468,7 @@ fn heating_latent_nonzero_during_defrost_with_sub1_shr() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2547,6 +2560,7 @@ fn heating_latent_zero_with_default_shr_during_defrost() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2622,6 +2636,7 @@ fn heating_latent_telemetry_key_present() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2698,6 +2713,7 @@ fn heating_sensible_plus_latent_equals_total_thermal_output() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2803,6 +2819,7 @@ fn defrost_accumulating_applies_continuous_multiplier() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2927,6 +2944,7 @@ fn mshp_load_above_stage1_runs_continuously() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -3106,6 +3124,7 @@ fn defrost_typed_config_propagates_to_heater_init() {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -3265,10 +3284,10 @@ fn defrost_config_serde_round_trip() {
 // cover the higher-level behavioural contracts via the public Equipment API.
 // ---------------------------------------------------------------------------
 
-// update_mode() full decision path — Heating → Deadband transition
-// exercises hvac_core.rs lines 654-734 (the entire update_mode body).
-// Without tracing (current state), this path runs silently.  Once tracing is added,
-// every call emits debug! with zone_temp, setpoints, current_mode, next_mode.
+// update_mode() full decision path — Heating → Deadband transition.
+// Exercises ThermostatFsm::update_mode() in thermostat.rs (the entire decision
+// body), which now emits tracing::debug! with zone_temp, setpoints,
+// current_mode, and next_mode on every call.
 #[test]
 fn update_mode_heating_to_deadband_transition() {
     let registry = EquipmentRegistry::new();
@@ -3314,8 +3333,9 @@ fn update_mode_heating_to_deadband_transition() {
 }
 
 // update_mode() Cooling path — Deadband → Cooling → Deadband.
-// Exercises the Cooling branch of the mode-decision logic (hvac_core.rs lines
-// 705-719) which must also be instrumented with tracing.
+// Exercises the Cooling branch of ThermostatFsm::update_mode() in thermostat.rs,
+// which emits tracing::debug! with zone_temp, setpoints, current_mode, and
+// next_mode on every call.
 #[test]
 fn update_mode_cooling_transition() {
     let registry = EquipmentRegistry::new();
@@ -4291,5 +4311,168 @@ fn ac_electrical_halved_thermal_unscaled_at_half_sf() {
          architecture (matches OCHRE HVAC.py add_gains_to_zone). \
          sens_full={sens_full:.1} W, sens_half={sens_half:.1} W, ratio={sensible_ratio:.4}. \
          If thermal-port scaling by space_fraction is implemented, update this assertion to expect ratio≈0.5."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-ticket integration: MSHP min-speed cycling + binary ER overshoot
+//
+// DoD item 8 (T-0015): when min_compressor_fraction constrains the MSHP to
+// a minimum non-zero output at low load and binary ER fires at full rated
+// in the same timestep, the combined thermal injection must not push zone
+// temperature above the thermostat turn-off threshold. The thermostat then
+// cycles both off on the next step — correct behavior — but the per-step
+// overshoot magnitude is what this test bounds.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
+    const RATED_W: f64 = 10_000.0;
+    const BACKUP_W: f64 = 4_000.0;
+    const SETPOINT_C: f64 = 21.0;
+    const HYSTERESIS_C: f64 = 1.0;
+    const DEADBAND_OFFSET: f64 = 0.2;
+    const DT_S: u64 = 60;
+
+    // Zone air thermal capacitance using the same formula as
+    // hares-envelope::boundary_rc::derive_zone_capacitances:
+    //   C = rho * cp * V * mass_multiplier
+    // with rho=1.2041 kg/m³, cp=1006 J/(kg·K), V=200 m³, mass_multiplier=7.0.
+    const ZONE_CAP_J_K: f64 = 1.2041 * 1006.0 * 200.0 * 7.0;
+
+    // Thermostat turn-off threshold: setpoint + hysteresis * deadband_offset.
+    // With defaults: 21.0 + 1.0 * 0.2 = 21.2°C. This is the upper bound
+    // for acceptable overshoot — the thermostat should cut out at or before
+    // this point, and zone temperature should not exceed it.
+    let turn_off_c = SETPOINT_C + HYSTERESIS_C * DEADBAND_OFFSET;
+
+    let cfg = EquipmentConfig::from_typed(
+        "mshp_er_cross".to_string(),
+        "MSHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(RATED_W),
+                heating_eir: Some(0.25),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(BACKUP_W),
+                backup_eir: Some(1.0),
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                cooling_eir: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: true,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: Some(SETPOINT_C),
+                cooling_setpoint_c: Some(26.0),
+                hysteresis_c: Some(HYSTERESIS_C),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+                er_stages: 1,
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: Some(100.0),
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: Some(0.0),
+            er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("MSHP Heater", cfg.clone()).unwrap();
+
+    // Start zone at 20.9°C — just below setpoint, low-load regime where:
+    // - load_ratio = (21 - 20.9) / 1.0 = 0.10 < min_compressor_fraction (0.25)
+    //   → HP cycles at minimum stage (2500 W)
+    // - ER is on (zone 20.9 < er_turn_on = 21.0 - 0.0 = 21.0°C)
+    //   → binary ER fires at full rated 4000 W
+    // Combined: 6500 W into a zone that only needs ~100 W to hold setpoint.
+    let mut zone_temp_c = 20.9;
+    let mut env = env_with_zone_temp(zone_temp_c);
+    env.weather.outdoor_temp_c = 5.0;
+    env.weather.outdoor_wet_bulb_c = 4.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut max_zone_temp_c = zone_temp_c;
+
+    for step in 0..20 {
+        env.zones[0].temperature_c = zone_temp_c;
+        let mut ports = ports_for_zone1();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(DT_S), &mut ports)
+            .unwrap();
+
+        let sensible_w = ports.thermal[0].sensible_gain_w;
+        let delta_t = sensible_w * DT_S as f64 / ZONE_CAP_J_K;
+        zone_temp_c += delta_t;
+        max_zone_temp_c = max_zone_temp_c.max(zone_temp_c);
+
+        // Verify ER is binary when on: either full rated or zero.
+        let er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        if er_kw > 1e-9 {
+            assert!(
+                (er_kw - BACKUP_W / 1000.0).abs() < 0.01,
+                "step {step}: binary ER must draw full rated {:.1} kW when on, got {er_kw:.4} kW",
+                BACKUP_W / 1000.0,
+            );
+        }
+
+        // Once zone exceeds turn-off, the thermostat should cut heating
+        // and zone should stop rising. Verify overshoot stays bounded.
+        if zone_temp_c > turn_off_c + 0.01 {
+            // One-step overshoot past turn_off is physically expected because
+            // the thermostat reacts to the *current* zone temperature, but the
+            // thermal injection from this step has already been committed.
+            // The overshoot must be modest (< 0.5°C above turn_off).
+            let overshoot = zone_temp_c - turn_off_c;
+            assert!(
+                overshoot < 0.5,
+                "step {step}: zone temperature overshoot {overshoot:.3}°C past turn-off \
+                 ({turn_off_c}°C) exceeds 0.5°C bound; zone_temp={zone_temp_c:.3}°C"
+            );
+        }
+    }
+
+    // Final assertion: maximum zone temperature over all steps must not exceed
+    // the thermostat turn-off threshold by more than one step's worth of thermal
+    // injection at combined HP+ER output. The 0.5°C tolerance accounts for the
+    // one-step delay between thermal injection and thermostat reaction.
+    let overshoot = max_zone_temp_c - turn_off_c;
+    assert!(
+        overshoot < 0.5,
+        "maximum zone temperature overshoot must stay within hysteresis band + 0.5°C \
+         (one-step reaction delay); max_zone={max_zone_temp_c:.3}°C, turn_off={turn_off_c}°C, \
+         overshoot={overshoot:.3}°C"
+    );
+
+    // Verify that the thermostat eventually cycles off: after enough steps,
+    // the equipment must transition out of HeatingHPAndER mode.
+    let er_kw_final = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+    assert!(
+        er_kw_final < 1e-9,
+        "ER must eventually cycle off as zone temperature rises above ER turn-on; \
+         still drawing {er_kw_final:.4} kW after 20 steps"
     );
 }

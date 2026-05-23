@@ -36,6 +36,7 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::ER_HARD_LOCKOUT_TIME_S, 0.0);
     telemetry.insert(tk::BACKUP_CAPACITY_W, 0.0);
     telemetry.insert(tk::BACKUP_EIR, 0.0);
+    telemetry.insert(tk::ER_STAGES_ON, 0.0);
     telemetry.insert(tk::MIN_COMPRESSOR_FRACTION, 0.25);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::MAX_CAPACITY_FRACTION, 1.0);
@@ -178,6 +179,11 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::BACKUP_EIR.to_string(),
             unit: "-".to_string(),
             description: "Backup heater energy input ratio".to_string(),
+        },
+        TelemetryField {
+            name: tk::ER_STAGES_ON.to_string(),
+            unit: "count".to_string(),
+            description: "Number of ER backup heating stages currently active (0 = off)".to_string(),
         },
         TelemetryField {
             name: tk::MIN_COMPRESSOR_FRACTION.to_string(),

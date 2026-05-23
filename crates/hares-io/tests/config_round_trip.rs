@@ -248,6 +248,7 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
             plf_max: Some(1.0),
             min_compressor_fraction: 0.25,
             eir_part_load_benefit: None,
+            er_stages: 1,
         },
         hp_lockout_temp_c: None,
         er_lockout_temp_c: None,

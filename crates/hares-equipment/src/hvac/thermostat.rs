@@ -325,7 +325,23 @@ impl ThermostatFsm {
         let zone_temp = lookup_zone_temp(env, zone_id)?;
         let setpoints = self.effective_setpoints();
 
+        tracing::debug!(
+            zone_temp,
+            heating_setpoint = setpoints.heating_c,
+            cooling_setpoint = setpoints.cooling_c,
+            current_mode = ?self.mode,
+            "update_mode: evaluating mode transition"
+        );
+
         if !is_cycle_change_allowed(&self.thermostat, self.last_mode_switch_at, env.current_time) {
+            tracing::debug!(
+                elapsed_s = self
+                    .last_mode_switch_at
+                    .map(|t| (env.current_time - t).num_milliseconds().max(0) as f64 / 1000.0)
+                    .unwrap_or(0.0),
+                min_cycle_time_s = self.thermostat.min_cycle_time_s,
+                "is_cycle_change_allowed: blocked by min_cycle_time"
+            );
             return Ok(self.mode);
         }
 
@@ -390,7 +406,26 @@ impl ThermostatFsm {
             }
         };
 
+        tracing::debug!(
+            current_mode = ?self.mode,
+            next_mode = ?next_mode,
+            offset,
+            hysteresis_c = hysteresis,
+            "update_mode: computed next_mode"
+        );
+
         if !self.can_transition_mode(next_mode, env.current_time) {
+            tracing::debug!(
+                current_mode = ?self.mode,
+                proposed_mode = ?next_mode,
+                elapsed_s = self
+                    .mode_start_at
+                    .map(|t| (env.current_time - t).num_milliseconds().max(0) as f64 / 1000.0)
+                    .unwrap_or(0.0),
+                min_on_time_s = self.min_on_time_s,
+                min_off_time_s = self.min_off_time_s,
+                "can_transition_mode: blocked by min on/off time"
+            );
             return Ok(self.mode);
         }
 

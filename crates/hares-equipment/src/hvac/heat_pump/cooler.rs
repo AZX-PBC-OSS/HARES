@@ -361,6 +361,7 @@ mod tests {
                     plf_max: None,
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
+                    er_stages: 1,
                 },
                 stage_shrs: None,
             },

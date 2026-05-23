@@ -384,8 +384,10 @@ fn ochre_minisplit_fixture_total_shape_and_timing_aligns() {
     // two-phase resolve (current-step inputs for ideal capacity),
     // B7/D6 fix: mass_multiplier=1.0 when furniture boundaries present (was 7.0,
     // double-counting with explicit furniture RC nodes; E+ ZoneCapacitanceMultiplier
-    // and InternalMass are mutually exclusive).
-    let expected_center: usize = 13;
+    // and InternalMass are mutually exclusive),
+    // ER binary on/off fix: resistive elements cannot draw fractional power;
+    // thermostat cycling handles time-averaging.
+    let expected_center: usize = 29;
     assert!(
         actual_center.abs_diff(expected_center) <= 2,
         "minisplit HVAC electric power timing center must stay near step {expected_center}: actual={actual_center}"

@@ -102,6 +102,15 @@ pub struct HeatPumpCommonConfig {
     /// pressure ratio (AHRI 210/240 variable-speed test procedure).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eir_part_load_benefit: Option<f64>,
+    /// Number of discrete electric-resistance backup heating stages.
+    /// Residential ER backup is typically a single binary element (1 stage) or
+    /// 2–3 sequenced strips activated by an outdoor thermostat (ASHRAE HVAC Systems
+    /// and Equipment 2020 Ch.9). Each stage is an on/off resistive element; there is
+    /// no continuous modulation within a stage. Valid range: 1–4.
+    /// AHRI 210/240 rates supplemental ER at nominal capacity, consistent with
+    /// discrete staged operation rather than modulation.
+    #[serde(default = "default_one")]
+    pub er_stages: u8,
 }
 
 impl Default for HeatPumpCommonConfig {
@@ -144,6 +153,7 @@ impl Default for HeatPumpCommonConfig {
             plf_max: None,
             min_compressor_fraction: 0.25,
             eir_part_load_benefit: None,
+            er_stages: 1,
         }
     }
 }
@@ -332,6 +342,12 @@ impl HeatPumpHeaterConfig {
                      for inverter compressors (AHRI 210/240, NREL field studies)"
                 );
             }
+        }
+        if !(1..=4).contains(&self.common.er_stages) {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpHeaterConfig: er_stages must be in [1, 4], got {}",
+                self.common.er_stages
+            )));
         }
         self.defrost
             .validate()
@@ -551,6 +567,7 @@ mod tests {
                 plf_max: Some(1.0),
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: Some(-17.8),
             er_lockout_temp_c: Some(4.4),
@@ -748,6 +765,7 @@ mod tests {
                 plf_max: Some(1.0),
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: Some(-17.8),
             er_lockout_temp_c: Some(4.4),

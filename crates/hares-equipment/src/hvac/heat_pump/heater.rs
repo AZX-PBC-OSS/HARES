@@ -84,6 +84,11 @@ struct HeatPumpHeaterCore {
     backup_capacity_w: f64,
     backup_eir: f64,
     backup_fuel_type: Option<FuelType>,
+    /// Number of discrete ER backup heating stages (1 = binary on/off, 2–4 = multi-stage).
+    er_stages: u8,
+    /// Per-stage ER capacity [W] = `backup_capacity_w / er_stages`.
+    /// When `er_stages = 1`, this equals `backup_capacity_w` (binary full-rated).
+    er_stage_capacity_w: f64,
     pan_heater_kw: f64,
     pan_heater_temp_c: f64,
     pan_heater_on: bool,
@@ -234,6 +239,8 @@ struct HeaterStep {
     pan_heater_kw: f64,
     hp_capacity_w: f64,
     er_capacity_w: f64,
+    /// Number of ER stages currently active (0 when ER off).
+    er_stages_on: u8,
     defrost_active: bool,
     defrost_time_fraction: f64,
     defrost_extra_power_w: f64,
@@ -400,6 +407,8 @@ impl HeatPumpHeaterCore {
             backup_capacity_w,
             backup_eir: DEFAULT_BACKUP_EIR,
             backup_fuel_type: None,
+            er_stages: 1,
+            er_stage_capacity_w: backup_capacity_w,
             pan_heater_kw: 0.0,
             pan_heater_temp_c: MSHP_PAN_HEATER_DEFAULT_TEMP_C,
             pan_heater_on: false,
@@ -634,6 +643,12 @@ impl HeatPumpHeaterCore {
             .unwrap_or_else(|| eir_from_backup_fuel(cfg.common.backup_fuel))
             .max(0.0);
         self.backup_fuel_type = fuel_type_from_backup_fuel(cfg.common.backup_fuel);
+        self.er_stages = cfg.common.er_stages;
+        self.er_stage_capacity_w = if self.er_stages > 0 && self.backup_capacity_w > 0.0 {
+            self.backup_capacity_w / self.er_stages as f64
+        } else {
+            0.0
+        };
         self.hp_lockout_temp_c = cfg.hp_lockout_temp_c.unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
         self.hp_lockout_hysteresis_c = DEFAULT_HP_LOCKOUT_HYSTERESIS_C;
         self.er_lockout_temp_c = cfg.er_lockout_temp_c.unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
@@ -934,6 +949,8 @@ impl HeatPumpHeaterCore {
         );
         self.telemetry.set(tk::HP_CAPACITY_W, step.hp_capacity_w);
         self.telemetry.set(tk::ER_CAPACITY_W, step.er_capacity_w);
+        self.telemetry
+            .set(tk::ER_STAGES_ON, step.er_stages_on as f64);
         self.telemetry.set(tk::FUEL_INPUT_W, scaled_fuel_w);
         self.telemetry.set(
             tk::MAX_CAPACITY_FRACTION,
@@ -1235,15 +1252,47 @@ impl HeatPumpHeaterCore {
             fan_power_w = 0.0;
         }
 
-        let mut er_capacity_w = if er_on && self.use_ideal {
-            (self.ideal_capacity_w - hp_capacity_w)
-                .max(0.0)
-                .min(self.backup_capacity_w)
+        // ER is a discrete resistive element: each stage is either fully on or off.
+        // PLR modulation (backup_capacity_w * plr) is physically incorrect — resistive
+        // elements cannot draw fractional power. In non-ideal mode, ER runs at full
+        // rated capacity when the thermostat calls for it; cycling provides time-averaged
+        // part-load behavior. In ideal mode, the minimum number of stages needed to
+        // cover the residual is activated (ceil rounding), potentially over-delivering
+        // so the thermostat cycles down on subsequent steps.
+        // OCHRE HVAC.py:1404-1405 (ASHPHeater.update_er_capacity): in non-ideal mode
+        // OCHRE uses `er_capacity = self.er_capacity_rated` (full rated, no PLR),
+        // matching this implementation. In ideal mode OCHRE uses continuous residual
+        // fill; HARES rounds up to the nearest stage boundary instead.
+        let mut er_capacity_w;
+        let mut er_stages_on: u8 = 0;
+        if er_on && self.use_ideal {
+            let residual = (self.ideal_capacity_w - hp_capacity_w).max(0.0);
+            if self.er_stages <= 1 {
+                // Single-stage (binary): full rated if any residual exists, else off.
+                if residual > 0.0 {
+                    er_capacity_w = self.backup_capacity_w;
+                    er_stages_on = 1;
+                } else {
+                    er_capacity_w = 0.0;
+                }
+            } else {
+                // Multi-stage: activate minimum stages to cover residual.
+                let n_stages_on = (residual / self.er_stage_capacity_w)
+                    .ceil()
+                    .min(self.er_stages as f64) as u32;
+                er_capacity_w = n_stages_on as f64 * self.er_stage_capacity_w;
+                er_stages_on = n_stages_on as u8;
+            }
         } else if er_on {
-            self.backup_capacity_w * plr
+            // Non-ideal mode: binary — all stages energize together at full rated capacity.
+            // Per-stage activation would require separate thermostats or time delays,
+            // beyond the scope of this model. The thermostat cycling handles time-averaged
+            // output; the instantaneous draw is always full rated.
+            er_capacity_w = self.backup_capacity_w;
+            er_stages_on = self.er_stages;
         } else {
-            0.0
-        };
+            er_capacity_w = 0.0;
+        }
 
         // During discrete Resistive defrost, the resistive element provides zone
         // heating in addition to defrosting the outdoor coil. This thermal output
@@ -1341,12 +1390,14 @@ impl HeatPumpHeaterCore {
                     backup_er_kw = 0.0;
                     fuel_w = 0.0;
                     step_er_capacity_w = 0.0;
+                    er_stages_on = 0;
                 } else {
                     // Still over limit after shedding ER; scale HP+fan+pan proportionally.
                     let er_thermal = step_er_capacity_w;
                     backup_er_kw = 0.0;
                     fuel_w = 0.0;
                     step_er_capacity_w = 0.0;
+                    er_stages_on = 0;
                     let ratio = self.ctrl_power_limit_kw / hp_only_total_kw.max(f64::MIN_POSITIVE);
                     electric_kw = self.ctrl_power_limit_kw;
                     thermal_output_w = (thermal_output_w - er_thermal) * ratio;
@@ -1388,6 +1439,7 @@ impl HeatPumpHeaterCore {
             pan_heater_kw: step_pan_heater_kw.max(0.0),
             hp_capacity_w: step_hp_capacity_w.max(0.0),
             er_capacity_w: step_er_capacity_w.max(0.0),
+            er_stages_on,
             defrost_active,
             defrost_time_fraction,
             defrost_extra_power_w,
@@ -1956,6 +2008,7 @@ mod tests {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2013,6 +2066,7 @@ mod tests {
                 plf_max: None,
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
+                er_stages: 1,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2546,17 +2600,24 @@ mod tests {
         );
     }
 
-    // Regression: ER capacity was always 100% due to `plr.max(1.0)` bug.
-    // ER output must scale with PLR when the ideal-capacity controller requests
-    // part-load operation.
+    // Regression: ER backup is binary on/off — a resistive element cannot draw
+    // fractional power. When the ideal-capacity controller requests a partial load
+    // below full rated ER capacity with er_stages=1, the ER element still fires at
+    // full rated capacity because it has no intermediate modulation capability.
+    // The thermostat handles time-averaged part-load output through cycling, not
+    // through per-timestep power modulation.
     #[test]
-    fn er_backup_capacity_modulated_by_plr() {
+    fn er_ideal_mode_single_stage_fires_at_full_rated_when_on() {
         // Lock HP out so only ER runs; this isolates ER draw in electric_kw.
         // Use ideal-capacity control to request PLR=0.5 on ER:
         // ideal_capacity_w / backup_capacity_w = 2000 / 4000 = 0.5.
+        // With er_stages=1 (binary), ER must fire at full 4.0 kW, not 2.0 kW.
         let mut cfg = heater_config_with(|typed| {
             typed.hp_lockout_temp_c = Some(10.0);
             typed.er_setpoint_offset_c = Some(0.0);
+            typed.common.backup_capacity_w = Some(4_000.0);
+            typed.common.backup_eir = Some(1.0);
+            typed.common.fan_power_w = Some(0.0); // zero fan to isolate ER draw
         });
         cfg.test_extras_mut()
             .insert("use_ideal_capacity".to_string(), true.into());
@@ -2581,16 +2642,18 @@ mod tests {
         eq.step(&env_cold, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        // With PLR=0.5: ER strip should be half backup capacity. Fan power may
-        // add on top, but total must still be below full-strip + fan.
-        let full_strip_plus_fan_kw = (backup_capacity_w / 1000.0) + 0.365 * 1200.0 / 1000.0;
+        let er_capacity_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(0.0);
+        let er_stages_on = eq.telemetry().get(tk::ER_STAGES_ON).unwrap_or(0.0);
         assert!(
-            electric_kw < full_strip_plus_fan_kw,
-            "ER draw {electric_kw:.3} kW should be below full-strip+fan {:.3} kW when PLR=0.5",
-            full_strip_plus_fan_kw,
+            (er_capacity_w - backup_capacity_w).abs() < 1e-6,
+            "single-stage ER must fire at full rated capacity ({backup_capacity_w} W) \
+             even when ideal capacity requests half, got {er_capacity_w:.1} W",
         );
-        assert!(electric_kw > 0.0, "ER must draw some power");
+        assert!(
+            (er_stages_on - 1.0).abs() < 1e-6,
+            "single-stage ER must report 1 stage on, got {er_stages_on}",
+        );
+        assert!(er_capacity_w > 0.0, "ER must produce some thermal output");
     }
 
     // Regression: ER backup must be binary on/off in non-ideal mode,
@@ -2598,7 +2661,7 @@ mod tests {
     // `er_capacity_w` must equal `backup_capacity_w` (full rated), not
     // `backup_capacity_w * plr`.
     //
-    // The bug manifests when the HP thermostat is in Heating mode AND PLR < 1.0.
+    // The bug manifested when the HP thermostat was in Heating mode AND PLR < 1.0.
     // PLR = hvac.duty_cycle = speed.part_load_ratio, which comes from load_ratio
     // = (setpoint - zone) / deadband divided by the low-speed capacity fraction
     // in TwoSpeedSetpoint mode.
@@ -2610,13 +2673,9 @@ mod tests {
     //   - Step 2: zone=20.55°C (zone warmed) → thermostat remains Heating (turn-off=21+0.8=21.8°C).
     //     load_ratio = (21 - 20.55) / 1.0 = 0.45.
     //     TwoSpeedSetpoint: 0.45 < low_cap(0.72) → speed_index=0, PLR = 0.45/0.72 ≈ 0.625.
-    //     ER on (zone < er_turn_on=21°C). Bug: er_capacity_w = 4000 * 0.625 = 2500 W.
-    //     Fix: er_capacity_w = 4000 W.
-    //
-    // This test currently panics — will stop panicking when non-ideal ER
-    // draws full rated power when on.
+    //     ER on (zone < er_turn_on=21°C). Before fix: er_capacity_w = 4000 * 0.625 = 2500 W.
+    //     After fix: er_capacity_w = 4000 W (full rated).
     #[test]
-    #[should_panic(expected = "non-ideal ER must draw full rated")]
     fn er_non_ideal_mode_is_binary_full_rated_when_on() {
         let backup_capacity_w = 4_000.0_f64;
         let cfg = heater_config_with(|typed| {
@@ -2665,6 +2724,172 @@ mod tests {
              got {backup_er_kw:.6} kW (PLR modulation bug: ER incorrectly scaled by HP PLR ≈0.625)",
             backup_capacity_w / 1000.0,
         );
+    }
+
+    // Multi-stage ER in ideal mode: with er_stages=2, backup_capacity_w=10_000 W,
+    // each stage = 5000 W. When the residual (ideal - hp) is 3 kW, the minimum
+    // number of stages to cover it is ceil(3000/5000) = 1, so er_capacity_w = 5000 W.
+    // When the residual is 7 kW, ceil(7000/5000) = 2 stages, er_capacity_w = 10_000 W.
+    #[test]
+    fn er_multi_stage_ideal_mode_activates_minimum_stages() {
+        let backup_capacity_w = 10_000.0_f64;
+        let stage_capacity_w = 5_000.0_f64;
+
+        // Scenario 1: residual = 3 kW → 1 stage (5 kW, over-delivers by 2 kW)
+        let mut cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(10.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.common.backup_capacity_w = Some(backup_capacity_w);
+            typed.common.backup_eir = Some(1.0);
+            typed.common.fan_power_w = Some(0.0);
+            typed.common.er_stages = 2;
+        });
+        cfg.test_extras_mut()
+            .insert("use_ideal_capacity".to_string(), true.into());
+
+        let env_cold = env(18.0, 0.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &env_cold).unwrap();
+
+        let mode = eq.update_control(&env_cold);
+        assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out");
+        // Request 3 kW — only 1 stage (5 kW) needed
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 3_000.0,
+        })
+        .expect("ideal-capacity control accepted");
+        eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let er_capacity_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(0.0);
+        let er_stages_on = eq.telemetry().get(tk::ER_STAGES_ON).unwrap_or(0.0);
+        assert!(
+            (er_capacity_w - stage_capacity_w).abs() < 1e-6,
+            "2-stage ER with 3 kW residual must activate 1 stage ({stage_capacity_w} W), \
+             got {er_capacity_w:.1} W",
+        );
+        assert!(
+            (er_stages_on - 1.0).abs() < 1e-6,
+            "2-stage ER with 3 kW residual must report 1 stage on, got {er_stages_on}",
+        );
+
+        // Scenario 2: residual = 7 kW → 2 stages (10 kW)
+        let mut eq2 = ASHPHeater::new(cfg.clone());
+        let mut ports2 = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq2.init(&cfg, &env_cold).unwrap();
+        eq2.update_control(&env_cold);
+        eq2.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 7_000.0,
+        })
+        .expect("ideal-capacity control accepted");
+        eq2.step(&env_cold, Duration::from_secs(60), &mut ports2)
+            .unwrap();
+
+        let er_capacity_w2 = eq2.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(0.0);
+        let er_stages_on2 = eq2.telemetry().get(tk::ER_STAGES_ON).unwrap_or(0.0);
+        assert!(
+            (er_capacity_w2 - backup_capacity_w).abs() < 1e-6,
+            "2-stage ER with 7 kW residual must activate 2 stages ({backup_capacity_w} W), \
+             got {er_capacity_w2:.1} W",
+        );
+        assert!(
+            (er_stages_on2 - 2.0).abs() < 1e-6,
+            "2-stage ER with 7 kW residual must report 2 stages on, got {er_stages_on2}",
+        );
+    }
+
+    // Non-ideal multi-stage ER: regardless of er_stages, all stages activate together
+    // at full rated capacity. Per-stage control requires separate thermostats.
+    #[test]
+    fn er_multi_stage_non_ideal_fires_all_stages() {
+        let backup_capacity_w = 10_000.0_f64;
+        let cfg = heater_config_with(|typed| {
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.common.backup_capacity_w = Some(backup_capacity_w);
+            typed.common.backup_eir = Some(1.0);
+            typed.common.fan_power_w = Some(0.0);
+            typed.common.number_of_speeds = 2;
+            typed.common.stage_heating_capacities_w = Some(vec![4_000.0, 8_000.0]);
+            typed.common.stage_heating_eirs = Some(vec![0.33, 0.33]);
+            typed.common.heating_capacity_w = None;
+            typed.common.hysteresis_c = Some(1.0);
+            typed.common.er_stages = 2;
+            typed.er_lockout_temp_c = Some(100.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+
+        let env_cold = env(19.0, 5.0, 0.003);
+        eq.init(&cfg, &env_cold).unwrap();
+        eq.update_control(&env_cold);
+        eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let er_capacity_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(0.0);
+        let er_stages_on = eq.telemetry().get(tk::ER_STAGES_ON).unwrap_or(0.0);
+        assert!(
+            (er_capacity_w - backup_capacity_w).abs() < 1e-6,
+            "non-ideal multi-stage ER must fire all stages at full rated ({backup_capacity_w} W), \
+             got {er_capacity_w:.1} W",
+        );
+        assert!(
+            (er_stages_on - 2.0).abs() < 1e-6,
+            "non-ideal 2-stage ER must report 2 stages on, got {er_stages_on}",
+        );
+    }
+
+    // er_stages validation: values outside [1, 4] must produce loud errors.
+    #[test]
+    fn er_stages_validation_rejects_zero() {
+        let cfg = HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                er_stages: 0,
+                ..HeatPumpCommonConfig::default()
+            },
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("er_stages must be in [1, 4]"),
+            "validation must reject er_stages=0; got: {err}",
+        );
+    }
+
+    #[test]
+    fn er_stages_validation_rejects_five() {
+        let cfg = HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                er_stages: 5,
+                ..HeatPumpCommonConfig::default()
+            },
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("er_stages must be in [1, 4]"),
+            "validation must reject er_stages=5; got: {err}",
+        );
+    }
+
+    #[test]
+    fn er_stages_defaults_to_one() {
+        let json = serde_json::json!({
+            "heating_capacity_w": 10_000.0,
+            "heating_eir": 0.25,
+        });
+        let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.common.er_stages, 1, "default er_stages must be 1",);
     }
 
     // Regression: ER-only mode must still include blower fan power.
@@ -5397,6 +5622,7 @@ mod ideal_capacity_tests {
                     plf_max: None,
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
+                    er_stages: 1,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
@@ -5596,6 +5822,7 @@ mod ideal_capacity_tests {
                     plf_max: None,
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
+                    er_stages: 1,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: Some(10.0),
@@ -5654,13 +5881,17 @@ mod ideal_capacity_tests {
             er_w > 0.0,
             "ER must be active when ideal demand exceeds HP capacity"
         );
-        // ER fills exactly the residual: er = (ideal - hp).min(er_rated).
-        // Startup capacity degradation may reduce hp_w below steady-state; ER compensates up
-        // to its rated limit regardless.
-        let expected_er_w = (IDEAL_W - hp_w).clamp(0.0, ER_RATED_W);
+        // With er_stages=1 (binary), ER fires at full rated capacity when any residual > 0.
+        // This covers the residual but may over-deliver; thermostat cycling handles
+        // time-averaging on subsequent steps. The key guarantee: er >= residual.
+        let residual = (IDEAL_W - hp_w).clamp(0.0, ER_RATED_W);
         assert!(
-            (er_w - expected_er_w).abs() < 1e-6,
-            "ER must fill only the residual gap (ideal - hp = {expected_er_w:.1} W); got {er_w:.1} W"
+            er_w >= residual - 1e-6,
+            "ER must cover at least the residual gap ({residual:.1} W); got {er_w:.1} W"
+        );
+        assert!(
+            er_w <= ER_RATED_W + 1e-6,
+            "ER must not exceed rated capacity ({ER_RATED_W:.0} W); got {er_w:.1} W"
         );
     }
 
@@ -5699,8 +5930,9 @@ mod ideal_capacity_tests {
         );
     }
 
-    // In bang-bang mode (use_ideal=false, 60 s timestep), ER uses the proportional
-    // PLR path: backup_capacity_w * plr.  Zone below setpoint → PLR=1.0 → ER runs
+    // In bang-bang mode (use_ideal=false, 60 s timestep), ER is binary on/off.
+    // Zone below setpoint → ER on → full rated capacity. The thermostat cycles
+    // ER on/off to achieve time-averaged part-load behavior.
     // at full rated capacity when OAT is below the ER lockout threshold.
     #[test]
     fn bang_bang_er_unchanged() {
@@ -5748,6 +5980,7 @@ mod ideal_capacity_tests {
                     plf_max: None,
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
+                    er_stages: 1,
                 },
                 hp_lockout_temp_c: Some(10.0),
                 er_lockout_temp_c: Some(5.0),
@@ -5781,10 +6014,10 @@ mod ideal_capacity_tests {
             .unwrap();
 
         let er_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(0.0);
-        // Bang-bang: PLR=1.0 → er_capacity = backup_capacity_w * 1.0 = ER_RATED_W.
+        // Bang-bang: ER is binary on/off — full rated capacity when on.
         assert!(
             (er_w - ER_RATED_W).abs() < 1.0,
-            "bang-bang ER must run at full rated capacity ({ER_RATED_W:.0} W) with PLR=1.0; \
+            "bang-bang ER must run at full rated capacity ({ER_RATED_W:.0} W) when on; \
              got {er_w:.1} W"
         );
     }
@@ -5848,6 +6081,7 @@ mod ideal_capacity_tests {
                     plf_max: None,
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
+                    er_stages: 1,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: Some(5.0),
@@ -5903,7 +6137,6 @@ mod ideal_capacity_tests {
     fn ideal_er_mode_hp_runs_at_full_plr_not_throttled_by_er_denominator() {
         const HP_RATED_W: f64 = 6_000.0;
         const IDEAL_W: f64 = 8_000.0;
-        const EXPECTED_ER_W: f64 = IDEAL_W - HP_RATED_W;
 
         let cfg = heater_config_with_er();
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -5935,10 +6168,14 @@ mod ideal_capacity_tests {
             "HP must run at full capacity ({HP_RATED_W:.0} W); got {hp_w:.1} W -- \
              Bug 2 fix: HP PLR denominator must not include ER capacity"
         );
-        // ER fills residual: IDEAL - HP = 2000 W.
+        // With er_stages=1 (binary), ER fires at full rated capacity (4000 W) when
+        // residual > 0, rather than filling exactly the residual (2000 W).
+        // Multi-stage ER tests verify precise residual fill; this test's primary
+        // purpose is verifying HP PLR (assertion above).
+        const ER_RATED_W: f64 = 4_000.0;
         assert!(
-            (er_w - EXPECTED_ER_W).abs() < 1.0,
-            "ER must fill only the residual ({EXPECTED_ER_W:.0} W); got {er_w:.1} W"
+            er_w > 0.0 && er_w <= ER_RATED_W + 1.0,
+            "ER must be active (≤{ER_RATED_W:.0} W rated) when residual > 0; got {er_w:.1} W"
         );
     }
 }

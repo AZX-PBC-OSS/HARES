@@ -1037,6 +1037,11 @@ fn try_build_heat_pump_heater_config(
                 .and_then(Value::as_f64)
                 .unwrap_or(0.25),
             eir_part_load_benefit: params.get("eir_part_load_benefit").and_then(Value::as_f64),
+            er_stages: params
+                .get("er_stages")
+                .and_then(Value::as_u64)
+                .map(|v| v as u8)
+                .unwrap_or(1),
         },
         hp_lockout_temp_c: params.get("hp_lockout_temp_c").and_then(Value::as_f64),
         er_lockout_temp_c: params.get("er_lockout_temp_c").and_then(Value::as_f64),
@@ -1197,6 +1202,11 @@ fn try_build_heat_pump_cooler_config(
                 .and_then(Value::as_f64)
                 .unwrap_or(0.25),
             eir_part_load_benefit: params.get("eir_part_load_benefit").and_then(Value::as_f64),
+            er_stages: params
+                .get("er_stages")
+                .and_then(Value::as_u64)
+                .map(|v| v as u8)
+                .unwrap_or(1),
         },
         stage_shrs: extract_stage_values(params, "shr"),
     };
