@@ -38,6 +38,9 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::BACKUP_EIR, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::MAX_CAPACITY_FRACTION, 1.0);
+    telemetry.insert(tk::CAP_RATIO, 0.0);
+    telemetry.insert(tk::EIR_RATIO, 0.0);
+    telemetry.insert(tk::BIQUADRATIC_CURVE_SOURCE, 0.0);
     telemetry
 }
 
@@ -180,6 +183,21 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::MAX_CAPACITY_FRACTION.to_string(),
             unit: "-".to_string(),
             description: "External max-capacity fraction control [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::CAP_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Biquadratic capacity correction ratio at current conditions".to_string(),
+        },
+        TelemetryField {
+            name: tk::EIR_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Biquadratic EIR correction ratio at current conditions (pre-PLF)".to_string(),
+        },
+        TelemetryField {
+            name: tk::BIQUADRATIC_CURVE_SOURCE.to_string(),
+            unit: "enum".to_string(),
+            description: "Biquadratic curve provenance: 0=identity, 1=equipment-type default, 2=user-supplied".to_string(),
         },
     ]
 }

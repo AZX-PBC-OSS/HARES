@@ -236,6 +236,10 @@ struct HeaterStep {
     /// Fuel consumption [W] when backup heater burns gas/propane/oil.
     /// Zero when backup is electric or not running.
     fuel_w: f64,
+    /// Biquadratic capacity correction ratio at current conditions.
+    cap_ratio: f64,
+    /// Biquadratic EIR correction ratio at current conditions (pre-PLF).
+    eir_ratio: f64,
 }
 
 impl ASHPHeater {
@@ -453,6 +457,10 @@ impl HeatPumpHeaterCore {
         self.dr_duration_remaining_s = None;
         self.dr_level = DRLevel::Normal;
         self.telemetry = default_heater_telemetry();
+        self.telemetry.set(
+            tk::BIQUADRATIC_CURVE_SOURCE,
+            self.hvac.config.biquadratic_curve_source.telemetry_value(),
+        );
         self.core_output = CoreOutput::default();
 
         Ok(())
@@ -825,6 +833,8 @@ impl HeatPumpHeaterCore {
             tk::MAX_CAPACITY_FRACTION,
             self.hvac.control.max_capacity_fraction,
         );
+        self.telemetry.set(tk::CAP_RATIO, step.cap_ratio);
+        self.telemetry.set(tk::EIR_RATIO, step.eir_ratio);
         let core_fuel_w = if scaled_fuel_w > 0.0 {
             self.backup_fuel_type.map(|fuel_type| FuelPower {
                 fuel_type,
@@ -1169,6 +1179,8 @@ impl HeatPumpHeaterCore {
             defrost_q_w,
             defrost_capacity_multiplier,
             fuel_w: fuel_w.max(0.0),
+            cap_ratio,
+            eir_ratio,
         })
     }
 
@@ -4785,6 +4797,99 @@ mod tests {
             (restored.core.hvac.runtime.time_at_current_speed_s - accumulated).abs() < 1e-9,
             "time_at_current_speed_s must survive checkpoint; expected {accumulated}, got {}",
             restored.core.hvac.runtime.time_at_current_speed_s
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Integration test: default curves vs identity curves produce measurable
+    // energy difference.
+    //
+    // The ticket DoD requires: "Annual heating energy in a cold-climate
+    // simulation differs by >15% from identity-curve baseline." A full annual
+    // BESTEST run is impractical in a unit test; instead we run a synthetic
+    // 24-hour cold day and verify the biquadratic correction propagates through
+    // the full init → step → port accumulation path to produce a significant
+    // thermal output difference.
+    //
+    // This test exercises the complete hot path:
+    //   init → maybe_substitute_defaults → compute_step → cap_ratio used in
+    //   steady_capacity_w = stage_capacity_w * cap_ratio → hp_capacity_w →
+    //   write_zone_thermal_contributions → port sensible_gain_w.
+    //
+    // A bug that silently discards the biquadratic correction (e.g. an
+    // accidental `let (_, _cap_ratio)` with an ignored value) would cause
+    // this test to fail because the two heaters would produce identical output.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ashp_default_curves_reduce_thermal_output_vs_identity_at_cold_oat() {
+        let mut cfg_default = heater_config_with(|_| {});
+        cfg_default.test_extras_mut().remove("biquadratic_coeffs");
+
+        let mut cfg_identity = heater_config_with(|_| {});
+        add_identity_biquadratic_curves(&mut cfg_identity);
+
+        let mut eq_default = ASHPHeater::new(cfg_default.clone());
+        let mut eq_identity = ASHPHeater::new(cfg_identity.clone());
+
+        let cold_env = env(18.0, -8.3, 0.002);
+
+        eq_default.init(&cfg_default, &cold_env).unwrap();
+        eq_identity.init(&cfg_identity, &cold_env).unwrap();
+
+        eq_default.update_control(&cold_env);
+        eq_identity.update_control(&cold_env);
+
+        let n_steps = 1440_usize;
+        let dt = Duration::from_secs(60);
+
+        let mut total_thermal_default_w_s: f64 = 0.0;
+        let mut total_thermal_identity_w_s: f64 = 0.0;
+
+        for _ in 0..n_steps {
+            let mut ports_default = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            let mut ports_identity = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+
+            eq_default.step(&cold_env, dt, &mut ports_default).unwrap();
+            eq_identity
+                .step(&cold_env, dt, &mut ports_identity)
+                .unwrap();
+
+            total_thermal_default_w_s +=
+                ports_default.thermal[0].sensible_gain_w * dt.as_secs_f64();
+            total_thermal_identity_w_s +=
+                ports_identity.thermal[0].sensible_gain_w * dt.as_secs_f64();
+
+            ports_default.thermal[0].zero();
+            ports_identity.thermal[0].zero();
+        }
+
+        let ratio = total_thermal_default_w_s / total_thermal_identity_w_s;
+        assert!(
+            ratio < 0.85,
+            "Default curves must reduce thermal output by >15% vs identity at OAT=-8.3°C; \
+             got ratio={ratio:.4} (default={total_thermal_default_w_s:.0} W·s, \
+             identity={total_thermal_identity_w_s:.0} W·s)"
+        );
+
+        let cap_ratio_default = eq_default.telemetry().get(tk::CAP_RATIO).unwrap_or(1.0);
+        assert!(
+            cap_ratio_default < 0.8,
+            "CAP_RATIO telemetry with default curves must be < 0.8 at -8.3°C; \
+             got {cap_ratio_default:.6}"
+        );
+
+        let cap_ratio_identity = eq_identity.telemetry().get(tk::CAP_RATIO).unwrap_or(1.0);
+        assert!(
+            (cap_ratio_identity - 1.0).abs() < 0.01,
+            "CAP_RATIO telemetry with identity curves must be ≈ 1.0; \
+             got {cap_ratio_identity:.6}"
         );
     }
 }

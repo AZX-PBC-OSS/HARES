@@ -12,6 +12,7 @@ use super::core_config::{
     load_bounds_pair, load_plr_coefficients, parse_biquadratic_list, parse_f64_array_3,
     parse_speed_control_mode,
 };
+use super::default_curves::{BiquadraticCurveSource, maybe_substitute_defaults};
 use super::speed_control::{SpeedControlMode, StartupConfig};
 use super::staging::{DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF};
 use super::thermostat::{
@@ -189,6 +190,7 @@ pub struct HvacConfig {
     /// is used (same fallback pattern as `biquadratic_coeffs`).
     pub eir_plr_coefficients: Option<Vec<[f64; 3]>>,
     pub min_time_per_speed_s: f64,
+    pub biquadratic_curve_source: BiquadraticCurveSource,
 }
 
 /// Runtime state updated every simulation timestep.
@@ -288,6 +290,7 @@ impl HvacEquipment {
                 eir_by_stage: vec![],
                 eir_plr_coefficients: None,
                 min_time_per_speed_s: 300.0,
+                biquadratic_curve_source: BiquadraticCurveSource::Identity,
             },
             thermostat_fsm: ThermostatFsm::new(ThermalSetpoints {
                 heating_c: 20.0,
@@ -433,6 +436,12 @@ impl HvacEquipment {
                 self.config.biquadratic_coeffs = interleaved;
             }
         }
+        // If the loaded coefficients are still identity and the equipment type
+        // has physically-correct defaults available, substitute them.
+        self.config.biquadratic_curve_source = maybe_substitute_defaults(
+            &mut self.config.biquadratic_coeffs,
+            self.config.equipment_type,
+        );
         // OCHRE HVAC.py: biquadratic CSV files specify `min_Twb`, `max_Twb`,
         // `min_Tdb`, `max_Tdb` bounds. Load from config if provided.
         self.config.biquadratic_x1_bounds = load_bounds_pair(
@@ -2944,8 +2953,8 @@ mod tests {
     // ---------------------------------------------------------------------------
     // Regression tests for default biquadratic performance curves
     //
-    // These tests FAIL with the current identity defaults [1,0,0,0,0,0] and
-    // PASS only after equipment-type-aware default curves are wired in.
+    // These tests verify that equipment-type-aware default curves produce
+    // physically correct temperature-dependent capacity and EIR ratios.
     //
     // Physics basis:
     //   AHRI 210/240-2023 H1 condition: OAT=8.3°C DB, indoor=21.1°C DB.
@@ -2957,21 +2966,15 @@ mod tests {
     //   Biquadratic MSHP Heater.csv column Variable_1.
     // ---------------------------------------------------------------------------
 
-    /// Will stop panicking when ASHP default biquadratic curves are wired in.
     #[test]
-    #[should_panic(expected = "AshpHeatPumpOnly still has identity")]
     fn ashp_default_cap_curve_unity_at_ahri_h1() {
-        let hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
-        // The default curves for AshpHeatPumpOnly must be the
-        // OCHRE Single_1 coefficients, not identity. Assert that the coefficients
-        // are NOT the identity placeholder.
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
         assert_ne!(
             hvac.config.biquadratic_coeffs[0], DEFAULT_BIQUADRATIC_COEFFS,
-            "AshpHeatPumpOnly still has identity biquadratic coefficients \
-             [1,0,0,0,0,0]; equipment-type default curves have not been wired in"
+            "AshpHeatPumpOnly must not have identity biquadratic coefficients after init"
         );
-        // At AHRI H1: cap_ratio must be ≈ 1.0 (within 5%).
-        // OCHRE Single_1 coefficients produce 0.9951 here (verified by hand).
         let cap_ratio_h1 = hvac.evaluate_biquadratic(0, 21.1, 8.3);
         assert!(
             (cap_ratio_h1 - 1.0).abs() < 0.05,
@@ -2980,35 +2983,29 @@ mod tests {
         );
     }
 
-    /// Will stop panicking when ASHP default biquadratic curves are wired in.
     #[test]
-    #[should_panic(expected = "ASHP cap_ratio at AHRI H3")]
     fn ashp_default_cap_curve_below_08_at_ahri_h3() {
-        let hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
-        // With identity coefficients this always returns 1.0; with the OCHRE
-        // Single_1 curve it returns ≈ 0.631, well within 0.50-0.70 range.
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
         let cap_ratio_h3 = hvac.evaluate_biquadratic(0, 21.1, -8.3);
         assert!(
             cap_ratio_h3 < 0.8,
             "ASHP cap_ratio at AHRI H3 (OAT=-8.3°C) is {cap_ratio_h3:.6}; \
-             identity default returns 1.0 — default curves not wired in"
+             must be < 0.8"
         );
     }
 
-    /// Will stop panicking when ASHP default EIR biquadratic curve is wired in.
     #[test]
-    #[should_panic(expected = "ASHP EIR at H3")]
     fn ashp_default_eir_curve_increases_at_low_oat() {
-        let hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
-        // curve_index=1 → EIR curve (odd index).
-        // Identity EIR returns 1.0 at all temperatures — no efficiency penalty.
-        // OCHRE Single_1: eir_h1 ≈ 0.994, eir_h3 ≈ 1.346.
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
         let eir_h1 = hvac.evaluate_biquadratic(1, 21.1, 8.3);
         let eir_h3 = hvac.evaluate_biquadratic(1, 21.1, -8.3);
         assert!(
             eir_h3 > eir_h1,
-            "ASHP EIR at H3 ({eir_h3:.4}) should exceed EIR at H1 ({eir_h1:.4}); \
-             identity default returns identical values — default curves not wired in"
+            "ASHP EIR at H3 ({eir_h3:.4}) must exceed EIR at H1 ({eir_h1:.4})"
         );
         assert!(
             eir_h3 > 1.0,
@@ -3017,17 +3014,34 @@ mod tests {
         );
     }
 
-    /// Will stop panicking when MSHP default biquadratic curves are wired in.
     #[test]
-    #[should_panic(expected = "MSHP cap_ratio at AHRI H3")]
     fn mshp_default_cap_curve_below_08_at_ahri_h3() {
-        let hvac = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
-        // OCHRE Variable_1 coefficients produce ≈ 0.568 at H3.
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
         let cap_ratio_h3 = hvac.evaluate_biquadratic(0, 21.1, -8.3);
         assert!(
             cap_ratio_h3 < 0.8,
             "MSHP cap_ratio at AHRI H3 (OAT=-8.3°C) is {cap_ratio_h3:.6}; \
-             identity default returns 1.0 — default curves not wired in"
+             must be < 0.8"
+        );
+    }
+
+    #[test]
+    fn mshp_default_eir_curve_increases_at_low_oat() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+        let eir_h1 = hvac.evaluate_biquadratic(1, 21.1, 8.3);
+        let eir_h3 = hvac.evaluate_biquadratic(1, 21.1, -8.3);
+        assert!(
+            eir_h3 > eir_h1,
+            "MSHP EIR at H3 ({eir_h3:.4}) must exceed EIR at H1 ({eir_h1:.4})"
+        );
+        assert!(
+            eir_h3 > 1.0,
+            "MSHP EIR at H3 must exceed 1.0 (worse than rated efficiency); \
+             got {eir_h3:.4}"
         );
     }
 
@@ -3094,6 +3108,99 @@ mod tests {
             hvac.config.biquadratic_coeffs[3], DEFAULT_BIQUADRATIC_COEFFS,
             "missing eir curve at speed 1 is silently filled with \
              identity coefficients [1,0,0,0,0,0] — no warning is emitted (bug)"
+        );
+    }
+
+    #[test]
+    fn biquadratic_curve_source_default_after_init_ashp() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+        assert_eq!(
+            hvac.config.biquadratic_curve_source,
+            BiquadraticCurveSource::Default,
+            "AshpHeatPumpOnly with no user curves must report Default source"
+        );
+    }
+
+    #[test]
+    fn biquadratic_curve_source_user_when_explicit_curves_provided() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config.test_extras_mut().insert(
+            "biquadratic_coeffs".to_string(),
+            "[[0.9,0.01,0,0.02,0,0],[1.1,0,0,0.03,0,0]]".into(),
+        );
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+        assert_eq!(
+            hvac.config.biquadratic_curve_source,
+            BiquadraticCurveSource::User,
+            "Explicitly provided curves must report User source"
+        );
+    }
+
+    #[test]
+    fn biquadratic_curve_source_identity_for_furnace() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+        assert_eq!(
+            hvac.config.biquadratic_curve_source,
+            BiquadraticCurveSource::Identity,
+            "GasFurnace has no biquadratic defaults; must report Identity"
+        );
+    }
+
+    #[test]
+    fn ashp_default_cap_curve_matches_ochre_csv_single_1() {
+        use super::super::default_curves::default_biquadratic_coeffs;
+        let defaults = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly).unwrap();
+        let expected_cap: [f64; 6] = [
+            0.878143655,
+            -0.002914855,
+            -0.00003337,
+            0.022386661,
+            0.000163944,
+            -0.00002187,
+        ];
+        let expected_eir: [f64; 6] = [
+            0.716518071,
+            0.010275901,
+            0.000460734,
+            -0.006480365,
+            0.000456354,
+            -0.00069764,
+        ];
+        assert_eq!(
+            defaults[0], expected_cap,
+            "ASHP capacity coefficients must match CSV"
+        );
+        assert_eq!(
+            defaults[1], expected_eir,
+            "ASHP EIR coefficients must match CSV"
+        );
+    }
+
+    #[test]
+    fn mshp_default_cap_curve_matches_ochre_csv_variable_1() {
+        use super::super::default_curves::default_biquadratic_coeffs;
+        let defaults = default_biquadratic_coeffs(HvacEquipmentType::MiniSplitHeat).unwrap();
+        let expected_cap: [f64; 6] = [1.002928121, -0.010386676, 0.0, 0.025961538, 0.0, 0.0];
+        let expected_eir: [f64; 6] = [
+            0.966475473,
+            0.00591495,
+            0.000191202,
+            -0.012965668,
+            0.00004225,
+            -0.000524003,
+        ];
+        assert_eq!(
+            defaults[0], expected_cap,
+            "MSHP capacity coefficients must match CSV"
+        );
+        assert_eq!(
+            defaults[1], expected_eir,
+            "MSHP EIR coefficients must match CSV"
         );
     }
 }

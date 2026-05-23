@@ -7,6 +7,7 @@ pub mod boiler;
 pub(super) mod coil_physics;
 pub mod cooling_config;
 pub(super) mod core_config;
+pub(super) mod default_curves;
 pub mod dehumidifier;
 pub(super) mod duct_distribution;
 pub(super) mod equivalent_battery;
