@@ -5426,7 +5426,7 @@ occupancy = 1.0
     /// that has occupancy configured but no schedule domain, or the hot-step
     /// path must emit a `tracing::warn!` / error.
     #[test]
-    fn ticket_109_absent_schedule_domain_silently_produces_zero_gains() {
+    fn absent_schedule_domain_silently_produces_zero_gains() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
@@ -5438,7 +5438,7 @@ occupancy = 1.0
         dwelling.occupancy_scale = 3.0;
 
         // Deliberately do NOT push a SCHEDULE_DOMAIN_ID update into latest_env.
-        // This is the "absent schedule domain" scenario described in ticket #109.
+        // This is the "absent schedule domain" scenario.
 
         for thermal in &mut dwelling.ports.thermal {
             thermal.zero();
@@ -5454,16 +5454,16 @@ occupancy = 1.0
             .find(|t| t.zone == indoor_zone)
             .expect("indoor zone must have a thermal port");
 
-        // BUG (ticket #109): gains are silently zero because `.unwrap_or(0.0)`
+        // BUG: gains are silently zero because `.unwrap_or(0.0)`
         // absorbs the missing domain.  Expected: a loud error or warning.
         assert_eq!(
             indoor_port.sensible_gain_w, 0.0,
-            "BUG (ticket #109): absent SCHEDULE_DOMAIN_ID silently yields 0 W sensible gain \
+            "absent SCHEDULE_DOMAIN_ID silently yields 0 W sensible gain \
              instead of a loud MissingScheduleDomain error"
         );
         assert_eq!(
             indoor_port.latent_gain_w, 0.0,
-            "BUG (ticket #109): absent SCHEDULE_DOMAIN_ID silently yields 0 W latent gain \
+            "absent SCHEDULE_DOMAIN_ID silently yields 0 W latent gain \
              instead of a loud MissingScheduleDomain error"
         );
     }

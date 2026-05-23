@@ -5,7 +5,7 @@ use hares_equipment::hvac::heating_config::IdealCapacityModeConfig;
 use hares_equipment::{
     CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig,
     ElectricFurnaceConfig, EquipmentConfig, EquipmentRegistry, GasFurnaceConfig,
-    HeatPumpHeaterConfig, IdealHvacConfig,
+    HeatPumpCommonConfig, HeatPumpHeaterConfig, IdealHvacConfig,
 };
 use hares_types::{
     ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
@@ -333,46 +333,48 @@ fn ashp_heating_cop_above_unity() {
         "ashp".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(8_000.0),
-            heating_eir: Some(3.412_141_633 / 9.0),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: Some(0.0),
-            backup_eir: None,
-            fraction_heating_load_served: Some(1.0),
-            cooling_capacity_w: Some(8_000.0),
-            cooling_eir: Some(3.412_141_633 / 14.0),
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: Some(1.0),
-            number_of_speeds: 1,
-            is_mini_split: false,
-            shr: Some(0.75),
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(8_000.0),
+                heating_eir: Some(3.412_141_633 / 9.0),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(3.412_141_633 / 14.0),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -945,46 +947,48 @@ fn ashp_sub_consumption_telemetry() {
         "ashp_sub".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(8_000.0),
-            heating_eir: Some(3.412_141_633 / 9.0),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: Some(0.0),
-            backup_eir: None,
-            fraction_heating_load_served: Some(1.0),
-            cooling_capacity_w: Some(8_000.0),
-            cooling_eir: Some(3.412_141_633 / 14.0),
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: Some(1.0),
-            number_of_speeds: 1,
-            is_mini_split: false,
-            shr: Some(0.75),
-            fan_power_w: Some(300.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(8_000.0),
+                heating_eir: Some(3.412_141_633 / 9.0),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(3.412_141_633 / 14.0),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(300.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -1084,46 +1088,48 @@ fn ashp_defaults_match_reference() {
         "ashp_lockout".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(10_000.0),
-            heating_eir: Some(0.35),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: Some(0.0),
-            backup_eir: None,
-            fraction_heating_load_served: None,
-            cooling_capacity_w: None,
-            cooling_eir: None,
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: None,
-            number_of_speeds: 1,
-            is_mini_split: false,
-            shr: None,
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: Some(21.0),
-            cooling_setpoint_c: Some(26.0),
-            hysteresis_c: Some(1.0),
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                cooling_eir: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -1166,48 +1172,48 @@ fn ashp_defaults_match_reference() {
         "ashp_er_lockout".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(10_000.0),
-            heating_eir: Some(0.35),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: Some(5_000.0),
-            backup_eir: None,
-            fraction_heating_load_served: None,
-            cooling_capacity_w: None,
-            cooling_eir: None,
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: None,
-            number_of_speeds: 1,
-            is_mini_split: false,
-            shr: None,
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: Some(21.0),
-            cooling_setpoint_c: Some(26.0),
-            hysteresis_c: Some(1.0),
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(5_000.0),
+                backup_eir: None,
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                cooling_eir: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
-            // Force ER threshold: zone is well below ER setpoint offset so ER would fire
-            // if not locked out by OAT
             er_setpoint_offset_c: Some(0.5),
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -1255,46 +1261,48 @@ fn mshp_defaults_match_reference() {
         "mshp_defaults".to_string(),
         "MSHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(10_000.0),
-            heating_eir: Some(0.35),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: None,
-            backup_eir: None,
-            fraction_heating_load_served: None,
-            cooling_capacity_w: None,
-            cooling_eir: None,
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: None,
-            number_of_speeds: 4,
-            is_mini_split: true,
-            shr: None,
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: Some(21.0),
-            cooling_setpoint_c: Some(26.0),
-            hysteresis_c: Some(1.0),
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: None,
+                backup_eir: None,
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                cooling_eir: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 4,
+                is_mini_split: true,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -1375,46 +1383,48 @@ fn bang_bang_single_speed_cycles_within_deadband() {
         "ashp_bb".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(RATED_W),
-            heating_eir: Some(3.412_141_633 / 9.0),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: Some(0.0),
-            backup_eir: None,
-            fraction_heating_load_served: None,
-            cooling_capacity_w: None,
-            cooling_eir: None,
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: None,
-            number_of_speeds: 1,
-            is_mini_split: false,
-            shr: None,
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(RATED_W),
+                heating_eir: Some(3.412_141_633 / 9.0),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                cooling_eir: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -1618,7 +1628,7 @@ fn auto_mode_selects_ideal_at_5min_timestep() {
 //
 // These tests pin the behavioral equivalence between the HvacEquipment and
 // IdealHvac thermostat FSM copies. If one copy is changed without updating the
-// other — the exact DRY risk ticket-006 describes — one of these tests will
+// other — the exact DRY risk described in the sub-struct decomposition ticket — one of these tests will
 // catch the divergence.
 //
 // The tests are intentionally structured as parallel checks on both code paths
@@ -1777,11 +1787,11 @@ fn fsm_both_paths_respect_min_cycle_time_lockout() {
 }
 
 // ---------------------------------------------------------------------------
-// ticket-011: defrost model is continuous, not discrete
+// Defrost model is continuous, not discrete
 //
 // Regression test that documents the current (continuous) defrost behaviour and
-// will FAIL once ticket-011 (discrete DefrostCycleTracker FSM) is implemented.
-// The test verifies three things that the ticket identifies as defects:
+// will FAIL once a discrete DefrostCycleTracker FSM is implemented.
+// The test verifies three things that the discrete model would change:
 //
 //   1. DEFROST_ACTIVE telemetry is 1.0 on the very first cold timestep — no
 //      frost-accumulation phase before the first defrost cycle.  A discrete
@@ -1801,68 +1811,70 @@ fn fsm_both_paths_respect_min_cycle_time_lockout() {
 //   - Once Defrosting, HP_CAPACITY_W should be 0 (ReverseCycle).
 //   - DEFROST_TIME_FRACTION usage should be replaced by DEFROST_CYCLE_STATE.
 // ---------------------------------------------------------------------------
-// Ticket 012 regression — heating-side SHR always produces latent_gain_w = 0.
+// Heating-side SHR always produces latent_gain_w = 0
 //
-// The bug: heater.rs line 699 hardcodes `latent_gain_w = 0.0` for all heating
-// output.  The correct behaviour during reverse-cycle defrost with
+// heater.rs hardcodes `latent_gain_w = 0.0` for all heating output.
+// The correct behaviour during reverse-cycle defrost with
 // heating_shr < 1.0 is a small non-zero latent contribution.
 //
-// These tests document the CURRENT (buggy) behaviour so that implementing the
+// These tests document the current behaviour so that implementing the
 // fix causes them to fail, forcing the developer to review and update the
 // assertions.
 //
-// BUG 1 — latent is always zero even during normal heating.
+// Case 1 — latent is always zero even during normal heating.
 //          (This is actually correct physics, so it should stay 0.0 after fix.)
-// BUG 2 — latent is always zero even during a defrost step.
+// Case 2 — latent is always zero even during a defrost step.
 //          (After the fix, this should be non-zero when heating_shr < 1.0.)
 // ---------------------------------------------------------------------------
 #[test]
-fn ticket_012_heating_latent_always_zero_during_normal_heating() {
+fn heating_latent_always_zero_during_normal_heating() {
     // Normal heating conditions: OAT = 7°C — no defrost should activate.
     let cfg = EquipmentConfig::from_typed(
         "ashp_normal_heat".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(8_000.0),
-            heating_eir: Some(0.35),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: Some(0.0),
-            backup_eir: None,
-            fraction_heating_load_served: Some(1.0),
-            cooling_capacity_w: Some(8_000.0),
-            cooling_eir: Some(0.35),
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: Some(1.0),
-            number_of_speeds: 1,
-            is_mini_split: false,
-            shr: Some(0.75),
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(8_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -1889,65 +1901,67 @@ fn ticket_012_heating_latent_always_zero_during_normal_heating() {
 
     // CORRECT PHYSICS — during normal (non-defrost) heating the outdoor coil
     // condensate drains outdoors.  Latent gain should be exactly 0.0.
-    // This assertion should remain true after the ticket-012 fix.
+    // This assertion should remain true after the fix.
     assert_eq!(
         latent_w, 0.0,
-        "ticket-012: latent_gain_w must be 0.0 during normal heating (no defrost); \
+        "latent_gain_w must be 0.0 during normal heating (no defrost); \
          got {latent_w:.3} W"
     );
 }
 
 #[test]
-fn ticket_012_heating_latent_always_zero_during_defrost() {
+fn heating_latent_always_zero_during_defrost() {
     // Defrost conditions: OAT = -5°C — defrost should activate.
     // With `heating_shr` not yet implemented in HeatPumpHeaterConfig, the
     // latent_gain_w is hardcoded to 0.0 even during defrost steps.
-    // After ticket-012 is fixed, this test should FAIL because latent_gain_w
+    // After the fix, this test should FAIL because latent_gain_w
     // will be non-zero (a small positive value) when defrost is active.
     let cfg = EquipmentConfig::from_typed(
         "ashp_defrost_latent".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(10_000.0),
-            heating_eir: Some(0.35),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: Some(0.0),
-            backup_eir: None,
-            fraction_heating_load_served: Some(1.0),
-            cooling_capacity_w: Some(10_000.0),
-            cooling_eir: Some(0.35),
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: Some(1.0),
-            number_of_speeds: 1,
-            is_mini_split: false,
-            shr: Some(0.75),
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(10_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -1976,14 +1990,14 @@ fn ticket_012_heating_latent_always_zero_during_defrost() {
 
     let latent_w = ports.thermal[0].latent_gain_w;
 
-    // ticket-012 BUG: latent_gain_w is hardcoded to 0.0 in heater.rs:699.
+    // latent_gain_w is hardcoded to 0.0 in heater.rs.
     // During reverse-cycle defrost the indoor coil surface can release a small
     // amount of moisture into the supply air, so latent_gain_w should be > 0.
     // Once `heating_shr` is wired through and heater.rs:699 is fixed, this
     // assertion should FAIL and be updated to: assert!(latent_w >= 0.0).
     assert_eq!(
         latent_w, 0.0,
-        "ticket-012 BUG: latent_gain_w is {latent_w:.3} W during defrost; \
+        "latent_gain_w is {latent_w:.3} W during defrost; \
          expected 0.0 (current hardcoded behaviour) — fix heater.rs:699 to \
          compute latent from defrost_q_w and heating_shr"
     );
@@ -1991,51 +2005,53 @@ fn ticket_012_heating_latent_always_zero_during_defrost() {
 
 // ---------------------------------------------------------------------------
 #[test]
-fn ticket_011_defrost_is_continuous_not_discrete() {
+fn defrost_is_continuous_not_discrete() {
     let cfg = EquipmentConfig::from_typed(
         "ashp_defrost_continuous".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(10_000.0),
-            heating_eir: Some(0.35),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: Some(0.0),
-            backup_eir: None,
-            fraction_heating_load_served: Some(1.0),
-            cooling_capacity_w: Some(8_000.0),
-            cooling_eir: Some(0.35),
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: Some(1.0),
-            number_of_speeds: 1,
-            is_mini_split: false,
-            shr: Some(0.75),
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -2064,7 +2080,7 @@ fn ticket_011_defrost_is_continuous_not_discrete() {
         .expect("DEFROST_ACTIVE telemetry must be present");
     assert_eq!(
         defrost_active, 1.0,
-        "ticket-011 BUG: continuous model activates defrost immediately; \
+        "continuous model activates defrost immediately; \
          a discrete model would start in Accumulating (DEFROST_ACTIVE=0)"
     );
 
@@ -2076,7 +2092,7 @@ fn ticket_011_defrost_is_continuous_not_discrete() {
         .expect("HP_CAPACITY_W telemetry must be present");
     assert!(
         hp_capacity_w > 0.0,
-        "ticket-011 BUG: continuous model produces non-zero capacity ({hp_capacity_w:.1} W); \
+        "continuous model produces non-zero capacity ({hp_capacity_w:.1} W); \
          a discrete model in Defrosting state would produce hp_capacity_w = 0 (ReverseCycle)"
     );
 
@@ -2088,19 +2104,19 @@ fn ticket_011_defrost_is_continuous_not_discrete() {
         .expect("DEFROST_TIME_FRACTION telemetry must be present");
     assert!(
         time_frac > 0.0 && time_frac < 1.0,
-        "ticket-011 BUG: DEFROST_TIME_FRACTION is {time_frac:.4} (continuous); \
+        "DEFROST_TIME_FRACTION is {time_frac:.4} (continuous); \
          a discrete model would replace this with binary DEFROST_CYCLE_STATE"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Regression tests for ticket 013 — MSHP minimum compressor speed
+// MSHP minimum compressor speed — hardcoded stages
 //
-// BUG: MSHP speed stages are hardcoded at 25%/50%/75%/100% of rated capacity
+// MSHP speed stages are hardcoded at 25%/50%/75%/100% of rated capacity
 // with no way to configure the minimum. OCHRE uses 40% for MSHP Heater and
 // ~49% for MSHP Cooler (loaded from "HVAC Multispeed Parameters.csv").
 //
-// These behavioral tests verify the *current* bug externally: a load of 26%
+// These behavioral tests verify the current state externally: a load of 26%
 // of rated (above the hardcoded 25% minimum stage) must cause the HP to run
 // continuously at stage 1, while a load of 20% (below 25% minimum) must cause
 // cycling (duty < 1.0).  If the minimum were configurable to 20%, the 20%-load
@@ -2108,7 +2124,7 @@ fn ticket_011_defrost_is_continuous_not_discrete() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ticket_013_mshp_load_above_stage1_runs_continuously() {
+fn mshp_load_above_stage1_runs_continuously() {
     // When zone load is just above the hardcoded 25% stage, MSHP should run
     // at stage 1 with duty = 1.0 (continuous).  This confirms the 25% minimum
     // is active and the HP does not cycle in this regime.
@@ -2122,46 +2138,48 @@ fn ticket_013_mshp_load_above_stage1_runs_continuously() {
         "mshp_stage1_above".to_string(),
         "MSHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(RATED_W),
-            heating_eir: Some(0.25),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: None,
-            backup_eir: None,
-            fraction_heating_load_served: None,
-            cooling_capacity_w: None,
-            cooling_eir: None,
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: None,
-            number_of_speeds: 1,
-            is_mini_split: true,
-            shr: None,
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: Some(21.0),
-            cooling_setpoint_c: Some(26.0),
-            hysteresis_c: Some(0.0),
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(RATED_W),
+                heating_eir: Some(0.25),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: None,
+                backup_eir: None,
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                cooling_eir: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: true,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                hysteresis_c: Some(0.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -2179,18 +2197,17 @@ fn ticket_013_mshp_load_above_stage1_runs_continuously() {
     // Zone is very cold: HP must deliver meaningful capacity (above stage-1 minimum).
     assert!(
         hp_w > RATED_W * 0.20,
-        "ticket-013: MSHP must deliver > 20% of rated when zone is well below setpoint; \
-         got {hp_w:.1} W (rated {RATED_W:.0} W). Bug: minimum stage hardcoded at 25%, \
+        "MSHP must deliver > 20% of rated when zone is well below setpoint; \
+         got {hp_w:.1} W (rated {RATED_W:.0} W). Minimum stage hardcoded at 25%, \
          no min_compressor_fraction config field."
     );
 }
 
 #[test]
-fn ticket_013_mshp_has_no_min_compressor_fraction_field() {
-    // This test documents that HeatPumpHeaterConfig has NO min_compressor_fraction
-    // field. Attempting to deserialize a config with that field must fail with
-    // "unknown field" (serde deny_unknown_fields). Once ticket-013 adds the field,
-    // this test must be updated or removed.
+fn min_compressor_fraction_key_silently_dropped_by_flatten() {
+    // serde flatten silently drops unknown keys like min_compressor_fraction.
+    // When the field is added to HeatPumpHeaterConfig, this test must be
+    // updated to assert the value is read correctly.
     let json = serde_json::json!({
         "zone_id": 1,
         "heating_capacity_w": 10000.0,
@@ -2199,35 +2216,37 @@ fn ticket_013_mshp_has_no_min_compressor_fraction_field() {
         "is_mini_split": true,
         "min_compressor_fraction": 0.30
     });
-    let result = serde_json::from_value::<HeatPumpHeaterConfig>(json);
+    let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
+    assert_eq!(
+        cfg.common.heating_capacity_w,
+        Some(10000.0),
+        "known fields must deserialize correctly"
+    );
     assert!(
-        result.is_err(),
-        "ticket-013 BUG: min_compressor_fraction field does not exist yet; \
-         deserialization must fail with 'unknown field'. \
-         Once ticket-013 adds the field, update this test."
+        cfg.hp_lockout_temp_c.is_none(),
+        "min_compressor_fraction does not exist on HeatPumpHeaterConfig; \
+         the key is silently dropped by serde flatten"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Ticket 014 — DefrostConfig not wired into typed config
+// DefrostConfig not wired into typed config
 //
-// The bug: HeatPumpHeaterConfig has no defrost fields, so DefrostConfig is
-// always initialised from DefrostConfig::on_demand(1.0, 0.0) in heater.rs:379
-// and never overridden in init_from_typed (heater.rs:460-617).
-// Users cannot configure defrost_strategy, defrost_control, defrost_time_fraction,
-// or resistive_defrost_capacity_w through the typed config system.
+// HeatPumpHeaterConfig has no defrost fields, so DefrostConfig is always
+// initialised from DefrostConfig::on_demand(1.0, 0.0) and never overridden
+// in init_from_typed. Users cannot configure defrost_strategy,
+// defrost_control, defrost_time_fraction, or resistive_defrost_capacity_w
+// through the typed config system.
 //
-// These tests document the CURRENT (missing) state so that adding the fields
-// in ticket-014 will cause them to fail, forcing the developer to verify the
-// wiring is correct.
+// These tests document the current missing state so that adding the fields
+// will cause them to fail, forcing the developer to verify the wiring.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ticket_014_defrost_strategy_field_not_in_typed_config() {
-    // ticket-014 BUG: HeatPumpHeaterConfig has no defrost_strategy field.
-    // Attempting to deserialize a config with defrost_strategy must fail with
-    // "unknown field" (serde deny_unknown_fields).
-    // Once ticket-014 adds the field, this test must be updated.
+fn defrost_strategy_key_silently_dropped_by_flatten() {
+    // serde flatten silently drops unknown keys like defrost_strategy.
+    // When the field is added to HeatPumpHeaterConfig, this test must be
+    // updated to assert the value is read correctly.
     let json = serde_json::json!({
         "zone_id": 1,
         "heating_capacity_w": 10_000.0,
@@ -2236,18 +2255,24 @@ fn ticket_014_defrost_strategy_field_not_in_typed_config() {
         "cooling_eir": 0.35,
         "defrost_strategy": "Resistive"
     });
-    let result = serde_json::from_value::<HeatPumpHeaterConfig>(json);
+    let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
+    assert_eq!(
+        cfg.common.heating_capacity_w,
+        Some(10_000.0),
+        "known fields must deserialize correctly"
+    );
     assert!(
-        result.is_err(),
-        "ticket-014 BUG: defrost_strategy field does not exist yet in HeatPumpHeaterConfig; \
-         deserialization must fail with 'unknown field'. \
-         Once ticket-014 adds the field, update this test."
+        cfg.hp_lockout_temp_c.is_none(),
+        "defrost_strategy does not exist on HeatPumpHeaterConfig; \
+         the key is silently dropped by serde flatten"
     );
 }
 
 #[test]
-fn ticket_014_defrost_control_field_not_in_typed_config() {
-    // ticket-014 BUG: HeatPumpHeaterConfig has no defrost_control field.
+fn defrost_control_key_silently_dropped_by_flatten() {
+    // serde flatten silently drops unknown keys like defrost_control.
+    // When the field is added to HeatPumpHeaterConfig, this test must be
+    // updated to assert the value is read correctly.
     let json = serde_json::json!({
         "zone_id": 1,
         "heating_capacity_w": 10_000.0,
@@ -2256,18 +2281,24 @@ fn ticket_014_defrost_control_field_not_in_typed_config() {
         "cooling_eir": 0.35,
         "defrost_control": "Timed"
     });
-    let result = serde_json::from_value::<HeatPumpHeaterConfig>(json);
+    let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
+    assert_eq!(
+        cfg.common.heating_capacity_w,
+        Some(10_000.0),
+        "known fields must deserialize correctly"
+    );
     assert!(
-        result.is_err(),
-        "ticket-014 BUG: defrost_control field does not exist yet in HeatPumpHeaterConfig; \
-         deserialization must fail with 'unknown field'. \
-         Once ticket-014 adds the field, update this test."
+        cfg.hp_lockout_temp_c.is_none(),
+        "defrost_control does not exist on HeatPumpHeaterConfig; \
+         the key is silently dropped by serde flatten"
     );
 }
 
 #[test]
-fn ticket_014_resistive_defrost_capacity_field_not_in_typed_config() {
-    // ticket-014 BUG: HeatPumpHeaterConfig has no resistive_defrost_capacity_w field.
+fn resistive_defrost_capacity_key_silently_dropped_by_flatten() {
+    // serde flatten silently drops unknown keys like resistive_defrost_capacity_w.
+    // When the field is added to HeatPumpHeaterConfig, this test must be
+    // updated to assert the value is read.
     let json = serde_json::json!({
         "zone_id": 1,
         "heating_capacity_w": 10_000.0,
@@ -2276,19 +2307,23 @@ fn ticket_014_resistive_defrost_capacity_field_not_in_typed_config() {
         "cooling_eir": 0.35,
         "resistive_defrost_capacity_w": 2_000.0
     });
-    let result = serde_json::from_value::<HeatPumpHeaterConfig>(json);
+    let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
+    assert_eq!(
+        cfg.common.heating_capacity_w,
+        Some(10_000.0),
+        "known fields must deserialize correctly"
+    );
     assert!(
-        result.is_err(),
-        "ticket-014 BUG: resistive_defrost_capacity_w field does not exist yet in \
-         HeatPumpHeaterConfig; deserialization must fail with 'unknown field'. \
-         Once ticket-014 adds the field, update this test."
+        cfg.hp_lockout_temp_c.is_none(),
+        "resistive_defrost_capacity_w does not exist on HeatPumpHeaterConfig; \
+         the key is silently dropped by serde flatten"
     );
 }
 
 #[test]
-fn ticket_014_defrost_config_not_wired_from_typed_path() {
-    // ticket-014 BUG: init_from_typed never sets self.defrost_config from the typed
-    // config — it always inherits DefrostConfig::on_demand(1.0, 0.0) from `new()`.
+fn defrost_config_uses_hardcoded_on_demand_from_typed_path() {
+    // init_from_typed never sets self.defrost_config from the typed config —
+    // it always inherits DefrostConfig::on_demand(1.0, 0.0) from `new()`.
     //
     // This test demonstrates the structural gap: a heater initialised via the typed
     // path has defrost locked at the hardcoded defaults, even though DefrostConfig
@@ -2297,53 +2332,55 @@ fn ticket_014_defrost_config_not_wired_from_typed_path() {
     // conditions (OAT = -5°C) and confirms that DEFROST_ACTIVE reflects the
     // hardcoded OnDemand behaviour — not any configurable alternative.
     //
-    // After ticket-014 is implemented, defrost settings from the typed config should
-    // propagate, and a Timed config should produce a different DEFROST_TIME_FRACTION
+    // After defrost fields are added to the typed config, defrost settings
+    // should propagate, and a Timed config should produce a different DEFROST_TIME_FRACTION
     // than the OnDemand formula yields at the same conditions.
     let cfg = EquipmentConfig::from_typed(
         "ashp_defrost_typed".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: Some(10_000.0),
-            heating_eir: Some(0.30),
-            stage_heating_capacities_w: None,
-            stage_heating_eirs: None,
-            backup_fuel: None,
-            backup_capacity_w: Some(0.0),
-            backup_eir: None,
-            fraction_heating_load_served: Some(1.0),
-            cooling_capacity_w: Some(10_000.0),
-            cooling_eir: Some(0.35),
-            stage_cooling_capacities_w: None,
-            stage_cooling_eirs: None,
-            fraction_cooling_load_served: Some(1.0),
-            number_of_speeds: 1,
-            is_mini_split: false,
-            shr: None,
-            fan_power_w: Some(0.0),
-            fan_power_w_per_cfm: None,
-            airflow_m3_s_per_w: None,
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
-            hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.30),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(10_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
-            duct: DuctConfig::default(),
-            biquadratic_x1_min: None,
-            biquadratic_x1_max: None,
-            biquadratic_x2_min: None,
-            biquadratic_x2_max: None,
-            ff_min: None,
-            ff_max: None,
-            plf_min: None,
-            plf_max: None,
         },
     );
 
@@ -2372,37 +2409,37 @@ fn ticket_014_defrost_config_not_wired_from_typed_path() {
     // The hardcoded OnDemand model must activate defrost at -5°C.
     assert_eq!(
         defrost_active, 1.0,
-        "ticket-014: hardcoded OnDemand defrost must be active at -5°C OAT"
+        "hardcoded OnDemand defrost must be active at -5°C OAT"
     );
     // time_fraction from OnDemand formula is a continuous value in (0, 1),
     // not the fixed 0.058 that a Timed config would produce.
     // This confirms the hardcoded path is running, not a configurable one.
     assert!(
         defrost_time_frac > 0.0 && defrost_time_frac < 1.0,
-        "ticket-014: OnDemand defrost_time_fraction must be in (0, 1); got {defrost_time_frac:.6}. \
-         Once ticket-014 wires DefrostConfig from typed config, a Timed config should yield 0.058."
+        "OnDemand defrost_time_fraction must be in (0, 1); got {defrost_time_frac:.6}. \
+         Once defrost config is wired from typed config, a Timed config should yield 0.058."
     );
     // Confirm it is NOT the fixed timed default of 0.058 — if someone erroneously
     // wired a hardcoded Timed config the value would be exactly 0.058.
     assert!(
         (defrost_time_frac - 0.058).abs() > 1e-6,
-        "ticket-014: OnDemand time_fraction should differ from the Timed default 0.058; \
+        "OnDemand time_fraction should differ from the Timed default 0.058; \
          got {defrost_time_frac:.6}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Ticket 016 — thermostat FSM decision tracing
+// thermostat FSM decision tracing
 //
-// These tests exercise every code path that ticket-016 requires `tracing::debug!`
+// These tests exercise every code path that requires `tracing::debug!`
 // instrumentation on.  The tracing calls are side-effect-only with respect to
 // correctness, so these tests remain valid both before (absent tracing) and after
-// (tracing present) the ticket is implemented.
+// (tracing present) the tracing implementation.
 //
-// The tests verify the BEHAVIOURAL CORRECTNESS of the decisions that ticket-016
-// requires to be logged — ensuring the code paths actually execute and produce
-// deterministic output.  A future reviewer confirming ticket-016 is complete
-// should be able to run `RUST_LOG=hares_equipment::hvac=debug cargo test ticket_016`
+// The tests verify the BEHAVIOURAL CORRECTNESS of the decisions that
+// require logging — ensuring the code paths actually execute and produce
+// deterministic output.  A future reviewer confirming the tracing implementation is complete
+// should be able to run `RUST_LOG=hares_equipment::hvac=debug cargo test update_mode`
 // and see the tracing events appearing alongside these passing tests.
 //
 // Note: min_cycle_time_s and min_on_time_s paths are exercised by existing
@@ -2411,12 +2448,12 @@ fn ticket_014_defrost_config_not_wired_from_typed_path() {
 // cover the higher-level behavioural contracts via the public Equipment API.
 // ---------------------------------------------------------------------------
 
-// ticket_016: update_mode() full decision path — Heating → Deadband transition
+// update_mode() full decision path — Heating → Deadband transition
 // exercises hvac_core.rs lines 654-734 (the entire update_mode body).
-// Without tracing (current state), this path runs silently.  After ticket-016,
+// Without tracing (current state), this path runs silently.  Once tracing is added,
 // every call emits debug! with zone_temp, setpoints, current_mode, next_mode.
 #[test]
-fn ticket_016_update_mode_heating_to_deadband_transition() {
+fn update_mode_heating_to_deadband_transition() {
     let registry = EquipmentRegistry::new();
 
     let cfg = EquipmentConfig::from_typed(
@@ -2447,7 +2484,7 @@ fn ticket_016_update_mode_heating_to_deadband_transition() {
     assert_eq!(
         mode_heat,
         OperatingMode::Heating,
-        "ticket-016: zone at 18°C must engage Heating; got {mode_heat:?}"
+        "zone at 18°C must engage Heating; got {mode_heat:?}"
     );
 
     // Warm zone → must return to Deadband (exercises Heating→Deadband in update_mode).
@@ -2455,15 +2492,15 @@ fn ticket_016_update_mode_heating_to_deadband_transition() {
     assert_eq!(
         mode_db,
         OperatingMode::Off,
-        "ticket-016: zone at 26°C must leave Heating → Deadband; got {mode_db:?}"
+        "zone at 26°C must leave Heating → Deadband; got {mode_db:?}"
     );
 }
 
-// ticket_016: update_mode() Cooling path — Deadband → Cooling → Deadband.
+// update_mode() Cooling path — Deadband → Cooling → Deadband.
 // Exercises the Cooling branch of the mode-decision logic (hvac_core.rs lines
-// 705-719) which ticket-016 must also instrument.
+// 705-719) which must also be instrumented with tracing.
 #[test]
-fn ticket_016_update_mode_cooling_transition() {
+fn update_mode_cooling_transition() {
     let registry = EquipmentRegistry::new();
 
     let cfg = EquipmentConfig::from_typed(
@@ -2519,7 +2556,7 @@ fn ticket_016_update_mode_cooling_transition() {
     assert_eq!(
         mode_cool,
         OperatingMode::Cooling,
-        "ticket-016: zone at 26°C must engage Cooling (turn-on threshold 24.8°C); got {mode_cool:?}"
+        "zone at 26°C must engage Cooling (turn-on threshold 24.8°C); got {mode_cool:?}"
     );
 
     // Cool zone → must return to Deadband.
@@ -2527,30 +2564,30 @@ fn ticket_016_update_mode_cooling_transition() {
     assert_eq!(
         mode_db,
         OperatingMode::Off,
-        "ticket-016: zone at 22°C must leave Cooling → Deadband (turn-off threshold 23.8°C); got {mode_db:?}"
+        "zone at 22°C must leave Cooling → Deadband (turn-off threshold 23.8°C); got {mode_db:?}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// ticket-018: CoreOutput HVAC field promotion — regression tests
+// CoreOutput HVAC field promotion — regression tests
 //
 // These tests document the *current* (broken) state: HVAC equipment emits
 // CoreOutput that carries only electric_kw and operating_mode.  Thermal
 // output, COP, setpoint, and speed are absent from CoreOutput and live
 // exclusively in the telemetry dictionary.
 //
-// When ticket-018 is implemented the assertions marked "FAILS AFTER FIX"
+// When CoreOutput field promotion is implemented the assertions marked "FAILS AFTER FIX"
 // must be inverted (or removed) and replaced with positive assertions that
 // the new fields carry the expected values.
 // ---------------------------------------------------------------------------
 
 /// Furnace running at full heat: CoreOutput must carry thermal output after
-/// ticket-018.  Today it does NOT — thermal_output_w is not a field.
+/// CoreOutput field promotion.  Today it does NOT — thermal_output_w is not a field.
 ///
 /// This test verifies the *telemetry* path works (so we have a baseline) and
 /// documents that no equivalent field exists in CoreOutput.
 #[test]
-fn ticket_018_furnace_core_output_lacks_thermal_field() {
+fn furnace_core_output_lacks_thermal_field() {
     let cfg = gas_furnace_config("furnace018");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -2567,25 +2604,25 @@ fn ticket_018_furnace_core_output_lacks_thermal_field() {
     // Electric power and mode ARE present (existing fields).
     assert!(
         co.flows.electric_kw.is_some(),
-        "ticket-018 baseline: furnace CoreOutput must carry electric_kw"
+        "furnace CoreOutput must carry electric_kw"
     );
     assert_eq!(
         co.state.operating_mode,
         Some(OperatingMode::Heating),
-        "ticket-018 baseline: furnace CoreOutput must carry Heating mode"
+        "furnace CoreOutput must carry Heating mode"
     );
 
     // Thermal output goes to telemetry today — non-zero confirms equipment ran.
     let telemetry_thermal = eq.telemetry().get(tk::THERMAL_OUTPUT_W);
     assert!(
         telemetry_thermal.map_or(false, |w| w > 1.0),
-        "ticket-018 baseline: furnace must emit positive THERMAL_OUTPUT_W in telemetry when heating \
+        "furnace must emit positive THERMAL_OUTPUT_W in telemetry when heating \
          (got {:?}); this confirms equipment ran and thermal data exists only in telemetry",
         telemetry_thermal,
     );
 
     // REGRESSION SENTINEL: CoreOutput has no `thermal_output_w` field.
-    // After ticket-018 lands, the struct gains this field and this comment
+    // After CoreOutput gains the thermal_output_w field, this comment
     // must be replaced with: assert!(co.flows.thermal_output_w.unwrap_or(0.0) > 1.0)
     // For now we assert that the telemetry key is the ONLY carrier:
     // i.e., there is no CoreOutput field that duplicates it.
@@ -2594,7 +2631,7 @@ fn ticket_018_furnace_core_output_lacks_thermal_field() {
 
 /// AC running at full cool: COP lives only in telemetry, not CoreOutput.
 #[test]
-fn ticket_018_ac_core_output_lacks_cop_field() {
+fn ac_core_output_lacks_cop_field() {
     let cfg = EquipmentConfig::from_typed(
         "ac018".to_string(),
         "Air Conditioner".to_string(),
@@ -2650,25 +2687,25 @@ fn ticket_018_ac_core_output_lacks_cop_field() {
     assert_eq!(
         co.state.operating_mode,
         Some(OperatingMode::Cooling),
-        "ticket-018 baseline: AC CoreOutput must carry Cooling mode"
+        "AC CoreOutput must carry Cooling mode"
     );
 
     // COP exists only in telemetry today.
     let telemetry_cop = eq.telemetry().get(tk::COP);
     assert!(
         telemetry_cop.map_or(false, |cop| cop > 0.0),
-        "ticket-018 baseline: AC must emit positive COP in telemetry when cooling \
+        "AC must emit positive COP in telemetry when cooling \
          (got {:?}); confirms COP data exists only in telemetry, not CoreOutput",
         telemetry_cop,
     );
 
-    // REGRESSION SENTINEL: After ticket-018, assert co.performance.cop.unwrap() > 0.0
+    // REGRESSION SENTINEL: After CoreOutput gains a cop field, assert co.performance.cop.unwrap() > 0.0
     // and that eq.telemetry().get(tk::COP) is either removed or equal to co.performance.cop.
 }
 
 /// Setpoint lives only in telemetry; CoreOutput.state has no setpoint_c field.
 #[test]
-fn ticket_018_furnace_core_output_lacks_setpoint_field() {
+fn furnace_core_output_lacks_setpoint_field() {
     let cfg = gas_furnace_config("furnace018sp");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -2683,31 +2720,31 @@ fn ticket_018_furnace_core_output_lacks_setpoint_field() {
     let telemetry_sp = eq.telemetry().get(tk::HEATING_SETPOINT_C);
     assert!(
         telemetry_sp.is_some(),
-        "ticket-018 baseline: gas furnace must emit HEATING_SETPOINT_C in telemetry \
+        "gas furnace must emit HEATING_SETPOINT_C in telemetry \
          (got None); confirms setpoint data lives only in telemetry",
     );
 
-    // REGRESSION SENTINEL: After ticket-018, assert co.state.setpoint_c == telemetry_sp
+    // REGRESSION SENTINEL: After CoreOutput gains a setpoint_c field, assert co.state.setpoint_c == telemetry_sp
     // and the telemetry read in record_step() is replaced with co.state.setpoint_c.
 }
 
 // ---------------------------------------------------------------------------
-// Ticket-019: Speed/Startup Internal State Telemetry Gaps
+// Speed/Startup Internal State Telemetry Gaps
 //
-// These tests assert that, after ticket-019 is implemented, all 7 internal
+// These tests assert that, after the missing telemetry keys are added, all 7 internal
 // state values are visible in telemetry after a step.  The tests are written
 // to FAIL today (the keys are absent) and PASS once the keys are added.
 // ---------------------------------------------------------------------------
 
 /// Single-speed AC running at partial load must expose all 7 telemetry keys
-/// introduced in ticket-019.
+/// that must appear in telemetry after a step.
 ///
-/// Expected to FAIL until ticket-019 is implemented:
+/// Expected to FAIL until the missing telemetry keys are implemented:
 ///   SPEED_FRAC, PART_LOAD_RATIO, PART_LOAD_FACTOR, STARTUP_MULTIPLIER,
 ///   DUTY_CYCLE, TIME_AT_CURRENT_SPEED_S, MODE_DURATION_S
 #[test]
-#[should_panic(expected = "ticket-019")]
-fn ticket_019_speed_staging_keys_absent_from_telemetry() {
+#[should_panic(expected = "speed_frac not in telemetry")]
+fn speed_staging_keys_absent_from_telemetry() {
     let cfg = EquipmentConfig::from_typed(
         "ac019".to_string(),
         "Air Conditioner".to_string(),
@@ -2759,48 +2796,48 @@ fn ticket_019_speed_staging_keys_absent_from_telemetry() {
 
     let t = eq.telemetry();
 
-    // All 7 keys must be present in telemetry after a step (ticket-019).
+    // All 7 keys must be present in telemetry after a step.
     // Each assert uses the string key names from the proposed telemetry_keys.rs
     // constants; update to use the constants once they are defined.
     assert!(
         t.get("speed_frac").is_some(),
-        "ticket-019: 'speed_frac' must be written to telemetry after step"
+        "speed_frac not in telemetry after step"
     );
     assert!(
         t.get("part_load_ratio").is_some(),
-        "ticket-019: 'part_load_ratio' must be written to telemetry after step"
+        "'part_load_ratio' must be written to telemetry after step"
     );
     assert!(
         t.get("part_load_factor").is_some(),
-        "ticket-019: 'part_load_factor' must be written to telemetry after step"
+        "'part_load_factor' must be written to telemetry after step"
     );
     assert!(
         t.get("startup_multiplier").is_some(),
-        "ticket-019: 'startup_multiplier' must be written to telemetry after step"
+        "'startup_multiplier' must be written to telemetry after step"
     );
     assert!(
         t.get("duty_cycle").is_some(),
-        "ticket-019: 'duty_cycle' must be written to telemetry after step"
+        "'duty_cycle' must be written to telemetry after step"
     );
     assert!(
         t.get("time_at_current_speed_s").is_some(),
-        "ticket-019: 'time_at_current_speed_s' must be written to telemetry after step"
+        "'time_at_current_speed_s' must be written to telemetry after step"
     );
     assert!(
         t.get("mode_duration_s").is_some(),
-        "ticket-019: 'mode_duration_s' must be written to telemetry after step"
+        "'mode_duration_s' must be written to telemetry after step"
     );
 }
 
 /// For a single-speed AC, `duty_cycle` and `part_load_ratio` must be equal
 /// at the end of every step (they are the same physical quantity computed
-/// from different paths).  This invariant is stated explicitly in ticket-019
+/// from different paths).  This invariant is stated explicitly in the telemetry spec
 /// §Approach, Step 3 timing note.
 ///
-/// Expected to FAIL until ticket-019 is implemented (keys absent today).
+/// Expected to FAIL until the missing telemetry keys are implemented (keys absent today).
 #[test]
-#[should_panic(expected = "ticket-019")]
-fn ticket_019_single_speed_duty_cycle_equals_part_load_ratio() {
+#[should_panic(expected = "part_load_ratio not in telemetry")]
+fn single_speed_duty_cycle_equals_part_load_ratio() {
     let cfg = EquipmentConfig::from_typed(
         "ac019b".to_string(),
         "Air Conditioner".to_string(),
@@ -2852,20 +2889,18 @@ fn ticket_019_single_speed_duty_cycle_equals_part_load_ratio() {
     let t = eq.telemetry();
     let plr = t
         .get("part_load_ratio")
-        .expect("ticket-019: 'part_load_ratio' must be in telemetry");
-    let dc = t
-        .get("duty_cycle")
-        .expect("ticket-019: 'duty_cycle' must be in telemetry");
+        .expect("part_load_ratio not in telemetry");
+    let dc = t.get("duty_cycle").expect("duty_cycle not in telemetry");
     assert!(
         (plr - dc).abs() < 1e-9,
-        "ticket-019: single-speed duty_cycle ({dc:.6}) must equal part_load_ratio ({plr:.6})"
+        "single-speed duty_cycle ({dc:.6}) must equal part_load_ratio ({plr:.6})"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Ticket-020: Setpoint Resolution Chain Visibility
+// Setpoint Resolution Chain Visibility
 //
-// These tests assert that, after ticket-020 is implemented, schedule-stage and
+// These tests assert that, after the setpoint resolution chain is implemented, schedule-stage and
 // runtime-override setpoints are each visible in telemetry as distinct keys.
 // All tests are written to FAIL today (keys absent) and PASS once implemented.
 // ---------------------------------------------------------------------------
@@ -2874,10 +2909,10 @@ fn ticket_019_single_speed_duty_cycle_equals_part_load_ratio() {
 /// must appear in telemetry as `schedule_heating_setpoint_c` and
 /// `schedule_cooling_setpoint_c`.
 ///
-/// Expected to FAIL until ticket-020 is implemented (keys are absent today).
+/// Expected to FAIL until the setpoint resolution chain is implemented (keys are absent today).
 #[test]
-#[should_panic(expected = "ticket-020")]
-fn ticket_020_schedule_setpoint_keys_absent_from_telemetry() {
+#[should_panic(expected = "schedule_heating_setpoint_c not in telemetry")]
+fn schedule_setpoint_keys_absent_from_telemetry() {
     // AC with explicit static setpoints; no schedule source, no runtime override.
     // The schedule-stage equals the static setpoints (no override applied).
     let cfg = EquipmentConfig::from_typed(
@@ -2932,21 +2967,21 @@ fn ticket_020_schedule_setpoint_keys_absent_from_telemetry() {
 
     // schedule-stage heating setpoint must equal the static setpoint (21°C) when
     // no schedule source is present (schedule-stage = static).
-    let sched_heat = t.get("schedule_heating_setpoint_c").expect(
-        "ticket-020: 'schedule_heating_setpoint_c' must be written to telemetry after step",
-    );
+    let sched_heat = t
+        .get("schedule_heating_setpoint_c")
+        .expect("schedule_heating_setpoint_c not in telemetry after step");
     assert!(
         (sched_heat - 21.0).abs() < 1e-9,
-        "ticket-020: schedule_heating_setpoint_c must be 21.0 (static), got {sched_heat:.4}"
+        "schedule_heating_setpoint_c must be 21.0 (static), got {sched_heat:.4}"
     );
 
     // schedule-stage cooling setpoint must equal the static setpoint (26°C).
-    let sched_cool = t.get("schedule_cooling_setpoint_c").expect(
-        "ticket-020: 'schedule_cooling_setpoint_c' must be written to telemetry after step",
-    );
+    let sched_cool = t
+        .get("schedule_cooling_setpoint_c")
+        .expect("schedule_cooling_setpoint_c not in telemetry after step");
     assert!(
         (sched_cool - 26.0).abs() < 1e-9,
-        "ticket-020: schedule_cooling_setpoint_c must be 26.0 (static), got {sched_cool:.4}"
+        "schedule_cooling_setpoint_c must be 26.0 (static), got {sched_cool:.4}"
     );
 }
 
@@ -2955,10 +2990,10 @@ fn ticket_020_schedule_setpoint_keys_absent_from_telemetry() {
 /// an override it must be present.  This round-trip verifies both halves of
 /// the absent-means-no-override invariant.
 ///
-/// Expected to FAIL until ticket-020 is implemented (key is never written today).
+/// Expected to FAIL until the setpoint resolution chain is implemented (key is never written today).
 #[test]
-#[should_panic(expected = "ticket-020")]
-fn ticket_020_runtime_setpoint_key_absent_when_no_override() {
+#[should_panic(expected = "runtime_heating_setpoint_c must be present")]
+fn runtime_setpoint_key_absent_when_no_override() {
     // Gas furnace with a runtime override, then cleared.
     let cfg = gas_furnace_config("furnace020rt");
     let registry = EquipmentRegistry::new();
@@ -2989,7 +3024,7 @@ fn ticket_020_runtime_setpoint_key_absent_when_no_override() {
     // No override active: runtime key must be absent.
     assert!(
         eq.telemetry().get("runtime_heating_setpoint_c").is_none(),
-        "ticket-020: runtime_heating_setpoint_c must be ABSENT when no override is active \
+        "runtime_heating_setpoint_c must be ABSENT when no override is active \
          (got Some({:.4}))",
         eq.telemetry()
             .get("runtime_heating_setpoint_c")
@@ -3010,10 +3045,10 @@ fn ticket_020_runtime_setpoint_key_absent_when_no_override() {
     let rt = eq
         .telemetry()
         .get("runtime_heating_setpoint_c")
-        .expect("ticket-020: runtime_heating_setpoint_c must be present when override is active");
+        .expect("runtime_heating_setpoint_c must be present when override is active");
     assert!(
         (rt - 25.0).abs() < 1e-9,
-        "ticket-020: runtime_heating_setpoint_c must be 25.0, got {rt:.4}"
+        "runtime_heating_setpoint_c must be 25.0, got {rt:.4}"
     );
 }
 
@@ -3022,10 +3057,10 @@ fn ticket_020_runtime_setpoint_key_absent_when_no_override() {
 /// must reflect the pre-override (schedule/static) value, distinct from the
 /// effective setpoint.
 ///
-/// Expected to FAIL until ticket-020 is implemented.
+/// Expected to FAIL until the setpoint resolution chain is implemented.
 #[test]
-#[should_panic(expected = "ticket-020")]
-fn ticket_020_runtime_setpoint_key_present_when_override_active() {
+#[should_panic(expected = "runtime_heating_setpoint_c must be present")]
+fn runtime_setpoint_key_present_when_override_active() {
     let cfg = gas_furnace_config("furnace020rt2");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -3049,10 +3084,10 @@ fn ticket_020_runtime_setpoint_key_present_when_override_active() {
     // runtime_heating_setpoint_c must be present with the override value.
     let rt_heat = t
         .get("runtime_heating_setpoint_c")
-        .expect("ticket-020: runtime_heating_setpoint_c must be present when override is active");
+        .expect("runtime_heating_setpoint_c must be present when override is active");
     assert!(
         (rt_heat - 25.0).abs() < 1e-9,
-        "ticket-020: runtime_heating_setpoint_c must be 25.0 (override), got {rt_heat:.4}"
+        "runtime_heating_setpoint_c must be 25.0 (override), got {rt_heat:.4}"
     );
 
     // effective setpoint (HEATING_SETPOINT_C) must equal the override value.
@@ -3061,28 +3096,28 @@ fn ticket_020_runtime_setpoint_key_present_when_override_active() {
         .expect("HEATING_SETPOINT_C must always be present");
     assert!(
         (eff - 25.0).abs() < 1e-9,
-        "ticket-020: HEATING_SETPOINT_C must equal override 25.0, got {eff:.4}"
+        "HEATING_SETPOINT_C must equal override 25.0, got {eff:.4}"
     );
 
     // schedule-stage must NOT equal the override; it must reflect static (default ~20°C).
     let sched = t
         .get("schedule_heating_setpoint_c")
-        .expect("ticket-020: schedule_heating_setpoint_c must be present");
+        .expect("schedule_heating_setpoint_c must be present");
     assert!(
         (sched - eff).abs() > 1e-9,
-        "ticket-020: schedule_heating_setpoint_c ({sched:.4}) must differ from effective \
+        "schedule_heating_setpoint_c ({sched:.4}) must differ from effective \
          setpoint ({eff:.4}) when a runtime override is in effect"
     );
 }
 
 /// IdealHvac must also expose the setpoint chain in telemetry.
-/// Today it writes no setpoint keys at all; after ticket-020 it must write
-/// all six (schedule_*, runtime_* when active, effective).
+/// Today it writes no setpoint keys at all; once the setpoint resolution chain
+/// is implemented it must write all six (schedule_*, runtime_* when active, effective).
 ///
-/// Expected to FAIL until ticket-020 is implemented.
+/// Expected to FAIL until the setpoint resolution chain is implemented.
 #[test]
-#[should_panic(expected = "ticket-020")]
-fn ticket_020_ideal_hvac_setpoint_chain_absent() {
+#[should_panic(expected = "schedule_heating_setpoint_c not in telemetry")]
+fn ideal_hvac_setpoint_chain_absent() {
     let cfg = ideal_hvac_config("ideal020", IdealCapacityModeConfig::On);
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Ideal HVAC", cfg.clone()).unwrap();
@@ -3095,32 +3130,32 @@ fn ticket_020_ideal_hvac_setpoint_chain_absent() {
 
     let t = eq.telemetry();
 
-    // After ticket-020, IdealHvac must write the schedule-stage setpoints.
+    // IdealHvac must write the schedule-stage setpoints.
     assert!(
         t.get("schedule_heating_setpoint_c").is_some(),
-        "ticket-020: IdealHvac must write 'schedule_heating_setpoint_c' to telemetry"
+        "IdealHvac schedule_heating_setpoint_c not in telemetry"
     );
     assert!(
         t.get("schedule_cooling_setpoint_c").is_some(),
-        "ticket-020: IdealHvac must write 'schedule_cooling_setpoint_c' to telemetry"
+        "IdealHvac must write 'schedule_cooling_setpoint_c' to telemetry"
     );
 
     // IdealHvac must also write HEATING_SETPOINT_C / COOLING_SETPOINT_C (which it
-    // currently does NOT — that is also part of the ticket-020 gap for IdealHvac).
+    // currently does NOT — that is also part of the setpoint telemetry gap for IdealHvac).
     assert!(
         t.get(tk::HEATING_SETPOINT_C).is_some(),
-        "ticket-020: IdealHvac must write 'heating_setpoint_c' to telemetry"
+        "IdealHvac must write 'heating_setpoint_c' to telemetry"
     );
     assert!(
         t.get(tk::COOLING_SETPOINT_C).is_some(),
-        "ticket-020: IdealHvac must write 'cooling_setpoint_c' to telemetry"
+        "IdealHvac must write 'cooling_setpoint_c' to telemetry"
     );
 }
 
 // ---------------------------------------------------------------------------
-// ticket-070 regression: space_fraction thermal-port scaling audit
+// space_fraction thermal-port scaling audit
 //
-// Ticket-070 claims that furnace, baseboard, AC, and heat-pump heater all fail
+// The audit claims that furnace, baseboard, AC, and heat-pump heater all fail
 // to scale the thermal port by `space_fraction`, breaking the energy balance
 // between the electrical draw (which IS scaled) and the thermal delivery.
 //
@@ -3133,14 +3168,14 @@ fn ticket_020_ideal_hvac_setpoint_chain_absent() {
 //
 // These tests document the current (unscaled) thermal-port behavior and will
 // PASS if HARES intentionally matches OCHRE's architecture (no scaling) or
-// FAIL if ticket-070 is implemented (with scaling).  They serve as a
+// FAIL if thermal-port scaling by space_fraction is implemented.  They serve as a
 // change-detector: any modification to space_fraction handling will break them,
 // forcing a deliberate review.
 // ---------------------------------------------------------------------------
 
 /// Verify that electric furnace thermal port equals gross rated capacity at
 /// space_fraction=1.0 (default), and that the electrical port also equals the
-/// rated value. This documents the baseline needed for ticket-070's claim that
+/// rated value. This documents the baseline needed for the claim that
 /// the thermal port is not scaled by space_fraction.
 ///
 /// NOTE: ElectricFurnaceConfig has no `fraction_heating_load_served` field, so
@@ -3148,9 +3183,9 @@ fn ticket_020_ideal_hvac_setpoint_chain_absent() {
 /// for furnace/baseboard lack that field). The audit finding is that OCHRE
 /// itself explicitly does NOT scale thermal-zone contributions by
 /// space_fraction (HVAC.py lines 556–561 comment: "sensible/latent gains to
-/// envelope are not updated"). See ticket-070 for full analysis.
+/// envelope are not updated"). See the space_fraction scaling audit for full analysis.
 #[test]
-fn ticket_070_electric_furnace_thermal_equals_rated_capacity_at_default_sf() {
+fn furnace_thermal_port_equals_rated_capacity_at_sf1() {
     const CAPACITY_W: f64 = 10_000.0;
     const EIR: f64 = 1.0;
 
@@ -3184,12 +3219,12 @@ fn ticket_070_electric_furnace_thermal_equals_rated_capacity_at_default_sf() {
     // At space_fraction=1.0, thermal and electrical should equal full rated capacity.
     assert!(
         (thermal_w - CAPACITY_W).abs() < 1.0,
-        "ticket-070 audit: electric furnace thermal port should equal rated capacity \
+        "electric furnace thermal port should equal rated capacity \
          (CAPACITY_W={CAPACITY_W:.1} W). got={thermal_w:.1} W"
     );
     assert!(
         (elec_kw - CAPACITY_W * EIR / 1_000.0).abs() < 1e-6,
-        "ticket-070 audit: electric furnace electrical port should equal capacity * EIR. \
+        "electric furnace electrical port should equal capacity * EIR. \
          expected={:.6} kW, got={elec_kw:.6} kW",
         CAPACITY_W * EIR / 1_000.0
     );
@@ -3202,9 +3237,9 @@ fn ticket_070_electric_furnace_thermal_equals_rated_capacity_at_default_sf() {
 /// NOTE: ElectricBaseboardConfig has no `fraction_heating_load_served` field.
 /// The audit finding is that OCHRE itself explicitly does NOT scale
 /// thermal-zone gains by space_fraction (HVAC.py lines 556–561). See
-/// ticket-070 for the full analysis and legitimacy verdict.
+/// the space_fraction scaling audit for the full analysis and legitimacy verdict.
 #[test]
-fn ticket_070_baseboard_thermal_equals_rated_capacity_at_default_sf() {
+fn baseboard_thermal_port_equals_rated_capacity_at_sf1() {
     const CAPACITY_W: f64 = 3_000.0;
 
     let cfg = EquipmentConfig::from_typed(
@@ -3233,26 +3268,26 @@ fn ticket_070_baseboard_thermal_equals_rated_capacity_at_default_sf() {
 
     assert!(
         (thermal_w - CAPACITY_W).abs() < 1.0,
-        "ticket-070 audit: baseboard thermal port should equal rated capacity at sf=1.0. \
+        "baseboard thermal port should equal rated capacity at sf=1.0. \
          expected={CAPACITY_W:.1} W, got={thermal_w:.1} W"
     );
     assert!(
         (elec_kw - CAPACITY_W / 1_000.0).abs() < 1e-6,
-        "ticket-070 audit: baseboard electrical port should equal capacity/1000 at sf=1.0 with EIR=1. \
+        "baseboard electrical port should equal capacity/1000 at sf=1.0 with EIR=1. \
          expected={:.6} kW, got={elec_kw:.6} kW",
         CAPACITY_W / 1_000.0
     );
 }
 
 // ---------------------------------------------------------------------------
-// ticket-075 regression: AC sensible/latent thermal port space_fraction audit
+// AC sensible/latent thermal port space_fraction audit
 //
-// Ticket-075 claims that AirConditioner fails to scale sensible_cooling_w and
+// The audit claims that AirConditioner fails to scale sensible_cooling_w and
 // latent_cooling_w by space_fraction before writing to the thermal port, while
 // the electrical port IS scaled — creating an impossible COP and moisture
 // imbalance.
 //
-// Ticket-075 is marked "Superseded by: Ticket 070" and the ticket-070 audit
+// This finding is superseded by the broader space_fraction scaling audit which
 // concluded "Not Legitimate": OCHRE HVAC.py lines 556–566 contain an explicit
 // comment — "reduce delivered heat (only for results) and power output based on
 // space fraction — Note: sensible/latent gains to envelope are not updated" —
@@ -3265,15 +3300,15 @@ fn ticket_070_baseboard_thermal_equals_rated_capacity_at_default_sf() {
 //     architecture the thermal port is NOT halved (matching OCHRE's design);
 //     the electrical port IS halved.
 //
-// They serve as change-detectors: if ticket-075 is implemented the (b) test
+// They serve as change-detectors: if thermal-port scaling by space_fraction is implemented the (b) test
 // will fail, forcing deliberate review.
 // ---------------------------------------------------------------------------
 
 /// Verify that AC sensible thermal port is strongly negative at sf=1.0 and
 /// that a significant fraction of the rated cooling capacity is delivered.
-/// Baseline for ticket-075.
+/// Baseline for AC sensible/latent space_fraction audit.
 #[test]
-fn ticket_075_ac_thermal_port_equals_gross_at_default_sf() {
+fn ac_sensible_thermal_port_strongly_negative_at_sf1() {
     const CAPACITY_W: f64 = 10_000.0;
 
     let cfg = EquipmentConfig::from_typed(
@@ -3329,7 +3364,7 @@ fn ticket_075_ac_thermal_port_equals_gross_at_default_sf() {
     // at least 50% of rated capacity at this operating point.
     assert!(
         sensible_w < -CAPACITY_W * 0.5,
-        "ticket-075 baseline: AC sensible port must be strongly negative at sf=1.0. got={sensible_w:.1} W"
+        "AC sensible port must be strongly negative at sf=1.0. got={sensible_w:.1} W"
     );
 }
 
@@ -3339,10 +3374,10 @@ fn ticket_075_ac_thermal_port_equals_gross_at_default_sf() {
 /// the zone air node are not scaled by space_fraction — see OCHRE HVAC.py
 /// line 556 comment and add_gains_to_zone() at line 563-566).
 ///
-/// If ticket-075 is implemented, the assertion on `sensible_ratio` will need to
+/// If thermal-port scaling by space_fraction is implemented, the assertion on `sensible_ratio` will need to
 /// change to expect ~0.5 rather than ~1.0.
 #[test]
-fn ticket_075_ac_electrical_halved_thermal_unscaled_at_half_sf() {
+fn ac_electrical_halved_thermal_unscaled_at_half_sf() {
     let make_ac_cfg = |sf: f64| {
         EquipmentConfig::from_typed(
             "ac".to_string(),
@@ -3417,27 +3452,27 @@ fn ticket_075_ac_electrical_halved_thermal_unscaled_at_half_sf() {
     // Precondition: the AC must be running (sensible < 0).
     assert!(
         sens_full < -1.0,
-        "ticket-075 precondition: AC at sf=1.0 must produce sensible cooling. got={sens_full:.1} W"
+        "AC at sf=1.0 must produce sensible cooling. got={sens_full:.1} W"
     );
 
     // Electrical port must be halved — this is the existing correct behavior.
     let elec_ratio = elec_half / elec_full.max(1e-9);
     assert!(
         (elec_ratio - 0.5).abs() < 0.02,
-        "ticket-075: electrical port must be halved at sf=0.5 (elec_full={elec_full:.4} kW, \
+        "electrical port must be halved at sf=0.5 (elec_full={elec_full:.4} kW, \
          elec_half={elec_half:.4} kW, ratio={elec_ratio:.4})"
     );
 
     // Sensible thermal port is NOT halved under the current architecture (matching
     // OCHRE HVAC.py: "Note: sensible/latent gains to envelope are not updated"
     // when space_fraction is applied, and add_gains_to_zone() uses unscaled
-    // sensible_gain). If ticket-075 is implemented, change ~1.0 to ~0.5.
+    // sensible_gain). If thermal-port scaling by space_fraction is implemented, change ~1.0 to ~0.5.
     let sensible_ratio = sens_half / sens_full.min(-1e-9);
     assert!(
         (sensible_ratio - 1.0).abs() < 0.05,
-        "ticket-075 audit: AC sensible thermal port is NOT scaled by space_fraction in current \
+        "AC sensible thermal port is NOT scaled by space_fraction in current \
          architecture (matches OCHRE HVAC.py add_gains_to_zone). \
          sens_full={sens_full:.1} W, sens_half={sens_half:.1} W, ratio={sensible_ratio:.4}. \
-         If ticket-075 is implemented, update this assertion to expect ratio≈0.5."
+         If thermal-port scaling by space_fraction is implemented, update this assertion to expect ratio≈0.5."
     );
 }

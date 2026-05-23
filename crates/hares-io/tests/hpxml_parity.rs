@@ -685,10 +685,10 @@ fn heat_pump_typed_config_for_mini_split_sets_four_speeds() {
     let cooler_cfg: HeatPumpCoolerConfig = cooler_typed.typed().expect("cooler typed config");
     let heater_cfg: HeatPumpHeaterConfig = heater_typed.typed().expect("heater typed config");
 
-    assert!(cooler_cfg.is_mini_split);
-    assert_eq!(cooler_cfg.number_of_speeds, 4);
-    assert!(heater_cfg.is_mini_split);
-    assert_eq!(heater_cfg.number_of_speeds, 4);
+    assert!(cooler_cfg.common.is_mini_split);
+    assert_eq!(cooler_cfg.common.number_of_speeds, 4);
+    assert!(heater_cfg.common.is_mini_split);
+    assert_eq!(heater_cfg.common.number_of_speeds, 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -787,7 +787,7 @@ fn ashp_backup_lockout_temperature_extracted() {
 }
 
 // ---------------------------------------------------------------------------
-// Ticket-095 audit regression tests
+// Lockout temperature regression tests
 //
 // These tests verify that the current HARES behaviour MATCHES OCHRE's mapping
 // in vendors/OCHRE/ochre/utils/hpxml.py lines 947-956:
@@ -805,11 +805,11 @@ fn ashp_backup_lockout_temperature_extracted() {
 // Mapping this field to hp_lockout_temp_c is therefore spec-correct.
 // ---------------------------------------------------------------------------
 
-/// Ticket-095 scenario A: only BackupHeatingSwitchoverTemperature present.
+/// Only BackupHeatingSwitchoverTemperature present.
 /// OCHRE uses it as hp_lockout fallback (0°F default, real value used when present).
 /// HARES must do the same: both hp_lockout_temp_c and er_lockout_temp_c take the value.
 #[test]
-fn ticket_095_switchover_only_maps_to_both_lockouts_ochre_parity() {
+fn switchover_only_maps_to_both_lockouts_ochre_parity() {
     let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
@@ -850,7 +850,7 @@ fn ticket_095_switchover_only_maps_to_both_lockouts_ochre_parity() {
     let expected_c = (40.0_f64 - 32.0) * 5.0 / 9.0;
     assert!(
         (hp - expected_c).abs() < 0.01,
-        "ticket-095 scenario A: hp_lockout must be 4.44°C (40°F switchover), got {hp:.4}"
+        "hp_lockout must be 4.44°C (40°F switchover), got {hp:.4}"
     );
 
     // OCHRE: er_lockout = BackupHeatingSwitchoverTemperature = 40°F = 4.44°C
@@ -862,14 +862,14 @@ fn ticket_095_switchover_only_maps_to_both_lockouts_ochre_parity() {
         .expect("er_lockout_temp_c must be present when switchover given");
     assert!(
         (er - expected_c).abs() < 0.01,
-        "ticket-095 scenario A: er_lockout must be 4.44°C (40°F switchover), got {er:.4}"
+        "er_lockout must be 4.44°C (40°F switchover), got {er:.4}"
     );
 }
 
-/// Ticket-095 scenario B: CompressorLockoutTemperature and BackupHeatingLockoutTemperature
+/// CompressorLockoutTemperature and BackupHeatingLockoutTemperature
 /// both supplied — switchover is absent or irrelevant. Each field maps to its own slot.
 #[test]
-fn ticket_095_separate_compressor_and_backup_lockouts_independent() {
+fn separate_compressor_and_backup_lockouts_independent() {
     let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
@@ -910,7 +910,7 @@ fn ticket_095_separate_compressor_and_backup_lockouts_independent() {
     let expected_hp = (5.0_f64 - 32.0) * 5.0 / 9.0;
     assert!(
         (hp - expected_hp).abs() < 0.01,
-        "ticket-095 scenario B: hp_lockout must be {expected_hp:.4}°C (5°F), got {hp:.4}"
+        "hp_lockout must be {expected_hp:.4}°C (5°F), got {hp:.4}"
     );
 
     // 35°F → 1.67°C
@@ -922,21 +922,21 @@ fn ticket_095_separate_compressor_and_backup_lockouts_independent() {
     let expected_er = (35.0_f64 - 32.0) * 5.0 / 9.0;
     assert!(
         (er - expected_er).abs() < 0.01,
-        "ticket-095 scenario B: er_lockout must be {expected_er:.4}°C (35°F), got {er:.4}"
+        "er_lockout must be {expected_er:.4}°C (35°F), got {er:.4}"
     );
 
     // HP lockout must be colder than ER lockout (compressor runs at lower temps than ER)
     assert!(
         hp < er,
-        "ticket-095 scenario B: hp_lockout ({hp:.4}°C) must be < er_lockout ({er:.4}°C)"
+        "hp_lockout ({hp:.4}°C) must be < er_lockout ({er:.4}°C)"
     );
 }
 
-/// Ticket-095 scenario C: neither lockout field is present.
+/// Neither lockout field is present.
 /// HARES must not emit lockout params; the equipment will use its own defaults
 /// (DEFAULT_HP_LOCKOUT_TEMP_C = -17.78°C, DEFAULT_ER_LOCKOUT_TEMP_C = 4.44°C).
 #[test]
-fn ticket_095_no_lockout_fields_emits_no_lockout_params() {
+fn no_lockout_fields_emits_no_lockout_params() {
     let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
@@ -970,11 +970,11 @@ fn ticket_095_no_lockout_fields_emits_no_lockout_params() {
     // and DEFAULT_ER_LOCKOUT_TEMP_C (4.44°C). Nothing should be forced into params.
     assert!(
         heater.parameters.get("hp_lockout_temp_c").is_none(),
-        "ticket-095 scenario C: hp_lockout_temp_c should be absent when no XML source"
+        "hp_lockout_temp_c should be absent when no XML source"
     );
     assert!(
         heater.parameters.get("er_lockout_temp_c").is_none(),
-        "ticket-095 scenario C: er_lockout_temp_c should be absent when no XML source"
+        "er_lockout_temp_c should be absent when no XML source"
     );
 }
 
@@ -1002,7 +1002,7 @@ fn cz4a_ashp_fixture_preserves_single_stage_compressor_intent() {
         .expect("typed ASHP heater config should deserialize");
 
     assert_eq!(
-        cfg.number_of_speeds, 1,
+        cfg.common.number_of_speeds, 1,
         "single-stage HPXML compressor must resolve to one speed"
     );
     assert!(

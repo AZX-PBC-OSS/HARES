@@ -21,14 +21,14 @@ use nalgebra::DMatrix;
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Ticket 047 regression: stale zone-air temperature in LWR convergence loop
+// Regression: stale zone-air temperature in LWR convergence loop
 // ---------------------------------------------------------------------------
 
-/// Ticket 047 — stale zone-air temperature characterisation.
+/// Stale zone-air temperature characterisation.
 ///
 /// `apply_interior_longwave_inputs` reads `env.zones[i].temperature_c` (the
 /// prior-step committed value) and holds it fixed throughout all convergence
-/// iterations.  The ticket claims a stale zone temp of 1 °C produces a
+/// iterations.  A claim states that a stale zone temp of 1 °C produces a
 /// ~16 W LWR error across 30 m² of surface.
 ///
 /// This test verifies the ACTUAL numerical impact:
@@ -48,7 +48,7 @@ use nalgebra::DMatrix;
 /// any "fix" to the stale zone temp in the linearised path actually
 /// changes the computed fluxes by less than 1 W.
 #[test]
-fn ticket047_stale_zone_temp_linearised_lwr_error_is_sub_watt() {
+fn stale_zone_temp_linearised_lwr_error_is_sub_watt() {
     use hares_envelope::{InteriorSurface, interior_longwave_linearised_w};
 
     let surfaces = vec![
@@ -248,7 +248,7 @@ fn test_interior_lwr_identical_surfaces_symmetric() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: ticket 044 — LWR fallback to linearised path must not be silent
+// Regression: LWR fallback to linearised path must not be silent
 // ---------------------------------------------------------------------------
 
 /// Build a minimal EnvironmentState for the regression test.
@@ -306,14 +306,14 @@ fn env_20c() -> EnvironmentState {
     }
 }
 
-/// Ticket 044 — primary defect regression test.
+/// Primary defect regression test.
 ///
 /// `ThermalSolver::new` must return `Err` when `interior_lwr_zones` is
 /// non-empty and any zone has `scriptf == None`.  The current code silently
 /// accepts this configuration and falls through to the linearised h_r path;
 /// this test will fail until the solver-construction guard is implemented.
 ///
-/// Fix pending on ticket 044 — will stop panicking when ThermalSolver::new
+/// Fix pending — will stop panicking when ThermalSolver::new
 /// returns Err for zones with scriptf == None.
 #[test]
 #[should_panic(expected = "ThermalSolver::new must return Err when interior_lwr_zones contains")]
@@ -390,21 +390,21 @@ fn lwr_zone_without_scriptf_must_error_at_construction() {
         boundary_diagnostics: Vec::new(),
     };
 
-    // BUG (ticket 044): ThermalSolver::new currently returns Ok here instead
-    // of Err.  When the ticket is fixed this assert_err should pass.
+    // BUG: ThermalSolver::new currently returns Ok here instead
+    // of Err.  When fixed this assert_err should pass.
     let result = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0);
     assert!(
         result.is_err(),
         "ThermalSolver::new must return Err when interior_lwr_zones contains \
-         a zone with scriptf == None (ticket 044)"
+         a zone with scriptf == None"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Ticket 128 regression: InteriorLwrMethod::default() must equal StarMesh
+// Regression: InteriorLwrMethod::default() must equal StarMesh
 // ---------------------------------------------------------------------------
 
-/// Ticket 128 — implicit default must be StarMesh, not any future variant.
+/// Implicit default must be StarMesh, not any future variant.
 ///
 /// `InteriorLwrMethod::default()` is used at ~28 callsites across
 /// `hares_envelope` and `hares_core`. The ticket requests those callsites be
@@ -412,26 +412,26 @@ fn lwr_zone_without_scriptf_must_error_at_construction() {
 /// resolves to `StarMesh` so that any accidental change to the `#[default]`
 /// attribute on `InteriorLwrMethod` will be caught immediately.
 ///
-/// NOTE: This test does NOT fix the ticket (callsites still use `default()`);
-/// it only guards the behavioural promise the ticket relies on.
+/// NOTE: This test does NOT fix the underlying issue (callsites still use `default()`);
+/// it only guards the behavioural promise relied on.
 #[test]
-fn ticket128_interior_lwr_default_is_starmesh() {
+fn interior_lwr_default_is_starmesh() {
     assert_eq!(
         hares_envelope::InteriorLwrMethod::default(),
         hares_envelope::InteriorLwrMethod::StarMesh,
         "InteriorLwrMethod::default() must be StarMesh; if you changed the \
          #[default] attribute, update all callsites in hares-envelope and \
-         hares-core to name the variant explicitly (ticket 128)"
+         hares-core to name the variant explicitly"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Ticket 089 regression: radiation_frac voltage-divider under StarMesh topology
+// Regression: radiation_frac voltage-divider under StarMesh topology
 // ---------------------------------------------------------------------------
 
-/// Ticket 089 — `radiation_frac` formula mismatch under StarMesh Y-Δ topology.
+/// `radiation_frac` formula mismatch under StarMesh Y-Δ topology.
 ///
-/// The ticket claims that `interior_rad_frac = r_film_int / (r_film_int + r_inner_half)`
+/// It was claimed that `interior_rad_frac = r_film_int / (r_film_int + r_inner_half)`
 /// was derived for a pre-S1 topology where the convective film resistance and the
 /// longwave radiation path were **combined** into a single `R_film_combined`.
 /// After S1 separated convection from radiation into parallel paths, the
@@ -460,14 +460,14 @@ fn ticket128_interior_lwr_default_is_starmesh() {
 ///   radiation_frac_correct = G_air / G_total = 8.33 / 30.42 = 0.274
 ///
 /// The difference is approximately 0.40 (27% absolute on a 0-1 scale),
-/// matching the "~27% empirical bias" claimed in the ticket for a single surface.
+/// matching the "~27% empirical bias" for a single surface.
 ///
 /// NOTE: This test characterises the BUG — it does NOT assert that the correct
 /// formula is currently used.  The test PASSES if the code still uses the old
 /// formula (i.e., it is a failing-in-the-correct-sense regression test).
-/// When ticket 089 is fixed, the assertion sense should be inverted.
+/// When this is fixed, the assertion sense should be inverted.
 #[test]
-fn ticket089_radiation_frac_old_formula_disagrees_with_current_divider() {
+fn radiation_frac_old_formula_disagrees_with_current_divider() {
     const SIGMA: f64 = 5.670374e-8;
     const T_REF_K: f64 = 293.15; // 20°C reference
     const EMISSIVITY: f64 = 0.9;
@@ -515,14 +515,14 @@ fn ticket089_radiation_frac_old_formula_disagrees_with_current_divider() {
     // verify the formula difference is in the same order of magnitude.
     assert!(
         radiation_frac_old > radiation_frac_correct,
-        "Ticket 089: old formula ({radiation_frac_old:.4}) should be LARGER than \
+        "old formula ({radiation_frac_old:.4}) should be LARGER than \
          correct current-divider ({radiation_frac_correct:.4}) — if equal the bug is fixed"
     );
 
     assert!(
         absolute_difference > 0.10,
-        "Ticket 089: formula difference {absolute_difference:.4} should be >0.10 \
-         (ticket claims ~27% empirical bias); got radiation_frac_old={radiation_frac_old:.4}, \
+        "formula difference {absolute_difference:.4} should be >0.10 \
+         (expected ~27% empirical bias); got radiation_frac_old={radiation_frac_old:.4}, \
          radiation_frac_correct={radiation_frac_correct:.4}"
     );
 

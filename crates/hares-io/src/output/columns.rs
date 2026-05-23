@@ -512,16 +512,16 @@ mod tests {
         }
     }
 
-    // ── Regression tests for ticket #017 ────────────────────────────────────
-    // These tests are EXPECTED TO FAIL until ticket #017 is implemented.
+    // ── Regression tests for verbosity 7 gaps ────────────────────────────────
+    // These tests are EXPECTED TO FAIL until the gaps are implemented.
     // They document the gap between HARES v7 output and OCHRE v7 output.
 
     /// OCHRE emits `{name} SHR (-)` at verbosity 7 for cooling equipment
     /// (HVAC.py:596). HARES verbosity 7 does not currently include this column.
-    /// Fix pending on ticket 017 — will stop panicking when SHR column is included at verbosity 7 for cooling equipment
+    /// Will stop panicking when SHR column is included at verbosity 7 for cooling equipment
     #[should_panic(expected = "verbosity 7 must include 'Air Conditioner SHR (-)'")]
     #[test]
-    fn ticket_017_verbosity_7_includes_shr_column_for_cooling_equipment() {
+    fn verbosity_7_includes_shr_column_for_cooling_equipment() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
         let schema = build_schema(&specs, 7);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -533,10 +533,10 @@ mod tests {
 
     /// OCHRE emits `{name} Speed (-)` at verbosity 7 for all HVAC equipment
     /// (HVAC.py:597). HARES verbosity 7 does not currently include this column.
-    /// Fix pending on ticket 017 — will stop panicking when Speed column is included at verbosity 7 for HVAC equipment
+    /// Will stop panicking when Speed column is included at verbosity 7 for HVAC equipment
     #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Speed (-)'")]
     #[test]
-    fn ticket_017_verbosity_7_includes_speed_column_for_hvac_equipment() {
+    fn verbosity_7_includes_speed_column_for_hvac_equipment() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
         let schema = build_schema(&specs, 7);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -548,10 +548,10 @@ mod tests {
 
     /// OCHRE emits `{name} Fan Power (kW)` at verbosity 7 (HVAC.py:593).
     /// HARES verbosity 7 does not currently include this column.
-    /// Fix pending on ticket 017 — will stop panicking when Fan Power column is included at verbosity 7
+    /// Will stop panicking when Fan Power column is included at verbosity 7
     #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Fan Power (kW)'")]
     #[test]
-    fn ticket_017_verbosity_7_includes_fan_power_column() {
+    fn verbosity_7_includes_fan_power_column() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
         let schema = build_schema(&specs, 7);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -563,10 +563,10 @@ mod tests {
 
     /// OCHRE emits `{name} Main Power (kW)` at verbosity 7 (HVAC.py:592).
     /// HARES verbosity 7 does not currently include this column.
-    /// Fix pending on ticket 017 — will stop panicking when Main Power column is included at verbosity 7
+    /// Will stop panicking when Main Power column is included at verbosity 7
     #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Main Power (kW)'")]
     #[test]
-    fn ticket_017_verbosity_7_includes_main_power_column() {
+    fn verbosity_7_includes_main_power_column() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
         let schema = build_schema(&specs, 7);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -577,12 +577,11 @@ mod tests {
     }
 
     /// OCHRE emits `{name} Runtime Fraction (-)` — not explicitly at v7 in
-    /// HVAC.py generate_results, but the ticket claims it should be v7.
-    /// Verified: ticket claims this should appear at v7 for all HVAC equipment.
-    /// Fix pending on ticket 017 — will stop panicking when Runtime Fraction column is included at verbosity 7
+    /// HVAC.py generate_results, but verified that it should appear at v7 for all HVAC equipment.
+    /// Will stop panicking when Runtime Fraction column is included at verbosity 7
     #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Runtime Fraction (-)'")]
     #[test]
-    fn ticket_017_verbosity_7_includes_runtime_fraction_column() {
+    fn verbosity_7_includes_runtime_fraction_column() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
         let schema = build_schema(&specs, 7);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -594,10 +593,10 @@ mod tests {
 
     /// OCHRE emits `{name} Capacity (W)` at verbosity 7 (HVAC.py:598).
     /// HARES places it at verbosity 8. It must be promoted to v7.
-    /// Fix pending on ticket 017 — will stop panicking when Capacity column is promoted from v8 to v7
+    /// Will stop panicking when Capacity column is promoted from v8 to v7
     #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Capacity (W)'")]
     #[test]
-    fn ticket_017_capacity_column_promoted_from_v8_to_v7() {
+    fn capacity_column_promoted_from_v8_to_v7() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
         let schema = build_schema(&specs, 7);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -609,11 +608,11 @@ mod tests {
 
     /// OCHRE emits `{name} COP (-)` at verbosity 4 (HVAC.py:584), so it must
     /// appear at v7 too. HARES currently places COP only at verbosity 8.
-    /// Note: ticket says promote from v8 to v7 — this tests that v7 has COP.
-    /// Fix pending on ticket 017 — will stop panicking when COP column is promoted from v8 to v7
+    /// Note: this tests that v7 has COP.
+    /// Will stop panicking when COP column is promoted from v8 to v7
     #[should_panic(expected = "verbosity 7 must include 'Air Conditioner COP (-)'")]
     #[test]
-    fn ticket_017_cop_column_promoted_from_v8_to_v7() {
+    fn cop_column_promoted_from_v8_to_v7() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
         let schema = build_schema(&specs, 7);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -625,10 +624,10 @@ mod tests {
 
     /// OCHRE emits `{name} Duct Losses (W)` at verbosity 5 (HVAC.py:588).
     /// HARES verbosity 5 currently has no duct losses column.
-    /// Fix pending on ticket 017 — will stop panicking when Duct Losses column is included at verbosity 5
+    /// Will stop panicking when Duct Losses column is included at verbosity 5
     #[should_panic(expected = "verbosity 5 must include 'HVAC Duct Losses (W)'")]
     #[test]
-    fn ticket_017_verbosity_5_includes_duct_losses_column() {
+    fn verbosity_5_includes_duct_losses_column() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
         let schema = build_schema(&specs, 5);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -638,8 +637,9 @@ mod tests {
         );
     }
 
-    // ── Regression tests for ticket #021 ────────────────────────────────────
-    // These tests are EXPECTED TO FAIL until ticket #021 is implemented.
+    // ── Regression tests for verbosity 6 per-zone gaps ───────────────────────
+    // These tests are EXPECTED TO FAIL until per-zone HVAC attribution columns
+    // are implemented at verbosity 6.
     // They document the gap: per-zone HVAC attribution columns are not present
     // at verbosity 6, even though zone_heat_fractions already distributes heat
     // across conditioned / basement / duct zones in duct_distribution.rs.
@@ -648,43 +648,43 @@ mod tests {
     /// name supplied. With three zones (conditioned, basement, duct) the schema
     /// must include all three "HVAC Heating Delivered - {zone} (W)" columns.
     ///
-    /// Ticket #021 proposes passing `zone_names: Vec<(ZoneId, String)>` to
+    /// The proposal is passing `zone_names: Vec<(ZoneId, String)>` to
     /// `build_schema()`. Until that API change is made, this test fails because
     /// `build_schema()` does not accept zone names.
-    /// Fix pending on ticket 021 — will stop panicking when per-zone HVAC heating columns appear at verbosity 6
+    /// Will stop panicking when per-zone HVAC heating columns appear at verbosity 6
     #[should_panic(expected = "HVAC Heating Delivered - Indoor (W)")]
     #[test]
-    fn ticket_021_verbosity_6_has_per_zone_hvac_heating_columns() {
-        // Once ticket 021 is implemented, build_schema will accept zone_names.
+    fn verbosity_6_has_per_zone_hvac_heating_columns() {
+        // Once per-zone HVAC columns are implemented, build_schema will accept zone_names.
         // For now we verify the gap: the column is absent at verbosity 6.
         let schema = build_schema(&[], 6);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        // This assertion documents the DESIRED post-021 behaviour and currently fails.
+        // This assertion documents the DESIRED behaviour and currently fails.
         assert!(
             names.contains(&"HVAC Heating Delivered - Indoor (W)"),
-            "verbosity 6 must include per-zone 'HVAC Heating Delivered - Indoor (W)' \
-             (ticket #021); column is absent, confirming the gap; got: {names:?}"
+            "verbosity 6 must include per-zone 'HVAC Heating Delivered - Indoor (W)'; \
+             column is absent, confirming the gap; got: {names:?}"
         );
     }
 
     /// At verbosity 6, per-zone HVAC cooling columns must exist for each zone.
-    /// Fix pending on ticket 021 — will stop panicking when per-zone HVAC cooling columns appear at verbosity 6
+    /// Will stop panicking when per-zone HVAC cooling columns appear at verbosity 6
     #[should_panic(expected = "HVAC Cooling Delivered - Indoor (W)")]
     #[test]
-    fn ticket_021_verbosity_6_has_per_zone_hvac_cooling_columns() {
+    fn verbosity_6_has_per_zone_hvac_cooling_columns() {
         let schema = build_schema(&[], 6);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
             names.contains(&"HVAC Cooling Delivered - Indoor (W)"),
-            "verbosity 6 must include per-zone 'HVAC Cooling Delivered - Indoor (W)' \
-             (ticket #021); column is absent, confirming the gap; got: {names:?}"
+            "verbosity 6 must include per-zone 'HVAC Cooling Delivered - Indoor (W)'; \
+             column is absent, confirming the gap; got: {names:?}"
         );
     }
 
     /// Verbosity 5 must NOT include per-zone attribution columns (those live at v6).
     /// This documents that the threshold is verbosity 6, not 5.
     #[test]
-    fn ticket_021_per_zone_hvac_columns_not_present_below_verbosity_6() {
+    fn per_zone_hvac_columns_not_present_below_verbosity_6() {
         for v in 0..=5u8 {
             let schema = build_schema(&[], v);
             let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();

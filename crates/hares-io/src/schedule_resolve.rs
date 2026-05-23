@@ -1455,7 +1455,9 @@ mod tests {
 
     #[test]
     fn typed_hvac_specs_receive_column_ref_setpoint_sources() {
-        use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+        use hares_equipment::hvac::heat_pump_config::{
+            HeatPumpCommonConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
+        };
 
         let mut schedule = make_schedule_with_setpoint_columns(&[20.0, 19.5], &[26.0, 25.5]);
         let mut specs = vec![
@@ -1463,50 +1465,55 @@ mod tests {
                 "ASHP Heater",
                 "ASHP Heater",
                 HeatPumpHeaterConfig {
-                    zone_id: Some(1),
-                    ..Default::default()
+                    common: HeatPumpCommonConfig {
+                        zone_id: Some(1),
+                        ..HeatPumpCommonConfig::default()
+                    },
+                    ..HeatPumpHeaterConfig::default()
                 },
             ),
             make_typed_spec(
                 "ASHP Cooler",
                 "ASHP Cooler",
                 HeatPumpCoolerConfig {
-                    equipment_id: None,
-                    zone_id: Some(1),
-                    heating_capacity_w: None,
-                    heating_eir: None,
-                    stage_heating_capacities_w: None,
-                    stage_heating_eirs: None,
-                    backup_fuel: None,
-                    backup_capacity_w: None,
-                    backup_eir: None,
-                    fraction_heating_load_served: None,
-                    cooling_capacity_w: None,
-                    cooling_eir: None,
-                    stage_cooling_capacities_w: None,
-                    stage_cooling_eirs: None,
+                    common: HeatPumpCommonConfig {
+                        equipment_id: None,
+                        zone_id: Some(1),
+                        heating_capacity_w: None,
+                        heating_eir: None,
+                        stage_heating_capacities_w: None,
+                        stage_heating_eirs: None,
+                        backup_fuel: None,
+                        backup_capacity_w: None,
+                        backup_eir: None,
+                        fraction_heating_load_served: None,
+                        cooling_capacity_w: None,
+                        cooling_eir: None,
+                        stage_cooling_capacities_w: None,
+                        stage_cooling_eirs: None,
+                        fraction_cooling_load_served: None,
+                        number_of_speeds: 1,
+                        is_mini_split: false,
+                        shr: None,
+                        fan_power_w: None,
+                        fan_power_w_per_cfm: None,
+                        airflow_m3_s_per_w: None,
+                        heating_setpoint_c: None,
+                        cooling_setpoint_c: None,
+                        hysteresis_c: None,
+                        heating_setpoint_source: None,
+                        cooling_setpoint_source: None,
+                        duct: hares_equipment::DuctConfig::default(),
+                        biquadratic_x1_min: None,
+                        biquadratic_x1_max: None,
+                        biquadratic_x2_min: None,
+                        biquadratic_x2_max: None,
+                        ff_min: None,
+                        ff_max: None,
+                        plf_min: None,
+                        plf_max: None,
+                    },
                     stage_shrs: None,
-                    fraction_cooling_load_served: None,
-                    number_of_speeds: 1,
-                    is_mini_split: false,
-                    shr: None,
-                    fan_power_w: None,
-                    fan_power_w_per_cfm: None,
-                    airflow_m3_s_per_w: None,
-                    heating_setpoint_c: None,
-                    cooling_setpoint_c: None,
-                    hysteresis_c: None,
-                    heating_setpoint_source: None,
-                    cooling_setpoint_source: None,
-                    duct: hares_equipment::DuctConfig::default(),
-                    biquadratic_x1_min: None,
-                    biquadratic_x1_max: None,
-                    biquadratic_x2_min: None,
-                    biquadratic_x2_max: None,
-                    ff_min: None,
-                    ff_max: None,
-                    plf_min: None,
-                    plf_max: None,
                 },
             ),
         ];

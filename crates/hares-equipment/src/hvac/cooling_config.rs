@@ -2,14 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::core_config::default_one;
+use super::core_config::equipment_type_name;
 use super::heating_config::DuctConfig;
 use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
 use hares_types::ScheduleSourceConfig;
-
-fn default_one() -> u8 {
-    1
-}
 
 /// Typed configuration for central air conditioners.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -107,7 +105,7 @@ pub struct CentralAirConditionerConfig {
 
 impl EquipmentTypedConfig for CentralAirConditionerConfig {
     fn equipment_type_name() -> &'static str {
-        "Central AC"
+        equipment_type_name::CENTRAL_AC
     }
 }
 
@@ -339,7 +337,7 @@ pub struct RoomAcConfig {
 
 impl EquipmentTypedConfig for RoomAcConfig {
     fn equipment_type_name() -> &'static str {
-        "Room AC"
+        equipment_type_name::ROOM_AC
     }
 }
 
@@ -427,7 +425,7 @@ pub struct DehumidifierConfig {
 
 impl EquipmentTypedConfig for DehumidifierConfig {
     fn equipment_type_name() -> &'static str {
-        "Dehumidifier"
+        equipment_type_name::DEHUMIDIFIER
     }
 }
 
@@ -977,32 +975,32 @@ mod tests {
 
     // Issue 1: default_one() duplicated in cooling_config.rs and heat_pump_config.rs.
     #[test]
-    fn regression_009_central_ac_number_of_speeds_defaults_to_one() {
+    fn central_ac_number_of_speeds_defaults_to_one() {
         let json = serde_json::json!({ "capacity_w": 10_000.0, "eir": 0.25 });
         let cfg: CentralAirConditionerConfig = serde_json::from_value(json).unwrap();
         assert_eq!(
             cfg.number_of_speeds, 1,
-            "ticket-009: default_one() must return 1 for CentralAirConditionerConfig.number_of_speeds"
+            "default_one() must return 1 for CentralAirConditionerConfig.number_of_speeds"
         );
     }
 
     // Issue 3: equipment type name string literals.
     #[test]
-    fn regression_009_equipment_type_name_literals() {
+    fn cooling_equipment_type_name_literals() {
         assert_eq!(
             CentralAirConditionerConfig::equipment_type_name(),
             "Central AC",
-            "ticket-009: CentralAirConditionerConfig type name must be 'Central AC'"
+            "CentralAirConditionerConfig type name must be 'Central AC'"
         );
         assert_eq!(
             RoomAcConfig::equipment_type_name(),
             "Room AC",
-            "ticket-009: RoomAcConfig type name must be 'Room AC'"
+            "RoomAcConfig type name must be 'Room AC'"
         );
         assert_eq!(
             DehumidifierConfig::equipment_type_name(),
             "Dehumidifier",
-            "ticket-009: DehumidifierConfig type name must be 'Dehumidifier'"
+            "DehumidifierConfig type name must be 'Dehumidifier'"
         );
     }
 }

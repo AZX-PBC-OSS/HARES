@@ -1,4 +1,4 @@
-//! Regression tests for ticket 041: warm-up period not enforced on HPXML path.
+//! Regression tests for warm-up period not enforced on HPXML path.
 //!
 //! `Dwelling::from_hpxml` hard-codes `initialization_duration: None`, so all
 //! HPXML-path simulations skip warm-up entirely. For heavyweight construction
@@ -28,7 +28,7 @@
 //!    It constructs a `DwellingConfig` matching `from_hpxml`'s current
 //!    behaviour (initialization_duration: None) and asserts the zone
 //!    temperature at step 1 agrees with the warmup run within 0.5 °C.
-//!    Currently fails because `from_hpxml` skips warmup (ticket 041).
+//!    Currently fails because `from_hpxml` skips warmup.
 //!    Remove the `#[ignore]` and this test should pass after the fix.
 
 #[cfg(test)]
@@ -154,7 +154,7 @@ mod tests {
         );
     }
 
-    /// The **failing regression test** for ticket 041.
+    /// The **failing regression test** for warmup enforcement on the HPXML path.
     ///
     /// `Dwelling::from_hpxml` hard-codes `initialization_duration: None`, so
     /// all HPXML-path simulations skip warm-up. This test asserts the
@@ -163,13 +163,13 @@ mod tests {
     /// that the default warmup is being applied.
     ///
     /// **Currently ignored** because `from_hpxml` doesn't apply warmup.
-    /// After the fix (ticket 041), remove `#[ignore]` and this should pass.
+    /// After the fix, remove `#[ignore]` and this should pass.
     ///
     /// The companion test `heavyweight_freefloat_warmup_changes_initial_zone_temperature`
     /// proves the precondition: warmup actually shifts temperatures > 0.5 °C,
     /// so this test is non-trivial to satisfy.
     #[test]
-    #[ignore = "ticket-041: from_hpxml skips warmup — remove ignore after fix lands"]
+    #[ignore = "from_hpxml skips warmup — remove ignore after fix lands"]
     fn hpxml_path_applies_default_warmup() {
         // Simulate what from_hpxml would produce: no initialization_duration.
         // After the fix, from_hpxml should set a 7-day default, so the
@@ -199,7 +199,7 @@ mod tests {
             "Zone temperature at step 1 differs by {delta:.3} °C between warmup \
              (21 days) and no-warmup runs for BESTEST 900FF heavyweight concrete \
              building (threshold: 0.5 °C — EnergyPlus Eng.Ref §Warmup Convergence). \
-             The HPXML path is not applying a default warmup period (ticket 041). \
+             The HPXML path is not applying a default warmup period. \
              Fix: set initialization_duration to Some(7d) in Dwelling::from_hpxml."
         );
     }

@@ -328,8 +328,8 @@ impl Equipment for RoomAC {
 impl CoolingCore {
     fn apply_cooling_startup_cd(&mut self, cd: Option<f64>) {
         if let Some(cd) = cd {
-            self.hvac.plf_cooling_degradation_coeff = cd;
-            self.hvac.startup.c_d = cd;
+            self.hvac.runtime.plf_cooling_degradation_coeff = cd;
+            self.hvac.runtime.startup.c_d = cd;
         }
     }
 
@@ -337,7 +337,7 @@ impl CoolingCore {
         &mut self,
         requested_capacity_fraction: f64,
     ) -> SpeedSelection {
-        let capacities = &self.hvac.cooling_capacities_w;
+        let capacities = &self.hvac.config.cooling_capacities_w;
         let cap_fracs = capacity_fractions_for(capacities);
         if cap_fracs.is_empty() {
             let selection = SpeedSelection {
@@ -345,8 +345,8 @@ impl CoolingCore {
                 speed_frac: 0.0,
                 part_load_ratio: 0.0,
             };
-            self.hvac.last_speed_index = selection.speed_index;
-            self.hvac.last_speed_frac = selection.speed_frac;
+            self.hvac.runtime.last_speed_index = selection.speed_index;
+            self.hvac.runtime.last_speed_frac = selection.speed_frac;
             return selection;
         }
         if cap_fracs.len() == 1 {
@@ -356,42 +356,45 @@ impl CoolingCore {
                 speed_frac: 0.0,
                 part_load_ratio: lf,
             };
-            self.hvac.last_speed_index = selection.speed_index;
-            self.hvac.last_speed_frac = selection.speed_frac;
+            self.hvac.runtime.last_speed_index = selection.speed_index;
+            self.hvac.runtime.last_speed_frac = selection.speed_frac;
             return selection;
         }
-        let selection =
-            interpolate_speed_stages(requested_capacity_fraction, &cap_fracs, true);
-        self.hvac.last_speed_index = selection.speed_index;
-        self.hvac.last_speed_frac = selection.speed_frac;
+        let selection = interpolate_speed_stages(requested_capacity_fraction, &cap_fracs, true);
+        self.hvac.runtime.last_speed_index = selection.speed_index;
+        self.hvac.runtime.last_speed_frac = selection.speed_frac;
         selection
     }
 
     fn variable_speed_point(&self, selection: SpeedSelection) -> (f64, f64, f64) {
-        let stage_capacity_w = if self.hvac.cooling_capacities_w.len() > 1
-            && selection.speed_frac > 0.0
-        {
-            self.hvac.interpolated_capacity(
-                &self.hvac.cooling_capacities_w,
-                selection.speed_index,
-                selection.speed_frac,
-            )
-        } else if self.hvac.cooling_capacities_w.len() == 1 {
-            self.hvac
-                .cooling_capacities_w
-                .first()
-                .copied()
-                .unwrap_or_default()
-        } else {
-            HvacEquipment::capacity_at_stage(&self.hvac.cooling_capacities_w, selection.speed_index)
-        };
-        let stage_eir = if self.hvac.cooling_capacities_w.len() > 1 && selection.speed_frac > 0.0 {
-            self.hvac
-                .interpolated_eir(selection.speed_index, selection.speed_frac)
-        } else {
-            self.hvac.eir_at_stage(selection.speed_index)
-        };
-        let part_load_ratio = if self.hvac.cooling_capacities_w.len() == 1
+        let stage_capacity_w =
+            if self.hvac.config.cooling_capacities_w.len() > 1 && selection.speed_frac > 0.0 {
+                self.hvac.interpolated_capacity(
+                    &self.hvac.config.cooling_capacities_w,
+                    selection.speed_index,
+                    selection.speed_frac,
+                )
+            } else if self.hvac.config.cooling_capacities_w.len() == 1 {
+                self.hvac
+                    .config
+                    .cooling_capacities_w
+                    .first()
+                    .copied()
+                    .unwrap_or_default()
+            } else {
+                HvacEquipment::capacity_at_stage(
+                    &self.hvac.config.cooling_capacities_w,
+                    selection.speed_index,
+                )
+            };
+        let stage_eir =
+            if self.hvac.config.cooling_capacities_w.len() > 1 && selection.speed_frac > 0.0 {
+                self.hvac
+                    .interpolated_eir(selection.speed_index, selection.speed_frac)
+            } else {
+                self.hvac.eir_at_stage(selection.speed_index)
+            };
+        let part_load_ratio = if self.hvac.config.cooling_capacities_w.len() == 1
             || (selection.speed_index == 0
                 && selection.speed_frac == 0.0
                 && selection.part_load_ratio < 1.0)
@@ -476,16 +479,17 @@ impl CoolingCore {
         self.hvac.init(config, env)?;
 
         if self.is_room_ac {
-            if self.hvac.speed_control_mode != SpeedControlMode::SingleSpeed {
+            if self.hvac.config.speed_control_mode != SpeedControlMode::SingleSpeed {
                 return Err(HaresError::Equipment(
                     "Room AC supports only single-speed mode".to_string(),
                 ));
             }
-            self.hvac.speed_control_mode = SpeedControlMode::SingleSpeed;
-            self.hvac.duct_dse = 1.0;
-            self.hvac.duct_zone_id = None;
+            self.hvac.config.speed_control_mode = SpeedControlMode::SingleSpeed;
+            self.hvac.config.duct_dse = 1.0;
+            self.hvac.config.duct_zone_id = None;
         } else {
-            self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
+            self.hvac.config.duct_zone_id =
+                super::helpers::parse_zone_id_key(config, "duct_zone_id");
         }
 
         self.init_from_typed(config, env)
@@ -500,59 +504,60 @@ impl CoolingCore {
             let cfg = config.require_typed::<RoomAcConfig>("Room AC")?;
             cfg.validate()?;
 
-            self.hvac.cooling_capacities_w = vec![cfg.capacity_w];
+            self.hvac.config.cooling_capacities_w = vec![cfg.capacity_w];
 
-            self.hvac.eir_by_stage = vec![cfg.eir];
+            self.hvac.config.eir_by_stage = vec![cfg.eir];
 
-            self.hvac.airflow_m3_s_per_w = cfg
+            self.hvac.config.airflow_m3_s_per_w = cfg
                 .airflow_m3_s_per_w
                 .unwrap_or(super::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W);
             self.rated_shr = cfg.shr.unwrap_or(0.75).clamp(0.0, 1.0);
             let cd = cfg.startup_cd.unwrap_or(0.22);
-            self.hvac.plf_cooling_degradation_coeff = cd;
-            self.hvac.startup.c_d = cd;
+            self.hvac.runtime.plf_cooling_degradation_coeff = cd;
+            self.hvac.runtime.startup.c_d = cd;
         } else {
             let cfg = config.require_typed::<CentralAirConditionerConfig>("Air Conditioner")?;
             cfg.validate()?;
 
-            self.hvac.cooling_capacities_w = if let Some(stages) = &cfg.stage_capacities_w {
+            self.hvac.config.cooling_capacities_w = if let Some(stages) = &cfg.stage_capacities_w {
                 stages.clone()
             } else {
                 vec![cfg.capacity_w]
             };
 
             let default_eir = cfg.eir;
-            let stage_count = self.hvac.cooling_capacities_w.len();
+            let stage_count = self.hvac.config.cooling_capacities_w.len();
 
-            self.hvac.eir_by_stage = if let Some(stages) = &cfg.stage_eirs {
+            self.hvac.config.eir_by_stage = if let Some(stages) = &cfg.stage_eirs {
                 stages.clone()
             } else {
                 vec![default_eir; stage_count]
             };
 
-            if self.hvac.cooling_capacities_w.len() != self.hvac.eir_by_stage.len() {
+            if self.hvac.config.cooling_capacities_w.len() != self.hvac.config.eir_by_stage.len() {
                 return Err(HaresError::Equipment(
                     "cooling capacity and EIR stage counts must match".to_string(),
                 ));
             }
 
             if let Some(airflow_m3_s_per_w) = cfg.airflow_m3_s_per_w {
-                self.hvac.airflow_m3_s_per_w = airflow_m3_s_per_w;
+                self.hvac.config.airflow_m3_s_per_w = airflow_m3_s_per_w;
             }
 
             let rated_cap = self
                 .hvac
+                .config
                 .cooling_capacities_w
                 .last()
                 .copied()
                 .unwrap_or(0.0);
-            let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
-            let n_speeds = self.hvac.cooling_capacities_w.len().min(255) as u8;
+            let fan_flow = self.hvac.config.airflow_m3_s_per_w * rated_cap;
+            let n_speeds = self.hvac.config.cooling_capacities_w.len().min(255) as u8;
             let cap_low = (n_speeds > 1)
-                .then(|| self.hvac.cooling_capacities_w.first().copied())
+                .then(|| self.hvac.config.cooling_capacities_w.first().copied())
                 .flatten();
-            let flow_low = cap_low.map(|c| self.hvac.airflow_m3_s_per_w * c);
-            self.hvac.duct_dse = if let Some(dse) = cfg.duct.dse_cool {
+            let flow_low = cap_low.map(|c| self.hvac.config.airflow_m3_s_per_w * c);
+            self.hvac.config.duct_dse = if let Some(dse) = cfg.duct.dse_cool {
                 dse
             } else {
                 super::helpers::resolve_duct_dse(
@@ -570,7 +575,7 @@ impl CoolingCore {
             };
 
             let speed_mode = cfg.cooling_speed_control_mode();
-            self.hvac.speed_control_mode = speed_mode;
+            self.hvac.config.speed_control_mode = speed_mode;
 
             self.rated_shr = cfg.shr.unwrap_or(0.75).clamp(0.0, 1.0);
 
@@ -593,7 +598,7 @@ impl CoolingCore {
 
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports);
-        self.hvac.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
+        self.hvac.config.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
         self.compute_coil_ao(self.rated_shr)?;
 
         let (crankcase_rated_kw, crankcase_threshold_c, crankcase_capacity_curve) =
@@ -648,7 +653,7 @@ impl CoolingCore {
 
         // Short-circuit: GridEmergency or explicit Off override.
         if self.dr_load_fraction <= 0.0 || self.ctrl_mode_override == Some(OperatingMode::Off) {
-            self.hvac.duty_cycle = 0.0;
+            self.hvac.runtime.duty_cycle = 0.0;
             self.operating_mode = OperatingMode::Off;
             return OperatingMode::Off;
         }
@@ -660,7 +665,7 @@ impl CoolingCore {
         if mode == ThermostatMode::Cooling {
             let base_setpoint = self.hvac.effective_setpoints().cooling_c;
             let setpoint = base_setpoint + self.dr_setpoint_offset_c;
-            let zone_temp = lookup_zone(env, self.hvac.zone_id)
+            let zone_temp = lookup_zone(env, self.hvac.config.zone_id)
                 .map(|z| z.temperature_c)
                 .unwrap_or(setpoint);
 
@@ -669,7 +674,7 @@ impl CoolingCore {
             // offset is active (non-zero) and the zone has cooled below the DR-adjusted threshold.
             let dr_suppressed = self.dr_setpoint_offset_c > 0.0 && zone_temp <= setpoint;
             if dr_suppressed {
-                self.hvac.duty_cycle = 0.0;
+                self.hvac.runtime.duty_cycle = 0.0;
                 self.operating_mode = OperatingMode::Off;
                 self.hvac.update_prev_zone_temp(None);
             } else {
@@ -679,14 +684,14 @@ impl CoolingCore {
                     .thermostat
                     .hysteresis_c
                     .max(MIN_LOAD_FRACTION_DEADBAND_C);
-                let load_fraction = if self.hvac.speed_control_mode == SpeedControlMode::SingleSpeed
-                {
-                    1.0
-                } else {
-                    ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0)
-                };
+                let load_fraction =
+                    if self.hvac.config.speed_control_mode == SpeedControlMode::SingleSpeed {
+                        1.0
+                    } else {
+                        ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0)
+                    };
                 self.hvac.update_prev_zone_temp(Some(zone_temp));
-                self.hvac.duty_cycle = match self.hvac.speed_control_mode {
+                self.hvac.runtime.duty_cycle = match self.hvac.config.speed_control_mode {
                     SpeedControlMode::VariableSpeedIdeal => {
                         self.select_variable_speed_cooling(load_fraction)
                             .part_load_ratio
@@ -698,14 +703,14 @@ impl CoolingCore {
                             .part_load_ratio
                     }
                 };
-                self.operating_mode = if self.hvac.duty_cycle > 0.0 {
+                self.operating_mode = if self.hvac.runtime.duty_cycle > 0.0 {
                     OperatingMode::Cooling
                 } else {
                     OperatingMode::Off
                 };
             }
         } else {
-            self.hvac.duty_cycle = 0.0;
+            self.hvac.runtime.duty_cycle = 0.0;
             self.operating_mode = OperatingMode::Off;
             self.hvac.update_prev_zone_temp(None);
         }
@@ -739,8 +744,8 @@ impl CoolingCore {
             fan_kw = perf.fan_kw;
             sensible_cooling_w = perf.sensible_cooling_w;
             latent_cooling_w = perf.latent_cooling_w;
-            self.hvac.shr = perf.shr;
-            self.hvac.supply_air_temp_c = perf.supply_temp_c;
+            self.hvac.config.shr = perf.shr;
+            self.hvac.config.supply_air_temp_c = perf.supply_temp_c;
 
             // Apply compound load multipliers (duty cycle * transient load * DR).
             let effective_load = (self.ctrl_duty_cycle
@@ -780,7 +785,7 @@ impl CoolingCore {
 
             if latent_cooling_w.abs() > 0.0 {
                 let moisture_mass_flow_kg_s = -latent_cooling_w / LATENT_HEAT_VAPORISATION_0C_J_KG;
-                for &(zone, fraction) in &self.hvac.zone_heat_fractions {
+                for &(zone, fraction) in &self.hvac.config.zone_heat_fractions {
                     if fraction > 0.0 {
                         ports.accumulate(&PortContribution::Humidity {
                             zone,
@@ -796,7 +801,7 @@ impl CoolingCore {
         } else {
             self.last_cooling_rtf = 0.0;
             self.cycle_off_steps += 1;
-            self.hvac.time_at_current_speed_s = 0.0;
+            self.hvac.runtime.time_at_current_speed_s = 0.0;
             self.hvac.update_prev_zone_temp(None);
             // apply_startup_capacity_degradation resets the ramp timer when off.
         }
@@ -815,7 +820,7 @@ impl CoolingCore {
         }
 
         let electric_kw =
-            (compressor_kw + fan_kw + self.crankcase_heater_kw) * self.hvac.space_fraction;
+            (compressor_kw + fan_kw + self.crankcase_heater_kw) * self.hvac.config.space_fraction;
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_kw: electric_kw,
@@ -824,7 +829,7 @@ impl CoolingCore {
         }
 
         // Telemetry reports delivered (post-DSE) values for the conditioned zone.
-        let dse = self.hvac.duct_dse.clamp(0.0, 1.0);
+        let dse = self.hvac.config.duct_dse.clamp(0.0, 1.0);
         let fan_heat_w = fan_kw * 1000.0;
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
         self.telemetry
@@ -836,11 +841,11 @@ impl CoolingCore {
         self.telemetry
             .set(tk::COIL_LATENT_COOLING_W, latent_cooling_w);
         self.telemetry.set(tk::FAN_HEAT_W, fan_heat_w);
-        self.telemetry.set(tk::SHR, self.hvac.shr);
+        self.telemetry.set(tk::SHR, self.hvac.config.shr);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
         self.telemetry
-            .set(tk::SPEED_INDEX, self.hvac.last_speed_index as f64);
+            .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         let compressor_only_w = compressor_kw * 1000.0;
         let total_cooling_w = sensible_cooling_w + latent_cooling_w;
@@ -855,13 +860,15 @@ impl CoolingCore {
         self.telemetry.set(tk::COMPRESSOR_KW, compressor_kw);
         self.telemetry.set(tk::FAN_KW, fan_kw);
         self.telemetry
-            .set(tk::SUPPLY_TEMP_C, self.hvac.supply_air_temp_c);
+            .set(tk::SUPPLY_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.telemetry
             .set(tk::APPARATUS_DEW_POINT_C, self.last_adp_c);
         self.telemetry
             .set(tk::BYPASS_FACTOR, self.last_bypass_factor);
-        self.telemetry
-            .set(tk::MAX_CAPACITY_FRACTION, self.hvac.max_capacity_fraction);
+        self.telemetry.set(
+            tk::MAX_CAPACITY_FRACTION,
+            self.hvac.control.max_capacity_fraction,
+        );
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
@@ -918,41 +925,46 @@ impl CoolingCore {
         env: &EnvironmentState,
         dt_min: f64,
     ) -> crate::Result<PerformanceResult> {
-        let zone = lookup_zone(env, self.hvac.zone_id)?;
+        let zone = lookup_zone(env, self.hvac.config.zone_id)?;
         if !zone.wet_bulb_c.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "zone {:?} wet_bulb_c must be finite before HVAC cooling step",
-                self.hvac.zone_id
+                self.hvac.config.zone_id
             )));
         }
 
         let is_variable_speed =
-            self.hvac.speed_control_mode == SpeedControlMode::VariableSpeedIdeal;
-        let mut speed_index = self.hvac.last_speed_index;
-        let speed_frac = self.hvac.last_speed_frac;
+            self.hvac.config.speed_control_mode == SpeedControlMode::VariableSpeedIdeal;
+        let mut speed_index = self.hvac.runtime.last_speed_index;
+        let speed_frac = self.hvac.runtime.last_speed_frac;
         let mut variable_selection = SpeedSelection {
             speed_index,
             speed_frac,
-            part_load_ratio: self.hvac.duty_cycle.clamp(0.0, 1.0),
+            part_load_ratio: self.hvac.runtime.duty_cycle.clamp(0.0, 1.0),
         };
-        let (mut stage_cap_w, mut stage_eir, mut variable_plr) = match self.hvac.speed_control_mode
-        {
-            SpeedControlMode::VariableSpeedIdeal => self.variable_speed_point(variable_selection),
-            SpeedControlMode::MultiSpeedInterpolated => (
-                self.hvac.interpolated_capacity(
-                    &self.hvac.cooling_capacities_w,
-                    speed_index,
-                    speed_frac,
+        let (mut stage_cap_w, mut stage_eir, mut variable_plr) =
+            match self.hvac.config.speed_control_mode {
+                SpeedControlMode::VariableSpeedIdeal => {
+                    self.variable_speed_point(variable_selection)
+                }
+                SpeedControlMode::MultiSpeedInterpolated => (
+                    self.hvac.interpolated_capacity(
+                        &self.hvac.config.cooling_capacities_w,
+                        speed_index,
+                        speed_frac,
+                    ),
+                    self.hvac.interpolated_eir(speed_index, speed_frac),
+                    self.hvac.runtime.duty_cycle.clamp(0.0, 1.0),
                 ),
-                self.hvac.interpolated_eir(speed_index, speed_frac),
-                self.hvac.duty_cycle.clamp(0.0, 1.0),
-            ),
-            _ => (
-                HvacEquipment::capacity_at_stage(&self.hvac.cooling_capacities_w, speed_index),
-                self.hvac.eir_at_stage(speed_index),
-                self.hvac.duty_cycle.clamp(0.0, 1.0),
-            ),
-        };
+                _ => (
+                    HvacEquipment::capacity_at_stage(
+                        &self.hvac.config.cooling_capacities_w,
+                        speed_index,
+                    ),
+                    self.hvac.eir_at_stage(speed_index),
+                    self.hvac.runtime.duty_cycle.clamp(0.0, 1.0),
+                ),
+            };
 
         let outdoor_c = env.weather.outdoor_temp_c;
 
@@ -965,13 +977,13 @@ impl CoolingCore {
             outdoor_c: f64,
             flow_fraction_correction: f64,
         ) -> (f64, f64, f64, f64, f64) {
-            let flow_m3_s_for_fan = stage_capacity_w.max(0.0) * hvac.airflow_m3_s_per_w;
+            let flow_m3_s_for_fan = stage_capacity_w.max(0.0) * hvac.config.airflow_m3_s_per_w;
             let fan_shaft_heat_correction_c = if flow_m3_s_for_fan > 0.0 {
                 use hares_physics::{
                     air_properties::moist_air_density_kg_m3,
                     psychrometrics::SPECIFIC_HEAT_DRY_AIR_KJ_KG_K,
                 };
-                let fan_power_w = hvac.fan_power_w_per_m3_s * flow_m3_s_for_fan;
+                let fan_power_w = hvac.config.fan_power_w_per_m3_s * flow_m3_s_for_fan;
                 let rho = moist_air_density_kg_m3(
                     env.weather.pressure_kpa * 1000.0,
                     zone.temperature_c,
@@ -1034,7 +1046,7 @@ impl CoolingCore {
         );
 
         // OCHRE HVAC.py:1044-1050 -- interpolate biquadratic between bracket stages.
-        if self.hvac.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
+        if self.hvac.config.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
             && speed_frac > 0.0
         {
             let (_, _, _, cap_ratio_high, eir_ratio_high) = curve_inputs(
@@ -1053,6 +1065,7 @@ impl CoolingCore {
         if is_variable_speed && self.use_ideal && self.ideal_capacity_w.abs() > f64::EPSILON {
             let max_capacity_w = self
                 .hvac
+                .config
                 .cooling_capacities_w
                 .last()
                 .copied()
@@ -1061,7 +1074,7 @@ impl CoolingCore {
                 (-self.ideal_capacity_w / (max_capacity_w * cap_ratio).max(1.0)).clamp(0.0, 1.0);
             variable_selection = self.select_variable_speed_cooling(requested_capacity_fraction);
             speed_index = variable_selection.speed_index;
-            self.hvac.duty_cycle = variable_selection.part_load_ratio;
+            self.hvac.runtime.duty_cycle = variable_selection.part_load_ratio;
             (stage_cap_w, stage_eir, variable_plr) = self.variable_speed_point(variable_selection);
             (
                 flow_m3_s_for_fan,
@@ -1093,10 +1106,10 @@ impl CoolingCore {
             let min_cap = (stage_cap_w * 0.01).max(1.0);
             let p = (-self.ideal_capacity_w / steady_capacity_w.max(min_cap)).clamp(0.0, 1.0);
             // Write back so telemetry and RTF reporting see the solver-derived value.
-            self.hvac.duty_cycle = p;
+            self.hvac.runtime.duty_cycle = p;
             p
         } else {
-            self.hvac.duty_cycle.clamp(0.0, 1.0)
+            self.hvac.runtime.duty_cycle.clamp(0.0, 1.0)
         };
         let plf = if is_variable_speed {
             1.0
@@ -1115,7 +1128,7 @@ impl CoolingCore {
             .hvac
             .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
         // OCHRE HVAC.py:445-448 -- clip to rated_max * ext_capacity_frac.
-        let capacity_ceiling = steady_capacity_w * self.hvac.max_capacity_fraction;
+        let capacity_ceiling = steady_capacity_w * self.hvac.control.max_capacity_fraction;
         let total_capacity_w = (staged_capacity_w * plr).max(0.0).min(capacity_ceiling);
 
         let flow_m3_s = flow_m3_s_for_fan;
@@ -1150,11 +1163,13 @@ impl CoolingCore {
             // Rated latent capacity at AHRI conditions (single-stage nominal).
             let rated_cap_w = self
                 .hvac
+                .config
                 .cooling_capacities_w
                 .get(speed_index)
                 .copied()
                 .unwrap_or_else(|| {
                     self.hvac
+                        .config
                         .cooling_capacities_w
                         .last()
                         .copied()
@@ -1176,7 +1191,7 @@ impl CoolingCore {
             steady_state_shr
         };
 
-        self.hvac.shr = shr;
+        self.hvac.config.shr = shr;
 
         // Return gross (pre-DSE) sensible/latent. zone_heat_fractions (set from
         // duct_dse during init) distributes gross output to conditioned and duct zones.
@@ -1199,8 +1214,8 @@ impl CoolingCore {
 
     fn compute_coil_ao(&mut self, rated_shr: f64) -> crate::Result<()> {
         self.coil_ao_by_stage = compute_coil_ao_by_stage(
-            &self.hvac.cooling_capacities_w,
-            self.hvac.airflow_m3_s_per_w,
+            &self.hvac.config.cooling_capacities_w,
+            self.hvac.config.airflow_m3_s_per_w,
             rated_shr,
         )?;
         Ok(())
@@ -1216,7 +1231,7 @@ impl CoolingCore {
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&AirConditionerState {
             mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.duty_cycle,
+            duty_cycle: self.hvac.runtime.duty_cycle,
             last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
             mode_start_at: self.hvac.thermostat_fsm.mode_start_at,
             runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
@@ -1225,15 +1240,15 @@ impl CoolingCore {
             cycle_on_steps: self.cycle_on_steps,
             cycle_off_steps: self.cycle_off_steps,
             crankcase_heater_on: self.crankcase_heater_on,
-            startup_c_d: self.hvac.startup.c_d,
-            startup_time_since_start_min: self.hvac.startup.time_since_start_min,
-            plf_state: self.hvac.plf_state,
-            last_speed_index: self.hvac.last_speed_index,
-            last_speed_frac: self.hvac.last_speed_frac,
+            startup_c_d: self.hvac.runtime.startup.c_d,
+            startup_time_since_start_min: self.hvac.runtime.startup.time_since_start_min,
+            plf_state: self.hvac.runtime.plf_state,
+            last_speed_index: self.hvac.runtime.last_speed_index,
+            last_speed_frac: self.hvac.runtime.last_speed_frac,
             electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
             sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
             latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
-            shr: self.telemetry.get(tk::SHR).unwrap_or(self.hvac.shr),
+            shr: self.telemetry.get(tk::SHR).unwrap_or(self.hvac.config.shr),
             operating_mode_code: self.telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0),
             ctrl_duty_cycle: self.ctrl_duty_cycle,
             ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
@@ -1250,14 +1265,14 @@ impl CoolingCore {
             last_adp_c: self.last_adp_c,
             last_bypass_factor: self.last_bypass_factor,
             thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
-            time_at_current_speed_s: self.hvac.time_at_current_speed_s,
+            time_at_current_speed_s: self.hvac.runtime.time_at_current_speed_s,
         })
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: AirConditionerState = load_postcard(state)?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
-        self.hvac.duty_cycle = decoded.duty_cycle;
+        self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.mode_start_at = decoded.mode_start_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
@@ -1266,12 +1281,12 @@ impl CoolingCore {
         self.cycle_on_steps = decoded.cycle_on_steps;
         self.cycle_off_steps = decoded.cycle_off_steps;
         self.crankcase_heater_on = decoded.crankcase_heater_on;
-        self.hvac.startup.c_d = decoded.startup_c_d;
-        self.hvac.startup.time_since_start_min = decoded.startup_time_since_start_min;
-        self.hvac.plf_state = decoded.plf_state;
-        self.hvac.last_speed_index = decoded.last_speed_index;
-        self.hvac.last_speed_frac = decoded.last_speed_frac;
-        self.hvac.shr = decoded.shr;
+        self.hvac.runtime.startup.c_d = decoded.startup_c_d;
+        self.hvac.runtime.startup.time_since_start_min = decoded.startup_time_since_start_min;
+        self.hvac.runtime.plf_state = decoded.plf_state;
+        self.hvac.runtime.last_speed_index = decoded.last_speed_index;
+        self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
+        self.hvac.config.shr = decoded.shr;
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
         self.ctrl_power_limit_kw = decoded.ctrl_power_limit_kw.unwrap_or(f64::INFINITY);
         self.ctrl_mode_override = decoded.ctrl_mode_override;
@@ -1283,7 +1298,7 @@ impl CoolingCore {
         self.last_adp_c = decoded.last_adp_c;
         self.last_bypass_factor = decoded.last_bypass_factor;
         self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
-        self.hvac.time_at_current_speed_s = decoded.time_at_current_speed_s;
+        self.hvac.runtime.time_at_current_speed_s = decoded.time_at_current_speed_s;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
@@ -1345,7 +1360,7 @@ impl CoolingCore {
                         self.descriptor.equipment_type
                     )));
                 }
-                self.hvac.max_capacity_fraction = *fraction;
+                self.hvac.control.max_capacity_fraction = *fraction;
             }
             _ => {}
         }
@@ -1361,7 +1376,7 @@ impl CoolingCore {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
-        Some((self.hvac.zone_id, setpoint))
+        Some((self.hvac.config.zone_id, setpoint))
     }
 
     fn apply_dr_level(&mut self, level: DRLevel) {
@@ -1583,10 +1598,10 @@ mod tests {
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).unwrap();
         assert_eq!(
-            eq.core.hvac.speed_control_mode,
+            eq.core.hvac.config.speed_control_mode,
             super::SpeedControlMode::SingleSpeed
         );
-        assert_eq!(eq.core.hvac.duct_dse, 1.0);
+        assert_eq!(eq.core.hvac.config.duct_dse, 1.0);
     }
 
     /// Regression: AC step() previously called update_control() internally,
@@ -1784,24 +1799,24 @@ mod tests {
         let cfg = ac_config();
         let eq = AirConditioner::new(cfg.clone());
         assert_eq!(
-            eq.core.hvac.equipment_type,
+            eq.core.hvac.config.equipment_type,
             crate::hvac::hvac_core::HvacEquipmentType::AcCooler,
         );
         // Tolerance 1e-9: uom ft³ constant (0.02831685) differs from NIST-exact
         // (0.028316846592) by ~3 ppm; implementation uses the NIST constant.
         assert!(
-            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
+            (eq.core.hvac.config.airflow_m3_s_per_w - expected).abs() < 1e-9,
             "Central AC default airflow mismatch, got {} m3/s/W",
-            eq.core.hvac.airflow_m3_s_per_w
+            eq.core.hvac.config.airflow_m3_s_per_w
         );
 
         let environment = env(27.0, 0.010, 19.0, 35.0);
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment).expect("init must succeed");
         assert!(
-            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
+            (eq.core.hvac.config.airflow_m3_s_per_w - expected).abs() < 1e-9,
             "init() must preserve default airflow ratio, got {} m3/s/W",
-            eq.core.hvac.airflow_m3_s_per_w
+            eq.core.hvac.config.airflow_m3_s_per_w
         );
     }
 
@@ -1823,12 +1838,12 @@ mod tests {
         let environment = env(27.0, 0.010, 19.0, 35.0);
         eq.init(&cfg, &environment).unwrap();
         assert!(
-            (eq.core.hvac.duct_dse - 1.0).abs() < f64::EPSILON,
+            (eq.core.hvac.config.duct_dse - 1.0).abs() < f64::EPSILON,
             "Room AC duct_dse must be 1.0, got {}",
-            eq.core.hvac.duct_dse
+            eq.core.hvac.config.duct_dse
         );
         assert!(
-            eq.core.hvac.duct_zone_id.is_none(),
+            eq.core.hvac.config.duct_zone_id.is_none(),
             "Room AC must have no duct zone"
         );
     }
@@ -1869,7 +1884,7 @@ mod tests {
         let environment = env(27.0, 0.010, 19.0, 35.0);
         eq.init(&cfg, &environment).unwrap();
 
-        let fracs = &eq.core.hvac.zone_heat_fractions;
+        let fracs = &eq.core.hvac.config.zone_heat_fractions;
         assert_eq!(
             fracs.len(),
             1,
@@ -1891,7 +1906,7 @@ mod tests {
         eq.init(&cfg, &environment).unwrap();
 
         let expected = 0.25;
-        let actual = eq.core.hvac.eir_by_stage[0];
+        let actual = eq.core.hvac.config.eir_by_stage[0];
         assert!(
             (actual - expected).abs() < 1e-9,
             "typed eir=0.25 must be preserved, got {actual}"
@@ -1915,7 +1930,7 @@ mod tests {
         eq.init(&cfg, &environment).unwrap();
 
         assert_eq!(
-            eq.core.hvac.eir_by_stage,
+            eq.core.hvac.config.eir_by_stage,
             vec![0.30],
             "SI stage_eirs must override eir-derived EIR"
         );
@@ -1997,9 +2012,9 @@ mod tests {
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &environment).expect("init must succeed");
         assert!(
-            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
+            (eq.core.hvac.config.airflow_m3_s_per_w - expected).abs() < 1e-9,
             "RoomAC airflow must equal the typed SI default after init(), got {} m3/s/W",
-            eq.core.hvac.airflow_m3_s_per_w
+            eq.core.hvac.config.airflow_m3_s_per_w
         );
     }
 
@@ -2080,12 +2095,12 @@ mod tests {
         let mut eq_full = AirConditioner::new(cfg.clone());
         eq_full.init(&cfg, &env_full).unwrap();
         eq_full.update_control(&env_full);
-        let duty_full = eq_full.core.hvac.duty_cycle;
+        let duty_full = eq_full.core.hvac.runtime.duty_cycle;
 
         let mut eq_part = AirConditioner::new(cfg.clone());
         eq_part.init(&cfg, &env_part).unwrap();
         eq_part.update_control(&env_part);
-        let duty_part = eq_part.core.hvac.duty_cycle;
+        let duty_part = eq_part.core.hvac.runtime.duty_cycle;
 
         assert!(
             (duty_full - 1.0).abs() < 1e-9,
@@ -2109,23 +2124,23 @@ mod tests {
         let mut eq_part = AirConditioner::new(cfg.clone());
         eq_part.init(&cfg, &env_part).unwrap();
         assert_eq!(
-            eq_part.core.hvac.speed_control_mode,
+            eq_part.core.hvac.config.speed_control_mode,
             SpeedControlMode::VariableSpeedIdeal
         );
         eq_part.update_control(&env_part);
         assert!(
-            (eq_part.core.hvac.duty_cycle - 0.5).abs() < 1e-9,
+            (eq_part.core.hvac.runtime.duty_cycle - 0.5).abs() < 1e-9,
             "variable-speed ideal should preserve fractional duty cycle; got {}",
-            eq_part.core.hvac.duty_cycle
+            eq_part.core.hvac.runtime.duty_cycle
         );
 
         let mut eq_full = AirConditioner::new(cfg.clone());
         eq_full.init(&cfg, &env_full).unwrap();
         eq_full.update_control(&env_full);
         assert!(
-            (eq_full.core.hvac.duty_cycle - 1.0).abs() < 1e-9,
+            (eq_full.core.hvac.runtime.duty_cycle - 1.0).abs() < 1e-9,
             "high load should clamp to full duty cycle; got {}",
-            eq_full.core.hvac.duty_cycle
+            eq_full.core.hvac.runtime.duty_cycle
         );
     }
 
@@ -2141,19 +2156,19 @@ mod tests {
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();
         assert_eq!(
-            eq.core.hvac.speed_control_mode,
+            eq.core.hvac.config.speed_control_mode,
             SpeedControlMode::VariableSpeedIdeal
         );
         assert_eq!(
-            eq.core.hvac.startup.c_d, 0.0,
+            eq.core.hvac.runtime.startup.c_d, 0.0,
             "OCHRE 4-speed variable cooling should map to zero startup Cd"
         );
 
         eq.update_control(&env);
         assert!(
-            (eq.core.hvac.duty_cycle - 0.5).abs() < 1e-9,
+            (eq.core.hvac.runtime.duty_cycle - 0.5).abs() < 1e-9,
             "central 4-speed variable cooling should preserve fractional duty; got {}",
-            eq.core.hvac.duty_cycle
+            eq.core.hvac.runtime.duty_cycle
         );
     }
 
@@ -2184,8 +2199,8 @@ mod tests {
         let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
         let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0);
 
-        assert_eq!(eq.core.hvac.last_speed_index, 0);
-        assert!((eq.core.hvac.last_speed_frac - 1.0).abs() < 1e-9);
+        assert_eq!(eq.core.hvac.runtime.last_speed_index, 0);
+        assert!((eq.core.hvac.runtime.last_speed_frac - 1.0).abs() < 1e-9);
         assert!(
             compressor_kw > 0.0,
             "load_fraction=0.5 with a 4-speed ladder must energize the second stage, got compressor_kw={compressor_kw}"
@@ -2208,18 +2223,18 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
 
         assert_eq!(
-            eq.core.hvac.speed_control_mode,
+            eq.core.hvac.config.speed_control_mode,
             SpeedControlMode::TwoSpeedSetpoint
         );
         assert!(
-            (eq.core.hvac.startup.c_d - 0.11).abs() < 1e-9,
+            (eq.core.hvac.runtime.startup.c_d - 0.11).abs() < 1e-9,
             "two-speed typed cooling must derive startup Cd=0.11, got {}",
-            eq.core.hvac.startup.c_d
+            eq.core.hvac.runtime.startup.c_d
         );
         assert!(
-            (eq.core.hvac.plf_cooling_degradation_coeff - 0.11).abs() < 1e-9,
+            (eq.core.hvac.runtime.plf_cooling_degradation_coeff - 0.11).abs() < 1e-9,
             "two-speed typed cooling must derive PLF Cd=0.11, got {}",
-            eq.core.hvac.plf_cooling_degradation_coeff
+            eq.core.hvac.runtime.plf_cooling_degradation_coeff
         );
     }
 
@@ -2406,7 +2421,7 @@ mod tests {
 
         // 5000W = 62.5% of 8000W max -- falls between stage 1 (50%) and stage 2 (75%),
         // so stage 1 is selected (lo index in the interpolation range).
-        assert_eq!(eq.core.hvac.last_speed_index, 1);
+        assert_eq!(eq.core.hvac.runtime.last_speed_index, 1);
         assert!(
             compressor_kw > 0.0,
             "IdealCapacity=-5 kW on a 4-speed ladder must energize the second stage, got compressor_kw={compressor_kw}"
@@ -2486,7 +2501,7 @@ mod tests {
         );
         assert_eq!(
             speed_index.unwrap(),
-            eq.core.hvac.last_speed_index as f64,
+            eq.core.hvac.runtime.last_speed_index as f64,
             "SPEED_INDEX telemetry must match hvac.last_speed_index"
         );
     }
@@ -2510,15 +2525,15 @@ mod tests {
         let mut core = CoolingCore::new(cfg.clone(), false);
         core.init(&cfg, &environment).unwrap();
 
-        core.hvac.biquadratic_coeffs = vec![
+        core.hvac.config.biquadratic_coeffs = vec![
             [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         ];
         core.operating_mode = OperatingMode::Cooling;
-        core.hvac.duty_cycle = 1.0;
-        core.hvac.last_speed_index = 1;
+        core.hvac.runtime.duty_cycle = 1.0;
+        core.hvac.runtime.last_speed_index = 1;
 
         let perf = core.calculate_performance(&environment, 15.0).unwrap();
 
@@ -2636,7 +2651,7 @@ mod tests {
                 .unwrap();
         }
 
-        let accumulated = eq.core.hvac.time_at_current_speed_s;
+        let accumulated = eq.core.hvac.runtime.time_at_current_speed_s;
         assert!(
             accumulated > 0.0,
             "time_at_current_speed_s must be positive after stepping"
@@ -2646,13 +2661,13 @@ mod tests {
 
         let mut restored = AirConditioner::new(cfg.clone());
         restored.init(&cfg, &environment).unwrap();
-        assert_eq!(restored.core.hvac.time_at_current_speed_s, 0.0);
+        assert_eq!(restored.core.hvac.runtime.time_at_current_speed_s, 0.0);
 
         restored.load_state(&state).unwrap();
         assert!(
-            (restored.core.hvac.time_at_current_speed_s - accumulated).abs() < 1e-9,
+            (restored.core.hvac.runtime.time_at_current_speed_s - accumulated).abs() < 1e-9,
             "time_at_current_speed_s must survive checkpoint; expected {accumulated}, got {}",
-            restored.core.hvac.time_at_current_speed_s
+            restored.core.hvac.runtime.time_at_current_speed_s
         );
     }
 }
@@ -4013,9 +4028,9 @@ mod defaults_tests {
         eq.init(&cfg, &env).unwrap();
 
         assert!(
-            (eq.core.hvac.low_speed_capacity_fraction - 0.72).abs() < 1e-12,
+            (eq.core.hvac.config.low_speed_capacity_fraction - 0.72).abs() < 1e-12,
             "2-speed AC must default to low_speed_capacity_fraction=0.72 (OCHRE/AHRI default), got {}",
-            eq.core.hvac.low_speed_capacity_fraction
+            eq.core.hvac.config.low_speed_capacity_fraction
         );
     }
 
@@ -4258,7 +4273,7 @@ mod speed_selection_parity_tests {
         let mut core = CoolingCore::new(cfg.clone(), false);
         core.init(&cfg, &env).unwrap();
         // Override capacities so the test controls the exact stage values.
-        core.hvac.cooling_capacities_w = capacities_w;
+        core.hvac.config.cooling_capacities_w = capacities_w;
         core
     }
 
@@ -4266,8 +4281,8 @@ mod speed_selection_parity_tests {
     /// same capacity stages so we can call select_speed() (→ select_multi_speed).
     fn make_hvac_cooling(capacities_w: Vec<f64>) -> HvacEquipment {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
-        hvac.cooling_capacities_w = capacities_w;
+        hvac.config.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        hvac.config.cooling_capacities_w = capacities_w;
         hvac.thermostat_fsm.mode = ThermostatMode::Cooling;
         hvac
     }

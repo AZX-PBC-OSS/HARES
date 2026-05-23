@@ -54,6 +54,13 @@ const DEFAULT_BIQUADRATIC_X1_BOUNDS: (f64, f64) = (-10.0, 50.0);
 /// Fallback only; per-curve explicit bounds from equipment CSV/specs must be preferred.
 const DEFAULT_BIQUADRATIC_X2_BOUNDS: (f64, f64) = (-50.0, 60.0);
 
+/// Maximum number of compressor speed stages supported by any HVAC equipment type.
+/// Covers 4-stage central AC/ASHP and 8-stage MSHP (the highest stage count in
+/// the OCHRE/HARES default performance curve set). Used for stack-allocated
+/// fixed-size arrays in `HvacControlState::disabled_speeds` to eliminate
+/// per-timestep heap allocation on the control-signal hot path.
+pub const MAX_SPEEDS: usize = 8;
+
 /// Equipment category for HVAC defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HvacEquipmentType {
@@ -126,18 +133,13 @@ impl HvacEquipmentType {
     }
 }
 
-/// Shared HVAC wrapper with thermostat state and base helper parameters.
+/// Equipment configuration set once at initialization and never modified at runtime.
 #[derive(Clone, Debug, PartialEq)]
-pub struct HvacEquipment {
+pub struct HvacConfig {
     pub equipment_type: HvacEquipmentType,
     pub zone_id: ZoneId,
-    pub thermostat_fsm: ThermostatFsm,
-    pub duty_cycle: f64,
-    pub heating_capacities_w: Vec<f64>,
-    pub cooling_capacities_w: Vec<f64>,
-    pub eir_by_stage: Vec<f64>,
-    pub fan_power_w_per_m3_s: f64,
     pub shr: f64,
+    pub fan_power_w_per_m3_s: f64,
     pub duct_dse: f64,
     /// Zone where duct losses are deposited (e.g. attic, garage, basement).
     /// `None` means duct losses are unrecoverable (lost to outdoors).
@@ -168,17 +170,14 @@ pub struct HvacEquipment {
     pub biquadratic_x2_bounds: (f64, f64),
     pub speed_control_mode: SpeedControlMode,
     pub low_speed_capacity_fraction: f64,
-    pub plf_cooling_degradation_coeff: f64,
-    pub plf_state: f64,
-    pub startup: StartupConfig,
-    pub last_speed_index: usize,
-    pub last_speed_frac: f64,
-    /// Seconds the unit has been running at the current speed stage.
-    /// OCHRE HVAC.py: min_time_in_speed prevents rapid speed hunting by
-    /// locking the current stage for at least `min_time_per_speed_s` seconds.
-    pub time_at_current_speed_s: f64,
-    /// Minimum time [s] before a two-speed stage change is allowed (default 300 s = 5 min).
-    pub min_time_per_speed_s: f64,
+    pub space_fraction: f64,
+    pub cap_ff_coeffs: [f64; 3],
+    pub eir_ff_coeffs: [f64; 3],
+    pub ff_bounds: (f64, f64),
+    pub plf_min: f64,
+    pub heating_capacities_w: Vec<f64>,
+    pub cooling_capacities_w: Vec<f64>,
+    pub eir_by_stage: Vec<f64>,
     /// Per-speed EIR part-load ratio (PLR) quadratic coefficients `[a, b, c]`.
     ///
     /// OCHRE HVAC.py lines 823, 841–844: each speed stage has its own `eir_plr`
@@ -189,112 +188,127 @@ pub struct HvacEquipment {
     /// Indexed by speed stage. If a stage index is out of range, the last entry
     /// is used (same fallback pattern as `biquadratic_coeffs`).
     pub eir_plr_coefficients: Option<Vec<[f64; 3]>>,
-    /// Per-speed disabled flags for demand-response control.
-    ///
-    /// OCHRE HVAC.py lines 754, 853–857: `disable_speeds[i]` marks speed stage `i`
-    /// as unavailable. When a desired speed is disabled, equipment routes to the
-    /// highest allowed (non-disabled) speed. Set via `set_disabled_speeds`.
-    ///
-    /// Length must match the number of speed stages. Empty = no stages disabled.
-    pub disabled_speeds: Vec<bool>,
-    /// Cached index of the highest non-disabled speed stage.
-    /// Recomputed on every `set_disabled_speeds` call.
-    /// OCHRE HVAC.py: `_max_enabled_speed`
-    pub max_enabled_speed: usize,
+    pub min_time_per_speed_s: f64,
+}
+
+/// Runtime state updated every simulation timestep.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HvacRuntimeState {
+    pub duty_cycle: f64,
+    /// Borderline config/runtime: set from config at init but also overridden at
+    /// runtime by equipment-type Cd defaults and by CoolingCore. Grouped with
+    /// runtime because it can change; if future work makes it truly immutable,
+    /// it can move to `HvacConfig`.
+    pub plf_cooling_degradation_coeff: f64,
+    pub plf_state: f64,
+    pub startup: StartupConfig,
+    pub last_speed_index: usize,
+    pub last_speed_frac: f64,
+    /// Seconds the unit has been running at the current speed stage.
+    /// OCHRE HVAC.py: min_time_in_speed prevents rapid speed hunting by
+    /// locking the current stage for at least `min_time_per_speed_s` seconds.
+    pub time_at_current_speed_s: f64,
     /// Previous zone temperature [°C], used by `TwoSpeedTime` mode to detect
     /// whether the temperature is still moving away from setpoint.
     /// Updated each timestep by `update_prev_zone_temp`.
     pub prev_zone_temp_c: Option<f64>,
-    /// Fraction of conditioned space served by this equipment [0, 1].
-    /// Scales electrical/fuel output but NOT thermal zone contributions.
-    /// OCHRE HVAC.py:104: `self.space_fraction`.
-    pub space_fraction: f64,
+}
+
+/// Control-signal state modified by external control signals.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HvacControlState {
     /// External max-capacity fraction [0, 1]. Clips ideal capacity output to
     /// `rated_max * max_capacity_fraction`. Set via `MaxCapacityFraction` control signal.
     /// OCHRE HVAC.py: `self.ext_capacity_frac`.
     pub max_capacity_fraction: f64,
-    /// Per-speed flow-fraction quadratic coefficients for capacity curve.
-    /// Evaluates: `cap_ff[0] + cap_ff[1]*ff + cap_ff[2]*ff^2`.
-    /// Default `[1.0, 0.0, 0.0]` = no flow-fraction correction (scalar 1.0).
-    pub cap_ff_coeffs: [f64; 3],
-    /// Per-speed flow-fraction quadratic coefficients for EIR curve.
-    /// Evaluates: `eir_ff[0] + eir_ff[1]*ff + eir_ff[2]*ff^2`.
-    pub eir_ff_coeffs: [f64; 3],
-    /// Flow-fraction clamping bounds `(min, max)` applied before evaluating the
-    /// flow-fraction quadratic in `evaluate_biquadratic_with_flow`.
-    /// Default `(0.0, f64::INFINITY)` = no clamping.
-    /// Config keys: `ff_min`, `ff_max`.
-    pub ff_bounds: (f64, f64),
-    /// Minimum PLF floor used in `part_load_factor_for_stage`.
-    /// Default 0.7 per AHRI 210/240.  MSHP CSV-derived configs may set a lower
-    /// value via the `plf_min` config key.
-    pub plf_min: f64,
+    /// Per-speed disable flags. Only indices `0..speed_count` are meaningful.
+    /// OCHRE HVAC.py lines 754, 853–857: `disable_speeds[i]` marks speed stage `i`
+    /// as unavailable. When a desired speed is disabled, equipment routes to the
+    /// highest allowed (non-disabled) speed. Set via `set_disabled_speeds`.
+    pub disabled_speeds: [bool; MAX_SPEEDS],
+    /// Number of active speed stages (mirrors the length of `heating_capacities_w`).
+    pub speed_count: u8,
+    /// Cached index of the highest non-disabled speed stage.
+    /// Recomputed on every `set_disabled_speeds` call.
+    /// OCHRE HVAC.py: `_max_enabled_speed`
+    pub max_enabled_speed: usize,
+}
+
+/// Shared HVAC wrapper with thermostat state and base helper parameters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HvacEquipment {
+    pub config: HvacConfig,
+    pub thermostat_fsm: ThermostatFsm,
+    pub runtime: HvacRuntimeState,
+    pub control: HvacControlState,
 }
 
 impl HvacEquipment {
     pub fn new(equipment_type: HvacEquipmentType, zone_id: ZoneId) -> Self {
+        let default_cd = match equipment_type {
+            HvacEquipmentType::MiniSplitHeat | HvacEquipmentType::MiniSplitCool => 0.0,
+            _ => DEFAULT_PLF_DEGRADATION_COEFF,
+        };
         Self {
-            equipment_type,
-            zone_id,
+            config: HvacConfig {
+                equipment_type,
+                zone_id,
+                shr: 1.0,
+                fan_power_w_per_m3_s: DEFAULT_FAN_POWER_W_PER_M3_S,
+                duct_dse: 1.0,
+                duct_zone_id: None,
+                basement_heat_frac: 0.0,
+                basement_zone_id: None,
+                supply_air_temp_c: equipment_type
+                    .default_supply_air_temp_c(DEFAULT_INIT_OUTDOOR_TEMP_C),
+                airflow_m3_s_per_w: match equipment_type {
+                    HvacEquipmentType::AcCooler => AIRFLOW_CENTRAL_AC_M3_S_PER_W,
+                    HvacEquipmentType::MiniSplitCool => AIRFLOW_MSHP_COOLING_M3_S_PER_W,
+                    HvacEquipmentType::GasFurnace
+                    | HvacEquipmentType::ElectricFurnace
+                    | HvacEquipmentType::AshpHeatPumpOnly
+                    | HvacEquipmentType::AshpHeatPumpAux
+                    | HvacEquipmentType::MiniSplitHeat
+                    | HvacEquipmentType::Baseboard
+                    | HvacEquipmentType::Other => AIRFLOW_HEATING_M3_S_PER_W,
+                },
+                zone_heat_fractions: vec![(zone_id, 1.0)],
+                biquadratic_coeffs: vec![DEFAULT_BIQUADRATIC_COEFFS],
+                biquadratic_x1_bounds: DEFAULT_BIQUADRATIC_X1_BOUNDS,
+                biquadratic_x2_bounds: DEFAULT_BIQUADRATIC_X2_BOUNDS,
+                speed_control_mode: SpeedControlMode::SingleSpeed,
+                low_speed_capacity_fraction: DEFAULT_LOW_SPEED_CAPACITY_FRACTION,
+                space_fraction: 1.0,
+                cap_ff_coeffs: [1.0, 0.0, 0.0],
+                eir_ff_coeffs: [1.0, 0.0, 0.0],
+                ff_bounds: (0.0, f64::INFINITY),
+                plf_min: 0.7,
+                heating_capacities_w: vec![],
+                cooling_capacities_w: vec![],
+                eir_by_stage: vec![],
+                eir_plr_coefficients: None,
+                min_time_per_speed_s: 300.0,
+            },
             thermostat_fsm: ThermostatFsm::new(ThermalSetpoints {
                 heating_c: 20.0,
                 cooling_c: 24.0,
             }),
-            duty_cycle: 0.0,
-            heating_capacities_w: vec![],
-            cooling_capacities_w: vec![],
-            eir_by_stage: vec![],
-            fan_power_w_per_m3_s: DEFAULT_FAN_POWER_W_PER_M3_S,
-            shr: 1.0,
-            duct_dse: 1.0,
-            duct_zone_id: None,
-            basement_heat_frac: 0.0,
-            basement_zone_id: None,
-            supply_air_temp_c: equipment_type
-                .default_supply_air_temp_c(DEFAULT_INIT_OUTDOOR_TEMP_C),
-            airflow_m3_s_per_w: match equipment_type {
-                HvacEquipmentType::AcCooler => AIRFLOW_CENTRAL_AC_M3_S_PER_W,
-                HvacEquipmentType::MiniSplitCool => AIRFLOW_MSHP_COOLING_M3_S_PER_W,
-                HvacEquipmentType::GasFurnace
-                | HvacEquipmentType::ElectricFurnace
-                | HvacEquipmentType::AshpHeatPumpOnly
-                | HvacEquipmentType::AshpHeatPumpAux
-                | HvacEquipmentType::MiniSplitHeat
-                | HvacEquipmentType::Baseboard
-                | HvacEquipmentType::Other => AIRFLOW_HEATING_M3_S_PER_W,
+            runtime: HvacRuntimeState {
+                duty_cycle: 0.0,
+                plf_cooling_degradation_coeff: default_cd,
+                plf_state: 1.0,
+                startup: StartupConfig::default(),
+                last_speed_index: 0,
+                last_speed_frac: 0.0,
+                time_at_current_speed_s: 0.0,
+                prev_zone_temp_c: None,
             },
-            zone_heat_fractions: vec![(zone_id, 1.0)],
-            biquadratic_coeffs: vec![DEFAULT_BIQUADRATIC_COEFFS],
-            // OCHRE HVAC.py: biquadratic curve inputs clamped to calibrated range.
-            // Default ±100°C matches OCHRE fallback when no explicit bounds configured.
-            // Prevents physically impossible extrapolation at extreme temperatures.
-            biquadratic_x1_bounds: DEFAULT_BIQUADRATIC_X1_BOUNDS,
-            biquadratic_x2_bounds: DEFAULT_BIQUADRATIC_X2_BOUNDS,
-            speed_control_mode: SpeedControlMode::SingleSpeed,
-            low_speed_capacity_fraction: DEFAULT_LOW_SPEED_CAPACITY_FRACTION,
-            // MSHP selects discrete compressor stages rather than cycling, so the
-            // AHRI 210/240 cycling-degradation penalty (Cd) does not apply.
-            // Config init() can still override this via the "cooling_cd" key.
-            plf_cooling_degradation_coeff: match equipment_type {
-                HvacEquipmentType::MiniSplitHeat | HvacEquipmentType::MiniSplitCool => 0.0,
-                _ => DEFAULT_PLF_DEGRADATION_COEFF,
+            control: HvacControlState {
+                max_capacity_fraction: 1.0,
+                disabled_speeds: [false; MAX_SPEEDS],
+                speed_count: 0,
+                max_enabled_speed: 0,
             },
-            plf_state: 1.0,
-            startup: StartupConfig::default(),
-            last_speed_index: 0,
-            last_speed_frac: 0.0,
-            time_at_current_speed_s: 0.0,
-            min_time_per_speed_s: 300.0,
-            eir_plr_coefficients: None,
-            disabled_speeds: vec![],
-            max_enabled_speed: 0,
-            prev_zone_temp_c: None,
-            space_fraction: 1.0,
-            max_capacity_fraction: 1.0,
-            cap_ff_coeffs: [1.0, 0.0, 0.0],
-            eir_ff_coeffs: [1.0, 0.0, 0.0],
-            ff_bounds: (0.0, f64::INFINITY),
-            plf_min: 0.7,
         }
     }
 
@@ -340,7 +354,7 @@ impl HvacEquipment {
         let explicit_airflow_m3_s_per_w = extract_numeric(config, "airflow_m3_s_per_w")
             .or_else(|| extract_numeric(config, "duct_airflow_m3_s_per_w"));
         let mut airflow_m3_s_per_w = explicit_airflow_m3_s_per_w
-            .unwrap_or_else(|| self.equipment_type.default_airflow_m3_s_per_w());
+            .unwrap_or_else(|| self.config.equipment_type.default_airflow_m3_s_per_w());
         if explicit_airflow_m3_s_per_w.is_none() {
             // HPXML installation quality uses defect deltas where 0.0 means
             // no defect and -0.25 means a 25% airflow reduction.
@@ -355,35 +369,38 @@ impl HvacEquipment {
                 airflow_m3_s_per_w
             )));
         }
-        self.airflow_m3_s_per_w = airflow_m3_s_per_w;
+        self.config.airflow_m3_s_per_w = airflow_m3_s_per_w;
         if let Some(w_per_m3_s) = extract_numeric(config, "fan_power_w_per_m3_s") {
-            self.fan_power_w_per_m3_s = w_per_m3_s.max(0.0);
+            self.config.fan_power_w_per_m3_s = w_per_m3_s.max(0.0);
         } else if let Some(w_per_cfm) = extract_numeric(config, "fan_power_w_per_cfm") {
-            self.fan_power_w_per_m3_s = w_per_cfm.max(0.0) * CFM_PER_M3_S;
+            self.config.fan_power_w_per_m3_s = w_per_cfm.max(0.0) * CFM_PER_M3_S;
         }
 
-        self.supply_air_temp_c =
-            extract_numeric(config, "supply_air_temp_c").unwrap_or_else(|| {
-                self.equipment_type
+        self.config.supply_air_temp_c = extract_numeric(config, "supply_air_temp_c")
+            .unwrap_or_else(|| {
+                self.config
+                    .equipment_type
                     .default_supply_air_temp_c(env.weather.outdoor_temp_c)
             });
 
-        self.speed_control_mode = parse_speed_control_mode(config);
-        self.low_speed_capacity_fraction = extract_numeric(config, "low_speed_capacity_fraction")
-            .unwrap_or(DEFAULT_LOW_SPEED_CAPACITY_FRACTION);
-        self.plf_cooling_degradation_coeff = extract_numeric(config, "cooling_cd")
-            .or_else(|| extract_numeric(config, "cd"))
-            .unwrap_or(DEFAULT_PLF_DEGRADATION_COEFF);
-        let cd = extract_numeric(config, "startup_cd")
-            .or_else(|| extract_numeric(config, "cooling_cd"))
-            .or_else(|| extract_numeric(config, "cd"))
-            .unwrap_or(DEFAULT_PLF_DEGRADATION_COEFF);
-        self.startup = StartupConfig {
+        self.config.speed_control_mode = parse_speed_control_mode(config);
+        self.config.low_speed_capacity_fraction =
+            extract_numeric(config, "low_speed_capacity_fraction")
+                .unwrap_or(DEFAULT_LOW_SPEED_CAPACITY_FRACTION);
+        let cd = super::core_config::resolve_cd(
+            config,
+            self.config.speed_control_mode,
+            extract_numeric(config, "rated_seer"),
+            extract_numeric(config, "rated_hspf"),
+            DEFAULT_PLF_DEGRADATION_COEFF,
+        );
+        self.runtime.plf_cooling_degradation_coeff = cd;
+        self.runtime.startup = StartupConfig {
             c_d: cd,
             time_since_start_min: 0.0,
         };
-        self.startup.validate()?;
-        self.biquadratic_coeffs = load_biquadratic_coeffs(config, "biquadratic_coeffs")?;
+        self.runtime.startup.validate()?;
+        self.config.biquadratic_coeffs = load_biquadratic_coeffs(config, "biquadratic_coeffs")?;
         // Also honour the split capacity/EIR keys that the HPXML resolver writes
         // (capacity_biquadratic_coeffs / eir_biquadratic_coeffs). These are the
         // same keys that ac_config::load_curve_pair handles for the AC path; the
@@ -413,24 +430,24 @@ impl HvacEquipment {
                     interleaved.push(cap);
                     interleaved.push(eir);
                 }
-                self.biquadratic_coeffs = interleaved;
+                self.config.biquadratic_coeffs = interleaved;
             }
         }
         // OCHRE HVAC.py: biquadratic CSV files specify `min_Twb`, `max_Twb`,
         // `min_Tdb`, `max_Tdb` bounds. Load from config if provided.
-        self.biquadratic_x1_bounds = load_bounds_pair(
+        self.config.biquadratic_x1_bounds = load_bounds_pair(
             config,
             "biquadratic_x1_min",
             "biquadratic_x1_max",
             DEFAULT_BIQUADRATIC_X1_BOUNDS,
         );
-        self.biquadratic_x2_bounds = load_bounds_pair(
+        self.config.biquadratic_x2_bounds = load_bounds_pair(
             config,
             "biquadratic_x2_min",
             "biquadratic_x2_max",
             DEFAULT_BIQUADRATIC_X2_BOUNDS,
         );
-        self.min_time_per_speed_s =
+        self.config.min_time_per_speed_s =
             extract_numeric(config, "min_time_per_speed_s").unwrap_or(300.0);
         // 0.0 = disabled (no compressor-level on/off hold). Configure via
         // "min_on_time_s" / "min_off_time_s" keys.
@@ -441,63 +458,33 @@ impl HvacEquipment {
         // Flow-fraction quadratic coefficients: OCHRE HVAC.py `cap_ff` / `eir_ff`.
         if let Some(raw) = extract_text(config, "cap_ff_coeffs") {
             if let Ok(arr) = parse_f64_array_3(raw) {
-                self.cap_ff_coeffs = arr;
+                self.config.cap_ff_coeffs = arr;
             }
         }
         if let Some(raw) = extract_text(config, "eir_ff_coeffs") {
             if let Ok(arr) = parse_f64_array_3(raw) {
-                self.eir_ff_coeffs = arr;
+                self.config.eir_ff_coeffs = arr;
             }
         }
 
         // Flow-fraction clamping bounds: applied before ff quadratic evaluation.
         if let Some(ff_min) = extract_numeric(config, "ff_min") {
-            self.ff_bounds.0 = ff_min;
+            self.config.ff_bounds.0 = ff_min;
         }
         if let Some(ff_max) = extract_numeric(config, "ff_max") {
-            self.ff_bounds.1 = ff_max;
+            self.config.ff_bounds.1 = ff_max;
         }
 
         // PLF floor: AHRI 210/240 default 0.7; MSHP CSV-derived configs may lower it.
         if let Some(plf_min) = extract_numeric(config, "plf_min") {
-            self.plf_min = plf_min;
+            self.config.plf_min = plf_min;
         }
 
-        // Apply equipment-type and efficiency-rating Cd defaults per AHRI / OCHRE table.
-        // Explicit config keys ("cooling_cd", "cd", "startup_cd") take precedence because
-        // they were already applied above; these overrides only run when no explicit key
-        // was provided (i.e., the config had no Cd key at all).
-        let explicit_cd = extract_numeric(config, "startup_cd")
-            .or_else(|| extract_numeric(config, "cooling_cd"))
-            .or_else(|| extract_numeric(config, "cd"));
-        if explicit_cd.is_none() {
-            let rated_seer = extract_numeric(config, "rated_seer");
-            let rated_hspf = extract_numeric(config, "rated_hspf");
-            let derived_cd = match self.speed_control_mode {
-                SpeedControlMode::VariableSpeedIdeal => Some(0.0),
-                SpeedControlMode::TwoSpeedSetpoint
-                | SpeedControlMode::TwoSpeedTime
-                | SpeedControlMode::TwoSpeedAlternating => Some(0.11),
-                SpeedControlMode::SingleSpeed => {
-                    // Low-SEER AC: Cd = 0.20; otherwise 0.07.
-                    // High-HSPF HP: Cd = 0.11; low-HSPF: 0.20.
-                    let from_seer = rated_seer.map(|s| if s < 13.0 { 0.20 } else { 0.07 });
-                    let from_hspf = rated_hspf.map(|h| if h < 7.0 { 0.20 } else { 0.11 });
-                    from_seer.or(from_hspf)
-                }
-                SpeedControlMode::MultiSpeedInterpolated => None,
-            };
-            if let Some(cd) = derived_cd {
-                self.plf_cooling_degradation_coeff = cd;
-                self.startup.c_d = cd;
-            }
-        }
-
-        self.eir_plr_coefficients = load_plr_coefficients(config, "eir_plr_coefficients")?;
+        self.config.eir_plr_coefficients = load_plr_coefficients(config, "eir_plr_coefficients")?;
 
         // space_fraction: OCHRE HVAC.py:104. Heating/cooling each reads their
         // specific fraction key, falling back to the generic key.
-        let frac = if self.equipment_type.is_heating() {
+        let frac = if self.config.equipment_type.is_heating() {
             extract_numeric(config, "fraction_heating_load_served")
                 .or_else(|| extract_numeric(config, "fraction_load_served"))
         } else {
@@ -508,23 +495,24 @@ impl HvacEquipment {
             if !(0.0..=1.0).contains(&f) {
                 tracing::warn!(
                     "space_fraction {f} out of range [0,1] for {:?}, clamping",
-                    self.equipment_type
+                    self.config.equipment_type
                 );
             }
-            self.space_fraction = f.clamp(0.0, 1.0);
+            self.config.space_fraction = f.clamp(0.0, 1.0);
         }
 
         if let Some(raw) = extract_numeric(config, "basement_zone_id") {
             if raw.is_finite() && raw >= 0.0 && raw.fract() == 0.0 && raw <= u16::MAX as f64 {
-                self.basement_zone_id = Some(ZoneId(raw as u16));
+                self.config.basement_zone_id = Some(ZoneId(raw as u16));
             }
         }
-        self.basement_heat_frac = extract_numeric(config, "basement_airflow_ratio").unwrap_or(0.0);
+        self.config.basement_heat_frac =
+            extract_numeric(config, "basement_airflow_ratio").unwrap_or(0.0);
 
         // Evaluate initial thermostat mode from zone temperature so the
         // FSM doesn't start stuck in Deadband when the zone is already
         // outside the comfort band (cold-start fix).
-        if let Ok(zone_temp) = lookup_zone_temp(env, self.zone_id) {
+        if let Ok(zone_temp) = lookup_zone_temp(env, self.config.zone_id) {
             let sp = self.thermostat_fsm.effective_setpoints();
             let hysteresis = self.thermostat_fsm.thermostat.hysteresis_c;
             let offset = self
@@ -557,7 +545,7 @@ impl HvacEquipment {
             return;
         }
         if let ControlSignal::MaxCapacityFraction { fraction } = signal {
-            self.max_capacity_fraction = fraction.clamp(0.0, 1.0);
+            self.control.max_capacity_fraction = fraction.clamp(0.0, 1.0);
         }
     }
 
@@ -574,25 +562,26 @@ impl HvacEquipment {
     }
 
     pub fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
-        self.thermostat_fsm.update_mode(env, self.zone_id)
+        self.thermostat_fsm.update_mode(env, self.config.zone_id)
     }
 
     pub fn use_ideal_capacity(&self, env: &EnvironmentState) -> bool {
         let variable_speed_mode = matches!(
-            self.speed_control_mode,
+            self.config.speed_control_mode,
             SpeedControlMode::VariableSpeedIdeal
         );
         let has_four_plus_stages = self
+            .config
             .heating_capacities_w
             .len()
-            .max(self.cooling_capacities_w.len())
+            .max(self.config.cooling_capacities_w.len())
             >= 4;
         let coarse_auto =
             env.time_res >= ChronoDuration::seconds(IDEAL_CAPACITY_TIME_RES_THRESHOLD_S);
         // Coarse-timestep auto-ideal is only valid for equipment paths that
         // implement ideal-capacity signal handling.
         let supports_auto_ideal = matches!(
-            self.equipment_type,
+            self.config.equipment_type,
             HvacEquipmentType::AcCooler
                 | HvacEquipmentType::MiniSplitCool
                 | HvacEquipmentType::AshpHeatPumpOnly
@@ -611,15 +600,16 @@ impl HvacEquipment {
         t_outdoor_c: f64,
     ) -> f64 {
         let coeffs = self
+            .config
             .biquadratic_coeffs
             .get(curve_index)
             .copied()
-            .or_else(|| self.biquadratic_coeffs.last().copied())
+            .or_else(|| self.config.biquadratic_coeffs.last().copied())
             .unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
         let curve = BiquadraticCurve {
             coeffs,
-            x1_bounds: self.biquadratic_x1_bounds,
-            x2_bounds: self.biquadratic_x2_bounds,
+            x1_bounds: self.config.biquadratic_x1_bounds,
+            x2_bounds: self.config.biquadratic_x2_bounds,
             warn_on_clamp: false,
         };
         curve.evaluate(t_indoor_c, t_outdoor_c)
@@ -651,12 +641,12 @@ impl HvacEquipment {
         flow_fraction: f64,
     ) -> (f64, f64) {
         let raw = self.evaluate_biquadratic(curve_index, t_indoor_c, t_outdoor_c);
-        let ff_clamped = flow_fraction.clamp(self.ff_bounds.0, self.ff_bounds.1);
+        let ff_clamped = flow_fraction.clamp(self.config.ff_bounds.0, self.config.ff_bounds.1);
         // Use cap_ff for capacity curves (even index), eir_ff for EIR curves (odd index).
         let ff_coeffs = if curve_index.is_multiple_of(2) {
-            &self.cap_ff_coeffs
+            &self.config.cap_ff_coeffs
         } else {
-            &self.eir_ff_coeffs
+            &self.config.eir_ff_coeffs
         };
         let ff_ratio = Self::evaluate_ff_quadratic(ff_coeffs, ff_clamped);
         let adjusted = raw * ff_ratio;
@@ -664,8 +654,9 @@ impl HvacEquipment {
     }
 
     pub fn update_supply_air_temp(&mut self, env: &EnvironmentState) {
-        if self.equipment_type == HvacEquipmentType::AshpHeatPumpOnly {
-            self.supply_air_temp_c = self
+        if self.config.equipment_type == HvacEquipmentType::AshpHeatPumpOnly {
+            self.config.supply_air_temp_c = self
+                .config
                 .equipment_type
                 .default_supply_air_temp_c(env.weather.outdoor_temp_c);
         }
@@ -919,7 +910,7 @@ mod tests {
     #[test]
     fn dse_reduces_effective_capacity() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.duct_dse = 0.8;
+        hvac.config.duct_dse = 0.8;
         assert_eq!(hvac.apply_duct_dse(10_000.0), 8_000.0);
     }
 
@@ -956,7 +947,7 @@ mod tests {
             .insert("AirflowDefectRatio".to_string(), (-0.2).into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         let expected = AIRFLOW_HEATING_M3_S_PER_W * 0.8;
-        assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
+        assert!((hvac.config.airflow_m3_s_per_w - expected).abs() < 1e-12);
     }
 
     #[test]
@@ -968,7 +959,7 @@ mod tests {
             .insert("AirflowDefectRatio".to_string(), (-0.2).into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         let expected = AIRFLOW_CENTRAL_AC_M3_S_PER_W * 0.8;
-        assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
+        assert!((hvac.config.airflow_m3_s_per_w - expected).abs() < 1e-12);
     }
 
     #[test]
@@ -979,7 +970,7 @@ mod tests {
             .test_extras_mut()
             .insert("AirflowDefectRatio".to_string(), 0.0.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
-        assert!((hvac.airflow_m3_s_per_w - AIRFLOW_CENTRAL_AC_M3_S_PER_W).abs() < 1e-12);
+        assert!((hvac.config.airflow_m3_s_per_w - AIRFLOW_CENTRAL_AC_M3_S_PER_W).abs() < 1e-12);
     }
 
     #[test]
@@ -993,7 +984,7 @@ mod tests {
             .test_extras_mut()
             .insert("AirflowDefectRatio".to_string(), (-0.5).into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
-        assert!((hvac.airflow_m3_s_per_w - 4.2e-5).abs() < 1e-12);
+        assert!((hvac.config.airflow_m3_s_per_w - 4.2e-5).abs() < 1e-12);
     }
 
     #[test]
@@ -1018,7 +1009,7 @@ mod tests {
     #[test]
     fn biquadratic_evaluation_matches_reference_value() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.biquadratic_coeffs = vec![[1.0, 0.2, 0.01, -0.1, 0.005, 0.02]];
+        hvac.config.biquadratic_coeffs = vec![[1.0, 0.2, 0.01, -0.1, 0.005, 0.02]];
         let x = 20.0;
         let y = 30.0;
         let expected = 1.0 + 0.2 * x + 0.01 * x * x - 0.1 * y + 0.005 * y * y + 0.02 * x * y;
@@ -1031,7 +1022,7 @@ mod tests {
         // PLF is NOT applied by evaluate_biquadratic_with_flow; callers handle
         // PLF separately: capacity does not use PLF, EIR divides by PLF.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        hvac.config.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
         // Default ff coeffs [1, 0, 0]: ff_ratio = 1.0 regardless of ff input.
         let (raw, adjusted) = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 0.8);
         assert!((raw - 1.0).abs() < 1e-12);
@@ -1039,7 +1030,7 @@ mod tests {
 
         // Non-trivial ff quadratic: ff_ratio = 0.7 + 0.4*ff - 0.1*ff^2
         // At ff=0.8: 0.7 + 0.32 - 0.064 = 0.956
-        hvac.cap_ff_coeffs = [0.7, 0.4, -0.1];
+        hvac.config.cap_ff_coeffs = [0.7, 0.4, -0.1];
         let (raw2, adjusted2) = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 0.8);
         assert!((raw2 - 1.0).abs() < 1e-12);
         let expected_ff = 0.7 + 0.4 * 0.8 + (-0.1) * 0.8 * 0.8;
@@ -1052,11 +1043,11 @@ mod tests {
     #[test]
     fn eir_ff_quadratic_used_for_odd_curve_index() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.biquadratic_coeffs = vec![
+        hvac.config.biquadratic_coeffs = vec![
             [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         ];
-        hvac.eir_ff_coeffs = [1.3, -0.5, 0.2];
+        hvac.config.eir_ff_coeffs = [1.3, -0.5, 0.2];
         // curve_index=1 (odd) → uses eir_ff_coeffs
         // At ff=0.8: 1.3 + (-0.5)*0.8 + 0.2*0.64 = 1.3 - 0.4 + 0.128 = 1.028
         let (raw, adjusted) = hvac.evaluate_biquadratic_with_flow(1, 19.0, 35.0, 0.8);
@@ -1071,7 +1062,7 @@ mod tests {
     #[test]
     fn part_load_factor_formula_correct() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.plf_cooling_degradation_coeff = 0.25;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.25;
         let plf = hvac.part_load_factor(0.5);
         assert!((plf - 0.875).abs() < 1e-12);
     }
@@ -1079,10 +1070,10 @@ mod tests {
     #[test]
     fn two_speed_setpoint_control_switches_at_threshold() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
-        hvac.low_speed_capacity_fraction = 0.6;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.config.low_speed_capacity_fraction = 0.6;
         // Disable minimum dwell time so threshold-crossing tests are not blocked.
-        hvac.min_time_per_speed_s = 0.0;
+        hvac.config.min_time_per_speed_s = 0.0;
         let low = hvac.select_speed(0.4);
         let high = hvac.select_speed(0.8);
         assert_eq!(low.speed_index, 0);
@@ -1099,9 +1090,9 @@ mod tests {
         //   update_control() → select_speed()  (speed decision first)
         //   step()           → advance_speed_timer()  (then accumulate dwell time)
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 600.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 600.0;
 
         // Start at low speed with a low load.
         let sel = hvac.select_speed(0.3);
@@ -1132,9 +1123,9 @@ mod tests {
     /// Helper: create an HvacEquipment in MultiSpeedInterpolated mode with 4 heating stages.
     fn make_msi_hvac() -> HvacEquipment {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        hvac.config.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
         // Capacities: [4000, 6000, 8000, 10000] W → fractions [0.4, 0.6, 0.8, 1.0]
-        hvac.heating_capacities_w = vec![4000.0, 6000.0, 8000.0, 10000.0];
+        hvac.config.heating_capacities_w = vec![4000.0, 6000.0, 8000.0, 10000.0];
         hvac
     }
 
@@ -1201,8 +1192,8 @@ mod tests {
         // P2-K speed selection fixes changed the VariableSpeedIdeal path.
         // This test needs multi-stage capacities to exercise the interpolation.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
-        hvac.heating_capacities_w = vec![3000.0, 6000.0, 9000.0, 12000.0];
+        hvac.config.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
+        hvac.config.heating_capacities_w = vec![3000.0, 6000.0, 9000.0, 12000.0];
         let sel = hvac.select_speed(0.63);
         assert!(sel.speed_index <= 3);
         assert!(sel.part_load_ratio >= 0.0 && sel.part_load_ratio <= 1.0);
@@ -1213,7 +1204,7 @@ mod tests {
         // AHRI Standard 210/240-2023, S6.6.3
         // PLF = 1 - Cd * (1 - PLR), default Cd = 0.25
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.plf_cooling_degradation_coeff = super::DEFAULT_PLF_DEGRADATION_COEFF;
+        hvac.runtime.plf_cooling_degradation_coeff = super::DEFAULT_PLF_DEGRADATION_COEFF;
 
         // At PLR=0.5: PLF = 1 - 0.25*0.5 = 0.875
         let plf_half = hvac.part_load_factor(0.5);
@@ -1238,8 +1229,8 @@ mod tests {
     fn startup_ramp_degrades_first_step_and_recovers_to_full() {
         // c_d=0.25 → t_full=5.4 min; with dt=1 min the ramp takes ~6 steps.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.startup.c_d = 0.25;
-        hvac.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = 0.25;
+        hvac.runtime.duty_cycle = 1.0;
 
         // First on-step must be degraded (t = 0.5 min < t_full = 5.4 min).
         let step1 = hvac.apply_startup_capacity_degradation(10_000.0, 1.0);
@@ -1256,13 +1247,13 @@ mod tests {
         );
 
         // Turn off resets the ramp.
-        hvac.duty_cycle = 0.0;
+        hvac.runtime.duty_cycle = 0.0;
         let off = hvac.apply_startup_capacity_degradation(10_000.0, 1.0);
         assert!((off - 10_000.0).abs() < 1e-9);
-        assert_eq!(hvac.startup.time_since_start_min, 0.0);
+        assert_eq!(hvac.runtime.startup.time_since_start_min, 0.0);
 
         // Restart must degrade again.
-        hvac.duty_cycle = 1.0;
+        hvac.runtime.duty_cycle = 1.0;
         let restart = hvac.apply_startup_capacity_degradation(10_000.0, 1.0);
         assert!(restart < 10_000.0, "restart must degrade again: {restart}");
     }
@@ -1277,7 +1268,7 @@ mod tests {
         ] {
             let hvac = HvacEquipment::new(eq_type, ZoneId(1));
             assert_eq!(
-                hvac.plf_cooling_degradation_coeff, 0.0,
+                hvac.runtime.plf_cooling_degradation_coeff, 0.0,
                 "{eq_type:?} must default to Cd=0 (no cycling penalty)"
             );
         }
@@ -1288,14 +1279,14 @@ mod tests {
         let env = env(26.0, 60, 0);
 
         let mut central = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
-        central.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
+        central.config.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
         assert!(
             central.use_ideal_capacity(&env),
             "4-speed central cooling must use ideal-capacity control"
         );
 
         let mut minisplit = HvacEquipment::new(HvacEquipmentType::MiniSplitCool, ZoneId(1));
-        minisplit.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
+        minisplit.config.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
         assert!(
             minisplit.use_ideal_capacity(&env),
             "4-speed mini-split cooling must use ideal-capacity control"
@@ -1306,8 +1297,8 @@ mod tests {
     fn four_stage_minisplit_heating_auto_enables_ideal_capacity() {
         let env = env(17.0, 60, 0);
         let mut minisplit_heat = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
-        minisplit_heat.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
-        minisplit_heat.heating_capacities_w = vec![2500.0, 5000.0, 7500.0, 10_000.0];
+        minisplit_heat.config.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        minisplit_heat.config.heating_capacities_w = vec![2500.0, 5000.0, 7500.0, 10_000.0];
         assert!(
             minisplit_heat.use_ideal_capacity(&env),
             "4-stage mini-split heating must auto-enable ideal-capacity control"
@@ -1327,7 +1318,7 @@ mod tests {
         ] {
             let hvac = HvacEquipment::new(eq_type, ZoneId(1));
             assert_eq!(
-                hvac.plf_cooling_degradation_coeff, DEFAULT_PLF_DEGRADATION_COEFF,
+                hvac.runtime.plf_cooling_degradation_coeff, DEFAULT_PLF_DEGRADATION_COEFF,
                 "{eq_type:?} must default to AHRI standard Cd={DEFAULT_PLF_DEGRADATION_COEFF}"
             );
         }
@@ -1339,7 +1330,7 @@ mod tests {
         // inputs outside these ranges must be clamped.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         // Linear curve: f(x1, x2) = x1 (coefficient on x1 = 1, rest 0)
-        hvac.biquadratic_coeffs = vec![[0.0, 1.0, 0.0, 0.0, 0.0, 0.0]];
+        hvac.config.biquadratic_coeffs = vec![[0.0, 1.0, 0.0, 0.0, 0.0, 0.0]];
         // With x1_bounds = (-10, 50): input -200°C must clamp to -10°C.
         let result = hvac.evaluate_biquadratic(0, -200.0, 30.0);
         assert!(
@@ -1351,7 +1342,7 @@ mod tests {
     #[test]
     fn biquadratic_x2_lower_bound_clamps_through_production_path() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.biquadratic_coeffs = vec![[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]];
+        hvac.config.biquadratic_coeffs = vec![[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]];
         let at_neg60 = hvac.evaluate_biquadratic(0, 20.0, -60.0);
         let at_neg50 = hvac.evaluate_biquadratic(0, 20.0, -50.0);
         assert_eq!(
@@ -1363,7 +1354,7 @@ mod tests {
     #[test]
     fn biquadratic_x2_upper_bound_clamps_through_production_path() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.biquadratic_coeffs = vec![[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]];
+        hvac.config.biquadratic_coeffs = vec![[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]];
         let at_pos70 = hvac.evaluate_biquadratic(0, 20.0, 70.0);
         let at_pos60 = hvac.evaluate_biquadratic(0, 20.0, 60.0);
         assert_eq!(
@@ -1452,14 +1443,14 @@ mod tests {
             .insert("rated_seer".to_string(), 10.0.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
-            (hvac.plf_cooling_degradation_coeff - 0.20).abs() < 1e-12,
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.20).abs() < 1e-12,
             "low-SEER Cd must be 0.20, got {}",
-            hvac.plf_cooling_degradation_coeff
+            hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.startup.c_d - 0.20).abs() < 1e-12,
+            (hvac.runtime.startup.c_d - 0.20).abs() < 1e-12,
             "startup c_d must also be 0.20 for low-SEER: {}",
-            hvac.startup.c_d
+            hvac.runtime.startup.c_d
         );
     }
 
@@ -1473,14 +1464,14 @@ mod tests {
             .insert("rated_seer".to_string(), 15.0.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
-            (hvac.plf_cooling_degradation_coeff - 0.07).abs() < 1e-12,
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.07).abs() < 1e-12,
             "high-SEER Cd must be 0.07, got {}",
-            hvac.plf_cooling_degradation_coeff
+            hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.startup.c_d - 0.07).abs() < 1e-12,
+            (hvac.runtime.startup.c_d - 0.07).abs() < 1e-12,
             "startup c_d must also be 0.07: {}",
-            hvac.startup.c_d
+            hvac.runtime.startup.c_d
         );
     }
 
@@ -1494,9 +1485,9 @@ mod tests {
             .insert("rated_hspf".to_string(), 6.5.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
-            (hvac.plf_cooling_degradation_coeff - 0.20).abs() < 1e-12,
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.20).abs() < 1e-12,
             "low-HSPF Cd must be 0.20, got {}",
-            hvac.plf_cooling_degradation_coeff
+            hvac.runtime.plf_cooling_degradation_coeff
         );
     }
 
@@ -1510,14 +1501,14 @@ mod tests {
             .insert("rated_hspf".to_string(), 8.0.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
-            (hvac.plf_cooling_degradation_coeff - 0.11).abs() < 1e-12,
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.11).abs() < 1e-12,
             "high-HSPF Cd must be 0.11, got {}",
-            hvac.plf_cooling_degradation_coeff
+            hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.startup.c_d - 0.11).abs() < 1e-12,
+            (hvac.runtime.startup.c_d - 0.11).abs() < 1e-12,
             "startup c_d must also be 0.11 for high-HSPF: {}",
-            hvac.startup.c_d
+            hvac.runtime.startup.c_d
         );
     }
 
@@ -1530,14 +1521,14 @@ mod tests {
             .insert("speed_control_mode".to_string(), "two_speed".into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
-            (hvac.plf_cooling_degradation_coeff - 0.11).abs() < 1e-12,
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.11).abs() < 1e-12,
             "two-speed must default Cd to 0.11, got {}",
-            hvac.plf_cooling_degradation_coeff
+            hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.startup.c_d - 0.11).abs() < 1e-12,
+            (hvac.runtime.startup.c_d - 0.11).abs() < 1e-12,
             "two-speed startup c_d must be 0.11: {}",
-            hvac.startup.c_d
+            hvac.runtime.startup.c_d
         );
     }
 
@@ -1550,7 +1541,7 @@ mod tests {
             .insert("speed_control_mode".to_string(), "variable".into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert_eq!(
-            hvac.startup.c_d, 0.0,
+            hvac.runtime.startup.c_d, 0.0,
             "variable-speed must default startup c_d to 0.0"
         );
     }
@@ -1568,11 +1559,11 @@ mod tests {
             .insert("rated_seer".to_string(), 10.0.into()); // would give 0.20 if derived
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
-            (hvac.plf_cooling_degradation_coeff - 0.15).abs() < 1e-12,
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.15).abs() < 1e-12,
             "explicit cooling_cd must not be overridden by SEER table"
         );
         assert!(
-            (hvac.startup.c_d - 0.15).abs() < 1e-12,
+            (hvac.runtime.startup.c_d - 0.15).abs() < 1e-12,
             "startup c_d must also respect explicit cooling_cd"
         );
     }
@@ -1597,11 +1588,11 @@ mod tests {
             .insert("biquadratic_x2_max".to_string(), 55.0.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
 
-        assert_eq!(hvac.biquadratic_x1_bounds, (12.0, 30.0));
-        assert_eq!(hvac.biquadratic_x2_bounds, (-15.0, 55.0));
+        assert_eq!(hvac.config.biquadratic_x1_bounds, (12.0, 30.0));
+        assert_eq!(hvac.config.biquadratic_x2_bounds, (-15.0, 55.0));
 
         // Evaluation must clamp: x1=5.0 → 12.0, x2=60.0 → 55.0
-        hvac.biquadratic_coeffs = vec![[0.0, 1.0, 0.0, 1.0, 0.0, 0.0]];
+        hvac.config.biquadratic_coeffs = vec![[0.0, 1.0, 0.0, 1.0, 0.0, 0.0]];
         let result = hvac.evaluate_biquadratic(0, 5.0, 60.0);
         let expected = 12.0 + 55.0; // clamped x1 + clamped x2
         assert!(
@@ -1620,26 +1611,26 @@ mod tests {
 
         // Default AHRI Cd = 0.25
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.plf_cooling_degradation_coeff = 0.25;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.25;
         assert!((hvac.part_load_factor(plr) - plf(0.25, plr)).abs() < 1e-12);
 
         // Low-SEER Cd = 0.2
-        hvac.plf_cooling_degradation_coeff = 0.2;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.2;
         assert!((hvac.part_load_factor(plr) - plf(0.2, plr)).abs() < 1e-12);
 
         // High-HSPF Cd = 0.11
-        hvac.plf_cooling_degradation_coeff = 0.11;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.11;
         assert!((hvac.part_load_factor(plr) - plf(0.11, plr)).abs() < 1e-12);
     }
 
-    // --- Feature: PLF cycling degradation floor (Ticket 11) ---
+    // --- Feature: PLF cycling degradation floor ---
 
     #[test]
     fn plf_floor_prevents_plf_below_0_7() {
         // EnergyPlus constraint: PLF >= 0.7 regardless of curve.
         // With Cd=1.0 (extreme) and PLR=0.0: PLF_raw = 0.0, must be floored to 0.7.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.plf_cooling_degradation_coeff = 1.0;
+        hvac.runtime.plf_cooling_degradation_coeff = 1.0;
         let plf = hvac.part_load_factor(0.0);
         assert!(
             plf >= 0.7,
@@ -1654,7 +1645,7 @@ mod tests {
         // With Cd=0.5 and PLR=0.75: PLF_raw = 1 - 0.5*0.25 = 0.875 >= PLR, no change.
         // Edge: PLR clamped to 1.0, PLF_raw = 1.0 by formula, max stays 1.0.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.plf_cooling_degradation_coeff = 0.25;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.25;
         for &plr in &[0.0, 0.3, 0.5, 0.7, 0.9, 1.0] {
             let plf = hvac.part_load_factor(plr);
             assert!(
@@ -1671,7 +1662,7 @@ mod tests {
         // Standard AHRI Cd=0.25 produces PLF well above 0.7 at any PLR >= 0.
         // PLF_raw at PLR=0.0: 1 - 0.25 = 0.75 > 0.7 -- floor has no effect.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.plf_cooling_degradation_coeff = 0.25;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.25;
         let plf_at_zero = hvac.part_load_factor(0.0);
         assert!(
             (plf_at_zero - 0.75).abs() < 1e-12,
@@ -1679,7 +1670,7 @@ mod tests {
         );
     }
 
-    // --- Feature: compressor minimum on/off time (Ticket 2) ---
+    // --- Feature: compressor minimum on/off time ---
 
     #[test]
     fn can_transition_mode_allows_when_disabled() {
@@ -1852,10 +1843,10 @@ mod tests {
     #[test]
     fn update_zone_heat_fractions_dse_one_produces_single_full_fraction() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.duct_dse = 1.0;
-        hvac.duct_zone_id = None;
+        hvac.config.duct_dse = 1.0;
+        hvac.config.duct_zone_id = None;
         hvac.update_zone_heat_fractions();
-        assert_eq!(hvac.zone_heat_fractions, vec![(ZoneId(1), 1.0)]);
+        assert_eq!(hvac.config.zone_heat_fractions, vec![(ZoneId(1), 1.0)]);
     }
 
     #[test]
@@ -1863,10 +1854,10 @@ mod tests {
         // Without a duct zone the conditioned-zone fraction equals DSE; duct losses
         // are unrecoverable (lost to outdoors). OCHRE HVAC.py line 190-192.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.duct_dse = 0.7;
-        hvac.duct_zone_id = None;
+        hvac.config.duct_dse = 0.7;
+        hvac.config.duct_zone_id = None;
         hvac.update_zone_heat_fractions();
-        assert_eq!(hvac.zone_heat_fractions, vec![(ZoneId(1), 0.7)]);
+        assert_eq!(hvac.config.zone_heat_fractions, vec![(ZoneId(1), 0.7)]);
     }
 
     #[test]
@@ -1874,14 +1865,14 @@ mod tests {
         // With a duct zone specified: conditioned gets DSE, duct zone gets 1-DSE.
         // OCHRE HVAC.py lines 190-192: zone_fractions[duct_zone] = 1 - duct_dse.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.duct_dse = 0.7;
-        hvac.duct_zone_id = Some(ZoneId(2));
+        hvac.config.duct_dse = 0.7;
+        hvac.config.duct_zone_id = Some(ZoneId(2));
         hvac.update_zone_heat_fractions();
-        assert_eq!(hvac.zone_heat_fractions.len(), 2);
-        assert!((hvac.zone_heat_fractions[0].1 - 0.7).abs() < 1e-12);
-        assert!((hvac.zone_heat_fractions[1].1 - 0.3).abs() < 1e-12);
-        assert_eq!(hvac.zone_heat_fractions[0].0, ZoneId(1));
-        assert_eq!(hvac.zone_heat_fractions[1].0, ZoneId(2));
+        assert_eq!(hvac.config.zone_heat_fractions.len(), 2);
+        assert!((hvac.config.zone_heat_fractions[0].1 - 0.7).abs() < 1e-12);
+        assert!((hvac.config.zone_heat_fractions[1].1 - 0.3).abs() < 1e-12);
+        assert_eq!(hvac.config.zone_heat_fractions[0].0, ZoneId(1));
+        assert_eq!(hvac.config.zone_heat_fractions[1].0, ZoneId(2));
     }
 
     #[test]
@@ -1889,8 +1880,8 @@ mod tests {
         // With DSE=0.7 and a duct zone: 10_000 W gross → 7_000 W conditioned,
         // 3_000 W to duct zone.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.duct_dse = 0.7;
-        hvac.duct_zone_id = Some(ZoneId(2));
+        hvac.config.duct_dse = 0.7;
+        hvac.config.duct_zone_id = Some(ZoneId(2));
         hvac.update_zone_heat_fractions();
 
         let mut ports = PortSlots {
@@ -1945,8 +1936,8 @@ mod tests {
         // Without a duct zone, only the conditioned zone receives heat.
         // Duct loss (1-DSE) is discarded (unrecoverable).
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.duct_dse = 0.7;
-        hvac.duct_zone_id = None;
+        hvac.config.duct_dse = 0.7;
+        hvac.config.duct_zone_id = None;
         hvac.update_zone_heat_fractions();
 
         let mut ports = PortSlots {
@@ -1973,13 +1964,13 @@ mod tests {
         // Duct losses loop back into the same zone, so effective DSE = 1.0 and
         // all gross capacity is delivered to the conditioned zone.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.duct_dse = 0.7;
-        hvac.duct_zone_id = Some(ZoneId(1)); // same as conditioned zone
+        hvac.config.duct_dse = 0.7;
+        hvac.config.duct_zone_id = Some(ZoneId(1)); // same as conditioned zone
         hvac.update_zone_heat_fractions();
         // Only one entry since duct_zone == zone_id.
-        assert_eq!(hvac.zone_heat_fractions.len(), 1);
+        assert_eq!(hvac.config.zone_heat_fractions.len(), 1);
         assert!(
-            (hvac.zone_heat_fractions[0].1 - 1.0).abs() < 1e-12,
+            (hvac.config.zone_heat_fractions[0].1 - 1.0).abs() < 1e-12,
             "conditioned-zone fraction must be 1.0 when ducts are inside the conditioned space"
         );
     }
@@ -1993,15 +1984,15 @@ mod tests {
         //   basement    = 0.8 * 0.2        = 0.16
         //   duct zone   = 1 - 0.8          = 0.20
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.duct_dse = 0.8;
-        hvac.duct_zone_id = Some(ZoneId(3));
-        hvac.basement_heat_frac = 0.2;
-        hvac.basement_zone_id = Some(ZoneId(2));
+        hvac.config.duct_dse = 0.8;
+        hvac.config.duct_zone_id = Some(ZoneId(3));
+        hvac.config.basement_heat_frac = 0.2;
+        hvac.config.basement_zone_id = Some(ZoneId(2));
         hvac.update_zone_heat_fractions();
 
-        assert_eq!(hvac.zone_heat_fractions.len(), 3);
+        assert_eq!(hvac.config.zone_heat_fractions.len(), 3);
         let fracs: std::collections::HashMap<ZoneId, f64> =
-            hvac.zone_heat_fractions.iter().copied().collect();
+            hvac.config.zone_heat_fractions.iter().copied().collect();
         assert!(
             (fracs[&ZoneId(1)] - 0.64).abs() < 1e-12,
             "conditioned zone expected 0.64, got {}",
@@ -2033,8 +2024,8 @@ mod tests {
             .test_extras_mut()
             .insert("basement_airflow_ratio".to_string(), 0.2.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
-        assert_eq!(hvac.basement_zone_id, Some(ZoneId(4)));
-        assert!((hvac.basement_heat_frac - 0.2).abs() < 1e-12);
+        assert_eq!(hvac.config.basement_zone_id, Some(ZoneId(4)));
+        assert!((hvac.config.basement_heat_frac - 0.2).abs() < 1e-12);
     }
 
     // --- Change 1: TwoSpeedTime and TwoSpeedAlternating speed control ---
@@ -2044,9 +2035,9 @@ mod tests {
         // OCHRE "Time" mode: start at low speed; switch to high if temperature
         // still moving away from setpoint after min_time_per_speed_s.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedTime;
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 300.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 300.0;
 
         // Step 1: no prior temp → start at low speed.
         let sel = hvac.select_speed_with_zone_temp(0.8, Some(19.0), true);
@@ -2066,9 +2057,9 @@ mod tests {
     fn two_speed_time_does_not_escalate_if_temperature_recovering() {
         // If temperature is moving toward setpoint, keep current low speed.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedTime;
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 300.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 300.0;
         hvac.update_prev_zone_temp(Some(19.0));
 
         // Dwell past min-time.
@@ -2086,8 +2077,8 @@ mod tests {
     fn two_speed_alternating_always_selects_high_speed() {
         // OCHRE "Time2" mode: always run at high speed (index 1) when on.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
-        hvac.low_speed_capacity_fraction = 0.5;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.config.low_speed_capacity_fraction = 0.5;
 
         let sel = hvac.select_speed(0.3);
         assert_eq!(
@@ -2109,7 +2100,10 @@ mod tests {
             .test_extras_mut()
             .insert("speed_control_mode".to_string(), "time".into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
-        assert_eq!(hvac.speed_control_mode, SpeedControlMode::TwoSpeedTime);
+        assert_eq!(
+            hvac.config.speed_control_mode,
+            SpeedControlMode::TwoSpeedTime
+        );
 
         let mut config2 = EquipmentConfig::default();
         config2
@@ -2117,7 +2111,7 @@ mod tests {
             .insert("speed_control_mode".to_string(), "time2".into());
         hvac.init(&config2, &env(20.0, 60, 0)).expect("init ok");
         assert_eq!(
-            hvac.speed_control_mode,
+            hvac.config.speed_control_mode,
             SpeedControlMode::TwoSpeedAlternating
         );
     }
@@ -2129,7 +2123,7 @@ mod tests {
         // PLR curve: PLF = 0.85 + 0.15 * PLR + 0.0 * PLR²
         // At PLR=0.6: PLF = 0.85 + 0.09 = 0.94
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.eir_plr_coefficients = Some(vec![[0.85, 0.15, 0.0]]);
+        hvac.config.eir_plr_coefficients = Some(vec![[0.85, 0.15, 0.0]]);
         let plf = hvac.part_load_factor(0.6);
         assert!(
             (plf - 0.94).abs() < 1e-12,
@@ -2141,8 +2135,8 @@ mod tests {
     fn eir_plr_falls_back_to_cd_when_not_configured() {
         // Without per-speed curves, PLF = 1 - Cd * (1 - PLR).
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.eir_plr_coefficients = None;
-        hvac.plf_cooling_degradation_coeff = 0.25;
+        hvac.config.eir_plr_coefficients = None;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.25;
         let plf = hvac.part_load_factor(0.5);
         assert!(
             (plf - 0.875).abs() < 1e-12,
@@ -2155,16 +2149,16 @@ mod tests {
         // Two curves: stage 0 = [0.9, 0.1, 0], stage 1 = [0.8, 0.2, 0].
         // At PLR=0.5: stage 0 → PLF=0.95, stage 1 → PLF=0.90.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.eir_plr_coefficients = Some(vec![[0.9, 0.1, 0.0], [0.8, 0.2, 0.0]]);
+        hvac.config.eir_plr_coefficients = Some(vec![[0.9, 0.1, 0.0], [0.8, 0.2, 0.0]]);
 
-        hvac.last_speed_index = 0;
+        hvac.runtime.last_speed_index = 0;
         let plf0 = hvac.part_load_factor(0.5);
         assert!(
             (plf0 - 0.95).abs() < 1e-12,
             "stage 0 PLF at PLR=0.5 must be 0.95; got {plf0}"
         );
 
-        hvac.last_speed_index = 1;
+        hvac.runtime.last_speed_index = 1;
         let plf1 = hvac.part_load_factor(0.5);
         assert!(
             (plf1 - 0.90).abs() < 1e-12,
@@ -2177,7 +2171,7 @@ mod tests {
         // Even with a curve that produces < 0.7, PLF must be floored to 0.7.
         // Curve: PLF = 0.5 + 0.1 * PLR at PLR=0 → 0.5 (below floor).
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.eir_plr_coefficients = Some(vec![[0.5, 0.1, 0.0]]);
+        hvac.config.eir_plr_coefficients = Some(vec![[0.5, 0.1, 0.0]]);
         let plf = hvac.part_load_factor(0.0);
         assert!(
             plf >= 0.7,
@@ -2191,13 +2185,16 @@ mod tests {
     fn set_disabled_speeds_routes_to_max_enabled_when_desired_disabled() {
         // OCHRE HVAC.py lines 906–909: disabled speed → highest allowed speed.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 0.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 0.0;
 
         // Disable high speed (index 1).
         hvac.set_disabled_speeds(&[false, true]);
-        assert_eq!(hvac.max_enabled_speed, 0, "highest non-disabled is index 0");
+        assert_eq!(
+            hvac.control.max_enabled_speed, 0,
+            "highest non-disabled is index 0"
+        );
 
         // Load fraction above threshold would normally select high speed.
         let sel = hvac.select_speed(0.8);
@@ -2210,9 +2207,9 @@ mod tests {
     #[test]
     fn set_disabled_speeds_empty_re_enables_all() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 0.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 0.0;
 
         hvac.set_disabled_speeds(&[false, true]);
         let sel = hvac.select_speed(0.8);
@@ -2237,7 +2234,7 @@ mod tests {
             (SpeedControlMode::VariableSpeedIdeal, 1),
         ] {
             let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-            hvac.speed_control_mode = mode;
+            hvac.config.speed_control_mode = mode;
             assert_eq!(
                 hvac.n_speed_stages(),
                 expected,
@@ -2246,8 +2243,8 @@ mod tests {
         }
         // MultiSpeedInterpolated derives stage count from capacities.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
-        hvac.heating_capacities_w = vec![4000.0, 6000.0, 8000.0, 10000.0];
+        hvac.config.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        hvac.config.heating_capacities_w = vec![4000.0, 6000.0, 8000.0, 10000.0];
         assert_eq!(
             hvac.n_speed_stages(),
             4,
@@ -2356,9 +2353,9 @@ mod tests {
     #[test]
     fn two_speed_time_restarts_at_low_speed_after_off_cycle() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedTime;
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 300.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 300.0;
 
         // Simulate a completed cycle: HVAC reached high speed (index 1).
         hvac.update_prev_zone_temp(Some(19.0));
@@ -2418,18 +2415,18 @@ mod tests {
         hvac.init(&config, &env(20.0, 60, 0))
             .expect("init must succeed");
         assert!(
-            hvac.biquadratic_coeffs.len() >= 2,
+            hvac.config.biquadratic_coeffs.len() >= 2,
             "must have at least two curves after split-key init"
         );
         assert!(
-            (hvac.biquadratic_coeffs[0][0] - 2.0).abs() < 1e-12,
+            (hvac.config.biquadratic_coeffs[0][0] - 2.0).abs() < 1e-12,
             "capacity curve intercept must be 2.0, got {}",
-            hvac.biquadratic_coeffs[0][0]
+            hvac.config.biquadratic_coeffs[0][0]
         );
         assert!(
-            (hvac.biquadratic_coeffs[1][0] - 3.0).abs() < 1e-12,
+            (hvac.config.biquadratic_coeffs[1][0] - 3.0).abs() < 1e-12,
             "EIR curve intercept must be 3.0, got {}",
-            hvac.biquadratic_coeffs[1][0]
+            hvac.config.biquadratic_coeffs[1][0]
         );
     }
 
@@ -2521,9 +2518,9 @@ mod tests {
     #[test]
     fn two_speed_time_escalates_when_temp_moving_wrong_way() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedTime;
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 60.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 60.0;
 
         let sel = hvac.select_speed_with_zone_temp(0.8, None, true);
         assert_eq!(sel.speed_index, 0, "fresh cycle → low speed");
@@ -2541,9 +2538,9 @@ mod tests {
     #[test]
     fn two_speed_time_stays_low_when_temp_moving_right_way() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedTime;
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 60.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 60.0;
 
         hvac.update_prev_zone_temp(Some(20.0));
         hvac.advance_speed_timer(61.0);
@@ -2558,7 +2555,7 @@ mod tests {
     #[test]
     fn two_speed_alternating_always_high_speed() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
 
         assert_eq!(
             hvac.select_speed(0.3).speed_index,
@@ -2575,13 +2572,13 @@ mod tests {
     #[test]
     fn all_disabled_speeds_falls_back_to_last() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 0.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 0.0;
 
         hvac.set_disabled_speeds(&[true, true]);
         assert_eq!(
-            hvac.max_enabled_speed, 1,
+            hvac.control.max_enabled_speed, 1,
             "all disabled → fallback to last (index 1)"
         );
 
@@ -2595,7 +2592,7 @@ mod tests {
     #[test]
     fn eir_plr_per_stage_with_custom_quad_curves() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.eir_plr_coefficients = Some(vec![[0.8, 0.3, -0.1], [0.9, 0.15, -0.05]]);
+        hvac.config.eir_plr_coefficients = Some(vec![[0.8, 0.3, -0.1], [0.9, 0.15, -0.05]]);
 
         let plf0 = hvac.part_load_factor_for_stage(0.5, 0);
         assert!(
@@ -2696,7 +2693,7 @@ mod tests {
     fn shr_sensible_latent_split() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
 
-        hvac.shr = 0.5;
+        hvac.config.shr = 0.5;
         let (s, l) = hvac.sensible_latent_from_shr(10_000.0);
         assert!(
             (s - 5_000.0).abs() < 1e-9,
@@ -2704,7 +2701,7 @@ mod tests {
         );
         assert!((l - 5_000.0).abs() < 1e-9, "shr=0.5 → latent=5000; got {l}");
 
-        hvac.shr = 1.0;
+        hvac.config.shr = 1.0;
         let (s, l) = hvac.sensible_latent_from_shr(10_000.0);
         assert!(
             (s - 10_000.0).abs() < 1e-9,
@@ -2712,7 +2709,7 @@ mod tests {
         );
         assert!((l - 0.0).abs() < 1e-9, "shr=1.0 → latent=0; got {l}");
 
-        hvac.shr = 0.0;
+        hvac.config.shr = 0.0;
         let (s, l) = hvac.sensible_latent_from_shr(10_000.0);
         assert!((s - 0.0).abs() < 1e-9, "shr=0.0 → sensible=0; got {s}");
         assert!(
@@ -2720,7 +2717,7 @@ mod tests {
             "shr=0.0 → latent=10000; got {l}"
         );
 
-        hvac.shr = 1.5;
+        hvac.config.shr = 1.5;
         let (s, l) = hvac.sensible_latent_from_shr(10_000.0);
         assert!(
             (s - 10_000.0).abs() < 1e-9,
@@ -2801,10 +2798,10 @@ mod tests {
     #[test]
     fn ff_bounds_clamp_flow_fraction_before_quadratic() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        hvac.config.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
         // ff quadratic: ratio = 0.5 + 0.5*ff  (linear in ff)
-        hvac.cap_ff_coeffs = [0.5, 0.5, 0.0];
-        hvac.ff_bounds = (0.7, 1.3);
+        hvac.config.cap_ff_coeffs = [0.5, 0.5, 0.0];
+        hvac.config.ff_bounds = (0.7, 1.3);
 
         // ff=0.6 is below ff_min=0.7, should be clamped to 0.7
         let (_raw, adjusted) = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 0.6);
@@ -2831,11 +2828,11 @@ mod tests {
         );
     }
 
-    // --- Regression tests for ticket 009 (Issue 4: Cd cascade) ---
+    // --- Regression tests for Cd cascade ---
     //
     // The Cd cascade in init() is performed in three separate blocks (lines 396-398,
     // 399-406, 491-515).  This test pins the observable semantics so that the
-    // refactoring to a single `resolve_cd` helper (ticket-009 Phase A) does not
+    // refactoring to a single `resolve_cd` helper does not
     // silently change behaviour.
 
     /// When the user provides only `"cooling_cd"`, it sets `plf_cooling_degradation_coeff`
@@ -2843,7 +2840,7 @@ mod tests {
     /// In the current code `cooling_cd` DOES set both because the second block also reads it.
     /// This test documents the actual (current) behaviour: both fields receive the same value.
     #[test]
-    fn regression_009_cooling_cd_sets_both_plf_and_startup_cd() {
+    fn cooling_cd_sets_both_plf_and_startup_cd() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -2852,22 +2849,23 @@ mod tests {
         hvac.init(&config, &env(24.0, 60, 0))
             .expect("init must succeed");
         assert!(
-            (hvac.plf_cooling_degradation_coeff - 0.15).abs() < 1e-12,
-            "ticket-009: cooling_cd must set plf_cooling_degradation_coeff to 0.15, got {}",
-            hvac.plf_cooling_degradation_coeff
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.15).abs() < 1e-12,
+            "cooling_cd must set plf_cooling_degradation_coeff to 0.15, got {}",
+            hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            (hvac.startup.c_d - 0.15).abs() < 1e-12,
-            "ticket-009: cooling_cd must also set startup.c_d to 0.15, got {}",
-            hvac.startup.c_d
+            (hvac.runtime.startup.c_d - 0.15).abs() < 1e-12,
+            "cooling_cd must also set startup.c_d to 0.15, got {}",
+            hvac.runtime.startup.c_d
         );
     }
 
-    /// When the user provides `"startup_cd"` but NOT `"cooling_cd"`, only `startup.c_d`
-    /// should be affected.  `plf_cooling_degradation_coeff` must fall through to the
-    /// derived default (or DEFAULT_PLF_DEGRADATION_COEFF if no equipment-type default applies).
+    /// When the user provides `"startup_cd"`, `resolve_cd` applies it to both
+    /// `plf_cooling_degradation_coeff` and `startup.c_d`. The old Cd cascade had an
+    /// asymmetry where `startup_cd` only set `startup.c_d` while `plf_cooling_degradation_coeff`
+    /// fell through to the default — this was a bug, now fixed by the unified `resolve_cd`.
     #[test]
-    fn regression_009_startup_cd_overrides_only_startup_not_plf() {
+    fn startup_cd_sets_both_plf_and_startup_cd() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -2876,38 +2874,21 @@ mod tests {
         hvac.init(&config, &env(24.0, 60, 0))
             .expect("init must succeed");
         assert!(
-            (hvac.startup.c_d - 0.05).abs() < 1e-12,
-            "ticket-009: startup_cd must set startup.c_d to 0.05, got {}",
-            hvac.startup.c_d
+            (hvac.runtime.startup.c_d - 0.05).abs() < 1e-12,
+            "startup_cd must set startup.c_d to 0.05, got {}",
+            hvac.runtime.startup.c_d
         );
-        // plf_cooling_degradation_coeff should NOT be 0.05 — startup_cd is absent from
-        // the first block (lines 396-398) which only reads "cooling_cd" | "cd".
-        // It will be the equipment-type/speed-mode derived value or the fallback default.
-        // The important invariant: plf Cd != startup Cd when only startup_cd is set.
         assert!(
-            (hvac.plf_cooling_degradation_coeff - 0.05).abs() > 1e-12
-                || hvac.plf_cooling_degradation_coeff == 0.05,
-            // NOTE: currently both are set to 0.05 because the third block overwrites
-            // with derived_cd when explicit_cd (which includes startup_cd) is None... wait,
-            // startup_cd IS in explicit_cd check, so derived path is skipped. And plf Cd
-            // came from "cooling_cd"|"cd" chain = None → DEFAULT_PLF_DEGRADATION_COEFF (0.25).
-            // So plf Cd should be 0.25, not 0.05.  Document the expected value:
-            "ticket-009: this assertion documents the Cd split semantics (see comment)"
-        );
-        // Cleaner assertion: plf Cd should be DEFAULT_PLF_DEGRADATION_COEFF (0.25)
-        // because "cooling_cd" and "cd" are absent from config.
-        assert!(
-            (hvac.plf_cooling_degradation_coeff - DEFAULT_PLF_DEGRADATION_COEFF).abs() < 1e-12,
-            "ticket-009: plf_cooling_degradation_coeff must be DEFAULT ({}) when startup_cd provided but cooling_cd absent, got {}",
-            DEFAULT_PLF_DEGRADATION_COEFF,
-            hvac.plf_cooling_degradation_coeff
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.05).abs() < 1e-12,
+            "startup_cd must also set plf_cooling_degradation_coeff to 0.05, got {}",
+            hvac.runtime.plf_cooling_degradation_coeff
         );
     }
 
     /// When no Cd key is set and speed_control_mode is VariableSpeedIdeal,
     /// the derived path must set both plf Cd and startup Cd to 0.0.
     #[test]
-    fn regression_009_variable_speed_derived_cd_is_zero() {
+    fn variable_speed_derived_cd_is_zero() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -2916,27 +2897,27 @@ mod tests {
         hvac.init(&config, &env(24.0, 60, 0))
             .expect("init must succeed");
         assert_eq!(
-            hvac.speed_control_mode,
+            hvac.config.speed_control_mode,
             SpeedControlMode::VariableSpeedIdeal,
-            "ticket-009: speed_control_mode must be VariableSpeedIdeal"
+            "speed_control_mode must be VariableSpeedIdeal"
         );
         assert!(
-            hvac.plf_cooling_degradation_coeff.abs() < 1e-12,
-            "ticket-009: variable-speed derived plf Cd must be 0.0, got {}",
-            hvac.plf_cooling_degradation_coeff
+            hvac.runtime.plf_cooling_degradation_coeff.abs() < 1e-12,
+            "variable-speed derived plf Cd must be 0.0, got {}",
+            hvac.runtime.plf_cooling_degradation_coeff
         );
         assert!(
-            hvac.startup.c_d.abs() < 1e-12,
-            "ticket-009: variable-speed derived startup Cd must be 0.0, got {}",
-            hvac.startup.c_d
+            hvac.runtime.startup.c_d.abs() < 1e-12,
+            "variable-speed derived startup Cd must be 0.0, got {}",
+            hvac.runtime.startup.c_d
         );
     }
 
-    /// The key chain "startup_cd" → "cooling_cd" → "cd" appears at lines 396-398,
-    /// 399-402, and 491-493.  This test verifies the key chain priority is preserved:
-    /// "startup_cd" takes precedence over "cooling_cd" for startup.c_d.
+    /// The key chain "startup_cd" → "cooling_cd" → "cd" is evaluated once by
+    /// `resolve_cd`. When both `startup_cd` and `cooling_cd` are present,
+    /// `startup_cd` wins for both `startup.c_d` and `plf_cooling_degradation_coeff`.
     #[test]
-    fn regression_009_cd_key_chain_priority() {
+    fn cd_key_chain_priority() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -2947,23 +2928,21 @@ mod tests {
             .insert("cooling_cd".to_string(), 0.30_f64.into());
         hvac.init(&config, &env(24.0, 60, 0))
             .expect("init must succeed");
-        // startup_cd (0.05) must win over cooling_cd (0.30) for startup.c_d
+        // startup_cd (0.05) takes precedence over cooling_cd (0.30)
         assert!(
-            (hvac.startup.c_d - 0.05).abs() < 1e-12,
-            "ticket-009: startup_cd must take precedence over cooling_cd for startup.c_d, got {}",
-            hvac.startup.c_d
+            (hvac.runtime.startup.c_d - 0.05).abs() < 1e-12,
+            "startup_cd must take precedence over cooling_cd for startup.c_d, got {}",
+            hvac.runtime.startup.c_d
         );
-        // cooling_cd (0.30) must win for plf_cooling_degradation_coeff
-        // because that block only reads "cooling_cd" | "cd"
         assert!(
-            (hvac.plf_cooling_degradation_coeff - 0.30).abs() < 1e-12,
-            "ticket-009: cooling_cd must set plf_cooling_degradation_coeff to 0.30, got {}",
-            hvac.plf_cooling_degradation_coeff
+            (hvac.runtime.plf_cooling_degradation_coeff - 0.05).abs() < 1e-12,
+            "startup_cd must also take precedence over cooling_cd for plf_cooling_degradation_coeff, got {}",
+            hvac.runtime.plf_cooling_degradation_coeff
         );
     }
 
     // ---------------------------------------------------------------------------
-    // Regression tests for ticket 010-default-biquadratic-performance-curves
+    // Regression tests for default biquadratic performance curves
     //
     // These tests FAIL with the current identity defaults [1,0,0,0,0,0] and
     // PASS only after equipment-type-aware default curves are wired in.
@@ -2978,18 +2957,17 @@ mod tests {
     //   Biquadratic MSHP Heater.csv column Variable_1.
     // ---------------------------------------------------------------------------
 
-    /// Fix pending on ticket 010 — will stop panicking when ASHP default
-    /// biquadratic curves are wired in.
+    /// Will stop panicking when ASHP default biquadratic curves are wired in.
     #[test]
-    #[should_panic(expected = "ticket 010 BUG: AshpHeatPumpOnly still has identity")]
-    fn ticket_010_ashp_default_cap_curve_unity_at_ahri_h1() {
+    #[should_panic(expected = "AshpHeatPumpOnly still has identity")]
+    fn ashp_default_cap_curve_unity_at_ahri_h1() {
         let hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
-        // After ticket 010: the default curves for AshpHeatPumpOnly must be the
+        // The default curves for AshpHeatPumpOnly must be the
         // OCHRE Single_1 coefficients, not identity. Assert that the coefficients
         // are NOT the identity placeholder.
         assert_ne!(
-            hvac.biquadratic_coeffs[0], DEFAULT_BIQUADRATIC_COEFFS,
-            "ticket 010 BUG: AshpHeatPumpOnly still has identity biquadratic coefficients \
+            hvac.config.biquadratic_coeffs[0], DEFAULT_BIQUADRATIC_COEFFS,
+            "AshpHeatPumpOnly still has identity biquadratic coefficients \
              [1,0,0,0,0,0]; equipment-type default curves have not been wired in"
         );
         // At AHRI H1: cap_ratio must be ≈ 1.0 (within 5%).
@@ -2997,32 +2975,30 @@ mod tests {
         let cap_ratio_h1 = hvac.evaluate_biquadratic(0, 21.1, 8.3);
         assert!(
             (cap_ratio_h1 - 1.0).abs() < 0.05,
-            "ticket 010: ASHP cap_ratio at AHRI H1 (21.1°C indoor, 8.3°C OAT) \
+            "ASHP cap_ratio at AHRI H1 (21.1°C indoor, 8.3°C OAT) \
              must be 1.0 ± 5%; got {cap_ratio_h1:.6}"
         );
     }
 
-    /// Fix pending on ticket 010 — will stop panicking when ASHP default
-    /// biquadratic curves are wired in.
+    /// Will stop panicking when ASHP default biquadratic curves are wired in.
     #[test]
-    #[should_panic(expected = "ticket 010 BUG: ASHP cap_ratio at AHRI H3")]
-    fn ticket_010_ashp_default_cap_curve_below_08_at_ahri_h3() {
+    #[should_panic(expected = "ASHP cap_ratio at AHRI H3")]
+    fn ashp_default_cap_curve_below_08_at_ahri_h3() {
         let hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
         // With identity coefficients this always returns 1.0; with the OCHRE
         // Single_1 curve it returns ≈ 0.631, well within 0.50-0.70 range.
         let cap_ratio_h3 = hvac.evaluate_biquadratic(0, 21.1, -8.3);
         assert!(
             cap_ratio_h3 < 0.8,
-            "ticket 010 BUG: ASHP cap_ratio at AHRI H3 (OAT=-8.3°C) is {cap_ratio_h3:.6}; \
+            "ASHP cap_ratio at AHRI H3 (OAT=-8.3°C) is {cap_ratio_h3:.6}; \
              identity default returns 1.0 — default curves not wired in"
         );
     }
 
-    /// Fix pending on ticket 010 — will stop panicking when ASHP default
-    /// EIR biquadratic curve is wired in.
+    /// Will stop panicking when ASHP default EIR biquadratic curve is wired in.
     #[test]
-    #[should_panic(expected = "ticket 010 BUG: ASHP EIR at H3")]
-    fn ticket_010_ashp_default_eir_curve_increases_at_low_oat() {
+    #[should_panic(expected = "ASHP EIR at H3")]
+    fn ashp_default_eir_curve_increases_at_low_oat() {
         let hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
         // curve_index=1 → EIR curve (odd index).
         // Identity EIR returns 1.0 at all temperatures — no efficiency penalty.
@@ -3031,36 +3007,35 @@ mod tests {
         let eir_h3 = hvac.evaluate_biquadratic(1, 21.1, -8.3);
         assert!(
             eir_h3 > eir_h1,
-            "ticket 010 BUG: ASHP EIR at H3 ({eir_h3:.4}) should exceed EIR at H1 ({eir_h1:.4}); \
+            "ASHP EIR at H3 ({eir_h3:.4}) should exceed EIR at H1 ({eir_h1:.4}); \
              identity default returns identical values — default curves not wired in"
         );
         assert!(
             eir_h3 > 1.0,
-            "ticket 010: ASHP EIR at H3 must exceed 1.0 (worse than rated efficiency); \
+            "ASHP EIR at H3 must exceed 1.0 (worse than rated efficiency); \
              got {eir_h3:.4}"
         );
     }
 
-    /// Fix pending on ticket 010 — will stop panicking when MSHP default
-    /// biquadratic curves are wired in.
+    /// Will stop panicking when MSHP default biquadratic curves are wired in.
     #[test]
-    #[should_panic(expected = "ticket 010 BUG: MSHP cap_ratio at AHRI H3")]
-    fn ticket_010_mshp_default_cap_curve_below_08_at_ahri_h3() {
+    #[should_panic(expected = "MSHP cap_ratio at AHRI H3")]
+    fn mshp_default_cap_curve_below_08_at_ahri_h3() {
         let hvac = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
         // OCHRE Variable_1 coefficients produce ≈ 0.568 at H3.
         let cap_ratio_h3 = hvac.evaluate_biquadratic(0, 21.1, -8.3);
         assert!(
             cap_ratio_h3 < 0.8,
-            "ticket 010 BUG: MSHP cap_ratio at AHRI H3 (OAT=-8.3°C) is {cap_ratio_h3:.6}; \
+            "MSHP cap_ratio at AHRI H3 (OAT=-8.3°C) is {cap_ratio_h3:.6}; \
              identity default returns 1.0 — default curves not wired in"
         );
     }
 
     // ---------------------------------------------------------------------------
-    // ticket 119: mismatched cap/EIR biquadratic curve counts should warn
+    // mismatched cap/EIR biquadratic curve counts should warn
     // ---------------------------------------------------------------------------
 
-    /// Regression test for ticket 119: when capacity_biquadratic_coeffs has
+    /// Regression test: when capacity_biquadratic_coeffs has
     /// more speed stages than eir_biquadratic_coeffs, the loader silently fills
     /// the missing EIR stages with DEFAULT_BIQUADRATIC_COEFFS (identity).
     ///
@@ -3068,11 +3043,11 @@ mod tests {
     /// exists) by asserting the interleaved `biquadratic_coeffs` vector has the
     /// expected length and that the padded EIR slot uses identity coefficients.
     ///
-    /// FAILS the spirit of ticket 119: no warning is emitted. The fix (add
+    /// FAILS the spirit of the issue: no warning is emitted. The fix (add
     /// `tracing::warn!` before the fill loop) must make this observable via
     /// a log subscriber; until then this test documents the silent behaviour.
     #[test]
-    fn ticket_119_mismatched_curve_counts_silently_filled_with_identity() {
+    fn mismatched_curve_counts_silently_filled_with_identity() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
         let mut config = EquipmentConfig::default();
         // 2 capacity curves, 1 EIR curve → loader must pad EIR with identity at
@@ -3089,35 +3064,35 @@ mod tests {
 
         // n_stages = max(2, 1) = 2; interleaved vector has 4 entries.
         assert_eq!(
-            hvac.biquadratic_coeffs.len(),
+            hvac.config.biquadratic_coeffs.len(),
             4,
-            "ticket 119: expected 4 interleaved coefficients (2 cap + 2 eir), \
+            "expected 4 interleaved coefficients (2 cap + 2 eir), \
              got {}",
-            hvac.biquadratic_coeffs.len()
+            hvac.config.biquadratic_coeffs.len()
         );
         // Slot 0 = cap for speed 0.
         assert_eq!(
-            hvac.biquadratic_coeffs[0],
+            hvac.config.biquadratic_coeffs[0],
             [0.9, 0.01, 0.0, 0.02, 0.0, 0.0],
-            "ticket 119: cap curve for speed 0 should be preserved"
+            "cap curve for speed 0 should be preserved"
         );
         // Slot 1 = eir for speed 0 (explicitly provided).
         assert_eq!(
-            hvac.biquadratic_coeffs[1],
+            hvac.config.biquadratic_coeffs[1],
             [1.1, 0.0, 0.0, 0.03, 0.0, 0.0],
-            "ticket 119: eir curve for speed 0 should be preserved"
+            "eir curve for speed 0 should be preserved"
         );
         // Slot 2 = cap for speed 1 (explicitly provided).
         assert_eq!(
-            hvac.biquadratic_coeffs[2],
+            hvac.config.biquadratic_coeffs[2],
             [0.8, 0.02, 0.0, 0.015, 0.0, 0.0],
-            "ticket 119: cap curve for speed 1 should be preserved"
+            "cap curve for speed 1 should be preserved"
         );
         // Slot 3 = eir for speed 1 — SILENTLY filled with identity (the bug).
         // After the fix, a tracing::warn! should fire before this assignment.
         assert_eq!(
-            hvac.biquadratic_coeffs[3], DEFAULT_BIQUADRATIC_COEFFS,
-            "ticket 119: missing eir curve at speed 1 is silently filled with \
+            hvac.config.biquadratic_coeffs[3], DEFAULT_BIQUADRATIC_COEFFS,
+            "missing eir curve at speed 1 is silently filled with \
              identity coefficients [1,0,0,0,0,0] — no warning is emitted (bug)"
         );
     }

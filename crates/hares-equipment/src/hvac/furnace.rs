@@ -120,12 +120,12 @@ impl Equipment for ElectricFurnace {
         let typed = config.require_typed::<ElectricFurnaceConfig>("Electric Furnace")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
-        let airflow_m3_s = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
+        let airflow_m3_s = self.hvac.config.airflow_m3_s_per_w * self.rated_capacity_w;
         self.fan_power_w = typed
             .fan_power_w
             .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
-        self.hvac.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
-        self.hvac.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
+        self.hvac.config.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
+        self.hvac.config.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
         if self.eir <= 0.0 || !self.eir.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Electric Furnace eir: {}",
@@ -134,9 +134,9 @@ impl Equipment for ElectricFurnace {
         }
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports);
-        self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
-        self.hvac.eir_by_stage = vec![self.eir];
-        self.hvac.startup.c_d = 0.0;
+        self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
+        self.hvac.config.eir_by_stage = vec![self.eir];
+        self.hvac.runtime.startup.c_d = 0.0;
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = electric_furnace_default_telemetry();
@@ -155,8 +155,8 @@ impl Equipment for ElectricFurnace {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
-        let sf = self.hvac.space_fraction;
+        let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
+        let sf = self.hvac.config.space_fraction;
         let gross_capacity_w = self.rated_capacity_w * duty;
         let fan_kw = (self.fan_power_w * duty) / 1_000.0 * sf;
         // Heating element power + fan power
@@ -186,7 +186,7 @@ impl Equipment for ElectricFurnace {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        let thermal_output_w = total_sensible_w * self.hvac.duct_dse.clamp(0.0, 1.0);
+        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::FAN_KW, fan_kw);
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
@@ -194,7 +194,7 @@ impl Equipment for ElectricFurnace {
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
         self.telemetry
-            .set(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
+            .set(tk::SUPPLY_AIR_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
         self.core_output = CoreOutput {
@@ -223,7 +223,7 @@ impl Equipment for ElectricFurnace {
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&FurnaceState {
             mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.duty_cycle,
+            duty_cycle: self.hvac.runtime.duty_cycle,
             last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
             runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
@@ -238,7 +238,7 @@ impl Equipment for ElectricFurnace {
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: FurnaceState = load_postcard(state)?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
-        self.hvac.duty_cycle = decoded.duty_cycle;
+        self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
@@ -251,7 +251,7 @@ impl Equipment for ElectricFurnace {
             operating_mode_code(decoded.operating_mode),
         );
         self.telemetry
-            .insert(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
+            .insert(tk::SUPPLY_AIR_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -318,12 +318,12 @@ impl Equipment for GasFurnace {
         let typed = config.require_typed::<GasFurnaceConfig>("Gas Furnace")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.fuel_efficiency = typed.afue;
-        let airflow_m3_s = self.rated_capacity_w * self.hvac.airflow_m3_s_per_w;
+        let airflow_m3_s = self.rated_capacity_w * self.hvac.config.airflow_m3_s_per_w;
         self.fan_power_w = typed
             .fan_power_w
             .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
-        self.hvac.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
-        self.hvac.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
+        self.hvac.config.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
+        self.hvac.config.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
         if self.fuel_efficiency <= 0.0 || !self.fuel_efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Gas Furnace fuel efficiency: {}",
@@ -332,24 +332,25 @@ impl Equipment for GasFurnace {
         }
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports);
-        self.hvac.heating_capacities_w = if let Some(stages) = &typed.stage_heating_capacities_w {
-            stages.clone()
-        } else {
-            vec![self.rated_capacity_w]
-        };
+        self.hvac.config.heating_capacities_w =
+            if let Some(stages) = &typed.stage_heating_capacities_w {
+                stages.clone()
+            } else {
+                vec![self.rated_capacity_w]
+            };
         let default_eir = 1.0 / self.fuel_efficiency;
-        let stage_count = self.hvac.heating_capacities_w.len();
-        self.hvac.eir_by_stage = if let Some(stages) = &typed.stage_heating_eirs {
+        let stage_count = self.hvac.config.heating_capacities_w.len();
+        self.hvac.config.eir_by_stage = if let Some(stages) = &typed.stage_heating_eirs {
             stages.clone()
         } else {
             vec![default_eir; stage_count]
         };
-        if self.hvac.heating_capacities_w.len() != self.hvac.eir_by_stage.len() {
+        if self.hvac.config.heating_capacities_w.len() != self.hvac.config.eir_by_stage.len() {
             return Err(HaresError::Equipment(
                 "heating capacity and EIR stage counts must match".to_string(),
             ));
         }
-        self.hvac.startup.c_d = 0.0;
+        self.hvac.runtime.startup.c_d = 0.0;
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = gas_furnace_default_telemetry();
@@ -368,8 +369,8 @@ impl Equipment for GasFurnace {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
-        let sf = self.hvac.space_fraction;
+        let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
+        let sf = self.hvac.config.space_fraction;
         // Fuel is computed from gross capacity: the furnace burns fuel regardless
         // of duct losses. zone_heat_fractions distributes gross output by DSE.
         let gross_capacity_w = self.rated_capacity_w * duty;
@@ -412,7 +413,7 @@ impl Equipment for GasFurnace {
         }
 
         // Telemetry reports delivered capacity (post-DSE) for the conditioned zone.
-        let thermal_output_w = total_sensible_w * self.hvac.duct_dse.clamp(0.0, 1.0);
+        let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::FAN_KW, fan_kw);
         self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
@@ -421,11 +422,11 @@ impl Equipment for GasFurnace {
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
         self.telemetry
-            .set(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
+            .set(tk::SUPPLY_AIR_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
         self.telemetry
-            .set(tk::SPEED_INDEX, self.hvac.last_speed_index as f64);
+            .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
@@ -455,7 +456,7 @@ impl Equipment for GasFurnace {
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&FurnaceState {
             mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.duty_cycle,
+            duty_cycle: self.hvac.runtime.duty_cycle,
             last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
             runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
@@ -470,12 +471,12 @@ impl Equipment for GasFurnace {
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: FurnaceState = load_postcard(state)?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
-        self.hvac.duty_cycle = decoded.duty_cycle;
+        self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
-        self.hvac.last_speed_index = decoded.speed_index as usize;
+        self.hvac.runtime.last_speed_index = decoded.speed_index as usize;
 
         self.telemetry.insert(tk::FAN_KW, decoded.electric_kw);
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
@@ -488,7 +489,7 @@ impl Equipment for GasFurnace {
             operating_mode_code(decoded.operating_mode),
         );
         self.telemetry
-            .insert(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
+            .insert(tk::SUPPLY_AIR_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.telemetry.insert(tk::SPEED_INDEX, decoded.speed_index);
         self.core_output = CoreOutput::default();
         Ok(())
@@ -794,7 +795,7 @@ mod tests {
         let mut eq = GasFurnace::new(cfg.clone());
         eq.init(&cfg, &env(18.0)).expect("gas furnace init");
 
-        let expected_airflow_m3_s = eq.hvac.airflow_m3_s_per_w * capacity_w;
+        let expected_airflow_m3_s = eq.hvac.config.airflow_m3_s_per_w * capacity_w;
         let expected = eq.hvac.fan_power_w(expected_airflow_m3_s);
         assert!((eq.fan_power_w - expected).abs() < 1e-9);
         assert!(eq.fan_power_w > 0.0);
@@ -867,7 +868,7 @@ mod tests {
         let mut eq = ElectricFurnace::new(cfg.clone());
         eq.init(&cfg, &env(20.0)).unwrap();
         assert!(
-            eq.hvac.supply_air_temp_c > 0.0,
+            eq.hvac.config.supply_air_temp_c > 0.0,
             "supply_air_temp_c must be set after init"
         );
     }
@@ -1102,7 +1103,7 @@ mod tests {
         let mut gas_eq = GasFurnace::new(gas_cfg.clone());
         gas_eq.init(&gas_cfg, &env(18.0)).unwrap();
         assert_eq!(
-            gas_eq.hvac.startup.c_d, 0.0,
+            gas_eq.hvac.runtime.startup.c_d, 0.0,
             "gas furnace must have startup c_d == 0.0 after init"
         );
 
@@ -1120,7 +1121,7 @@ mod tests {
         let mut elec_eq = ElectricFurnace::new(elec_cfg.clone());
         elec_eq.init(&elec_cfg, &env(18.0)).unwrap();
         assert_eq!(
-            elec_eq.hvac.startup.c_d, 0.0,
+            elec_eq.hvac.runtime.startup.c_d, 0.0,
             "electric furnace must have startup c_d == 0.0 after init"
         );
     }
@@ -1149,29 +1150,29 @@ mod tests {
         eq.init(&cfg, &env(18.0)).unwrap();
 
         assert_eq!(
-            eq.hvac.heating_capacities_w.len(),
+            eq.hvac.config.heating_capacities_w.len(),
             2,
             "two-speed furnace must have two capacity stages"
         );
         assert!(
-            (eq.hvac.heating_capacities_w[0] - low_cap_w).abs() < 1e-9,
+            (eq.hvac.config.heating_capacities_w[0] - low_cap_w).abs() < 1e-9,
             "low stage capacity must match stage_heating_capacities_w[0]"
         );
         assert!(
-            (eq.hvac.heating_capacities_w[1] - high_cap_w).abs() < 1e-9,
+            (eq.hvac.config.heating_capacities_w[1] - high_cap_w).abs() < 1e-9,
             "high stage capacity must match stage_heating_capacities_w[1]"
         );
         assert_eq!(
-            eq.hvac.eir_by_stage.len(),
+            eq.hvac.config.eir_by_stage.len(),
             2,
             "two-speed furnace must have two EIR stages"
         );
         assert!(
-            (eq.hvac.eir_by_stage[0] - low_eir).abs() < 1e-9,
+            (eq.hvac.config.eir_by_stage[0] - low_eir).abs() < 1e-9,
             "low stage EIR must match stage_heating_eirs[0]"
         );
         assert!(
-            (eq.hvac.eir_by_stage[1] - high_eir).abs() < 1e-9,
+            (eq.hvac.config.eir_by_stage[1] - high_eir).abs() < 1e-9,
             "high stage EIR must match stage_heating_eirs[1]"
         );
     }

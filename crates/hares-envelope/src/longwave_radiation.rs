@@ -772,19 +772,19 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Ticket #115 regression: σ consistency and linearised_h_r correctness
+    // σ consistency and linearised_h_r correctness
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Regression for ticket #115: verifies that the σ constant used by
+    /// Regression: verifies that the σ constant used by
     /// `linearised_h_r` matches NIST CODATA 2018 (5.670374419×10⁻⁸ W·m⁻²·K⁻⁴)
     /// and that the formula produces the correct value at the canonical test
     /// point (ε=0.9, T=293.15 K / 20°C → h_r ≈ 5.143 W/(m²·K)).
     ///
-    /// The ticket incorrectly claimed ~5.79 W/(m²·K) at T=295 K; the correct
+    /// The original report incorrectly claimed ~5.79 W/(m²·K) at T=295 K; the correct
     /// value at that point is 5.241 W/(m²·K). This test uses the corrected
     /// expected value.
     #[test]
-    fn ticket_115_linearised_h_r_value_and_sigma_correctness() {
+    fn linearised_h_r_value_and_sigma_correctness() {
         // Canonical NIST CODATA 2018 value (also in hares_physics::constants::STEFAN_BOLTZMANN)
         let sigma_nist: f64 = 5.670_374_419e-8;
         assert!(

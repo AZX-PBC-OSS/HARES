@@ -132,14 +132,14 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
     match hvac.update_mode(env) {
         Ok(super::thermostat::ThermostatMode::Heating) => {
             if !hvac.use_ideal_capacity(env) {
-                hvac.duty_cycle = 1.0;
+                hvac.runtime.duty_cycle = 1.0;
             } else {
-                hvac.duty_cycle = hvac.duty_cycle.clamp(0.0, 1.0);
+                hvac.runtime.duty_cycle = hvac.runtime.duty_cycle.clamp(0.0, 1.0);
             }
             OperatingMode::Heating
         }
         _ => {
-            hvac.duty_cycle = 0.0;
+            hvac.runtime.duty_cycle = 0.0;
             OperatingMode::Off
         }
     }
@@ -184,7 +184,7 @@ pub fn apply_simple_heating_ideal_capacity_control(
             0.0
         };
         hvac.thermostat_fsm.thermostat.use_ideal_capacity = true;
-        hvac.duty_cycle = duty.clamp(0.0, 1.0);
+        hvac.runtime.duty_cycle = duty.clamp(0.0, 1.0);
     }
 }
 

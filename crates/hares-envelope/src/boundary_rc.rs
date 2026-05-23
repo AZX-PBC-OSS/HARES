@@ -1527,7 +1527,7 @@ mod tests {
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 
-    // ── Ticket 103 regression: zero/negative pressure must error, not silently
+    // ── Zero/negative pressure regression: zero/negative pressure must error, not silently
     // substitute AIR_DENSITY_KG_M3. These tests document the BUG: currently
     // `derive_zone_capacitances` accepts non-positive pressure and silently uses
     // sea-level density (1.2041 kg/m³), masking misconfigured weather data.
@@ -1536,15 +1536,13 @@ mod tests {
     // tests must be rewritten to assert the new `Result`-returning signature.
     // The fix also makes `zone_capacitance_zero_pressure_uses_fallback` above
     // obsolete; that test should be removed or replaced.
-    //
-    // Ref: docs/tickets/103-zone-capacitance-air-density-loud-error.md
 
-    /// BUG (ticket 103): passing 0.0 Pa silently returns a capacitance using
+    /// BUG: passing 0.0 Pa silently returns a capacitance using
     /// sea-level density instead of propagating an error.  At a 1500 m site
     /// the correct rho_air is ~1.05 kg/m³ vs the fallback 1.2041 kg/m³ — a
     /// ~14 % bias in zone thermal capacitance.
     #[test]
-    fn ticket_103_zero_pressure_silently_uses_sea_level_density_not_an_error() {
+    fn zero_pressure_silently_uses_sea_level_density_not_an_error() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
@@ -1558,14 +1556,14 @@ mod tests {
         assert!(
             (caps[0] - sea_level_cap).abs() < 1e-6,
             "BUG: zero pressure should error, not silently produce sea-level capacitance \
-             ({} J/K); see ticket 103",
+             ({} J/K)",
             caps[0]
         );
     }
 
-    /// BUG (ticket 103): same silent substitution for negative pressure.
+    /// BUG: same silent substitution for negative pressure.
     #[test]
-    fn ticket_103_negative_pressure_silently_uses_sea_level_density_not_an_error() {
+    fn negative_pressure_silently_uses_sea_level_density_not_an_error() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(250.0),
@@ -1578,7 +1576,7 @@ mod tests {
         assert!(
             (caps[0] - sea_level_cap).abs() < 1e-6,
             "BUG: negative pressure should error, not silently produce sea-level capacitance \
-             ({} J/K); see ticket 103",
+             ({} J/K)",
             caps[0]
         );
     }
@@ -2911,7 +2909,7 @@ mod tests {
         }
     }
 
-    // ── Ticket 116 regression ───────────────────────────────────────────
+    // ── Layer inner_node vs reserved IDs regression ───────────────────
     //
     // Verify that layer_info.inner_node (SurfaceLayerInfo) does not collide
     // with OUTDOOR_NODE_ID or GROUND_NODE_ID.  Also verifies the diagnostic
@@ -2929,10 +2927,10 @@ mod tests {
     // u32::MAX - 1 - 1000 ≈ 4 294 966 295 nodes — physically impossible.
     // This test documents and enforces the invariant, analogous to the existing
     // many_boundaries_no_node_id_collision test but scoped to inner_node
-    // specifically, per ticket 116.
+    // specifically.
 
     #[test]
-    fn ticket_116_inner_node_does_not_collide_with_reserved_ids_material_path() {
+    fn inner_node_does_not_collide_with_reserved_ids_material_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
@@ -2977,7 +2975,7 @@ mod tests {
     }
 
     #[test]
-    fn ticket_116_inner_node_does_not_collide_with_reserved_ids_precomputed_path() {
+    fn inner_node_does_not_collide_with_reserved_ids_precomputed_path() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
@@ -3031,7 +3029,7 @@ mod tests {
         }
     }
 
-    // ── Ticket 104 regression ───────────────────────────────────────────
+    // ── R_FILM_INTERIOR constant mismatch regression ───────────────────
     //
     // R_FILM_INTERIOR_M2_K_W = 0.12 is a combined (convection + radiation)
     // surface resistance sourced from ASHRAE 90.1 / ISO 6946 conventions.
@@ -3059,7 +3057,7 @@ mod tests {
         // the convection-only value used in production.
         assert!(
             (R_FILM_INTERIOR_M2_K_W - 0.12).abs() < 1e-10,
-            "constant value changed from 0.12 — update ticket 104"
+            "constant value changed from 0.12 — update regression test"
         );
 
         // Production r_film_int is ~2.7× larger than the constant.
@@ -3070,7 +3068,7 @@ mod tests {
             r_production > R_FILM_INTERIOR_M2_K_W * 2.0,
             "production convection-only r_film_int={r_production:.4} should be \
              >2× the combined constant {R_FILM_INTERIOR_M2_K_W} — \
-             see ticket 104 for context"
+             see R_FILM_INTERIOR mismatch context"
         );
     }
 }

@@ -10,6 +10,70 @@ use crate::config::ConfigPayload;
 use super::hvac_core::DEFAULT_BIQUADRATIC_COEFFS;
 use super::speed_control::SpeedControlMode;
 
+/// Serde default for `number_of_speeds` fields across all HVAC config structs.
+/// Centralised here so the same function is not defined independently in
+/// cooling_config, heat_pump_config, and heating_config.
+pub(super) fn default_one() -> u8 {
+    1
+}
+
+/// Compile-time-verified equipment type name constants.
+///
+/// Each constant corresponds to an `EquipmentTypedConfig::equipment_type_name()`
+/// implementation. A mismatch between these constants and the trait impls is
+/// caught by the test `equipment_type_names_match_constants` in each config module.
+/// Adding a new equipment type without adding a constant here will be caught
+/// when the matching test is updated.
+pub mod equipment_type_name {
+    pub const CENTRAL_AC: &str = "Central AC";
+    pub const ROOM_AC: &str = "Room AC";
+    pub const ASHP_HEATER: &str = "ASHP Heater";
+    pub const ASHP_COOLER: &str = "ASHP Cooler";
+    pub const DEHUMIDIFIER: &str = "Dehumidifier";
+    pub const GAS_FURNACE: &str = "Gas Furnace";
+    pub const ELECTRIC_FURNACE: &str = "Electric Furnace";
+    pub const GAS_BOILER: &str = "Gas Boiler";
+    pub const ELECTRIC_BOILER: &str = "Electric Boiler";
+    pub const ELECTRIC_BASEBOARD: &str = "Electric Baseboard";
+    pub const IDEAL_HVAC: &str = "Ideal HVAC";
+}
+
+/// Resolve the Cd (degradation coefficient) from config keys and equipment-type
+/// defaults. Precedence:
+///   1. Explicit key: "startup_cd" > "cooling_cd" > "cd"
+///   2. Derived from speed_control_mode, SEER, HSPF (equipment-type default)
+///   3. DEFAULT_PLF_DEGRADATION_COEFF (0.25)
+///
+/// OCHRE utils/equipment.py:470–500 `calc_c_d` uses the identical decision table.
+/// Variable-speed: 0.0; two-speed: 0.11; single-speed: SEER < 13 → 0.20, else 0.07
+/// (cooling) or HSPF < 7 → 0.20, else 0.11 (heating).
+pub(super) fn resolve_cd(
+    config: &EquipmentConfig,
+    speed_mode: SpeedControlMode,
+    rated_seer: Option<f64>,
+    rated_hspf: Option<f64>,
+    default_cd: f64,
+) -> f64 {
+    if let Some(cd) = extract_numeric(config, "startup_cd")
+        .or_else(|| extract_numeric(config, "cooling_cd"))
+        .or_else(|| extract_numeric(config, "cd"))
+    {
+        return cd;
+    }
+    match speed_mode {
+        SpeedControlMode::VariableSpeedIdeal => 0.0,
+        SpeedControlMode::TwoSpeedSetpoint
+        | SpeedControlMode::TwoSpeedTime
+        | SpeedControlMode::TwoSpeedAlternating => 0.11,
+        SpeedControlMode::SingleSpeed => {
+            let from_seer = rated_seer.map(|s| if s < 13.0 { 0.20 } else { 0.07 });
+            let from_hspf = rated_hspf.map(|h| if h < 7.0 { 0.20 } else { 0.11 });
+            from_seer.or(from_hspf).unwrap_or(default_cd)
+        }
+        SpeedControlMode::MultiSpeedInterpolated => default_cd,
+    }
+}
+
 /// Shared duct configuration fields for heating/cooling equipment.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

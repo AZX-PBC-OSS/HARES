@@ -8,7 +8,9 @@ use hares_equipment::EquipmentConfig;
 use hares_equipment::hvac::cooling_config::{
     CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
 };
-use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+use hares_equipment::hvac::heat_pump_config::{
+    HeatPumpCommonConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
+};
 use hares_equipment::hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
     GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
@@ -993,46 +995,48 @@ fn try_build_heat_pump_heater_config(
     };
 
     let cfg = HeatPumpHeaterConfig {
-        equipment_id: None,
-        zone_id: None,
-        heating_capacity_w,
-        heating_eir,
-        stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
-        stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
-        backup_fuel,
-        backup_capacity_w,
-        backup_eir,
-        fraction_heating_load_served,
-        cooling_capacity_w,
-        cooling_eir,
-        stage_cooling_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
-        stage_cooling_eirs: extract_stage_values(params, "cooling_eir_stage"),
-        fraction_cooling_load_served,
-        number_of_speeds: n_speeds,
-        is_mini_split,
-        shr,
-        fan_power_w,
-        fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
-        airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
-        hysteresis_c: None,
-        heating_setpoint_source,
-        cooling_setpoint_source,
+        common: HeatPumpCommonConfig {
+            equipment_id: None,
+            zone_id: None,
+            heating_capacity_w,
+            heating_eir,
+            stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
+            stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
+            backup_fuel,
+            backup_capacity_w,
+            backup_eir,
+            fraction_heating_load_served,
+            cooling_capacity_w,
+            cooling_eir,
+            stage_cooling_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
+            stage_cooling_eirs: extract_stage_values(params, "cooling_eir_stage"),
+            fraction_cooling_load_served,
+            number_of_speeds: n_speeds,
+            is_mini_split,
+            shr,
+            fan_power_w,
+            fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
+            airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            hysteresis_c: None,
+            heating_setpoint_source,
+            cooling_setpoint_source,
+            duct,
+            biquadratic_x1_min: curve_bounds.x1_min,
+            biquadratic_x1_max: curve_bounds.x1_max,
+            biquadratic_x2_min: curve_bounds.x2_min,
+            biquadratic_x2_max: curve_bounds.x2_max,
+            ff_min: curve_bounds.ff_min,
+            ff_max: curve_bounds.ff_max,
+            plf_min: curve_bounds.plf_min,
+            plf_max: curve_bounds.plf_max,
+        },
         hp_lockout_temp_c: params.get("hp_lockout_temp_c").and_then(Value::as_f64),
         er_lockout_temp_c: params.get("er_lockout_temp_c").and_then(Value::as_f64),
         max_oat_supplemental_c: params.get("max_oat_supplemental_c").and_then(Value::as_f64),
         er_setpoint_offset_c: params.get("er_setpoint_offset_c").and_then(Value::as_f64),
         er_hard_lockout_time_s: params.get("er_hard_lockout_time_s").and_then(Value::as_f64),
-        duct,
-        biquadratic_x1_min: curve_bounds.x1_min,
-        biquadratic_x1_max: curve_bounds.x1_max,
-        biquadratic_x2_min: curve_bounds.x2_min,
-        biquadratic_x2_max: curve_bounds.x2_max,
-        ff_min: curve_bounds.ff_min,
-        ff_max: curve_bounds.ff_max,
-        plf_min: curve_bounds.plf_min,
-        plf_max: curve_bounds.plf_max,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -1106,42 +1110,44 @@ fn try_build_heat_pump_cooler_config(
     };
 
     let cfg = HeatPumpCoolerConfig {
-        equipment_id: None,
-        zone_id: None,
-        heating_capacity_w,
-        heating_eir,
-        stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
-        stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
-        backup_fuel,
-        backup_capacity_w,
-        backup_eir,
-        fraction_heating_load_served,
-        cooling_capacity_w,
-        cooling_eir,
-        stage_cooling_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
-        stage_cooling_eirs: extract_stage_values(params, "cooling_eir_stage"),
+        common: HeatPumpCommonConfig {
+            equipment_id: None,
+            zone_id: None,
+            heating_capacity_w,
+            heating_eir,
+            stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
+            stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
+            backup_fuel,
+            backup_capacity_w,
+            backup_eir,
+            fraction_heating_load_served,
+            cooling_capacity_w,
+            cooling_eir,
+            stage_cooling_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
+            stage_cooling_eirs: extract_stage_values(params, "cooling_eir_stage"),
+            fraction_cooling_load_served,
+            number_of_speeds: n_speeds,
+            is_mini_split,
+            shr,
+            fan_power_w,
+            fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
+            airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            hysteresis_c: None,
+            heating_setpoint_source,
+            cooling_setpoint_source,
+            duct,
+            biquadratic_x1_min: curve_bounds.x1_min,
+            biquadratic_x1_max: curve_bounds.x1_max,
+            biquadratic_x2_min: curve_bounds.x2_min,
+            biquadratic_x2_max: curve_bounds.x2_max,
+            ff_min: curve_bounds.ff_min,
+            ff_max: curve_bounds.ff_max,
+            plf_min: curve_bounds.plf_min,
+            plf_max: curve_bounds.plf_max,
+        },
         stage_shrs: extract_stage_values(params, "shr"),
-        fraction_cooling_load_served,
-        number_of_speeds: n_speeds,
-        is_mini_split,
-        shr,
-        fan_power_w,
-        fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
-        airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
-        hysteresis_c: None,
-        heating_setpoint_source,
-        cooling_setpoint_source,
-        duct,
-        biquadratic_x1_min: curve_bounds.x1_min,
-        biquadratic_x1_max: curve_bounds.x1_max,
-        biquadratic_x2_min: curve_bounds.x2_min,
-        biquadratic_x2_max: curve_bounds.x2_max,
-        ff_min: curve_bounds.ff_min,
-        ff_max: curve_bounds.ff_max,
-        plf_min: curve_bounds.plf_min,
-        plf_max: curve_bounds.plf_max,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -2983,15 +2989,15 @@ mod tests {
         );
     }
 
-    // Regression test for ticket #118: the `_ =>` arm at line 1232 silently
+    // Regression test: the `_ =>` arm at line 1232 silently
     // returns "attic_vented" for any ZoneType not explicitly matched (Outdoor,
     // Ground, Adjacent, Other). This must be replaced with a panic/error or
     // an exhaustive match so mis-classified zones are caught at construction
     // time rather than silently producing wrong ASHRAE 152 zone strings.
-    /// Fix pending on ticket 118 — will stop panicking when non-attic zone types no longer silently return attic_vented
+    /// Will stop panicking when non-attic zone types no longer silently return attic_vented
     #[should_panic(expected = "must not silently map to \"attic_vented\"")]
     #[test]
-    fn ticket_118_non_attic_zone_types_must_not_return_attic_vented() {
+    fn non_attic_zone_types_must_not_return_attic_vented() {
         let building = building_with(None, vec![]);
 
         for zone_type in [
@@ -3594,8 +3600,8 @@ mod tests {
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
         let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
-        assert!(cfg.is_mini_split);
-        assert_eq!(cfg.number_of_speeds, 4);
+        assert!(cfg.common.is_mini_split);
+        assert_eq!(cfg.common.number_of_speeds, 4);
     }
 
     #[test]
@@ -3616,7 +3622,7 @@ mod tests {
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
         let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
-        assert_eq!(cfg.number_of_speeds, 2);
+        assert_eq!(cfg.common.number_of_speeds, 2);
         assert_eq!(cfg.stage_shrs, Some(vec![0.81, 0.74]));
     }
 
@@ -4307,8 +4313,8 @@ mod tests {
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
         let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
-        assert!(cfg.is_mini_split);
-        assert_eq!(cfg.number_of_speeds, 4);
+        assert!(cfg.common.is_mini_split);
+        assert_eq!(cfg.common.number_of_speeds, 4);
     }
 
     #[test]
@@ -4328,8 +4334,8 @@ mod tests {
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
         let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
-        assert!(cfg.is_mini_split);
-        assert_eq!(cfg.number_of_speeds, 4);
+        assert!(cfg.common.is_mini_split);
+        assert_eq!(cfg.common.number_of_speeds, 4);
     }
 
     // ---- Ticket 076: HeatPump FractionHeatLoadServed / FractionCoolLoadServed ----
@@ -4421,12 +4427,12 @@ mod tests {
             .expect("typed cooler config");
 
         assert_eq!(
-            heater_cfg.fraction_heating_load_served,
+            heater_cfg.common.fraction_heating_load_served,
             Some(0.8),
             "FractionHeatLoadServed (canonical) must be parsed for heater"
         );
         assert_eq!(
-            cooler_cfg.fraction_cooling_load_served,
+            cooler_cfg.common.fraction_cooling_load_served,
             Some(0.7),
             "FractionCoolLoadServed (canonical) must be parsed for cooler"
         );
@@ -4511,12 +4517,12 @@ mod tests {
             .expect("typed cooler config");
 
         assert_eq!(
-            heater_cfg.fraction_heating_load_served,
+            heater_cfg.common.fraction_heating_load_served,
             Some(0.6),
             "FractionHeatingLoadServed (alias) must be parsed for heater as fallback"
         );
         assert_eq!(
-            cooler_cfg.fraction_cooling_load_served,
+            cooler_cfg.common.fraction_cooling_load_served,
             Some(0.5),
             "FractionCoolingLoadServed (alias) must be parsed for cooler as fallback"
         );

@@ -861,7 +861,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Regression test for ticket 073: ERV/HRV bypass/defrost effectiveness not
+    // Regression test for ERV/HRV bypass/defrost effectiveness not
     // propagated to the thermal solver.
     //
     // The bug: `ThermalSolverConfig.ventilation.sensible_recovery_efficiency` is
@@ -884,7 +884,7 @@ mod tests {
     /// complementary test below shows the wrong answer produced by the stale rated
     /// value.
     #[test]
-    fn ticket073_bypass_zero_effectiveness_gives_full_ventilation_load() {
+    fn bypass_zero_effectiveness_gives_full_ventilation_load() {
         let forced_m3_s = 0.03_f64;
 
         // Bypass active: effectiveness = 0.0
@@ -942,7 +942,7 @@ mod tests {
     /// orchestration layer has NOT updated `sensible_recovery_efficiency`.  Confirming
     /// the 4× ratio documents exactly what goes wrong when the fix is absent.
     #[test]
-    fn ticket073_rated_vs_bypass_effectiveness_ratio_is_4x() {
+    fn rated_vs_bypass_effectiveness_ratio_is_4x() {
         let forced_m3_s = 0.03_f64;
 
         let make_config = |eff: f64| ThermalSolverConfig {
@@ -990,7 +990,7 @@ mod tests {
         let ratio = h_bypass / h_rated;
         assert!(
             (ratio - 4.0).abs() < 0.01,
-            "bypass/rated h_inf ratio must be 4.0 (ticket 073 energy-balance error), got {ratio:.4}"
+            "bypass/rated h_inf ratio must be 4.0 (energy-balance error), got {ratio:.4}"
         );
     }
 }

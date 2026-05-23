@@ -1,4 +1,4 @@
-//! Regression tests for ticket #109 — occupant count silently returns 0.0 when
+//! Regression tests for occupant count silently returning 0.0 when
 //! the schedule domain payload is absent at step time.
 //!
 //! ## What the bug is
@@ -23,7 +23,7 @@
 //!
 //! Construction-time behaviour observable through the public API: a synthetic
 //! TOML fixture with an explicitly-zero occupancy schedule builds and steps
-//! without error.  Once ticket #109 is fixed, legitimately unoccupied dwellings
+//! without error.  Once fixed, legitimately unoccupied dwellings
 //! must declare `occupants_present: false`, and dwellings with an Occupancy
 //! spec but no schedule column must error at construction.
 
@@ -34,7 +34,7 @@ use hares_core::Dwelling;
 /// A fixture with `occupancy = 0.0` in the schedule must build successfully
 /// and simulate without error.  This is the "legitimately zero occupancy" path.
 ///
-/// Once ticket #109 is fixed, this fixture must additionally declare
+/// Once fixed, this fixture must additionally declare
 /// `occupants_present: false` in the TOML for the construction to succeed;
 /// without it the builder should reject the configuration with
 /// `MissingScheduleDomain { domain: "occupants" }`.
@@ -63,7 +63,7 @@ fn zero_occupancy_step_succeeds() {
     let result = dwelling.step();
     assert!(
         result.is_ok(),
-        "BUG context (ticket #109): zero-occupancy fixture must step without error: {:?}",
+        "zero-occupancy fixture must step without error: {:?}",
         result.err()
     );
 }

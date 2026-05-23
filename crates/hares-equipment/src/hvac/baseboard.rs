@@ -96,10 +96,10 @@ impl Equipment for ElectricBaseboard {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
-        self.hvac.duct_dse = 1.0;
-        self.hvac.duct_zone_id = None;
-        self.hvac.basement_heat_frac = 0.0;
-        self.hvac.basement_zone_id = None;
+        self.hvac.config.duct_dse = 1.0;
+        self.hvac.config.duct_zone_id = None;
+        self.hvac.config.basement_heat_frac = 0.0;
+        self.hvac.config.basement_zone_id = None;
         self.hvac.update_zone_heat_fractions();
         let typed = config.require_typed::<ElectricBaseboardConfig>("Electric Baseboard")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
@@ -110,7 +110,7 @@ impl Equipment for ElectricBaseboard {
                 self.eir
             )));
         }
-        self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
+        self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = default_telemetry();
@@ -129,9 +129,9 @@ impl Equipment for ElectricBaseboard {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
+        let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let thermal_output_w = self.rated_capacity_w * duty;
-        let electric_kw = thermal_output_w * self.eir / 1_000.0 * self.hvac.space_fraction;
+        let electric_kw = thermal_output_w * self.eir / 1_000.0 * self.hvac.config.space_fraction;
 
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -177,7 +177,7 @@ impl Equipment for ElectricBaseboard {
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&BaseboardState {
             mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.duty_cycle,
+            duty_cycle: self.hvac.runtime.duty_cycle,
             last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
             runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
@@ -190,7 +190,7 @@ impl Equipment for ElectricBaseboard {
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: BaseboardState = load_postcard(state)?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
-        self.hvac.duty_cycle = decoded.duty_cycle;
+        self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
@@ -324,7 +324,7 @@ mod tests {
         let mut eq = ElectricBaseboard::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
-        assert!((eq.hvac.duct_dse - 1.0).abs() < 1e-12);
+        assert!((eq.hvac.config.duct_dse - 1.0).abs() < 1e-12);
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],

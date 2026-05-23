@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::EquipmentTypedConfig;
 
 pub use super::core_config::DuctConfig;
+use super::core_config::default_one;
+use super::core_config::equipment_type_name;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,7 +41,7 @@ pub struct GasFurnaceConfig {
 
 impl EquipmentTypedConfig for GasFurnaceConfig {
     fn equipment_type_name() -> &'static str {
-        "Gas Furnace"
+        equipment_type_name::GAS_FURNACE
     }
 }
 
@@ -88,7 +90,7 @@ pub struct ElectricFurnaceConfig {
 
 impl EquipmentTypedConfig for ElectricFurnaceConfig {
     fn equipment_type_name() -> &'static str {
-        "Electric Furnace"
+        equipment_type_name::ELECTRIC_FURNACE
     }
 }
 
@@ -139,7 +141,7 @@ pub struct GasBoilerConfig {
 
 impl EquipmentTypedConfig for GasBoilerConfig {
     fn equipment_type_name() -> &'static str {
-        "Gas Boiler"
+        equipment_type_name::GAS_BOILER
     }
 }
 
@@ -194,7 +196,7 @@ pub struct ElectricBoilerConfig {
 
 impl EquipmentTypedConfig for ElectricBoilerConfig {
     fn equipment_type_name() -> &'static str {
-        "Electric Boiler"
+        equipment_type_name::ELECTRIC_BOILER
     }
 }
 
@@ -238,7 +240,7 @@ pub struct ElectricBaseboardConfig {
 
 impl EquipmentTypedConfig for ElectricBaseboardConfig {
     fn equipment_type_name() -> &'static str {
-        "Electric Baseboard"
+        equipment_type_name::ELECTRIC_BASEBOARD
     }
 }
 
@@ -319,12 +321,8 @@ pub enum IdealCapacityModeConfig {
 
 impl EquipmentTypedConfig for IdealHvacConfig {
     fn equipment_type_name() -> &'static str {
-        "Ideal HVAC"
+        equipment_type_name::IDEAL_HVAC
     }
-}
-
-fn default_one() -> u8 {
-    1
 }
 
 fn default_flow_rate_kg_s() -> f64 {

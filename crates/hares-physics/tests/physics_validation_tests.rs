@@ -283,10 +283,10 @@ fn tarp_h_natural_vertical_surface() {
 }
 
 // ===========================================================================
-// 9. Roughness class changes exterior film resistance (ticket 038 regression)
+// 9. Roughness class changes exterior film resistance
 // ===========================================================================
 
-/// Regression test for ticket 038: SurfaceRoughness::Rough was hardcoded for
+/// Regression test: SurfaceRoughness::Rough was hardcoded for
 /// all exterior boundaries regardless of actual siding material.
 ///
 /// The DOE-2 model scales forced convection by Rf (Walton 1981, via EnergyPlus
@@ -303,7 +303,7 @@ fn tarp_h_natural_vertical_surface() {
 /// using the correct roughness class.
 #[test]
 fn roughness_class_changes_exterior_film_resistance() {
-    // Ticket 038: VinylSiding → Smooth (Rf=1.11); BrickVeneer → VeryRough (Rf=2.17)
+    // VinylSiding → Smooth (Rf=1.11); BrickVeneer → VeryRough (Rf=2.17)
     // At the same wind speed, VeryRough must produce lower R_ext than Smooth.
     let tilt = 90.0_f64;
     let ground_c = 10.0_f64;
@@ -348,7 +348,7 @@ fn roughness_class_changes_exterior_film_resistance() {
         );
     }
 
-    // Ticket 038 specific assertion: using Rough (1.67) instead of Smooth (1.11)
+    // Specific assertion: using Rough (1.67) instead of Smooth (1.11)
     // for vinyl siding overcounts forced convection — R_ext must be *lower*
     // under Rough than under Smooth.
     let r_rough = r_exts[1]; // SurfaceRoughness::Rough
@@ -370,11 +370,11 @@ fn roughness_class_changes_exterior_film_resistance() {
 }
 
 // ===========================================================================
-// 10. Ticket 101: ASHRAE Simple interior h_conv is ΔT-independent (frozen-at-init
+// 10. ASHRAE Simple interior h_conv is ΔT-independent (frozen-at-init
 //     defect demonstration)
 // ===========================================================================
 
-/// Regression test for ticket 101: interior film coefficient is computed with
+/// Regression test: interior film coefficient is computed with
 /// the ASHRAE "Simple" algorithm (fixed by orientation, ΔT-independent), NOT
 /// the ΔT^(1/3) TARP model.
 ///
@@ -392,9 +392,9 @@ fn roughness_class_changes_exterior_film_resistance() {
 /// - EnergyPlus Engineering Reference "Interior Convection / TARP Algorithm",
 ///   Eq. 90–92: h = 1.31|ΔT|^(1/3) (vertical), 9.482|ΔT|^(1/3)/(...) etc.
 /// - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655.
-/// - Ticket 101: interior film coefficients must recompute per timestep.
+/// - Interior film coefficients must recompute per timestep.
 #[test]
-fn ticket_101_ashrae_simple_interior_h_conv_is_dt_independent() {
+fn ashrae_simple_interior_h_conv_is_dt_independent() {
     use hares_physics::film_coefficients::ashrae_simple_interior_h_conv;
 
     // Vertical wall: ASHRAE Simple returns 3.076 regardless of ΔT.
@@ -402,7 +402,7 @@ fn ticket_101_ashrae_simple_interior_h_conv_is_dt_independent() {
     let h_at_11c = ashrae_simple_interior_h_conv(90.0, 31.0, 20.0, true);
     let h_at_20c = ashrae_simple_interior_h_conv(90.0, 40.0, 20.0, true);
 
-    // BUG (ticket 101): all three return the same frozen value 3.076 W/(m²·K)
+    // BUG: all three return the same frozen value 3.076 W/(m²·K)
     // regardless of the surface-to-air ΔT.
     assert_approx(h_at_1c, 3.076, 1e-9);
     assert_approx(h_at_11c, 3.076, 1e-9);
@@ -730,10 +730,10 @@ fn psychrometric_multi_point_round_trip() {
 }
 
 // ===========================================================================
-// Ticket 053 regression: garage infiltration ach50/20 rule-of-thumb errors
+// Garage infiltration ach50/20 rule-of-thumb errors
 // ===========================================================================
 
-/// Ticket 053 — Error 1: Fixed N=20 divisor ignores climate.
+/// Error 1: Fixed N=20 divisor ignores climate.
 ///
 /// The AIM-2 model's annual-average effective N-factor varies with climate:
 /// ~9.8 for windy/exposed sites, ~29 for sheltered northern sites
@@ -747,7 +747,7 @@ fn psychrometric_multi_point_round_trip() {
 ///
 /// Reference: Walker & Wilson (1998) AIM-2 model.
 #[test]
-fn ticket_053_aim2_flow_varies_with_climate_unlike_fixed_n20() {
+fn aim2_flow_varies_with_climate_unlike_fixed_n20() {
     // Garage parameters: leaky garage, ACH50=8, typical 1-car volume
     let ach50 = 8.0_f64;
     let volume_m3 = 55.0_f64;
@@ -800,12 +800,12 @@ fn ticket_053_aim2_flow_varies_with_climate_unlike_fixed_n20() {
     let ratio = flow_cold / flow_windy;
     assert!(
         (ratio - 1.0).abs() > 0.3,
-        "ticket 053: cold/windy AIM-2 flow ratio ({ratio:.4}) must differ from 1.0 \
+        "cold/windy AIM-2 flow ratio ({ratio:.4}) must differ from 1.0 \
          by > 30% — a fixed N=20 model would give ratio=1.0 regardless of climate"
     );
 }
 
-/// Ticket 053 — Error 3: `InfiltrationMethod::Ach` is constant; ELA is time-varying.
+/// Error 3: `InfiltrationMethod::Ach` is constant; ELA is time-varying.
 ///
 /// The ELA model produces different flow rates at different wind/stack conditions.
 /// A constant-ACH model cannot capture this variation. This test verifies that
@@ -820,7 +820,7 @@ fn ticket_053_aim2_flow_varies_with_climate_unlike_fixed_n20() {
 /// Reference: Sherman & Grimsrud (1980) ELA model; Walker & Wilson (1998) Table 2
 /// (hor_lk_frac = 0.4 for garage).
 #[test]
-fn ticket_053_ela_model_varies_with_conditions_unlike_constant_ach() {
+fn ela_model_varies_with_conditions_unlike_constant_ach() {
     let garage_height_m = 2.4_f64;
     let (stack_coeff, wind_coeff) = garage_ela_coefficients(garage_height_m);
 
@@ -862,23 +862,23 @@ fn ticket_053_ela_model_varies_with_conditions_unlike_constant_ach() {
     // Windy flow must exceed calm flow (wind_coeff > 0 means wind adds to infiltration)
     assert!(
         flow_windy > flow_calm,
-        "ticket 053: windy ELA flow ({flow_windy:.6}) must exceed calm flow \
+        "windy ELA flow ({flow_windy:.6}) must exceed calm flow \
          ({flow_calm:.6}) — ELA model is time-varying unlike constant ACH"
     );
 
     // Cold/stack flow must exceed calm flow (stack_coeff > 0 means ΔT drives infiltration)
     assert!(
         flow_cold > flow_calm,
-        "ticket 053: cold-stack ELA flow ({flow_cold:.6}) must exceed calm flow \
+        "cold-stack ELA flow ({flow_cold:.6}) must exceed calm flow \
          ({flow_calm:.6}) — ELA model varies with ΔT"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Ticket 055 — Ground temperature: Kusuda-Achenbach depth correction
+// Ground temperature: Kusuda-Achenbach depth correction
 // ---------------------------------------------------------------------------
 
-/// Ticket 055 — The solver feeds `env.weather.ground_temp_c` (DOE-2 surface
+/// The solver feeds `env.weather.ground_temp_c` (DOE-2 surface
 /// model, depth ≈ 0 m) to ALL below-grade boundary nodes without any depth
 /// correction. This test quantifies the error by comparing the surface
 /// temperature to the Kusuda-Achenbach temperature at a realistic basement
@@ -896,14 +896,14 @@ fn ticket_053_ela_model_varies_with_conditions_unlike_constant_ach() {
 ///
 /// This test PASSES today because it exercises only the physics function, not
 /// the solver wiring. The solver wiring bug (ground_temp_c used at all depths)
-/// is what ticket 055 fixes. Once the solver is fixed the bestest integration
+/// is what the depth-correction fix addresses. Once the solver is fixed the bestest integration
 /// test described in the ticket will verify the end-to-end path.
 ///
 /// Reference: Kusuda & Achenbach (1965), ASHRAE Transactions 71(1):61-74;
 ///            EnergyPlus Engineering Reference, Undisturbed Ground Temperature
 ///            Model: Kusuda-Achenbach.
 #[test]
-fn ticket_055_kusuda_depth_correction_exceeds_3c_vs_surface_in_january_minneapolis() {
+fn kusuda_depth_correction_exceeds_3c_vs_surface_in_january_minneapolis() {
     // Minneapolis TMY3 climate parameters.
     let t_mean_c = 7.0_f64;
     let t_amplitude_c = 14.0_f64; // half of ~28 °C annual swing
@@ -931,7 +931,7 @@ fn ticket_055_kusuda_depth_correction_exceeds_3c_vs_surface_in_january_minneapol
     // Surface must be significantly colder than basement in January (cold climate).
     assert!(
         t_surface_c < t_basement_c,
-        "ticket 055: in January the surface temperature ({t_surface_c:.2}°C) must be \
+        "in January the surface temperature ({t_surface_c:.2}°C) must be \
          colder than the basement depth temperature ({t_basement_c:.2}°C) — \
          depth attenuation and phase lag warm the deep ground relative to the surface"
     );
@@ -939,14 +939,14 @@ fn ticket_055_kusuda_depth_correction_exceeds_3c_vs_surface_in_january_minneapol
     let diff_c = t_basement_c - t_surface_c;
     assert!(
         diff_c >= 3.0,
-        "ticket 055: depth correction at 2.4 m must be ≥ 3 °C in January for \
+        "depth correction at 2.4 m must be ≥ 3 °C in January for \
          Minneapolis climate — got {diff_c:.2} °C. \
          The solver bug (ground_temp_c applied at all depths) causes this magnitude \
          of boundary-condition error."
     );
 }
 
-/// Ticket 055 — Summer sign-reversal: the DOE-2 surface is warm while deep
+/// Summer sign-reversal: the DOE-2 surface is warm while deep
 /// soil is cool, reversing the direction of heat flow compared to the correct
 /// Kusuda-Achenbach temperature.
 ///
@@ -955,7 +955,7 @@ fn ticket_055_kusuda_depth_correction_exceeds_3c_vs_surface_in_january_minneapol
 ///   Kusuda-Achenbach at 2.4 m: soil has not yet warmed — noticeably cooler
 ///   Expected: surface > basement (at least 3 °C difference, opposite sign to January)
 #[test]
-fn ticket_055_kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
+fn kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
     let t_mean_c = 7.0_f64;
     let t_amplitude_c = 14.0_f64;
     let phase_day = DEFAULT_PHASE_DAY_NORTHERN;
@@ -979,7 +979,7 @@ fn ticket_055_kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
     // In summer the surface is warmer than the deep soil.
     assert!(
         t_surface_c > t_basement_c,
-        "ticket 055: in late July the surface ({t_surface_c:.2}°C) must be warmer \
+        "in late July the surface ({t_surface_c:.2}°C) must be warmer \
          than basement depth ({t_basement_c:.2}°C) — the DOE-2 surface model would \
          show the ground as a heat source, while Kusuda shows it as a heat sink"
     );
@@ -987,15 +987,15 @@ fn ticket_055_kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
     let diff_c = t_surface_c - t_basement_c;
     assert!(
         diff_c >= 1.0,
-        "ticket 055: summer sign-reversal magnitude must be ≥ 1 °C — got {diff_c:.2} °C"
+        "summer sign-reversal magnitude must be ≥ 1 °C — got {diff_c:.2} °C"
     );
 }
 
 // ===========================================================================
-// Ticket 027 regression: DOE-2 surface temp misapplied to below-grade boundaries
+// DOE-2 surface temp misapplied to below-grade boundaries
 // ===========================================================================
 
-/// Ticket 027 — The thermal solver applies `env.weather.ground_temp_c`
+/// The thermal solver applies `env.weather.ground_temp_c`
 /// (the DOE-2 surface model output, which uses depth_factor=10 m and gives a
 /// heavily-damped temperature) to ALL DrivingTemp::Ground boundary nodes,
 /// including slab-on-grade floors and crawlspace floors whose actual depth is
@@ -1016,7 +1016,7 @@ fn ticket_055_kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
 /// The test only calls the DOE-2 damping formula and Kusuda directly and
 /// passes today. The solver-wiring bug (hares-envelope passing ground_temp_c
 /// to slab boundaries without depth correction) is separate and is the actual
-/// behaviour that ticket 027 requires fixing.
+/// behaviour that the depth-correction fix requires.
 ///
 /// References:
 /// - HARES `crates/hares-io/src/epw.rs:363-465` (DOE-2 formula)
@@ -1026,7 +1026,7 @@ fn ticket_055_kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
 ///   soil under a conditioned building." (bigladdersoftware.com/epx/docs/8-2/
 ///   auxiliary-programs/ground-heat-transfer-in-energyplus.html)
 #[test]
-fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_january() {
+fn doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_january() {
     use hares_physics::ground::{
         DEFAULT_PHASE_DAY_NORTHERN, DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY, kusuda_achenbach_temp,
     };
@@ -1079,7 +1079,7 @@ fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_january() {
     // This means the solver UNDER-predicts slab heat loss in winter.
     assert!(
         t_doe2_surface > t_kusuda_slab,
-        "ticket 027: in January the DOE-2 surface output ({t_doe2_surface:.2}°C) must be \
+        "in January the DOE-2 surface output ({t_doe2_surface:.2}°C) must be \
          warmer than the Kusuda-Achenbach slab temperature at {slab_depth_m}m \
          ({t_kusuda_slab:.2}°C) — applying the DOE-2 value as a slab boundary \
          condition under-predicts winter heat loss"
@@ -1088,19 +1088,19 @@ fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_january() {
     let discrepancy_c = t_doe2_surface - t_kusuda_slab;
     assert!(
         discrepancy_c >= 2.0,
-        "ticket 027: DOE-2 vs Kusuda discrepancy at 0.5 m slab depth in January must \
+        "DOE-2 vs Kusuda discrepancy at 0.5 m slab depth in January must \
          be ≥ 2 °C for a cold-climate site — got {discrepancy_c:.2} °C. \
-         This quantifies the boundary-condition error that ticket 027 must fix."
+         This quantifies the boundary-condition error."
     );
 }
 
-/// Ticket 027 — Summer sign check: in summer the DOE-2 surface model is COOLER
+/// Summer sign check: in summer the DOE-2 surface model is COOLER
 /// than Kusuda at slab depth (the 10 m fixed depth means its seasonal swing
 /// lags and is damped, so it does not warm as fast as the actual 0.5 m depth).
 /// This causes the solver to OVER-predict summer slab cooling (an opposite sign
 /// error to the winter under-prediction above).
 #[test]
-fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
+fn doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
     use hares_physics::ground::{
         DEFAULT_PHASE_DAY_NORTHERN, DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY, kusuda_achenbach_temp,
     };
@@ -1143,17 +1143,17 @@ fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
     // DOE-2 10 m output — the solver over-predicts summer slab cooling.
     assert!(
         t_kusuda_slab > t_doe2_surface,
-        "ticket 027: in late July Kusuda at 0.5 m ({t_kusuda_slab:.2}°C) must be \
+        "in late July Kusuda at 0.5 m ({t_kusuda_slab:.2}°C) must be \
          warmer than the DOE-2 surface output ({t_doe2_surface:.2}°C) — applying \
          the DOE-2 value over-predicts summer slab cooling"
     );
 }
 
 // ===========================================================================
-// Ticket 124 regression: ISA pressure exponent constant precision mismatch
+// ISA pressure exponent constant precision mismatch
 // ===========================================================================
 
-/// Ticket 124 — `ISA_PRESSURE_EXPONENT` in `hares-physics` and the inline
+/// `ISA_PRESSURE_EXPONENT` in `hares-physics` and the inline
 /// literal in `hares-io/resstock_csv.rs` must agree.
 ///
 /// The USSA 1976 tropospheric pressure exponent is derived as:
@@ -1179,8 +1179,8 @@ fn ticket_027_doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
 /// Reference: U.S. Standard Atmosphere 1976 (NOAA-S/T 76-1562) §1.2.5;
 ///            Wikipedia "Barometric formula" model equations table, layer 0.
 #[test]
-#[should_panic(expected = "ticket 124: ISA_PRESSURE_EXPONENT")]
-fn ticket_124_isa_pressure_exponent_matches_ussa76_derivation() {
+#[should_panic(expected = "ISA_PRESSURE_EXPONENT")]
+fn isa_pressure_exponent_matches_ussa76_derivation() {
     use hares_physics::constants::ISA_PRESSURE_EXPONENT;
 
     // USSA 1976 primary constants (matches Wikipedia barometric formula table).
@@ -1195,12 +1195,12 @@ fn ticket_124_isa_pressure_exponent_matches_ussa76_derivation() {
     // (i.e., correct to at least 5 significant figures, matching 6-sig-fig
     // rounding of 5.255876… to give 5.25588, not the current over-rounded 5.2559).
     //
-    // BUG (ticket 124): `ISA_PRESSURE_EXPONENT = 5.2559` diverges from the
+    // BUG: `ISA_PRESSURE_EXPONENT = 5.2559` diverges from the
     // derived value by 0.00002, which is larger than the 1e-5 tolerance.
     // This assertion therefore FAILS until the constant is updated.
     assert!(
         (ISA_PRESSURE_EXPONENT - derived).abs() < 1e-5,
-        "ticket 124: ISA_PRESSURE_EXPONENT ({ISA_PRESSURE_EXPONENT}) deviates from \
+        "ISA_PRESSURE_EXPONENT ({ISA_PRESSURE_EXPONENT}) deviates from \
          USSA 1976 derivation ({derived:.10}) by {:.2e}, which exceeds 1e-5. \
          The constant must be updated to at least 5.25588 (6 sig figs).",
         (ISA_PRESSURE_EXPONENT - derived).abs()
@@ -1208,7 +1208,7 @@ fn ticket_124_isa_pressure_exponent_matches_ussa76_derivation() {
 }
 
 // ===========================================================================
-// Ticket 122: water_density_kg_m3(t_celsius) function in hares-physics
+// water_density_kg_m3(t_celsius) function in hares-physics
 // ===========================================================================
 
 /// Verify that `water_density_kg_m3` exists in `hares_physics` and returns
@@ -1230,10 +1230,10 @@ fn ticket_124_isa_pressure_exponent_matches_ussa76_derivation() {
 /// figs) while remaining tighter than the ~12 kg/m³ error produced by the
 /// current constant (1000.0 kg/m³ at 80°C).
 ///
-/// BUG (ticket 122): `water_density_kg_m3` does not yet exist in `hares_physics`;
+/// BUG: `water_density_kg_m3` does not yet exist in `hares_physics`;
 /// this import will fail to compile until the function is added.
 #[test]
-fn ticket_122_water_density_four_reference_points() {
+fn water_density_four_reference_points() {
     use hares_physics::water_density_kg_m3;
 
     // 4°C: maximum density (NIST: 999.97 kg/m³; Kell rational: 999.972)
@@ -1256,9 +1256,9 @@ fn ticket_122_water_density_four_reference_points() {
 /// so the constant over-estimates mass and thermal capacity by ~1.2%.
 ///
 /// This test documents the magnitude of the existing bias; it passes today
-/// (asserting the constant IS 1000.0) to serve as a canary for ticket 122.
+/// (asserting the constant IS 1000.0) to serve as a canary.
 #[test]
-fn ticket_122_constant_bias_at_typical_tank_temp() {
+fn constant_bias_at_typical_tank_temp() {
     use hares_physics::water_density_kg_m3;
 
     let rho_at_50c = water_density_kg_m3(50.0);
@@ -1267,7 +1267,7 @@ fn ticket_122_constant_bias_at_typical_tank_temp() {
     // The bias at 50°C must be between 1.0% and 1.5% (NIST: ~1.20%).
     assert!(
         (1.0..=1.5).contains(&bias_pct),
-        "ticket 122: bias of WATER_DENSITY_KG_PER_M3=1000.0 at 50°C is {bias_pct:.3}%, \
+        "bias of WATER_DENSITY_KG_PER_M3=1000.0 at 50°C is {bias_pct:.3}%, \
          expected 1.0–1.5% per NIST IAPWS tabulated density of {rho_at_50c:.2} kg/m³",
     );
 }

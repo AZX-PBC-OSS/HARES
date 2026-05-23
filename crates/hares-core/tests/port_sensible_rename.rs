@@ -1,4 +1,4 @@
-//! Regression test for ticket #127 — `port_sensible_w` naming footgun.
+//! Regression test for `port_sensible_w` naming footgun.
 //!
 //! `port_sensible_w` carries only the *convective* portion of equipment port
 //! heat, yet its name uses the `_sensible_` token, which elsewhere in the
@@ -8,7 +8,7 @@
 //!
 //! This test documents the naming invariant and will fail if/when the field is
 //! renamed to `port_convective_w` (intentionally: it must be updated as part
-//! of the rename to confirm the ticket was completed correctly).
+//! of the rename to confirm the fix was completed correctly).
 
 use hares_envelope::EnvelopeComponentGains;
 
@@ -30,7 +30,7 @@ fn port_sensible_w_is_convective_only_not_full_sensible() {
     let expected_total_sensible_w = convective_w + radiant_w;
 
     let gains = EnvelopeComponentGains {
-        port_sensible_w: convective_w, // ticket #127: misleading name — holds convective only
+        port_sensible_w: convective_w,
         port_radiant_w: radiant_w,
         ..EnvelopeComponentGains::default()
     };
@@ -59,5 +59,5 @@ fn port_sensible_w_is_convective_only_not_full_sensible() {
     // Document that the field name contradicts the "sensible = conv + rad" convention
     // used everywhere else (internal_gain_w, combined_airflow_sensible_w, etc.).
     // After rename: this field should become `port_convective_w`.
-    let _ = gains.port_sensible_w; // expected to be renamed to port_convective_w by ticket #127
+    let _ = gains.port_sensible_w;
 }

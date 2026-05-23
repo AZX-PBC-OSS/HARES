@@ -1214,7 +1214,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Regression tests for ticket 024-epw-ground-temp-constant-default
+    // EPW ground-temp constant default
     // -----------------------------------------------------------------------
 
     /// Build a synthetic GROUND TEMPERATURES header line with the given depths
@@ -1272,8 +1272,8 @@ mod tests {
     }
 
     /// An EPW with depths [0.1, 0.5, 2.0] MUST select 0.5 m (closest to 0.5),
-    /// NOT 0.1 m (the shallowest). This is the exact scenario described in the
-    /// ticket and demonstrates the real bug: current code picks 0.1 m.
+    /// NOT 0.1 m (the shallowest). This is the exact scenario that
+    /// demonstrates the real bug: current code picks 0.1 m.
     #[test]
     #[should_panic]
     fn ground_temp_depth_selection_picks_0_5_m_not_0_1_m() {
@@ -1304,7 +1304,7 @@ mod tests {
 
     /// With the DOE-2 formula using `α = 0.025 m²/hr` and `τ = 8760 hr`, the
     /// attenuation factor `gm` at depth `z = 10 m` is approximately 0.55,
-    /// while at `z = 0.5 m` it is approximately 0.97.  The ticket claims these
+    /// while at `z = 0.5 m` it is approximately 0.97.  The original report claims these
     /// numbers should be 0.018 and 0.82 respectively, but those values apply
     /// only when EnergyPlus's much smaller diffusivity
     /// (`2.3225760E-03 m²/day ≈ 9.68E-05 m²/hr`) is used.
@@ -1313,7 +1313,7 @@ mod tests {
     /// depth factor is supposed to represent the burial depth of the
     /// representative soil boundary for a shallow foundation (slab/crawlspace),
     /// not a deep-soil value.  The DOE-2 original used 5 ft (≈1.524 m).
-    /// The ticket asks for 0.5 m (matching the EPW reference depth).
+    /// The original report asks for 0.5 m (matching the EPW reference depth).
     ///
     /// This test verifies that the amplitude ratio `ground_amplitude /
     /// monthly_amplitude` is SMALLER at depth 10 m than it would be at 0.5 m,
@@ -1532,10 +1532,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Regression tests for ticket 125 – Berdahl-Martin coefficient citation
+    // Berdahl-Martin coefficient citation
     // -----------------------------------------------------------------------
     //
-    // The ticket asserts that coefficients 0.758/0.521/0.625 are NOT from the
+    // The original report asserts that coefficients 0.758/0.521/0.625 are NOT from the
     // original Berdahl & Martin (1984) Solar Energy 32(5) paper (whose values
     // are 0.711/0.56/0.73), but from the Li, Jiang & Coimbra (2017) Solar Energy
     // 144:40-48 recalibration (as used by EnergyPlus 9.3+). The test below pins
@@ -1580,7 +1580,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Regression tests for ticket 031 – EPW liquid precip silent zero default
+    // EPW liquid precip silent zero default
     // -----------------------------------------------------------------------
 
     // Helper: build a synthetic EPW where every row has exactly `field_count`
@@ -1610,15 +1610,15 @@ mod tests {
         .join("\n")
     }
 
-    /// Ticket 031 bug 1: when EPW rows have fewer than 34 fields (field 33 absent),
+    /// When EPW rows have fewer than 34 fields (field 33 absent),
     /// the current code silently returns 0.0 with no diagnostic.
     ///
     /// This test documents the BUG by verifying that parse succeeds and that
-    /// all liquid_precip_m values are 0.0. When the ticket fix is applied, it
+    /// all liquid_precip_m values are 0.0. When the fix is applied, it
     /// should emit a `tracing::debug!` at file level; the 0.0 values remain
     /// correct, so this test stays green after the fix.
     #[test]
-    fn ticket_031_absent_field_33_yields_zero_no_diagnostic() {
+    fn absent_field_33_yields_zero_no_diagnostic() {
         // Build an EPW with only 30 fields per row — field 33 is absent.
         // EPW_RECORD_MIN_FIELDS is 24, so this passes the minimum check.
         let epw = build_short_field_epw(30);
@@ -1632,11 +1632,11 @@ mod tests {
         assert_eq!(parsed.liquid_precip_m.len(), 8760);
     }
 
-    /// Ticket 031 bug 2: when field 33 contains the EPW missing-data sentinel
+    /// When field 33 contains the EPW missing-data sentinel
     /// (999 per EnergyPlus EPW Data Dictionary §N33, \missing 999), the current
     /// code maps it to 0.0 via `.max(0.0)` without any diagnostic.
     ///
-    /// Note: the ticket incorrectly cites the sentinel as 9999; the correct
+    /// Note: the original report incorrectly cites the sentinel as 9999; the correct
     /// EnergyPlus value is 999 (verified against E+ 9.6 and 24.2 docs).
     /// The threshold `>= 900.0` used here covers the standard 999 sentinel
     /// and any slightly-above-range variants.
@@ -1646,7 +1646,7 @@ mod tests {
     /// `tracing::debug!` should be emitted at file level; the 0.0 substitution
     /// remains correct, so this test stays green after the fix.
     #[test]
-    fn ticket_031_sentinel_999_in_field_33_yields_zero_no_diagnostic() {
+    fn sentinel_999_in_field_33_yields_zero_no_diagnostic() {
         // Set field 33 of row 100 to the EPW missing-data sentinel for
         // Liquid Precipitation Depth: 999 mm (per E+ IDD \missing 999).
         let epw = build_synthetic_epw(8760, |row, fields| {
@@ -1669,7 +1669,7 @@ mod tests {
         );
     }
 
-    /// Ticket 031 bug 2b: when field 33 is present with a parse error (non-numeric),
+    /// When field 33 is present with a parse error (non-numeric),
     /// the current `unwrap_or(0.0)` silently discards the error and returns 0.0
     /// without any `tracing::warn!` or row number.
     ///
@@ -1677,7 +1677,7 @@ mod tests {
     /// silently. When the fix is applied, a `tracing::warn!` with row number
     /// and raw field value should be emitted.
     #[test]
-    fn ticket_031_parse_error_in_field_33_silently_becomes_zero() {
+    fn parse_error_in_field_33_silently_becomes_zero() {
         // Inject a non-numeric string into field 33 of row 50.
         let epw = build_synthetic_epw(8760, |row, fields| {
             if row == 50 {
@@ -1696,8 +1696,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Regression test: ticket-032 — caller-provided coordinates silently
-    // discarded for EPW files.
+    // Caller-provided coordinates silently discarded for EPW files.
     //
     // `parse_weather_with_location` documents that EPW/PSM3 "carry their own
     // location metadata" and ignores caller lat/lon/tz/elevation. When a caller
@@ -1711,10 +1710,10 @@ mod tests {
     // so the assertion fails, demonstrating the bug.
     //
     // DO NOT change production code under src/ to make this pass; implement the
-    // fix described in docs/tickets/032-hpxml-weather-file-location-not-validated.md.
+    // fix for caller coordinates being silently discarded.
     // -----------------------------------------------------------------------
     #[test]
-    #[ignore = "regression for ticket-032: parse_weather_with_location silently discards caller coordinates for EPW"]
+    #[ignore = "parse_weather_with_location silently discards caller coordinates for EPW — remove ignore after fix lands"]
     fn epw_caller_coordinates_not_silently_discarded() {
         // Build a synthetic EPW whose LOCATION header embeds Denver, CO (39.74, -104.99).
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
@@ -1744,13 +1743,13 @@ mod tests {
         // This assertion FAILS with the current implementation (returns 39.74, not 33.45).
         assert!(
             (weather.meta.latitude - caller_lat).abs() < 0.001,
-            "ticket-032: parse_weather_with_location silently discarded caller latitude \
+            "parse_weather_with_location silently discarded caller latitude \
              {caller_lat}; got file latitude {} instead",
             weather.meta.latitude
         );
         assert!(
             (weather.meta.longitude - caller_lon).abs() < 0.001,
-            "ticket-032: parse_weather_with_location silently discarded caller longitude \
+            "parse_weather_with_location silently discarded caller longitude \
              {caller_lon}; got file longitude {} instead",
             weather.meta.longitude
         );

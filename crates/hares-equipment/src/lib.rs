@@ -53,15 +53,17 @@ pub use generator::GeneratorConfig;
 pub use hares_types::Telemetry;
 pub use hares_types::{CoreFlows, CoreOutput, CoreState};
 pub use hvac::cooling_config::{CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig};
-pub use hvac::heat_pump_config::{HeatPumpConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+pub use hvac::heat_pump_config::{
+    HeatPumpCommonConfig, HeatPumpConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
+};
 pub use hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
     GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
 };
 pub use hvac::{
     AIRFLOW_CENTRAL_AC_M3_S_PER_W, AIRFLOW_HEATING_M3_S_PER_W, AIRFLOW_MSHP_COOLING_M3_S_PER_W,
-    AIRFLOW_ROOM_AC_M3_S_PER_W, EquivalentBatteryModel, HvacEquipment, HvacEquipmentType,
-    RuntimeSetpointOverride,
+    AIRFLOW_ROOM_AC_M3_S_PER_W, EquivalentBatteryModel, HvacConfig, HvacControlState,
+    HvacEquipment, HvacEquipmentType, HvacRuntimeState, MAX_SPEEDS, RuntimeSetpointOverride,
 };
 pub use ndinterp::RegularGridInterpolator;
 pub use pv::PvConfig;

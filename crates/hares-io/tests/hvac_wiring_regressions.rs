@@ -1,4 +1,4 @@
-//! Regression tests for ticket 023 — HPXML HVAC configuration wiring gaps.
+//! Regression tests for HPXML HVAC configuration wiring gaps.
 //!
 //! Each test demonstrates a gap: a field that is present in the HPXML input
 //! and in the typed config struct, but is **not** wired through the resolver.
@@ -75,9 +75,9 @@ fn find_spec<'a>(
 // threshold default is 10 °C.
 
 #[test]
-#[should_panic(expected = "BUG (ticket 023 G1): CrankcaseHeaterWatts=75 must wire to")]
+#[should_panic(expected = "BUG (G1): CrankcaseHeaterWatts=75 must wire to")]
 fn g1_crankcase_heater_watts_wired_from_hpxml() {
-    // BUG (ticket 023 G1): the resolver sets crankcase_heater_kw = None
+    // BUG (G1): the resolver sets crankcase_heater_kw = None
     // regardless of the <CrankcaseHeaterWatts> HPXML value.
     // This test must FAIL until the wiring is added.
     let xml = wrap_systems(
@@ -107,16 +107,16 @@ fn g1_crankcase_heater_watts_wired_from_hpxml() {
     assert_eq!(
         cfg.crankcase_heater_kw,
         Some(0.075),
-        "BUG (ticket 023 G1): CrankcaseHeaterWatts=75 must wire to \
+        "BUG (G1): CrankcaseHeaterWatts=75 must wire to \
          crankcase_heater_kw=Some(0.075 kW); got {:?}",
         cfg.crankcase_heater_kw
     );
 }
 
 #[test]
-#[should_panic(expected = "BUG (ticket 023 G1): absent CrankcaseHeaterWatts must apply OCHRE")]
+#[should_panic(expected = "BUG (G1): absent CrankcaseHeaterWatts must apply OCHRE")]
 fn g1_crankcase_heater_absent_uses_ochre_default() {
-    // BUG (ticket 023 G1): when CrankcaseHeaterWatts is absent, the resolver
+    // BUG (G1): when CrankcaseHeaterWatts is absent, the resolver
     // must apply OCHRE-compatible defaults (50 W, 12.78 °C for central AC).
     // Currently it leaves both fields as None.
     // This test must FAIL until the default application is added.
@@ -146,14 +146,14 @@ fn g1_crankcase_heater_absent_uses_ochre_default() {
     assert_eq!(
         cfg.crankcase_heater_kw,
         Some(0.050),
-        "BUG (ticket 023 G1): absent CrankcaseHeaterWatts must apply OCHRE \
+        "BUG (G1): absent CrankcaseHeaterWatts must apply OCHRE \
          default of 0.050 kW (50 W) for central AC; got {:?}",
         cfg.crankcase_heater_kw
     );
     let threshold = cfg.crankcase_heater_threshold_c.unwrap_or(f64::NAN);
     assert!(
         (threshold - 12.78).abs() < 0.01,
-        "BUG (ticket 023 G1): absent threshold must default to 12.78 °C (55 °F); \
+        "BUG (G1): absent threshold must default to 12.78 °C (55 °F); \
          got {threshold:.2}"
     );
 }
@@ -232,8 +232,8 @@ fn g3_resolver_does_not_wire_min_compressor_fraction() {
 
     assert!(
         heater.parameters.get("min_compressor_fraction").is_none(),
-        "Gap confirmed (ticket 023 G3): min_compressor_fraction must be absent \
-         from resolver output until tickets 013+023-G3 are implemented; \
+        "Gap confirmed (G3): min_compressor_fraction must be absent \
+         from resolver output until the gap is closed; \
          if this assertion fires, the gap has been closed"
     );
 }
@@ -268,7 +268,7 @@ fn g4_gas_boiler_config_has_no_condensing_field() {
     // No `condensing` key in the raw params — the field doesn't exist yet.
     assert!(
         boiler.parameters.get("condensing").is_none(),
-        "Gap confirmed (ticket 023 G4): `condensing` field absent from \
+        "Gap confirmed (G4): `condensing` field absent from \
          GasBoilerConfig/params; AFUE=0.95 should be treated as condensing \
          (OCHRE: AFUE>0.90) once the field is added. \
          If this fires, the field has been added."
@@ -339,7 +339,7 @@ fn g6_supplemental_heating_lockout_temperature_not_read_from_standard_element() 
 
     assert!(
         supplemental_oat.is_none(),
-        "Gap confirmed (ticket 023 G6): SupplementalHeatingLockoutTemperature \
+        "Gap confirmed (G6): SupplementalHeatingLockoutTemperature \
          is not parsed from the standard HPXML element; max_oat_supplemental_c \
          must be None. Got {supplemental_oat:?}. \
          If this fires, the standard-element wiring has been added."

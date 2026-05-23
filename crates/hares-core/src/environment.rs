@@ -1916,9 +1916,9 @@ mod tests {
         );
     }
 
-    // ---- Regression tests for ticket 034: Kusuda amplitude derivation ----
+    // ---- Regression tests for Kusuda amplitude derivation ----
 
-    /// Regression for ticket 034, Defect 1: leap-year weather (8784 hourly records)
+    /// Regression for Defect 1: leap-year weather (8784 hourly records)
     /// must use 29-day February when computing monthly means for the Kusuda amplitude.
     ///
     /// The bug: `month_days` is hardcoded to `[31, 28, ...]` so February consumes only
@@ -1939,9 +1939,9 @@ mod tests {
     ///
     /// NOTE: this test FAILS with the current (buggy) code because `month_days` uses
     /// 28 for February even when `temps.len() == 8784`.
-    /// Fix pending on ticket 034 — will stop panicking when leap-year day count is corrected.
+    /// Fix pending — will stop panicking when leap-year day count is corrected.
     #[test]
-    #[should_panic(expected = "ticket-034 Defect 1")]
+    #[should_panic(expected = "expected monthly range")]
     fn leap_year_february_uses_29_days_for_monthly_mean() {
         // 8784 hours in a leap year (366 days × 24).
         let n = 8784usize;
@@ -2051,13 +2051,13 @@ mod tests {
         // The correct code must return range = 100.0.
         assert!(
             (range2 - 100.0).abs() < 0.01,
-            "ticket-034 Defect 1: expected monthly range = 100.0°C when March is \
+            "expected monthly range = 100.0°C when March is \
              100°C and all other months 0°C in a leap-year (8784-hour) series, \
              but got {range2:.4} — indicates February is not using 29-day slice"
         );
     }
 
-    /// Regression for ticket 034, Defect 2: when weather has fewer than 8760 hourly
+    /// Regression for Defect 2: when weather has fewer than 8760 hourly
     /// records, the fallback must derive the amplitude from whatever monthly means are
     /// available, NOT from the instantaneous min/max of the raw hourly series.
     ///
@@ -2068,10 +2068,10 @@ mod tests {
     /// choice per the ticket).  The buggy code returns 40°C.
     ///
     /// NOTE: this test FAILS with the current (buggy) code.
-    /// Fix pending on ticket 034 — will stop panicking when short-weather
+    /// Fix pending — will stop panicking when short-weather
     /// fallback uses monthly means instead of instantaneous extremes.
     #[test]
-    #[should_panic(expected = "ticket-034 Defect 2")]
+    #[should_panic(expected = "expected amplitude")]
     fn short_weather_fallback_uses_monthly_means_not_instantaneous_extremes() {
         let step_secs = 3600u32;
         let n = 48usize; // 2 days — far less than one full calendar month
@@ -2117,7 +2117,7 @@ mod tests {
         // Fixed code: no full months available → amplitude = 0.0.
         assert!(
             range < 5.0,
-            "ticket-034 Defect 2: expected amplitude ≈ 0.0 for 48-hour weather \
+            "expected amplitude ≈ 0.0 for 48-hour weather \
              (fewer than one full calendar month), but got {range:.4} — \
              indicates fallback is using instantaneous hourly extremes (simple_range) \
              instead of monthly means"

@@ -22,16 +22,17 @@ pub(super) const DEFAULT_PLF_DEGRADATION_COEFF: f64 = 0.25;
 impl HvacEquipment {
     /// Number of discrete speed stages. For single-speed equipment this is 1.
     pub fn n_speed_stages(&self) -> usize {
-        match self.speed_control_mode {
+        match self.config.speed_control_mode {
             SpeedControlMode::SingleSpeed => 1,
             SpeedControlMode::TwoSpeedSetpoint
             | SpeedControlMode::TwoSpeedTime
             | SpeedControlMode::TwoSpeedAlternating => 2,
             SpeedControlMode::MultiSpeedInterpolated => {
                 let caps = self
+                    .config
                     .heating_capacities_w
                     .len()
-                    .max(self.cooling_capacities_w.len());
+                    .max(self.config.cooling_capacities_w.len());
                 caps.max(1)
             }
             SpeedControlMode::VariableSpeedIdeal => 1,
@@ -42,17 +43,19 @@ impl HvacEquipment {
     ///
     /// If all speeds are disabled, `max_enabled_speed` falls back to the last stage.
     pub fn set_disabled_speeds(&mut self, disabled: &[bool]) {
+        use super::hvac_core::MAX_SPEEDS;
         let n = self.n_speed_stages();
-        self.disabled_speeds.resize(n, false);
-        for (i, slot) in self.disabled_speeds.iter_mut().enumerate() {
-            *slot = disabled.get(i).copied().unwrap_or(false);
+        self.control.speed_count = n as u8;
+        for i in 0..MAX_SPEEDS {
+            self.control.disabled_speeds[i] = disabled.get(i).copied().unwrap_or(false);
         }
-        self.max_enabled_speed = self
+        self.control.max_enabled_speed = self
+            .control
             .disabled_speeds
             .iter()
             .enumerate()
             .rev()
-            .find(|&(_, d)| !d)
+            .find(|&(i, &d)| !d && i < n)
             .map(|(i, _)| i)
             .unwrap_or(n.saturating_sub(1));
     }
@@ -60,12 +63,12 @@ impl HvacEquipment {
     /// Record the current zone temperature for the next step's `TwoSpeedTime` comparison.
     /// Pass `None` when the unit turns off to ensure the next on-cycle starts at low speed.
     pub fn update_prev_zone_temp(&mut self, zone_temp_c: Option<f64>) {
-        self.prev_zone_temp_c = zone_temp_c;
+        self.runtime.prev_zone_temp_c = zone_temp_c;
     }
 
     /// Advance the speed-stage timer by `dt_s` seconds.
     pub fn advance_speed_timer(&mut self, dt_s: f64) {
-        self.time_at_current_speed_s += dt_s;
+        self.runtime.time_at_current_speed_s += dt_s;
     }
 
     pub fn select_speed(&mut self, load_fraction: f64) -> SpeedSelection {
@@ -81,7 +84,7 @@ impl HvacEquipment {
         is_heating: bool,
     ) -> SpeedSelection {
         let load_fraction = load_fraction.clamp(0.0, 1.0);
-        let selection = match self.speed_control_mode {
+        let selection = match self.config.speed_control_mode {
             SpeedControlMode::SingleSpeed => SpeedSelection {
                 speed_index: 0,
                 part_load_ratio: load_fraction,
@@ -93,10 +96,10 @@ impl HvacEquipment {
             }
             SpeedControlMode::TwoSpeedAlternating => {
                 let desired_index = self.apply_disabled_speeds_two_speed(1);
-                if desired_index != self.last_speed_index {
-                    self.time_at_current_speed_s = 0.0;
+                if desired_index != self.runtime.last_speed_index {
+                    self.runtime.time_at_current_speed_s = 0.0;
                 }
-                let low_cap = self.low_speed_capacity_fraction.clamp(0.01, 0.999);
+                let low_cap = self.config.low_speed_capacity_fraction.clamp(0.01, 0.999);
                 let high_cap = 1.0; // high speed = full capacity fraction
                 if desired_index == 1 {
                     SpeedSelection {
@@ -115,22 +118,22 @@ impl HvacEquipment {
             SpeedControlMode::MultiSpeedInterpolated => self.select_multi_speed(load_fraction),
             SpeedControlMode::VariableSpeedIdeal => self.select_multi_speed(load_fraction),
         };
-        self.last_speed_index = selection.speed_index;
-        self.last_speed_frac = selection.speed_frac;
+        self.runtime.last_speed_index = selection.speed_index;
+        self.runtime.last_speed_frac = selection.speed_frac;
         selection
     }
 
     fn select_two_speed_setpoint(&mut self, load_fraction: f64) -> SpeedSelection {
-        let low_cap = self.low_speed_capacity_fraction.clamp(0.01, 0.999);
+        let low_cap = self.config.low_speed_capacity_fraction.clamp(0.01, 0.999);
         let desired_index = if load_fraction > low_cap { 1 } else { 0 };
         let desired_index = self.apply_disabled_speeds_two_speed(desired_index);
-        let locked = self.time_at_current_speed_s < self.min_time_per_speed_s
-            && desired_index != self.last_speed_index;
+        let locked = self.runtime.time_at_current_speed_s < self.config.min_time_per_speed_s
+            && desired_index != self.runtime.last_speed_index;
         let speed_index = if locked {
-            self.last_speed_index
+            self.runtime.last_speed_index
         } else {
-            if desired_index != self.last_speed_index {
-                self.time_at_current_speed_s = 0.0;
+            if desired_index != self.runtime.last_speed_index {
+                self.runtime.time_at_current_speed_s = 0.0;
             }
             desired_index
         };
@@ -155,37 +158,37 @@ impl HvacEquipment {
         zone_temp_c: Option<f64>,
         is_heating: bool,
     ) -> SpeedSelection {
-        let (desired_index, fresh_cycle) = if let (Some(current), Some(prev)) =
-            (zone_temp_c, self.prev_zone_temp_c)
-        {
-            let moving_wrong_way = if is_heating {
-                current < prev
-            } else {
-                current > prev
-            };
-            let idx =
-                if moving_wrong_way && self.time_at_current_speed_s >= self.min_time_per_speed_s {
+        let (desired_index, fresh_cycle) =
+            if let (Some(current), Some(prev)) = (zone_temp_c, self.runtime.prev_zone_temp_c) {
+                let moving_wrong_way = if is_heating {
+                    current < prev
+                } else {
+                    current > prev
+                };
+                let idx = if moving_wrong_way
+                    && self.runtime.time_at_current_speed_s >= self.config.min_time_per_speed_s
+                {
                     1
                 } else {
-                    self.last_speed_index
+                    self.runtime.last_speed_index
                 };
-            (idx, false)
-        } else {
-            (0, true)
-        };
+                (idx, false)
+            } else {
+                (0, true)
+            };
         let desired_index = self.apply_disabled_speeds_two_speed(desired_index);
         let locked = !fresh_cycle
-            && self.time_at_current_speed_s < self.min_time_per_speed_s
-            && desired_index != self.last_speed_index;
+            && self.runtime.time_at_current_speed_s < self.config.min_time_per_speed_s
+            && desired_index != self.runtime.last_speed_index;
         let speed_index = if locked {
-            self.last_speed_index
+            self.runtime.last_speed_index
         } else {
-            if desired_index != self.last_speed_index {
-                self.time_at_current_speed_s = 0.0;
+            if desired_index != self.runtime.last_speed_index {
+                self.runtime.time_at_current_speed_s = 0.0;
             }
             desired_index
         };
-        let low_cap = self.low_speed_capacity_fraction.clamp(0.01, 0.999);
+        let low_cap = self.config.low_speed_capacity_fraction.clamp(0.01, 0.999);
         if speed_index == 1 {
             SpeedSelection {
                 speed_index: 1,
@@ -203,30 +206,31 @@ impl HvacEquipment {
 
     fn select_multi_speed(&self, load_fraction: f64) -> SpeedSelection {
         let caps = match self.thermostat_fsm.mode {
-            ThermostatMode::Heating if !self.heating_capacities_w.is_empty() => {
-                &self.heating_capacities_w
+            ThermostatMode::Heating if !self.config.heating_capacities_w.is_empty() => {
+                &self.config.heating_capacities_w
             }
-            ThermostatMode::Cooling if !self.cooling_capacities_w.is_empty() => {
-                &self.cooling_capacities_w
+            ThermostatMode::Cooling if !self.config.cooling_capacities_w.is_empty() => {
+                &self.config.cooling_capacities_w
             }
-            _ if !self.heating_capacities_w.is_empty() => &self.heating_capacities_w,
-            _ => &self.cooling_capacities_w,
+            _ if !self.config.heating_capacities_w.is_empty() => &self.config.heating_capacities_w,
+            _ => &self.config.cooling_capacities_w,
         };
         let cap_fracs = capacity_fractions_for(caps);
         interpolate_speed_stages(load_fraction, &cap_fracs, false)
     }
 
     fn apply_disabled_speeds_two_speed(&self, desired_index: usize) -> usize {
-        if self.disabled_speeds.is_empty() {
+        if self.control.speed_count == 0 {
             return desired_index;
         }
         if self
+            .control
             .disabled_speeds
             .get(desired_index)
             .copied()
             .unwrap_or(false)
         {
-            self.max_enabled_speed
+            self.control.max_enabled_speed
         } else {
             desired_index
         }
@@ -234,21 +238,21 @@ impl HvacEquipment {
 
     /// Compute part-load factor at the current speed stage.
     pub fn part_load_factor(&mut self, plr: f64) -> f64 {
-        self.part_load_factor_for_stage(plr, self.last_speed_index)
+        self.part_load_factor_for_stage(plr, self.runtime.last_speed_index)
     }
 
     /// Compute PLF for an explicit speed stage index.
     pub fn part_load_factor_for_stage(&mut self, plr: f64, stage_index: usize) -> f64 {
         if matches!(
-            self.speed_control_mode,
+            self.config.speed_control_mode,
             SpeedControlMode::VariableSpeedIdeal
         ) {
-            self.plf_state = 1.0;
+            self.runtime.plf_state = 1.0;
             return 1.0;
         }
         let plr = plr.clamp(0.0, 1.0);
 
-        let plf_raw = if let Some(ref curves) = self.eir_plr_coefficients {
+        let plf_raw = if let Some(ref curves) = self.config.eir_plr_coefficients {
             let coeffs = if let Some(&c) = curves.get(stage_index) {
                 c
             } else {
@@ -261,21 +265,21 @@ impl HvacEquipment {
             };
             quadratic(&coeffs, plr)
         } else {
-            let cd = self.plf_cooling_degradation_coeff.clamp(0.0, 1.0);
+            let cd = self.runtime.plf_cooling_degradation_coeff.clamp(0.0, 1.0);
             1.0 - cd * (1.0 - plr)
         };
 
-        if plf_raw < self.plf_min {
+        if plf_raw < self.config.plf_min {
             tracing::warn!(
                 plf_raw,
                 plr,
                 stage_index,
-                plf_min = self.plf_min,
+                plf_min = self.config.plf_min,
                 "PLF curve returned value < plf_min; check eir_plr or cooling_cd. Clamping to max(plf_min, PLR)."
             );
         }
-        let plf = plf_raw.clamp(self.plf_min.max(plr), 1.0);
-        self.plf_state = plf;
+        let plf = plf_raw.clamp(self.config.plf_min.max(plr), 1.0);
+        self.runtime.plf_state = plf;
         plf
     }
 
@@ -285,19 +289,21 @@ impl HvacEquipment {
         steady_capacity_w: f64,
         dt_min: f64,
     ) -> f64 {
-        let on_now = self.duty_cycle > 0.0;
-        let mult = self.startup.capacity_multiplier(on_now, dt_min);
+        let on_now = self.runtime.duty_cycle > 0.0;
+        let mult = self.runtime.startup.capacity_multiplier(on_now, dt_min);
         steady_capacity_w * mult
     }
 
     pub fn rated_capacity_w(&self, mode: ThermostatMode) -> f64 {
         match mode {
             ThermostatMode::Heating => self
+                .config
                 .heating_capacities_w
                 .first()
                 .copied()
                 .unwrap_or_default(),
             ThermostatMode::Cooling => self
+                .config
                 .cooling_capacities_w
                 .first()
                 .copied()
@@ -314,25 +320,27 @@ impl HvacEquipment {
     }
 
     pub fn eir_at_stage(&self, stage_index: usize) -> f64 {
-        if self.eir_by_stage.is_empty() {
+        if self.config.eir_by_stage.is_empty() {
             return 1.0;
         }
-        self.eir_by_stage[stage_index.min(self.eir_by_stage.len() - 1)]
+        self.config.eir_by_stage[stage_index.min(self.config.eir_by_stage.len() - 1)]
     }
 
     /// Normalized capacity fractions `cap[i] / cap[last]` for the populated capacities array.
     pub fn capacity_fractions(&self) -> Vec<f64> {
         let caps = match self.thermostat_fsm.mode {
-            ThermostatMode::Heating if !self.heating_capacities_w.is_empty() => {
-                &self.heating_capacities_w
+            ThermostatMode::Heating if !self.config.heating_capacities_w.is_empty() => {
+                &self.config.heating_capacities_w
             }
-            ThermostatMode::Cooling if !self.cooling_capacities_w.is_empty() => {
-                &self.cooling_capacities_w
+            ThermostatMode::Cooling if !self.config.cooling_capacities_w.is_empty() => {
+                &self.config.cooling_capacities_w
             }
-            _ if self.heating_capacities_w.len() >= self.cooling_capacities_w.len() => {
-                &self.heating_capacities_w
+            _ if self.config.heating_capacities_w.len()
+                >= self.config.cooling_capacities_w.len() =>
+            {
+                &self.config.heating_capacities_w
             }
-            _ => &self.cooling_capacities_w,
+            _ => &self.config.cooling_capacities_w,
         };
         capacity_fractions_for(caps)
     }
@@ -365,15 +373,15 @@ impl HvacEquipment {
     }
 
     pub fn airflow_m3_s_for_capacity_w(&self, capacity_w: f64) -> f64 {
-        capacity_w.max(0.0) * self.airflow_m3_s_per_w
+        capacity_w.max(0.0) * self.config.airflow_m3_s_per_w
     }
 
     pub fn fan_power_w(&self, airflow_m3_s: f64) -> f64 {
-        airflow_m3_s.max(0.0) * self.fan_power_w_per_m3_s
+        airflow_m3_s.max(0.0) * self.config.fan_power_w_per_m3_s
     }
 
     pub fn sensible_latent_from_shr(&self, total_cooling_w: f64) -> (f64, f64) {
-        let shr = self.shr.clamp(0.0, 1.0);
+        let shr = self.config.shr.clamp(0.0, 1.0);
         let sensible = total_cooling_w * shr;
         let latent = total_cooling_w - sensible;
         (sensible, latent)
@@ -384,21 +392,21 @@ impl HvacEquipment {
 mod tests {
     use hares_types::ZoneId;
 
-    use super::super::hvac_core::{HvacEquipment, HvacEquipmentType};
+    use super::super::hvac_core::{HvacEquipment, HvacEquipmentType, MAX_SPEEDS};
     use super::super::speed_control::SpeedControlMode;
     use super::super::thermostat::ThermostatMode;
 
     fn make_single_speed() -> HvacEquipment {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::SingleSpeed;
-        hvac.heating_capacities_w = vec![10_000.0];
+        hvac.config.speed_control_mode = SpeedControlMode::SingleSpeed;
+        hvac.config.heating_capacities_w = vec![10_000.0];
         hvac
     }
 
     fn make_multi_speed_4() -> HvacEquipment {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
-        hvac.cooling_capacities_w = vec![2_500.0, 5_000.0, 7_500.0, 10_000.0];
+        hvac.config.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        hvac.config.cooling_capacities_w = vec![2_500.0, 5_000.0, 7_500.0, 10_000.0];
         hvac
     }
 
@@ -406,7 +414,7 @@ mod tests {
     #[test]
     fn plf_ahri_210_240_default_cd() {
         let mut hvac = make_single_speed();
-        assert!((hvac.plf_cooling_degradation_coeff - 0.25).abs() < 1e-12);
+        assert!((hvac.runtime.plf_cooling_degradation_coeff - 0.25).abs() < 1e-12);
 
         let cases: &[(f64, f64)] = &[(1.00, 1.000), (0.75, 0.9375), (0.50, 0.875)];
         for &(plr, expected_plf) in cases {
@@ -436,7 +444,7 @@ mod tests {
     #[test]
     fn plf_floor_clamp_with_high_cd() {
         let mut hvac = make_single_speed();
-        hvac.plf_cooling_degradation_coeff = 0.5;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.5;
         let plf = hvac.part_load_factor_for_stage(0.3, 0);
         assert!(
             (plf - 0.7).abs() < 1e-9,
@@ -449,8 +457,8 @@ mod tests {
     #[test]
     fn plf_floor_uses_custom_plf_min() {
         let mut hvac = make_single_speed();
-        hvac.plf_cooling_degradation_coeff = 0.5;
-        hvac.plf_min = 0.2195;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.5;
+        hvac.config.plf_min = 0.2195;
         let plf = hvac.part_load_factor_for_stage(0.3, 0);
         // raw=0.65, floor=max(0.2195, 0.3)=0.3, so PLF=0.65 (above floor)
         assert!(
@@ -468,7 +476,7 @@ mod tests {
 
         // Extreme: Cd=0.95, PLR=0.1 → raw PLF = 1 - 0.95*0.9 = 0.145 < plf_min=0.2195
         // floor=max(0.2195, 0.1)=0.2195, clamp to 0.2195
-        hvac.plf_cooling_degradation_coeff = 0.95;
+        hvac.runtime.plf_cooling_degradation_coeff = 0.95;
         let plf3 = hvac.part_load_factor_for_stage(0.1, 0);
         assert!(
             (plf3 - 0.2195).abs() < 1e-9,
@@ -530,7 +538,7 @@ mod tests {
     fn interpolated_eir_between_stages() {
         let mut hvac = make_single_speed();
         // COP ~3.3 at low speed, ~2.5 at high speed (realistic AC EIR values)
-        hvac.eir_by_stage = vec![0.30, 0.40];
+        hvac.config.eir_by_stage = vec![0.30, 0.40];
         let result = hvac.interpolated_eir(0, 0.5);
         assert!(
             (result - 0.35).abs() < 1e-9,
@@ -542,7 +550,7 @@ mod tests {
     #[test]
     fn interpolated_eir_at_stage_boundary() {
         let mut hvac = make_single_speed();
-        hvac.eir_by_stage = vec![0.30, 0.40];
+        hvac.config.eir_by_stage = vec![0.30, 0.40];
         let result = hvac.interpolated_eir(0, 0.0);
         assert!(
             (result - 0.30).abs() < 1e-9,
@@ -555,7 +563,7 @@ mod tests {
     #[test]
     fn capacity_fractions_two_speed() {
         let mut hvac = make_single_speed();
-        hvac.heating_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.config.heating_capacities_w = vec![5_000.0, 10_000.0];
         hvac.thermostat_fsm.mode = ThermostatMode::Heating;
         let fracs = hvac.capacity_fractions();
         assert_eq!(fracs.len(), 2, "two-speed must yield two fractions");
@@ -580,8 +588,8 @@ mod tests {
     #[test]
     fn capacity_fractions_follow_active_mode() {
         let mut hvac = make_single_speed();
-        hvac.heating_capacities_w = vec![4_000.0, 8_000.0];
-        hvac.cooling_capacities_w = vec![2_000.0, 4_000.0, 6_000.0, 12_000.0];
+        hvac.config.heating_capacities_w = vec![4_000.0, 8_000.0];
+        hvac.config.cooling_capacities_w = vec![2_000.0, 4_000.0, 6_000.0, 12_000.0];
 
         hvac.thermostat_fsm.mode = ThermostatMode::Heating;
         let heating_fracs = hvac.capacity_fractions();
@@ -595,8 +603,8 @@ mod tests {
     #[test]
     fn two_speed_alternating_normalizes_low_stage_plr_when_high_disabled() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
-        hvac.low_speed_capacity_fraction = 0.5;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.config.low_speed_capacity_fraction = 0.5;
         hvac.set_disabled_speeds(&[false, true]);
 
         let sel = hvac.select_speed(0.3);
@@ -607,22 +615,22 @@ mod tests {
 
     fn make_two_speed_setpoint() -> HvacEquipment {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
-        hvac.cooling_capacities_w = vec![5_000.0, 10_000.0];
-        hvac.low_speed_capacity_fraction = 0.5;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.config.cooling_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.config.low_speed_capacity_fraction = 0.5;
         // Set min_time_per_speed_s = 0 so tests are not time-locked.
-        hvac.min_time_per_speed_s = 0.0;
-        hvac.time_at_current_speed_s = 0.0;
+        hvac.config.min_time_per_speed_s = 0.0;
+        hvac.runtime.time_at_current_speed_s = 0.0;
         hvac
     }
 
     fn make_two_speed_time() -> HvacEquipment {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedTime;
-        hvac.cooling_capacities_w = vec![5_000.0, 10_000.0];
-        hvac.low_speed_capacity_fraction = 0.5;
-        hvac.min_time_per_speed_s = 300.0;
-        hvac.time_at_current_speed_s = 0.0;
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.config.cooling_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.config.low_speed_capacity_fraction = 0.5;
+        hvac.config.min_time_per_speed_s = 300.0;
+        hvac.runtime.time_at_current_speed_s = 0.0;
         hvac
     }
 
@@ -703,9 +711,9 @@ mod tests {
     fn select_speed_two_speed_time_min_guard() {
         let mut hvac = make_two_speed_time();
         // Establish: running at speed 0, timer has not yet expired.
-        hvac.last_speed_index = 0;
-        hvac.time_at_current_speed_s = 100.0; // less than 300 s minimum
-        hvac.prev_zone_temp_c = Some(25.0);
+        hvac.runtime.last_speed_index = 0;
+        hvac.runtime.time_at_current_speed_s = 100.0; // less than 300 s minimum
+        hvac.runtime.prev_zone_temp_c = Some(25.0);
 
         // Zone temp is rising during cooling -- would normally trigger escalation,
         // but the min-time guard must block it.
@@ -723,9 +731,9 @@ mod tests {
     #[test]
     fn startup_capacity_degradation_cold_start() {
         let mut hvac = make_single_speed();
-        hvac.duty_cycle = 1.0; // unit is on
-        hvac.startup.c_d = 0.25;
-        hvac.startup.time_since_start_min = 0.0;
+        hvac.runtime.duty_cycle = 1.0; // unit is on
+        hvac.runtime.startup.c_d = 0.25;
+        hvac.runtime.startup.time_since_start_min = 0.0;
 
         let steady_w = 10_000.0;
         let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
@@ -755,9 +763,9 @@ mod tests {
     #[test]
     fn startup_capacity_degradation_c_d_zero_no_ramp() {
         let mut hvac = make_single_speed();
-        hvac.duty_cycle = 1.0;
-        hvac.startup.c_d = 0.0;
-        hvac.startup.time_since_start_min = 0.0;
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = 0.0;
+        hvac.runtime.startup.time_since_start_min = 0.0;
 
         let steady_w = 10_000.0;
         let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
@@ -779,9 +787,9 @@ mod tests {
 
         // Run enough on-steps to pass t_full.
         let mut hvac = make_single_speed();
-        hvac.duty_cycle = 1.0;
-        hvac.startup.c_d = c_d;
-        hvac.startup.time_since_start_min = 0.0;
+        hvac.runtime.duty_cycle = 1.0;
+        hvac.runtime.startup.c_d = c_d;
+        hvac.runtime.startup.time_since_start_min = 0.0;
 
         // Advance beyond t_full with 1-min steps.
         let mut mult_at_full = 0.0_f64;
@@ -795,11 +803,11 @@ mod tests {
         );
 
         // Off cycle resets the timer.
-        hvac.duty_cycle = 0.0;
+        hvac.runtime.duty_cycle = 0.0;
         let _ = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
 
         // First on-step after off must ramp again (mult < 1.0).
-        hvac.duty_cycle = 1.0;
+        hvac.runtime.duty_cycle = 1.0;
         let w_restart = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
         assert!(
             w_restart < steady_w,
@@ -807,59 +815,48 @@ mod tests {
         );
     }
 
-    // ---- ticket 008: disabled_speeds is Vec<bool> and calls Vec::resize on every
-    // set_disabled_speeds invocation, allocating on the heap in the control-signal path.
-    // When ticket 008 is implemented these tests must be updated: disabled_speeds should
-    // become [bool; MAX_SPEEDS] with a speed_count: u8 field and no heap allocation.
+    // ---- ticket 008: disabled_speeds is now [bool; MAX_SPEEDS] (stack-allocated) ----
 
-    /// Demonstrates that disabled_speeds is currently Vec<bool> (heap-allocated).
-    /// After ticket 008 this should be [bool; MAX_SPEEDS] (stack-allocated).
+    /// Verifies that disabled_speeds is now a fixed-size array [bool; MAX_SPEEDS]
+    /// (ticket 008) instead of a heap-allocated Vec<bool>.
     #[test]
-    fn disabled_speeds_is_vec_not_fixed_array() {
+    fn disabled_speeds_is_fixed_array_not_vec() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
-        hvac.cooling_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.config.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.config.cooling_capacities_w = vec![5_000.0, 10_000.0];
 
-        // Initially empty (new() sets vec![]).
         assert_eq!(
-            hvac.disabled_speeds.len(),
-            0,
-            "ticket-008: disabled_speeds starts empty Vec"
+            hvac.control.speed_count, 0,
+            "speed_count starts at 0 before set_disabled_speeds"
         );
-
-        // set_disabled_speeds calls Vec::resize, which heap-allocates.
         hvac.set_disabled_speeds(&[false, true]);
         assert_eq!(
-            hvac.disabled_speeds.len(),
-            2,
-            "ticket-008: Vec::resize set length to n_speed_stages"
+            hvac.control.speed_count, 2,
+            "set_disabled_speeds sets speed_count to n_speed_stages"
         );
-        assert_eq!(hvac.disabled_speeds[0], false);
-        assert_eq!(hvac.disabled_speeds[1], true);
-
-        // A second call re-calls Vec::resize (potential reallocation).
-        hvac.set_disabled_speeds(&[false, false]);
-        assert_eq!(
-            hvac.disabled_speeds.len(),
-            2,
-            "ticket-008: second call still heap-backed Vec"
-        );
+        assert_eq!(hvac.control.disabled_speeds[0], false);
+        assert_eq!(hvac.control.disabled_speeds[1], true);
+        // Remaining slots must be false (initialized to [false; MAX_SPEEDS]).
+        for i in 2..MAX_SPEEDS {
+            assert_eq!(
+                hvac.control.disabled_speeds[i], false,
+                "slot {i} must be false"
+            );
+        }
     }
 
-    /// Demonstrates that MAX_SPEEDS is absent from the codebase (ticket 008 must define it).
-    /// This test documents the absence; it would fail to compile after ticket 008 introduces the
-    /// constant.  For now it is a no-op compile-time check via the type system.
+    /// Verifies that MAX_SPEEDS is defined and disabled_speeds is typed [bool; MAX_SPEEDS].
     #[test]
-    fn max_speeds_constant_not_yet_defined() {
-        // ticket-008: after implementation, `const MAX_SPEEDS: usize = 8` must exist
-        // and disabled_speeds must be typed [bool; MAX_SPEEDS].
-        // This assertion documents the current state where no MAX_SPEEDS constant exists.
-        let hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
-        // Verify the type is currently Vec — size_of::<Vec<bool>>() == 3 * usize (ptr+len+cap).
+    fn max_speeds_constant_defined() {
         assert_eq!(
-            std::mem::size_of_val(&hvac.disabled_speeds),
-            3 * std::mem::size_of::<usize>(),
-            "ticket-008: disabled_speeds must be Vec<bool> (24 bytes on 64-bit) until ticket 008 fixes it"
+            MAX_SPEEDS, 8,
+            "MAX_SPEEDS must be 8 (highest stage count in default curves)"
+        );
+        let hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        assert_eq!(
+            std::mem::size_of_val(&hvac.control.disabled_speeds),
+            MAX_SPEEDS,
+            "disabled_speeds must be [bool; MAX_SPEEDS]"
         );
     }
 }

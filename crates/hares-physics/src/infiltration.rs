@@ -1511,27 +1511,27 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Regression tests for ticket 028: terrain/height correction invariants
+    // Regression tests for terrain/height correction invariants
     // -----------------------------------------------------------------------
 
     /// Verify the suburban terrain at 8 m height correction factor.
     ///
-    /// Ticket 028 claims `terrain_wind_speed(u_met, 0.22, 370.0, 8.0) ≈ 0.62 × u_met`
+    /// Claims that `terrain_wind_speed(u_met, 0.22, 370.0, 8.0) ≈ 0.62 × u_met`
     /// (suburban at 8 m per ASHRAE HoF Ch. 24 Table 1).
     ///
     /// The actual formula gives 0.6824, not 0.62.  This test pins the correct value
     /// so any change to the terrain constants is caught immediately.
     #[test]
-    fn ticket028_suburban_8m_correction_factor() {
+    fn suburban_8m_correction_factor() {
         // ASHRAE HoF Ch.24 Table 1 suburban terrain: alpha=0.22, delta=370 m.
         // Met station: alpha=0.14, delta=270 m, height=10 m.
         let factor = terrain_wind_speed(1.0, SUBURBAN_ALPHA, SUBURBAN_DELTA_M, 8.0);
-        // Ticket 028 states ~0.62; actual value is ~0.6824.
-        // This test documents the correct value so the ticket's numeric claim can be corrected.
+        // A prior claim stated ~0.62; actual value is ~0.6824.
+        // This test documents the correct value so the numeric claim can be corrected.
         assert!(
             (factor - 0.6824).abs() < 0.001,
             "suburban 8 m correction factor: expected ~0.6824, got {factor:.6} \
-             (ticket 028 incorrectly states ~0.62)"
+             (incorrectly stated as ~0.62)"
         );
         assert!(
             factor < 1.0,
@@ -1552,7 +1552,7 @@ mod tests {
     /// wind speed to a coefficient set with `f_t = 1.0` (i.e., terrain correction
     /// embedded in the coefficient, not the speed).
     #[test]
-    fn ticket028_ela_wind_coeff_embeds_terrain_correction() {
+    fn ela_wind_coeff_embeds_terrain_correction() {
         // Build ELA wind coefficient for suburban terrain at 5 m building height.
         let (_, wind_coeff_with_terrain) =
             calculate_ela_coefficients(0.0, 2.5, 2.5, TerrainClass::Suburban, SHIELDING_NORMAL);
@@ -1589,7 +1589,7 @@ mod tests {
         // Double-correction must understate flow relative to single-correction.
         assert!(
             flow_double_corrected < flow_correct,
-            "double-correcting wind speed (ticket-028 bug path) must understate infiltration: \
+            "double-correcting wind speed must understate infiltration: \
              double={flow_double_corrected:.8}, correct={flow_correct:.8}"
         );
 
@@ -1606,7 +1606,7 @@ mod tests {
     /// into `shelter_coeff`, so `ashrae_wind_stack` must receive the raw met-station
     /// wind speed (not a separately terrain-corrected one) to avoid double-correction.
     #[test]
-    fn ticket028_aim2_shelter_coeff_embeds_terrain_correction() {
+    fn aim2_shelter_coeff_embeds_terrain_correction() {
         // Suburban terrain at 5 m infiltration height.
         let params = Aim2Params {
             ach50: 7.0,

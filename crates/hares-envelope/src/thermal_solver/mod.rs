@@ -2036,7 +2036,7 @@ mod tests {
         );
     }
 
-    /// Regression test for ticket #129: when `solve_ideal_capacity_for_target` encounters a
+    /// Regression test: when `solve_ideal_capacity_for_target` encounters a
     /// singular/zero-gain condition (failure path), it silently returns 0.0 and currently
     /// logs at `debug!`. This test documents the failure path returns 0 and verifies the
     /// bug is present (no `warn!` is emitted). When the ticket fix is applied, the log
@@ -2095,10 +2095,10 @@ mod tests {
         let q = solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
         assert_eq!(
             q, 0.0,
-            "failure path must return 0.0 (silent fallback — ticket #129: log level should be warn)"
+            "failure path must return 0.0 (silent fallback — log level should be warn)"
         );
         // NOTE: this test intentionally does NOT assert a warn! is captured, because
-        // `tracing-test` is not yet a dev-dependency. Once ticket #129 is fixed, add
+        // `tracing-test` is not yet a dev-dependency. Once the log level fix is applied, add
         // `tracing-test` to [dev-dependencies] and add:
         //   #[traced_test] and assert!(logs_contain("solve_ideal_capacity_for_target failed"))
     }
@@ -4767,14 +4767,14 @@ mod tests {
         );
     }
 
-    // Regression test for ticket #117:
+    // Regression test:
     // The comment at ports.rs:135-136 says "Windows (input_index=None)" but
     // solver_builder always sets input_index: Some(zone_air_idx) for every surface,
     // including windows. Windows are excluded from the solar radiant distribution
     // because solar_absorptance = 0.0 produces zero weight — NOT because
     // input_index is None (which never occurs in production).
     #[test]
-    fn ticket_117_window_excluded_via_zero_solar_absorptance_not_none_input_index() {
+    fn window_excluded_via_zero_solar_absorptance_not_none_input_index() {
         use hares_types::{THERMAL_CATEGORY_COUNT, ThermalAccumulator};
 
         let env = env_for_temp(20.0, 10.0);

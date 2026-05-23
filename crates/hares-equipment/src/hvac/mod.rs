@@ -24,10 +24,13 @@ pub(super) mod thermostat;
 
 pub use cooling_config::{CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig};
 pub use equivalent_battery::EquivalentBatteryModel;
-pub use heat_pump_config::{HeatPumpConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+pub use heat_pump_config::{
+    HeatPumpCommonConfig, HeatPumpConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
+};
 pub use hvac_core::{
     AIRFLOW_CENTRAL_AC_M3_S_PER_W, AIRFLOW_HEATING_M3_S_PER_W, AIRFLOW_MSHP_COOLING_M3_S_PER_W,
-    AIRFLOW_ROOM_AC_M3_S_PER_W, HvacEquipment, HvacEquipmentType,
+    AIRFLOW_ROOM_AC_M3_S_PER_W, HvacConfig, HvacControlState, HvacEquipment, HvacEquipmentType,
+    HvacRuntimeState, MAX_SPEEDS,
 };
 pub use speed_control::{
     SpeedControlMode, SpeedSelection, StartupConfig, capacity_fractions_for,

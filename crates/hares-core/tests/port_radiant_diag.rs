@@ -1,12 +1,12 @@
-//! Ticket #108 — `port_radiant_w` missing from `EnvelopeDiag`.
+//! `port_radiant_w` missing from `EnvelopeDiag`.
 //!
 //! `EnvelopeComponentGains` carries `port_radiant_w`, but the diagnostic
 //! wrapper `EnvelopeDiag` only exposes `port_sensible_w`, dropping the
 //! radiant component.
 //!
 //! Commented out: `port_radiant_w` field does not yet exist on
-//! `EnvelopeDiag` — fix pending on ticket 108.
-//! Uncomment when ticket 108 is resolved.
+//! `EnvelopeDiag` — fix pending.
+//! Uncomment when resolved.
 
 // use hares_core::diagnostics::EnvelopeDiag;
 // use hares_envelope::EnvelopeComponentGains;

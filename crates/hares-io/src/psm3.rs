@@ -694,7 +694,7 @@ mod tests {
         );
     }
 
-    // ── Regression tests for ticket 025 ─────────────────────────────────────
+    // ── PSM3 Lwdown / Stefan-Boltzmann path ──────────────────────────────
 
     /// When IR = 0.0 (no column present), sky temp from compute_sky_temp_c must
     /// be numerically identical to the current clark_allen_sky_temp_c result.
@@ -730,9 +730,9 @@ mod tests {
     ///
     /// This test FAILS on current code (the parser ignores the Lwdown column
     /// and always calls clark_allen_sky_temp_c).  It will pass once the fix
-    /// from ticket 025 is applied.
-    /// Fix pending on ticket 025 — will stop panicking when PSM3 Lwdown column activates Stefan-Boltzmann path
-    #[should_panic(expected = "ticket-025")]
+    /// is applied.
+    /// Will stop panicking when PSM3 Lwdown column activates Stefan-Boltzmann path
+    #[should_panic(expected = "Stefan-Boltzmann inversion")]
     #[test]
     fn psm3_lwdown_column_activates_stefan_boltzmann_path() {
         use crate::epw::compute_sky_temp_c;
@@ -778,7 +778,7 @@ mod tests {
         // After the fix: sky_temp_c must equal the Stefan-Boltzmann inversion.
         assert!(
             (ts.sky_temp_c[0] - stefan_boltzmann_expected).abs() < 1e-6,
-            "ticket-025: PSM3 with Lwdown column must use Stefan-Boltzmann inversion \
+            "PSM3 with Lwdown column must use Stefan-Boltzmann inversion \
              (expected {stefan_boltzmann_expected:.4} °C) but got {:.4} °C \
              (Clark-Allen fallback would give {clark_allen_fallback:.4} °C)",
             ts.sky_temp_c[0]
@@ -787,7 +787,7 @@ mod tests {
         // After the fix: horizontal_infrared_w_m2 must be populated from the column.
         assert!(
             (ts.horizontal_infrared_w_m2[0] - lwdown).abs() < 1e-6,
-            "ticket-025: PSM3 Lwdown column must populate horizontal_infrared_w_m2 \
+            "PSM3 Lwdown column must populate horizontal_infrared_w_m2 \
              (expected {lwdown}) but got {}",
             ts.horizontal_infrared_w_m2[0]
         );

@@ -37,8 +37,8 @@ impl HpCooler {
         let mut inner = AirConditioner::new(config.clone());
         if is_mshp {
             let mshp_type = crate::hvac::hvac_core::HvacEquipmentType::MiniSplitCool;
-            inner.core.hvac.equipment_type = mshp_type;
-            inner.core.hvac.airflow_m3_s_per_w = mshp_type.default_airflow_m3_s_per_w();
+            inner.core.hvac.config.equipment_type = mshp_type;
+            inner.core.hvac.config.airflow_m3_s_per_w = mshp_type.default_airflow_m3_s_per_w();
             // Apply MSHP crankcase defaults at construction so that step() uses
             // correct values (15 W / 0 °C) even if init() has not been called yet.
             inner.set_crankcase_defaults_if_unconfigured(
@@ -106,9 +106,11 @@ impl HpCooler {
         hp_cfg: &HeatPumpCoolerConfig,
     ) -> crate::Result<EquipmentConfig> {
         let eir = hp_cfg
+            .common
             .cooling_eir
             .or_else(|| {
                 hp_cfg
+                    .common
                     .stage_cooling_eirs
                     .as_ref()
                     .and_then(|eirs| eirs.first().copied())
@@ -120,9 +122,11 @@ impl HpCooler {
             })?;
 
         let capacity_w = hp_cfg
+            .common
             .cooling_capacity_w
             .or_else(|| {
                 hp_cfg
+                    .common
                     .stage_cooling_capacities_w
                     .as_ref()
                     .and_then(|caps| caps.last().copied())
@@ -130,38 +134,41 @@ impl HpCooler {
             .unwrap_or(8_000.0);
 
         let mapped = CentralAirConditionerConfig {
-            equipment_id: hp_cfg.equipment_id,
-            zone_id: hp_cfg.zone_id,
+            equipment_id: hp_cfg.common.equipment_id,
+            zone_id: hp_cfg.common.zone_id,
             capacity_w,
             eir,
-            shr: hp_cfg.shr,
+            shr: hp_cfg.common.shr,
             number_of_speeds: hp_cfg.effective_number_of_speeds(),
-            stage_capacities_w: hp_cfg.stage_cooling_capacities_w.clone(),
-            stage_eirs: hp_cfg.stage_cooling_eirs.clone(),
+            stage_capacities_w: hp_cfg.common.stage_cooling_capacities_w.clone(),
+            stage_eirs: hp_cfg.common.stage_cooling_eirs.clone(),
             stage_shrs: hp_cfg.stage_shrs.clone(),
-            fan_power_w: hp_cfg.fan_power_w,
-            fan_power_w_per_cfm: hp_cfg.fan_power_w_per_cfm,
-            cooling_setpoint_c: hp_cfg.cooling_setpoint_c,
-            heating_setpoint_c: hp_cfg.heating_setpoint_c,
-            hysteresis_c: hp_cfg.hysteresis_c,
-            heating_setpoint_source: hp_cfg.heating_setpoint_source.clone(),
-            cooling_setpoint_source: hp_cfg.cooling_setpoint_source.clone(),
-            airflow_m3_s_per_w: hp_cfg.airflow_m3_s_per_w,
-            fraction_load_served: hp_cfg.fraction_cooling_load_served,
+            fan_power_w: hp_cfg.common.fan_power_w,
+            fan_power_w_per_cfm: hp_cfg.common.fan_power_w_per_cfm,
+            cooling_setpoint_c: hp_cfg.common.cooling_setpoint_c,
+            heating_setpoint_c: hp_cfg.common.heating_setpoint_c,
+            hysteresis_c: hp_cfg.common.hysteresis_c,
+            heating_setpoint_source: hp_cfg.common.heating_setpoint_source.clone(),
+            cooling_setpoint_source: hp_cfg.common.cooling_setpoint_source.clone(),
+            airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
+            fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
-            duct: hp_cfg.duct.clone(),
-            system_type: hp_cfg.is_mini_split.then(|| "mini-split".to_string()),
+            duct: hp_cfg.common.duct.clone(),
+            system_type: hp_cfg
+                .common
+                .is_mini_split
+                .then(|| "mini-split".to_string()),
             startup_cd: hp_cfg.derived_cooling_startup_cd(),
-            biquadratic_x1_min: hp_cfg.biquadratic_x1_min,
-            biquadratic_x1_max: hp_cfg.biquadratic_x1_max,
-            biquadratic_x2_min: hp_cfg.biquadratic_x2_min,
-            biquadratic_x2_max: hp_cfg.biquadratic_x2_max,
-            ff_min: hp_cfg.ff_min,
-            ff_max: hp_cfg.ff_max,
-            plf_min: hp_cfg.plf_min,
-            plf_max: hp_cfg.plf_max,
+            biquadratic_x1_min: hp_cfg.common.biquadratic_x1_min,
+            biquadratic_x1_max: hp_cfg.common.biquadratic_x1_max,
+            biquadratic_x2_min: hp_cfg.common.biquadratic_x2_min,
+            biquadratic_x2_max: hp_cfg.common.biquadratic_x2_max,
+            ff_min: hp_cfg.common.ff_min,
+            ff_max: hp_cfg.common.ff_max,
+            plf_min: hp_cfg.common.plf_min,
+            plf_max: hp_cfg.common.plf_max,
         };
 
         Ok(EquipmentConfig::from_typed(
@@ -186,7 +193,7 @@ impl Equipment for HpCooler {
         typed_hp_cfg.validate()?;
         let mapped = Self::typed_hp_to_central_ac_config(config, &typed_hp_cfg)?;
         self.inner.init(&mapped, env)?;
-        let n_speeds = self.inner.core.hvac.cooling_capacities_w.len();
+        let n_speeds = self.inner.core.hvac.config.cooling_capacities_w.len();
         if let Some(shrs) = &typed_hp_cfg.stage_shrs {
             if !shrs.is_empty() && shrs.len() != n_speeds {
                 return Err(HaresError::Equipment(format!(
@@ -316,42 +323,44 @@ mod tests {
             "HP Cooler".to_string(),
             "ASHP Cooler".to_string(),
             crate::HeatPumpCoolerConfig {
-                equipment_id: None,
-                zone_id: Some(1),
-                heating_capacity_w: None,
-                heating_eir: None,
-                stage_heating_capacities_w: None,
-                stage_heating_eirs: None,
-                backup_fuel: None,
-                backup_capacity_w: None,
-                backup_eir: None,
-                fraction_heating_load_served: None,
-                cooling_capacity_w: Some(8_000.0),
-                cooling_eir: Some(0.33),
-                stage_cooling_capacities_w: None,
-                stage_cooling_eirs: None,
+                common: crate::HeatPumpCommonConfig {
+                    equipment_id: None,
+                    zone_id: Some(1),
+                    heating_capacity_w: None,
+                    heating_eir: None,
+                    stage_heating_capacities_w: None,
+                    stage_heating_eirs: None,
+                    backup_fuel: None,
+                    backup_capacity_w: None,
+                    backup_eir: None,
+                    fraction_heating_load_served: None,
+                    cooling_capacity_w: Some(8_000.0),
+                    cooling_eir: Some(0.33),
+                    stage_cooling_capacities_w: None,
+                    stage_cooling_eirs: None,
+                    fraction_cooling_load_served: None,
+                    number_of_speeds: 1,
+                    is_mini_split: false,
+                    shr: None,
+                    fan_power_w: None,
+                    fan_power_w_per_cfm: None,
+                    airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                    heating_setpoint_c: None,
+                    cooling_setpoint_c: None,
+                    hysteresis_c: None,
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                    duct: Default::default(),
+                    biquadratic_x1_min: None,
+                    biquadratic_x1_max: None,
+                    biquadratic_x2_min: None,
+                    biquadratic_x2_max: None,
+                    ff_min: None,
+                    ff_max: None,
+                    plf_min: None,
+                    plf_max: None,
+                },
                 stage_shrs: None,
-                fraction_cooling_load_served: None,
-                number_of_speeds: 1,
-                is_mini_split: false,
-                shr: None,
-                fan_power_w: None,
-                fan_power_w_per_cfm: None,
-                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
-                heating_setpoint_c: None,
-                cooling_setpoint_c: None,
-                hysteresis_c: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
-                duct: Default::default(),
-                biquadratic_x1_min: None,
-                biquadratic_x1_max: None,
-                biquadratic_x2_min: None,
-                biquadratic_x2_max: None,
-                ff_min: None,
-                ff_max: None,
-                plf_min: None,
-                plf_max: None,
             },
         )
     }
@@ -434,14 +443,14 @@ mod tests {
         let cfg = base_config();
         let eq = HpCooler::mshp_cooler(cfg);
         assert_eq!(
-            eq.inner.core.hvac.equipment_type,
+            eq.inner.core.hvac.config.equipment_type,
             crate::hvac::hvac_core::HvacEquipmentType::MiniSplitCool,
         );
         let expected = crate::hvac::hvac_core::AIRFLOW_MSHP_COOLING_M3_S_PER_W;
         assert!(
-            (eq.inner.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
+            (eq.inner.core.hvac.config.airflow_m3_s_per_w - expected).abs() < 1e-12,
             "MSHP cooler airflow mismatch, got {} m3/s/W",
-            eq.inner.core.hvac.airflow_m3_s_per_w
+            eq.inner.core.hvac.config.airflow_m3_s_per_w
         );
     }
 
@@ -613,11 +622,11 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
 
         assert_eq!(
-            eq.inner.core.hvac.speed_control_mode,
+            eq.inner.core.hvac.config.speed_control_mode,
             SpeedControlMode::VariableSpeedIdeal
         );
         assert_eq!(
-            eq.inner.core.hvac.startup.c_d, 0.0,
+            eq.inner.core.hvac.runtime.startup.c_d, 0.0,
             "typed mini-split cooling must derive zero startup Cd"
         );
     }
@@ -667,7 +676,7 @@ mod tests {
         .unwrap();
 
         eq.update_control(&env);
-        let duty = eq.inner.core.hvac.duty_cycle;
+        let duty = eq.inner.core.hvac.runtime.duty_cycle;
         assert!(
             duty > 0.0 && duty < 1.0,
             "mini-split variable-speed cooling should preserve fractional runtime near setpoint, got duty={duty}"

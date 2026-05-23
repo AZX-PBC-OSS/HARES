@@ -473,7 +473,7 @@ fn window_decomposition_continuity_at_threshold() {
     );
 }
 
-// ── Regression: ticket-036 exterior film handling ────────────────────────────
+// ── Regression: exterior film handling ────────────────────────────
 //
 // window_u_factor_decomposition returns (r_glass, r_int) where r_glass absorbs
 // the exterior film resistance (Ro,w ≈ 0.034 m²·K/W per EnergyPlus).  The
@@ -492,7 +492,7 @@ fn window_decomposition_continuity_at_threshold() {
 /// If it did, r_glass + r_int would be less than 1/U by Ro,w ≈ 0.034 m²·K/W.
 /// This test pins the current HARES/OCHRE behaviour: r_glass + r_int == 1/U.
 #[test]
-fn ticket036_exterior_film_absorbed_into_r_glass_matches_ochre() {
+fn exterior_film_absorbed_into_r_glass_matches_ochre() {
     let ep_ro_w = |u: f64| 1.0 / (0.025342 * u + 29.163853); // E+ formula, ~0.034
 
     for &u in &[0.5_f64, 1.0, 2.0, 3.0, 5.0, 5.85, 6.5] {
@@ -526,7 +526,7 @@ fn ticket036_exterior_film_absorbed_into_r_glass_matches_ochre() {
 /// HARES window_u_factor_decomposition does the same: r_glass = 1/U - r_int.
 /// This ensures full OCHRE parity.
 #[test]
-fn ticket036_hares_r_glass_matches_ochre_r_window() {
+fn hares_r_glass_matches_ochre_r_window() {
     for &u in &[1.0_f64, 2.0, 3.0] {
         let (r_glass, _r_int) = window_u_factor_decomposition(u);
         let ochre_res_int = if u < 5.85 {

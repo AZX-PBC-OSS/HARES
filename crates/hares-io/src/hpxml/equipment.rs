@@ -1504,11 +1504,11 @@ mod tests {
         );
     }
 
-    // --- Regression test for ticket 080 ---
+    // --- HeatingCapacity17F ratio ---
     // HeatingCapacity17F (21600 BTU/h) with HeatingCapacity (36000 BTU/h) must
     // produce capacity_ratio_at_17f ≈ 0.600 in the ASHP Heater typed config.
     // This test FAILS until the resolver reads HeatingCapacity17F.
-    /// Fix pending on ticket 080 — will stop panicking when HeatingCapacity17F is parsed into typed config
+    /// Will stop panicking when HeatingCapacity17F is parsed into typed config
     #[should_panic(expected = "capacity_ratio_at_17f")]
     #[test]
     fn ashp_heating_capacity_17f_ratio_is_parsed_into_typed_config() {
@@ -1546,17 +1546,19 @@ mod tests {
             .find(|s| s.name == "ASHP Heater")
             .expect("ASHP Heater spec must be present");
 
-        // ticket-080: the ratio must be present in the raw params map as
+        // The ratio must be present in the raw params map as
         // "capacity_ratio_at_17f" until the typed config grows the field.
         let ratio = heater
             .parameters
             .get("capacity_ratio_at_17f")
             .and_then(Value::as_f64)
-            .expect("ticket-080: HeatingCapacity17F must be parsed and stored as capacity_ratio_at_17f in params");
+            .expect(
+                "HeatingCapacity17F must be parsed and stored as capacity_ratio_at_17f in params",
+            );
 
         assert!(
             (ratio - 0.600).abs() < 0.01,
-            "ticket-080: capacity_ratio_at_17f = {ratio:.4}, expected ~0.600 (21600/36000)"
+            "capacity_ratio_at_17f = {ratio:.4}, expected ~0.600 (21600/36000)"
         );
     }
 
@@ -1596,7 +1598,7 @@ mod tests {
             .find(|s| s.name == "ASHP Heater")
             .expect("ASHP Heater spec must be present");
 
-        // ticket-080: when HeatingCapacity17F is absent the field must be None
+        // When HeatingCapacity17F is absent the field must be None
         // (cannot assert this yet -- typed config has no such field; the test
         // verifies at least that parsing succeeds without panic)
         let _typed: hares_equipment::HeatPumpHeaterConfig = heater
@@ -1607,16 +1609,16 @@ mod tests {
             .expect("heater typed config must deserialise");
     }
 
-    // Regression tests for ticket-083: unsupported HeatPumpType should not silently skip HVAC.
+    // Unsupported HeatPumpType should not silently skip HVAC.
     // Currently these tests document the BROKEN behaviour (silent skip → 0 specs).
     // After the fix they must be updated to assert an Err containing "unsupported HeatPumpType".
 
     #[test]
-    fn heat_pump_ground_to_air_currently_silently_skips_hvac_ticket_083() {
+    fn heat_pump_ground_to_air_currently_silently_skips_hvac() {
         // ground-to-air is a valid HPXML 4.x HeatPumpType (hpxml.nlr.gov/datadictionary/4.0.0)
         // but HARES has no handler for it.  The _ => None arm at resolve_hvac.rs:1454 causes the
         // if let Some(...) guard at line 1573 to be skipped, so the building emits zero HVAC specs.
-        // This test FAILS after the fix (which should return Err) — see ticket-083.
+        // This test FAILS after the fix (which should return Err).
         let xml = minimal_hvac_xml(
             r#"<HeatPump>
           <HeatPumpType>ground-to-air</HeatPumpType>
@@ -1633,12 +1635,12 @@ mod tests {
             !specs
                 .iter()
                 .any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
-            "ticket-083: ground-to-air silently drops HVAC — zero heater/cooler specs emitted"
+            "ground-to-air silently drops HVAC — zero heater/cooler specs emitted"
         );
     }
 
     #[test]
-    fn heat_pump_water_loop_to_air_currently_silently_skips_hvac_ticket_083() {
+    fn heat_pump_water_loop_to_air_currently_silently_skips_hvac() {
         // water-loop-to-air is another valid HPXML 4.x HeatPumpType that is unhandled.
         let xml = minimal_hvac_xml(
             r#"<HeatPump>
@@ -1654,7 +1656,7 @@ mod tests {
             !specs
                 .iter()
                 .any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
-            "ticket-083: water-loop-to-air silently drops HVAC — zero heater/cooler specs emitted"
+            "water-loop-to-air silently drops HVAC — zero heater/cooler specs emitted"
         );
     }
 }

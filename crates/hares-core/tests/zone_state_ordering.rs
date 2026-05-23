@@ -1,6 +1,6 @@
-//! Regression tests for Ticket 045: Equipment Ports Applied Before Zone State Update.
+//! Regression tests for Equipment Ports Applied Before Zone State Update.
 //!
-//! Defect 1: The ticket claimed non-thermal equipment (PV, Battery, EV) at Step 3b
+//! Defect 1: It was claimed that non-thermal equipment (PV, Battery, EV) at Step 3b
 //! (mod.rs:2168) sees post-integrate zone temperatures because it runs after
 //! `apply_thermal_update_to_zones` (mod.rs:2240). This test proves the claim is
 //! FALSE: Step 3b runs at line 2168, well before `integrate` at line 2236 and
@@ -40,7 +40,7 @@ fn nanos_suffix() -> u128 {
 
 fn unique_temp_toml(tag: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
-    path.push(format!("hares-ticket045-{tag}-{}.toml", nanos_suffix()));
+    path.push(format!("hares-zone-state-{tag}-{}.toml", nanos_suffix()));
     path
 }
 
@@ -205,7 +205,7 @@ impl Equipment for ZoneTemperatureSniffer {
 #[test]
 fn nonthermal_equipment_sees_predictor_consistent_zone_temps() {
     let recorded: ZoneTempRecord = Arc::new(Mutex::new(Vec::new()));
-    let mut dwelling = build_dwelling("ticket045-defect1");
+    let mut dwelling = build_dwelling("zone-state-defect1");
     dwelling.add_equipment(Box::new(ZoneTemperatureSniffer::new(
         "zone_temp_sniffer",
         Arc::clone(&recorded),
@@ -239,14 +239,14 @@ fn nonthermal_equipment_sees_predictor_consistent_zone_temps() {
 
 /// Documents the actual execution order in `run_timestep` as of the current
 /// code. This test is a static assertion that the line-number ordering
-/// described in the ticket is wrong: non-thermal equipment (Step 3b) occurs
+/// described is wrong: non-thermal equipment (Step 3b) occurs
 /// BEFORE envelope integration, not after apply_thermal_update_to_zones.
 ///
-/// The test passes vacuously — it is here as documentation that the ticket's
+/// The test passes vacuously — it is here as documentation that the
 /// ordering claim was audited and found incorrect. The substantive check is
-/// the code reading recorded in the audit section of the ticket.
+/// the code reading recorded in the audit section.
 #[test]
-fn ticket_045_defect1_ordering_claim_is_factually_incorrect() {
+fn ordering_claim_is_factually_incorrect() {
     // The ticket states:
     //   "Non-thermal equipment step (mod.rs:2168) runs AFTER apply_thermal_update_to_zones
     //    (mod.rs:2240)"
@@ -279,7 +279,7 @@ fn ticket_045_defect1_ordering_claim_is_factually_incorrect() {
 /// that broke the solver, this would surface as NaN or an extreme humidity ratio.
 #[test]
 fn humidity_solver_produces_valid_output_across_multiple_steps() {
-    let mut dwelling = build_dwelling("ticket045-defect2");
+    let mut dwelling = build_dwelling("zone-state-defect2");
 
     // Run 10 timesteps — enough to pass through any initialization edge case.
     for step in 0..10 {

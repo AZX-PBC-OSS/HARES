@@ -185,7 +185,7 @@ impl Equipment for ElectricBoiler {
                 self.eir
             )));
         }
-        self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
+        self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports);
         self.ports[1].loop_id = Some(self.loop_id);
@@ -207,8 +207,8 @@ impl Equipment for ElectricBoiler {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
-        let sf = self.hvac.space_fraction;
+        let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
+        let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;
         let electric_kw = thermal_output_w * self.eir / 1_000.0;
 
@@ -270,7 +270,7 @@ impl Equipment for ElectricBoiler {
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&BoilerState {
             mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.duty_cycle,
+            duty_cycle: self.hvac.runtime.duty_cycle,
             last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
             runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
@@ -287,7 +287,7 @@ impl Equipment for ElectricBoiler {
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: BoilerState = load_postcard(state)?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
-        self.hvac.duty_cycle = decoded.duty_cycle;
+        self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
@@ -431,7 +431,7 @@ impl Equipment for GasBoiler {
         self.eir_max = 1.0 / fuel_efficiency;
         self.condensing_eir_coeffs = DEFAULT_CONDENSING_EIR_COEFFS;
         self.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
-        self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
+        self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports);
         self.ports[3].loop_id = Some(self.loop_id);
@@ -453,8 +453,8 @@ impl Equipment for GasBoiler {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let plr = self.hvac.duty_cycle.clamp(0.0, 1.0);
-        let sf = self.hvac.space_fraction;
+        let plr = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
+        let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * plr * sf;
         let return_temp_c =
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
@@ -463,7 +463,7 @@ impl Equipment for GasBoiler {
         let zone_temp_c = env
             .zones
             .iter()
-            .find(|z| z.id == self.hvac.zone_id)
+            .find(|z| z.id == self.hvac.config.zone_id)
             .map(|z| z.temperature_c)
             .unwrap_or(20.0);
         let eir = if thermal_output_w > 0.0 {
@@ -562,7 +562,7 @@ impl Equipment for GasBoiler {
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&BoilerState {
             mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.duty_cycle,
+            duty_cycle: self.hvac.runtime.duty_cycle,
             last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
             runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
@@ -579,7 +579,7 @@ impl Equipment for GasBoiler {
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: BoilerState = load_postcard(state)?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
-        self.hvac.duty_cycle = decoded.duty_cycle;
+        self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
@@ -895,7 +895,7 @@ mod tests {
         eq.eir_max = 1.2;
         eq.condensing_eir_coeffs = DEFAULT_CONDENSING_EIR_COEFFS;
 
-        eq.hvac.duty_cycle = 0.5;
+        eq.hvac.runtime.duty_cycle = 0.5;
         eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
 
         env.custom_domains.push(DomainUpdate {
@@ -954,9 +954,9 @@ mod tests {
         non_boiler.condensing = false;
         non_boiler.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
 
-        cond_boiler.hvac.duty_cycle = 0.5;
+        cond_boiler.hvac.runtime.duty_cycle = 0.5;
         cond_boiler.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
-        non_boiler.hvac.duty_cycle = 0.5;
+        non_boiler.hvac.runtime.duty_cycle = 0.5;
         non_boiler.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
 
         let mut ports = PortSlots {
@@ -1018,7 +1018,7 @@ mod tests {
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
 
-        eq.hvac.duty_cycle = 0.5;
+        eq.hvac.runtime.duty_cycle = 0.5;
         eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
 
         let mut ports = PortSlots {
@@ -1069,7 +1069,7 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
 
         // Force full-load operation.
-        eq.hvac.duty_cycle = 1.0;
+        eq.hvac.runtime.duty_cycle = 1.0;
         eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
 
         let mut ports = PortSlots {
@@ -1172,7 +1172,7 @@ mod tests {
 
         let mut eq_half = ElectricBoiler::new(cfg.clone());
         eq_half.init(&cfg, &env).unwrap();
-        eq_half.hvac.space_fraction = 0.5;
+        eq_half.hvac.config.space_fraction = 0.5;
 
         let mut ports_full = PortSlots {
             fluid: vec![hares_types::FluidAccumulator::new(
@@ -1226,7 +1226,7 @@ mod tests {
 
         let mut eq_half = GasBoiler::new(cfg.clone());
         eq_half.init(&cfg, &env).unwrap();
-        eq_half.hvac.space_fraction = 0.5;
+        eq_half.hvac.config.space_fraction = 0.5;
 
         let mut ports_full = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],

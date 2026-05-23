@@ -509,7 +509,7 @@ mod tests {
         ));
     }
 
-    // ── Regression tests for ticket 025 ─────────────────────────────────────
+    // ── TMY3 sky-temp routing ────────────────────────────────────────────
 
     /// When IR = 0.0 (TMY3 has no IR column), compute_sky_temp_c(0.0,…,0.0)
     /// must produce the same value as clark_allen_sky_temp_c.  This guards
@@ -535,7 +535,7 @@ mod tests {
         );
     }
 
-    // ── Regression tests for ticket 097 ─────────────────────────────────────
+    // ── TMY3 B4 end-of-interval timestamps ───────────────────────────────
 
     /// Guards the B4 fix: TMY3 uses end-of-interval timestamps, so the midpoint
     /// of each hourly record is 1800 seconds (30 min) before the timestamp.
@@ -593,7 +593,7 @@ mod tests {
         let direct = clark_allen_sky_temp_c(db, dp);
         assert!(
             (routed - direct).abs() < 1e-12,
-            "ticket-025: compute_sky_temp_c(0.0, db, dp, 0.0) must equal \
+            "compute_sky_temp_c(0.0, db, dp, 0.0) must equal \
              clark_allen_sky_temp_c(db, dp): routed={routed}, direct={direct}"
         );
     }

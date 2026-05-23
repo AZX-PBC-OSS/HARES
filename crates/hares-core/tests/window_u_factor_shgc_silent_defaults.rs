@@ -1,4 +1,4 @@
-//! Regression tests for ticket #110 — window U-factor and SHGC silently
+//! Regression tests for window U-factor and SHGC silent defaults —
 //! default to single-pane aluminium values (5.0 W/(m²·K) and 0.4) when the
 //! HPXML or TOML input omits those fields.
 //!
@@ -24,8 +24,7 @@
 //!    `shgc` when the HPXML omits those elements — the HPXML layer is correct.
 //!
 //! 2. The solver layer (`solver_builder.rs`) does NOT reject `None`; it
-//!    silently substitutes 5.0 / 0.4 and builds successfully.  Once #110 is
-//!    fixed, `Dwelling::from_hpxml` (or equivalent) must error when a window
+//!    silently substitutes 5.0 / 0.4 and builds successfully.  Once fixed, `Dwelling::from_hpxml` (or equivalent) must error when a window
 //!    element is present but its U-factor or SHGC is absent.
 //!
 //! ## NOTE: these tests describe the *current buggy* behaviour
@@ -205,7 +204,7 @@ fn hpxml_parser_converts_u_factor_from_imperial_to_si() {
 // Solver layer (BUG — these tests document current broken behaviour)
 // ===========================================================================
 
-/// BUG (ticket #110): Attempting to build a `Dwelling` from an HPXML that
+/// BUG: Attempting to build a `Dwelling` from an HPXML that
 /// omits window U-factor and SHGC must eventually reach `solver_builder.rs`
 /// and silently use 5.0 W/(m²·K) / 0.4 today.
 ///
@@ -219,7 +218,7 @@ fn hpxml_parser_converts_u_factor_from_imperial_to_si() {
 /// intent is documented; the solver-layer integration path for the silent
 /// default is shown in the companion TODO below.
 #[test]
-fn current_behaviour_none_u_factor_does_not_error_at_io_layer_bug_ticket_110() {
+fn current_behaviour_none_u_factor_does_not_error_at_io_layer() {
     // The IO layer correctly returns None — the bug is that the solver layer
     // then silently substitutes 5.0 W/(m²·K) rather than erroring.
     let building = parse_building(&hpxml_with_window_missing_u_and_shgc())
@@ -231,10 +230,10 @@ fn current_behaviour_none_u_factor_does_not_error_at_io_layer_bug_ticket_110() {
     // The bug is downstream in solver_builder.rs: unwrap_or(5.0).
     assert!(
         win.u_factor_w_m2_k.is_none(),
-        "IO layer already correct; bug is in solver_builder unwrap_or(5.0) — ticket #110"
+        "IO layer already correct; bug is in solver_builder unwrap_or(5.0)"
     );
 
-    // TODO (ticket #110): Once fixed, remove the above assertion and add:
+    // TODO: Once fixed, remove the above assertion and add:
     // let result = Dwelling::from_hpxml(...);
     // assert!(result.is_err(), "Dwelling construction must fail when window U-factor is absent");
     // assert!(result.unwrap_err().to_string().contains("MissingWindowProperty"));
@@ -255,7 +254,7 @@ fn current_behaviour_none_u_factor_does_not_error_at_io_layer_bug_ticket_110() {
 ///   construction window in any US climate zone — a catastrophic overestimate
 ///   of heat loss.
 #[test]
-fn documents_unreasonable_single_pane_default_values_that_ticket_110_must_remove() {
+fn documents_unreasonable_single_pane_default_values_that_must_be_removed() {
     // The 5.0 W/(m²·K) default corresponds to a 1970s clear single-pane glass
     // (ASHRAE Table 4 row ~ID2, glass only, no frame).  The IECC 2021 permits
     // at most 0.30 Btu/(h·ft²·°F) = 1.703 W/(m²·K) for residential windows
@@ -266,7 +265,7 @@ fn documents_unreasonable_single_pane_default_values_that_ticket_110_must_remove
     assert!(
         silent_u_default > iecc_2021_cz5_8_max_u_si * 2.5,
         "The silent 5.0 W/(m²·K) default is {:.1}× the IECC 2021 CZ5-8 max U-factor \
-         ({iecc_2021_cz5_8_max_u_si:.3} W/(m²·K)) — ticket #110 must remove this default",
+         ({iecc_2021_cz5_8_max_u_si:.3} W/(m²·K)) — this default must be removed",
         silent_u_default / iecc_2021_cz5_8_max_u_si
     );
 
@@ -275,6 +274,6 @@ fn documents_unreasonable_single_pane_default_values_that_ticket_110_must_remove
     let silent_shgc_default = 0.4_f64;
     assert!(
         silent_shgc_default > 0.0 && silent_shgc_default < 1.0,
-        "SHGC default 0.4 is within range but must not be silently applied — ticket #110"
+        "SHGC default 0.4 is within range but must not be silently applied"
     );
 }

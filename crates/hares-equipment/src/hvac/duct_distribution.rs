@@ -22,37 +22,43 @@ impl HvacEquipment {
     pub fn update_zone_heat_fractions(&mut self) {
         // When ducts are located within the conditioned space, losses loop back to
         // the same zone -- effectively DSE = 1.0. Route full gross capacity there.
-        let effective_dse = if self.duct_zone_id.is_some_and(|dz| dz == self.zone_id) {
-            if self.duct_dse < 1.0 {
+        let effective_dse = if self
+            .config
+            .duct_zone_id
+            .is_some_and(|dz| dz == self.config.zone_id)
+        {
+            if self.config.duct_dse < 1.0 {
                 warn!(
-                    duct_dse = self.duct_dse,
-                    zone_id = %self.zone_id,
+                    duct_dse = self.config.duct_dse,
+                    zone_id = %self.config.zone_id,
                     "duct_zone == conditioned_zone with DSE < 1.0; \
                      treating as DSE=1.0 (losses stay in conditioned space)"
                 );
             }
             1.0
         } else {
-            self.duct_dse.clamp(0.0, 1.0)
+            self.config.duct_dse.clamp(0.0, 1.0)
         };
-        let basement_frac = self.basement_heat_frac.clamp(0.0, 1.0);
+        let basement_frac = self.config.basement_heat_frac.clamp(0.0, 1.0);
 
         let conditioned_frac = effective_dse * (1.0 - basement_frac);
-        self.zone_heat_fractions = vec![(self.zone_id, conditioned_frac)];
+        self.config.zone_heat_fractions = vec![(self.config.zone_id, conditioned_frac)];
 
         if basement_frac > 0.0 {
-            if let Some(basement_zone) = self.basement_zone_id {
-                if basement_zone != self.zone_id {
-                    self.zone_heat_fractions
+            if let Some(basement_zone) = self.config.basement_zone_id {
+                if basement_zone != self.config.zone_id {
+                    self.config
+                        .zone_heat_fractions
                         .push((basement_zone, effective_dse * basement_frac));
                 }
             }
         }
 
         if effective_dse < 1.0 {
-            if let Some(duct_zone) = self.duct_zone_id {
-                if duct_zone != self.zone_id {
-                    self.zone_heat_fractions
+            if let Some(duct_zone) = self.config.duct_zone_id {
+                if duct_zone != self.config.zone_id {
+                    self.config
+                        .zone_heat_fractions
                         .push((duct_zone, 1.0 - effective_dse));
                 }
             }
@@ -66,18 +72,19 @@ impl HvacEquipment {
     /// Merge zone_heat_fractions entries with the same ZoneId by summing their
     /// fractions. Preserves order of first occurrence.
     fn deduplicate_zone_heat_fractions(&mut self) {
-        if self.zone_heat_fractions.len() <= 1 {
+        if self.config.zone_heat_fractions.len() <= 1 {
             return;
         }
-        let mut merged: Vec<(ZoneId, f64)> = Vec::with_capacity(self.zone_heat_fractions.len());
-        for &(zone, frac) in &self.zone_heat_fractions {
+        let mut merged: Vec<(ZoneId, f64)> =
+            Vec::with_capacity(self.config.zone_heat_fractions.len());
+        for &(zone, frac) in &self.config.zone_heat_fractions {
             if let Some(entry) = merged.iter_mut().find(|(z, _)| *z == zone) {
                 entry.1 += frac;
             } else {
                 merged.push((zone, frac));
             }
         }
-        self.zone_heat_fractions = merged;
+        self.config.zone_heat_fractions = merged;
     }
 
     /// Distribute gross capacity across zones using absolute `zone_heat_fractions`.
@@ -91,25 +98,26 @@ impl HvacEquipment {
         latent_gain_w: f64,
         category: ThermalCategory,
     ) -> crate::Result<()> {
-        if self.zone_heat_fractions.is_empty() {
+        if self.config.zone_heat_fractions.is_empty() {
             return Err(HaresError::Equipment(
                 "write_zone_thermal_contributions called before update_zone_heat_fractions".into(),
             ));
         }
 
-        let fractions: &[(ZoneId, f64)] = &self.zone_heat_fractions;
+        let fractions: &[(ZoneId, f64)] = &self.config.zone_heat_fractions;
 
         for &(zone, fraction) in fractions {
             if fraction > 0.0 {
                 // Contributions to the duct zone (and NOT the conditioned zone)
                 // are tagged DuctLoss so the thermal solver can distinguish
                 // delivered capacity from duct losses in its diagnostics.
-                let effective_category =
-                    if self.duct_zone_id.is_some_and(|dz| dz == zone) && zone != self.zone_id {
-                        ThermalCategory::DuctLoss
-                    } else {
-                        category
-                    };
+                let effective_category = if self.config.duct_zone_id.is_some_and(|dz| dz == zone)
+                    && zone != self.config.zone_id
+                {
+                    ThermalCategory::DuctLoss
+                } else {
+                    category
+                };
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: sensible_gain_w * fraction,
@@ -124,7 +132,7 @@ impl HvacEquipment {
 
     /// Apply duct distribution system efficiency (DSE) to a capacity value.
     pub fn apply_duct_dse(&self, capacity_w: f64) -> f64 {
-        capacity_w * self.duct_dse.clamp(0.0, 1.0)
+        capacity_w * self.config.duct_dse.clamp(0.0, 1.0)
     }
 
     /// Rebuild thermal port declarations to include all zones referenced by
@@ -133,7 +141,7 @@ impl HvacEquipment {
     pub fn rebuild_thermal_ports(&self, ports: &mut Vec<PortDeclaration>) {
         use hares_types::PortType;
         ports.retain(|p| p.port_type != PortType::Thermal && p.port_type != PortType::Humidity);
-        for &(zone, _) in &self.zone_heat_fractions {
+        for &(zone, _) in &self.config.zone_heat_fractions {
             ports.push(PortDeclaration::thermal(zone));
             ports.push(PortDeclaration::humidity(zone));
         }
@@ -154,7 +162,7 @@ mod tests {
     #[test]
     fn duct_dse_scales_capacity() {
         let mut hvac = make_hvac();
-        hvac.duct_dse = 0.80;
+        hvac.config.duct_dse = 0.80;
         let result = hvac.apply_duct_dse(10_000.0);
         assert!(
             (result - 8_000.0).abs() < 1e-9,
@@ -166,13 +174,13 @@ mod tests {
     #[test]
     fn zone_heat_fractions_single_zone_no_duct_loss() {
         let mut hvac = make_hvac();
-        hvac.duct_dse = 1.0;
-        hvac.basement_heat_frac = 0.0;
-        hvac.duct_zone_id = None;
+        hvac.config.duct_dse = 1.0;
+        hvac.config.basement_heat_frac = 0.0;
+        hvac.config.duct_zone_id = None;
         hvac.update_zone_heat_fractions();
 
-        assert_eq!(hvac.zone_heat_fractions.len(), 1);
-        let (zone, frac) = hvac.zone_heat_fractions[0];
+        assert_eq!(hvac.config.zone_heat_fractions.len(), 1);
+        let (zone, frac) = hvac.config.zone_heat_fractions[0];
         assert_eq!(zone, ZoneId(1));
         assert!(
             (frac - 1.0).abs() < 1e-12,
@@ -187,27 +195,30 @@ mod tests {
     #[test]
     fn zone_heat_fractions_with_basement() {
         let mut hvac = make_hvac();
-        hvac.duct_dse = 0.85;
-        hvac.basement_heat_frac = 0.30;
-        hvac.basement_zone_id = Some(ZoneId(2));
-        hvac.duct_zone_id = Some(ZoneId(3));
+        hvac.config.duct_dse = 0.85;
+        hvac.config.basement_heat_frac = 0.30;
+        hvac.config.basement_zone_id = Some(ZoneId(2));
+        hvac.config.duct_zone_id = Some(ZoneId(3));
         hvac.update_zone_heat_fractions();
 
-        assert_eq!(hvac.zone_heat_fractions.len(), 3);
+        assert_eq!(hvac.config.zone_heat_fractions.len(), 3);
 
         let cond = hvac
+            .config
             .zone_heat_fractions
             .iter()
             .find(|&&(z, _)| z == ZoneId(1))
             .unwrap()
             .1;
         let bsmt = hvac
+            .config
             .zone_heat_fractions
             .iter()
             .find(|&&(z, _)| z == ZoneId(2))
             .unwrap()
             .1;
         let duct = hvac
+            .config
             .zone_heat_fractions
             .iter()
             .find(|&&(z, _)| z == ZoneId(3))
@@ -238,18 +249,19 @@ mod tests {
     #[test]
     fn duct_dse_one_no_duct_zone_entry() {
         let mut hvac = make_hvac();
-        hvac.duct_dse = 1.0;
-        hvac.duct_zone_id = Some(ZoneId(3));
+        hvac.config.duct_dse = 1.0;
+        hvac.config.duct_zone_id = Some(ZoneId(3));
         hvac.update_zone_heat_fractions();
 
         let has_duct = hvac
+            .config
             .zone_heat_fractions
             .iter()
             .any(|&(z, _)| z == ZoneId(3));
         assert!(
             !has_duct,
             "DSE=1.0 must not produce a duct zone entry, got {:?}",
-            hvac.zone_heat_fractions
+            hvac.config.zone_heat_fractions
         );
     }
 
@@ -258,19 +270,19 @@ mod tests {
     #[test]
     fn update_zone_heat_fractions_same_duct_zone() {
         let mut hvac = make_hvac();
-        hvac.duct_dse = 0.85;
-        hvac.basement_heat_frac = 0.0;
-        hvac.duct_zone_id = Some(ZoneId(1));
+        hvac.config.duct_dse = 0.85;
+        hvac.config.basement_heat_frac = 0.0;
+        hvac.config.duct_zone_id = Some(ZoneId(1));
         hvac.update_zone_heat_fractions();
 
         assert_eq!(
-            hvac.zone_heat_fractions.len(),
+            hvac.config.zone_heat_fractions.len(),
             1,
             "duct_zone == indoor_zone must produce exactly one zone entry; \
              got {:?}",
-            hvac.zone_heat_fractions
+            hvac.config.zone_heat_fractions
         );
-        let (zone, frac) = hvac.zone_heat_fractions[0];
+        let (zone, frac) = hvac.config.zone_heat_fractions[0];
         assert_eq!(zone, ZoneId(1));
         assert!(
             (frac - 1.0).abs() < 1e-9,
@@ -285,7 +297,7 @@ mod tests {
         use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
 
         let mut hvac = make_hvac();
-        hvac.duct_dse = 1.0;
+        hvac.config.duct_dse = 1.0;
         hvac.update_zone_heat_fractions();
 
         let mut ports = PortSlots {
@@ -323,7 +335,7 @@ mod tests {
         use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
 
         let mut hvac = make_hvac();
-        hvac.duct_dse = 1.0;
+        hvac.config.duct_dse = 1.0;
         hvac.update_zone_heat_fractions();
 
         let mut ports = PortSlots {
@@ -365,8 +377,8 @@ mod tests {
         use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
 
         let mut hvac = make_hvac();
-        hvac.duct_dse = 0.7;
-        hvac.duct_zone_id = Some(ZoneId(2));
+        hvac.config.duct_dse = 0.7;
+        hvac.config.duct_zone_id = Some(ZoneId(2));
         hvac.update_zone_heat_fractions();
 
         let mut ports = PortSlots {
@@ -404,8 +416,8 @@ mod tests {
         use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
 
         let mut hvac = make_hvac();
-        hvac.duct_dse = 0.7;
-        hvac.duct_zone_id = Some(ZoneId(2));
+        hvac.config.duct_dse = 0.7;
+        hvac.config.duct_zone_id = Some(ZoneId(2));
         hvac.update_zone_heat_fractions();
 
         let mut ports = PortSlots {
@@ -441,10 +453,10 @@ mod tests {
     #[test]
     fn basement_equals_duct_zone_merges() {
         let mut hvac = make_hvac();
-        hvac.duct_dse = 0.8;
-        hvac.basement_heat_frac = 0.2;
-        hvac.basement_zone_id = Some(ZoneId(2));
-        hvac.duct_zone_id = Some(ZoneId(2)); // same as basement
+        hvac.config.duct_dse = 0.8;
+        hvac.config.basement_heat_frac = 0.2;
+        hvac.config.basement_zone_id = Some(ZoneId(2));
+        hvac.config.duct_zone_id = Some(ZoneId(2)); // same as basement
         hvac.update_zone_heat_fractions();
 
         // conditioned: 0.8 * 0.8 = 0.64
@@ -452,12 +464,13 @@ mod tests {
         // duct:        0.2
         // merged zone 2: 0.16 + 0.2 = 0.36
         assert_eq!(
-            hvac.zone_heat_fractions.len(),
+            hvac.config.zone_heat_fractions.len(),
             2,
             "basement==duct must produce 2 entries (not 3); got {:?}",
-            hvac.zone_heat_fractions
+            hvac.config.zone_heat_fractions
         );
         let merged_frac = hvac
+            .config
             .zone_heat_fractions
             .iter()
             .find(|&&(z, _)| z == ZoneId(2))
@@ -467,7 +480,7 @@ mod tests {
             (merged_frac - 0.36).abs() < 1e-9,
             "merged zone 2 fraction must be 0.36, got {merged_frac}"
         );
-        let total: f64 = hvac.zone_heat_fractions.iter().map(|(_, f)| f).sum();
+        let total: f64 = hvac.config.zone_heat_fractions.iter().map(|(_, f)| f).sum();
         assert!(
             (total - 1.0).abs() < 1e-9,
             "fractions must sum to 1.0, got {total}"
@@ -483,10 +496,10 @@ mod tests {
         use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
 
         let mut hvac = make_hvac(); // conditioned = ZoneId(1)
-        hvac.duct_dse = 0.8;
-        hvac.basement_heat_frac = 0.2;
-        hvac.basement_zone_id = Some(ZoneId(2));
-        hvac.duct_zone_id = Some(ZoneId(2)); // same as basement
+        hvac.config.duct_dse = 0.8;
+        hvac.config.basement_heat_frac = 0.2;
+        hvac.config.basement_zone_id = Some(ZoneId(2));
+        hvac.config.duct_zone_id = Some(ZoneId(2)); // same as basement
         hvac.update_zone_heat_fractions();
 
         // conditioned: 0.8 * 0.8 = 0.64
@@ -539,26 +552,27 @@ mod tests {
     #[test]
     fn cooling_finished_basement_no_basement_frac() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
-        hvac.duct_dse = 0.85;
-        hvac.basement_heat_frac = 0.0; // cooling systems don't route to basement
-        hvac.basement_zone_id = Some(ZoneId(2));
-        hvac.duct_zone_id = Some(ZoneId(3));
+        hvac.config.duct_dse = 0.85;
+        hvac.config.basement_heat_frac = 0.0; // cooling systems don't route to basement
+        hvac.config.basement_zone_id = Some(ZoneId(2));
+        hvac.config.duct_zone_id = Some(ZoneId(3));
         hvac.update_zone_heat_fractions();
 
         let has_basement = hvac
+            .config
             .zone_heat_fractions
             .iter()
             .any(|&(z, _)| z == ZoneId(2));
         assert!(
             !has_basement,
             "cooling with basement_heat_frac=0 must not route to basement; got {:?}",
-            hvac.zone_heat_fractions
+            hvac.config.zone_heat_fractions
         );
         assert_eq!(
-            hvac.zone_heat_fractions.len(),
+            hvac.config.zone_heat_fractions.len(),
             2,
             "expected conditioned + duct zones only; got {:?}",
-            hvac.zone_heat_fractions
+            hvac.config.zone_heat_fractions
         );
     }
 
@@ -569,8 +583,8 @@ mod tests {
         use hares_types::{PortDeclaration, PortType};
 
         let mut hvac = make_hvac();
-        hvac.duct_dse = 0.8;
-        hvac.duct_zone_id = Some(ZoneId(3));
+        hvac.config.duct_dse = 0.8;
+        hvac.config.duct_zone_id = Some(ZoneId(3));
         hvac.update_zone_heat_fractions();
 
         let mut ports = vec![

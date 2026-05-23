@@ -1,7 +1,7 @@
-//! Regression tests for ticket 096: Actor trait must expose a `telemetry()` method.
+//! Regression tests: Actor trait must expose a `telemetry()` method.
 //!
 //! These tests document the CURRENT BROKEN STATE — they test properties that
-//! MUST hold once the ticket is implemented, but currently CANNOT be expressed
+//! MUST hold once the fix is implemented, but currently CANNOT be expressed
 //! because `Actor::telemetry()` does not exist.
 //!
 //! How to use these tests:
@@ -10,7 +10,7 @@
 //!     `telemetry` field). The runtime tests that can run today document the
 //!     missing telemetry surface by asserting the trait only exposes `decide()`,
 //!     `name()`, and `interests()`.
-//!  2. After the fix: un-comment the `#[cfg(TODO_096_IMPLEMENTED)]` blocks.
+//!  2. After the fix: un-comment the `#[cfg(TODO_IMPLEMENTED)]` blocks.
 //!     All tests should pass with non-empty telemetry for every concrete actor.
 //!
 //! The tests intentionally compile cleanly today so that `cargo test` can run
@@ -39,14 +39,14 @@ impl Actor for SpyActor {
 }
 
 // ---------------------------------------------------------------------------
-// Ticket-096 gap documentation tests (compile and pass today)
+// Gap documentation tests (compile and pass today)
 // ---------------------------------------------------------------------------
 
 /// The Actor trait currently has exactly three methods: name(), interests(),
 /// and decide(). There is no telemetry() method. This test documents the trait
 /// surface so that any future addition of telemetry() is detectable.
 #[test]
-fn actor_trait_has_no_telemetry_method_ticket_096() {
+fn actor_trait_has_no_telemetry_method() {
     let actor = SpyActor {
         name: "spy".to_string(),
     };
@@ -56,7 +56,7 @@ fn actor_trait_has_no_telemetry_method_ticket_096() {
     let _interests: &[ActorInterest] = actor.interests();
 
     // There is deliberately no `actor.telemetry()` call here — the method does
-    // not exist on the trait. Once ticket 096 is implemented, add:
+    // not exist on the trait. Once implemented, add:
     //
     //   let tel = actor.telemetry();
     //   assert!(tel.is_none(), "SpyActor has no observable state; default must return None");
@@ -68,7 +68,7 @@ fn actor_trait_has_no_telemetry_method_ticket_096() {
 /// After the fix, calling occupant.telemetry() should return Some(&Telemetry)
 /// containing at least a presence/mode channel.
 #[test]
-fn occupant_actor_missing_telemetry_ticket_096() {
+fn occupant_actor_missing_telemetry() {
     use hares_core::actors::Presence;
 
     let schedule = vec![Presence::Away, Presence::Home, Presence::Away];
@@ -79,9 +79,9 @@ fn occupant_actor_missing_telemetry_ticket_096() {
     occupant.decide(&env, &mut out);
 
     // Today: no way to inspect the decision other than by reading `out`.
-    // After ticket 096 is implemented, add:
+    // After implemented, add:
     //
-    //   let tel = occupant.telemetry().expect("Occupant must expose telemetry after 096");
+    //   let tel = occupant.telemetry().expect("Occupant must expose telemetry");
     //   assert!(tel.get("presence").is_some(), "telemetry must contain 'presence' key");
 }
 
@@ -89,7 +89,7 @@ fn occupant_actor_missing_telemetry_ticket_096() {
 /// telemetry today. After the fix, telemetry() should return Some(&Telemetry)
 /// containing at least `heating_setpoint_c` or `cooling_setpoint_c`.
 #[test]
-fn ideal_thermostat_actor_missing_telemetry_ticket_096() {
+fn ideal_thermostat_actor_missing_telemetry() {
     use hares_core::actors::OverrideState;
 
     let mut thermostat = IdealThermostat::new("HVAC").with_override(OverrideState {
@@ -108,21 +108,21 @@ fn ideal_thermostat_actor_missing_telemetry_ticket_096() {
         "IdealThermostat should have dispatched a setpoint override"
     );
 
-    // After ticket 096 is implemented, add:
+    // After implemented, add:
     //
-    //   let tel = thermostat.telemetry().expect("IdealThermostat must expose telemetry after 096");
+    //   let tel = thermostat.telemetry().expect("IdealThermostat must expose telemetry");
     //   assert_eq!(tel.get("heating_setpoint_c"), Some(20.0));
 }
 
 /// DrCompliance actor makes compliance decisions but exposes no structured
 /// telemetry today.
 #[test]
-fn dr_compliance_actor_missing_telemetry_ticket_096() {
+fn dr_compliance_actor_missing_telemetry() {
     let actor = DrCompliance::new("DRAgent");
 
     let _name = actor.name();
 
-    // After ticket 096 is implemented, add:
+    // After implemented, add:
     //
     //   let tel = actor.telemetry();
     //   // After a decide() call with a DR event active, telemetry should contain
@@ -132,7 +132,7 @@ fn dr_compliance_actor_missing_telemetry_ticket_096() {
 /// BatteryManagementActor makes charge/discharge decisions but exposes no
 /// structured telemetry today.
 #[test]
-fn bms_actor_missing_telemetry_ticket_096() {
+fn bms_actor_missing_telemetry() {
     let actor = BatteryManagementActor::new(
         "Battery",
         BmsMode::SelfConsumption {
@@ -149,7 +149,7 @@ fn bms_actor_missing_telemetry_ticket_096() {
 
     let _name = actor.name();
 
-    // After ticket 096 is implemented, add:
+    // After implemented, add:
     //
     //   let tel = actor.telemetry();
     //   // After a decide() call, telemetry should contain charge/discharge
@@ -165,10 +165,10 @@ fn bms_actor_missing_telemetry_ticket_096() {
 /// per the ticket's Definition of Done. This test is intentionally a no-op
 /// today and becomes meaningful once the trait method is added.
 ///
-/// After ticket 096: each `assert_actor_has_telemetry` call should compile and
+/// After the fix: each `assert_actor_has_telemetry` call should compile and
 /// pass, proving each actor satisfies the contract.
 #[test]
-fn all_observable_actors_return_some_telemetry_ticket_096() {
+fn all_observable_actors_return_some_telemetry() {
     // The actors that MUST return Some(&Telemetry) per the DoD are:
     //
     // 1. Occupant          (presence, transition)
@@ -180,7 +180,7 @@ fn all_observable_actors_return_some_telemetry_ticket_096() {
     // The only actor exempt from the requirement is SolverFeedbackActor, which
     // has no observable internal state beyond the DispatchRequest it emits.
     //
-    // Once ticket 096 is implemented, replace this comment block with:
+    // Once implemented, replace this comment block with:
     //
     //   fn assert_actor_has_telemetry<A: Actor>(actor: &mut A, env: &EnvironmentState) {
     //       let mut out = Vec::new();

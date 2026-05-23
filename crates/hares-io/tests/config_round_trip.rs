@@ -4,7 +4,7 @@ use chrono::{FixedOffset, TimeZone};
 use hares_equipment::hvac::cooling_config::{
     CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
 };
-use hares_equipment::hvac::heat_pump_config::HeatPumpConfig;
+use hares_equipment::hvac::heat_pump_config::{HeatPumpCommonConfig, HeatPumpConfig};
 use hares_equipment::hvac::heating_config::{
     ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, GasBoilerConfig,
     GasFurnaceConfig, IdealHvacConfig,
@@ -210,46 +210,48 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
     let mut duct = sample_duct_config();
     duct.airflow_m3_s_per_w = None;
     HeatPumpConfig {
-        equipment_id: Some(9),
-        zone_id: Some(1),
-        heating_capacity_w: Some(12_000.0),
-        heating_eir: Some(3.412_141_633 / 9.5),
-        stage_heating_capacities_w: Some(vec![6_000.0, 12_000.0]),
-        stage_heating_eirs: Some(vec![0.34, 0.28]),
-        backup_fuel: Some(FuelType::Electric),
-        backup_capacity_w: Some(5_000.0),
-        backup_eir: Some(1.0),
-        fraction_heating_load_served: Some(1.0),
-        cooling_capacity_w: Some(12_000.0),
-        cooling_eir: Some(3.412_141_633 / 16.0),
-        stage_cooling_capacities_w: Some(vec![6_000.0, 12_000.0]),
-        stage_cooling_eirs: Some(vec![0.28, 0.24]),
-        fraction_cooling_load_served: Some(1.0),
-        number_of_speeds: 2,
-        is_mini_split: false,
-        shr: Some(0.75),
-        fan_power_w: Some(320.0),
-        fan_power_w_per_cfm: None,
-        airflow_m3_s_per_w: Some(5.3678384759785085e-5),
-        heating_setpoint_c: Some(21.0),
-        cooling_setpoint_c: Some(26.0),
-        hysteresis_c: Some(1.0),
-        heating_setpoint_source: None,
-        cooling_setpoint_source: None,
+        common: HeatPumpCommonConfig {
+            equipment_id: Some(9),
+            zone_id: Some(1),
+            heating_capacity_w: Some(12_000.0),
+            heating_eir: Some(3.412_141_633 / 9.5),
+            stage_heating_capacities_w: Some(vec![6_000.0, 12_000.0]),
+            stage_heating_eirs: Some(vec![0.34, 0.28]),
+            backup_fuel: Some(FuelType::Electric),
+            backup_capacity_w: Some(5_000.0),
+            backup_eir: Some(1.0),
+            fraction_heating_load_served: Some(1.0),
+            cooling_capacity_w: Some(12_000.0),
+            cooling_eir: Some(3.412_141_633 / 16.0),
+            stage_cooling_capacities_w: Some(vec![6_000.0, 12_000.0]),
+            stage_cooling_eirs: Some(vec![0.28, 0.24]),
+            fraction_cooling_load_served: Some(1.0),
+            number_of_speeds: 2,
+            is_mini_split: false,
+            shr: Some(0.75),
+            fan_power_w: Some(320.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: Some(5.3678384759785085e-5),
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            duct,
+            biquadratic_x1_min: Some(12.0),
+            biquadratic_x1_max: Some(24.0),
+            biquadratic_x2_min: Some(18.0),
+            biquadratic_x2_max: Some(46.0),
+            ff_min: Some(0.6),
+            ff_max: Some(1.2),
+            plf_min: Some(0.7),
+            plf_max: Some(1.0),
+        },
         hp_lockout_temp_c: None,
         er_lockout_temp_c: None,
         max_oat_supplemental_c: None,
         er_setpoint_offset_c: None,
         er_hard_lockout_time_s: None,
-        duct,
-        biquadratic_x1_min: Some(12.0),
-        biquadratic_x1_max: Some(24.0),
-        biquadratic_x2_min: Some(18.0),
-        biquadratic_x2_max: Some(46.0),
-        ff_min: Some(0.6),
-        ff_max: Some(1.2),
-        plf_min: Some(0.7),
-        plf_max: Some(1.0),
     }
 }
 
@@ -684,12 +686,23 @@ typed_config_tests!(
     RoomAcConfig,
     sample_room_ac_config
 );
-typed_config_tests!(
-    round_trip_heat_pump_config,
-    deny_unknown_field_heat_pump_config,
-    HeatPumpConfig,
-    sample_heat_pump_config
-);
+
+#[test]
+fn round_trip_heat_pump_config() {
+    assert_round_trip(sample_heat_pump_config());
+}
+
+#[test]
+fn heat_pump_config_ignores_unknown_fields() {
+    let mut value = serde_json::to_value(&sample_heat_pump_config()).unwrap();
+    value["unknown_key"] = serde_json::json!(42.0);
+    let result: Result<HeatPumpConfig, _> = serde_json::from_value(value);
+    assert!(
+        result.is_ok(),
+        "serde flatten + no deny_unknown_fields: unknown keys are silently ignored"
+    );
+}
+
 typed_config_tests!(
     round_trip_dehumidifier_config,
     deny_unknown_field_dehumidifier_config,
