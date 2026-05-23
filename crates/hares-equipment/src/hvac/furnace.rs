@@ -222,10 +222,10 @@ impl Equipment for ElectricFurnace {
 
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&FurnaceState {
-            mode: self.hvac.mode,
+            mode: self.hvac.thermostat_fsm.mode,
             duty_cycle: self.hvac.duty_cycle,
-            last_mode_switch_at: self.hvac.last_mode_switch_at,
-            runtime_setpoints: self.hvac.runtime_setpoints,
+            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
             electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -237,10 +237,10 @@ impl Equipment for ElectricFurnace {
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: FurnaceState = load_postcard(state)?;
-        self.hvac.mode = decoded.mode;
+        self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.duty_cycle = decoded.duty_cycle;
-        self.hvac.last_mode_switch_at = decoded.last_mode_switch_at;
-        self.hvac.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
+        self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
@@ -454,10 +454,10 @@ impl Equipment for GasFurnace {
 
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&FurnaceState {
-            mode: self.hvac.mode,
+            mode: self.hvac.thermostat_fsm.mode,
             duty_cycle: self.hvac.duty_cycle,
-            last_mode_switch_at: self.hvac.last_mode_switch_at,
-            runtime_setpoints: self.hvac.runtime_setpoints,
+            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
             electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -469,10 +469,10 @@ impl Equipment for GasFurnace {
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: FurnaceState = load_postcard(state)?;
-        self.hvac.mode = decoded.mode;
+        self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.duty_cycle = decoded.duty_cycle;
-        self.hvac.last_mode_switch_at = decoded.last_mode_switch_at;
-        self.hvac.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
+        self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.hvac.last_speed_index = decoded.speed_index as usize;

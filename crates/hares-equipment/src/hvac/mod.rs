@@ -31,5 +31,6 @@ pub use hvac_core::{
 };
 pub use speed_control::{SpeedControlMode, SpeedSelection, StartupConfig};
 pub use thermostat::{
-    RuntimeSetpointOverride, ScheduleSetpoints, ThermalSetpoints, ThermostatConfig, ThermostatMode,
+    RuntimeSetpointOverride, ScheduleSetpoints, ThermalSetpoints, ThermostatConfig, ThermostatFsm,
+    ThermostatMode,
 };

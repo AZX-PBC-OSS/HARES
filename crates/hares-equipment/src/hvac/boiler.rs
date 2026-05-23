@@ -269,10 +269,10 @@ impl Equipment for ElectricBoiler {
 
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&BoilerState {
-            mode: self.hvac.mode,
+            mode: self.hvac.thermostat_fsm.mode,
             duty_cycle: self.hvac.duty_cycle,
-            last_mode_switch_at: self.hvac.last_mode_switch_at,
-            runtime_setpoints: self.hvac.runtime_setpoints,
+            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
             electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -286,10 +286,10 @@ impl Equipment for ElectricBoiler {
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: BoilerState = load_postcard(state)?;
-        self.hvac.mode = decoded.mode;
+        self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.duty_cycle = decoded.duty_cycle;
-        self.hvac.last_mode_switch_at = decoded.last_mode_switch_at;
-        self.hvac.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
+        self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
 
@@ -561,10 +561,10 @@ impl Equipment for GasBoiler {
 
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&BoilerState {
-            mode: self.hvac.mode,
+            mode: self.hvac.thermostat_fsm.mode,
             duty_cycle: self.hvac.duty_cycle,
-            last_mode_switch_at: self.hvac.last_mode_switch_at,
-            runtime_setpoints: self.hvac.runtime_setpoints,
+            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
             electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
@@ -578,10 +578,10 @@ impl Equipment for GasBoiler {
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: BoilerState = load_postcard(state)?;
-        self.hvac.mode = decoded.mode;
+        self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.duty_cycle = decoded.duty_cycle;
-        self.hvac.last_mode_switch_at = decoded.last_mode_switch_at;
-        self.hvac.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
+        self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
 
@@ -896,7 +896,7 @@ mod tests {
         eq.condensing_eir_coeffs = DEFAULT_CONDENSING_EIR_COEFFS;
 
         eq.hvac.duty_cycle = 0.5;
-        eq.hvac.mode = super::ThermostatMode::Heating;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
 
         env.custom_domains.push(DomainUpdate {
             domain_id: FLUID,
@@ -955,9 +955,9 @@ mod tests {
         non_boiler.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
 
         cond_boiler.hvac.duty_cycle = 0.5;
-        cond_boiler.hvac.mode = super::ThermostatMode::Heating;
+        cond_boiler.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
         non_boiler.hvac.duty_cycle = 0.5;
-        non_boiler.hvac.mode = super::ThermostatMode::Heating;
+        non_boiler.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -1019,7 +1019,7 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
 
         eq.hvac.duty_cycle = 0.5;
-        eq.hvac.mode = super::ThermostatMode::Heating;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -1070,7 +1070,7 @@ mod tests {
 
         // Force full-load operation.
         eq.hvac.duty_cycle = 1.0;
-        eq.hvac.mode = super::ThermostatMode::Heating;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],

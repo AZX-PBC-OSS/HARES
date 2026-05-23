@@ -705,6 +705,7 @@ impl CoolingCore {
             } else {
                 let deadband = self
                     .hvac
+                    .thermostat_fsm
                     .thermostat
                     .hysteresis_c
                     .max(MIN_LOAD_FRACTION_DEADBAND_C);
@@ -1244,11 +1245,11 @@ impl CoolingCore {
 
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&AirConditionerState {
-            mode: self.hvac.mode,
+            mode: self.hvac.thermostat_fsm.mode,
             duty_cycle: self.hvac.duty_cycle,
-            last_mode_switch_at: self.hvac.last_mode_switch_at,
-            mode_start_at: self.hvac.mode_start_at,
-            runtime_setpoints: self.hvac.runtime_setpoints,
+            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+            mode_start_at: self.hvac.thermostat_fsm.mode_start_at,
+            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
             cycle_on_steps: self.cycle_on_steps,
@@ -1278,18 +1279,18 @@ impl CoolingCore {
             dr_duration_remaining_s: self.dr_duration_remaining_s,
             last_adp_c: self.last_adp_c,
             last_bypass_factor: self.last_bypass_factor,
-            thermostat_hysteresis_c: self.hvac.thermostat.hysteresis_c,
+            thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
             time_at_current_speed_s: self.hvac.time_at_current_speed_s,
         })
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: AirConditionerState = load_postcard(state)?;
-        self.hvac.mode = decoded.mode;
+        self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.duty_cycle = decoded.duty_cycle;
-        self.hvac.last_mode_switch_at = decoded.last_mode_switch_at;
-        self.hvac.mode_start_at = decoded.mode_start_at;
-        self.hvac.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
+        self.hvac.thermostat_fsm.mode_start_at = decoded.mode_start_at;
+        self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.cycle_on_steps = decoded.cycle_on_steps;
@@ -1311,7 +1312,7 @@ impl CoolingCore {
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
         self.last_adp_c = decoded.last_adp_c;
         self.last_bypass_factor = decoded.last_bypass_factor;
-        self.hvac.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
         self.hvac.time_at_current_speed_s = decoded.time_at_current_speed_s;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
@@ -1340,7 +1341,7 @@ impl CoolingCore {
                             self.descriptor.equipment_type
                         )));
                     }
-                    self.hvac.thermostat.hysteresis_c = *db;
+                    self.hvac.thermostat_fsm.thermostat.hysteresis_c = *db;
                 }
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
@@ -2615,7 +2616,7 @@ mod tests {
             deadband_c: Some(3.0),
         })
         .unwrap();
-        assert_eq!(eq.core.hvac.thermostat.hysteresis_c, 3.0);
+        assert_eq!(eq.core.hvac.thermostat_fsm.thermostat.hysteresis_c, 3.0);
 
         // Step once so state is fully populated.
         eq.update_control(&environment);
@@ -2633,13 +2634,13 @@ mod tests {
         let mut restored = AirConditioner::new(cfg.clone());
         restored.init(&cfg, &environment).unwrap();
         assert_eq!(
-            restored.core.hvac.thermostat.hysteresis_c, 1.0,
+            restored.core.hvac.thermostat_fsm.thermostat.hysteresis_c, 1.0,
             "fresh instance must have config default"
         );
 
         restored.load_state(&state).unwrap();
         assert_eq!(
-            restored.core.hvac.thermostat.hysteresis_c, 3.0,
+            restored.core.hvac.thermostat_fsm.thermostat.hysteresis_c, 3.0,
             "thermostat_hysteresis_c must survive checkpoint round-trip"
         );
     }
@@ -4296,7 +4297,7 @@ mod speed_selection_parity_tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
         hvac.cooling_capacities_w = capacities_w;
-        hvac.mode = ThermostatMode::Cooling;
+        hvac.thermostat_fsm.mode = ThermostatMode::Cooling;
         hvac
     }
 

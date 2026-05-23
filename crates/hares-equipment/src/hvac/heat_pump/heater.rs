@@ -583,7 +583,7 @@ impl HeatPumpHeaterCore {
             .unwrap_or(MAX_OAT_SUPPLEMENTAL_C)
             .min(MAX_OAT_SUPPLEMENTAL_C);
         self.er_setpoint_offset_c = cfg.er_setpoint_offset_c.unwrap_or(
-            self.hvac.thermostat.hysteresis_c
+            self.hvac.thermostat_fsm.thermostat.hysteresis_c
                 * (DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER - DEFAULT_ER_SETPOINT_DEADBAND_OFFSET),
         );
         self.er_hard_lockout_time_s = cfg
@@ -1220,7 +1220,7 @@ impl HeatPumpHeaterCore {
             });
         }
 
-        let deadband = self.hvac.thermostat.hysteresis_c.max(0.1);
+        let deadband = self.hvac.thermostat_fsm.thermostat.hysteresis_c.max(0.1);
 
         let load_ratio = if self.use_ideal {
             // Ideal capacity mode: solver provides PLR via compute_step.
@@ -1255,7 +1255,7 @@ impl HeatPumpHeaterCore {
         // Turn on:  zone <= setpoint - er_offset
         // Turn off: zone > er_turn_on + deadband
         let er_turn_on_c = setpoint - self.er_setpoint_offset_c;
-        let er_turn_off_c = er_turn_on_c + self.hvac.thermostat.hysteresis_c;
+        let er_turn_off_c = er_turn_on_c + self.hvac.thermostat_fsm.thermostat.hysteresis_c;
         let er_thermostat_call = if self.er_was_on {
             zone.temperature_c <= er_turn_off_c
         } else {
@@ -1414,11 +1414,11 @@ impl HeatPumpHeaterCore {
 
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&HeaterState {
-            mode: self.hvac.mode,
+            mode: self.hvac.thermostat_fsm.mode,
             duty_cycle: self.hvac.duty_cycle,
-            last_mode_switch_at: self.hvac.last_mode_switch_at,
-            mode_start_at: self.hvac.mode_start_at,
-            runtime_setpoints: self.hvac.runtime_setpoints,
+            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+            mode_start_at: self.hvac.thermostat_fsm.mode_start_at,
+            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
             cycle_on_steps: self.cycle_on_steps,
@@ -1454,18 +1454,18 @@ impl HeatPumpHeaterCore {
             max_oat_supplemental_c: self.max_oat_supplemental_c,
             hp_available: self.hp_available,
             er_was_on: self.er_was_on,
-            thermostat_hysteresis_c: self.hvac.thermostat.hysteresis_c,
+            thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
             time_at_current_speed_s: self.hvac.time_at_current_speed_s,
         })
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: HeaterState = load_postcard(state)?;
-        self.hvac.mode = decoded.mode;
+        self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.duty_cycle = decoded.duty_cycle;
-        self.hvac.last_mode_switch_at = decoded.last_mode_switch_at;
-        self.hvac.mode_start_at = decoded.mode_start_at;
-        self.hvac.runtime_setpoints = decoded.runtime_setpoints;
+        self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
+        self.hvac.thermostat_fsm.mode_start_at = decoded.mode_start_at;
+        self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
         self.cycle_on_steps = decoded.cycle_on_steps;
@@ -1488,7 +1488,7 @@ impl HeatPumpHeaterCore {
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
         self.hp_available = decoded.hp_available;
         self.max_oat_supplemental_c = decoded.max_oat_supplemental_c;
-        self.hvac.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac.thermostat_fsm.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
         self.hvac.time_at_current_speed_s = decoded.time_at_current_speed_s;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
@@ -1526,7 +1526,7 @@ impl HeatPumpHeaterCore {
                             self.descriptor.equipment_type
                         )));
                     }
-                    self.hvac.thermostat.hysteresis_c = *db;
+                    self.hvac.thermostat_fsm.thermostat.hysteresis_c = *db;
                 }
             }
             ControlSignal::DutyCycle { on_fraction, .. } => {
@@ -4686,7 +4686,7 @@ mod tests {
             deadband_c: Some(3.0),
         })
         .unwrap();
-        assert_eq!(eq.core.hvac.thermostat.hysteresis_c, 3.0);
+        assert_eq!(eq.core.hvac.thermostat_fsm.thermostat.hysteresis_c, 3.0);
 
         eq.update_control(&environment);
         let mut ports = PortSlots {
@@ -4701,13 +4701,13 @@ mod tests {
         let mut restored = ASHPHeater::new(cfg.clone());
         restored.init(&cfg, &environment).unwrap();
         assert_eq!(
-            restored.core.hvac.thermostat.hysteresis_c, 1.0,
+            restored.core.hvac.thermostat_fsm.thermostat.hysteresis_c, 1.0,
             "fresh instance must have config default"
         );
 
         restored.load_state(&state).unwrap();
         assert_eq!(
-            restored.core.hvac.thermostat.hysteresis_c, 3.0,
+            restored.core.hvac.thermostat_fsm.thermostat.hysteresis_c, 3.0,
             "thermostat_hysteresis_c must survive checkpoint round-trip"
         );
     }

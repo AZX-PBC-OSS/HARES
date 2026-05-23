@@ -1,7 +1,7 @@
 //! Thermostat types and FSM logic shared across HVAC equipment.
 
 use chrono::{DateTime, FixedOffset};
-use hares_types::{EnvironmentState, HaresError, ZoneId};
+use hares_types::{EnvironmentState, HaresError, ScheduleSource, ZoneId};
 use serde::{Deserialize, Serialize};
 
 pub(super) const HEATING_DISABLED_SETPOINT_C: f64 = -999.0;
@@ -181,4 +181,262 @@ pub(super) fn is_cycle_change_allowed(
     };
     let elapsed_ms = (now - last_switch).num_milliseconds().max(0) as f64;
     elapsed_ms / 1000.0 >= thermostat.min_cycle_time_s
+}
+
+/// Thermostat finite-state machine owning the 11 fields and 5 methods that
+/// were previously duplicated between [`HvacEquipment`](super::HvacEquipment)
+/// and [`IdealHvac`](super::IdealHvac).
+///
+/// Both structs embed `pub thermostat_fsm: ThermostatFsm` and delegate to it.
+/// Equipment-specific side-effects (e.g. `IdealHvac` clearing
+/// `ideal_capacity_w` on Deadband entry) remain in wrapper methods on the
+/// owning struct.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThermostatFsm {
+    pub mode: ThermostatMode,
+    pub mode_start_at: Option<DateTime<FixedOffset>>,
+    pub last_mode_switch_at: Option<DateTime<FixedOffset>>,
+    pub thermostat: ThermostatConfig,
+    pub static_setpoints: ThermalSetpoints,
+    pub schedule_setpoints: Option<ScheduleSetpoints>,
+    pub runtime_setpoints: Option<RuntimeSetpointOverride>,
+    pub heating_setpoint_source: Option<ScheduleSource>,
+    pub cooling_setpoint_source: Option<ScheduleSource>,
+    /// Minimum time [s] compressor must remain On before an Off transition is
+    /// allowed. Prevents short-cycle wear. 0.0 = disabled (default).
+    pub min_on_time_s: f64,
+    /// Minimum time [s] compressor must remain Off before an On transition is
+    /// allowed. Prevents short-cycle wear. 0.0 = disabled (default).
+    pub min_off_time_s: f64,
+}
+
+impl ThermostatFsm {
+    pub fn new(static_setpoints: ThermalSetpoints) -> Self {
+        Self {
+            mode: ThermostatMode::Deadband,
+            mode_start_at: None,
+            last_mode_switch_at: None,
+            thermostat: ThermostatConfig::default(),
+            static_setpoints,
+            schedule_setpoints: None,
+            runtime_setpoints: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            min_on_time_s: 0.0,
+            min_off_time_s: 0.0,
+        }
+    }
+
+    pub fn effective_setpoints(&self) -> ThermalSetpoints {
+        self.static_setpoints
+            .with_schedule_override(self.schedule_setpoints)
+            .with_control_override(self.runtime_setpoints)
+    }
+
+    /// Resolve the current setpoint from config-owned schedule data and inject
+    /// as `schedule_setpoints`. Priority:
+    ///   1. Per-timestep schedule array (from CSV column)
+    ///   2. 24-hour weekday/weekend profile (from HPXML thermostat)
+    ///   3. None -- falls through to static_setpoints
+    pub fn resolve_profile_setpoints(&mut self, env: &EnvironmentState) {
+        if self.heating_setpoint_source.is_none() && self.cooling_setpoint_source.is_none() {
+            return;
+        }
+
+        let heating_c = self
+            .heating_setpoint_source
+            .as_mut()
+            .and_then(|source| source.value_at(env).ok());
+        let cooling_c = self
+            .cooling_setpoint_source
+            .as_mut()
+            .and_then(|source| source.value_at(env).ok());
+
+        if heating_c.is_some() || cooling_c.is_some() {
+            self.schedule_setpoints = Some(ScheduleSetpoints {
+                heating_c,
+                cooling_c,
+                ..ScheduleSetpoints::default()
+            });
+        } else {
+            self.schedule_setpoints = None;
+        }
+    }
+
+    /// Set the thermostat mode and record the transition timestamp.
+    ///
+    /// This is the only correct way to change `mode`. It atomically updates
+    /// `mode_start_at` to `when`, upholding the invariant that `mode_start_at`
+    /// always reflects when the current mode began. Callers that bypass this
+    /// method by assigning `mode` directly will silently break minimum on/off
+    /// time enforcement in `can_transition_mode`.
+    pub fn set_mode(&mut self, mode: ThermostatMode, when: DateTime<FixedOffset>) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.last_mode_switch_at = Some(when);
+            self.mode_start_at = Some(when);
+        }
+    }
+
+    /// Returns `false` when a minimum on-time or off-time constraint blocks the
+    /// proposed mode transition.
+    ///
+    /// - Deadband → any On mode: blocked until the unit has been Off for at least
+    ///   `min_off_time_s` (compressor short-cycle protection on restart).
+    /// - Any On mode → Deadband: blocked until the unit has been On for at least
+    ///   `min_on_time_s` (compressor short-cycle protection on shutdown).
+    /// - On mode → different On mode (e.g. Heating↔Cooling reversal): blocked
+    ///   until `min_on_time_s` in the current mode has elapsed.
+    ///
+    /// Returns `true` when `mode_start_at` is `None` (first transition ever) or
+    /// when the minimum duration for the current mode has elapsed.
+    pub fn can_transition_mode(
+        &self,
+        proposed: ThermostatMode,
+        now: DateTime<FixedOffset>,
+    ) -> bool {
+        if self.mode == proposed {
+            return true;
+        }
+        let Some(start) = self.mode_start_at else {
+            return true;
+        };
+        let elapsed_s = (now - start).num_milliseconds().max(0) as f64 / 1000.0;
+        let current_is_on = self.mode != ThermostatMode::Deadband;
+        let min_s = if current_is_on {
+            self.min_on_time_s
+        } else {
+            self.min_off_time_s
+        };
+        elapsed_s >= min_s
+    }
+
+    /// Core thermostat hysteresis + cycle-time logic. Returns the resolved mode.
+    ///
+    /// Callers that need to track the target temperature (e.g. `IdealHvac`
+    /// maintaining `current_target_c`) should wrap this method and add their
+    /// own pre/post hooks rather than modifying the FSM's internals.
+    pub fn update_mode(
+        &mut self,
+        env: &EnvironmentState,
+        zone_id: ZoneId,
+    ) -> crate::Result<ThermostatMode> {
+        self.resolve_profile_setpoints(env);
+        let zone_temp = lookup_zone_temp(env, zone_id)?;
+        let setpoints = self.effective_setpoints();
+
+        if !is_cycle_change_allowed(&self.thermostat, self.last_mode_switch_at, env.current_time) {
+            return Ok(self.mode);
+        }
+
+        let hysteresis = self.thermostat.hysteresis_c;
+        let offset = self.thermostat.deadband_offset.clamp(0.0, 1.0);
+        let cutout = self.thermostat.cutout_ratio;
+        let next_mode = if offset > 0.0 {
+            match self.mode {
+                ThermostatMode::Heating => {
+                    let turn_off = setpoints.heating_c + hysteresis * offset;
+                    if zone_temp > turn_off {
+                        ThermostatMode::Deadband
+                    } else {
+                        ThermostatMode::Heating
+                    }
+                }
+                ThermostatMode::Cooling => {
+                    let turn_off = setpoints.cooling_c - hysteresis * offset;
+                    if zone_temp < turn_off {
+                        ThermostatMode::Deadband
+                    } else {
+                        ThermostatMode::Cooling
+                    }
+                }
+                ThermostatMode::Deadband => {
+                    let heat_turn_on = setpoints.heating_c - hysteresis * (1.0 - offset);
+                    let cool_turn_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
+                    if zone_temp < heat_turn_on {
+                        ThermostatMode::Heating
+                    } else if zone_temp > cool_turn_on {
+                        ThermostatMode::Cooling
+                    } else {
+                        ThermostatMode::Deadband
+                    }
+                }
+            }
+        } else {
+            match self.mode {
+                ThermostatMode::Heating => {
+                    if zone_temp > setpoints.heating_c + hysteresis * cutout {
+                        ThermostatMode::Deadband
+                    } else {
+                        ThermostatMode::Heating
+                    }
+                }
+                ThermostatMode::Cooling => {
+                    if zone_temp < setpoints.cooling_c - hysteresis * cutout {
+                        ThermostatMode::Deadband
+                    } else {
+                        ThermostatMode::Cooling
+                    }
+                }
+                ThermostatMode::Deadband => {
+                    if zone_temp < setpoints.heating_c - hysteresis {
+                        ThermostatMode::Heating
+                    } else if zone_temp > setpoints.cooling_c + hysteresis {
+                        ThermostatMode::Cooling
+                    } else {
+                        ThermostatMode::Deadband
+                    }
+                }
+            }
+        };
+
+        if !self.can_transition_mode(next_mode, env.current_time) {
+            return Ok(self.mode);
+        }
+
+        self.set_mode(next_mode, env.current_time);
+        Ok(self.mode)
+    }
+
+    /// Apply `ThermalSetpoint` and `ThermalSetpointDelta` control signals.
+    ///
+    /// Returns `true` if the signal was handled, `false` if it was an unrelated
+    /// signal type. Equipment-specific validation (e.g. `IdealHvac`'s
+    /// `validate_runtime_override`) and deadband updates must be done by the
+    /// caller before/after invoking this method.
+    pub fn apply_thermal_setpoint_signal(&mut self, signal: &hares_types::ControlSignal) -> bool {
+        use hares_types::ControlSignal;
+        match signal {
+            ControlSignal::ThermalSetpoint {
+                heating_setpoint_c,
+                cooling_setpoint_c,
+                ..
+            } => {
+                self.runtime_setpoints = Some(RuntimeSetpointOverride {
+                    heating_c: *heating_setpoint_c,
+                    cooling_c: *cooling_setpoint_c,
+                });
+                true
+            }
+            ControlSignal::ThermalSetpointDelta {
+                heating_delta_c,
+                cooling_delta_c,
+            } => {
+                let base = self
+                    .static_setpoints
+                    .with_schedule_override(self.schedule_setpoints);
+                let prior = self.runtime_setpoints.unwrap_or_default();
+                self.runtime_setpoints = Some(RuntimeSetpointOverride {
+                    heating_c: heating_delta_c
+                        .map(|d| base.heating_c + d)
+                        .or(prior.heating_c),
+                    cooling_c: cooling_delta_c
+                        .map(|d| base.cooling_c + d)
+                        .or(prior.cooling_c),
+                });
+                true
+            }
+            _ => false,
+        }
+    }
 }

@@ -163,7 +163,7 @@ pub fn apply_heating_control_unchecked(
                 "invalid deadband_c for {equipment_name}: {deadband_c}"
             )));
         }
-        hvac.thermostat.hysteresis_c = *deadband_c;
+        hvac.thermostat_fsm.thermostat.hysteresis_c = *deadband_c;
     }
     Ok(())
 }
@@ -183,7 +183,7 @@ pub fn apply_simple_heating_ideal_capacity_control(
         } else {
             0.0
         };
-        hvac.thermostat.use_ideal_capacity = true;
+        hvac.thermostat_fsm.thermostat.use_ideal_capacity = true;
         hvac.duty_cycle = duty.clamp(0.0, 1.0);
     }
 }

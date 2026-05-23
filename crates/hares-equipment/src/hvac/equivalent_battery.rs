@@ -39,9 +39,9 @@ impl HvacEquipment {
         time_res_s: f64,
     ) -> EquivalentBatteryModel {
         let setpoints = self.effective_setpoints();
-        let hysteresis = self.thermostat.hysteresis_c;
+        let hysteresis = self.thermostat_fsm.thermostat.hysteresis_c;
 
-        let (max_power_kw, energy_kwh, max_energy_kwh) = match self.mode {
+        let (max_power_kw, energy_kwh, max_energy_kwh) = match self.thermostat_fsm.mode {
             ThermostatMode::Heating => {
                 let rated_w = self.rated_capacity_w(ThermostatMode::Heating);
                 if rated_w <= 0.0 {

@@ -200,7 +200,7 @@ impl HvacEquipment {
     }
 
     fn select_multi_speed(&self, load_fraction: f64) -> SpeedSelection {
-        let caps = match self.mode {
+        let caps = match self.thermostat_fsm.mode {
             ThermostatMode::Heating if !self.heating_capacities_w.is_empty() => {
                 &self.heating_capacities_w
             }
@@ -354,7 +354,7 @@ impl HvacEquipment {
 
     /// Normalized capacity fractions `cap[i] / cap[last]` for the populated capacities array.
     pub fn capacity_fractions(&self) -> Vec<f64> {
-        let caps = match self.mode {
+        let caps = match self.thermostat_fsm.mode {
             ThermostatMode::Heating if !self.heating_capacities_w.is_empty() => {
                 &self.heating_capacities_w
             }
@@ -596,7 +596,7 @@ mod tests {
     fn capacity_fractions_two_speed() {
         let mut hvac = make_single_speed();
         hvac.heating_capacities_w = vec![5_000.0, 10_000.0];
-        hvac.mode = ThermostatMode::Heating;
+        hvac.thermostat_fsm.mode = ThermostatMode::Heating;
         let fracs = hvac.capacity_fractions();
         assert_eq!(fracs.len(), 2, "two-speed must yield two fractions");
         assert!(
@@ -623,11 +623,11 @@ mod tests {
         hvac.heating_capacities_w = vec![4_000.0, 8_000.0];
         hvac.cooling_capacities_w = vec![2_000.0, 4_000.0, 6_000.0, 12_000.0];
 
-        hvac.mode = ThermostatMode::Heating;
+        hvac.thermostat_fsm.mode = ThermostatMode::Heating;
         let heating_fracs = hvac.capacity_fractions();
         assert_eq!(heating_fracs, vec![0.5, 1.0]);
 
-        hvac.mode = ThermostatMode::Cooling;
+        hvac.thermostat_fsm.mode = ThermostatMode::Cooling;
         let cooling_fracs = hvac.capacity_fractions();
         assert_eq!(cooling_fracs, vec![1.0 / 6.0, 1.0 / 3.0, 0.5, 1.0]);
     }
