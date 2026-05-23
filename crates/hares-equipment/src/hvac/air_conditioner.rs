@@ -24,7 +24,7 @@ use super::coil_physics::{
     CoilResult, LatentDegradationParams, calculate_shr, effective_shr_with_latent_degradation,
 };
 use super::latent_degradation::compute_coil_ao_by_stage;
-use super::speed_control::SpeedSelection;
+use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{equipment_id_from_config, lookup_zone, operating_mode_code, zone_id_from_config},
@@ -337,61 +337,31 @@ impl CoolingCore {
         &mut self,
         requested_capacity_fraction: f64,
     ) -> SpeedSelection {
-        let requested_capacity_fraction = requested_capacity_fraction.clamp(0.0, 1.0);
         let capacities = &self.hvac.cooling_capacities_w;
-        let selection = if capacities.is_empty() {
-            SpeedSelection {
+        let cap_fracs = capacity_fractions_for(capacities);
+        if cap_fracs.is_empty() {
+            let selection = SpeedSelection {
                 speed_index: 0,
                 speed_frac: 0.0,
                 part_load_ratio: 0.0,
-            }
-        } else if capacities.len() == 1 {
-            SpeedSelection {
+            };
+            self.hvac.last_speed_index = selection.speed_index;
+            self.hvac.last_speed_frac = selection.speed_frac;
+            return selection;
+        }
+        if cap_fracs.len() == 1 {
+            let lf = requested_capacity_fraction.clamp(0.0, 1.0);
+            let selection = SpeedSelection {
                 speed_index: 0,
                 speed_frac: 0.0,
-                part_load_ratio: requested_capacity_fraction,
-            }
-        } else {
-            let max_capacity_w = capacities.last().copied().unwrap_or_default();
-            let capacity_fractions: Vec<f64> = capacities
-                .iter()
-                .map(|capacity_w| capacity_w / max_capacity_w.max(f64::MIN_POSITIVE))
-                .collect();
-            if requested_capacity_fraction <= capacity_fractions[0] {
-                SpeedSelection {
-                    speed_index: 0,
-                    speed_frac: 0.0,
-                    part_load_ratio: (requested_capacity_fraction
-                        / capacity_fractions[0].max(f64::MIN_POSITIVE))
-                    .clamp(0.0, 1.0),
-                }
-            } else if requested_capacity_fraction
-                >= *capacity_fractions
-                    .last()
-                    .expect("non-empty capacity fractions")
-            {
-                SpeedSelection {
-                    speed_index: capacity_fractions.len() - 1,
-                    speed_frac: 0.0,
-                    part_load_ratio: 1.0,
-                }
-            } else {
-                let hi = capacity_fractions
-                    .partition_point(|&fraction| fraction < requested_capacity_fraction);
-                let lo = hi - 1;
-                let span = capacity_fractions[hi] - capacity_fractions[lo];
-                let speed_frac = if span > f64::EPSILON {
-                    (requested_capacity_fraction - capacity_fractions[lo]) / span
-                } else {
-                    0.0
-                };
-                SpeedSelection {
-                    speed_index: lo,
-                    speed_frac,
-                    part_load_ratio: 1.0,
-                }
-            }
-        };
+                part_load_ratio: lf,
+            };
+            self.hvac.last_speed_index = selection.speed_index;
+            self.hvac.last_speed_frac = selection.speed_frac;
+            return selection;
+        }
+        let selection =
+            interpolate_speed_stages(requested_capacity_fraction, &cap_fracs, true);
         self.hvac.last_speed_index = selection.speed_index;
         self.hvac.last_speed_frac = selection.speed_frac;
         selection
@@ -4180,11 +4150,12 @@ mod defaults_tests {
     }
 }
 
-// Regression tests for ticket 007: select_variable_speed_cooling duplicates the
-// bracket-interpolation logic of HvacEquipment::select_multi_speed.  These tests
-// verify that both paths produce identical SpeedSelection values for the same
-// normalised load fractions and capacity stages, making a latent divergence
-// visible as a test failure before the refactor unifies them.
+// Parity regression tests: select_variable_speed_cooling and
+// HvacEquipment::select_multi_speed both delegate to interpolate_speed_stages.
+// These tests verify that both paths produce identical SpeedSelection values for
+// the same normalised load fractions and capacity stages.  If either caller is
+// ever re-implemented without going through the shared function, a divergence
+// will appear here first.
 //
 // The tests exercise select_variable_speed_cooling directly by constructing a
 // minimal CoolingCore and overriding cooling_capacities_w after init.
@@ -4301,11 +4272,11 @@ mod speed_selection_parity_tests {
         hvac
     }
 
-    // Ticket-007 regression: select_variable_speed_cooling must produce the same
+    // Regression: select_variable_speed_cooling must produce the same
     // speed_index and speed_frac as select_multi_speed for every interior bracket.
-    // If the two duplicate implementations diverge this test will catch it.
+    // If the two paths diverge this test will catch it.
     #[test]
-    fn variable_speed_and_multi_speed_agree_on_bracket_interpolation() {
+    fn variable_speed_multi_speed_parity_interior_brackets() {
         // 4-stage: fractions [0.4, 0.6, 0.8, 1.0]
         let caps = vec![4_000.0, 6_000.0, 8_000.0, 10_000.0];
         let mut core = make_cooling_core(caps.clone());
@@ -4338,9 +4309,9 @@ mod speed_selection_parity_tests {
         }
     }
 
-    // Ticket-007 regression: below the lowest stage, PLR computation must agree.
+    // Regression: below the lowest stage, PLR computation must agree between paths.
     #[test]
-    fn variable_speed_and_multi_speed_agree_below_lowest_stage() {
+    fn variable_speed_multi_speed_parity_below_lowest_stage() {
         let caps = vec![4_000.0, 6_000.0, 8_000.0, 10_000.0];
         let mut core = make_cooling_core(caps.clone());
         let mut hvac = make_hvac_cooling(caps);
@@ -4360,9 +4331,9 @@ mod speed_selection_parity_tests {
         );
     }
 
-    // Ticket-007 regression: at full load both paths must return the last index.
+    // Regression: at full load both paths must return the last index.
     #[test]
-    fn variable_speed_and_multi_speed_agree_at_full_load() {
+    fn variable_speed_multi_speed_parity_at_full_load() {
         let caps = vec![4_000.0, 6_000.0, 8_000.0, 10_000.0];
         let mut core = make_cooling_core(caps.clone());
         let mut hvac = make_hvac_cooling(caps);

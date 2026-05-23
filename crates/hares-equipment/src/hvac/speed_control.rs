@@ -109,6 +109,80 @@ pub struct SpeedSelection {
     pub part_load_ratio: f64,
 }
 
+/// Normalize absolute capacities `[W]` into fractions of the maximum capacity.
+///
+/// Returns an empty `Vec` when the maximum capacity is `<= 0`.
+/// This is the same algorithm as the former `HvacEquipment::capacity_fractions_for`
+/// but extracted as a free function so it can be shared across modules.
+pub fn capacity_fractions_for(caps: &[f64]) -> Vec<f64> {
+    let max_cap = caps.last().copied().unwrap_or(0.0);
+    if max_cap <= 0.0 {
+        return vec![];
+    }
+    caps.iter().map(|&c| c / max_cap).collect()
+}
+
+/// Bracket-interpolation of a requested load fraction against normalized
+/// capacity fractions, returning a `SpeedSelection`.
+///
+/// `capacity_fractions` must be sorted ascending. When `capacity_fractions` is
+/// empty or `load_fraction` (after optional clamping) is `<= 0`, returns a
+/// zero `SpeedSelection` (speed_index=0, speed_frac=0, part_load_ratio=0).
+///
+/// When `clamp_input` is true the load fraction is clamped to `[0, 1]` before
+/// processing (used by variable-speed paths); when false no clamping is applied
+/// (used by multi-speed paths that rely on the caller's own bounds checks).
+///
+/// EnergyPlus Engineering Reference (v8.3 Air System Compound Component Groups):
+///   SpeedRatio = ABS(Q_required − Q_{n−1}) / ABS(Q_n − Q_{n−1})
+/// which is the same linear interpolation implemented here.
+pub fn interpolate_speed_stages(
+    load_fraction: f64,
+    capacity_fractions: &[f64],
+    clamp_input: bool,
+) -> SpeedSelection {
+    let lf = if clamp_input {
+        load_fraction.clamp(0.0, 1.0)
+    } else {
+        load_fraction
+    };
+    if capacity_fractions.is_empty() || lf <= 0.0 {
+        return SpeedSelection {
+            speed_index: 0,
+            speed_frac: 0.0,
+            part_load_ratio: 0.0,
+        };
+    }
+    if lf <= capacity_fractions[0] {
+        let plr = (lf / capacity_fractions[0].max(f64::MIN_POSITIVE)).clamp(0.0, 1.0);
+        return SpeedSelection {
+            speed_index: 0,
+            speed_frac: 0.0,
+            part_load_ratio: plr,
+        };
+    }
+    if lf >= *capacity_fractions.last().expect("non-empty") {
+        return SpeedSelection {
+            speed_index: capacity_fractions.len() - 1,
+            speed_frac: 0.0,
+            part_load_ratio: 1.0,
+        };
+    }
+    let hi = capacity_fractions.partition_point(|&f| f < lf);
+    let lo = hi - 1;
+    let span = capacity_fractions[hi] - capacity_fractions[lo];
+    let speed_frac = if span > f64::EPSILON {
+        (lf - capacity_fractions[lo]) / span
+    } else {
+        0.0
+    };
+    SpeedSelection {
+        speed_index: lo,
+        speed_frac,
+        part_load_ratio: 1.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +276,178 @@ mod tests {
             (mult - expected).abs() < 1e-9,
             "expected {expected}, got {mult}"
         );
+    }
+
+    #[test]
+    fn capacity_fractions_empty_input() {
+        assert!(capacity_fractions_for(&[]).is_empty());
+    }
+
+    #[test]
+    fn capacity_fractions_zero_max_returns_empty() {
+        assert!(capacity_fractions_for(&[0.0, 0.0]).is_empty());
+    }
+
+    #[test]
+    fn capacity_fractions_normalizes_by_max() {
+        let fracs = capacity_fractions_for(&[4_000.0, 6_000.0, 8_000.0, 10_000.0]);
+        assert_eq!(fracs, vec![0.4, 0.6, 0.8, 1.0]);
+    }
+
+    #[test]
+    fn capacity_fractions_single_stage() {
+        let fracs = capacity_fractions_for(&[5_000.0]);
+        assert_eq!(fracs, vec![1.0]);
+    }
+
+    #[test]
+    fn interpolate_empty_fractions_returns_zero() {
+        let sel = interpolate_speed_stages(0.5, &[], false);
+        assert_eq!(
+            sel,
+            SpeedSelection {
+                speed_index: 0,
+                speed_frac: 0.0,
+                part_load_ratio: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_zero_load_returns_zero() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(0.0, &fracs, false);
+        assert_eq!(
+            sel,
+            SpeedSelection {
+                speed_index: 0,
+                speed_frac: 0.0,
+                part_load_ratio: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_below_lowest_returns_plr_only() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(0.3, &fracs, false);
+        assert_eq!(sel.speed_index, 0);
+        assert_eq!(sel.speed_frac, 0.0);
+        let expected_plr = 0.3 / 0.4;
+        assert!((sel.part_load_ratio - expected_plr).abs() < 1e-12);
+    }
+
+    #[test]
+    fn interpolate_at_first_stage_boundary() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(0.4, &fracs, false);
+        assert_eq!(sel.speed_index, 0);
+        assert_eq!(sel.speed_frac, 0.0);
+        assert!((sel.part_load_ratio - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn interpolate_between_stages_midpoint() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(0.5, &fracs, false);
+        assert_eq!(sel.speed_index, 0);
+        assert!((sel.speed_frac - 0.5).abs() < 1e-12);
+        assert_eq!(sel.part_load_ratio, 1.0);
+    }
+
+    #[test]
+    fn interpolate_between_stages_asymmetric() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(0.7, &fracs, false);
+        assert_eq!(sel.speed_index, 1);
+        assert!((sel.speed_frac - 0.5).abs() < 1e-12);
+        assert_eq!(sel.part_load_ratio, 1.0);
+    }
+
+    #[test]
+    fn interpolate_at_last_stage_returns_full() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(1.0, &fracs, false);
+        assert_eq!(
+            sel,
+            SpeedSelection {
+                speed_index: 3,
+                speed_frac: 0.0,
+                part_load_ratio: 1.0
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_above_last_stage_returns_full() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(1.5, &fracs, false);
+        assert_eq!(
+            sel,
+            SpeedSelection {
+                speed_index: 3,
+                speed_frac: 0.0,
+                part_load_ratio: 1.0
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_clamp_input_clamps_above_one() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(1.5, &fracs, true);
+        assert_eq!(
+            sel,
+            SpeedSelection {
+                speed_index: 3,
+                speed_frac: 0.0,
+                part_load_ratio: 1.0
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_clamp_input_clamps_below_zero() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(-0.5, &fracs, true);
+        assert_eq!(
+            sel,
+            SpeedSelection {
+                speed_index: 0,
+                speed_frac: 0.0,
+                part_load_ratio: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_no_clamp_negative_load_returns_zero() {
+        let fracs = vec![0.4, 0.6, 0.8, 1.0];
+        let sel = interpolate_speed_stages(-0.5, &fracs, false);
+        assert_eq!(
+            sel,
+            SpeedSelection {
+                speed_index: 0,
+                speed_frac: 0.0,
+                part_load_ratio: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_zero_span_returns_zero_frac() {
+        let fracs = vec![0.5, 0.5, 1.0];
+        let sel = interpolate_speed_stages(0.5, &fracs, false);
+        assert_eq!(sel.speed_index, 0);
+        assert_eq!(sel.speed_frac, 0.0);
+    }
+
+    #[test]
+    fn interpolate_two_stage_interpolation() {
+        let fracs = vec![0.6, 1.0];
+        let sel = interpolate_speed_stages(0.8, &fracs, false);
+        assert_eq!(sel.speed_index, 0);
+        assert!((sel.speed_frac - 0.5).abs() < 1e-12);
+        assert_eq!(sel.part_load_ratio, 1.0);
     }
 }

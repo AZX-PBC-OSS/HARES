@@ -29,7 +29,10 @@ pub use hvac_core::{
     AIRFLOW_CENTRAL_AC_M3_S_PER_W, AIRFLOW_HEATING_M3_S_PER_W, AIRFLOW_MSHP_COOLING_M3_S_PER_W,
     AIRFLOW_ROOM_AC_M3_S_PER_W, HvacEquipment, HvacEquipmentType,
 };
-pub use speed_control::{SpeedControlMode, SpeedSelection, StartupConfig};
+pub use speed_control::{
+    SpeedControlMode, SpeedSelection, StartupConfig, capacity_fractions_for,
+    interpolate_speed_stages,
+};
 pub use thermostat::{
     RuntimeSetpointOverride, ScheduleSetpoints, ThermalSetpoints, ThermostatConfig, ThermostatFsm,
     ThermostatMode,

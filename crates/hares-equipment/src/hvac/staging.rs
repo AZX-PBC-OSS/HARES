@@ -6,7 +6,9 @@
 use hares_physics::biquadratic::quadratic;
 
 use super::hvac_core::HvacEquipment;
-use super::speed_control::{SpeedControlMode, SpeedSelection};
+use super::speed_control::{
+    SpeedControlMode, SpeedSelection, capacity_fractions_for, interpolate_speed_stages,
+};
 use super::thermostat::ThermostatMode;
 
 /// Default low-speed capacity fraction for two-speed equipment.
@@ -210,42 +212,8 @@ impl HvacEquipment {
             _ if !self.heating_capacities_w.is_empty() => &self.heating_capacities_w,
             _ => &self.cooling_capacities_w,
         };
-        let cap_fracs = Self::capacity_fractions_for(caps);
-        if cap_fracs.is_empty() || load_fraction <= 0.0 {
-            return SpeedSelection {
-                speed_index: 0,
-                speed_frac: 0.0,
-                part_load_ratio: 0.0,
-            };
-        }
-        if load_fraction <= cap_fracs[0] {
-            return SpeedSelection {
-                speed_index: 0,
-                speed_frac: 0.0,
-                part_load_ratio: load_fraction / cap_fracs[0],
-            };
-        }
-        // SAFETY: cap_fracs is non-empty (early return above checks is_empty).
-        if load_fraction >= *cap_fracs.last().expect("cap_fracs non-empty") {
-            return SpeedSelection {
-                speed_index: cap_fracs.len() - 1,
-                speed_frac: 0.0,
-                part_load_ratio: 1.0,
-            };
-        }
-        let hi = cap_fracs.partition_point(|&f| f < load_fraction);
-        let lo = hi - 1;
-        let span = cap_fracs[hi] - cap_fracs[lo];
-        let frac = if span > f64::EPSILON {
-            (load_fraction - cap_fracs[lo]) / span
-        } else {
-            0.0
-        };
-        SpeedSelection {
-            speed_index: lo,
-            speed_frac: frac,
-            part_load_ratio: 1.0,
-        }
+        let cap_fracs = capacity_fractions_for(caps);
+        interpolate_speed_stages(load_fraction, &cap_fracs, false)
     }
 
     fn apply_disabled_speeds_two_speed(&self, desired_index: usize) -> usize {
@@ -366,15 +334,7 @@ impl HvacEquipment {
             }
             _ => &self.cooling_capacities_w,
         };
-        Self::capacity_fractions_for(caps)
-    }
-
-    fn capacity_fractions_for(caps: &[f64]) -> Vec<f64> {
-        let max_cap = caps.last().copied().unwrap_or(0.0);
-        if max_cap <= 0.0 {
-            return vec![];
-        }
-        caps.iter().map(|&c| c / max_cap).collect()
+        capacity_fractions_for(caps)
     }
 
     /// Interpolate capacity between two bracket stages using `speed_frac`.
