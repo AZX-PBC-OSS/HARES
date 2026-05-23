@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use hares_equipment::{
-    BatteryConfig, CentralAirConditionerConfig, DehumidifierConfig, DuctConfig,
+    BatteryConfig, CentralAirConditionerConfig, DefrostConfig, DehumidifierConfig, DuctConfig,
     ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, Equipment,
     EquipmentConfig, EquipmentRegistry, EquipmentTypedConfig, EvConfig, GasBoilerConfig,
     GasFurnaceConfig, GeneratorConfig, HeatPumpCommonConfig, HeatPumpCoolerConfig,
@@ -738,12 +738,16 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
+                    min_compressor_fraction: 0.25,
+                    eir_part_load_benefit: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
                 max_oat_supplemental_c: None,
                 er_setpoint_offset_c: None,
                 er_hard_lockout_time_s: None,
+                heating_shr: None,
+                defrost: DefrostConfig::default(),
             },
         ),
         "ASHP Cooler" | "MSHP Cooler" => typed_alias_config(
@@ -785,6 +789,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
+                    min_compressor_fraction: 0.25,
+                    eir_part_load_benefit: None,
                 },
                 stage_shrs: None,
             },

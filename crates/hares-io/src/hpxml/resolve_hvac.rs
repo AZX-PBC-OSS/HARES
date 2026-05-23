@@ -8,6 +8,7 @@ use hares_equipment::EquipmentConfig;
 use hares_equipment::hvac::cooling_config::{
     CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
 };
+use hares_equipment::hvac::heat_pump::defrost::{DefrostConfig, DefrostControl, DefrostStrategy};
 use hares_equipment::hvac::heat_pump_config::{
     HeatPumpCommonConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
 };
@@ -1031,12 +1032,57 @@ fn try_build_heat_pump_heater_config(
             ff_max: curve_bounds.ff_max,
             plf_min: curve_bounds.plf_min,
             plf_max: curve_bounds.plf_max,
+            min_compressor_fraction: params
+                .get("min_compressor_fraction")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.25),
+            eir_part_load_benefit: params.get("eir_part_load_benefit").and_then(Value::as_f64),
         },
         hp_lockout_temp_c: params.get("hp_lockout_temp_c").and_then(Value::as_f64),
         er_lockout_temp_c: params.get("er_lockout_temp_c").and_then(Value::as_f64),
         max_oat_supplemental_c: params.get("max_oat_supplemental_c").and_then(Value::as_f64),
         er_setpoint_offset_c: params.get("er_setpoint_offset_c").and_then(Value::as_f64),
         er_hard_lockout_time_s: params.get("er_hard_lockout_time_s").and_then(Value::as_f64),
+        heating_shr: None,
+        defrost: {
+            let mut d = DefrostConfig::default();
+            if let Some(s) = params.get("defrost_control").and_then(Value::as_str) {
+                if let Ok(c) =
+                    serde_json::from_value::<DefrostControl>(Value::String(s.to_string()))
+                {
+                    d.control = c;
+                }
+            }
+            if let Some(s) = params.get("defrost_strategy").and_then(Value::as_str) {
+                if let Ok(st) =
+                    serde_json::from_value::<DefrostStrategy>(Value::String(s.to_string()))
+                {
+                    d.strategy = st;
+                }
+            }
+            if let Some(v) = params.get("defrost_time_fraction").and_then(Value::as_f64) {
+                d.defrost_time_fraction = v;
+            }
+            if let Some(v) = params.get("defrost_max_oat_c").and_then(Value::as_f64) {
+                d.max_oat_defrost_c = v;
+            }
+            if let Some(v) = params
+                .get("defrost_capacity_reduction_factor")
+                .and_then(Value::as_f64)
+            {
+                d.capacity_reduction_factor = v;
+            }
+            if let Some(v) = params.get("defrost_power_w").and_then(Value::as_f64) {
+                d.defrost_power_w = v;
+            }
+            if let Some(v) = params
+                .get("resistive_defrost_capacity_w")
+                .and_then(Value::as_f64)
+            {
+                d.resistive_defrost_capacity_w = v;
+            }
+            d
+        },
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -1146,6 +1192,11 @@ fn try_build_heat_pump_cooler_config(
             ff_max: curve_bounds.ff_max,
             plf_min: curve_bounds.plf_min,
             plf_max: curve_bounds.plf_max,
+            min_compressor_fraction: params
+                .get("min_compressor_fraction")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.25),
+            eir_part_load_benefit: params.get("eir_part_load_benefit").and_then(Value::as_f64),
         },
         stage_shrs: extract_stage_values(params, "shr"),
     };
@@ -1477,6 +1528,28 @@ pub(super) fn resolve_hvac(
             "CoolingCapacity",
             "cooling_capacity_w",
         );
+        // HPXML MinimumCapacity → min_compressor_fraction when HeatingCapacity is available.
+        // MinimumCapacity is the lowest compressor output; min_compressor_fraction = MinimumCapacity / HeatingCapacity.
+        if let Some(min_btu_h) = child_f64(heat_pump, "MinimumCapacity") {
+            if let Some(Value::Number(cap_n)) = params.get("heating_capacity_w") {
+                if let Some(heat_w) = cap_n.as_f64() {
+                    if heat_w > 0.0 {
+                        let min_w = conv::power_btu_h_to_w(min_btu_h);
+                        let raw_frac = min_w / heat_w;
+                        let frac = raw_frac.clamp(0.1, 0.5);
+                        if (frac - raw_frac).abs() > f64::EPSILON {
+                            tracing::warn!(
+                                raw = raw_frac,
+                                clamped = frac,
+                                "HPXML MinimumCapacity / HeatingCapacity = {raw_frac:.3} \
+                                 is outside [0.1, 0.5]; clamped to {frac:.3}"
+                            );
+                        }
+                        params.insert("min_compressor_fraction".to_string(), json!(frac));
+                    }
+                }
+            }
+        }
         insert_annual_efficiency(&mut params, heat_pump, true);
         insert_annual_efficiency(&mut params, heat_pump, false);
         params.insert(

@@ -14,8 +14,8 @@ use hares_equipment::water_heater::wh_config::{
     TanklessWaterHeaterConfig,
 };
 use hares_equipment::{
-    BatteryConfig, DuctConfig, EquipmentConfig, EquipmentRegistry, EquipmentTypedConfig, EvConfig,
-    GeneratorConfig, PvConfig, VentilationConfig,
+    BatteryConfig, DefrostConfig, DuctConfig, EquipmentConfig, EquipmentRegistry,
+    EquipmentTypedConfig, EvConfig, GeneratorConfig, PvConfig, VentilationConfig,
 };
 use hares_types::{
     BoundaryPolicy, EnvironmentState, FuelType, GridState, ScheduleSourceConfig, SurfaceIrradiance,
@@ -246,12 +246,16 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
             ff_max: Some(1.2),
             plf_min: Some(0.7),
             plf_max: Some(1.0),
+            min_compressor_fraction: 0.25,
+            eir_part_load_benefit: None,
         },
         hp_lockout_temp_c: None,
         er_lockout_temp_c: None,
         max_oat_supplemental_c: None,
         er_setpoint_offset_c: None,
         er_hard_lockout_time_s: None,
+        heating_shr: None,
+        defrost: DefrostConfig::default(),
     }
 }
 

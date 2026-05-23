@@ -3,7 +3,12 @@
 use serde::{Deserialize, Serialize};
 
 use super::core_config::default_one;
+use super::heat_pump::defrost::DefrostConfig;
 use super::heating_config::DuctConfig;
+
+fn default_min_compressor_fraction() -> f64 {
+    0.25
+}
 use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
 use hares_types::{FuelType, ScheduleSourceConfig};
@@ -84,6 +89,19 @@ pub struct HeatPumpCommonConfig {
     pub plf_min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plf_max: Option<f64>,
+    /// Minimum compressor speed as a fraction of rated capacity for mini-split heat pumps.
+    /// Default 0.25 matches the original hardcoded value; OCHRE uses 0.40 for MSHP Heater
+    /// (from "HVAC Multispeed Parameters.csv"). EnergyPlus sets minimum compressor capacity
+    /// via the ratio of Speed 1 to Speed N `Gross Rated Heating Capacity` fields in
+    /// `Coil:Heating:DX:MultiSpeed` — there is no single "minimum fraction" parameter.
+    #[serde(default = "default_min_compressor_fraction")]
+    pub min_compressor_fraction: f64,
+    /// Fractional EIR reduction at part load: `eir[i] = rated_eir * (1 - benefit * (1 - frac[i]))`.
+    /// Default `None` = 0.0 (constant EIR, current behavior). Values of 0.1–0.2 are typical
+    /// for inverter compressors where COP improves at lower compressor speeds due to reduced
+    /// pressure ratio (AHRI 210/240 variable-speed test procedure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eir_part_load_benefit: Option<f64>,
 }
 
 impl Default for HeatPumpCommonConfig {
@@ -124,6 +142,8 @@ impl Default for HeatPumpCommonConfig {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            min_compressor_fraction: 0.25,
+            eir_part_load_benefit: None,
         }
     }
 }
@@ -158,6 +178,18 @@ pub struct HeatPumpHeaterConfig {
     /// ER hard lockout duration after a setpoint raise [s].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_hard_lockout_time_s: Option<f64>,
+    /// Heating-side sensible heat ratio. Default 1.0 (all-sensible) matching
+    /// OCHRE HVAC.py:458-462 which returns SHR=1 for all heating modes.
+    /// When < 1.0, a small positive latent gain is emitted during
+    /// reverse-cycle defrost from indoor-coil surface moisture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_shr: Option<f64>,
+    /// Defrost configuration: control mode, strategy, timing, capacity.
+    /// Flattened into the same JSON namespace as heater-only fields.
+    /// All fields default to the OnDemand/ReverseCycle values matching
+    /// the previous `DefrostConfig::on_demand(1.0, 0.0)` hardcoded path.
+    #[serde(flatten)]
+    pub defrost: DefrostConfig,
 }
 
 impl EquipmentTypedConfig for HeatPumpHeaterConfig {
@@ -217,6 +249,7 @@ impl HeatPumpHeaterConfig {
             ("max_oat_supplemental_c", self.max_oat_supplemental_c),
             ("er_setpoint_offset_c", self.er_setpoint_offset_c),
             ("er_hard_lockout_time_s", self.er_hard_lockout_time_s),
+            ("heating_shr", self.heating_shr),
         ] {
             if let Some(v) = value
                 && !v.is_finite()
@@ -247,6 +280,13 @@ impl HeatPumpHeaterConfig {
                 "HeatPumpHeaterConfig: er_hard_lockout_time_s must be >= 0".to_string(),
             ));
         }
+        if let Some(v) = self.heating_shr
+            && !(0.0..=1.0).contains(&v)
+        {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpHeaterConfig: heating_shr must be in [0, 1], got {v}"
+            )));
+        }
         if !self.common.is_mini_split {
             let n_speeds = self.effective_number_of_speeds() as usize;
             if n_speeds >= 2 {
@@ -270,6 +310,32 @@ impl HeatPumpHeaterConfig {
                 }
             }
         }
+        if self.common.is_mini_split {
+            let v = self.common.min_compressor_fraction;
+            if !v.is_finite() || !(0.1..=0.5).contains(&v) {
+                return Err(HaresError::Equipment(format!(
+                    "HeatPumpHeaterConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
+                )));
+            }
+        }
+        if let Some(v) = self.common.eir_part_load_benefit {
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                return Err(HaresError::Equipment(format!(
+                    "HeatPumpHeaterConfig: eir_part_load_benefit must be in [0.0, 1.0], got {v}"
+                )));
+            }
+            if v > 0.5 {
+                tracing::warn!(
+                    benefit = v,
+                    "HeatPumpHeaterConfig: eir_part_load_benefit={v} exceeds 0.5; \
+                     measured COP improvement at minimum stage vs rated is typically 30–50% \
+                     for inverter compressors (AHRI 210/240, NREL field studies)"
+                );
+            }
+        }
+        self.defrost
+            .validate()
+            .map_err(|e| HaresError::Equipment(format!("HeatPumpHeaterConfig: {e}")))?;
         Ok(())
     }
 }
@@ -400,6 +466,30 @@ impl HeatPumpCoolerConfig {
             ));
         }
 
+        if self.common.is_mini_split {
+            let v = self.common.min_compressor_fraction;
+            if !v.is_finite() || !(0.1..=0.5).contains(&v) {
+                return Err(HaresError::Equipment(format!(
+                    "HeatPumpCoolerConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
+                )));
+            }
+        }
+        if let Some(v) = self.common.eir_part_load_benefit {
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                return Err(HaresError::Equipment(format!(
+                    "HeatPumpCoolerConfig: eir_part_load_benefit must be in [0.0, 1.0], got {v}"
+                )));
+            }
+            if v > 0.5 {
+                tracing::warn!(
+                    benefit = v,
+                    "HeatPumpCoolerConfig: eir_part_load_benefit={v} exceeds 0.5; \
+                     measured COP improvement at minimum stage vs rated is typically 30–50% \
+                     for inverter compressors (AHRI 210/240, NREL field studies)"
+                );
+            }
+        }
+
         Ok(())
     }
 }
@@ -459,12 +549,16 @@ mod tests {
                 ff_max: Some(1.2),
                 plf_min: Some(0.7),
                 plf_max: Some(1.0),
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: Some(-17.8),
             er_lockout_temp_c: Some(4.4),
             max_oat_supplemental_c: Some(21.0),
             er_setpoint_offset_c: Some(1.6),
             er_hard_lockout_time_s: Some(600.0),
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         };
         let ec = typed_config(cfg.clone());
         let recovered: HeatPumpHeaterConfig = ec.typed().unwrap();
@@ -652,12 +746,16 @@ mod tests {
                 ff_max: Some(1.2),
                 plf_min: Some(0.7),
                 plf_max: Some(1.0),
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: Some(-17.8),
             er_lockout_temp_c: Some(4.4),
             max_oat_supplemental_c: Some(21.0),
             er_setpoint_offset_c: Some(1.6),
             er_hard_lockout_time_s: Some(600.0),
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         };
         let value = serde_json::to_value(&cfg).unwrap();
         let recovered: HeatPumpHeaterConfig = serde_json::from_value(value.clone()).unwrap();
@@ -770,14 +868,58 @@ mod tests {
     }
 
     #[test]
-    fn equipment_type_names_match_constants() {
-        assert_eq!(
-            HeatPumpHeaterConfig::equipment_type_name(),
-            super::super::core_config::equipment_type_name::ASHP_HEATER
+    fn heat_pump_cooler_validate_rejects_min_compressor_fraction_out_of_range() {
+        let mut cfg_below = HeatPumpCoolerConfig {
+            common: HeatPumpCommonConfig {
+                cooling_capacity_w: Some(12_000.0),
+                cooling_eir: Some(0.25),
+                is_mini_split: true,
+                min_compressor_fraction: 0.05,
+                ..HeatPumpCommonConfig::default()
+            },
+            stage_shrs: None,
+        };
+        let err = cfg_below.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("min_compressor_fraction must be in [0.1, 0.5]"),
+            "cooler validation must reject min_compressor_fraction < 0.1; got: {err}",
         );
-        assert_eq!(
-            HeatPumpCoolerConfig::equipment_type_name(),
-            super::super::core_config::equipment_type_name::ASHP_COOLER
+
+        cfg_below.common.min_compressor_fraction = 0.55;
+        let err = cfg_below.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("min_compressor_fraction must be in [0.1, 0.5]"),
+            "cooler validation must reject min_compressor_fraction > 0.5; got: {err}",
+        );
+    }
+
+    #[test]
+    fn min_compressor_fraction_defaults_to_25_percent() {
+        let json = serde_json::json!({
+            "heating_capacity_w": 10_000.0,
+            "heating_eir": 0.25,
+        });
+        let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
+        assert!(
+            (cfg.common.min_compressor_fraction - 0.25).abs() < 1e-9,
+            "default min_compressor_fraction must be 0.25; got {}",
+            cfg.common.min_compressor_fraction,
+        );
+    }
+
+    #[test]
+    fn eir_part_load_benefit_defaults_to_none() {
+        let json = serde_json::json!({
+            "heating_capacity_w": 10_000.0,
+            "heating_eir": 0.25,
+        });
+        let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
+        assert!(
+            cfg.common.eir_part_load_benefit.is_none(),
+            "default eir_part_load_benefit must be None; got {:?}",
+            cfg.common.eir_part_load_benefit,
         );
     }
 }

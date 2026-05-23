@@ -25,6 +25,7 @@ pub(super) mod thermostat;
 
 pub use cooling_config::{CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig};
 pub use equivalent_battery::EquivalentBatteryModel;
+pub use heat_pump::defrost::{DefrostConfig, DefrostControl, DefrostStrategy};
 pub use heat_pump_config::{
     HeatPumpCommonConfig, HeatPumpConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
 };

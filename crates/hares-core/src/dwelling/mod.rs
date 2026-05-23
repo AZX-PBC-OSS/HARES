@@ -145,6 +145,7 @@ struct EquipmentColumns {
     power_factor: Option<usize>,
     energy_kwh: Option<usize>,
     schedule: Option<usize>,
+    defrost_state: Option<usize>,
 }
 
 /// Build column index maps for each equipment piece using instance-qualified
@@ -189,6 +190,9 @@ fn build_equipment_column_map(
                     .copied(),
                 energy_kwh: column_index.get(&format!("{name} Energy (kWh)")).copied(),
                 schedule: column_index.get(&format!("{name} Schedule (-)")).copied(),
+                defrost_state: column_index
+                    .get(&format!("{name} Defrost State (-)"))
+                    .copied(),
             }
         })
         .collect()
@@ -2589,6 +2593,9 @@ impl Dwelling {
                     .operating_mode
                     .is_some_and(|m| m != hares_types::OperatingMode::Off);
                 row[idx] = if is_active { 1.0 } else { 0.0 };
+            }
+            if let Some(idx) = cols.defrost_state {
+                row[idx] = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
             }
         }
 

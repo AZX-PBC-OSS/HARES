@@ -65,6 +65,7 @@ pub use hvac::{
     AIRFLOW_ROOM_AC_M3_S_PER_W, EquivalentBatteryModel, HvacConfig, HvacControlState,
     HvacEquipment, HvacEquipmentType, HvacRuntimeState, MAX_SPEEDS, RuntimeSetpointOverride,
 };
+pub use hvac::{DefrostConfig, DefrostControl, DefrostStrategy};
 pub use ndinterp::RegularGridInterpolator;
 pub use pv::PvConfig;
 pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};

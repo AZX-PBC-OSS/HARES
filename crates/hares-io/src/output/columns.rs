@@ -46,6 +46,9 @@ const ENERGY_SUFFIX: &str = "Energy (kWh)";
 const REACTIVE_POWER_SUFFIX: &str = "Reactive Power (kVAR)";
 const POWER_FACTOR_SUFFIX: &str = "Power Factor (-)";
 
+/// Defrost state column suffix for verbosity 7 (heat pump heaters only).
+const DEFROST_STATE_SUFFIX: &str = "Defrost State (-)";
+
 /// Builds an Arrow schema for the output based on equipment list and verbosity.
 ///
 /// The schema always includes a timestamp column, followed by columns
@@ -203,6 +206,13 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
                 DataType::Float64,
                 true,
             ));
+            if is_heat_pump_heater(name) {
+                fields.push(Field::new(
+                    format!("{name} {DEFROST_STATE_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+            }
         }
         fields.push(Field::new(
             HOT_WATER_MAINS_TEMP_COL,
@@ -359,6 +369,13 @@ fn has_soc(name: &str) -> bool {
         || lower == "ev"
         || lower.starts_with("ev ")
         || lower.starts_with("ev#")
+}
+
+fn is_heat_pump_heater(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("ashp heater")
+        || lower.contains("mshp heater")
+        || lower.contains("heat pump heater")
 }
 
 #[cfg(test)]

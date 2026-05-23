@@ -2,7 +2,7 @@
 
 pub mod constants;
 mod cooler;
-mod defrost;
+pub mod defrost;
 mod heater;
 mod heater_config;
 

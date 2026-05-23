@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_equipment::{
-    CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, EquipmentConfig,
-    EquipmentRegistry, GasFurnaceConfig, HeatPumpCommonConfig, HeatPumpCoolerConfig,
-    HeatPumpHeaterConfig, IdealHvacConfig,
+    CentralAirConditionerConfig, DefrostConfig, DuctConfig, ElectricBaseboardConfig,
+    EquipmentConfig, EquipmentRegistry, GasFurnaceConfig, HeatPumpCommonConfig,
+    HeatPumpCoolerConfig, HeatPumpHeaterConfig, IdealHvacConfig,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, HumidityAccumulator, OperatingMode,
@@ -173,12 +173,16 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
+                    min_compressor_fraction: 0.25,
+                    eir_part_load_benefit: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
                 max_oat_supplemental_c: None,
                 er_setpoint_offset_c: None,
                 er_hard_lockout_time_s: None,
+                heating_shr: None,
+                defrost: DefrostConfig::default(),
             },
         ),
         "Ideal HVAC" => EquipmentConfig::from_typed(
@@ -262,6 +266,8 @@ fn hp_cooler_cfg(
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             stage_shrs: None,
         },
@@ -855,26 +861,27 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     eq.init(&c, &env).unwrap();
 
     // Run 30 minutes at sub-freezing to allow defrost logic to accumulate
-    for _ in 0..30 {
+    // Collect average thermal and electric across all steps since the discrete
+    // defrost model produces zero thermal output during Defrosting steps.
+    let mut total_thermal_w = 0.0_f64;
+    let mut total_electric_kw = 0.0_f64;
+    let n_steps = 30_usize;
+    for _ in 0..n_steps {
         let mut ports = make_ports();
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let tel = eq.telemetry();
+        total_thermal_w += tel.get("thermal_output_w").unwrap_or(0.0);
+        total_electric_kw += tel.get("electric_kw").unwrap_or(0.0);
     }
 
-    let tel = eq.telemetry();
-    let defrost_active = tel
-        .get("defrost_active")
-        .expect("defrost_active must exist in telemetry");
-    let thermal_output_w = tel
-        .get("thermal_output_w")
-        .expect("thermal_output_w must exist in telemetry");
-    let electric_kw = tel
-        .get("electric_kw")
-        .expect("electric_kw must exist in telemetry");
+    let defrost_active = eq.telemetry().get("defrost_active").unwrap_or(0.0);
+    let avg_thermal_w = total_thermal_w / n_steps as f64;
+    let avg_electric_kw = total_electric_kw / n_steps as f64;
 
     eprintln!(
         "[hvac_parity] defrost_at_0C: defrost_active={defrost_active:.0}, \
-         thermal_output={thermal_output_w:.1} W, electric={electric_kw:.4} kW"
+         avg_thermal={avg_thermal_w:.1} W, avg_electric={avg_electric_kw:.4} kW"
     );
 
     // Defrost must be active at 0°C -- the OnDemand model triggers below max_oat_defrost_c
@@ -885,25 +892,27 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
          got defrost_active={defrost_active:.0}"
     );
 
-    // The unit must deliver positive heat and draw positive electricity.
+    // The unit must deliver positive average heat and draw positive electricity
+    // over the accumulation-defrost cycle. Individual Defrosting steps may have
+    // zero thermal output (ReverseCycle), but the average over the cycle must be positive.
     assert!(
-        thermal_output_w > 0.0,
-        "ASHP must deliver positive thermal output at 0°C during defrost; \
-         got {thermal_output_w:.1} W"
+        avg_thermal_w > 0.0,
+        "ASHP must deliver positive average thermal output at 0°C during defrost; \
+         got avg {avg_thermal_w:.1} W"
     );
     assert!(
-        electric_kw > 0.0,
-        "ASHP must draw positive electricity at 0°C; got {electric_kw:.4} kW"
+        avg_electric_kw > 0.0,
+        "ASHP must draw positive electricity at 0°C; got avg {avg_electric_kw:.4} kW"
     );
 
-    // COP must be physically plausible. DEFROST_EIR_TEMP_MODIFIER is dimensionless
-    // (0.1528 × capacity_W / 1.01667 → extra_power in W). With correct units, the
-    // defrost overhead for a 10 kW unit is ~150 W, not 150 kW, so COP stays above 0.5.
-    let cop = thermal_output_w / (electric_kw * 1_000.0);
+    // Average COP must be physically plausible. The discrete model's Defrosting
+    // steps have COP = 0 (no thermal output), but average COP over the full cycle
+    // should be above 0.5.
+    let cop = avg_thermal_w / (avg_electric_kw * 1_000.0);
     assert!(
         cop > 0.5,
-        "ASHP COP during defrost at 0°C must be > 0.5 (heat pump, not resistance heater); \
-         got COP={cop:.3} (thermal={thermal_output_w:.1} W, electric={electric_kw:.4} kW)"
+        "ASHP average COP during defrost at 0°C must be > 0.5; \
+         got COP={cop:.3} (avg_thermal={avg_thermal_w:.1} W, avg_electric={avg_electric_kw:.4} kW)"
     );
 }
 
@@ -1184,39 +1193,52 @@ fn ashp_cop_drops_with_defrost() {
         let env = make_env(19.0, outdoor_c, outdoor_c - 2.0);
         eq.init(&c, &env).unwrap();
         // Run 30 steps to allow defrost accumulation to reach steady state.
-        for _ in 0..30 {
+        // Collect average thermal/electric since discrete defrost has zero-thermal
+        // Defrosting steps that would distort single-step COP.
+        let mut total_thermal_w = 0.0_f64;
+        let mut total_electric_kw = 0.0_f64;
+        let n_steps = 30_usize;
+        for _ in 0..n_steps {
             eq.update_control(&env);
             let mut ports = make_ports();
             eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+            let tel = eq.telemetry();
+            total_thermal_w += tel.get("thermal_output_w").unwrap_or(0.0);
+            total_electric_kw += tel.get("electric_kw").unwrap_or(0.0);
         }
-        let tel = eq.telemetry();
-        let thermal_w = tel.get("thermal_output_w").expect("thermal_output_w");
-        let electric_kw = tel.get("electric_kw").expect("electric_kw");
-        let cop = thermal_w / (electric_kw * 1_000.0);
-        (cop, thermal_w, electric_kw)
+        let avg_thermal_w = total_thermal_w / n_steps as f64;
+        let avg_electric_kw = total_electric_kw / n_steps as f64;
+        let cop = avg_thermal_w / (avg_electric_kw * 1_000.0);
+        (cop, avg_thermal_w, avg_electric_kw)
     };
 
     let (cop_7, thermal_7, elec_7) = make_ashp_cop(7.0);
     let (cop_0, thermal_0, elec_0) = make_ashp_cop(0.0);
     let (cop_m10, thermal_m10, elec_m10) = make_ashp_cop(-10.0);
 
-    assert!(cop_7 > 0.0, "COP must be positive at 7°C; got {cop_7:.3}");
-    assert!(cop_0 > 0.0, "COP must be positive at 0°C; got {cop_0:.3}");
+    assert!(
+        cop_7 > 0.0,
+        "Average COP must be positive at 7°C; got {cop_7:.3}"
+    );
+    assert!(
+        cop_0 > 0.0,
+        "Average COP must be positive at 0°C; got {cop_0:.3}"
+    );
     assert!(
         cop_m10 > 0.0,
-        "COP must be positive at -10°C; got {cop_m10:.3}"
+        "Average COP must be positive at -10°C; got {cop_m10:.3}"
     );
 
     // At 0°C and -10°C defrost is active; at 7°C it is not.
-    // COP with defrost must be lower than COP without defrost.
+    // Average COP with defrost must be lower than COP without defrost.
     assert!(
         cop_7 >= cop_0,
-        "COP at 7°C ({cop_7:.3}) must be >= COP at 0°C ({cop_0:.3}) \
+        "Average COP at 7°C ({cop_7:.3}) must be >= COP at 0°C ({cop_0:.3}) \
          (defrost active at 0°C; outdoor_temp < max_oat_defrost_c)"
     );
     assert!(
         cop_0 > cop_m10,
-        "COP at 0°C ({cop_0:.3}) must exceed COP at -10°C ({cop_m10:.3}) \
+        "Average COP at 0°C ({cop_0:.3}) must exceed COP at -10°C ({cop_m10:.3}) \
          (deeper defrost penalty at -10°C)"
     );
 
@@ -1841,12 +1863,16 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: Some(10.0),
             er_lockout_temp_c: Some(5.0),
             max_oat_supplemental_c: Some(50.0),
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 

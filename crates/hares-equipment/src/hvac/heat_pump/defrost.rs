@@ -2,21 +2,24 @@
 
 use hares_physics::psychrometrics::humidity_ratio_from_twb;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use super::constants::{
-    DEFAULT_DEFROST_TIME_FRACTION, DEFROST_CAPACITY_MULTIPLIER_BASE, DEFROST_CAPACITY_UNIT_FACTOR,
-    DEFROST_COIL_TEMP_OFFSET_C, DEFROST_COIL_TEMP_SLOPE, DEFROST_EIR_CURVE_TEMP_MIN_C,
-    DEFROST_EIR_TEMP_MODIFIER, DEFROST_ENABLE_TEMP_C, DEFROST_MIN_DELTA_HUMIDITY_RATIO,
-    DEFROST_POWER_MULTIPLIER_NUMERATOR, DEFROST_Q_MULTIPLIER, DEFROST_REFERENCE_TEMP_C,
-    DEFROST_TIME_FRACTION_NUMERATOR, TIMED_DEFROST_CAP_MULT_BASE, TIMED_DEFROST_CAP_MULT_SLOPE,
+    DEFAULT_DEFROST_CYCLE_DURATION_S, DEFAULT_DEFROST_TIME_FRACTION,
+    DEFROST_CAPACITY_MULTIPLIER_BASE, DEFROST_CAPACITY_UNIT_FACTOR, DEFROST_COIL_TEMP_OFFSET_C,
+    DEFROST_COIL_TEMP_SLOPE, DEFROST_EIR_CURVE_TEMP_MIN_C, DEFROST_EIR_TEMP_MODIFIER,
+    DEFROST_ENABLE_TEMP_C, DEFROST_MIN_DELTA_HUMIDITY_RATIO, DEFROST_POWER_MULTIPLIER_NUMERATOR,
+    DEFROST_Q_MULTIPLIER, DEFROST_REFERENCE_TEMP_C, DEFROST_TIME_FRACTION_NUMERATOR,
+    MAX_DEFROST_CYCLE_DURATION_S, TIMED_DEFROST_CAP_MULT_BASE, TIMED_DEFROST_CAP_MULT_SLOPE,
     TIMED_DEFROST_PWR_MULT_BASE, TIMED_DEFROST_PWR_MULT_SLOPE,
 };
 
 /// Defrost activation / timing strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DefrostControl {
     /// Humidity-based -- defrost fraction computed from outdoor coil moisture
     /// accumulation. More physical but requires humidity data (OCHRE default).
+    #[default]
     OnDemand,
     /// Timer-based -- fixed defrost time fraction. Simpler, used by many real
     /// units. Uses different capacity/EIR multiplier equations from DOE-2.
@@ -24,36 +27,86 @@ pub enum DefrostControl {
 }
 
 /// How defrost heat is delivered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DefrostStrategy {
     /// Reverse refrigerant cycle (most common in modern heat pumps).
+    #[default]
     ReverseCycle,
     /// Resistive heating element.
     Resistive,
 }
 
 /// Full defrost configuration including control mode and strategy.
-#[derive(Clone, Copy, Debug)]
+///
+/// Embedded in `HeatPumpHeaterConfig` via `#[serde(flatten)]`, following the
+/// same pattern as `DuctConfig`. All fields default to the values produced by
+/// `DefrostConfig::on_demand(1.0, 0.0)` so that existing configs without
+/// defrost keys are unaffected.
+///
+/// `deny_unknown_fields` is intentionally omitted: serde `flatten` is
+/// incompatible with `deny_unknown_fields` on the inner (flattened) struct.
+/// Unknown-field rejection is the responsibility of the outer struct
+/// (`HeatPumpCommonConfig` / `HeatPumpHeaterConfig`).
+/// See <https://serde.rs/attr-flatten.html>.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DefrostConfig {
     /// Legacy capacity scaling factor applied after defrost multiplier [0..1].
+    /// Default 1.0: no additional reduction beyond the defrost multiplier.
+    #[serde(
+        default = "default_capacity_reduction_factor",
+        rename = "defrost_capacity_reduction_factor"
+    )]
     pub capacity_reduction_factor: f64,
     /// Additional fixed defrost power draw [W] (legacy/OCHRE field).
+    #[serde(default)]
     pub defrost_power_w: f64,
     /// Control mode: OnDemand (humidity-based) or Timed.
+    /// Default OnDemand: matches OCHRE default and the previous hardcoded path.
+    /// EnergyPlus defaults to Timed, but HARES follows the OCHRE physics-based approach.
+    #[serde(default, rename = "defrost_control")]
     pub control: DefrostControl,
     /// Defrost strategy: ReverseCycle or Resistive.
+    /// Default ReverseCycle: most common in modern heat pumps.
+    /// EnergyPlus I/O Reference `Coil:Heating:DX`: "If this input field is left blank,
+    /// the default defrost strategy is reverse-cycle."
+    #[serde(default, rename = "defrost_strategy")]
     pub strategy: DefrostStrategy,
     /// For Timed mode: fraction of hour spent in defrost [0..1].
     /// Typical value: 0.058 (~3.5 min/hr). Ignored in OnDemand mode.
+    /// EnergyPlus I/O Reference: default 0.058333 (3.5/60).
+    /// HARES uses 0.058 (truncated), matching DEFAULT_DEFROST_TIME_FRACTION.
+    #[serde(default = "default_defrost_time_fraction")]
     pub defrost_time_fraction: f64,
     /// Maximum OAT for defrost activation [°C].
+    /// OCHRE/HARES default: 4.4445°C (≈40°F). EnergyPlus default: 5°C.
+    /// HARES follows OCHRE's 40°F threshold.
+    #[serde(default = "default_max_oat_defrost_c", rename = "defrost_max_oat_c")]
     pub max_oat_defrost_c: f64,
-    /// For ReverseCycle strategy: optional biquadratic EIR curve coefficients
+    /// For ReverseCycle + Timed strategy: optional biquadratic EIR curve coefficients
     /// `[c0, c1, c2, c3, c4, c5]` evaluated at `(wb, db)` with a 15.555°C floor.
     /// `None` means no EIR adjustment (factor = 1.0).
+    /// EnergyPlus `Coil:Heating:DX` field: `Defrost Energy Input Ratio Function of
+    /// Temperature Curve Name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defrost_eir_coeffs: Option<[f64; 6]>,
     /// For Resistive strategy: rated defrost heater capacity [W].
+    /// Must be > 0 when `strategy == Resistive`; zero is valid for ReverseCycle
+    /// (the default) since reverse-cycle defrost uses the compressor, not a
+    /// dedicated heater.
+    #[serde(default)]
     pub resistive_defrost_capacity_w: f64,
+}
+
+fn default_capacity_reduction_factor() -> f64 {
+    1.0
+}
+
+fn default_defrost_time_fraction() -> f64 {
+    DEFAULT_DEFROST_TIME_FRACTION
+}
+
+fn default_max_oat_defrost_c() -> f64 {
+    DEFROST_ENABLE_TEMP_C
 }
 
 impl DefrostConfig {
@@ -70,6 +123,192 @@ impl DefrostConfig {
             defrost_eir_coeffs: None,
             resistive_defrost_capacity_w: 0.0,
         }
+    }
+
+    /// Validate defrost configuration ranges and logical constraints.
+    ///
+    /// Returns `Err` with a descriptive message for:
+    /// - `capacity_reduction_factor` outside [0.0, 1.0]
+    /// - `defrost_time_fraction` outside [0.0, 1.0]
+    /// - `max_oat_defrost_c` outside [-30.0, 21.0]
+    /// - `resistive_defrost_capacity_w` < 0
+    /// - `Resistive` strategy with `resistive_defrost_capacity_w == 0.0`
+    ///   (a resistive defrost heater with zero capacity is a config error)
+    pub fn validate(&self) -> Result<(), String> {
+        if !(0.0..=1.0).contains(&self.capacity_reduction_factor) {
+            return Err(format!(
+                "defrost_capacity_reduction_factor must be in [0.0, 1.0], got {}",
+                self.capacity_reduction_factor
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.defrost_time_fraction) {
+            return Err(format!(
+                "defrost_time_fraction must be in [0.0, 1.0], got {}",
+                self.defrost_time_fraction
+            ));
+        }
+        if !(-30.0..=21.0).contains(&self.max_oat_defrost_c) {
+            return Err(format!(
+                "defrost_max_oat_c must be in [-30.0, 21.0], got {}",
+                self.max_oat_defrost_c
+            ));
+        }
+        if self.resistive_defrost_capacity_w < 0.0 {
+            return Err(format!(
+                "resistive_defrost_capacity_w must be >= 0, got {}",
+                self.resistive_defrost_capacity_w
+            ));
+        }
+        if self.strategy == DefrostStrategy::Resistive && self.resistive_defrost_capacity_w == 0.0 {
+            return Err(
+                "defrost_strategy is Resistive but resistive_defrost_capacity_w is 0.0; \
+                 a resistive defrost heater requires a positive rated capacity"
+                    .to_string(),
+            );
+        }
+        if let Some(coeffs) = &self.defrost_eir_coeffs {
+            for (i, c) in coeffs.iter().enumerate() {
+                if !c.is_finite() {
+                    return Err(format!("defrost_eir_coeffs[{i}] must be finite, got {c}"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for DefrostConfig {
+    fn default() -> Self {
+        Self::on_demand(1.0, 0.0)
+    }
+}
+
+/// Discrete defrost cycle state.
+///
+/// HARES-specific enhancement: models explicit ON/OFF defrost cycling rather than
+/// the continuous/fractional approach in EnergyPlus §15.2.11.4. The continuous model
+/// averages the defrost penalty across each timestep, underestimating peak power draw
+/// and overestimating average capacity. The discrete model transitions between frost
+/// accumulation and active defrost with distinct capacity/EIR in each phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DefrostCycleState {
+    /// Normal heating — frost building on outdoor coil.
+    Accumulating,
+    /// Defrost cycle active (reverse-cycle or resistive).
+    Defrosting,
+}
+
+impl DefrostCycleState {
+    /// Numeric code for telemetry: 0 = Accumulating, 1 = Defrosting.
+    #[must_use]
+    pub fn code(self) -> f64 {
+        match self {
+            Self::Accumulating => 0.0,
+            Self::Defrosting => 1.0,
+        }
+    }
+}
+
+impl std::fmt::Display for DefrostCycleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Accumulating => write!(f, "Accumulating"),
+            Self::Defrosting => write!(f, "Defrosting"),
+        }
+    }
+}
+
+/// Tracks discrete defrost cycle state for a heat pump.
+///
+/// The inter-defrost interval is derived from `cycle_duration_s / time_fraction`:
+/// at a given `time_fraction`, this produces the same average time-in-defrost as the
+/// continuous model but with distinct ON/OFF phases. Source: mathematically equivalent
+/// to the EnergyPlus §15.2.11.4 continuous model when averaged over full cycles; the
+/// formula `interval = duration / dtf` is HARES-specific (not from E+ source).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefrostCycleTracker {
+    /// Current cycle state.
+    pub state: DefrostCycleState,
+    /// Accumulated frost proxy: incremented by `dt * time_fraction` each step when
+    /// the compressor is running and conditions favor frost. Reset on Defrosting entry.
+    pub accumulated_frost_s: f64,
+    /// Elapsed time in the current defrost cycle [s]. Reset on Accumulating entry.
+    pub defrost_elapsed_s: f64,
+    /// Target defrost cycle duration [s] (default 210 s = 3.5 min).
+    pub cycle_duration_s: f64,
+    /// Hard cap on defrost cycle duration [s] (default 600 s = 10 min).
+    pub max_defrost_duration_s: f64,
+}
+
+impl DefrostCycleTracker {
+    /// Construct a tracker starting in the Accumulating state with defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: DefrostCycleState::Accumulating,
+            accumulated_frost_s: 0.0,
+            defrost_elapsed_s: 0.0,
+            cycle_duration_s: DEFAULT_DEFROST_CYCLE_DURATION_S,
+            max_defrost_duration_s: MAX_DEFROST_CYCLE_DURATION_S,
+        }
+    }
+
+    /// Advance the FSM by one timestep.
+    ///
+    /// - `dt_s` — timestep duration [s]
+    /// - `time_fraction` — continuous defrost time fraction from `evaluate_defrost`
+    ///   (only meaningful when `conditions_favor_frost` is true)
+    /// - `conditions_favor_frost` — true when OAT < max_oat_defrost_c and the
+    ///   compressor is running (i.e. `DefrostResult.active` from `evaluate_defrost`)
+    ///
+    /// Returns the new state after the transition.
+    pub fn advance(&mut self, dt_s: f64, time_fraction: f64, conditions_favor_frost: bool) {
+        let old_state = self.state;
+        match self.state {
+            DefrostCycleState::Accumulating => {
+                if conditions_favor_frost && time_fraction > 0.0 {
+                    self.accumulated_frost_s += dt_s * time_fraction;
+                    // Inter-defrost interval: how long we need to accumulate before
+                    // the next defrost cycle fires. Derived so that the long-run
+                    // average fraction of time in defrost matches the continuous model.
+                    let interval_s = self.cycle_duration_s / time_fraction;
+                    if self.accumulated_frost_s >= interval_s {
+                        self.state = DefrostCycleState::Defrosting;
+                        self.defrost_elapsed_s = 0.0;
+                    }
+                }
+            }
+            DefrostCycleState::Defrosting => {
+                self.defrost_elapsed_s += dt_s;
+                if self.defrost_elapsed_s >= self.cycle_duration_s.min(self.max_defrost_duration_s)
+                {
+                    self.state = DefrostCycleState::Accumulating;
+                    self.accumulated_frost_s = 0.0;
+                    self.defrost_elapsed_s = 0.0;
+                }
+            }
+        }
+        if old_state != self.state {
+            debug!(
+                old = %old_state,
+                new = %self.state,
+                frost_s = self.accumulated_frost_s,
+                "defrost FSM state transition"
+            );
+        }
+    }
+
+    /// Whether the compressor should suppress heating output this step.
+    /// During Defrosting, zone capacity is zero (ReverseCycle) or resistive-only.
+    #[must_use]
+    pub fn is_defrosting(&self) -> bool {
+        self.state == DefrostCycleState::Defrosting
+    }
+}
+
+impl Default for DefrostCycleTracker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -108,6 +347,10 @@ impl DefrostResult {
 /// - `runtime_fraction` -- compressor runtime fraction [0..1]; scales timed
 ///   defrost power proportionally with compressor operation
 #[must_use]
+// Why: the 8 parameters are all distinct physical inputs to a stateless
+// defrost model (config, four weather/zone scalars, two capacity scalars, runtime
+// fraction). Merging them into an intermediate struct would require a throw-away
+// type used in exactly one call site and obscure the function's dependencies.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_defrost(
     config: &DefrostConfig,
@@ -602,6 +845,153 @@ mod defrost_tests {
             result.time_fraction > 0.0 && result.time_fraction < 1.0,
             "time_fraction {:.8} must be in (0, 1)",
             result.time_fraction
+        );
+    }
+
+    // ── DefrostCycleTracker unit tests ───────────────────────────────────────
+
+    #[test]
+    fn tracker_starts_in_accumulating() {
+        let tracker = DefrostCycleTracker::new();
+        assert_eq!(tracker.state, DefrostCycleState::Accumulating);
+        assert!(!tracker.is_defrosting());
+        assert_eq!(tracker.accumulated_frost_s, 0.0);
+        assert_eq!(tracker.defrost_elapsed_s, 0.0);
+    }
+
+    #[test]
+    fn tracker_accumulates_frost_when_conditions_favor_frost() {
+        let mut tracker = DefrostCycleTracker::new();
+        let time_fraction = 0.2;
+        tracker.advance(60.0, time_fraction, true);
+        assert_eq!(tracker.state, DefrostCycleState::Accumulating);
+        let expected = 60.0 * 0.2;
+        assert!(
+            (tracker.accumulated_frost_s - expected).abs() < 1e-9,
+            "accumulated_frost_s {} != expected {expected}",
+            tracker.accumulated_frost_s,
+        );
+    }
+
+    #[test]
+    fn tracker_does_not_accumulate_when_no_frost() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.advance(60.0, 0.0, false);
+        assert_eq!(tracker.state, DefrostCycleState::Accumulating);
+        assert_eq!(tracker.accumulated_frost_s, 0.0);
+    }
+
+    #[test]
+    fn tracker_transitions_to_defrosting_after_interval() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 210.0;
+        let time_fraction: f64 = 0.2;
+        // interval = cycle_duration / time_fraction = 210 / 0.2 = 1050 s
+        // Each step accumulates dt * time_fraction = 60 * 0.2 = 12 s of frost.
+        let interval_s: f64 = 210.0 / 0.2;
+        let dt: f64 = 60.0;
+        let frost_per_step = dt * time_fraction;
+
+        // Simulate steps until just before threshold
+        let steps_before: usize = (interval_s / frost_per_step).floor() as usize;
+        for _ in 0..steps_before {
+            tracker.advance(dt, time_fraction, true);
+        }
+        assert_eq!(
+            tracker.state,
+            DefrostCycleState::Accumulating,
+            "must still be accumulating before threshold"
+        );
+
+        // One more step crosses the threshold
+        tracker.advance(dt, time_fraction, true);
+        assert_eq!(
+            tracker.state,
+            DefrostCycleState::Defrosting,
+            "must transition to Defrosting after accumulated frost >= interval"
+        );
+        assert!(tracker.is_defrosting());
+        assert_eq!(tracker.defrost_elapsed_s, 0.0, "elapsed resets on entry");
+    }
+
+    #[test]
+    fn tracker_returns_to_accumulating_after_cycle_duration() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 210.0;
+        tracker.max_defrost_duration_s = 600.0;
+        tracker.state = DefrostCycleState::Defrosting;
+        tracker.defrost_elapsed_s = 0.0;
+        tracker.accumulated_frost_s = 0.0;
+
+        let dt = 60.0;
+        // 3 steps = 180s, not yet 210s
+        for _ in 0..3 {
+            tracker.advance(dt, 1.0, true);
+        }
+        assert_eq!(tracker.state, DefrostCycleState::Defrosting);
+
+        // 4th step = 240s > 210s → back to Accumulating
+        tracker.advance(dt, 1.0, true);
+        assert_eq!(
+            tracker.state,
+            DefrostCycleState::Accumulating,
+            "must return to Accumulating after cycle_duration_s"
+        );
+        assert_eq!(tracker.accumulated_frost_s, 0.0, "frost resets on exit");
+        assert_eq!(tracker.defrost_elapsed_s, 0.0, "elapsed resets on exit");
+    }
+
+    #[test]
+    fn tracker_max_duration_caps_defrost_cycle() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 210.0;
+        tracker.max_defrost_duration_s = 180.0; // lower than cycle_duration
+        tracker.state = DefrostCycleState::Defrosting;
+        tracker.defrost_elapsed_s = 0.0;
+
+        // 3 steps = 180s = max_duration
+        for _ in 0..2 {
+            tracker.advance(60.0, 1.0, true);
+        }
+        assert_eq!(tracker.state, DefrostCycleState::Defrosting);
+        tracker.advance(60.0, 1.0, true);
+        assert_eq!(
+            tracker.state,
+            DefrostCycleState::Accumulating,
+            "max_defrost_duration_s must override cycle_duration_s"
+        );
+    }
+
+    #[test]
+    fn tracker_cycle_state_code() {
+        assert_eq!(DefrostCycleState::Accumulating.code(), 0.0);
+        assert_eq!(DefrostCycleState::Defrosting.code(), 1.0);
+    }
+
+    #[test]
+    fn tracker_zero_time_fraction_does_not_accumulate() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.advance(60.0, 0.0, true);
+        assert_eq!(tracker.accumulated_frost_s, 0.0);
+        assert_eq!(tracker.state, DefrostCycleState::Accumulating);
+    }
+
+    #[test]
+    fn tracker_defrosting_ignores_frost_conditions() {
+        // When already in Defrosting, frost conditions should not matter;
+        // only elapsed time drives the state back to Accumulating.
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 210.0;
+        tracker.state = DefrostCycleState::Defrosting;
+        tracker.defrost_elapsed_s = 200.0;
+
+        // Advance with conditions_favor_frost = false — should still progress
+        tracker.advance(60.0, 0.0, false);
+        // 260s > 210s → back to Accumulating
+        assert_eq!(
+            tracker.state,
+            DefrostCycleState::Accumulating,
+            "Defrosting state must still progress even without frost conditions"
         );
     }
 }

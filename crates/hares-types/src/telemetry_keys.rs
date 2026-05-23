@@ -57,6 +57,9 @@ pub const DEFROST_TIME_FRACTION: &str = "defrost_time_fraction";
 pub const DEFROST_EXTRA_POWER_W: &str = "defrost_extra_power_w";
 pub const DEFROST_Q_W: &str = "defrost_q_w";
 pub const DEFROST_CAPACITY_MULTIPLIER: &str = "defrost_capacity_multiplier";
+pub const DEFROST_CYCLE_STATE: &str = "defrost_cycle_state";
+pub const DEFROST_ACCUMULATED_FROST_S: &str = "defrost_accumulated_frost_s";
+pub const DEFROST_ELAPSED_S: &str = "defrost_elapsed_s";
 pub const BYPASS_ACTIVE: &str = "bypass_active";
 pub const BYPASS_FACTOR: &str = "bypass_factor";
 pub const IS_ON: &str = "is_on";
@@ -110,6 +113,7 @@ pub const SHADING_FACTOR: &str = "shading_factor";
 // ── HVAC capacity reporting ────────────────────────────────────────────────
 pub const HVAC_HEATING_CAPACITY_W: &str = "hvac_heating_capacity_w";
 pub const HVAC_COOLING_CAPACITY_W: &str = "hvac_cooling_capacity_w";
+pub const HEATING_LATENT_W: &str = "heating_latent_w";
 
 // ── HVAC component power ───────────────────────────────────────────────────
 pub const COMPRESSOR_KW: &str = "compressor_kw";
@@ -127,6 +131,7 @@ pub const ER_SETPOINT_OFFSET_C: &str = "er_setpoint_offset_c";
 pub const ER_HARD_LOCKOUT_TIME_S: &str = "er_hard_lockout_time_s";
 pub const BACKUP_CAPACITY_W: &str = "backup_capacity_w";
 pub const BACKUP_EIR: &str = "backup_eir";
+pub const MIN_COMPRESSOR_FRACTION: &str = "min_compressor_fraction";
 
 // ── Water heater ────────────────────────────────────────────────────────────
 pub const ELEMENT_KW: &str = "element_kw";

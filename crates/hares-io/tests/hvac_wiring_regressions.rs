@@ -200,23 +200,22 @@ fn g1_crankcase_heater_kw_is_currently_none_documents_gap() {
 }
 
 // ---------------------------------------------------------------------------
-// G3: MinimumCapacity — NOT WIRED, 25% hardcode in heater.rs
+// G3: MinimumCapacity — WIRED
 // ---------------------------------------------------------------------------
 //
-// Documents that the resolver does not populate a min_compressor_fraction
-// param.  The 25% hardcode lives in heater.rs:517-524 (init-time, not
-// resolver-time), so it is checked separately.
+// MinimumCapacity in HPXML is wired to min_compressor_fraction via
+// MinimumCapacity / HeatingCapacity. The 25% hardcode in heater.rs has been
+// replaced with the configurable min_compressor_fraction field.
 
 #[test]
-fn g3_resolver_does_not_wire_min_compressor_fraction() {
-    // Documents the gap: MinimumCapacity in HPXML is not wired to any
-    // resolver output parameter.  This test PASSES today (gap confirmed).
+fn g3_resolver_wires_min_compressor_fraction_from_minimum_capacity() {
     let xml = wrap_systems(
         r#"<Systems><HVAC>
           <HeatPump>
             <SystemIdentifier id="MSHP1"/>
             <HeatPumpType>mini-split</HeatPumpType>
             <HeatingCapacity>36000</HeatingCapacity>
+            <MinimumCapacity>10800</MinimumCapacity>
             <CoolingCapacity>36000</CoolingCapacity>
             <AnnualHeatingEfficiency>
               <Units>HSPF</Units><Value>10.0</Value>
@@ -230,11 +229,21 @@ fn g3_resolver_does_not_wire_min_compressor_fraction() {
     let specs = resolve_ok(&xml);
     let heater = find_spec(&specs, "MSHP Heater");
 
+    let frac = heater
+        .parameters
+        .get("min_compressor_fraction")
+        .and_then(|v| v.as_f64());
     assert!(
-        heater.parameters.get("min_compressor_fraction").is_none(),
-        "Gap confirmed (G3): min_compressor_fraction must be absent \
-         from resolver output until the gap is closed; \
-         if this assertion fires, the gap has been closed"
+        frac.is_some(),
+        "min_compressor_fraction must be wired from MinimumCapacity / HeatingCapacity"
+    );
+    // 10800 Btu/h / 36000 Btu/h = 0.30
+    let expected = 10_800.0 / 36_000.0;
+    assert!(
+        (frac.unwrap() - expected).abs() < 1e-6,
+        "min_compressor_fraction = {:.4}, expected {:.4}",
+        frac.unwrap(),
+        expected,
     );
 }
 

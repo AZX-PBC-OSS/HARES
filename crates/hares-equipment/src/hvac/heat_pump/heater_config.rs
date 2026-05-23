@@ -36,11 +36,16 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::ER_HARD_LOCKOUT_TIME_S, 0.0);
     telemetry.insert(tk::BACKUP_CAPACITY_W, 0.0);
     telemetry.insert(tk::BACKUP_EIR, 0.0);
+    telemetry.insert(tk::MIN_COMPRESSOR_FRACTION, 0.25);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::MAX_CAPACITY_FRACTION, 1.0);
     telemetry.insert(tk::CAP_RATIO, 0.0);
     telemetry.insert(tk::EIR_RATIO, 0.0);
     telemetry.insert(tk::BIQUADRATIC_CURVE_SOURCE, 0.0);
+    telemetry.insert(tk::HEATING_LATENT_W, 0.0);
+    telemetry.insert(tk::DEFROST_CYCLE_STATE, 0.0);
+    telemetry.insert(tk::DEFROST_ACCUMULATED_FROST_S, 0.0);
+    telemetry.insert(tk::DEFROST_ELAPSED_S, 0.0);
     telemetry
 }
 
@@ -175,6 +180,11 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             description: "Backup heater energy input ratio".to_string(),
         },
         TelemetryField {
+            name: tk::MIN_COMPRESSOR_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Minimum compressor speed as a fraction of rated capacity (MSHP only)".to_string(),
+        },
+        TelemetryField {
             name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Fuel backup heater combustion input power".to_string(),
@@ -198,6 +208,26 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::BIQUADRATIC_CURVE_SOURCE.to_string(),
             unit: "enum".to_string(),
             description: "Biquadratic curve provenance: 0=identity, 1=equipment-type default, 2=user-supplied".to_string(),
+        },
+        TelemetryField {
+            name: tk::DEFROST_CYCLE_STATE.to_string(),
+            unit: "enum".to_string(),
+            description: "Defrost cycle state: 0=Accumulating, 1=Defrosting".to_string(),
+        },
+        TelemetryField {
+            name: tk::DEFROST_ACCUMULATED_FROST_S.to_string(),
+            unit: "s".to_string(),
+            description: "Accumulated frost proxy time since last defrost cycle [s]".to_string(),
+        },
+        TelemetryField {
+            name: tk::DEFROST_ELAPSED_S.to_string(),
+            unit: "s".to_string(),
+            description: "Elapsed time in current defrost cycle [s]".to_string(),
+        },
+        TelemetryField {
+            name: tk::HEATING_LATENT_W.to_string(),
+            unit: "W".to_string(),
+            description: "Heating-side latent gain to zone; non-zero only during reverse-cycle defrost with heating_shr < 1.0".to_string(),
         },
     ]
 }

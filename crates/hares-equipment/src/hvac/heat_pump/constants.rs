@@ -61,4 +61,13 @@ pub const MSHP_PAN_HEATER_DEFAULT_TEMP_C: f64 = 0.0;
 /// Per OCHRE MinisplitAHSPHeater class attribute (HVAC.py:1482).
 pub const MSHP_PAN_HEATER_DEFAULT_KW: f64 = 0.150;
 
-pub const HEATER_TELEMETRY_CAPACITY: usize = 30;
+pub const HEATER_TELEMETRY_CAPACITY: usize = 34;
+
+// Discrete defrost cycle parameters (HARES-specific enhancement, not from EnergyPlus)
+/// Default defrost cycle duration [s]. 3.5 min ≈ typical residential ASHP reverse-cycle
+/// defrost period. EnergyPlus §15.2.11.4 uses a continuous model; HARES adds discrete
+/// ON/OFF cycling for subhourly dispatch fidelity.
+pub const DEFAULT_DEFROST_CYCLE_DURATION_S: f64 = 210.0;
+/// Maximum defrost cycle duration [s]. Hard cap prevents runaway defrost; 10 min
+/// is the practical upper bound for residential equipment safety.
+pub const MAX_DEFROST_CYCLE_DURATION_S: f64 = 600.0;

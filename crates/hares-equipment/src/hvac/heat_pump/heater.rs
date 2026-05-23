@@ -28,10 +28,10 @@ use super::constants::{
     DEFAULT_ER_HARD_LOCKOUT_TIME_S, DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
     DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR,
     DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_ER_CYCLE_TIME_S,
-    DEFAULT_ZONE_ID, MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_KW,
-    MSHP_PAN_HEATER_DEFAULT_TEMP_C,
+    DEFAULT_ZONE_ID, DEFROST_CAPACITY_UNIT_FACTOR, DEFROST_EIR_CURVE_TEMP_MIN_C,
+    MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_KW, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
 };
-use super::defrost::{DefrostConfig, evaluate_defrost};
+use super::defrost::{DefrostConfig, DefrostCycleTracker, DefrostStrategy, evaluate_defrost};
 use super::heater_config::{
     default_heater_telemetry, heater_telemetry_fields, operating_mode_code,
 };
@@ -94,6 +94,7 @@ struct HeatPumpHeaterCore {
     defrost_active: bool,
     defrost_time_fraction: f64,
     defrost_accumulator_s: f64,
+    defrost_cycle_tracker: DefrostCycleTracker,
     last_er_off_at: Option<DateTime<FixedOffset>>,
     er_was_on: bool,
     /// Previous BASE heating setpoint (without DR offset) -- used to detect
@@ -122,6 +123,10 @@ struct HeatPumpHeaterCore {
     /// Exposed so the HP system coordinator can pass it to the companion cooler
     /// for crankcase heater power accounting.
     last_heating_rtf: f64,
+    /// Heating-side sensible heat ratio. Default 1.0 (all-sensible) per OCHRE
+    /// HVAC.py:458-462. When < 1.0, reverse-cycle defrost produces a small
+    /// positive latent gain from indoor-coil surface moisture.
+    heating_shr: f64,
 
     // --- Ideal capacity (solver-driven) ---
     use_ideal: bool,
@@ -166,6 +171,7 @@ struct HeaterState {
     defrost_active: bool,
     defrost_time_fraction: f64,
     defrost_accumulator_s: f64,
+    defrost_cycle_tracker: DefrostCycleTracker,
     pan_heater_on: bool,
     last_er_off_at: Option<DateTime<FixedOffset>>,
     last_speed_index: usize,
@@ -240,6 +246,9 @@ struct HeaterStep {
     cap_ratio: f64,
     /// Biquadratic EIR correction ratio at current conditions (pre-PLF).
     eir_ratio: f64,
+    /// Latent gain to zone [W]. Zero during normal heating; positive during
+    /// reverse-cycle defrost when heating_shr < 1.0 (indoor-coil surface moisture).
+    latent_gain_w: f64,
 }
 
 impl ASHPHeater {
@@ -401,6 +410,7 @@ impl HeatPumpHeaterCore {
             defrost_active: false,
             defrost_time_fraction: 0.0,
             defrost_accumulator_s: 0.0,
+            defrost_cycle_tracker: DefrostCycleTracker::new(),
             last_er_off_at: None,
             er_was_on: false,
             prev_base_setpoint: f64::NEG_INFINITY,
@@ -410,6 +420,7 @@ impl HeatPumpHeaterCore {
             er_soft_lockout: false,
             soft_lockout_elapsed_s: 0.0,
             last_heating_rtf: 0.0,
+            heating_shr: 1.0,
             use_ideal: false,
             ideal_capacity_w: 0.0,
             ctrl_duty_cycle: 1.0,
@@ -434,6 +445,7 @@ impl HeatPumpHeaterCore {
         self.defrost_active = false;
         self.defrost_time_fraction = 0.0;
         self.defrost_accumulator_s = 0.0;
+        self.defrost_cycle_tracker = DefrostCycleTracker::new();
         self.pan_heater_on = false;
         self.last_er_off_at = None;
         self.er_was_on = false;
@@ -533,9 +545,36 @@ impl HeatPumpHeaterCore {
             if self.hvac.config.heating_capacities_w.len() == 1 {
                 let base_cap = self.hvac.config.heating_capacities_w[0];
                 let base_eir = self.hvac.config.eir_by_stage[0];
-                self.hvac.config.heating_capacities_w =
-                    vec![base_cap * 0.25, base_cap * 0.5, base_cap * 0.75, base_cap];
-                self.hvac.config.eir_by_stage = vec![base_eir; 4];
+                let min_frac = cfg.common.min_compressor_fraction;
+                let n: usize = 4;
+                // Evenly-spaced stages from min_frac to 1.0:
+                //   stage[i] = rated * (min_frac + (1 - min_frac) * i / (n - 1))
+                // For min_frac=0.25, n=4: [0.25, 0.50, 0.75, 1.00] (original behavior).
+                // EnergyPlus sets minimum compressor capacity via the ratio of
+                // Speed 1 to Speed N `Gross Rated Heating Capacity` in
+                // `Coil:Heating:DX:MultiSpeed` — no single "minimum fraction" field.
+                self.hvac.config.heating_capacities_w = (0..n)
+                    .map(|i| base_cap * (min_frac + (1.0 - min_frac) * i as f64 / (n - 1) as f64))
+                    .collect();
+                if cfg.common.stage_heating_eirs.is_none() {
+                    let benefit = cfg.common.eir_part_load_benefit.unwrap_or(0.0);
+                    // eir[i] = rated_eir * (1 - benefit * (1 - frac[i]))
+                    // At minimum speed (frac = min_frac), EIR is reduced by benefit * (1 - min_frac).
+                    // benefit=0 yields constant EIR (original behavior).
+                    // Inverter compressors typically see 10–20% COP improvement at minimum speed
+                    // due to reduced pressure ratio (AHRI 210/240 variable-speed test procedure).
+                    self.hvac.config.eir_by_stage = (0..n)
+                        .map(|i| {
+                            let frac = min_frac + (1.0 - min_frac) * i as f64 / (n - 1) as f64;
+                            base_eir * (1.0 - benefit * (1.0 - frac))
+                        })
+                        .collect();
+                }
+                tracing::debug!(
+                    n_stages = n,
+                    min_fraction = min_frac,
+                    "MSHP generating {n} speed stages from min_fraction={min_frac:.2} to rated"
+                );
             }
             self.hvac.config.duct_dse = 1.0;
             self.pan_heater_kw = MSHP_PAN_HEATER_DEFAULT_KW;
@@ -634,6 +673,14 @@ impl HeatPumpHeaterCore {
         self.telemetry
             .set(tk::BACKUP_CAPACITY_W, self.backup_capacity_w);
         self.telemetry.set(tk::BACKUP_EIR, self.backup_eir);
+        self.telemetry.set(
+            tk::MIN_COMPRESSOR_FRACTION,
+            cfg.common.min_compressor_fraction,
+        );
+
+        self.heating_shr = cfg.heating_shr.unwrap_or(1.0);
+
+        self.defrost_config = cfg.defrost;
 
         Ok(())
     }
@@ -711,13 +758,60 @@ impl HeatPumpHeaterCore {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let dt_min = dt.as_secs_f64() / 60.0;
+        let dt_s = dt.as_secs_f64();
+
+        // Pre-compute defrost conditions for FSM advance. evaluate_defrost is
+        // pure and uses only current weather + config, so we can call it here.
+        let hp_on_control_pre = matches!(
+            self.operating_mode,
+            OperatingMode::HeatingHP | OperatingMode::HeatingHPAndER
+        );
+        let defrost_conditions = if hp_on_control_pre {
+            let zone = lookup_zone(env, self.hvac.config.zone_id);
+            let pressure_pa = env.weather.pressure_pa();
+            let zone_ok = zone.is_ok();
+            if zone_ok {
+                let zone = zone.unwrap();
+                let max_capacity_w = self
+                    .hvac
+                    .config
+                    .heating_capacities_w
+                    .last()
+                    .copied()
+                    .unwrap_or(0.0);
+                let current_cap = max_capacity_w;
+                let rtf = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
+                let defrost = evaluate_defrost(
+                    &self.defrost_config,
+                    env.weather.outdoor_temp_c,
+                    env.weather.outdoor_humidity_ratio,
+                    pressure_pa,
+                    zone.wet_bulb_c,
+                    max_capacity_w,
+                    current_cap,
+                    rtf,
+                );
+                (defrost.active, defrost.time_fraction)
+            } else {
+                (false, 0.0)
+            }
+        } else {
+            (false, 0.0)
+        };
+
+        // Advance the discrete defrost FSM BEFORE compute_step so the current
+        // state is visible during step computation.
+        self.defrost_cycle_tracker
+            .advance(dt_s, defrost_conditions.1, defrost_conditions.0);
+
         let step = self.compute_step(env, dt_min)?;
 
         if step.thermal_output_w > 0.0 {
+            let sensible_gain_w = step.thermal_output_w - step.latent_gain_w;
             self.hvac.write_zone_thermal_contributions(
                 ports,
-                step.thermal_output_w,
-                0.0,
+                sensible_gain_w,
+                step.latent_gain_w,
                 ThermalCategory::HvacHeating,
             )?;
         }
@@ -810,6 +904,18 @@ impl HeatPumpHeaterCore {
             tk::DEFROST_CAPACITY_MULTIPLIER,
             step.defrost_capacity_multiplier,
         );
+        self.telemetry.set(
+            tk::DEFROST_CYCLE_STATE,
+            self.defrost_cycle_tracker.state.code(),
+        );
+        self.telemetry.set(
+            tk::DEFROST_ACCUMULATED_FROST_S,
+            self.defrost_cycle_tracker.accumulated_frost_s,
+        );
+        self.telemetry.set(
+            tk::DEFROST_ELAPSED_S,
+            self.defrost_cycle_tracker.defrost_elapsed_s,
+        );
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(
             tk::HEATING_SETPOINT_C,
@@ -835,6 +941,13 @@ impl HeatPumpHeaterCore {
         );
         self.telemetry.set(tk::CAP_RATIO, step.cap_ratio);
         self.telemetry.set(tk::EIR_RATIO, step.eir_ratio);
+        self.telemetry.set(tk::HEATING_LATENT_W, step.latent_gain_w);
+        if step.latent_gain_w > 0.0 {
+            tracing::debug!(
+                heating_latent_w = step.latent_gain_w,
+                "heating latent gain during defrost"
+            );
+        }
         let core_fuel_w = if scaled_fuel_w > 0.0 {
             self.backup_fuel_type.map(|fuel_type| FuelPower {
                 fuel_type,
@@ -992,8 +1105,70 @@ impl HeatPumpHeaterCore {
         let mut defrost_extra_power_w = 0.0;
         let mut defrost_q_w = 0.0;
         let mut defrost_capacity_multiplier = 1.0;
+        let mut latent_gain_w = 0.0;
 
-        if hp_on {
+        // Discrete defrost: when the FSM is in Defrosting AND the compressor is
+        // running, override the continuous model with distinct capacity/EIR behavior.
+        // The FSM continues advancing (so defrost completes on elapsed time) even
+        // when the compressor is off, but the capacity/power override only applies
+        // during actual compressor operation — otherwise the equipment reports
+        // phantom draw while commanded off.
+        let is_discrete_defrosting = self.defrost_cycle_tracker.is_defrosting() && hp_on;
+
+        if is_discrete_defrosting {
+            defrost_active = true;
+            defrost_time_fraction = 1.0; // full timestep is in defrost
+
+            match self.defrost_config.strategy {
+                DefrostStrategy::ReverseCycle => {
+                    // Reverse-cycle: compressor reverses; zone capacity = 0 (no net
+                    // heating or cooling). Indoor coil absorbs heat from zone air to
+                    // defrost outdoor coil. Electric power follows defrost EIR curve.
+                    // EnergyPlus §15.2.11.4 continuous model averages this penalty;
+                    // HARES discrete model applies it at full intensity for cycle_duration_s.
+                    defrost_capacity_multiplier = 0.0;
+                    defrost_q_w = 0.0;
+                    let defrost_eir = match self.defrost_config.defrost_eir_coeffs {
+                        Some(c) => {
+                            let wb = zone.wet_bulb_c.max(DEFROST_EIR_CURVE_TEMP_MIN_C);
+                            let db = env.weather.outdoor_temp_c.max(DEFROST_EIR_CURVE_TEMP_MIN_C);
+                            c[0] + c[1] * wb
+                                + c[2] * wb * wb
+                                + c[3] * db
+                                + c[4] * wb * db
+                                + c[5] * db * db
+                        }
+                        None => 1.0,
+                    };
+                    let max_capacity_w = self
+                        .hvac
+                        .config
+                        .heating_capacities_w
+                        .last()
+                        .copied()
+                        .unwrap_or(stage_capacity_w)
+                        .max(0.0);
+                    defrost_extra_power_w = defrost_eir
+                        * (max_capacity_w / DEFROST_CAPACITY_UNIT_FACTOR)
+                        + self.defrost_config.defrost_power_w;
+                    hp_capacity_w = 0.0;
+                    hp_electric_w = defrost_extra_power_w;
+                }
+                DefrostStrategy::Resistive => {
+                    // Compressor off; resistive element defrosts outdoor coil.
+                    // Zone receives heat from the resistive element during defrost.
+                    defrost_capacity_multiplier = 0.0;
+                    defrost_q_w = 0.0;
+                    let resistive_w = self.defrost_config.resistive_defrost_capacity_w;
+                    defrost_extra_power_w = resistive_w + self.defrost_config.defrost_power_w;
+                    hp_capacity_w = 0.0;
+                    // Resistive defrost power is tracked in defrost_extra_power_w for
+                    // telemetry; it is also included in the total electric_kw via the
+                    // Resistive er_capacity_w path (EIR=1.0 for electric resistance).
+                    hp_electric_w = 0.0;
+                }
+            }
+        } else if hp_on {
             let max_capacity_w = self
                 .hvac
                 .config
@@ -1060,7 +1235,7 @@ impl HeatPumpHeaterCore {
             fan_power_w = 0.0;
         }
 
-        let er_capacity_w = if er_on && self.use_ideal {
+        let mut er_capacity_w = if er_on && self.use_ideal {
             (self.ideal_capacity_w - hp_capacity_w)
                 .max(0.0)
                 .min(self.backup_capacity_w)
@@ -1069,7 +1244,28 @@ impl HeatPumpHeaterCore {
         } else {
             0.0
         };
-        let er_power_w = er_capacity_w * self.backup_eir;
+
+        // During discrete Resistive defrost, the resistive element provides zone
+        // heating in addition to defrosting the outdoor coil. This thermal output
+        // is separate from the backup ER that the thermostat controls.
+        if is_discrete_defrosting && self.defrost_config.strategy == DefrostStrategy::Resistive {
+            er_capacity_w += self.defrost_config.resistive_defrost_capacity_w;
+        }
+        // Electric power for the defrost resistive element (if Resistive strategy).
+        // This is separate from the backup ER: the defrost heater's EIR is 1.0
+        // (pure electric resistance), and its thermal output was added to
+        // er_capacity_w above. The backup ER's electric draw uses backup_eir,
+        // so we must subtract the defrost portion before computing er_power_w.
+        let (defrost_resistive_thermal_w, defrost_resistive_electric_w) = if is_discrete_defrosting
+            && self.defrost_config.strategy == DefrostStrategy::Resistive
+        {
+            let thermal = self.defrost_config.resistive_defrost_capacity_w;
+            let electric = thermal + self.defrost_config.defrost_power_w;
+            (thermal, electric)
+        } else {
+            (0.0, 0.0)
+        };
+        let er_power_w = (er_capacity_w - defrost_resistive_thermal_w).max(0.0) * self.backup_eir;
 
         self.pan_heater_on = matches!(self.variant, HeaterVariant::Minisplit)
             && env.weather.outdoor_temp_c < self.pan_heater_temp_c
@@ -1092,7 +1288,12 @@ impl HeatPumpHeaterCore {
         // zone_heat_fractions (set from duct_dse during init) distributes
         // this to conditioned and duct zones in write_zone_thermal_contributions.
         let mut thermal_output_w = hp_capacity_w + er_capacity_w + fan_power_w;
-        let mut electric_kw = (hp_electric_w + er_electric_w + fan_power_w + pan_heater_w) / 1000.0;
+        let mut electric_kw = (hp_electric_w
+            + er_electric_w
+            + fan_power_w
+            + pan_heater_w
+            + defrost_resistive_electric_w)
+            / 1000.0;
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Track compressor-only kW separately so scaling stays consistent with electric_kw.
         let mut compressor_kw = hp_electric_w / 1000.0;
@@ -1164,6 +1365,20 @@ impl HeatPumpHeaterCore {
             self.hvac.update_supply_air_temp(env);
         }
 
+        // Heating-side latent gain.
+        // During normal heating (no defrost) the outdoor coil condensate drains
+        // outdoors — latent_gain_w = 0.0 is physically correct.
+        // During reverse-cycle defrost with heating_shr < 1.0, residual moisture
+        // on the indoor coil surface (from the brief period when it acted as an
+        // evaporator) evaporates into supply air, producing a small positive
+        // zone latent gain. EnergyPlus DX heating coils produce no latent output
+        // in any mode (GitHub issue #7440); this model extends beyond EnergyPlus
+        // to capture the small but non-zero defrost-recovery moisture effect.
+        // OCHRE also uses SHR=1.0 for all heating (HVAC.py:458-462).
+        if defrost_active && self.heating_shr < 1.0 {
+            latent_gain_w = step_hp_capacity_w * (1.0 - self.heating_shr) * defrost_time_fraction;
+        }
+
         Ok(HeaterStep {
             thermal_output_w,
             electric_kw,
@@ -1181,6 +1396,7 @@ impl HeatPumpHeaterCore {
             fuel_w: fuel_w.max(0.0),
             cap_ratio,
             eir_ratio,
+            latent_gain_w,
         })
     }
 
@@ -1461,6 +1677,7 @@ impl HeatPumpHeaterCore {
             defrost_active: self.defrost_active,
             defrost_time_fraction: self.defrost_time_fraction,
             defrost_accumulator_s: self.defrost_accumulator_s,
+            defrost_cycle_tracker: self.defrost_cycle_tracker.clone(),
             pan_heater_on: self.pan_heater_on,
             last_er_off_at: self.last_er_off_at,
             last_speed_index: self.hvac.runtime.last_speed_index,
@@ -1508,6 +1725,10 @@ impl HeatPumpHeaterCore {
         self.defrost_active = decoded.defrost_active;
         self.defrost_time_fraction = decoded.defrost_time_fraction;
         self.defrost_accumulator_s = decoded.defrost_accumulator_s;
+        let tracker_state_code = decoded.defrost_cycle_tracker.state.code();
+        let tracker_frost_s = decoded.defrost_cycle_tracker.accumulated_frost_s;
+        let tracker_elapsed_s = decoded.defrost_cycle_tracker.defrost_elapsed_s;
+        self.defrost_cycle_tracker = decoded.defrost_cycle_tracker;
         self.pan_heater_on = decoded.pan_heater_on;
         self.last_er_off_at = decoded.last_er_off_at;
         self.er_was_on = decoded.er_was_on;
@@ -1536,6 +1757,12 @@ impl HeatPumpHeaterCore {
             tk::DEFROST_ACTIVE,
             if decoded.defrost_active { 1.0 } else { 0.0 },
         );
+        self.telemetry
+            .insert(tk::DEFROST_CYCLE_STATE, tracker_state_code);
+        self.telemetry
+            .insert(tk::DEFROST_ACCUMULATED_FROST_S, tracker_frost_s);
+        self.telemetry
+            .insert(tk::DEFROST_ELAPSED_S, tracker_elapsed_s);
         self.prev_base_setpoint = decoded.prev_base_setpoint;
         self.er_lockout_remaining_s = decoded.er_lockout_remaining_s;
         self.prev_zone_temp_c = decoded.prev_zone_temp_c;
@@ -1642,7 +1869,9 @@ mod tests {
     };
 
     use super::{ASHPHeater, MinisplitHeater, SpeedControlMode};
-    use crate::{Equipment, EquipmentConfig, HeatPumpCommonConfig, HeatPumpHeaterConfig};
+    use crate::{
+        DefrostConfig, Equipment, EquipmentConfig, HeatPumpCommonConfig, HeatPumpHeaterConfig,
+    };
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
         EnvironmentState {
@@ -1725,12 +1954,16 @@ mod tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         }
     }
 
@@ -1778,12 +2011,16 @@ mod tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         }
     }
 
@@ -1855,6 +2092,168 @@ mod tests {
                 BASE_EIR,
             );
         }
+    }
+
+    #[test]
+    fn mshp_min_compressor_fraction_30_produces_correct_stages() {
+        // min_compressor_fraction = 0.30 with 4 stages produces
+        // [0.30, 0.5333, 0.7667, 1.00] of rated capacity.
+        // stage[i] = rated * (min_frac + (1 - min_frac) * i / (n - 1))
+        const RATED_W: f64 = 10_000.0;
+
+        let mut typed = mshp_typed_config(RATED_W);
+        typed.common.min_compressor_fraction = 0.30;
+        let cfg =
+            EquipmentConfig::from_typed("mshp_min30".to_string(), "MSHP Heater".to_string(), typed);
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let e = env(18.0, 5.0, 0.004);
+        eq.init(&cfg, &e).unwrap();
+
+        let stages = &eq.core.hvac.config.heating_capacities_w;
+        assert_eq!(stages.len(), 4);
+
+        let min_frac = 0.30_f64;
+        let expected: Vec<f64> = (0..4)
+            .map(|i| RATED_W * (min_frac + (1.0 - min_frac) * i as f64 / 3.0))
+            .collect();
+
+        for (i, (&actual, &exp)) in stages.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 0.5,
+                "stage {} capacity = {:.2} W, expected {:.2} W",
+                i + 1,
+                actual,
+                exp,
+            );
+        }
+        assert!(
+            (stages[0] - RATED_W * 0.30).abs() < 0.5,
+            "stage 1 must be 30% of rated; got {:.2} W",
+            stages[0],
+        );
+        assert!(
+            (stages[3] - RATED_W).abs() < 0.5,
+            "stage 4 must be 100% of rated; got {:.2} W",
+            stages[3],
+        );
+    }
+
+    #[test]
+    fn mshp_eir_part_load_benefit_reduces_low_speed_eir() {
+        // eir_part_load_benefit = 0.15: eir[i] = rated_eir * (1 - 0.15 * (1 - frac[i])).
+        // At minimum speed (frac = 0.25 with default min_compressor_fraction):
+        //   eir[0] = 0.25 * (1 - 0.15 * 0.75) = 0.25 * 0.8875 = 0.221875
+        // At rated speed (frac = 1.0): eir[3] = 0.25 (unchanged).
+        const RATED_W: f64 = 10_000.0;
+        const BASE_EIR: f64 = 0.25;
+        const BENEFIT: f64 = 0.15;
+
+        let mut typed = mshp_typed_config(RATED_W);
+        typed.common.eir_part_load_benefit = Some(BENEFIT);
+        let cfg = EquipmentConfig::from_typed(
+            "mshp_eir_benefit".to_string(),
+            "MSHP Heater".to_string(),
+            typed,
+        );
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let e = env(18.0, 5.0, 0.004);
+        eq.init(&cfg, &e).unwrap();
+
+        let eirs = &eq.core.hvac.config.eir_by_stage;
+        assert_eq!(eirs.len(), 4);
+
+        // First stage EIR must be lower than rated EIR.
+        assert!(
+            eirs[0] < BASE_EIR,
+            "stage 1 EIR = {:.6} must be < rated EIR {:.4} with benefit={}",
+            eirs[0],
+            BASE_EIR,
+            BENEFIT,
+        );
+        // Last stage EIR must equal rated EIR.
+        assert!(
+            (eirs[3] - BASE_EIR).abs() < 1e-9,
+            "stage 4 EIR = {:.6} must equal rated EIR {:.4}",
+            eirs[3],
+            BASE_EIR,
+        );
+        // Verify the formula explicitly at stage 1 (frac = 0.25):
+        let frac_0 = 0.25_f64;
+        let expected_eir_0 = BASE_EIR * (1.0 - BENEFIT * (1.0 - frac_0));
+        assert!(
+            (eirs[0] - expected_eir_0).abs() < 1e-9,
+            "stage 1 EIR = {:.6}, expected {:.6}",
+            eirs[0],
+            expected_eir_0,
+        );
+    }
+
+    #[test]
+    fn mshp_stage_heating_eirs_preserved_when_is_mini_split() {
+        // When stage_heating_eirs is explicitly provided alongside is_mini_split=true,
+        // the mini-split init path must NOT overwrite those EIRs with the
+        // eir_part_load_benefit formula. The user's per-stage EIRs take precedence.
+        const RATED_W: f64 = 10_000.0;
+
+        let mut typed = mshp_typed_config(RATED_W);
+        typed.common.stage_heating_eirs = Some(vec![0.20, 0.22, 0.23, 0.25]);
+        let cfg = EquipmentConfig::from_typed(
+            "mshp_explicit_eirs".to_string(),
+            "MSHP Heater".to_string(),
+            typed,
+        );
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let e = env(18.0, 5.0, 0.004);
+        eq.init(&cfg, &e).unwrap();
+
+        let eirs = &eq.core.hvac.config.eir_by_stage;
+        assert_eq!(
+            eirs,
+            &vec![0.20, 0.22, 0.23, 0.25],
+            "explicit stage_heating_eirs must not be overwritten by mini-split init path",
+        );
+    }
+
+    #[test]
+    fn mshp_validate_rejects_min_compressor_fraction_out_of_range() {
+        let mut cfg_below = mshp_typed_config(10_000.0);
+        cfg_below.common.min_compressor_fraction = 0.05;
+        let err = cfg_below.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("min_compressor_fraction must be in [0.1, 0.5]"),
+            "validation must reject min_compressor_fraction < 0.1; got: {err}",
+        );
+
+        let mut cfg_above = mshp_typed_config(10_000.0);
+        cfg_above.common.min_compressor_fraction = 0.55;
+        let err = cfg_above.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("min_compressor_fraction must be in [0.1, 0.5]"),
+            "validation must reject min_compressor_fraction > 0.5; got: {err}",
+        );
+    }
+
+    #[test]
+    fn mshp_validate_rejects_eir_part_load_benefit_out_of_range() {
+        let mut cfg_below = mshp_typed_config(10_000.0);
+        cfg_below.common.eir_part_load_benefit = Some(-0.1);
+        let err = cfg_below.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("eir_part_load_benefit must be in [0.0, 1.0]"),
+            "validation must reject eir_part_load_benefit < 0.0; got: {err}",
+        );
+
+        let mut cfg_above = mshp_typed_config(10_000.0);
+        cfg_above.common.eir_part_load_benefit = Some(1.5);
+        let err = cfg_above.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("eir_part_load_benefit must be in [0.0, 1.0]"),
+            "validation must reject eir_part_load_benefit > 1.0; got: {err}",
+        );
     }
 
     fn add_identity_biquadratic_curves(cfg: &mut EquipmentConfig) {
@@ -4905,7 +5304,7 @@ mod ideal_capacity_tests {
     };
 
     use super::ASHPHeater;
-    use crate::{Equipment, EquipmentConfig};
+    use crate::{DefrostConfig, Equipment, EquipmentConfig};
 
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     /// OAT is held above the HP lockout (default -17.78°C) and above the ER lockout
@@ -4996,12 +5395,16 @@ mod ideal_capacity_tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
+                    min_compressor_fraction: 0.25,
+                    eir_part_load_benefit: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
                 max_oat_supplemental_c: None,
                 er_setpoint_offset_c: None,
                 er_hard_lockout_time_s: None,
+                heating_shr: None,
+                defrost: DefrostConfig::default(),
             },
         );
         cfg.test_extras_mut().insert(
@@ -5191,12 +5594,16 @@ mod ideal_capacity_tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
+                    min_compressor_fraction: 0.25,
+                    eir_part_load_benefit: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: Some(10.0),
                 max_oat_supplemental_c: Some(21.0),
                 er_setpoint_offset_c: Some(3.0),
                 er_hard_lockout_time_s: None,
+                heating_shr: None,
+                defrost: DefrostConfig::default(),
             },
         );
         // Identity curves: cap_ratio = 1.0, eir_ratio = 1.0
@@ -5339,12 +5746,16 @@ mod ideal_capacity_tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
+                    min_compressor_fraction: 0.25,
+                    eir_part_load_benefit: None,
                 },
                 hp_lockout_temp_c: Some(10.0),
                 er_lockout_temp_c: Some(5.0),
                 max_oat_supplemental_c: Some(21.0),
                 er_setpoint_offset_c: Some(0.0),
                 er_hard_lockout_time_s: None,
+                heating_shr: None,
+                defrost: DefrostConfig::default(),
             },
         );
         cfg.test_extras_mut().insert(
@@ -5435,12 +5846,16 @@ mod ideal_capacity_tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
+                    min_compressor_fraction: 0.25,
+                    eir_part_load_benefit: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: Some(5.0),
                 max_oat_supplemental_c: Some(21.0),
                 er_setpoint_offset_c: Some(3.0),
                 er_hard_lockout_time_s: None,
+                heating_shr: None,
+                defrost: DefrostConfig::default(),
             },
         );
         cfg.test_extras_mut().insert(

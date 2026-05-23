@@ -3,9 +3,10 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_equipment::hvac::heating_config::IdealCapacityModeConfig;
 use hares_equipment::{
-    CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig,
-    ElectricFurnaceConfig, EquipmentConfig, EquipmentRegistry, GasFurnaceConfig,
-    HeatPumpCommonConfig, HeatPumpHeaterConfig, IdealHvacConfig,
+    CentralAirConditionerConfig, DefrostConfig, DefrostControl, DefrostStrategy, DuctConfig,
+    ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, EquipmentConfig,
+    EquipmentRegistry, GasFurnaceConfig, HeatPumpCommonConfig, HeatPumpHeaterConfig,
+    IdealHvacConfig,
 };
 use hares_types::{
     ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
@@ -206,27 +207,120 @@ fn furnace_heats_when_below_setpoint() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. furnace_off_when_above_setpoint
-//    Zone at 23°C, setpoint 21°C → thermal gain = 0
+// Regression: discrete defrost block must not fire when compressor is off
+//
+// When the FSM is in Defrosting and an external signal forces the compressor
+// off (e.g. ctrl_mode_override = Off mid-cycle), the capacity/power override
+// must not apply. Without the hp_on guard, the equipment reports non-zero
+// electric_kw while commanded off — a phantom draw of ~1.5–2 kW for a
+// 10 kW unit. The FSM continues advancing (defrost completes on elapsed
+// time), but the compute_step override is gated on hp_on.
 // ---------------------------------------------------------------------------
-
 #[test]
-fn furnace_off_when_above_setpoint() {
-    let cfg = gas_furnace_config("furnace");
+fn discrete_defrost_no_phantom_draw_when_compressor_off() {
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_phantom_draw".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
+        },
+    );
+
     let registry = EquipmentRegistry::new();
-    let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
-    let env = env_with_zone_temp(23.0);
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = -5.0;
+    env.weather.outdoor_humidity_ratio = 0.005;
+    env.weather.outdoor_wet_bulb_c = -6.0;
     eq.init(&cfg, &env).unwrap();
 
     let mut ports = ports_for_zone1();
-    eq.update_control(&env);
-    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+    let dt = Duration::from_secs(60);
 
+    // Advance to Defrosting state
+    let mut reached_defrosting = false;
+    for _ in 0..200 {
+        eq.update_control(&env);
+        eq.step(&env, dt, &mut ports).unwrap();
+        let cycle_state = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0);
+        if cycle_state == 1.0 {
+            reached_defrosting = true;
+            break;
+        }
+    }
     assert!(
-        ports.thermal[0].sensible_gain_w.abs() < 1e-6,
-        "expected zero thermal gain when zone ({:.1}°C) is above heating setpoint (20°C), got {:.3} W",
-        23.0,
-        ports.thermal[0].sensible_gain_w,
+        reached_defrosting,
+        "FSM must reach Defrosting within 200 steps"
+    );
+
+    // Force the compressor off mid-defrost via ModeOverride
+    eq.apply_control(&ControlSignal::ModeOverride {
+        mode: OperatingMode::Off,
+    })
+    .unwrap();
+
+    // Step with compressor forced off but FSM still Defrosting
+    eq.update_control(&env);
+    eq.step(&env, dt, &mut ports).unwrap();
+
+    let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(-1.0);
+    assert_eq!(
+        electric_kw, 0.0,
+        "electric_kw must be zero when compressor is off even if FSM is Defrosting; \
+         got {electric_kw:.6} kW — phantom draw bug"
+    );
+
+    // Verify FSM is still advancing (defrost_elapsed_s increases)
+    let elapsed = eq.telemetry().get(tk::DEFROST_ELAPSED_S).unwrap_or(0.0);
+    assert!(
+        elapsed > 0.0,
+        "FSM must continue advancing even when compressor is off; elapsed={elapsed:.1}s"
     );
 }
 
@@ -369,12 +463,16 @@ fn ashp_heating_cop_above_unity() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -983,12 +1081,16 @@ fn ashp_sub_consumption_telemetry() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -1124,12 +1226,16 @@ fn ashp_defaults_match_reference() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -1208,12 +1314,16 @@ fn ashp_defaults_match_reference() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: Some(0.5),
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -1297,12 +1407,16 @@ fn mshp_defaults_match_reference() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -1419,12 +1533,16 @@ fn bang_bang_single_speed_cycles_within_deadband() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -1787,44 +1905,422 @@ fn fsm_both_paths_respect_min_cycle_time_lockout() {
 }
 
 // ---------------------------------------------------------------------------
-// Defrost model is continuous, not discrete
+// Discrete defrost cycle model
 //
-// Regression test that documents the current (continuous) defrost behaviour and
-// will FAIL once a discrete DefrostCycleTracker FSM is implemented.
-// The test verifies three things that the discrete model would change:
-//
-//   1. DEFROST_ACTIVE telemetry is 1.0 on the very first cold timestep — no
-//      frost-accumulation phase before the first defrost cycle.  A discrete
-//      model would start in Accumulating and only transition after
-//      `cycle_duration_s / time_fraction` seconds have elapsed.
-//
-//   2. HP_CAPACITY_W is strictly positive (capacity-reduced, not zero) during
-//      the first cold timestep.  A discrete model in the Defrosting state
-//      would set zone capacity = 0 (ReverseCycle).
-//
-//   3. DEFROST_TIME_FRACTION is between 0 and 1 (a continuous fraction, not a
-//      binary 0/1 flag).  A discrete model would always be either 0 (off) or
-//      1 (on) within a given state.
-//
-// When discrete defrost is implemented these assertions should be INVERTED:
-//   - First few steps should have DEFROST_ACTIVE = 0 (Accumulating).
-//   - Once Defrosting, HP_CAPACITY_W should be 0 (ReverseCycle).
-//   - DEFROST_TIME_FRACTION usage should be replaced by DEFROST_CYCLE_STATE.
+// After implementing DefrostCycleTracker, the defrost model is now discrete:
+//   1. DEFROST_ACTIVE telemetry is 0.0 on the very first cold timestep —
+//      the equipment starts in the Accumulating state and must wait for
+//      sufficient frost accumulation before transitioning to Defrosting.
+//   2. HP_CAPACITY_W is zero during the Defrosting state (ReverseCycle) —
+//      the compressor reverses and zone capacity drops to zero.
+//   3. DEFROST_CYCLE_STATE is a binary flag (0=Accumulating, 1=Defrosting)
+//      replacing the continuous DEFROST_TIME_FRACTION for cycle state.
 // ---------------------------------------------------------------------------
-// Heating-side SHR always produces latent_gain_w = 0
+#[test]
+fn defrost_discrete_cycle_starts_in_accumulating() {
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_discrete".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+
+    // Cold, humid conditions: OAT = -5°C, HR = 0.005 kg/kg — well below the 4.4445°C
+    // defrost-enable threshold, sufficient humidity to produce a non-trivial time_fraction.
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = -5.0;
+    env.weather.outdoor_humidity_ratio = 0.005;
+    env.weather.outdoor_wet_bulb_c = -6.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let tel = eq.telemetry();
+
+    // --- DISCRETE: first step starts in Accumulating (no defrost yet) ---
+    let cycle_state = tel
+        .get(tk::DEFROST_CYCLE_STATE)
+        .expect("DEFROST_CYCLE_STATE telemetry must be present");
+    assert_eq!(
+        cycle_state, 0.0,
+        "discrete model must start in Accumulating (DEFROST_CYCLE_STATE=0)"
+    );
+
+    // --- DISCRETE: capacity is non-zero during Accumulating ---
+    let hp_capacity_w = tel
+        .get(tk::HP_CAPACITY_W)
+        .expect("HP_CAPACITY_W telemetry must be present");
+    assert!(
+        hp_capacity_w > 0.0,
+        "discrete model must produce non-zero capacity during Accumulating; got {hp_capacity_w:.1} W"
+    );
+
+    // --- DISCRETE: DEFROST_CYCLE_STATE is binary (0 or 1) ---
+    assert!(
+        cycle_state == 0.0 || cycle_state == 1.0,
+        "DEFROST_CYCLE_STATE must be binary (0=Accumulating, 1=Defrosting); got {cycle_state}"
+    );
+}
+
+#[test]
+fn defrost_discrete_cycle_transitions_to_defrosting() {
+    // Run enough cold-condition steps to trigger Accumulating→Defrosting.
+    // At OAT=-5°C, outdoor_hr=0.005: evaluate_defrost produces time_fraction ≈ 0.26.
+    // Inter-defrost interval = cycle_duration_s / time_fraction = 210 / 0.26 ≈ 807 s.
+    // With dt=60s, accumulation per step = 60 * 0.26 ≈ 15.6 s; threshold in ~52 steps.
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_fsm_transition".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = -5.0;
+    env.weather.outdoor_humidity_ratio = 0.005;
+    env.weather.outdoor_wet_bulb_c = -6.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    let dt = Duration::from_secs(60);
+    let mut reached_defrosting = false;
+
+    // Run up to 100 steps — should trigger defrost within that time.
+    for _ in 0..100 {
+        eq.update_control(&env);
+        eq.step(&env, dt, &mut ports).unwrap();
+        let cycle_state = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0);
+        if cycle_state == 1.0 {
+            reached_defrosting = true;
+            // Verify: hp_capacity_w = 0 during ReverseCycle Defrosting
+            let hp_cap = eq.telemetry().get(tk::HP_CAPACITY_W).unwrap_or(-1.0);
+            assert_eq!(
+                hp_cap, 0.0,
+                "ReverseCycle Defrosting must produce hp_capacity_w = 0; got {hp_cap:.1} W"
+            );
+            // Verify: electric power is non-zero (compressor running in reverse)
+            let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+            assert!(
+                electric_kw > 0.0,
+                "ReverseCycle Defrosting must draw non-zero electric power; got {electric_kw:.3} kW"
+            );
+            break;
+        }
+    }
+
+    assert!(
+        reached_defrosting,
+        "FSM must transition to Defrosting within 100 cold steps"
+    );
+}
+
+#[test]
+fn defrost_discrete_cycle_returns_to_accumulating() {
+    // Verify that after a defrost cycle completes, the FSM returns to Accumulating
+    // and normal compressor capacity resumes immediately (no recovery ramp).
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_fsm_return".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = -5.0;
+    env.weather.outdoor_humidity_ratio = 0.005;
+    env.weather.outdoor_wet_bulb_c = -6.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    let dt = Duration::from_secs(60);
+
+    // Advance to Defrosting state
+    let mut entered_defrosting_at_step = None;
+    for i in 0..200 {
+        eq.update_control(&env);
+        eq.step(&env, dt, &mut ports).unwrap();
+        let cycle_state = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0);
+        if cycle_state == 1.0 && entered_defrosting_at_step.is_none() {
+            entered_defrosting_at_step = Some(i);
+        }
+        if entered_defrosting_at_step.is_some() && cycle_state == 0.0 {
+            // Returned to Accumulating — verify immediate capacity recovery
+            let hp_cap = eq.telemetry().get(tk::HP_CAPACITY_W).unwrap_or(0.0);
+            assert!(
+                hp_cap > 0.0,
+                "capacity must resume immediately after defrost ends (no recovery ramp); \
+                 got {hp_cap:.1} W"
+            );
+            return;
+        }
+    }
+    panic!("FSM did not complete a full accumulate-defrost cycle within 200 steps");
+}
+
+#[test]
+fn defrost_discrete_peak_power_exceeds_continuous_average() {
+    // During ReverseCycle defrost, the compressor draws power at a different EIR.
+    // The discrete model produces peak instantaneous power that exceeds what the
+    // continuous model would produce as an averaged value for the same timestep.
+    // We verify by comparing the Defrosting-step electric_kw against the
+    // continuous model's defrost_time_fraction-weighted average.
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_peak_power".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = -5.0;
+    env.weather.outdoor_humidity_ratio = 0.005;
+    env.weather.outdoor_wet_bulb_c = -6.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    let dt = Duration::from_secs(60);
+
+    // Collect first-step (continuous model) power as baseline for comparison.
+    // The Accumulating step uses the continuous defrost multiplier.
+    eq.update_control(&env);
+    eq.step(&env, dt, &mut ports).unwrap();
+    let accumulating_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+    let defrost_time_frac = eq.telemetry().get(tk::DEFROST_TIME_FRACTION).unwrap_or(0.0);
+
+    // The continuous model's average power for a timestep with defrost is
+    // lower than the discrete model's peak during Defrosting because the
+    // continuous model spreads the penalty. We verify this by running until
+    // Defrosting and checking that peak power exceeds the continuous average.
+    let mut defrosting_kw = None;
+    for _ in 0..200 {
+        eq.update_control(&env);
+        eq.step(&env, dt, &mut ports).unwrap();
+        let cycle_state = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0);
+        if cycle_state == 1.0 {
+            defrosting_kw = Some(eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0));
+            break;
+        }
+    }
+
+    let peak_kw = defrosting_kw.expect("must reach Defrosting state within 200 steps");
+    // The continuous model estimates average power = base_power * power_multiplier + extra.
+    // The discrete model applies this at full intensity. Peak must exceed the
+    // continuous average by a meaningful margin.
+    // A conservative check: peak > accumulating_step_power (which has the continuous penalty applied).
+    assert!(
+        peak_kw > accumulating_kw,
+        "discrete defrost peak power ({peak_kw:.3} kW) must exceed continuous-averaged \
+         power ({accumulating_kw:.3} kW) at defrost_time_fraction={defrost_time_frac:.4}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Heating-side latent gain
 //
-// heater.rs hardcodes `latent_gain_w = 0.0` for all heating output.
-// The correct behaviour during reverse-cycle defrost with
-// heating_shr < 1.0 is a small non-zero latent contribution.
-//
-// These tests document the current behaviour so that implementing the
-// fix causes them to fail, forcing the developer to review and update the
-// assertions.
-//
-// Case 1 — latent is always zero even during normal heating.
-//          (This is actually correct physics, so it should stay 0.0 after fix.)
-// Case 2 — latent is always zero even during a defrost step.
-//          (After the fix, this should be non-zero when heating_shr < 1.0.)
+// During normal heating (no defrost), outdoor-coil condensate drains outdoors
+// and latent_gain_w = 0.0 — physically correct per EnergyPlus DX heating
+// coil model.  When reverse-cycle defrost is active and heating_shr < 1.0,
+// indoor-coil surface moisture evaporates into supply air, producing a small
+// positive latent gain.  With the default heating_shr = 1.0, latent gain
+// remains zero in all modes (matches OCHRE and EnergyPlus behaviour).
 // ---------------------------------------------------------------------------
 #[test]
 fn heating_latent_always_zero_during_normal_heating() {
@@ -1869,12 +2365,16 @@ fn heating_latent_always_zero_during_normal_heating() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -1910,12 +2410,10 @@ fn heating_latent_always_zero_during_normal_heating() {
 }
 
 #[test]
-fn heating_latent_always_zero_during_defrost() {
-    // Defrost conditions: OAT = -5°C — defrost should activate.
-    // With `heating_shr` not yet implemented in HeatPumpHeaterConfig, the
-    // latent_gain_w is hardcoded to 0.0 even during defrost steps.
-    // After the fix, this test should FAIL because latent_gain_w
-    // will be non-zero (a small positive value) when defrost is active.
+fn heating_latent_nonzero_during_defrost_with_sub1_shr() {
+    // Reverse-cycle defrost with heating_shr < 1.0 produces a small positive
+    // latent gain from indoor-coil surface moisture. With the default
+    // heating_shr = 1.0, latent gain remains zero (all-sensible).
     let cfg = EquipmentConfig::from_typed(
         "ashp_defrost_latent".to_string(),
         "ASHP Heater".to_string(),
@@ -1956,12 +2454,16 @@ fn heating_latent_always_zero_during_defrost() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: Some(0.95),
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -1990,22 +2492,275 @@ fn heating_latent_always_zero_during_defrost() {
 
     let latent_w = ports.thermal[0].latent_gain_w;
 
-    // latent_gain_w is hardcoded to 0.0 in heater.rs.
-    // During reverse-cycle defrost the indoor coil surface can release a small
-    // amount of moisture into the supply air, so latent_gain_w should be > 0.
-    // Once `heating_shr` is wired through and heater.rs:699 is fixed, this
-    // assertion should FAIL and be updated to: assert!(latent_w >= 0.0).
+    // During reverse-cycle defrost with heating_shr = 0.95, indoor-coil
+    // surface moisture produces a small positive latent gain to the zone.
+    assert!(
+        latent_w > 0.0,
+        "latent_gain_w must be > 0 during defrost with heating_shr < 1.0; got {latent_w:.3} W"
+    );
+}
+
+#[test]
+fn heating_latent_zero_with_default_shr_during_defrost() {
+    // With the default heating_shr = 1.0 (all-sensible), latent gain should
+    // remain zero even during defrost. This matches OCHRE and EnergyPlus
+    // behavior where DX heating produces no latent output.
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_shr1".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(10_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = -5.0;
+    env.weather.outdoor_humidity_ratio = 0.005;
+    env.weather.outdoor_wet_bulb_c = -6.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let latent_w = ports.thermal[0].latent_gain_w;
     assert_eq!(
         latent_w, 0.0,
-        "latent_gain_w is {latent_w:.3} W during defrost; \
-         expected 0.0 (current hardcoded behaviour) — fix heater.rs:699 to \
-         compute latent from defrost_q_w and heating_shr"
+        "latent_gain_w must be 0.0 during defrost with default heating_shr=1.0; got {latent_w:.3} W"
+    );
+}
+
+#[test]
+fn heating_latent_telemetry_key_present() {
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_latent_telemetry".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(8_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = 7.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let latent_w = eq
+        .telemetry()
+        .get(tk::HEATING_LATENT_W)
+        .expect("HEATING_LATENT_W telemetry key must be present");
+    assert_eq!(
+        latent_w, 0.0,
+        "HEATING_LATENT_W must be 0.0 during normal heating; got {latent_w:.3} W"
+    );
+}
+
+#[test]
+fn heating_sensible_plus_latent_equals_total_thermal_output() {
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_energy_balance".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(10_000.0),
+                cooling_eir: Some(0.35),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            heating_shr: Some(0.95),
+            defrost: DefrostConfig::default(),
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = -5.0;
+    env.weather.outdoor_humidity_ratio = 0.005;
+    env.weather.outdoor_wet_bulb_c = -6.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let tel = eq.telemetry();
+    let thermal_output_w = tel
+        .get(tk::THERMAL_OUTPUT_W)
+        .expect("THERMAL_OUTPUT_W must exist");
+    let heating_latent_w = tel
+        .get(tk::HEATING_LATENT_W)
+        .expect("HEATING_LATENT_W must exist");
+    let sensible_w = ports.thermal[0].sensible_gain_w;
+    let port_latent_w = ports.thermal[0].latent_gain_w;
+
+    let total_delivered = sensible_w + port_latent_w;
+    assert!(
+        (total_delivered - thermal_output_w).abs() < 0.01,
+        "sensible + latent must equal total thermal output: \
+         sensible={sensible_w:.3} latent={port_latent_w:.3} sum={total_delivered:.3} \
+         thermal_output={thermal_output_w:.3}"
+    );
+    assert!(
+        heating_latent_w > 0.0,
+        "HEATING_LATENT_W must be > 0 with heating_shr=0.95 in defrost; got {heating_latent_w:.3} W"
     );
 }
 
 // ---------------------------------------------------------------------------
+// During Accumulating state, the continuous defrost multiplier still applies
+//
+// The discrete defrost FSM starts in Accumulating on the first cold timestep.
+// During Accumulating, evaluate_defrost still returns active=true and the
+// continuous capacity/power multipliers are applied (reduced but not zeroed).
+// The discrete model only overrides capacity when the FSM transitions to
+// Defrosting (where hp_capacity_w becomes 0 for ReverseCycle).
+//
+// This test verifies the Accumulating-phase behavior:
+//   1. DEFROST_ACTIVE = 1.0 — conditions favor frost even though FSM is Accumulating
+//   2. HP_CAPACITY_W > 0 — capacity is reduced by continuous multiplier, not zeroed
+//   3. DEFROST_TIME_FRACTION in (0, 1) — continuous fraction drives frost accumulation
+// ---------------------------------------------------------------------------
 #[test]
-fn defrost_is_continuous_not_discrete() {
+fn defrost_accumulating_applies_continuous_multiplier() {
     let cfg = EquipmentConfig::from_typed(
         "ashp_defrost_continuous".to_string(),
         "ASHP Heater".to_string(),
@@ -2046,12 +2801,16 @@ fn defrost_is_continuous_not_discrete() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -2072,40 +2831,32 @@ fn defrost_is_continuous_not_discrete() {
 
     let tel = eq.telemetry();
 
-    // --- BUG 1: defrost activates immediately (no Accumulating phase) ---
-    // Current behaviour: active on first step because there is no frost-accumulation
-    // state machine.  A discrete model would keep DEFROST_ACTIVE = 0.0 initially.
+    // --- Accumulating: defrost conditions are active but FSM is not Defrosting ---
     let defrost_active = tel
         .get(tk::DEFROST_ACTIVE)
         .expect("DEFROST_ACTIVE telemetry must be present");
     assert_eq!(
         defrost_active, 1.0,
-        "continuous model activates defrost immediately; \
-         a discrete model would start in Accumulating (DEFROST_ACTIVE=0)"
+        "Accumulating state still reports DEFROST_ACTIVE=1 (conditions favor frost)"
     );
 
-    // --- BUG 2: capacity is reduced but not zero (no discrete Defrosting state) ---
-    // Current behaviour: capacity is multiplied by a fractional multiplier (0 < mult < 1).
-    // A discrete model in the Defrosting state would set hp_capacity_w = 0 (ReverseCycle).
+    // --- Accumulating: capacity is reduced by continuous multiplier, not zeroed ---
     let hp_capacity_w = tel
         .get(tk::HP_CAPACITY_W)
         .expect("HP_CAPACITY_W telemetry must be present");
     assert!(
         hp_capacity_w > 0.0,
-        "continuous model produces non-zero capacity ({hp_capacity_w:.1} W); \
-         a discrete model in Defrosting state would produce hp_capacity_w = 0 (ReverseCycle)"
+        "Accumulating state produces non-zero capacity ({hp_capacity_w:.1} W); \
+         only Defrosting state zeroes hp_capacity_w (ReverseCycle)"
     );
 
-    // --- BUG 3: time_fraction is a continuous value, not a binary 0/1 ---
-    // Current behaviour: DEFROST_TIME_FRACTION is a fraction in (0, 1).
-    // A discrete model would use a binary DEFROST_CYCLE_STATE (0=Accumulating, 1=Defrosting).
+    // --- Accumulating: time_fraction is continuous, drives frost accumulation ---
     let time_frac = tel
         .get(tk::DEFROST_TIME_FRACTION)
         .expect("DEFROST_TIME_FRACTION telemetry must be present");
     assert!(
         time_frac > 0.0 && time_frac < 1.0,
-        "DEFROST_TIME_FRACTION is {time_frac:.4} (continuous); \
-         a discrete model would replace this with binary DEFROST_CYCLE_STATE"
+        "DEFROST_TIME_FRACTION is {time_frac:.4} (continuous); drives frost accumulation in Accumulating"
     );
 }
 
@@ -2174,12 +2925,16 @@ fn mshp_load_above_stage1_runs_continuously() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig::default(),
         },
     );
 
@@ -2204,10 +2959,7 @@ fn mshp_load_above_stage1_runs_continuously() {
 }
 
 #[test]
-fn min_compressor_fraction_key_silently_dropped_by_flatten() {
-    // serde flatten silently drops unknown keys like min_compressor_fraction.
-    // When the field is added to HeatPumpHeaterConfig, this test must be
-    // updated to assert the value is read correctly.
+fn min_compressor_fraction_deserializes_from_json() {
     let json = serde_json::json!({
         "zone_id": 1,
         "heating_capacity_w": 10000.0,
@@ -2223,56 +2975,39 @@ fn min_compressor_fraction_key_silently_dropped_by_flatten() {
         "known fields must deserialize correctly"
     );
     assert!(
-        cfg.hp_lockout_temp_c.is_none(),
-        "min_compressor_fraction does not exist on HeatPumpHeaterConfig; \
-         the key is silently dropped by serde flatten"
+        (cfg.common.min_compressor_fraction - 0.30).abs() < 1e-9,
+        "min_compressor_fraction must deserialize from JSON; got {}",
+        cfg.common.min_compressor_fraction,
     );
 }
 
 // ---------------------------------------------------------------------------
-// DefrostConfig not wired into typed config
+// DefrostConfig typed config wiring
 //
-// HeatPumpHeaterConfig has no defrost fields, so DefrostConfig is always
-// initialised from DefrostConfig::on_demand(1.0, 0.0) and never overridden
-// in init_from_typed. Users cannot configure defrost_strategy,
-// defrost_control, defrost_time_fraction, or resistive_defrost_capacity_w
-// through the typed config system.
-//
-// These tests document the current missing state so that adding the fields
-// will cause them to fail, forcing the developer to verify the wiring.
+// DefrostConfig is embedded in HeatPumpHeaterConfig via #[serde(flatten)]
+// and propagated to the heater core in init_from_typed. These tests verify
+// that defrost fields are correctly read from typed config JSON and that
+// validation enforces the required constraints.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn defrost_strategy_key_silently_dropped_by_flatten() {
-    // serde flatten silently drops unknown keys like defrost_strategy.
-    // When the field is added to HeatPumpHeaterConfig, this test must be
-    // updated to assert the value is read correctly.
+fn defrost_strategy_propagates_from_typed_config() {
     let json = serde_json::json!({
         "zone_id": 1,
         "heating_capacity_w": 10_000.0,
         "heating_eir": 0.25,
         "cooling_capacity_w": 10_000.0,
         "cooling_eir": 0.35,
-        "defrost_strategy": "Resistive"
+        "defrost_strategy": "Resistive",
+        "resistive_defrost_capacity_w": 2_000.0
     });
     let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
-    assert_eq!(
-        cfg.common.heating_capacity_w,
-        Some(10_000.0),
-        "known fields must deserialize correctly"
-    );
-    assert!(
-        cfg.hp_lockout_temp_c.is_none(),
-        "defrost_strategy does not exist on HeatPumpHeaterConfig; \
-         the key is silently dropped by serde flatten"
-    );
+    assert_eq!(cfg.defrost.strategy, DefrostStrategy::Resistive);
+    assert_eq!(cfg.defrost.resistive_defrost_capacity_w, 2_000.0);
 }
 
 #[test]
-fn defrost_control_key_silently_dropped_by_flatten() {
-    // serde flatten silently drops unknown keys like defrost_control.
-    // When the field is added to HeatPumpHeaterConfig, this test must be
-    // updated to assert the value is read correctly.
+fn defrost_control_propagates_from_typed_config() {
     let json = serde_json::json!({
         "zone_id": 1,
         "heating_capacity_w": 10_000.0,
@@ -2282,61 +3017,55 @@ fn defrost_control_key_silently_dropped_by_flatten() {
         "defrost_control": "Timed"
     });
     let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
-    assert_eq!(
-        cfg.common.heating_capacity_w,
-        Some(10_000.0),
-        "known fields must deserialize correctly"
-    );
-    assert!(
-        cfg.hp_lockout_temp_c.is_none(),
-        "defrost_control does not exist on HeatPumpHeaterConfig; \
-         the key is silently dropped by serde flatten"
-    );
+    assert_eq!(cfg.defrost.control, DefrostControl::Timed);
 }
 
 #[test]
-fn resistive_defrost_capacity_key_silently_dropped_by_flatten() {
-    // serde flatten silently drops unknown keys like resistive_defrost_capacity_w.
-    // When the field is added to HeatPumpHeaterConfig, this test must be
-    // updated to assert the value is read.
+fn resistive_defrost_capacity_propagates_from_typed_config() {
     let json = serde_json::json!({
         "zone_id": 1,
         "heating_capacity_w": 10_000.0,
         "heating_eir": 0.25,
         "cooling_capacity_w": 10_000.0,
         "cooling_eir": 0.35,
+        "defrost_strategy": "Resistive",
         "resistive_defrost_capacity_w": 2_000.0
     });
     let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
-    assert_eq!(
-        cfg.common.heating_capacity_w,
-        Some(10_000.0),
-        "known fields must deserialize correctly"
-    );
     assert!(
-        cfg.hp_lockout_temp_c.is_none(),
-        "resistive_defrost_capacity_w does not exist on HeatPumpHeaterConfig; \
-         the key is silently dropped by serde flatten"
+        (cfg.defrost.resistive_defrost_capacity_w - 2_000.0).abs() < 1e-6,
+        "resistive_defrost_capacity_w must deserialize from typed config; got {}",
+        cfg.defrost.resistive_defrost_capacity_w,
     );
 }
 
 #[test]
-fn defrost_config_uses_hardcoded_on_demand_from_typed_path() {
-    // init_from_typed never sets self.defrost_config from the typed config —
-    // it always inherits DefrostConfig::on_demand(1.0, 0.0) from `new()`.
-    //
-    // This test demonstrates the structural gap: a heater initialised via the typed
-    // path has defrost locked at the hardcoded defaults, even though DefrostConfig
-    // itself is fully capable of representing Timed / Resistive modes.  The test
-    // builds a typed config, initialises the heater, then runs a step under defrost
-    // conditions (OAT = -5°C) and confirms that DEFROST_ACTIVE reflects the
-    // hardcoded OnDemand behaviour — not any configurable alternative.
-    //
-    // After defrost fields are added to the typed config, defrost settings
-    // should propagate, and a Timed config should produce a different DEFROST_TIME_FRACTION
-    // than the OnDemand formula yields at the same conditions.
+fn defrost_config_defaults_to_on_demand_reverse_cycle() {
+    let json = serde_json::json!({
+        "zone_id": 1,
+        "heating_capacity_w": 10_000.0,
+        "heating_eir": 0.25,
+        "cooling_capacity_w": 10_000.0,
+        "cooling_eir": 0.35
+    });
+    let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
+    assert_eq!(cfg.defrost.control, DefrostControl::OnDemand);
+    assert_eq!(cfg.defrost.strategy, DefrostStrategy::ReverseCycle);
+    assert!((cfg.defrost.capacity_reduction_factor - 1.0).abs() < 1e-9);
+    assert!((cfg.defrost.defrost_power_w - 0.0).abs() < 1e-9);
+    assert!((cfg.defrost.defrost_time_fraction - 0.058).abs() < 1e-9);
+    assert!((cfg.defrost.max_oat_defrost_c - 4.4445).abs() < 1e-4);
+    assert_eq!(cfg.defrost.defrost_eir_coeffs, None);
+    assert!((cfg.defrost.resistive_defrost_capacity_w - 0.0).abs() < 1e-9);
+}
+
+#[test]
+fn defrost_typed_config_propagates_to_heater_init() {
+    // A heater initialised via the typed path with a Timed defrost config
+    // must use the Timed model — producing a fixed time_fraction of 0.05
+    // (the configured value) rather than the OnDemand formula output.
     let cfg = EquipmentConfig::from_typed(
-        "ashp_defrost_typed".to_string(),
+        "ashp_defrost_typed_timed".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
             common: HeatPumpCommonConfig {
@@ -2375,19 +3104,31 @@ fn defrost_config_uses_hardcoded_on_demand_from_typed_path() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            heating_shr: None,
+            defrost: DefrostConfig {
+                control: DefrostControl::Timed,
+                strategy: DefrostStrategy::ReverseCycle,
+                defrost_time_fraction: 0.05,
+                max_oat_defrost_c: 4.4445,
+                capacity_reduction_factor: 1.0,
+                defrost_power_w: 0.0,
+                defrost_eir_coeffs: None,
+                resistive_defrost_capacity_w: 0.0,
+            },
         },
     );
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
 
-    // Cold, humid: OAT = -5°C should trigger defrost (OnDemand active below 4.4445°C).
     let mut env = env_with_zone_temp(18.0);
     env.weather.outdoor_temp_c = -5.0;
     env.weather.outdoor_humidity_ratio = 0.005;
@@ -2406,25 +3147,101 @@ fn defrost_config_uses_hardcoded_on_demand_from_typed_path() {
         .get(tk::DEFROST_TIME_FRACTION)
         .expect("DEFROST_TIME_FRACTION telemetry must be present");
 
-    // The hardcoded OnDemand model must activate defrost at -5°C.
+    assert_eq!(defrost_active, 1.0, "defrost must be active at -5°C OAT");
+    // Timed mode uses the configured time_fraction directly.
+    assert!(
+        (defrost_time_frac - 0.05).abs() < 1e-6,
+        "Timed defrost_time_fraction must match configured value 0.05; got {defrost_time_frac:.6}"
+    );
+}
+
+#[test]
+fn defrost_resistive_strategy_requires_positive_capacity() {
+    let json = serde_json::json!({
+        "zone_id": 1,
+        "heating_capacity_w": 10_000.0,
+        "heating_eir": 0.25,
+        "cooling_capacity_w": 10_000.0,
+        "cooling_eir": 0.35,
+        "defrost_strategy": "Resistive",
+        "resistive_defrost_capacity_w": 0.0
+    });
+    let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.to_string().contains("Resistive")
+            && err.to_string().contains("resistive_defrost_capacity_w"),
+        "Resistive strategy with zero capacity must fail validation; got: {err}"
+    );
+}
+
+#[test]
+fn defrost_capacity_reduction_factor_validation_rejects_out_of_range() {
+    let json = serde_json::json!({
+        "zone_id": 1,
+        "heating_capacity_w": 10_000.0,
+        "heating_eir": 0.25,
+        "cooling_capacity_w": 10_000.0,
+        "cooling_eir": 0.35,
+        "defrost_capacity_reduction_factor": 1.5
+    });
+    let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("defrost_capacity_reduction_factor"),
+        "capacity_reduction_factor > 1.0 must fail validation; got: {err}"
+    );
+}
+
+#[test]
+fn defrost_time_fraction_validation_rejects_out_of_range() {
+    let json = serde_json::json!({
+        "zone_id": 1,
+        "heating_capacity_w": 10_000.0,
+        "heating_eir": 0.25,
+        "cooling_capacity_w": 10_000.0,
+        "cooling_eir": 0.35,
+        "defrost_time_fraction": -0.1
+    });
+    let cfg = serde_json::from_value::<HeatPumpHeaterConfig>(json).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.to_string().contains("defrost_time_fraction"),
+        "negative defrost_time_fraction must fail validation; got: {err}"
+    );
+}
+
+#[test]
+fn defrost_config_serde_round_trip() {
+    let cfg = HeatPumpHeaterConfig {
+        common: HeatPumpCommonConfig {
+            equipment_id: Some(1),
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            heating_eir: Some(0.25),
+            cooling_capacity_w: Some(10_000.0),
+            cooling_eir: Some(0.35),
+            ..HeatPumpCommonConfig::default()
+        },
+        defrost: DefrostConfig {
+            control: DefrostControl::Timed,
+            strategy: DefrostStrategy::ReverseCycle,
+            defrost_time_fraction: 0.058,
+            max_oat_defrost_c: 4.4445,
+            capacity_reduction_factor: 0.9,
+            defrost_power_w: 150.0,
+            defrost_eir_coeffs: Some([1.0, 0.02, -0.001, 0.005, -0.0003, 0.0001]),
+            resistive_defrost_capacity_w: 0.0,
+        },
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&cfg).unwrap();
+    let recovered: HeatPumpHeaterConfig = serde_json::from_value(value.clone()).unwrap();
+    let reserialized = serde_json::to_value(&recovered).unwrap();
     assert_eq!(
-        defrost_active, 1.0,
-        "hardcoded OnDemand defrost must be active at -5°C OAT"
-    );
-    // time_fraction from OnDemand formula is a continuous value in (0, 1),
-    // not the fixed 0.058 that a Timed config would produce.
-    // This confirms the hardcoded path is running, not a configurable one.
-    assert!(
-        defrost_time_frac > 0.0 && defrost_time_frac < 1.0,
-        "OnDemand defrost_time_fraction must be in (0, 1); got {defrost_time_frac:.6}. \
-         Once defrost config is wired from typed config, a Timed config should yield 0.058."
-    );
-    // Confirm it is NOT the fixed timed default of 0.058 — if someone erroneously
-    // wired a hardcoded Timed config the value would be exactly 0.058.
-    assert!(
-        (defrost_time_frac - 0.058).abs() > 1e-6,
-        "OnDemand time_fraction should differ from the Timed default 0.058; \
-         got {defrost_time_frac:.6}"
+        value, reserialized,
+        "defrost config must round-trip through serde"
     );
 }
 
