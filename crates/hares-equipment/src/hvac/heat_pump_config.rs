@@ -156,8 +156,8 @@ impl Default for HeatPumpCommonConfig {
 /// `deny_unknown_fields` is intentionally omitted: serde `flatten` is
 /// incompatible with `deny_unknown_fields` on both the inner and outer struct.
 /// See <https://serde.rs/attr-flatten.html> and <https://github.com/serde-rs/serde/issues/2384>.
-/// The `heater_only_fields_missing_from_cooler_json` and
-/// `cooler_only_field_missing_from_heater_json` tests guard against key leakage
+/// The `heater_ignores_cooler_only_field_stage_shrs` and
+/// `cooler_ignores_heater_only_field_hp_lockout` tests guard against key leakage
 /// between heater and cooler structs.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HeatPumpHeaterConfig {
@@ -348,8 +348,8 @@ impl HeatPumpHeaterConfig {
 /// `deny_unknown_fields` is intentionally omitted: serde `flatten` is
 /// incompatible with `deny_unknown_fields` on both the inner and outer struct.
 /// See <https://serde.rs/attr-flatten.html> and <https://github.com/serde-rs/serde/issues/2384>.
-/// The `cooler_only_field_missing_from_heater_json` and
-/// `heater_only_fields_missing_from_cooler_json` tests guard against key leakage.
+/// The `cooler_ignores_heater_only_field_hp_lockout` and
+/// `heater_ignores_cooler_only_field_stage_shrs` tests guard against key leakage.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HeatPumpCoolerConfig {
     #[serde(flatten)]
