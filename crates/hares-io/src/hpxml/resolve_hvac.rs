@@ -27,11 +27,23 @@ use hares_physics::units as conv;
 
 use crate::defaults::DefaultsStore;
 
+/// SEER2→SEER factor for ducted split/package systems.
+/// RESNET MINHERS Addendum 71f / ANSI/RESNET 301-2022:
+/// ducted SEER2/SEER ratio ≈ 0.95 (≈5% reduction).
+/// Ductless (mini-split): factor = 1.0 (SEER2 = SEER, no conversion needed).
 const SEER2_TO_SEER_FACTOR: f64 = 1.0 / 0.95;
-/// HSPF2→HSPF factor. DOE 87 FR 74364 (Dec 2022) / AHRI 210/240-2023:
+/// HSPF2→HSPF factor for ducted split/package systems.
+/// DOE 87 FR 74364 (Dec 2022) / AHRI 210/240-2023 / RESNET MINHERS Addendum 71f:
 /// ducted split-system heat pump HSPF2/HSPF ratio ≈ 0.85 (≈15% reduction).
-/// Distinct from SEER2→SEER (0.95). RESNET MINHERS Addendum 71f.
+/// Distinct from SEER2→SEER (0.95). For ductless (mini-split) use
+/// HSPF2_TO_HSPF_FACTOR_DUCTLESS (1/0.90 ≈ 10% reduction).
 const HSPF2_TO_HSPF_FACTOR: f64 = 1.0 / 0.85;
+/// HSPF2→HSPF factor for ductless (mini-split) heat pumps.
+/// RESNET MINHERS Addendum 71f / ANSI/RESNET 301-2022:
+/// ductless/mini-split HSPF2/HSPF ratio ≈ 0.90 (≈10% reduction).
+/// The test-procedure change for ductless units is milder than for ducted
+/// units because ductless units have no external static pressure duct penalty.
+const HSPF2_TO_HSPF_FACTOR_DUCTLESS: f64 = 1.0 / 0.90;
 /// EER2→EER factor. DOE 10 CFR Part 430 Appendix F revision / AHRI 340/360-2022:
 /// EER2 ratings ≈ 8% lower than EER under revised test procedure.
 /// Residential central estimate per DOE 2022 rulemaking.
@@ -1378,9 +1390,9 @@ pub(super) fn resolve_hvac(
             "CoolingCapacity",
             "cooling_capacity_w",
         );
-        insert_annual_efficiency(&mut params, heating, true);
+        insert_annual_efficiency(&mut params, heating, true, false);
         if name == "Ideal HVAC" {
-            insert_annual_efficiency(&mut params, heating, false);
+            insert_annual_efficiency(&mut params, heating, false, false);
         }
         params.insert("system_type".to_string(), Value::String(system_type));
 
@@ -1466,7 +1478,7 @@ pub(super) fn resolve_hvac(
             "CoolingCapacity",
             "cooling_capacity_w",
         );
-        insert_annual_efficiency(&mut params, cooling, false);
+        insert_annual_efficiency(&mut params, cooling, false, false);
         params.insert("system_type".to_string(), Value::String(system_type));
         insert_mode_and_speed_metadata(
             &mut params,
@@ -1567,8 +1579,9 @@ pub(super) fn resolve_hvac(
                 }
             }
         }
-        insert_annual_efficiency(&mut params, heat_pump, true);
-        insert_annual_efficiency(&mut params, heat_pump, false);
+        let is_mini_split = heat_pump_type == "mini-split";
+        insert_annual_efficiency(&mut params, heat_pump, true, is_mini_split);
+        insert_annual_efficiency(&mut params, heat_pump, false, is_mini_split);
         params.insert(
             "heat_pump_type".to_string(),
             Value::String(heat_pump_type.clone()),
@@ -1859,7 +1872,12 @@ fn insert_capacity_w(params: &mut Map<String, Value>, node: &XmlNode, tag: &str,
     }
 }
 
-fn insert_annual_efficiency(params: &mut Map<String, Value>, node: &XmlNode, is_heating: bool) {
+fn insert_annual_efficiency(
+    params: &mut Map<String, Value>,
+    node: &XmlNode,
+    is_heating: bool,
+    is_ductless: bool,
+) {
     let annual_tag = if is_heating {
         "AnnualHeatingEfficiency"
     } else {
@@ -1870,7 +1888,8 @@ fn insert_annual_efficiency(params: &mut Map<String, Value>, node: &XmlNode, is_
         && let (Some(units), Some(value)) =
             (child_text(annual, "Units"), child_f64(annual, "Value"))
     {
-        let (normalized_units, normalized_value) = normalize_efficiency_units(&units, value);
+        let (normalized_units, normalized_value) =
+            normalize_efficiency_units(&units, value, is_ductless);
         params.insert(
             if is_heating {
                 "heating_efficiency_units".to_string()
@@ -1893,7 +1912,7 @@ fn insert_annual_efficiency(params: &mut Map<String, Value>, node: &XmlNode, is_
         "SEER", "SEER2", "EER", "EER2", "HSPF", "HSPF2", "AFUE", "COP",
     ] {
         if let Some(value) = child_f64(node, tag) {
-            let (units, normalized) = normalize_efficiency_units(tag, value);
+            let (units, normalized) = normalize_efficiency_units(tag, value, is_ductless);
             params.insert(
                 format!("efficiency_{}", units.to_ascii_lowercase()),
                 json!(normalized),
@@ -1902,9 +1921,17 @@ fn insert_annual_efficiency(params: &mut Map<String, Value>, node: &XmlNode, is_
     }
 }
 
-fn normalize_efficiency_units(units: &str, value: f64) -> (String, f64) {
+fn normalize_efficiency_units(units: &str, value: f64, is_ductless: bool) -> (String, f64) {
     match units.trim().to_ascii_uppercase().as_str() {
+        // Ductless/mini-split units: the AHRI 210/240-2023 test-procedure change
+        // primarily affects external static pressure in ducted systems. Ductless
+        // SEER2 = SEER (factor 1.0) per RESNET MINHERS Addendum 71f.
+        "SEER2" if is_ductless => ("SEER".to_string(), value),
         "SEER2" => ("SEER".to_string(), value * SEER2_TO_SEER_FACTOR),
+        // Ductless HSPF2→HSPF ratio ≈ 0.90 (≈10% reduction) per MINHERS Addendum 71f,
+        // milder than the ducted 0.85 because ductless units have no external static
+        // pressure duct penalty.
+        "HSPF2" if is_ductless => ("HSPF".to_string(), value * HSPF2_TO_HSPF_FACTOR_DUCTLESS),
         "HSPF2" => ("HSPF".to_string(), value * HSPF2_TO_HSPF_FACTOR),
         "EER2" => ("EER".to_string(), value * EER2_TO_EER_FACTOR),
         "SEER" | "EER" | "HSPF" | "AFUE" | "PERCENT" | "COP" => {
@@ -3679,10 +3706,9 @@ mod tests {
         assert!((cfg.eir - expected_eir).abs() < 1e-12);
     }
 
-    // Regression test for ticket 087: try_build_room_ac_config always hard-coded
-    // `shr: None`, ignoring any SHR that was already loaded into `params["shr"]`
-    // by the CoolingSystem loop.  This test will FAIL until the bug is fixed.
-    /// Fix pending on ticket 087 — will stop panicking when room_ac_builder propagates SHR from params
+    // try_build_room_ac_config always hard-codes `shr: None`, ignoring any SHR
+    // that was already loaded into `params["shr"]` by the CoolingSystem loop.
+    // This test will FAIL until the room_ac_builder propagates SHR from params.
     #[should_panic(expected = "shr should be Some(0.82)")]
     #[test]
     fn room_ac_builder_propagates_shr_from_params() {
@@ -3997,17 +4023,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Ticket 113: reconcile_setpoint_pair must surface mutation loudly
+    // reconcile_setpoint_pair must surface mutation loudly
     // -----------------------------------------------------------------------
 
-    /// Regression test for ticket 113.
-    ///
     /// When heating/cooling setpoints are too close (gap < 2 °C), the
     /// reconciler silently widens them but emits no machine-readable signal —
     /// no `setpoints_reconciled` key is inserted into the params map.
     ///
-    /// This test FAILS until ticket 113 is resolved (path A or B).  Once the
-    /// fix lands the assertion must be changed to match the chosen API.
+    /// This test FAILS until the reconciler inserts a machine-readable signal
+    /// on widening (path A: key insertion, or path B: Err return).
+    /// Once the fix lands the assertion must be changed to match the chosen API.
     #[test]
     #[should_panic(expected = "setpoints_reconciled key must be present after reconciliation")]
     fn reconcile_setpoint_pair_narrow_gap_produces_no_machine_readable_signal() {
@@ -4859,14 +4884,14 @@ mod tests {
         );
     }
 
-    // Regression (ticket 078): HSPF2_TO_HSPF_FACTOR must be 1/0.85, not 1/0.95.
+    // HSPF2_TO_HSPF_FACTOR must be 1/0.85, not 1/0.95.
     // Per MINHERS Addendum 71f (RESNET, adopted from AHRI), the HSPF2/HSPF ratio for
     // ducted split-system heat pumps is 0.85 (≈15% reduction), whereas the SEER2/SEER
     // ratio is 0.95 (≈5% reduction). Using 0.95 for HSPF2 overstates COP by ~10%.
     #[test]
     fn hspf2_to_hspf_factor_is_one_over_0_85() {
-        // normalize_efficiency_units("HSPF2", 9.0) must return ("HSPF", 9.0 / 0.85).
-        let (units, hspf) = normalize_efficiency_units("HSPF2", 9.0);
+        // normalize_efficiency_units("HSPF2", 9.0, false) must return ("HSPF", 9.0 / 0.85).
+        let (units, hspf) = normalize_efficiency_units("HSPF2", 9.0, false);
         assert_eq!(units, "HSPF", "unit label must be HSPF after conversion");
 
         let expected = 9.0_f64 / 0.85;
@@ -4876,12 +4901,12 @@ mod tests {
         );
     }
 
-    // Regression (ticket 078): the EIR derived from the converted HSPF must match
+    // The EIR derived from the converted HSPF must match
     // 3.412 / (HSPF2 / 0.85), not 3.412 / (HSPF2 / 0.95).
     #[test]
     fn hspf2_conversion_eir_matches_correct_factor() {
         let hspf2 = 9.0_f64;
-        let (_, hspf) = normalize_efficiency_units("HSPF2", hspf2);
+        let (_, hspf) = normalize_efficiency_units("HSPF2", hspf2, false);
 
         // EIR = BTU_PER_WH / HSPF  (3.412 Btu/Wh)
         const BTU_PER_WH: f64 = 3.412_141_633;
@@ -4900,10 +4925,11 @@ mod tests {
         );
     }
 
-    // Sanity check: SEER2→SEER factor must remain 1/0.95 (unchanged by ticket 078).
+    // Sanity check: SEER2→SEER factor for ducted systems must remain 1/0.95, independent of
+    // the HSPF2→HSPF correction. The two conversion factors are distinct (0.85 vs. 0.95).
     #[test]
     fn seer2_to_seer_factor_is_one_over_0_95() {
-        let (units, seer) = normalize_efficiency_units("SEER2", 14.0);
+        let (units, seer) = normalize_efficiency_units("SEER2", 14.0, false);
         assert_eq!(units, "SEER");
         let expected = 14.0_f64 / 0.95;
         assert!(
@@ -4912,12 +4938,12 @@ mod tests {
         );
     }
 
-    // Regression (ticket 088): EER2 must be converted to EER using EER2_TO_EER_FACTOR (1/0.92).
+    // EER2 must be converted to EER using EER2_TO_EER_FACTOR (1/0.92).
     // DOE 10 CFR Part 430 Appendix F revision / AHRI 340/360-2022: EER2 ratings are ≈8%
     // lower than EER under the revised test procedure. EER = EER2 / 0.92.
     #[test]
     fn eer2_is_converted_to_eer_with_correct_factor() {
-        let (units, eer) = normalize_efficiency_units("EER2", 10.0);
+        let (units, eer) = normalize_efficiency_units("EER2", 10.0, false);
         assert_eq!(units, "EER", "EER2 must normalize to label 'EER'");
 
         let expected = 10.0_f64 / 0.92;
@@ -4931,14 +4957,89 @@ mod tests {
         );
     }
 
-    // Regression (ticket 088): plain EER must remain unchanged through normalize_efficiency_units.
+    // Plain EER must pass through normalize_efficiency_units unchanged — no conversion applied.
     #[test]
     fn eer_passthrough_unchanged() {
-        let (units, eer) = normalize_efficiency_units("EER", 10.0);
+        let (units, eer) = normalize_efficiency_units("EER", 10.0, false);
         assert_eq!(units, "EER");
         assert!(
             (eer - 10.0).abs() < 1e-9,
             "EER=10.0 must pass through unchanged, got {eer}"
+        );
+    }
+
+    // Ductless/mini-split heat pumps use HSPF2/HSPF ratio ≈ 0.90 (≈10% reduction)
+    // per RESNET MINHERS Addendum 71f. Ductless units have no external static pressure
+    // duct penalty, so the test-procedure impact is milder than for ducted units (0.85).
+    #[test]
+    fn hspf2_to_hspf_factor_is_one_over_0_90_for_ductless() {
+        // normalize_efficiency_units("HSPF2", 9.0, true) must return ("HSPF", 9.0 / 0.90).
+        let (units, hspf) = normalize_efficiency_units("HSPF2", 9.0, true);
+        assert_eq!(units, "HSPF", "unit label must be HSPF after conversion");
+
+        let expected = 9.0_f64 / 0.90;
+        assert!(
+            (hspf - expected).abs() < expected * 0.001,
+            "HSPF2=9.0 ductless must convert to HSPF≈{expected:.4} (1/0.90), got {hspf:.4}"
+        );
+        // Ductless HSPF (10.0 = 9.0/0.90) must be GREATER than the wrong
+        // SEER2 factor (1/0.95 → 9.47) and LESS than the ducted HSPF2 factor
+        // (1/0.85 → 10.59), proving the conversion uses the ductless factor.
+        assert!(
+            hspf > 9.0 / 0.95,
+            "ductless HSPF2 must NOT use the SEER2 factor 1/0.95, got {hspf}"
+        );
+        assert!(
+            hspf < 9.0 / 0.85,
+            "ductless HSPF2 must NOT use the ducted factor 1/0.85, got {hspf}"
+        );
+    }
+
+    // Ductless/mini-split SEER2 = SEER (ratio 1.00) per RESNET MINHERS Addendum 71f.
+    // The AHRI 210/240-2023 test-procedure change for external static pressure
+    // does not affect ductless units, so SEER2 = SEER for mini-splits.
+    #[test]
+    fn seer2_to_seer_factor_is_one_for_ductless() {
+        let (units, seer) = normalize_efficiency_units("SEER2", 14.0, true);
+        assert_eq!(units, "SEER", "unit label must be SEER after conversion");
+        // SEER2 = SEER for ductless (factor 1.0), so value unchanged.
+        assert!(
+            (seer - 14.0).abs() < 1e-9,
+            "SEER2=14.0 ductless must equal SEER=14.0 (factor 1.0), got {seer}"
+        );
+        // Must NOT equal the ducted conversion (14.0 / 0.95 ≈ 14.74).
+        let ducted = 14.0_f64 / 0.95;
+        assert!(
+            (seer - ducted).abs() > 0.5,
+            "SEER2=14.0 ductless must NOT equal ducted conversion {ducted:.2}, got {seer}"
+        );
+    }
+
+    // Ductless HSPF2 EIR sanity check: derive EIR from HSPF2=9.0 ductless
+    // and verify it matches 3.412 / (9.0 / 0.90), not the ducted 1/0.85 or 1/0.95.
+    #[test]
+    fn hspf2_ductless_eir_matches_correct_factor() {
+        let hspf2 = 9.0_f64;
+        let (_, hspf) = normalize_efficiency_units("HSPF2", hspf2, true);
+
+        const BTU_PER_WH: f64 = 3.412_141_633;
+        let eir = BTU_PER_WH / hspf;
+
+        let correct_eir = BTU_PER_WH / (hspf2 / 0.90);
+        let ducted_eir = BTU_PER_WH / (hspf2 / 0.85);
+        let wrong_eir = BTU_PER_WH / (hspf2 / 0.95);
+
+        assert!(
+            (eir - correct_eir).abs() < 1e-6,
+            "ductless EIR must be {correct_eir:.6} (HSPF2/0.90), got {eir:.6}"
+        );
+        assert!(
+            (eir - ducted_eir).abs() > 1e-6,
+            "ductless EIR must NOT equal ducted EIR {ducted_eir:.6}"
+        );
+        assert!(
+            (eir - wrong_eir).abs() > 0.01,
+            "ductless EIR must NOT equal wrong (1/0.95) EIR {wrong_eir:.6}"
         );
     }
 }
