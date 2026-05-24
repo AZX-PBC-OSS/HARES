@@ -2831,6 +2831,8 @@ mod tests {
             floor_or_ceiling: None,
             tilt_deg: None,
             framing_factor: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
         }
     }
 
@@ -2855,6 +2857,8 @@ mod tests {
             floor_or_ceiling: None,
             tilt_deg: None,
             framing_factor: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
         }
     }
 

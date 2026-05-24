@@ -127,6 +127,20 @@ pub struct Boundary {
     /// Typical values: 0.23 for 2x4 @ 16" OC, 0.22 for 2x6 @ 16" OC.
     /// `None` means no framing correction (insulation R-value used uniformly).
     pub framing_factor: Option<f64>,
+    /// Exposed perimeter length [m] for slab-on-grade boundaries.
+    ///
+    /// Parsed from HPXML `<Slab>/<ExposedPerimeter>` (HPXML 4.x) or
+    /// `<Slab>/<Perimeter>` (HPXML 3.x), in feet; converted to meters via
+    /// `ValueKind::Length`. When absent, derived from `4 × sqrt(area_m2)` as a
+    /// square-plan approximation. Required for the ASHRAE F-factor perimeter
+    /// heat loss method.
+    pub perimeter_m: Option<f64>,
+    /// Perimeter insulation nominal R-value [m²·K/W] (SI) for slab boundaries.
+    ///
+    /// Parsed from HPXML `<Slab>/<PerimeterInsulation>/<Layer>/<NominalRValue>`
+    /// (converted from IP ft²·°F·h/Btu). Used to select the ASHRAE F2 perimeter
+    /// heat loss coefficient via [`hares_physics::ground::f2_coefficient`].
+    pub perimeter_insulation_r_m2_k_w: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -573,7 +587,11 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     }
 
     // Post-process slab boundaries: extract insulation details from PerimeterInsulation
-    // and UnderSlabInsulation elements. OCHRE envelope.py:462-485.
+    // and UnderSlabInsulation elements, and parse perimeter geometry for the ASHRAE
+    // F-factor perimeter heat loss method.
+    //
+    // OCHRE envelope.py:462-485 for insulation details.
+    // ASHRAE HoF 2021 Ch. 18.31 for F-factor perimeter method.
     if let Some(slabs_group) = details.path(&["Enclosure", "Slabs"]) {
         for bd in &mut boundaries {
             if bd.boundary_type == BoundaryType::Slab {
@@ -584,6 +602,21 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         .unwrap_or(false)
                 }) {
                     bd.insulation_details = extract_slab_insulation(slab_node);
+
+                    // Parse exposed perimeter length for F-factor method.
+                    // HPXML 4.x <ExposedPerimeter> and 3.x <Perimeter>, in feet;
+                    // convert to meters via ValueKind::Length.
+                    bd.perimeter_m = slab_node
+                        .child("ExposedPerimeter")
+                        .or_else(|| slab_node.child("Perimeter"))
+                        .and_then(|n| parse_value_with_units(Some(n), ValueKind::Length));
+
+                    // Parse perimeter insulation R-value for F2 coefficient selection.
+                    // HPXML NominalRValue is in IP ft²·°F·h/Btu; convert to SI m²·K/W
+                    // via ValueKind::RValue.
+                    bd.perimeter_insulation_r_m2_k_w = slab_node
+                        .path(&["PerimeterInsulation", "Layer", "NominalRValue"])
+                        .and_then(|n| parse_value_with_units(Some(n), ValueKind::RValue));
                 }
             }
         }
@@ -645,6 +678,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                     tilt_deg: Some(90.0),
                     lut_boundary_name: Some("Interior Wall".to_string()),
                     floor_or_ceiling: None,
+                    perimeter_m: None,
+                    perimeter_insulation_r_m2_k_w: None,
                 });
             }
         }
@@ -697,6 +732,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         tilt_deg: Some(90.0),
                         lut_boundary_name: Some(lut_name.to_string()),
                         floor_or_ceiling: None,
+                        perimeter_m: None,
+                        perimeter_insulation_r_m2_k_w: None,
                     });
                 }
             }
@@ -1044,6 +1081,8 @@ fn parse_windows(
             framing_factor: None,
             lut_boundary_name: None,
             floor_or_ceiling: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
         });
     }
 
@@ -1122,6 +1161,8 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
                 _ => None,
             }
         }),
+        perimeter_m: None,
+        perimeter_insulation_r_m2_k_w: None,
     })
 }
 
@@ -3284,6 +3325,89 @@ mod tests {
         assert_eq!(slab.insulation_details.as_deref(), Some("Minimal"));
     }
 
+    // ── F-factor perimeter parsing regression tests ─────────────────────
+
+    #[test]
+    fn slab_exposed_perimeter_parsed_from_hpxml_4x() {
+        // Regression: <ExposedPerimeter> (HPXML 4.x) was silently ignored
+        // because the code only looked for <Perimeter> (HPXML 3.x).
+        // 140.0 ft → 42.672 m.
+        let xml = SAMPLE_XML.replace(
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n          </Slab>",
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n            <ExposedPerimeter>140.0</ExposedPerimeter>\n          </Slab>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let slab = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Slab)
+            .expect("slab expected");
+        let perimeter = slab
+            .perimeter_m
+            .expect("perimeter should be parsed from <ExposedPerimeter>");
+        // 140 ft → 42.672 m (±0.01)
+        let expected_m = 140.0 * 0.3048;
+        assert!(
+            (perimeter - expected_m).abs() < 0.01,
+            "expected {expected_m} m, got {perimeter} m"
+        );
+    }
+
+    #[test]
+    fn slab_perimeter_falls_back_to_hpxml_3x_element() {
+        // HPXML 3.x uses <Perimeter> instead of <ExposedPerimeter>.
+        // The fallback path should still parse it.
+        let xml = SAMPLE_XML.replace(
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n          </Slab>",
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n            <Perimeter>100.0</Perimeter>\n          </Slab>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let slab = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Slab)
+            .expect("slab expected");
+        let perimeter = slab
+            .perimeter_m
+            .expect("perimeter should be parsed from <Perimeter>");
+        let expected_m = 100.0 * 0.3048;
+        assert!(
+            (perimeter - expected_m).abs() < 0.01,
+            "expected {expected_m} m, got {perimeter} m"
+        );
+    }
+
+    #[test]
+    fn slab_perimeter_insulation_r_value_parsed_from_hpxml() {
+        // Regression: perimeter_insulation_r_m2_k_w was untested at the
+        // HPXML parsing level. NominalRValue=5 IP (ft²·°F·h/Btu)
+        // converts to ≈ 0.88 m²·K/W (SI).
+        let xml = SAMPLE_XML.replace(
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n          </Slab>",
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n            <PerimeterInsulation><Layer><NominalRValue>5</NominalRValue><InsulationDepth>2</InsulationDepth></Layer></PerimeterInsulation>\n          </Slab>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let slab = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Slab)
+            .expect("slab expected");
+        let r_si = slab
+            .perimeter_insulation_r_m2_k_w
+            .expect("perimeter insulation R-value should be parsed");
+        // R-5 IP ≈ 0.88 m²·K/W (±0.02)
+        let expected_r_si = 0.88;
+        assert!(
+            (r_si - expected_r_si).abs() < 0.02,
+            "expected R-5 IP ≈ {expected_r_si} m²·K/W, got {r_si}"
+        );
+        assert_eq!(
+            slab.insulation_details.as_deref(),
+            Some("2ft R5 Perimeter"),
+            "insulation_details should identify perimeter-only insulation"
+        );
+    }
+
     // ── Furniture boundary auto-generation tests ────────────────────────
 
     #[test]
@@ -3842,6 +3966,8 @@ mod tests {
                 tilt_deg: Some(90.0),
                 lut_boundary_name: None,
                 floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
             }
         }
         let boundaries = vec![
@@ -3889,6 +4015,8 @@ mod tests {
                 tilt_deg: Some(90.0),
                 lut_boundary_name: None,
                 floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
             }
         }
         let boundaries = vec![
@@ -3929,6 +4057,8 @@ mod tests {
                 tilt_deg: Some(90.0),
                 lut_boundary_name: None,
                 floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
             }
         }
         let garage_area = 30.0;
@@ -3987,6 +4117,8 @@ mod tests {
                 tilt_deg: tilt,
                 lut_boundary_name: None,
                 floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
             }
         }
         // 6:12 pitch → tilt = atan(0.5) ≈ 26.565°
@@ -4056,6 +4188,8 @@ mod tests {
                 tilt_deg: tilt,
                 lut_boundary_name: None,
                 floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
             }
         }
         // Regression guard: verifies compound attic volume formula against
@@ -4179,6 +4313,8 @@ mod tests {
                 tilt_deg: tilt,
                 lut_boundary_name: None,
                 floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
             }
         }
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
@@ -4278,6 +4414,8 @@ mod tests {
                 tilt_deg: tilt,
                 lut_boundary_name: None,
                 floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
             }
         }
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
@@ -4357,6 +4495,8 @@ mod tests {
                 tilt_deg: tilt,
                 lut_boundary_name: None,
                 floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
             }
         }
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
@@ -4420,6 +4560,8 @@ mod tests {
                 tilt_deg: tilt,
                 lut_boundary_name: None,
                 floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
             }
         }
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();

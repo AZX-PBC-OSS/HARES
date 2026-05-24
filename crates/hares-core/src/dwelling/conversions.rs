@@ -115,6 +115,7 @@ pub fn building_to_boundary_inputs(
     use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use hares_physics::film_coefficients::{SurfaceRoughness, film_resistances};
+    use hares_physics::ground::f2_coefficient;
     use hares_physics::solar::window_u_factor_decomposition;
 
     let envelope_lut = defaults.envelope_lut();
@@ -154,9 +155,61 @@ pub fn building_to_boundary_inputs(
                 .unwrap_or(DEFAULT_R_M2_K_W)
                 .max(1e-6);
 
-            // Skip LUT when the boundary has explicit material layers (BESTEST
-            // synthetic configs define their own layer stack).
-            let precomputed_rc = if !bd.material_layers.is_empty() {
+            // ASHRAE F-factor perimeter method for slab-on-grade boundaries.
+            // Replaces area-UA conduction with F2 × P × ΔT per ASHRAE HoF 2021
+            // Ch. 18.31. The F-factor method accounts for 3-D edge heat flow
+            // around the slab perimeter rather than 1-D conduction through the
+            // full floor area, which can overstate loss by 2–2.5×.
+            // Ref: ANSI/ASHRAE 90.1-2022 Table A6.3.1;
+            // EnergyPlus Eng.Ref "Slab-on-grade and Underground Floors Defined
+            // with F-factors".
+            let precomputed_rc = if bd.boundary_type == BoundaryType::Slab {
+                let perimeter_m = bd.perimeter_m.unwrap_or_else(|| {
+                    // Square-plan approximation: P ≈ 4 × √(area).
+                    // ASHRAE 90.1-2022 §A6.3 permits this as a fallback when
+                    // exposed perimeter is not explicitly documented.
+                    let derived = 4.0 * bd.area_m2.sqrt();
+                    tracing::warn!(
+                        slab_id = %bd.id,
+                        area_m2 = bd.area_m2,
+                        derived_perimeter_m = derived,
+                        "slab <Perimeter> element not provided; using square-plan approximation P ≈ 4 × √(area)"
+                    );
+                    derived
+                });
+                let insulation_r = bd.perimeter_insulation_r_m2_k_w.unwrap_or(0.0);
+                let f2 = f2_coefficient(insulation_r);
+                let g_w_per_k = f2 * perimeter_m;
+
+                // Q = F2 × P × (T_indoor - T_ground) → G = F2 × P [W/K].
+                // build_precomputed_boundary adds film_int to the interior-side
+                // resistor, so the layer resistance must be reduced by film_int
+                // to keep total R from interior → ground = 1/(F2×P).
+                let r_slab_m2_k_w = if g_w_per_k > 1e-9 && bd.area_m2 > 1e-9 {
+                    (bd.area_m2 / g_w_per_k - r_film_int).max(1e-6)
+                } else {
+                    DEFAULT_R_M2_K_W
+                };
+
+                // Concrete slab thermal mass capacitance per unit area [kJ/(m²·K)].
+                // Density 2400 kg/m³, Cp 880 J/(kg·K), thickness 0.1 m for typical
+                // 4-inch residential slab. Ref: ASHRAE HoF 2021 Ch. 33, Table 1.
+                // C = ρ × Cp × t / 1000 = 2400 × 880 × 0.1 / 1000 ≈ 211.2 kJ/(m²·K).
+                const CONCRETE_DENSITY_KG_M3: f64 = 2400.0;
+                const CONCRETE_CP_J_KG_K: f64 = 880.0;
+                const TYPICAL_SLAB_THICKNESS_M: f64 = 0.1;
+                let slab_cap_kj_m2_k = CONCRETE_DENSITY_KG_M3
+                    * CONCRETE_CP_J_KG_K
+                    * TYPICAL_SLAB_THICKNESS_M
+                    / 1000.0;
+
+                vec![PrecomputedRCLayer {
+                    resistance_m2_k_w: r_slab_m2_k_w,
+                    capacitance_kj_m2_k: slab_cap_kj_m2_k,
+                }]
+            } else if !bd.material_layers.is_empty() {
+                // Skip LUT when the boundary has explicit material layers (BESTEST
+                // synthetic configs define their own layer stack).
                 Vec::new()
             } else {
                 envelope_lut
@@ -231,6 +284,17 @@ pub fn building_to_boundary_inputs(
                 }
             } else {
                 (fallback_r, r_film_int, r_film_ext)
+            };
+
+            // For slab-on-grade boundaries, zero the exterior film resistance.
+            // Ground is a fixed-temperature node — no convective exterior film
+            // applies. The F-factor perimeter conductance G = F2 × P captures
+            // the entire slab-to-ground pathway; adding an exterior film would
+            // over-resist it. Per ASHRAE HoF 2021 Ch. 18.31.
+            let r_film_ext = if bd.boundary_type == BoundaryType::Slab {
+                0.0
+            } else {
+                r_film_ext
             };
 
             // Interior-facing longwave emissivity for star-mesh LWR conductance.
@@ -764,6 +828,8 @@ mod tests {
             tilt_deg: Some(90.0),
             lut_boundary_name: None,
             floor_or_ceiling: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
         }
     }
 
@@ -1126,5 +1192,249 @@ mod tests {
             (updated_alpha - alpha).abs() < 1e-12,
             "alpha should be updated from 0.1 to {alpha}, got {updated_alpha}"
         );
+    }
+
+    // ── slab F-factor integration tests ───────────────────────────────
+
+    fn slab_boundary(perimeter_m: Option<f64>, insulation_r: Option<f64>) -> Boundary {
+        Boundary {
+            id: "slab-1".to_string(),
+            boundary_type: BoundaryType::Slab,
+            area_m2: 100.0,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Ground),
+            material_layers: Vec::new(),
+            framing_factor: None,
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(180.0),
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            perimeter_m,
+            perimeter_insulation_r_m2_k_w: insulation_r,
+        }
+    }
+
+    /// A slab boundary without perimeter derives P ≈ 4 × √(area)
+    /// and produces a precomputed RC layer with resistance matching F2 × P.
+    #[test]
+    fn slab_f_factor_derives_perimeter_from_area() {
+        let building = hares_io::Building {
+            boundaries: vec![slab_boundary(None, None)],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+
+        assert_eq!(inputs.len(), 1);
+        let slab_input = &inputs[0];
+        // Should have exactly one precomputed RC layer (F-factor based)
+        assert_eq!(
+            slab_input.precomputed_rc.len(),
+            1,
+            "slab boundary should produce exactly one precomputed RC layer"
+        );
+        // Exterior film must be zero — ground is a fixed-temperature boundary
+        assert_eq!(
+            slab_input.r_film_exterior_m2_k_w, 0.0,
+            "slab boundary must have zero exterior film"
+        );
+        // The RC layer capacitance should be non-zero (concrete thermal mass)
+        assert!(
+            slab_input.precomputed_rc[0].capacitance_kj_m2_k > 0.0,
+            "slab should retain concrete thermal mass capacitance"
+        );
+        // The resistance should combine with film_int to give total R ≈ 1/(F2 × P)
+        let expected_p = 4.0 * 100.0_f64.sqrt(); // derived perimeter ≈ 40 m
+        let f2 = 1.17; // uninsulated F2
+        let g = f2 * expected_p;
+        let expected_r_total = 1.0 / g; // total K/W from interior to ground
+        let r_int_abs = slab_input.r_film_interior_m2_k_w / slab_input.area_m2;
+        let r_layer_abs = slab_input.precomputed_rc[0].resistance_m2_k_w / slab_input.area_m2;
+        let actual_r_total = r_layer_abs + r_int_abs;
+        let tolerance = expected_r_total * 0.02; // 2% tolerance for rounding
+        assert!(
+            (actual_r_total - expected_r_total).abs() <= tolerance,
+            "slab total R from indoor to ground should be ~{:.6} K/W (±2%), got {:.6}",
+            expected_r_total,
+            actual_r_total
+        );
+    }
+
+    /// A slab boundary with explicit perimeter uses that value directly.
+    #[test]
+    fn slab_f_factor_uses_explicit_perimeter() {
+        let perimeter_m = 30.0;
+        let building = hares_io::Building {
+            boundaries: vec![slab_boundary(Some(perimeter_m), None)],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+
+        assert_eq!(inputs.len(), 1);
+        let slab_input = &inputs[0];
+        assert_eq!(slab_input.r_film_exterior_m2_k_w, 0.0);
+
+        // G = F2 × P = 1.17 × 30 = 35.1 W/K
+        let f2 = 1.17;
+        let g = f2 * perimeter_m;
+        let expected_r_total = 1.0 / g;
+        let r_int_abs = slab_input.r_film_interior_m2_k_w / slab_input.area_m2;
+        let r_layer_abs = slab_input.precomputed_rc[0].resistance_m2_k_w / slab_input.area_m2;
+        let actual_r_total = r_layer_abs + r_int_abs;
+        let tolerance = expected_r_total * 0.02;
+        assert!(
+            (actual_r_total - expected_r_total).abs() <= tolerance,
+            "slab total R with P={perimeter_m}m should be ~{:.6} K/W (±2%), got {:.6}",
+            expected_r_total,
+            actual_r_total
+        );
+    }
+
+    /// Perimeter insulation reduces F2 coefficient and increases total resistance.
+    #[test]
+    fn slab_insulation_increases_resistance() {
+        let perimeter_m = 30.0;
+
+        let building_unins = hares_io::Building {
+            boundaries: vec![slab_boundary(Some(perimeter_m), None)],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let building_r5 = hares_io::Building {
+            boundaries: vec![slab_boundary(
+                Some(perimeter_m),
+                Some(0.88), // R-5 perimeter insulation (SI)
+            )],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+
+        let store = load_defaults_store();
+        let unins = super::building_to_boundary_inputs(&building_unins, 1, &store, 2.0, 10.0, 10.0);
+        let r5 = super::building_to_boundary_inputs(&building_r5, 1, &store, 2.0, 10.0, 10.0);
+
+        // Insulated slab should have higher layer resistance
+        let unins_r = unins[0].precomputed_rc[0].resistance_m2_k_w;
+        let r5_r = r5[0].precomputed_rc[0].resistance_m2_k_w;
+        assert!(
+            r5_r > unins_r,
+            "R-5 perimeter insulation should increase resistance: unins={unins_r:.4}, R5={r5_r:.4}"
+        );
+    }
+
+    /// Non-slab boundaries are unaffected by the slab F-factor path.
+    #[test]
+    fn wall_boundary_unaffected_by_slab_f_factor() {
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "wall-1".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 20.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: Some(3.0),
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: Vec::new(),
+                framing_factor: None,
+                construction_type: None,
+                finish_type: None,
+                insulation_details: Some("Uninsulated".to_string()),
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+
+        let store = load_defaults_store();
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+
+        assert_eq!(inputs.len(), 1);
+        // Wall should have a non-zero exterior film (outdoor convection)
+        assert!(
+            inputs[0].r_film_exterior_m2_k_w > 0.0,
+            "wall boundary must have non-zero exterior film"
+        );
+    }
+
+    /// Build a minimal DefaultsStore for tests that need one.
+    fn load_defaults_store() -> hares_io::DefaultsStore {
+        let defaults_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        hares_io::DefaultsStore::load(&defaults_path)
+            .expect("DefaultsStore must be loadable from project defaults/ directory")
     }
 }

@@ -1385,6 +1385,8 @@ mod tests {
             floor_or_ceiling: None,
             tilt_deg: Some(15.0),
             framing_factor: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
         }
     }
 
@@ -1433,6 +1435,8 @@ mod tests {
             floor_or_ceiling: None,
             tilt_deg: Some(90.0),
             framing_factor: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
         };
         assert_eq!(
             interior_solar_absorptance(&boundary),
@@ -1465,6 +1469,8 @@ mod tests {
             floor_or_ceiling: None,
             tilt_deg: Some(90.0),
             framing_factor: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
         };
         assert_eq!(
             interior_solar_absorptance(&boundary),
@@ -1516,6 +1522,8 @@ mod tests {
             floor_or_ceiling: None,
             tilt_deg: Some(90.0),
             framing_factor: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
         };
         assert_eq!(
             exterior_emissivity(&window),

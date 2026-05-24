@@ -1142,6 +1142,8 @@ mod tests {
                     framing_factor: None,
                     lut_boundary_name: None,
                     floor_or_ceiling: None,
+                    perimeter_m: None,
+                    perimeter_insulation_r_m2_k_w: None,
                 },
                 Boundary {
                     id: "north-wall".to_string(),
@@ -1163,6 +1165,8 @@ mod tests {
                     framing_factor: None,
                     lut_boundary_name: None,
                     floor_or_ceiling: None,
+                    perimeter_m: None,
+                    perimeter_insulation_r_m2_k_w: None,
                 },
             ],
             windows: Vec::<Window>::new(),

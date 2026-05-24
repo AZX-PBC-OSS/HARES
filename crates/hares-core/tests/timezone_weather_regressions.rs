@@ -69,6 +69,8 @@ fn minimal_building() -> hares_io::Building {
             framing_factor: None,
             lut_boundary_name: None,
             floor_or_ceiling: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
         }],
         windows: Vec::<Window>::new(),
         infiltration_ach50: None,
