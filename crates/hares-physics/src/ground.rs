@@ -300,8 +300,10 @@ mod tests {
         let delta_t = 15.0;
         let t_indoor = 20.0;
         let t_ground = t_indoor - delta_t;
-        let q_unins = slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.0, false), t_indoor, t_ground);
-        let q_r5 = slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.88, false), t_indoor, t_ground);
+        let q_unins =
+            slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.0, false), t_indoor, t_ground);
+        let q_r5 =
+            slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.88, false), t_indoor, t_ground);
         assert!(
             q_r5 < q_unins,
             "R-5 perimeter insulation should reduce loss: unins={q_unins} W, R-5={q_r5} W"

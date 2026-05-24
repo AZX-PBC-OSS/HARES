@@ -163,6 +163,9 @@ pub enum PyFuelType {
     Gas,
     Propane,
     Oil,
+    Wood,
+    Coal,
+    WoodPellet,
     NoFuel,
 }
 
@@ -189,6 +192,21 @@ impl PyFuelType {
     }
 
     #[staticmethod]
+    fn wood() -> Self {
+        PyFuelType::Wood
+    }
+
+    #[staticmethod]
+    fn coal() -> Self {
+        PyFuelType::Coal
+    }
+
+    #[staticmethod]
+    fn wood_pellet() -> Self {
+        PyFuelType::WoodPellet
+    }
+
+    #[staticmethod]
     fn no_fuel() -> Self {
         PyFuelType::NoFuel
     }
@@ -200,6 +218,9 @@ impl PyFuelType {
             "gas" => Ok(PyFuelType::Gas),
             "propane" => Ok(PyFuelType::Propane),
             "oil" => Ok(PyFuelType::Oil),
+            "wood" => Ok(PyFuelType::Wood),
+            "coal" => Ok(PyFuelType::Coal),
+            "woodpellet" | "wood_pellet" | "wood pellets" => Ok(PyFuelType::WoodPellet),
             "none" | "nofuel" => Ok(PyFuelType::NoFuel),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "invalid FuelType variant: {}",
@@ -218,6 +239,9 @@ impl PyFuelType {
             PyFuelType::Gas => "Gas".to_string(),
             PyFuelType::Propane => "Propane".to_string(),
             PyFuelType::Oil => "Oil".to_string(),
+            PyFuelType::Wood => "Wood".to_string(),
+            PyFuelType::Coal => "Coal".to_string(),
+            PyFuelType::WoodPellet => "WoodPellet".to_string(),
             PyFuelType::NoFuel => "NoFuel".to_string(),
         }
     }
@@ -230,6 +254,9 @@ impl From<RustFuelType> for PyFuelType {
             RustFuelType::Gas => PyFuelType::Gas,
             RustFuelType::Propane => PyFuelType::Propane,
             RustFuelType::Oil => PyFuelType::Oil,
+            RustFuelType::Wood => PyFuelType::Wood,
+            RustFuelType::Coal => PyFuelType::Coal,
+            RustFuelType::WoodPellet => PyFuelType::WoodPellet,
             RustFuelType::None => PyFuelType::NoFuel,
         }
     }
@@ -242,6 +269,9 @@ impl From<PyFuelType> for RustFuelType {
             PyFuelType::Gas => RustFuelType::Gas,
             PyFuelType::Propane => RustFuelType::Propane,
             PyFuelType::Oil => RustFuelType::Oil,
+            PyFuelType::Wood => RustFuelType::Wood,
+            PyFuelType::Coal => RustFuelType::Coal,
+            PyFuelType::WoodPellet => RustFuelType::WoodPellet,
             PyFuelType::NoFuel => RustFuelType::None,
         }
     }

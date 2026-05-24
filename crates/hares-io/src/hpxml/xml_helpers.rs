@@ -14,6 +14,10 @@ pub(crate) fn parse_fuel(raw: Option<&str>) -> FuelType {
         "propane" => FuelType::Propane,
         "oil" | "fuel oil" | "fuel_oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
         | "fuel oil 5/6" | "kerosene" | "diesel" => FuelType::Oil,
+        "wood" => FuelType::Wood,
+        "wood pellets" | "wood_pellets" => FuelType::WoodPellet,
+        "coal" | "anthracite coal" | "anthracite_coal" | "bituminous coal" | "bituminous_coal"
+        | "coke" => FuelType::Coal,
         other => {
             tracing::warn!(fuel = %other, "unrecognized fuel string; defaulting to Electric");
             FuelType::Electric

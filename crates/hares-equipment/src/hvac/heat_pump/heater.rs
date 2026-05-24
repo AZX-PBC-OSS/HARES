@@ -38,14 +38,28 @@ use super::heater_config::{
 
 fn eir_from_backup_fuel(fuel: Option<FuelType>) -> f64 {
     match fuel {
-        Some(FuelType::Gas) | Some(FuelType::Propane) | Some(FuelType::Oil) => 1.0 / 0.80,
+        Some(
+            FuelType::Gas
+            | FuelType::Propane
+            | FuelType::Oil
+            | FuelType::Wood
+            | FuelType::Coal
+            | FuelType::WoodPellet,
+        ) => 1.0 / 0.80,
         _ => DEFAULT_BACKUP_EIR,
     }
 }
 
 fn fuel_type_from_backup_fuel(fuel: Option<FuelType>) -> Option<FuelType> {
     match fuel {
-        Some(FuelType::Gas) | Some(FuelType::Propane) | Some(FuelType::Oil) => fuel,
+        Some(
+            FuelType::Gas
+            | FuelType::Propane
+            | FuelType::Oil
+            | FuelType::Wood
+            | FuelType::Coal
+            | FuelType::WoodPellet,
+        ) => fuel,
         _ => None,
     }
 }
@@ -1468,7 +1482,14 @@ impl HeatPumpHeaterCore {
 
         let backup_is_fuel = matches!(
             self.backup_fuel_type,
-            Some(FuelType::Gas | FuelType::Propane | FuelType::Oil)
+            Some(
+                FuelType::Gas
+                    | FuelType::Propane
+                    | FuelType::Oil
+                    | FuelType::Wood
+                    | FuelType::Coal
+                    | FuelType::WoodPellet
+            )
         );
         let er_electric_w = if backup_is_fuel { 0.0 } else { er_power_w };
         let mut fuel_w = if backup_is_fuel { er_power_w } else { 0.0 };
@@ -5719,6 +5740,90 @@ mod tests {
         assert!(
             (raw_h3 - 0.6).abs() < 1e-9,
             "H3 evaluation must match capacity_ratio_at_17f=0.6; got {raw_h3}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Charge defect ratio — physics-level regression test for HP heater
+    // -----------------------------------------------------------------------
+
+    fn hp_charge_defect_config(charge_defect_ratio: Option<f64>) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "HP Heater".to_string(),
+            "ASHP Heater".to_string(),
+            HeatPumpHeaterConfig {
+                common: HeatPumpCommonConfig {
+                    charge_defect_ratio,
+                    equipment_id: None,
+                    zone_id: Some(1),
+                    heating_capacity_w: Some(8_000.0),
+                    heating_eir: Some(0.33),
+                    stage_heating_capacities_w: None,
+                    stage_heating_eirs: None,
+                    backup_fuel: None,
+                    backup_capacity_w: Some(4_000.0),
+                    backup_eir: None,
+                    fraction_heating_load_served: None,
+                    cooling_capacity_w: None,
+                    cooling_eir: None,
+                    stage_cooling_capacities_w: None,
+                    stage_cooling_eirs: None,
+                    fraction_cooling_load_served: None,
+                    number_of_speeds: 1,
+                    is_mini_split: false,
+                    shr: None,
+                    fan_power_w: None,
+                    fan_power_w_per_cfm: None,
+                    airflow_m3_s_per_w: None,
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(26.0),
+                    hysteresis_c: Some(1.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                    duct: Default::default(),
+                    biquadratic_x1_min: None,
+                    biquadratic_x1_max: None,
+                    biquadratic_x2_min: None,
+                    biquadratic_x2_max: None,
+                    ff_min: None,
+                    ff_max: None,
+                    plf_min: None,
+                    plf_max: None,
+                    min_compressor_fraction: 0.25,
+                    eir_part_load_benefit: None,
+                    er_stages: 1,
+                },
+                hp_lockout_temp_c: None,
+                er_lockout_temp_c: None,
+                max_oat_supplemental_c: None,
+                er_setpoint_offset_c: None,
+                er_hard_lockout_time_s: None,
+                heating_shr: None,
+                capacity_ratio_at_17f: None,
+                defrost: DefrostConfig::default(),
+            },
+        )
+    }
+
+    #[test]
+    fn charge_defect_reduces_rated_heating_capacity_and_eir() {
+        let cfg = hp_charge_defect_config(Some(-0.10));
+        let mut hp = ASHPHeater::new(cfg.clone());
+        let e = env(18.0, 8.0, 0.004);
+        hp.init(&cfg, &e).unwrap();
+
+        let capacity = hp.core.hvac.config.heating_capacities_w[0];
+        let expected_cap = 8_000.0 * 0.91;
+        assert!(
+            (capacity - expected_cap).abs() / expected_cap < 1e-3,
+            "charge_defect_ratio=-0.10 must reduce heating capacity by 9%; expected {expected_cap} got {capacity}"
+        );
+
+        let eir = hp.core.hvac.config.eir_by_stage[0];
+        let expected_eir = 0.33 * 0.91;
+        assert!(
+            (eir - expected_eir).abs() / expected_eir < 1e-3,
+            "charge_defect_ratio=-0.10 must reduce heating EIR by 9%; expected {expected_eir} got {eir}"
         );
     }
 }

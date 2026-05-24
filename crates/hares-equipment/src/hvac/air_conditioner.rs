@@ -2868,6 +2868,120 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Charge defect ratio — DoD physics-level regression tests
+    //
+    // These verify that the correction is actually applied to the rated
+    // capacity and EIR values in hares-equipment (not just propagated
+    // through the typed config). A change to the coefficient constants
+    // or to the ordering of the correction relative to other init steps
+    // will cause these tests to fail.
+    // -----------------------------------------------------------------------
+
+    fn ac_charge_defect_config(charge_defect_ratio: Option<f64>) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "AC".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                charge_defect_ratio,
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                eir: 0.25,
+                shr: Some(0.75),
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                fraction_load_served: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        )
+    }
+
+    #[test]
+    fn charge_defect_reduces_rated_cooling_capacity_and_eir() {
+        let cfg = ac_charge_defect_config(Some(-0.10));
+        let mut ac = AirConditioner::new(cfg.clone());
+        let e = env(26.0, 0.010, 19.0, 35.0);
+        ac.init(&cfg, &e).unwrap();
+
+        let capacity = ac.core.hvac.config.cooling_capacities_w[0];
+        let expected_cap = 8_000.0 * 0.91;
+        assert!(
+            (capacity - expected_cap).abs() / expected_cap < 1e-3,
+            "charge_defect_ratio=-0.10 must reduce capacity by 9%; expected {expected_cap} got {capacity}"
+        );
+
+        let eir = ac.core.hvac.config.eir_by_stage[0];
+        let expected_eir = 0.25 * 0.91;
+        assert!(
+            (eir - expected_eir).abs() / expected_eir < 1e-3,
+            "charge_defect_ratio=-0.10 must reduce EIR by 9%; expected {expected_eir} got {eir}"
+        );
+    }
+
+    #[test]
+    fn zero_charge_defect_leaves_capacity_and_eir_unchanged() {
+        let cfg = ac_charge_defect_config(Some(0.0));
+        let mut ac = AirConditioner::new(cfg.clone());
+        let e = env(26.0, 0.010, 19.0, 35.0);
+        ac.init(&cfg, &e).unwrap();
+
+        let capacity = ac.core.hvac.config.cooling_capacities_w[0];
+        assert!(
+            (capacity - 8_000.0).abs() < 1e-9,
+            "charge_defect_ratio=0.0 must leave capacity unchanged; got {capacity}"
+        );
+
+        let eir = ac.core.hvac.config.eir_by_stage[0];
+        assert!(
+            (eir - 0.25).abs() < 1e-9,
+            "charge_defect_ratio=0.0 must leave EIR unchanged; got {eir}"
+        );
+    }
+
+    #[test]
+    fn absent_charge_defect_leaves_capacity_and_eir_unchanged() {
+        let cfg = ac_charge_defect_config(None);
+        let mut ac = AirConditioner::new(cfg.clone());
+        let e = env(26.0, 0.010, 19.0, 35.0);
+        ac.init(&cfg, &e).unwrap();
+
+        let capacity = ac.core.hvac.config.cooling_capacities_w[0];
+        assert!(
+            (capacity - 8_000.0).abs() < 1e-9,
+            "absent charge_defect_ratio must leave capacity unchanged; got {capacity}"
+        );
+
+        let eir = ac.core.hvac.config.eir_by_stage[0];
+        assert!(
+            (eir - 0.25).abs() < 1e-9,
+            "absent charge_defect_ratio must leave EIR unchanged; got {eir}"
+        );
+    }
 }
 
 #[cfg(test)]

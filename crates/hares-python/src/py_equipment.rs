@@ -868,6 +868,9 @@ impl PyCoreOutput {
             FuelType::Gas => "Gas".to_string(),
             FuelType::Propane => "Propane".to_string(),
             FuelType::Oil => "Oil".to_string(),
+            FuelType::Wood => "Wood".to_string(),
+            FuelType::Coal => "Coal".to_string(),
+            FuelType::WoodPellet => "WoodPellet".to_string(),
             FuelType::None => "NoFuel".to_string(),
         })
     }

@@ -101,6 +101,14 @@ pub const AIRFLOW_ROOM_AC_M3_S_PER_W: f64 = 4.294_270_780_782_807e-5;
 /// Both Cc and Ce use the same magnitude; the verification audit was unable to
 /// confirm the exact coefficient values from publicly available sources; the
 /// coefficients should be confirmed against the standard when accessible.
+///
+/// Note: this constant is the absolute value (magnitude) of the coefficient.
+/// The sign convention separates the constant magnitude from the physical
+/// direction encoded in r: an undercharge (r < 0) yields a multiplier < 1.0
+/// (capacity reduction), while the coefficient itself is stored as positive.
+/// Some sources (e.g. ANSI/RESNET reports) quote Cc ≈ −0.9 with the negative
+/// sign embedded; the formula 1.0 + CC_CHARGE_DEFECT * r produces the same
+/// numeric result — for r = −0.10, both formulations give 0.91.
 pub const CC_CHARGE_DEFECT: f64 = 0.9;
 
 /// Refrigerant charge defect EIR correction coefficient (Ce).

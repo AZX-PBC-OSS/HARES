@@ -271,7 +271,7 @@ impl ElectricalAccumulator {
 }
 
 /// Number of fuel types excluding `FuelType::None`.
-const FUEL_TYPE_COUNT: usize = 4;
+const FUEL_TYPE_COUNT: usize = 7;
 
 fn fuel_index(fuel_type: FuelType) -> Option<usize> {
     match fuel_type {
@@ -279,13 +279,17 @@ fn fuel_index(fuel_type: FuelType) -> Option<usize> {
         FuelType::Gas => Some(1),
         FuelType::Propane => Some(2),
         FuelType::Oil => Some(3),
+        FuelType::Wood => Some(4),
+        FuelType::Coal => Some(5),
+        FuelType::WoodPellet => Some(6),
         FuelType::None => None,
     }
 }
 
 /// Fuel consumption totals grouped by fuel type.
 ///
-/// Indexed by fuel type ordinal: [Electric=0, Gas=1, Propane=2, Oil=3].
+/// Indexed by fuel type ordinal: [Electric=0, Gas=1, Propane=2, Oil=3,
+/// Wood=4, Coal=5, WoodPellet=6].
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct FuelAccumulator {
     totals: [f64; FUEL_TYPE_COUNT],

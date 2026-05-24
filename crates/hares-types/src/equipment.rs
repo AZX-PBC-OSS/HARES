@@ -149,6 +149,9 @@ pub enum FuelType {
     Gas,
     Propane,
     Oil,
+    Wood,
+    Coal,
+    WoodPellet,
     #[default]
     None,
 }

@@ -146,6 +146,9 @@ fn fuel_type_label(fuel_type: FuelType) -> String {
         FuelType::Gas => "natural gas",
         FuelType::Propane => "propane",
         FuelType::Oil => "fuel oil",
+        FuelType::Wood => "wood",
+        FuelType::Coal => "coal",
+        FuelType::WoodPellet => "wood pellets",
         FuelType::None => "none",
     }
     .to_string()

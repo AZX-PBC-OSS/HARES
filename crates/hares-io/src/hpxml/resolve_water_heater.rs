@@ -378,6 +378,10 @@ fn parse_water_heater_fuel(wh: &XmlNode) -> std::result::Result<FuelType, super:
         "propane" => Ok(FuelType::Propane),
         "oil" | "fuel oil" | "fuel_oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
         | "fuel oil 5/6" | "kerosene" | "diesel" => Ok(FuelType::Oil),
+        "wood" => Ok(FuelType::Wood),
+        "wood pellets" | "wood_pellets" => Ok(FuelType::WoodPellet),
+        "coal" | "anthracite coal" | "anthracite_coal" | "bituminous coal" | "bituminous_coal"
+        | "coke" => Ok(FuelType::Coal),
         other => Err(super::HpxmlError::Parse(format!(
             "unsupported water-heater FuelType '{other}'"
         ))),
@@ -505,12 +509,24 @@ fn canonical_water_heater_name(
         ("storage water heater", FuelType::Electric) => "Electric Resistance Water Heater",
         ("instantaneous water heater", FuelType::Electric) => "Tankless Water Heater",
         ("heat pump water heater", FuelType::Electric) => "Heat Pump Water Heater",
-        ("storage water heater", FuelType::Gas | FuelType::Propane | FuelType::Oil) => {
-            "Gas Water Heater"
-        }
-        ("instantaneous water heater", FuelType::Gas | FuelType::Propane | FuelType::Oil) => {
-            "Gas Tankless Water Heater"
-        }
+        (
+            "storage water heater",
+            FuelType::Gas
+            | FuelType::Propane
+            | FuelType::Oil
+            | FuelType::Wood
+            | FuelType::Coal
+            | FuelType::WoodPellet,
+        ) => "Gas Water Heater",
+        (
+            "instantaneous water heater",
+            FuelType::Gas
+            | FuelType::Propane
+            | FuelType::Oil
+            | FuelType::Wood
+            | FuelType::Coal
+            | FuelType::WoodPellet,
+        ) => "Gas Tankless Water Heater",
         _ => {
             return Err(super::HpxmlError::Parse(format!(
                 "unsupported HPXML water heater type/fuel combination: \
