@@ -275,7 +275,16 @@ impl ThermalSolver {
                     // instead of state vector node.
                     match dt {
                         super::config::DrivingTemp::Outdoor => env.weather.outdoor_temp_c,
-                        super::config::DrivingTemp::Ground => env.weather.ground_temp_c,
+                        super::config::DrivingTemp::Ground { depth_m } => {
+                            hares_physics::ground::kusuda_achenbach_temp(
+                                depth_m,
+                                env.weather.day_of_year,
+                                env.weather.ground_t_mean_c,
+                                env.weather.ground_t_amplitude_c,
+                                env.weather.ground_phase_day,
+                                hares_physics::ground::DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
+                            )
+                        }
                     }
                 } else if s.state_index < self.x.len() {
                     self.x[s.state_index]

@@ -195,8 +195,24 @@ pub(crate) struct SyntheticBoundaryConfig {
 pub(crate) struct SyntheticMaterialLayer {
     pub(crate) thickness_m: f64,
     pub(crate) conductivity_w_m_k: f64,
+    /// Material density [kg/m³].
+    ///
+    /// Defaults to `0.0` when omitted — a zero-density layer has **zero
+    /// thermal capacitance** and behaves as a pure resistance. This is a
+    /// valid steady-state modelling choice, but transient thermal storage
+    /// (the "C" nodes in a 3R2C wall model) will be absent. Prefer
+    /// setting this explicitly (e.g. 2240 kg/m³ for concrete, 800 kg/m³
+    /// for wood, per EnergyPlus `Material` defaults) unless you
+    /// intentionally want a massless layer.
     #[serde(default)]
     pub(crate) density_kg_m3: f64,
+    /// Material specific heat [J/(kg·K)].
+    ///
+    /// Defaults to `0.0` when omitted. Together with [`density_kg_m3`]
+    /// this controls the layer's volumetric heat capacity
+    /// `ρ·c_p·thickness`.  Zero specific heat eliminates transient
+    /// thermal storage in the wall assembly.  Typical values:
+    /// 900 J/(kg·K) for concrete/masonry, 840 for glass, 1_200 for wood.
     #[serde(default)]
     pub(crate) specific_heat_j_kg_k: f64,
 }

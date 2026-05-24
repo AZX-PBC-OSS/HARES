@@ -506,7 +506,7 @@ pub(crate) fn build_default_solvers(
         zone_state_rows,
         layer_info,
         outdoor_col,
-        ground_col,
+        ground_cols,
         n_ext,
         node_capacitances,
         ..
@@ -607,11 +607,12 @@ pub(crate) fn build_default_solvers(
     } else {
         wiring.outdoor_temp_input_indices = vec![];
     }
-    if let Some(col) = ground_col {
-        wiring.ground_temp_input_indices = vec![col];
-    } else {
-        wiring.ground_temp_input_indices = vec![];
-    }
+    // Populate per-depth ground input indices and depths.
+    // One B-matrix column per unique foundation depth; the Kusuda-Achenbach
+    // model is evaluated at each depth to set the corresponding column's
+    // driving temperature at each timestep.
+    wiring.ground_temp_input_indices = ground_cols.iter().map(|(_, col)| *col).collect();
+    wiring.ground_temp_input_depths_m = ground_cols.iter().map(|(d, _)| *d).collect();
 
     // Populate per-zone thermal capacitances [J/K] for energy balance closure check.
     for (zone_idx, zone) in env.zones.iter().enumerate() {
@@ -809,7 +810,9 @@ pub(crate) fn build_default_solvers(
                 let diag_bd = diag_by_idx.get(&sb.surface_idx);
                 if let Some(d) = diag_bd {
                     let driving_temp = match d.exterior_target {
-                        ExteriorTarget::Ground => DrivingTemp::Ground,
+                        ExteriorTarget::Ground => DrivingTemp::Ground {
+                            depth_m: d.foundation_depth_m,
+                        },
                         _ => DrivingTemp::Outdoor,
                     };
                     thermal_cfg

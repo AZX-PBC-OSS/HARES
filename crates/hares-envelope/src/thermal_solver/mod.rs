@@ -1,4 +1,32 @@
 //! Thermal domain solver for the building envelope.
+//!
+//! ## Ground temperature boundary conditions
+//!
+//! Ground-connected envelope boundaries use the Kusuda-Achenbach undisturbed
+//! ground temperature model (Kusuda & Achenbach 1965, ASHRAE Trans. 71(1):61-74;
+//! EnergyPlus Engineering Reference, "Undisturbed Ground Temperature Model").
+//! Each unique foundation depth gets its own B-matrix driving column; per-step
+//! depth-attenuated and phase-shifted temperatures are evaluated via
+//! [`hares_physics::ground::kusuda_achenbach_temp`] using the site-specific
+//! annual mean, amplitude, and phase parameters carried on
+//! [`EnvironmentState::weather`].
+//!
+//! The DOE-2 surface ground temperature model (`env.weather.ground_temp_c`)
+//! is a sinusoidal fit to monthly mean ambient temperatures at the ground
+//! surface (depth ≈ 0 m). It is retained as a legacy field and is **not** used
+//! by the thermal solver to set below-grade boundary conditions. All ground
+//! driving temperatures are computed from the Kusuda-Achenbach parameters.
+//!
+//! ## Boundary type distinction
+//!
+//! - **Below-grade boundaries** (basement walls, slab-on-grade floors,
+//!   crawlspace floors): receive Kusuda-Achenbach depth-corrected ground
+//!   temperature at their centroid foundation depth.
+//! - **Grade-surface boundaries** (slab perimeter F2 method, ground-facing
+//!   windows): receive Kusuda-Achenbach temperature at depth 0.0 m, which
+//!   includes the correct phase lag but no depth attenuation.
+//! - **Above-grade boundaries** (walls, roofs, windows facing outdoor):
+//!   driven by `outdoor_temp_c` — unaffected by ground temperature.
 
 mod config;
 mod infiltration;
@@ -113,9 +141,11 @@ pub struct ThermalSolver {
     /// Used by boundary diagnostics for non-RC boundaries.
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     cached_outdoor_temp_c: f64,
-    /// Cached ground temperature [°C] from the most recent input vector.
+    /// Cached per-depth ground temperatures [°C] parallel to
+    /// `wiring.ground_temp_input_depths_m`. Index `i` holds the Kusuda-Achenbach
+    /// temperature at depth `ground_temp_input_depths_m[i]`.
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-    cached_ground_temp_c: f64,
+    cached_ground_temps_c: Vec<f64>,
     /// Per-exterior-surface diagnostic buffer (compiled out in release).
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     ext_surface_diag_buf: Vec<config::ExtSurfaceDiag>,
@@ -338,7 +368,16 @@ impl ThermalSolver {
                 let t_boundary = if let Some(dt) = s.driving_temp {
                     match dt {
                         DrivingTemp::Outdoor => env.weather.outdoor_temp_c,
-                        DrivingTemp::Ground => env.weather.ground_temp_c,
+                        DrivingTemp::Ground { depth_m } => {
+                            hares_physics::ground::kusuda_achenbach_temp(
+                                depth_m,
+                                env.weather.day_of_year,
+                                env.weather.ground_t_mean_c,
+                                env.weather.ground_t_amplitude_c,
+                                env.weather.ground_phase_day,
+                                hares_physics::ground::DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
+                            )
+                        }
                     }
                 } else if s.state_index < x.len() {
                     x[s.state_index]
@@ -364,6 +403,8 @@ impl ThermalSolver {
         let n_ext_surfaces = config.exterior_surfaces.len();
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         let n_windows = config.window_properties.len();
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        let n_ground_depths = wiring.ground_temp_input_depths_m.len();
 
         Ok(Self {
             model,
@@ -410,7 +451,7 @@ impl ThermalSolver {
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             cached_outdoor_temp_c: env.weather.outdoor_temp_c,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-            cached_ground_temp_c: env.weather.ground_temp_c,
+            cached_ground_temps_c: Vec::with_capacity(n_ground_depths),
         })
     }
 
@@ -636,7 +677,25 @@ impl ThermalSolver {
             window_heat_gain_w: 0.0,
             internal_mass_heat_gain_w: 0.0,
             driving_outdoor_temp_c: env.weather.outdoor_temp_c,
-            driving_ground_temp_c: env.weather.ground_temp_c,
+            driving_ground_temp_c: {
+                // Use the deepest below-grade boundary as the representative
+                // ground driving temperature for diagnostics. If no ground
+                // boundaries exist, depth=0.0 returns the Kusuda surface value.
+                let deepest = self
+                    .wiring
+                    .ground_temp_input_depths_m
+                    .iter()
+                    .copied()
+                    .fold(0.0_f64, f64::max);
+                hares_physics::ground::kusuda_achenbach_temp(
+                    deepest,
+                    env.weather.day_of_year,
+                    env.weather.ground_t_mean_c,
+                    env.weather.ground_t_amplitude_c,
+                    env.weather.ground_phase_day,
+                    hares_physics::ground::DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
+                )
+            },
             opaque_solar_w,
             exterior_lwr_w,
             window_exterior_lwr_w: self.window_exterior_lwr_w,
@@ -752,11 +811,34 @@ impl ThermalSolver {
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         {
             self.cached_outdoor_temp_c = env.weather.outdoor_temp_c;
-            self.cached_ground_temp_c = env.weather.ground_temp_c;
+            self.cached_ground_temps_c.clear();
         }
-        for &idx in &self.wiring.ground_temp_input_indices {
+        // Kusuda-Achenbach depth-corrected ground temperature: one temperature
+        // per unique foundation depth, written to the corresponding B-matrix
+        // ground column. Replaces the pre-fix behaviour of writing the DOE-2
+        // surface ground temperature to all below-grade boundaries.
+        //
+        // Kusuda & Achenbach (1965) ASHRAE Trans. 71(1):61-74.
+        // EnergyPlus Engineering Reference: Ground Heat Transfer chapter,
+        // "Undisturbed Ground Temperature Model: Kusuda-Achenbach".
+        for (&idx, &depth_m) in self
+            .wiring
+            .ground_temp_input_indices
+            .iter()
+            .zip(self.wiring.ground_temp_input_depths_m.iter())
+        {
             if idx < u.len() {
-                u[idx] = env.weather.ground_temp_c;
+                let t_ground = hares_physics::ground::kusuda_achenbach_temp(
+                    depth_m,
+                    env.weather.day_of_year,
+                    env.weather.ground_t_mean_c,
+                    env.weather.ground_t_amplitude_c,
+                    env.weather.ground_phase_day,
+                    hares_physics::ground::DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
+                );
+                u[idx] = t_ground;
+                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                self.cached_ground_temps_c.push(t_ground);
             }
         }
     }
@@ -860,6 +942,10 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -897,6 +983,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -951,6 +1038,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 0)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -1112,6 +1200,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![1],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -1203,6 +1292,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -1659,6 +1749,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -1708,6 +1799,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -1879,6 +1971,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -1945,6 +2038,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -1995,6 +2089,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -2049,6 +2144,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -2124,6 +2220,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -2215,6 +2312,10 @@ mod tests {
                     mains_temp_c: 15.0,
                     rainfall_m: 0.0,
                     ground_albedo: 0.2,
+                    ground_t_mean_c: 10.0,
+                    ground_t_amplitude_c: 0.0,
+                    ground_phase_day: 35.0,
+                    day_of_year: 1.0,
                 },
                 grid: GridState {
                     voltage_pu: 1.0,
@@ -2241,6 +2342,7 @@ mod tests {
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 ground_temp_input_indices: vec![],
+                ground_temp_input_depths_m: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
@@ -2366,6 +2468,10 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -2391,6 +2497,7 @@ mod tests {
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 ground_temp_input_indices: vec![],
+                ground_temp_input_depths_m: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
@@ -2526,6 +2633,10 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -2551,6 +2662,7 @@ mod tests {
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 ground_temp_input_indices: vec![],
+                ground_temp_input_depths_m: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
@@ -2872,6 +2984,10 @@ mod tests {
                     mains_temp_c: 15.0,
                     rainfall_m: 0.0,
                     ground_albedo: 0.2,
+                    ground_t_mean_c: 10.0,
+                    ground_t_amplitude_c: 0.0,
+                    ground_phase_day: 35.0,
+                    day_of_year: 1.0,
                 },
                 grid: GridState {
                     voltage_pu: 1.0,
@@ -2898,6 +3014,7 @@ mod tests {
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 ground_temp_input_indices: vec![],
+                ground_temp_input_depths_m: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
@@ -3021,6 +3138,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -3105,6 +3223,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -3202,6 +3321,7 @@ mod tests {
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
                 outdoor_temp_input_indices: vec![0],
                 ground_temp_input_indices: vec![],
+                ground_temp_input_depths_m: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
@@ -3325,6 +3445,10 @@ mod tests {
                     mains_temp_c: 15.0,
                     rainfall_m: 0.0,
                     ground_albedo: 0.2,
+                    ground_t_mean_c: 10.0,
+                    ground_t_amplitude_c: 0.0,
+                    ground_phase_day: 35.0,
+                    day_of_year: 1.0,
                 },
                 grid: GridState {
                     voltage_pu: 1.0,
@@ -3351,6 +3475,7 @@ mod tests {
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 ground_temp_input_indices: vec![],
+                ground_temp_input_depths_m: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
                 c_zone_j_k: HashMap::new(),
@@ -3464,6 +3589,7 @@ mod tests {
                     zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
                     outdoor_temp_input_indices: vec![0],
                     ground_temp_input_indices: vec![],
+                    ground_temp_input_depths_m: vec![],
                     indoor_temp_input_indices: vec![],
                     solar_input_indices: HashMap::new(),
                     c_zone_j_k: HashMap::new(),
@@ -3804,6 +3930,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -3868,6 +3995,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -4050,6 +4178,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -4185,6 +4314,10 @@ mod tests {
                     mains_temp_c: 15.0,
                     rainfall_m: 0.0,
                     ground_albedo: 0.2,
+                    ground_t_mean_c: 10.0,
+                    ground_t_amplitude_c: 0.0,
+                    ground_phase_day: 35.0,
+                    day_of_year: 1.0,
                 },
                 grid: GridState {
                     voltage_pu: 1.0,
@@ -4211,6 +4344,7 @@ mod tests {
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 ground_temp_input_indices: vec![],
+                ground_temp_input_depths_m: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
                 c_zone_j_k: HashMap::new(),
@@ -4484,6 +4618,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 0)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -4624,6 +4759,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(zone, 3)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -4884,6 +5020,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 3)]),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),

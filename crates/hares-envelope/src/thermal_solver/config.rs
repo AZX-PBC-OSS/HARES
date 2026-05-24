@@ -45,7 +45,14 @@ pub enum BoundaryDiagnosticInfo {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DrivingTemp {
     Outdoor,
-    Ground,
+    /// Ground temperature at a specific foundation depth.
+    ///
+    /// The Kusuda-Achenbach model is used at runtime to compute the
+    /// depth-attenuated, phase-shifted ground temperature at `depth_m`
+    /// metres below grade. Depth 0.0 = surface (DOE-2 model).
+    Ground {
+        depth_m: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -74,6 +81,15 @@ pub enum InfiltrationMethod {
 }
 
 impl Default for InfiltrationMethod {
+    /// Zero air-changes-per-hour — hermetically sealed building.
+    ///
+    /// This is a **conservative sentinel** used when a zone is absent from
+    /// `ThermalSolverConfig::infiltration`.  Zero ACH eliminates all
+    /// wind/stack-driven infiltration and the associated sensible and latent
+    /// loads, which is safe for a "no data" baseline (it will not invent
+    /// fictitious loads) but is physically unrealistic for any occupied
+    /// building.  Production code should override this via the per-zone
+    /// infiltration map.
     fn default() -> Self {
         Self::Ach { ach: 0.0 }
     }
@@ -85,6 +101,14 @@ impl Default for InfiltrationMethod {
 /// the full ERV/HRV specification. This struct holds only the parameters the infiltration
 /// solver needs: flow distribution per zone, whether the system is balanced, and recovery
 /// efficiencies.
+///
+/// # Default recovery efficiencies
+///
+/// `sensible_recovery_efficiency` and `latent_recovery_efficiency` both default to `0.0`
+/// — i.e. no heat/moisture recovery from the exhaust stream. This is the correct default
+/// for dwellings without an ERV/HRV (unbalanced or natural-ventilation-only systems).
+/// When a balanced ERV/HRV is configured, both efficiencies must be set explicitly to
+/// the manufacturer-rated values (typically 0.65–0.85 for modern units).
 #[derive(Debug, Clone, Default)]
 pub struct MechanicalVentilationParams {
     pub zone_flow_m3_s: HashMap<ZoneId, f64>,
@@ -373,7 +397,15 @@ pub struct StateSpaceWiring {
     pub zone_sensible_input_indices: HashMap<ZoneId, usize>,
     pub outdoor_temp_input_indices: Vec<usize>,
     /// B-matrix columns driving ground-connected boundaries [°C].
+    /// Each entry is a column index in B_ext. The parallel vec
+    /// `ground_temp_input_depths_m` holds the foundation depth for each column.
     pub ground_temp_input_indices: Vec<usize>,
+    /// Foundation depth [m] for each entry in `ground_temp_input_indices`.
+    ///
+    /// Same length as `ground_temp_input_indices`. Each depth is used to
+    /// evaluate `kusuda_achenbach_temp` for the corresponding B-matrix column
+    /// at each timestep. 0.0 = grade surface.
+    pub ground_temp_input_depths_m: Vec<f64>,
     /// B-matrix columns carrying indoor air temperature [°C] as an external input.
     ///
     /// Empty in the standard RC topology where zone air nodes are internal states

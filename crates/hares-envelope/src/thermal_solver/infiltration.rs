@@ -327,6 +327,10 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,

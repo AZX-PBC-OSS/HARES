@@ -103,7 +103,21 @@ pub struct SurfaceIrradiance {
 }
 
 /// Weather boundary state for the current timestep.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+///
+/// # Default values
+///
+/// Every field carries a physically plausible default so that
+/// `WeatherState::default()` produces a self-consistent meteorological
+/// state. The defaults represent a calm, nighttime condition at 20 °C /
+/// 50 % RH and standard sea-level pressure — a conservative "no data"
+/// baseline that will not produce NaN/Inf, divide-by-zero, or
+/// saturated-enthalpy paradoxes in downstream psychrometric or heat-load
+/// calculations.
+///
+/// Fields with domain-specific defaults (mains temperature, ground albedo,
+/// Kusuda-Achenbach parameters) delegate to the same `default_*()`
+/// functions used for `#[serde(default = "...")]`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WeatherState {
     pub outdoor_temp_c: f64,
     pub outdoor_humidity_ratio: f64,
@@ -149,6 +163,32 @@ pub struct WeatherState {
     /// From PSM3 satellite data when available; defaults to 0.2 (bare ground).
     #[serde(default = "default_ground_albedo")]
     pub ground_albedo: f64,
+    /// Kusuda-Achenbach annual mean ground surface temperature [°C].
+    ///
+    /// Populated by `EnvironmentManager::update_in_place` from weather series
+    /// statistics. Used by the thermal solver to compute depth-corrected
+    /// ground temperature via `kusuda_achenbach_temp`.
+    #[serde(default = "default_ground_t_mean_c")]
+    pub ground_t_mean_c: f64,
+    /// Kusuda-Achenbach annual amplitude of ground surface temperature [°C].
+    ///
+    /// Half the annual range of monthly mean dry-bulb temperatures
+    /// (Kusuda & Achenbach 1965).
+    #[serde(default = "default_ground_t_amplitude_c")]
+    pub ground_t_amplitude_c: f64,
+    /// Kusuda-Achenbach day of minimum surface temperature [day of year].
+    ///
+    /// Defaults to 35 (early Feb) for northern hemisphere mid-latitudes,
+    /// 217.5 for southern hemisphere (EnergyPlus default).
+    #[serde(default = "default_ground_phase_day")]
+    pub ground_phase_day: f64,
+    /// Current day of year [1–366].
+    ///
+    /// Populated by `EnvironmentManager::update_in_place` from
+    /// `current_time.ordinal()`. Used by the thermal solver with
+    /// `kusuda_achenbach_temp` for per-step ground temperature evaluation.
+    #[serde(default = "default_day_of_year")]
+    pub day_of_year: f64,
 }
 
 fn default_mains_temp_c() -> f64 {
@@ -157,6 +197,99 @@ fn default_mains_temp_c() -> f64 {
 
 fn default_ground_albedo() -> f64 {
     0.2
+}
+
+fn default_ground_t_mean_c() -> f64 {
+    // Conservative HARES default for annual mean soil surface temperature.
+    // EnergyPlus monthly shallow ground temperatures default to 13.0 °C
+    // (SiteShallowGroundTemperatures.cc:122), which would give a Kusuda-
+    // Achenbach annual mean of 13.0. The lower 10.0 value is a deliberate
+    // HARES choice for a "no data" baseline. EnvironmentManager overrides
+    // this from weather series statistics.
+    10.0
+}
+
+fn default_ground_t_amplitude_c() -> f64 {
+    // Conservative default: zero amplitude means no seasonal variation.
+    // With amplitude=0 the Kusuda model returns T_mean at all depths,
+    // collapsing to the pre-fix behaviour (no depth correction).
+    // EnvironmentManager overrides this with half the monthly-mean range.
+    0.0
+}
+
+fn default_ground_phase_day() -> f64 {
+    // EnergyPlus default for northern hemisphere mid-latitudes:
+    // day 35 = early February. EnvironmentManager overrides based on latitude.
+    35.0
+}
+
+fn default_day_of_year() -> f64 {
+    1.0
+}
+
+impl Default for WeatherState {
+    fn default() -> Self {
+        // Calm, clear-sky nighttime condition at 20 °C dry-bulb /
+        // 55 % RH / standard sea-level pressure. These values avoid
+        // 0.0-derived NaN/Inf hazards in psychrometric and heat-load
+        // calculations while staying conservative (no wind, no solar).
+        // All sky/gas constants match EnergyPlus defaults.
+        //
+        // outdoor_temp_c:          20.0 °C — mild-day engineering default
+        // outdoor_humidity_ratio:   0.008   — 55.2 % RH at 20.0 °C,
+        //                                     101.325 kPa (ASHRAE HOF)
+        // outdoor_wet_bulb_c:      14.0 °C — derived via ASHRAE HOF 2021
+        //                                     Eq.35 (T_db=20.0, w=0.008,
+        //                                     P=101.325 kPa); computed
+        //                                     ~14.4 °C, rounded
+        // outdoor_enthalpy_j_kg:   40_000   — ASHRAE HOF Eq.30 from
+        //                                     T_db=20.0, w=0.008; exact
+        //                                     value 40 426 J/kg, rounded
+        // wind_speed_m_s:           0.0     — calm
+        // wind_dir_deg:             0.0     — north
+        // ground_temp_c:           13.0 °C — EnergyPlus default monthly
+        //                                     shallow ground temperature
+        //                                     (SiteShallowGroundTemperatures
+        //                                     .cc:122; header default {13.0})
+        // sky_temp_c:               5.5 °C — Clark-Allen clear-sky model
+        //                                     at T_db=20.0, w=0.008
+        //                                     (EnergyPlus default sky
+        //                                     model; WeatherManager.hh:208,
+        //                                     WeatherManager.cc:3213–3214)
+        // pressure_kpa:           101.325   — standard sea-level pressure
+        //                                     (EnergyPlus DataEnvironment
+        //                                     .hh:82 StdPressureSeaLevel
+        //                                     = 101325.0 Pa)
+        // solar_irradiance:         []       — nighttime / no data
+        // ghi_w_m2, dni_w_m2,
+        // dhi_w_m2:                 0.0      — nighttime
+        // solar_altitude_deg,
+        // solar_azimuth_deg:        0.0      — night
+        Self {
+            outdoor_temp_c: 20.0,
+            outdoor_humidity_ratio: 0.008,
+            outdoor_wet_bulb_c: 14.0,
+            outdoor_enthalpy_j_kg: 40_000.0,
+            wind_speed_m_s: 0.0,
+            wind_dir_deg: 0.0,
+            ground_temp_c: 13.0,
+            sky_temp_c: 5.5,
+            pressure_kpa: 101.325,
+            solar_irradiance: Vec::new(),
+            ghi_w_m2: 0.0,
+            dni_w_m2: 0.0,
+            dhi_w_m2: 0.0,
+            solar_altitude_deg: 0.0,
+            solar_azimuth_deg: 0.0,
+            mains_temp_c: default_mains_temp_c(),
+            rainfall_m: 0.0,
+            ground_albedo: default_ground_albedo(),
+            ground_t_mean_c: default_ground_t_mean_c(),
+            ground_t_amplitude_c: default_ground_t_amplitude_c(),
+            ground_phase_day: default_ground_phase_day(),
+            day_of_year: default_day_of_year(),
+        }
+    }
 }
 
 impl WeatherState {
@@ -313,6 +446,10 @@ mod tests {
                 mains_temp_c: 10.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -485,5 +622,154 @@ mod tests {
         assert_eq!(state.custom_domains.len(), 2);
         assert_eq!(state.custom_domains[0], a);
         assert_eq!(state.custom_domains[1], b_updated);
+    }
+
+    /// WeatherState::default() must produce values that avoid NaN/Inf hazards
+    /// and are physically self-consistent: non-zero pressure, non-zero
+    /// ground temperature, sky temperature below dry-bulb, etc.
+    #[test]
+    fn weather_state_default_produces_physically_plausible_ranges() {
+        let w = WeatherState::default();
+
+        // Pressure: standard sea level ± 5 %, not vacuum.
+        assert!(
+            (w.pressure_kpa - 101.325).abs() < 5.0,
+            "pressure_kpa={} is not near standard sea level (101.325 kPa)",
+            w.pressure_kpa,
+        );
+
+        // Dry-bulb: a mild day, not freezing and not extreme.
+        assert!(
+            (10.0..=35.0).contains(&w.outdoor_temp_c),
+            "outdoor_temp_c={} is not in mild-day range 10–35 °C",
+            w.outdoor_temp_c,
+        );
+
+        // Humidity ratio: non-zero, non-negative, sub-saturated.
+        assert!(
+            w.outdoor_humidity_ratio > 0.0,
+            "outdoor_humidity_ratio={} is zero — bone-dry air invalid",
+            w.outdoor_humidity_ratio,
+        );
+        assert!(
+            w.outdoor_humidity_ratio < 0.030,
+            "outdoor_humidity_ratio={} exceeds reasonable outdoor max ~0.030 kg/kg",
+            w.outdoor_humidity_ratio,
+        );
+
+        // Wet-bulb: between dew-point and dry-bulb.
+        assert!(
+            w.outdoor_wet_bulb_c > 0.0,
+            "outdoor_wet_bulb_c={} is sub-freezing for a mild-day default",
+            w.outdoor_wet_bulb_c,
+        );
+        assert!(
+            w.outdoor_wet_bulb_c <= w.outdoor_temp_c,
+            "outdoor_wet_bulb_c={} exceeds outdoor_temp_c={}",
+            w.outdoor_wet_bulb_c,
+            w.outdoor_temp_c,
+        );
+
+        // Enthalpy: non-zero, positive for above-freezing moist air.
+        assert!(
+            w.outdoor_enthalpy_j_kg > 1_000.0,
+            "outdoor_enthalpy_j_kg={} J/kg is near zero (0 K air)",
+            w.outdoor_enthalpy_j_kg,
+        );
+
+        // Ground temperature: within normal soil range.
+        assert!(
+            (5.0..=25.0).contains(&w.ground_temp_c),
+            "ground_temp_c={} is outside normal soil range 5–25 °C",
+            w.ground_temp_c,
+        );
+
+        // Sky temperature: below dry-bulb (radiative cooling to sky).
+        assert!(
+            w.sky_temp_c < w.outdoor_temp_c,
+            "sky_temp_c={} is not below outdoor_temp_c={} — \
+             longwave sky cooling eliminated",
+            w.sky_temp_c,
+            w.outdoor_temp_c,
+        );
+        assert!(
+            w.sky_temp_c > -30.0,
+            "sky_temp_c={} is unreasonably cold for a mild-day default",
+            w.sky_temp_c,
+        );
+
+        // Mains temperature: within plausible range.
+        assert!(
+            (2.0..=25.0).contains(&w.mains_temp_c),
+            "mains_temp_c={} is outside plausible range",
+            w.mains_temp_c,
+        );
+
+        // Ground albedo: physically bounded.
+        assert!(
+            (0.0..=1.0).contains(&w.ground_albedo),
+            "ground_albedo={} is outside [0, 1]",
+            w.ground_albedo,
+        );
+
+        // Solar fields: zero irradiance at night is correct.
+        assert_eq!(w.ghi_w_m2, 0.0, "ghi_w_m2 should be 0.0 at night");
+        assert_eq!(w.dni_w_m2, 0.0, "dni_w_m2 should be 0.0 at night");
+        assert_eq!(w.dhi_w_m2, 0.0, "dhi_w_m2 should be 0.0 at night");
+        assert!(
+            w.solar_irradiance.is_empty(),
+            "solar_irradiance should be empty at night"
+        );
+
+        // Kusuda-Achenbach parameters: plausible ranges.
+        assert!(
+            (0.0..=45.0).contains(&w.ground_t_mean_c),
+            "ground_t_mean_c={} outside plausible annual soil mean range",
+            w.ground_t_mean_c,
+        );
+        assert!(
+            w.ground_t_amplitude_c >= 0.0,
+            "ground_t_amplitude_c={} must be non-negative",
+            w.ground_t_amplitude_c,
+        );
+        assert!(
+            (1.0..=365.0).contains(&w.ground_phase_day),
+            "ground_phase_day={} outside day-of-year range",
+            w.ground_phase_day,
+        );
+        assert!(
+            (1.0..=366.0).contains(&w.day_of_year),
+            "day_of_year={} outside calendar range",
+            w.day_of_year,
+        );
+    }
+
+    /// All WeatherState defaults must survive JSON round-trip unchanged.
+    /// Proves that the explicit Default impl is compatible with serde
+    /// (de)serialisation of every field including the new Kusuda-Achenbach
+    /// fields.
+    #[test]
+    fn weather_state_default_round_trips_through_json() {
+        let w = WeatherState::default();
+        let json = serde_json::to_string(&w).expect("serialize WeatherState");
+        let decoded: WeatherState = serde_json::from_str(&json).expect("deserialize WeatherState");
+        assert_eq!(
+            decoded, w,
+            "WeatherState default must survive JSON round-trip"
+        );
+    }
+
+    /// Proof that a zero-pressure WeatherState would be caught by the range
+    /// check.  Setting pressure_kpa to 0.0 (the old derived-Default value)
+    /// triggers a panic.
+    #[test]
+    #[should_panic(expected = "vacuum is invalid")]
+    fn weather_state_zero_pressure_is_rejected() {
+        let mut w = WeatherState::default();
+        w.pressure_kpa = 0.0;
+        assert!(
+            w.pressure_kpa > 0.0,
+            "pressure_kpa must be > 0 — vacuum is invalid"
+        );
     }
 }

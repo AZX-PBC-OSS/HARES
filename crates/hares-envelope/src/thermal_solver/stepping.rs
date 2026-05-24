@@ -176,7 +176,19 @@ impl ThermalSolver {
                     } => {
                         let t_driving = match driving_temp {
                             DrivingTemp::Outdoor => self.cached_outdoor_temp_c,
-                            DrivingTemp::Ground => self.cached_ground_temp_c,
+                            DrivingTemp::Ground { depth_m } => {
+                                // Look up the cached Kusuda temperature for this depth.
+                                // The cached_ground_temps_c vec is parallel to
+                                // wiring.ground_temp_input_depths_m; depths are
+                                // matched by rounding to millimetre precision.
+                                let key = (depth_m * 1000.0).round() as i64;
+                                self.cached_ground_temps_c
+                                    .iter()
+                                    .zip(self.wiring.ground_temp_input_depths_m.iter())
+                                    .find(|(_, d)| (*d * 1000.0).round() as i64 == key)
+                                    .map(|(t, _)| *t)
+                                    .unwrap_or(0.0)
+                            }
                         };
                         (ua_w_k * (t_driving - t_zone), *category)
                     }

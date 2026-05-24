@@ -69,8 +69,29 @@ impl HumiditySolver {
         }
     }
 
+    /// Return the committed humidity ratio for `zone_id`.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds (debug-assertions) panics when `zone_id` is not in the
+    /// solver's internal map. Production callers must keep the zone set
+    /// consistent with the set passed to [`Self::new`]; a missing zone
+    /// produces a sentinel of `0.0 kg/kg` that downstream latent-load guards
+    /// in `dwelling/mod.rs` interpret as "no latent contribution."
+    ///
+    /// The `0.0` sentinel is intentional — it is already caught by the
+    /// `w_new <= 0.0` skip-guard at the sole runtime call site. Changing it
+    /// to a physically plausible default would **bypass that guard** and
+    /// silently corrupt the moisture mass balance. If you need to validate
+    /// zone completeness, run in debug mode.
     #[must_use]
     pub fn humidity_ratio(&self, zone_id: ZoneId) -> f64 {
+        debug_assert!(
+            self.humidity_ratios.contains_key(&zone_id),
+            "humidity_ratio: ZoneId {} not found in solver map — \
+             ensure the solver is re-initialized after zone list changes",
+            zone_id.0,
+        );
         self.humidity_ratios.get(&zone_id).copied().unwrap_or(0.0)
     }
 }
@@ -347,6 +368,10 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -914,6 +939,10 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -1138,6 +1167,10 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -1668,5 +1701,18 @@ mod tests {
              diff={:.9e} kg",
             (delta_m - source_m).abs()
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "humidity_ratio: ZoneId 999 not found in solver map")]
+    fn humidity_ratio_missing_zone_panics_in_debug() {
+        // `debug_assert!` fires only in debug builds.
+        // In release the call returns the 0.0 sentinel, which the
+        // downstream `w_new <= 0.0` guard at dwelling/mod.rs:3080 catches.
+        let config = HumiditySolverConfig::default();
+        let env = env_with_zone(22.0, 0.008);
+        let solver = HumiditySolver::new(config, &env);
+        let _ = solver.humidity_ratio(ZoneId(999));
     }
 }

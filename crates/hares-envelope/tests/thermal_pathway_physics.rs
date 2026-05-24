@@ -54,6 +54,10 @@ fn make_env(zone_temp: f64, outdoor_temp: f64, ground_temp: f64) -> EnvironmentS
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
             ground_albedo: 0.2,
+            ground_t_mean_c: ground_temp,
+            ground_t_amplitude_c: 0.0,
+            ground_phase_day: 35.0,
+            day_of_year: 1.0,
         },
         grid: GridState {
             voltage_pu: 1.0,
@@ -123,6 +127,7 @@ fn ground_temperature_drives_zone() {
         zone_sensible_input_indices: HashMap::from([(ZONE, 2)]),
         outdoor_temp_input_indices: vec![0],
         ground_temp_input_indices: vec![1],
+        ground_temp_input_depths_m: vec![0.0],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
@@ -273,6 +278,7 @@ fn interior_solar_distribution_damps_peak_temp() {
         zone_sensible_input_indices: HashMap::from([(ZONE, 1)]),
         outdoor_temp_input_indices: vec![0],
         ground_temp_input_indices: vec![],
+        ground_temp_input_depths_m: vec![],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
@@ -340,7 +346,7 @@ fn interior_solar_distribution_damps_peak_temp() {
 // ---------------------------------------------------------------------------
 
 /// Constructs a building RC network with a ground-connected slab boundary
-/// and verifies that ground_col is Some (not None).
+/// and verifies that ground_cols is non-empty.
 #[test]
 fn rc_network_exposes_ground_column() {
     use hares_envelope::boundary_rc::*;
@@ -370,14 +376,15 @@ fn rc_network_exposes_ground_column() {
         r_film_exterior_m2_k_w: 0.03,
         framing_factor: None,
         interior_emissivity: 0.9,
+        foundation_depth_m: 0.0,
     }];
 
     let (rc, diag) =
         assemble_building_rc(&boundaries, 1, &zone_caps, InteriorLwrMethod::StarMesh).unwrap();
 
     assert!(
-        rc.ground_col.is_some(),
-        "ground_col must be Some when a ground-connected boundary exists"
+        !rc.ground_cols.is_empty(),
+        "ground_cols must be non-empty when a ground-connected boundary exists"
     );
     assert!(
         rc.outdoor_col.is_none(),
@@ -468,6 +475,7 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         zone_sensible_input_indices: HashMap::from([(ZONE, 2)]),
         outdoor_temp_input_indices: vec![0],
         ground_temp_input_indices: vec![],
+        ground_temp_input_depths_m: vec![],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
@@ -536,5 +544,157 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         expected_after_port,
         convective_w,
         air_radiant_residual_w,
+    );
+}
+
+// ── Ground temperature depth correction integration test ────────────────────
+
+/// Verifies that the thermal solver uses Kusuda-Achenbach depth-corrected
+/// ground temperature rather than the DOE-2 surface temperature.
+///
+/// Minneapolis climate (annual mean 7°C, amplitude 14°C), January 15,
+/// foundation depth 2.4 m. The Kusuda temperature at 2.4 m is ~5.9°C;
+/// the DOE-2 surface temperature is ~-6.2°C. The solver must produce
+/// a driving ground temperature within 1°C of the Kusuda value.
+#[test]
+fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
+    use hares_physics::ground::{
+        self, DEFAULT_PHASE_DAY_NORTHERN, DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
+    };
+
+    // ── Build a 1-state RC model with a ground-connected floor ──────────
+    let c_zone = 1_094_000.0; // J/K
+    let ua_ground = 10.0; // W/K — floor UA
+    let depth_m = 2.4;
+
+    // A_c: dT/dt = -(UA_gnd)/C * T + UA_gnd/C * T_gnd
+    let a_c = DMatrix::from_row_slice(1, 1, &[-(ua_ground) / c_zone]);
+    // B_c: inputs [ground(0), sensible(1)]
+    let b_c = DMatrix::from_row_slice(1, 2, &[ua_ground / c_zone, 1.0 / c_zone]);
+
+    let mapping = OutputMapping {
+        output_count: 1,
+        node_to_output: vec![(0, 0, 1.0)],
+        input_to_output: vec![],
+    };
+
+    let model = StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping).unwrap();
+
+    let wiring = StateSpaceWiring {
+        zone_state_indices: HashMap::from([(ZONE, 0)]),
+        zone_output_indices: HashMap::from([(ZONE, 0)]),
+        zone_sensible_input_indices: HashMap::from([(ZONE, 1)]),
+        outdoor_temp_input_indices: vec![],
+        ground_temp_input_indices: vec![0],
+        ground_temp_input_depths_m: vec![depth_m],
+        indoor_temp_input_indices: vec![],
+        solar_input_indices: HashMap::new(),
+        c_zone_j_k: HashMap::new(),
+    };
+
+    let config = ThermalSolverConfig {
+        indoor_zone_id: ZONE,
+        ..ThermalSolverConfig::default()
+    };
+
+    // ── Minneapolis January 15 environment ──────────────────────────────
+    let t_mean_c = 7.0;
+    let t_amplitude_c = 14.0;
+    let phase_day = DEFAULT_PHASE_DAY_NORTHERN;
+    let day_of_year = 15.0; // Jan 15
+    let ground_temp_c = -5.0; // surface DOE-2 value (wrong, as proven below)
+
+    let env = EnvironmentState {
+        zones: vec![ZoneState {
+            id: ZONE,
+            temperature_c: 20.0,
+            humidity_ratio: 0.008,
+            relative_humidity: 0.45,
+            wet_bulb_c: 15.0,
+            volume_m3: 200.0,
+        }],
+        weather: WeatherState {
+            outdoor_temp_c: -5.0,
+            outdoor_humidity_ratio: 0.003,
+            outdoor_wet_bulb_c: -6.0,
+            outdoor_enthalpy_j_kg: 5_000.0,
+            wind_speed_m_s: 2.0,
+            wind_dir_deg: 0.0,
+            ground_temp_c, // DOE-2 surface value — should NOT be used
+            sky_temp_c: -15.0,
+            pressure_kpa: 101.325,
+            solar_irradiance: vec![],
+            ghi_w_m2: 0.0,
+            dni_w_m2: 0.0,
+            dhi_w_m2: 0.0,
+            solar_altitude_deg: 0.0,
+            solar_azimuth_deg: 180.0,
+            mains_temp_c: 10.0,
+            rainfall_m: 0.0,
+            ground_albedo: 0.2,
+            ground_t_mean_c: t_mean_c,
+            ground_t_amplitude_c: t_amplitude_c,
+            ground_phase_day: phase_day,
+            day_of_year,
+        },
+        grid: GridState {
+            voltage_pu: 1.0,
+            frequency_hz: 60.0,
+        },
+        custom_domains: vec![],
+        equipment_telemetry: std::collections::HashMap::new(),
+        current_time: FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
+            .single()
+            .expect("valid timestamp"),
+        time_res: chrono::Duration::seconds(DT_S as i64),
+        price_signal: Default::default(),
+        electrical: Default::default(),
+        equipment_core: Default::default(),
+    };
+
+    let mut solver = ThermalSolver::new(model, wiring, config, DT_S, &env, 20.0).unwrap();
+
+    let ports = PortSlots {
+        thermal: vec![ThermalAccumulator::new(ZONE)],
+        ..Default::default()
+    };
+    let dt = Duration::from_secs_f64(DT_S);
+
+    solver.resolve_new(&ports, &env, dt);
+
+    let gains = solver.component_gains();
+
+    // Expected Kusuda-Achenbach temperature at depth 2.4 m on day 15.
+    let t_expected = ground::kusuda_achenbach_temp(
+        depth_m,
+        day_of_year,
+        t_mean_c,
+        t_amplitude_c,
+        phase_day,
+        DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
+    );
+
+    // The solver must report a driving ground temperature within 1°C of the
+    // analytical Kusuda result.
+    assert!(
+        (gains.driving_ground_temp_c - t_expected).abs() < 1.0,
+        "driving_ground_temp_c = {:.2}°C, expected Kusuda({:.1} m, day {:.0}) = {:.2}°C",
+        gains.driving_ground_temp_c,
+        depth_m,
+        day_of_year,
+        t_expected,
+    );
+
+    // The DOE-2 surface temperature differs from Kusuda at 2.4 m by
+    // at least 3°C in January — verify the solver is NOT using it.
+    let diff_from_surface = (gains.driving_ground_temp_c - ground_temp_c).abs();
+    assert!(
+        diff_from_surface > 3.0,
+        "driving_ground_temp_c = {:.2}°C is within 3°C of DOE-2 surface temp = {:.2}°C; \
+         the solver may be using the surface temperature instead of Kusuda",
+        gains.driving_ground_temp_c,
+        ground_temp_c,
     );
 }

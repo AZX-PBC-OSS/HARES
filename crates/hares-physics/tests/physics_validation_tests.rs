@@ -27,6 +27,7 @@ use hares_physics::psychrometrics::{
     wet_bulb_from_humidity_ratio,
 };
 use hares_physics::water_mains::{Hemisphere, water_mains_temperature_c};
+use hares_types::WeatherState;
 
 // ---------------------------------------------------------------------------
 // Assertion helper -- replaces the #[cfg(test)]-gated test_utils::approx_eq
@@ -1269,5 +1270,108 @@ fn constant_bias_at_typical_tank_temp() {
         (1.0..=1.5).contains(&bias_pct),
         "bias of WATER_DENSITY_KG_PER_M3=1000.0 at 50°C is {bias_pct:.3}%, \
          expected 1.0–1.5% per NIST IAPWS tabulated density of {rho_at_50c:.2} kg/m³",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WeatherState::default() psychrometric self-consistency
+// ---------------------------------------------------------------------------
+
+/// Re-derive the hardcoded defaults from psychrometric first principles
+/// to prove the `WeatherState::default()` values are self-consistent.
+///
+/// # Sources
+/// - ASHRAE HOF 2021 Ch.1 Eq.30: h = cp_da × T + W × (h_fg_0 + cp_v × T)
+/// - ASHRAE HOF 2021 Eq.35: psychrometer equation (wet-bulb from dry-bulb, W)
+/// - Clark & Allen (EnergyPlus default sky model, WeatherManager.cc:3213)
+/// - EnergyPlus DataEnvironment.hh:82: StdPressureSeaLevel = 101325.0 Pa
+#[test]
+fn weather_state_default_is_psychrometrically_self_consistent() {
+    let w = WeatherState::default();
+
+    let p_pa = w.pressure_pa();
+    assert!(
+        (p_pa - 101_325.0).abs() < 1.0,
+        "pressure_pa from default pressure_kpa={} should be ~101325 Pa",
+        w.pressure_kpa,
+    );
+
+    // 1. Humidity ratio ↔ wet-bulb round-trip (ASHRAE HOF 2021 Eq.35).
+    //    Given T_db=20.0, P=101.325 kPa, the wet-bulb that produces
+    //    W=0.008 should match the hardcoded 14.0 °C within ±1 °C.
+    let wb_computed =
+        wet_bulb_from_humidity_ratio(w.outdoor_temp_c, w.outdoor_humidity_ratio, p_pa);
+    assert!(
+        (wb_computed - w.outdoor_wet_bulb_c).abs() < 1.0,
+        "wet-bulb: computed={wb_computed:.3} °C, hardcoded={} °C \
+         (T_db={}, W={}, P={:.1} Pa)",
+        w.outdoor_wet_bulb_c,
+        w.outdoor_temp_c,
+        w.outdoor_humidity_ratio,
+        p_pa,
+    );
+
+    // 2. Enthalpy (ASHRAE HOF 2021 Eq.30).
+    //    h = 1.006×20 + 0.008×(2501 + 1.86×20) = 40.426 kJ/kg.
+    let h_computed = moist_air_enthalpy(w.outdoor_temp_c, w.outdoor_humidity_ratio);
+    let h_computed_kj = h_computed / 1000.0;
+    let h_default_kj = w.outdoor_enthalpy_j_kg / 1000.0;
+    assert!(
+        (h_computed_kj - h_default_kj).abs() < 1.0,
+        "enthalpy: computed={h_computed_kj:.3} kJ/kg, \
+         hardcoded={h_default_kj:.3} kJ/kg",
+    );
+
+    // 3. Relative humidity at default conditions.
+    let rh = relative_humidity(w.outdoor_temp_c, w.outdoor_humidity_ratio, p_pa);
+    assert!(
+        (0.50..=0.60).contains(&rh),
+        "RH={rh:.3} at T_db={}, W={} — \
+         expected 50–60 % (55.2 % at pure psychrometrics)",
+        w.outdoor_temp_c,
+        w.outdoor_humidity_ratio,
+    );
+
+    // 4. Dew point: non-zero, below dry-bulb.
+    let t_dp = dew_point(w.outdoor_humidity_ratio, p_pa);
+    assert!(
+        t_dp > 0.0,
+        "dew point={t_dp:.2} °C is sub-freezing for a mild-day default",
+    );
+    assert!(
+        t_dp < w.outdoor_temp_c,
+        "dew point={t_dp:.2} °C exceeds dry-bulb={} °C",
+        w.outdoor_temp_c,
+    );
+
+    // 5. Sky temperature below ambient (Clark-Allen model).
+    //    At T_db=20.0, W=0.008, T_dp≈10.7 °C:
+    //    ε_sky = 0.787 + 0.764×ln((10.7+273.15)/273.15) ≈ 0.816
+    //    T_sky = (20.0+273.15)×0.816^0.25 − 273.15 ≈ 5.5 °C
+    //    The default must be at least 10 °C below dry-bulb to maintain
+    //    longwave sky cooling as a meaningful heat-loss pathway.
+    assert!(
+        w.sky_temp_c < w.outdoor_temp_c - 10.0,
+        "sky_temp_c={} is only {} °C below outdoor_temp_c={} — \
+         sky cooling requires at least 10 °C depression",
+        w.sky_temp_c,
+        w.outdoor_temp_c - w.sky_temp_c,
+        w.outdoor_temp_c,
+    );
+
+    // 6. Ground temperature: within EnergyPlus default range.
+    assert!(
+        (w.ground_temp_c - 13.0).abs() < 2.0,
+        "ground_temp_c={} deviates from EnergyPlus default 13.0 °C \
+         (SiteShallowGroundTemperatures.cc:122)",
+        w.ground_temp_c,
+    );
+
+    // 7. Mains temperature: plausible range, non-freezing default.
+    assert!(
+        w.mains_temp_c > 2.0,
+        "mains_temp_c={} is near freezing — \
+         EnergyPlus default is 10.0 °C (WeatherManager.cc:7156)",
+        w.mains_temp_c,
     );
 }

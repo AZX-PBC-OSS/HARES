@@ -35,8 +35,15 @@ pub const R_FILM_EXTERIOR_M2_K_W: f64 = 0.03;
 pub const R_FILM_INTERIOR_M2_K_W: f64 = 0.12;
 /// NodeId for the outdoor temperature driving node.
 pub const OUTDOOR_NODE_ID: u32 = u32::MAX - 1;
-/// NodeId for the ground temperature driving node.
+/// NodeId for the ground temperature driving node (legacy single-ground reference).
 pub const GROUND_NODE_ID: u32 = u32::MAX;
+/// Base NodeId for per-depth ground driving nodes.
+///
+/// Each unique foundation depth gets its own ground node: `GROUND_NODE_BASE + i`
+/// where `i` is the depth index in ascending order. All ground nodes are assigned
+/// below `OUTDOOR_NODE_ID` so the sorted external-node list places ground columns
+/// before the outdoor column in the B-matrix. Up to 99 unique depths are supported.
+pub const GROUND_NODE_BASE: u32 = u32::MAX - 100;
 /// First NodeId used for material-layer nodes (above zone air node range).
 const LAYER_NODE_BASE: u32 = 1_000;
 
@@ -172,6 +179,18 @@ pub struct BoundaryInput {
     /// Populated from the building's boundary emissivity data by
     /// `building_to_boundary_inputs` in `hares-core`.
     pub interior_emissivity: f64,
+    /// Centroid depth of the boundary below grade [m].
+    ///
+    /// For ground-contacting boundaries (`ExteriorTarget::Ground`), this is the
+    /// depth at which the Kusuda-Achenbach ground temperature is evaluated.
+    /// 0.0 = grade surface. For above-grade boundaries (Outdoor, Zone), this
+    /// field is unused but must be set to a valid value.
+    ///
+    /// Typical values: slab-on-grade floor ≈ 0.1–0.5 m, basement wall centroid
+    /// ≈ 1.2 m for a 2.4 m basement, crawlspace floor ≈ 0.5–1.0 m.
+    ///
+    /// Default: 0.0 m (grade surface — matches pre-fix behaviour).
+    pub foundation_depth_m: f64,
 }
 
 /// Zone input: floor area, volume, and mass multiplier for capacitance derivation.
@@ -240,6 +259,12 @@ pub struct BoundaryDiagnostic {
     pub inner_node: Option<NodeId>,
     /// Interior-facing longwave emissivity [-] for star-mesh radiation.
     pub interior_emissivity: f64,
+    /// Foundation depth below grade for ground-contacting boundaries [m].
+    ///
+    /// Copied from `BoundaryInput::foundation_depth_m`. 0.0 for above-grade
+    /// boundaries. Used by solver_builder to attach depth-aware
+    /// `DrivingTemp::Ground { depth_m }` to boundary diagnostics.
+    pub foundation_depth_m: f64,
 }
 
 /// Diagnostics captured during RC network construction.
@@ -297,8 +322,11 @@ pub struct BuildingRC {
     pub layer_info: HashMap<usize, SurfaceLayerInfo>,
     /// Column index of outdoor temperature in B_ext (if present).
     pub outdoor_col: Option<usize>,
-    /// Column index of ground temperature in B_ext (if present).
-    pub ground_col: Option<usize>,
+    /// Ground temperature columns in B_ext — one per unique foundation depth.
+    /// Each entry is `(depth_m, col_index)`, sorted by ascending depth.
+    /// Depth = 0.0 m represents the grade surface (DOE-2 surface model).
+    /// Empty when no ground-connected boundaries exist.
+    pub ground_cols: Vec<(f64, usize)>,
     /// Number of external driving columns in B_ext.
     pub n_ext: usize,
     /// NodeId → thermal capacitance [J/K] for all internal nodes.
@@ -405,7 +433,26 @@ pub fn assemble_building_rc(
     interior_lwr_method: InteriorLwrMethod,
 ) -> Result<(BuildingRC, EnvelopeDiagnostics), String> {
     let outdoor_node = NodeId(OUTDOOR_NODE_ID);
-    let ground_node = NodeId(GROUND_NODE_ID);
+
+    // Collect unique foundation depths for ground-connected boundaries.
+    // A depth->NodeId map is built so each distinct depth gets its own ground
+    // driving node and B-matrix column.
+    let mut unique_depths: Vec<f64> = boundaries
+        .iter()
+        .filter(|b| b.exterior == ExteriorTarget::Ground && b.area_m2 > 0.0)
+        .map(|b| (b.foundation_depth_m * 1000.0).round() / 1000.0) // round to mm
+        .collect();
+    unique_depths.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    unique_depths.dedup();
+    let depth_to_node: std::collections::HashMap<u64, NodeId> = unique_depths
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| {
+            // Round to integer millimetres for the HashMap key (avoids f64 hashing).
+            let key = (d * 1000.0).round() as u64;
+            (key, NodeId(GROUND_NODE_BASE + i as u32))
+        })
+        .collect();
 
     // Pre-size from boundary data.
     let est_nodes = n_zones
@@ -443,7 +490,16 @@ pub fn assemble_building_rc(
         let exterior_node = match bd.exterior {
             ExteriorTarget::Zone(idx) => NodeId((idx + 1) as u32),
             ExteriorTarget::Outdoor => outdoor_node,
-            ExteriorTarget::Ground => ground_node,
+            ExteriorTarget::Ground => {
+                let key = (bd.foundation_depth_m * 1000.0).round() as u64;
+                *depth_to_node.get(&key).unwrap_or_else(|| {
+                    panic!(
+                        "boundary {bd_idx}: foundation_depth_m={} has no ground node; \
+                         available depths: {unique_depths:?}",
+                        bd.foundation_depth_m
+                    )
+                })
+            }
         };
 
         let same_zone = interior_node == exterior_node;
@@ -547,6 +603,7 @@ pub fn assemble_building_rc(
                 path: RCPath::Precomputed,
                 inner_node,
                 interior_emissivity: bd.interior_emissivity,
+                foundation_depth_m: bd.foundation_depth_m,
             });
             continue;
         }
@@ -637,6 +694,7 @@ pub fn assemble_building_rc(
                 path: RCPath::MaterialLayer,
                 inner_node,
                 interior_emissivity: bd.interior_emissivity,
+                foundation_depth_m: bd.foundation_depth_m,
             });
         } else if !same_zone {
             // Fallback: single lumped resistance. fallback_r_m2_k_w is typically
@@ -781,6 +839,7 @@ pub fn assemble_building_rc(
                 path: RCPath::FallbackR,
                 inner_node: None,
                 interior_emissivity: bd.interior_emissivity,
+                foundation_depth_m: bd.foundation_depth_m,
             });
         }
     }
@@ -926,15 +985,23 @@ pub fn assemble_building_rc(
         }
     }
 
-    // Build external nodes list -- at most 2 entries, already sorted by ID.
-    let mut external_nodes = Vec::with_capacity(2);
+    // Build external nodes list: all ground nodes (one per depth) + outdoor.
+    let n_ground = if ground_connected {
+        depth_to_node.len()
+    } else {
+        0
+    };
+    let mut external_nodes = Vec::with_capacity(n_ground + 1);
+    if ground_connected {
+        for &node in depth_to_node.values() {
+            external_nodes.push(node);
+        }
+    }
     if outdoor_connected {
         external_nodes.push(outdoor_node);
     }
-    if ground_connected {
-        external_nodes.push(ground_node);
-    }
-    // OUTDOOR_NODE_ID < GROUND_NODE_ID, so already sorted.
+    // Ground nodes (GROUND_NODE_BASE + i) are all < OUTDOOR_NODE_ID,
+    // so RCNetwork::from_elements will sort them: ground[0] < ground[1] < ... < outdoor.
 
     let (capacitances, resistances) = graph.into_elements();
 
@@ -943,7 +1010,26 @@ pub fn assemble_building_rc(
 
     // Look up outdoor column by node ID in the sorted external_nodes list.
     let outdoor_col = rc.external_nodes.iter().position(|&n| n == outdoor_node);
-    let ground_col = rc.external_nodes.iter().position(|&n| n == ground_node);
+    // Build (depth_m, col_index) pairs in ascending depth order.
+    // unique_depths is sorted, and NodeIds are GROUND_NODE_BASE + depth_index,
+    // so column positions match depth order.
+    let ground_cols: Vec<(f64, usize)> = depth_to_node
+        .iter()
+        .map(|(&key, &node)| {
+            let depth_m = key as f64 / 1000.0;
+            let col = rc
+                .external_nodes
+                .iter()
+                .position(|&n| n == node)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ground node {:?} (depth={depth_m}) missing from external nodes",
+                        node
+                    )
+                });
+            (depth_m, col)
+        })
+        .collect();
 
     let (a_c, b_ext) = rc
         .build_matrices()
@@ -993,7 +1079,7 @@ pub fn assemble_building_rc(
             zone_state_rows,
             layer_info,
             outdoor_col,
-            ground_col,
+            ground_cols,
             n_ext,
             node_capacitances,
         },
@@ -1498,6 +1584,7 @@ mod tests {
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         }
     }
 
@@ -1743,7 +1830,10 @@ mod tests {
 
         assert_eq!(rc.zone_state_rows.len(), 2);
         assert_eq!(rc.n_ext, 2); // outdoor + ground
-        assert_eq!(rc.outdoor_col, Some(0)); // outdoor sorted first
+        // Ground nodes (GROUND_NODE_BASE) are numerically < OUTDOOR_NODE_ID,
+        // so they sort first in the external-nodes list.
+        assert_eq!(rc.outdoor_col, Some(1)); // outdoor after ground
+        assert_eq!(rc.ground_cols, vec![(0.0, 0)]); // depth 0.0 at column 0
     }
 
     // ── Ground-only produces no outdoor column ──────────────────────────
@@ -1765,6 +1855,7 @@ mod tests {
         // Ground is the only external node; outdoor_col should be None.
         assert_eq!(rc.outdoor_col, None);
         assert_eq!(rc.n_ext, 1);
+        assert_eq!(rc.ground_cols, vec![(0.0, 0)]);
     }
 
     // ── Same-zone boundary without layers is a no-op ───────────────────
@@ -2084,6 +2175,7 @@ mod tests {
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         }
     }
 
@@ -2349,6 +2441,7 @@ mod tests {
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         };
         let (rc, _diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -2408,6 +2501,7 @@ mod tests {
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         };
         let (rc_no_ff, _) =
             assemble_building_rc(&[bd_no_ff], 1, &caps, InteriorLwrMethod::ScriptF).expect("no ff");
@@ -2424,6 +2518,7 @@ mod tests {
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: Some(0.25),
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         };
         let (rc_ff, _) =
             assemble_building_rc(&[bd_ff], 1, &caps, InteriorLwrMethod::ScriptF).expect("with ff");
@@ -2673,6 +2768,7 @@ mod tests {
             r_film_exterior_m2_k_w: 0.0,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -2718,6 +2814,7 @@ mod tests {
             r_film_exterior_m2_k_w: 0.0,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -2764,6 +2861,7 @@ mod tests {
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -2807,6 +2905,7 @@ mod tests {
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -2849,6 +2948,7 @@ mod tests {
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -2888,6 +2988,7 @@ mod tests {
             r_film_exterior_m2_k_w: r_film_ext,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -2948,6 +3049,7 @@ mod tests {
                 r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
                 framing_factor: None,
                 interior_emissivity: emissivity,
+                foundation_depth_m: 0.0,
             })
             .collect();
 

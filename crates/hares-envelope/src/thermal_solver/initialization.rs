@@ -41,9 +41,20 @@ pub(crate) fn initialize_steady_state(
             u[idx] = env.weather.outdoor_temp_c;
         }
     }
-    for &idx in &wiring.ground_temp_input_indices {
+    for (&idx, &depth_m) in wiring
+        .ground_temp_input_indices
+        .iter()
+        .zip(wiring.ground_temp_input_depths_m.iter())
+    {
         if idx < m {
-            u[idx] = env.weather.ground_temp_c;
+            u[idx] = hares_physics::ground::kusuda_achenbach_temp(
+                depth_m,
+                env.weather.day_of_year,
+                env.weather.ground_t_mean_c,
+                env.weather.ground_t_amplitude_c,
+                env.weather.ground_phase_day,
+                hares_physics::ground::DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
+            );
         }
     }
     for &idx in &wiring.indoor_temp_input_indices {
@@ -199,6 +210,10 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -235,6 +250,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::new(),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -289,6 +305,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::new(),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -325,8 +342,10 @@ mod tests {
     /// return a flat-temperature vector — it should return an error.
     ///
     /// Currently this test FAILS because the code at lines 79-83 silently
-    /// Fix pending — will stop panicking when the missing-zone-ID path returns
-    /// an error instead of silently falling through.
+    /// falls through via `filter_map` when the pinned zone is absent, returning
+    /// `Ok(steady_state)` instead of `Err`. Fix pending — will stop panicking
+    /// when the missing-zone-ID path returns an error instead of silently
+    /// falling through.
     #[test]
     #[should_panic(expected = "expected Err when indoor_zone_id is absent")]
     fn missing_indoor_zone_id_in_zone_state_indices_errors() {
@@ -349,6 +368,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::new(),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
@@ -385,6 +405,7 @@ mod tests {
             zone_sensible_input_indices: HashMap::new(),
             outdoor_temp_input_indices: vec![0],
             ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),

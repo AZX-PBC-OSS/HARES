@@ -621,6 +621,10 @@ impl EnvironmentManager {
         state.weather.mains_temp_c = mains_temp_c;
         state.weather.rainfall_m = self.weather.get(WeatherField::LiquidPrecipM, weather_idx);
         state.weather.ground_albedo = ground_albedo;
+        state.weather.ground_t_mean_c = self.ground_t_mean_c;
+        state.weather.ground_t_amplitude_c = self.ground_t_amplitude_c;
+        state.weather.ground_phase_day = self.ground_phase_day;
+        state.weather.day_of_year = clock.current_time().ordinal() as f64;
 
         state.current_time = clock.current_time();
         state.time_res = clock.time_res;

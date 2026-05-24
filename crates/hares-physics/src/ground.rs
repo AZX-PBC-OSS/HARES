@@ -8,7 +8,11 @@
 //! - Kusuda, T. and Achenbach, P.R. (1965), "Earth Temperatures and Thermal
 //!   Diffusivity at Selected Stations in the United States", ASHRAE Transactions,
 //!   Vol. 71(1), pp. 61-74.
-//! - ASHRAE Handbook of Fundamentals, Ch. 18.31 (Below-Grade Heat Transfer).
+//! - ASHRAE Handbook of Fundamentals 2021, Ch. 27 (Heat, Air, and Moisture Control
+//!   in Building Assemblies — Examples) — below-grade heat transfer boundary
+//!   conditions for basement walls, slab-on-grade, and crawlspace floors.
+//! - EnergyPlus Engineering Reference: Ground Heat Transfer, "Undisturbed Ground
+//!   Temperature Model: Kusuda-Achenbach".
 
 use std::f64::consts::PI;
 
@@ -81,7 +85,7 @@ pub fn kusuda_achenbach_temp(
 
 /// ASHRAE slab perimeter heat loss [W].
 ///
-/// Simple perimeter-loss method from ASHRAE Handbook of Fundamentals Ch. 18.31:
+/// Simple perimeter-loss method from ASHRAE Handbook of Fundamentals Ch. 27:
 /// `Q = F2 × P × (T_indoor - T_ground_surface)`
 ///
 /// where F2 is the heat loss coefficient per unit length of exposed perimeter
@@ -133,7 +137,7 @@ pub fn foundation_wall_loss_w(
 
 /// Simplified perimeter loss coefficient [W/(m·K)] for common slab configurations.
 ///
-/// Based on ASHRAE Handbook of Fundamentals Ch. 18.31 simplified perimeter
+/// Based on ASHRAE Handbook of Fundamentals Ch. 27 simplified perimeter
 /// method. These are approximate values for typical residential slabs; for
 /// code-compliance F-factors use ASHRAE 90.1 Table A6.3.1 instead.
 #[must_use]
