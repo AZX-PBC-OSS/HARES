@@ -831,6 +831,10 @@ impl CoolingCore {
         // Telemetry reports delivered (post-DSE) values for the conditioned zone.
         let dse = self.hvac.config.duct_dse.clamp(0.0, 1.0);
         let fan_heat_w = fan_kw * 1000.0;
+        // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
+        // sensible_cooling_w + latent_cooling_w are pre-DSE (gross) values from compute_performance.
+        let gross_cooling_w = sensible_cooling_w + latent_cooling_w;
+        let duct_loss_w = gross_cooling_w * (1.0 - dse);
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
         self.telemetry
             .set(tk::SENSIBLE_COOLING_W, sensible_cooling_w * dse);
@@ -840,7 +844,21 @@ impl CoolingCore {
             .set(tk::COIL_SENSIBLE_COOLING_W, sensible_cooling_w);
         self.telemetry
             .set(tk::COIL_LATENT_COOLING_W, latent_cooling_w);
+        // OCHRE HVAC.py:595: Latent Gains = latent_gain * space_fraction (pre-DSE).
+        // coil_latent_cooling_w is the pre-DSE gross latent; space_fraction scales
+        // the output to the conditioned-space fraction served by this equipment.
+        self.telemetry.set(
+            tk::LATENT_GAINS_W,
+            latent_cooling_w * self.hvac.config.space_fraction,
+        );
         self.telemetry.set(tk::FAN_HEAT_W, fan_heat_w);
+        // OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
+        // For cooling equipment total_input = compressor + fan, so main = compressor.
+        self.telemetry.set(
+            tk::MAIN_POWER_KW,
+            compressor_kw * self.hvac.config.space_fraction,
+        );
+        self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry.set(tk::SHR, self.hvac.config.shr);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
@@ -1476,7 +1494,8 @@ mod tests {
     use super::{AirConditioner, CoolingCore, RoomAC, SpeedControlMode};
 
     use crate::{
-        CentralAirConditionerConfig, Equipment, EquipmentConfig, EquipmentRegistry, RoomAcConfig,
+        CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, EquipmentRegistry,
+        RoomAcConfig,
     };
 
     fn env(
@@ -2669,6 +2688,109 @@ mod tests {
             "time_at_current_speed_s must survive checkpoint; expected {accumulated}, got {}",
             restored.core.hvac.runtime.time_at_current_speed_s
         );
+    }
+
+    // ── Duct loss and main power telemetry ──────────────────────────────────
+
+    /// AC duct_loss_w must equal gross_cooling * (1 - dse).
+    /// ASHRAE 152. Uses pre-DSE gross values, not post-DSE telemetry.
+    #[test]
+    fn ac_duct_loss_uses_pre_dse_gross_capacity() {
+        let cfg = ac_config_with(|c| {
+            c.duct = DuctConfig {
+                dse_cool: Some(0.8),
+                ..DuctConfig::default()
+            };
+        });
+        let mut eq = AirConditioner::new(cfg.clone());
+        let e = env(28.0, 0.009, 19.0, 35.0);
+        eq.init(&cfg, &e).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&e);
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let duct_loss_w = eq.telemetry().get(tk::DUCT_LOSS_W).unwrap();
+        let coil_sensible = eq.telemetry().get(tk::COIL_SENSIBLE_COOLING_W).unwrap();
+        let coil_latent = eq.telemetry().get(tk::COIL_LATENT_COOLING_W).unwrap();
+        let gross = coil_sensible + coil_latent;
+        let dse = eq.core.hvac.config.duct_dse.clamp(0.0, 1.0);
+        let expected = gross * (1.0 - dse);
+        assert!(
+            (duct_loss_w - expected).abs() < 1e-3,
+            "duct_loss_w must be gross * (1 - dse) = {expected}, got {duct_loss_w}"
+        );
+    }
+
+    /// AC main_power_kw equals compressor_kw (total_input - fan = compressor).
+    /// OCHRE HVAC.py:575.
+    #[test]
+    fn ac_main_power_equals_compressor_kw() {
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let e = env(28.0, 0.009, 19.0, 35.0);
+        eq.init(&cfg, &e).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&e);
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let main_kw = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap();
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+        let sf = eq.core.hvac.config.space_fraction;
+        assert!(
+            (main_kw - compressor_kw * sf).abs() < 1e-9,
+            "AC main_power must equal compressor_kw * space_fraction, got main={main_kw} compressor={compressor_kw} sf={sf}"
+        );
+    }
+
+    /// latent_gains_w must equal pre-DSE coil latent * space_fraction.
+    /// OCHRE HVAC.py:595: Latent Gains = latent_gain * space_fraction.
+    /// Must NOT use post-DSE latent_cooling_w which is 80% of the correct value at dse=0.8.
+    #[test]
+    fn ac_latent_gains_uses_pre_dse_gross_latent_times_space_fraction() {
+        let cfg = ac_config_with(|c| {
+            c.duct = DuctConfig {
+                dse_cool: Some(0.8),
+                ..DuctConfig::default()
+            };
+        });
+        let mut eq = AirConditioner::new(cfg.clone());
+        let e = env(28.0, 0.009, 19.0, 35.0);
+        eq.init(&cfg, &e).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&e);
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let latent_gains_w = eq.telemetry().get(tk::LATENT_GAINS_W).unwrap();
+        let coil_latent = eq.telemetry().get(tk::COIL_LATENT_COOLING_W).unwrap();
+        let sf = eq.core.hvac.config.space_fraction;
+        let expected = coil_latent * sf;
+        assert!(
+            (latent_gains_w - expected).abs() < 1e-3,
+            "latent_gains_w must be coil_latent * space_fraction = {expected}, got {latent_gains_w}"
+        );
+        // Verify it is NOT the post-DSE value.
+        let post_dse_latent = eq.telemetry().get(tk::LATENT_COOLING_W).unwrap();
+        if sf > 0.0 && coil_latent > 0.0 {
+            assert!(
+                (latent_gains_w - post_dse_latent).abs() > 1e-3,
+                "latent_gains_w must NOT equal post-DSE latent_cooling_w; got gains={latent_gains_w} post_dse={post_dse_latent}"
+            );
+        }
     }
 }
 

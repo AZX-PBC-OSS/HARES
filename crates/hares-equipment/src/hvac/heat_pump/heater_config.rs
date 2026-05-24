@@ -19,6 +19,8 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::COP, 0.0);
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::COMPRESSOR_KW, 0.0);
+    telemetry.insert(tk::MAIN_POWER_KW, 0.0);
+    telemetry.insert(tk::DUCT_LOSS_W, 0.0);
     telemetry.insert(tk::DEFROST_TIME_FRACTION, 0.0);
     telemetry.insert(tk::DEFROST_EXTRA_POWER_W, 0.0);
     telemetry.insert(tk::DEFROST_Q_W, 0.0);
@@ -93,6 +95,16 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::COMPRESSOR_KW.to_string(),
             unit: "kW".to_string(),
             description: "Compressor-only electric power".to_string(),
+        },
+        TelemetryField {
+            name: tk::MAIN_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Main power (compressor-only) per OCHRE HVAC.py:1464-1467".to_string(),
+        },
+        TelemetryField {
+            name: tk::DUCT_LOSS_W.to_string(),
+            unit: "W".to_string(),
+            description: "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)".to_string(),
         },
         TelemetryField {
             name: tk::DEFROST_TIME_FRACTION.to_string(),

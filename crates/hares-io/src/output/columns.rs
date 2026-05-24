@@ -49,6 +49,9 @@ const POWER_FACTOR_SUFFIX: &str = "Power Factor (-)";
 /// Defrost state column suffix for verbosity 7 (heat pump heaters only).
 const DEFROST_STATE_SUFFIX: &str = "Defrost State (-)";
 
+/// Duct losses column for verbosity 5.
+const HVAC_DUCT_LOSSES_COL: &str = "HVAC Duct Losses (W)";
+
 /// Builds an Arrow schema for the output based on equipment list and verbosity.
 ///
 /// The schema always includes a timestamp column, followed by columns
@@ -170,6 +173,9 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
             DataType::Float64,
             true,
         ));
+        // OCHRE HVAC.py:588: duct losses at verbosity 5.
+        // Computed as gross_capacity_w * (1 - dse) per ASHRAE 152.
+        fields.push(Field::new(HVAC_DUCT_LOSSES_COL, DataType::Float64, true));
     }
 
     if verbosity >= 6 {
@@ -213,6 +219,54 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
                     true,
                 ));
             }
+            // OCHRE HVAC.py:590-599: per-equipment HVAC performance columns at v7.
+            if is_hvac_or_wh(name) {
+                // SHR and Latent Gains are cooling-only (OCHRE HVAC.py:595-596).
+                if is_cooling_equipment(name) {
+                    fields.push(Field::new(
+                        format!("{name} SHR (-)"),
+                        DataType::Float64,
+                        true,
+                    ));
+                    fields.push(Field::new(
+                        format!("{name} Latent Gains (W)"),
+                        DataType::Float64,
+                        true,
+                    ));
+                }
+                fields.push(Field::new(
+                    format!("{name} Speed (-)"),
+                    DataType::Float64,
+                    true,
+                ));
+                // OCHRE HVAC.py:575: main_power = total_input - fan.
+                fields.push(Field::new(
+                    format!("{name} Main Power (kW)"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} Fan Power (kW)"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} Runtime Fraction (-)"),
+                    DataType::Float64,
+                    true,
+                ));
+                // Promoted from v8: OCHRE emits Capacity and COP at v7 (HVAC.py:584,598).
+                fields.push(Field::new(
+                    format!("{name} Capacity (W)"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} COP (-)"),
+                    DataType::Float64,
+                    true,
+                ));
+            }
         }
         fields.push(Field::new(
             HOT_WATER_MAINS_TEMP_COL,
@@ -223,18 +277,7 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
 
     if verbosity >= 8 {
         // Level 8: all individual equipment state variables.
-        for (name, _fuel) in &names {
-            fields.push(Field::new(
-                format!("{name} Capacity (W)"),
-                DataType::Float64,
-                true,
-            ));
-            fields.push(Field::new(
-                format!("{name} COP (-)"),
-                DataType::Float64,
-                true,
-            ));
-        }
+        // (Capacity and COP were promoted to v7 to match OCHRE HVAC.py:584,598.)
     }
 
     let mut metadata = std::collections::HashMap::new();
@@ -263,6 +306,7 @@ pub fn expected_columns_at_verbosity(verbosity: u8) -> Vec<&'static str> {
 
     if verbosity >= 5 {
         cols.push(NET_SENSIBLE_HEAT_GAIN_COL);
+        cols.push(HVAC_DUCT_LOSSES_COL);
     }
 
     if verbosity >= 7 {
@@ -376,6 +420,18 @@ fn is_heat_pump_heater(name: &str) -> bool {
     lower.contains("ashp heater")
         || lower.contains("mshp heater")
         || lower.contains("heat pump heater")
+}
+
+/// Returns true if the equipment name indicates cooling-only equipment
+/// that should emit SHR and Latent Gains columns at v7.
+/// Heat-pump heaters that also cool are excluded here — the cooler
+/// companion emits those columns under its own name.
+fn is_cooling_equipment(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("air conditioner")
+        || lower.contains("room ac")
+        || lower.contains("cooler")
+        || lower.contains("dehumidifier")
 }
 
 #[cfg(test)]
@@ -529,124 +585,65 @@ mod tests {
         }
     }
 
-    // ── Regression tests for verbosity 7 gaps ────────────────────────────────
-    // These tests are EXPECTED TO FAIL until the gaps are implemented.
-    // They document the gap between HARES v7 output and OCHRE v7 output.
+    // ── Verbosity 7 HVAC output columns ────────────────────────────────────
 
-    /// OCHRE emits `{name} SHR (-)` at verbosity 7 for cooling equipment
-    /// (HVAC.py:596). HARES verbosity 7 does not currently include this column.
-    /// Will stop panicking when SHR column is included at verbosity 7 for cooling equipment
-    #[should_panic(expected = "verbosity 7 must include 'Air Conditioner SHR (-)'")]
+    /// Cooling equipment gets SHR and Latent Gains at v7; heating-only does not.
+    /// OCHRE HVAC.py:595-596.
     #[test]
-    fn verbosity_7_includes_shr_column_for_cooling_equipment() {
-        let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let schema = build_schema(&specs, 7);
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            names.contains(&"Air Conditioner SHR (-)"),
-            "verbosity 7 must include 'Air Conditioner SHR (-)' (OCHRE HVAC.py:596); got: {names:?}"
-        );
+    fn cooling_equipment_gets_shr_and_latent_gains_at_v7_heating_does_not() {
+        let cool = build_schema(&[make_spec("Air Conditioner", FuelType::Electric)], 7);
+        let heat = build_schema(&[make_spec("Gas Furnace", FuelType::Gas)], 7);
+        let cool_names: Vec<&str> = cool.fields().iter().map(|f| f.name().as_str()).collect();
+        let heat_names: Vec<&str> = heat.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(cool_names.contains(&"Air Conditioner SHR (-)"));
+        assert!(cool_names.contains(&"Air Conditioner Latent Gains (W)"));
+        assert!(!heat_names.contains(&"Gas Furnace SHR (-)"));
+        assert!(!heat_names.contains(&"Gas Furnace Latent Gains (W)"));
     }
 
-    /// OCHRE emits `{name} Speed (-)` at verbosity 7 for all HVAC equipment
-    /// (HVAC.py:597). HARES verbosity 7 does not currently include this column.
-    /// Will stop panicking when Speed column is included at verbosity 7 for HVAC equipment
-    #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Speed (-)'")]
+    /// HVAC equipment gets Speed, Fan Power, Main Power, Runtime Fraction,
+    /// Capacity, and COP at v7. Non-HVAC equipment gets none of these.
+    /// OCHRE HVAC.py:592-599.
     #[test]
-    fn verbosity_7_includes_speed_column_for_hvac_equipment() {
-        let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let schema = build_schema(&specs, 7);
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            names.contains(&"Air Conditioner Speed (-)"),
-            "verbosity 7 must include 'Air Conditioner Speed (-)' (OCHRE HVAC.py:597); got: {names:?}"
-        );
+    fn hvac_equipment_gets_performance_columns_non_hvac_does_not() {
+        let hvac = build_schema(&[make_spec("Gas Furnace", FuelType::Gas)], 7);
+        let non = build_schema(&[make_spec("Battery", FuelType::Electric)], 7);
+        let hvac_names: Vec<&str> = hvac.fields().iter().map(|f| f.name().as_str()).collect();
+        let non_names: Vec<&str> = non.fields().iter().map(|f| f.name().as_str()).collect();
+        let hvac_only = [
+            "Gas Furnace Speed (-)",
+            "Gas Furnace Fan Power (kW)",
+            "Gas Furnace Main Power (kW)",
+            "Gas Furnace Runtime Fraction (-)",
+            "Gas Furnace Capacity (W)",
+            "Gas Furnace COP (-)",
+        ];
+        for col in &hvac_only {
+            assert!(hvac_names.contains(col), "HVAC schema missing '{col}'");
+            assert!(
+                !non_names.contains(col),
+                "non-HVAC schema must not include '{col}'"
+            );
+        }
     }
 
-    /// OCHRE emits `{name} Fan Power (kW)` at verbosity 7 (HVAC.py:593).
-    /// HARES verbosity 7 does not currently include this column.
-    /// Will stop panicking when Fan Power column is included at verbosity 7
-    #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Fan Power (kW)'")]
+    /// Capacity and COP promoted from v8 to v7; not duplicated at v8.
     #[test]
-    fn verbosity_7_includes_fan_power_column() {
+    fn capacity_and_cop_promoted_to_v7_not_duplicated_at_v8() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let schema = build_schema(&specs, 7);
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            names.contains(&"Air Conditioner Fan Power (kW)"),
-            "verbosity 7 must include 'Air Conditioner Fan Power (kW)' (OCHRE HVAC.py:593); got: {names:?}"
-        );
+        let s7 = build_schema(&specs, 7);
+        let s8 = build_schema(&specs, 8);
+        let n7: Vec<&str> = s7.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(n7.contains(&"Air Conditioner Capacity (W)"));
+        assert!(n7.contains(&"Air Conditioner COP (-)"));
+        // v8 must be identical in length to v7 (Capacity and COP are not re-added at v8).
+        assert_eq!(s8.fields().len(), s7.fields().len());
     }
 
-    /// OCHRE emits `{name} Main Power (kW)` at verbosity 7 (HVAC.py:592).
-    /// HARES verbosity 7 does not currently include this column.
-    /// Will stop panicking when Main Power column is included at verbosity 7
-    #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Main Power (kW)'")]
+    /// HVAC Duct Losses column present at v5 (OCHRE HVAC.py:588).
     #[test]
-    fn verbosity_7_includes_main_power_column() {
-        let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let schema = build_schema(&specs, 7);
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            names.contains(&"Air Conditioner Main Power (kW)"),
-            "verbosity 7 must include 'Air Conditioner Main Power (kW)' (OCHRE HVAC.py:592); got: {names:?}"
-        );
-    }
-
-    /// OCHRE emits `{name} Runtime Fraction (-)` — not explicitly at v7 in
-    /// HVAC.py generate_results, but verified that it should appear at v7 for all HVAC equipment.
-    /// Will stop panicking when Runtime Fraction column is included at verbosity 7
-    #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Runtime Fraction (-)'")]
-    #[test]
-    fn verbosity_7_includes_runtime_fraction_column() {
-        let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let schema = build_schema(&specs, 7);
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            names.contains(&"Air Conditioner Runtime Fraction (-)"),
-            "verbosity 7 must include 'Air Conditioner Runtime Fraction (-)'; got: {names:?}"
-        );
-    }
-
-    /// OCHRE emits `{name} Capacity (W)` at verbosity 7 (HVAC.py:598).
-    /// HARES places it at verbosity 8. It must be promoted to v7.
-    /// Will stop panicking when Capacity column is promoted from v8 to v7
-    #[should_panic(expected = "verbosity 7 must include 'Air Conditioner Capacity (W)'")]
-    #[test]
-    fn capacity_column_promoted_from_v8_to_v7() {
-        let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let schema = build_schema(&specs, 7);
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            names.contains(&"Air Conditioner Capacity (W)"),
-            "verbosity 7 must include 'Air Conditioner Capacity (W)' (currently only at v8); got: {names:?}"
-        );
-    }
-
-    /// OCHRE emits `{name} COP (-)` at verbosity 4 (HVAC.py:584), so it must
-    /// appear at v7 too. HARES currently places COP only at verbosity 8.
-    /// Note: this tests that v7 has COP.
-    /// Will stop panicking when COP column is promoted from v8 to v7
-    #[should_panic(expected = "verbosity 7 must include 'Air Conditioner COP (-)'")]
-    #[test]
-    fn cop_column_promoted_from_v8_to_v7() {
-        let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let schema = build_schema(&specs, 7);
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            names.contains(&"Air Conditioner COP (-)"),
-            "verbosity 7 must include 'Air Conditioner COP (-)' (currently only at v8); got: {names:?}"
-        );
-    }
-
-    /// OCHRE emits `{name} Duct Losses (W)` at verbosity 5 (HVAC.py:588).
-    /// HARES verbosity 5 currently has no duct losses column.
-    /// Will stop panicking when Duct Losses column is included at verbosity 5
-    #[should_panic(expected = "verbosity 5 must include 'HVAC Duct Losses (W)'")]
-    #[test]
-    fn verbosity_5_includes_duct_losses_column() {
-        let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let schema = build_schema(&specs, 5);
+    fn hvac_duct_losses_column_present_at_verbosity_5() {
+        let schema = build_schema(&[], 5);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
             names.contains(&"HVAC Duct Losses (W)"),

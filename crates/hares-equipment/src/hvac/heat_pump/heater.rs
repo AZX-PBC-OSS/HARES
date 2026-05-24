@@ -877,7 +877,14 @@ impl HeatPumpHeaterCore {
         self.defrost_time_fraction = step.defrost_time_fraction;
 
         // Telemetry reports delivered (post-DSE) thermal output for the conditioned zone.
-        let delivered_thermal_w = step.thermal_output_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
+        let dse = self.hvac.config.duct_dse.clamp(0.0, 1.0);
+        let delivered_thermal_w = step.thermal_output_w * dse;
+        // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
+        let duct_loss_w = step.thermal_output_w * (1.0 - dse);
+        // OCHRE HVAC.py:1464-1467: ASHP heater Main Power = compressor-only (excludes ER).
+        // For ASHP/MSHP: main_power = total_input - fan - er_backup - pan_heater.
+        // OCHRE HVAC.py:575 defines main_power = total_input_kw - fan_kw.
+        let main_power_kw = step.compressor_kw * self.hvac.config.space_fraction;
         self.telemetry.set(tk::ELECTRIC_KW, scaled_electric_kw);
         self.telemetry
             .set(tk::THERMAL_OUTPUT_W, delivered_thermal_w);
@@ -910,6 +917,8 @@ impl HeatPumpHeaterCore {
             tk::COMPRESSOR_KW,
             step.compressor_kw * self.hvac.config.space_fraction,
         );
+        self.telemetry.set(tk::MAIN_POWER_KW, main_power_kw);
+        self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry
             .set(tk::DEFROST_TIME_FRACTION, step.defrost_time_fraction);
         self.telemetry

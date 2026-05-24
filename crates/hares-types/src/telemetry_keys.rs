@@ -25,6 +25,9 @@ pub const SENSIBLE_COOLING_W: &str = "sensible_cooling_w";
 pub const LATENT_COOLING_W: &str = "latent_cooling_w";
 pub const COIL_SENSIBLE_COOLING_W: &str = "coil_sensible_cooling_w";
 pub const COIL_LATENT_COOLING_W: &str = "coil_latent_cooling_w";
+// OCHRE HVAC.py:595: latent_gains = latent_gain * space_fraction (pre-DSE).
+// Distinct from LATENT_COOLING_W which is post-DSE.
+pub const LATENT_GAINS_W: &str = "latent_gains_w";
 pub const FAN_HEAT_W: &str = "fan_heat_w";
 pub const IDEAL_CAPACITY_W: &str = "ideal_capacity_w";
 
@@ -121,6 +124,13 @@ pub const COMPRESSOR_POWER_W: &str = "compressor_power_w";
 pub const FAN_KW: &str = "fan_kw";
 pub const FAN_ELECTRIC_W: &str = "fan_electric_w";
 pub const FAN_POWER_W: &str = "fan_power_w";
+// OCHRE HVAC.py:575: main_power = total_input_power_kw - fan_kw.
+// For cooling: main_power = compressor_kw. For gas furnace: gas input in kW.
+// For ASHP heating: compressor-only (excludes ER power per HVAC.py:1464-1467).
+pub const MAIN_POWER_KW: &str = "main_power_kw";
+// ASHRAE 152: duct_loss_w = gross_capacity_w * (1 - dse).
+// Must use pre-DSE gross capacity, not post-DSE telemetry values.
+pub const DUCT_LOSS_W: &str = "duct_loss_w";
 pub const BACKUP_ER_KW: &str = "backup_er_kw";
 pub const PAN_HEATER_KW: &str = "pan_heater_kw";
 pub const HP_CAPACITY_W: &str = "hp_capacity_w";

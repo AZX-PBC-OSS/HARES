@@ -249,13 +249,16 @@ fn verbosity_7_produces_additional_columns_beyond_level_6() {
 }
 
 #[test]
-fn verbosity_8_produces_additional_columns_beyond_level_7() {
+fn verbosity_8_produces_at_least_as_many_columns_as_level_7() {
+    // v8 currently inherits all columns from v7 (Capacity and COP were
+    // promoted from v8 to v7 per OCHRE HVAC.py:584,598). v8 may gain
+    // additional columns in future; for now it must not lose any.
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
     let schema_7 = build_schema(&specs, 7);
     let schema_8 = build_schema(&specs, 8);
     assert!(
-        schema_8.fields().len() > schema_7.fields().len(),
-        "verbosity 8 ({}) must produce more columns than verbosity 7 ({})",
+        schema_8.fields().len() >= schema_7.fields().len(),
+        "verbosity 8 ({}) must produce at least as many columns as verbosity 7 ({})",
         schema_8.fields().len(),
         schema_7.fields().len()
     );

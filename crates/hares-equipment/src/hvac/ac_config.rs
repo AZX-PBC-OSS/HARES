@@ -20,12 +20,13 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
     [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub(super) fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(19);
+    let mut telemetry = Telemetry::with_capacity(22);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::LATENT_COOLING_W, 0.0);
     telemetry.insert(tk::COIL_SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::COIL_LATENT_COOLING_W, 0.0);
+    telemetry.insert(tk::LATENT_GAINS_W, 0.0);
     telemetry.insert(tk::FAN_HEAT_W, 0.0);
     telemetry.insert(tk::SHR, 1.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
@@ -34,6 +35,10 @@ pub(super) fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::COMPRESSOR_KW, 0.0);
     telemetry.insert(tk::FAN_KW, 0.0);
+    // OCHRE HVAC.py:575: main_power = total_input - fan.
+    telemetry.insert(tk::MAIN_POWER_KW, 0.0);
+    // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
+    telemetry.insert(tk::DUCT_LOSS_W, 0.0);
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
     telemetry.insert(tk::APPARATUS_DEW_POINT_C, 0.0);
     telemetry.insert(tk::BYPASS_FACTOR, 0.0);
@@ -69,6 +74,11 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::COIL_LATENT_COOLING_W.to_string(),
             unit: "W".to_string(),
             description: "Gross latent cooling at the coil (pre-DSE)".to_string(),
+        },
+        TelemetryField {
+            name: tk::LATENT_GAINS_W.to_string(),
+            unit: "W".to_string(),
+            description: "Pre-DSE gross latent cooling scaled by space_fraction; matches OCHRE HVAC.py:595 Latent Gains column".to_string(),
         },
         TelemetryField {
             name: tk::FAN_HEAT_W.to_string(),
@@ -109,6 +119,16 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::FAN_KW.to_string(),
             unit: "kW".to_string(),
             description: "Supply fan electric power".to_string(),
+        },
+        TelemetryField {
+            name: tk::MAIN_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Main (compressor-only) power per OCHRE HVAC.py:575: total_input - fan".to_string(),
+        },
+        TelemetryField {
+            name: tk::DUCT_LOSS_W.to_string(),
+            unit: "W".to_string(),
+            description: "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)".to_string(),
         },
         TelemetryField {
             name: tk::SUPPLY_TEMP_C.to_string(),

@@ -146,6 +146,13 @@ struct EquipmentColumns {
     energy_kwh: Option<usize>,
     schedule: Option<usize>,
     defrost_state: Option<usize>,
+    shr: Option<usize>,
+    speed: Option<usize>,
+    fan_power: Option<usize>,
+    main_power: Option<usize>,
+    runtime_fraction: Option<usize>,
+    latent_gains: Option<usize>,
+    duct_losses: Option<usize>,
 }
 
 /// Build column index maps for each equipment piece using instance-qualified
@@ -193,6 +200,19 @@ fn build_equipment_column_map(
                 defrost_state: column_index
                     .get(&format!("{name} Defrost State (-)"))
                     .copied(),
+                shr: column_index.get(&format!("{name} SHR (-)")).copied(),
+                speed: column_index.get(&format!("{name} Speed (-)")).copied(),
+                fan_power: column_index.get(&format!("{name} Fan Power (kW)")).copied(),
+                main_power: column_index
+                    .get(&format!("{name} Main Power (kW)"))
+                    .copied(),
+                runtime_fraction: column_index
+                    .get(&format!("{name} Runtime Fraction (-)"))
+                    .copied(),
+                latent_gains: column_index
+                    .get(&format!("{name} Latent Gains (W)"))
+                    .copied(),
+                duct_losses: column_index.get("HVAC Duct Losses (W)").copied(),
             }
         })
         .collect()
@@ -2596,6 +2616,35 @@ impl Dwelling {
             }
             if let Some(idx) = cols.defrost_state {
                 row[idx] = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
+            }
+            // Per-equipment HVAC performance columns at v7.
+            // All read from telemetry (not CoreOutput) since these are
+            // HVAC-specific signals that don't yet have CoreOutput fields.
+            if let Some(idx) = cols.shr {
+                row[idx] = eq.telemetry().get(tk::SHR).unwrap_or(0.0); // allowed: SHR remains telemetry-only until CoreOutput gains an SHR field.
+            }
+            if let Some(idx) = cols.speed {
+                row[idx] = eq.telemetry().get(tk::SPEED_INDEX).unwrap_or(0.0); // allowed: speed index remains telemetry-only until CoreOutput gains a speed field.
+            }
+            if let Some(idx) = cols.fan_power {
+                row[idx] = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0); // allowed: fan power remains telemetry-only until CoreOutput gains a fan power field.
+            }
+            if let Some(idx) = cols.main_power {
+                // OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
+                row[idx] = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap_or(0.0); // allowed: main power remains telemetry-only until CoreOutput gains a main power field.
+            }
+            if let Some(idx) = cols.runtime_fraction {
+                row[idx] = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0); // allowed: runtime fraction remains telemetry-only until CoreOutput gains an RTF field.
+            }
+            if let Some(idx) = cols.latent_gains {
+                // OCHRE HVAC.py:595: Latent Gains = latent_gain * space_fraction (pre-DSE).
+                row[idx] = eq.telemetry().get(tk::LATENT_GAINS_W).unwrap_or(0.0); // allowed: latent gains remains telemetry-only until CoreOutput gains a latent gains field.
+            }
+            if let Some(idx) = cols.duct_losses {
+                // Aggregate column: sum duct_loss_w across all HVAC equipment.
+                // Only the first equipment's index is used; all HVAC contributions
+                // are accumulated into the same row slot.
+                row[idx] += eq.telemetry().get(tk::DUCT_LOSS_W).unwrap_or(0.0); // allowed: duct loss remains telemetry-only until CoreOutput gains a duct loss field.
             }
         }
 
