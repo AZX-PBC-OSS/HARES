@@ -12,9 +12,7 @@
 //! - Gallons appear only inside conversion constants; they are never exposed.
 
 use hares_physics::constants::MINUTES_PER_DAY;
-
-/// US gallons per litre (exact by definition of US gallon).
-const GAL_PER_L: f64 = 1.0 / 3.785_411_784;
+use hares_physics::units as conv;
 
 /// ANSI/RESNET/ICC 301-2014 Addendum A-2015 §4.2.2.5.2.11: reference waste water coefficient.
 /// Formula: ref_w_gpd = RESNET_WASTE_COEFF_GPD × bedrooms^RESNET_WASTE_EXPONENT  [gal/day]
@@ -28,10 +26,10 @@ const RESNET_WASTE_EXPONENT: f64 = 0.43;
 /// `pipe_r_value` in [`DistributionSystem`] is stored in SI [m²·K/W].
 const PIPE_INSULATION_R_THRESHOLD_M2_K_W: f64 = 3.0 * 0.176_110;
 
-/// Convert US gallons to litres.
+/// Convert US gallons to litres via uom.
 #[inline]
 fn gal_to_l(gal: f64) -> f64 {
-    gal / GAL_PER_L
+    conv::volume_gal_to_l(gal)
 }
 
 /// Normalize a raw water draw schedule (dimensionless fractions) to mass flow rates in kg/s.
@@ -433,7 +431,7 @@ mod tests {
     #[test]
     fn fixture_formula_matches_ansi_resnet_301() {
         // Reference: 14.6 + 10.0 * 3 = 44.6 gal/day for 3 bedrooms, standard fixtures.
-        let expected_l = 44.6 / GAL_PER_L;
+        let expected_l = conv::volume_gal_to_l(44.6);
         let result = fixture_daily_hot_water_l(3.0, FixtureEfficiency::Standard, 1.0);
         assert!(
             (result - expected_l).abs() < 1e-6,

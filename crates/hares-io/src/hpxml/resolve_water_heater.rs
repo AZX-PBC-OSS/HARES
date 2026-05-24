@@ -113,7 +113,7 @@ pub(super) fn resolve_water_heaters(
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
-                    pilot_power_w: child_f64(wh, "PilotPower"),
+                    pilot_power_w: child_f64(wh, "PilotPower").map(conv::power_btu_h_to_w),
                     flue_loss_fraction: gas_flue_loss_fraction,
                     skin_loss_fraction: None,
                     ignition_type: child_text(wh, "IgnitionType"),
@@ -937,6 +937,52 @@ mod tests {
         assert!(
             cfg.ignition_type.is_none(),
             "absent IgnitionType must yield None in config"
+        );
+    }
+
+    #[test]
+    fn pilot_power_btu_h_converted_to_watts() {
+        let ignition_elem = "                      <PilotPower>600</PilotPower>\n";
+        let xml = format!(
+            r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>storage water heater</WaterHeaterType>
+                      <TankVolume>40</TankVolume>
+                      <EnergyFactor>0.59</EnergyFactor>
+{ignition_elem}
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#
+        );
+        let cfg = parse_gas_wh_config(&xml);
+        let expected_w = 600.0 * 0.293_071_07;
+        let pw = cfg.pilot_power_w.expect("pilot_power_w must be set when PilotPower is in HPXML");
+        assert!(
+            (pw - expected_w).abs() < 0.01,
+            "PilotPower=600 BTU/h must convert to ~{expected_w:.2} W, got {pw:.2}"
+        );
+    }
+
+    #[test]
+    fn pilot_power_absent_yields_none() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_ignition(None));
+        assert!(
+            cfg.pilot_power_w.is_none(),
+            "absent PilotPower must yield None in config"
         );
     }
 

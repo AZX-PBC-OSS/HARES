@@ -22,7 +22,7 @@ use uom::si::mass_density::{kilogram_per_cubic_meter, pound_per_cubic_foot};
 use uom::si::pressure::pascal;
 use uom::si::specific_heat_capacity::{btu_per_pound_degree_fahrenheit, joule_per_kilogram_kelvin};
 use uom::si::thermodynamic_temperature::{degree_celsius, degree_fahrenheit, kelvin};
-use uom::si::volume::{cubic_foot, cubic_meter, gallon};
+use uom::si::volume::{cubic_foot, cubic_meter, gallon, liter};
 
 pub type Temperature = UomTemperature;
 pub type Power = UomPower;
@@ -168,6 +168,18 @@ pub fn volume_ft3_to_m3(ft3: f64) -> f64 {
 
 pub fn volume_gal_to_m3(gal: f64) -> f64 {
     UomVolume::new::<gallon>(gal).get::<cubic_meter>()
+}
+
+pub fn volume_gal_to_l(gal: f64) -> f64 {
+    UomVolume::new::<gallon>(gal).get::<liter>()
+}
+
+pub fn volume_m3_to_l(m3: f64) -> f64 {
+    UomVolume::new::<cubic_meter>(m3).get::<liter>()
+}
+
+pub fn volume_l_to_m3(l: f64) -> f64 {
+    UomVolume::new::<liter>(l).get::<cubic_meter>()
 }
 
 // --- Temperature (plain f64) ---
