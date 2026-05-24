@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
 };
@@ -385,7 +385,12 @@ impl HeatPumpHeaterCore {
                     | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY
                     | ControlCapabilities::MAX_CAPACITY_FRACTION,
-                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+                core_capabilities: CoreCapabilities::ELECTRIC
+                    | CoreCapabilities::HAS_MODE
+                    | CoreCapabilities::THERMAL
+                    | CoreCapabilities::HAS_SPEED
+                    | CoreCapabilities::HAS_SETPOINT
+                    | CoreCapabilities::HAS_COP,
                 telemetry_fields: heater_telemetry_fields(),
             },
             ports: vec![
@@ -982,15 +987,30 @@ impl HeatPumpHeaterCore {
         } else {
             None
         };
+        let sp = self.hvac.effective_setpoints();
+        let active_setpoint_c = match self.operating_mode {
+            OperatingMode::Heating => sp.heating_c + self.dr_setpoint_offset_c,
+            OperatingMode::Cooling => sp.cooling_c,
+            _ => sp.heating_c + self.dr_setpoint_offset_c,
+        };
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(scaled_electric_kw.max(0.0))),
                 reactive_power_kvar: None,
                 fuel_w: core_fuel_w,
+                thermal_output_w: Some(delivered_thermal_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.operating_mode),
                 soc: None,
+                speed_index: Some(self.hvac.runtime.last_speed_index as u8),
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance {
+                cop: Some(cop),
+                main_power_kw: Some(main_power_kw),
             },
         };
 

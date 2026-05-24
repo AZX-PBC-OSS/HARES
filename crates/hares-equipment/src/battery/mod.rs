@@ -15,10 +15,10 @@ use std::time::Duration;
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows,
-    CoreOutput, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FuelType, GridExportRule, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Soc, Telemetry, TelemetryField, ThermalCategory,
-    ZoneId,
+    CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule, HaresError,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Soc, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1072,11 +1072,17 @@ impl Equipment for Battery {
                 electric_kw: Some(ElectricPower::Bidirectional(port_power_kw)),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.mode),
                 soc: Soc::try_from(self.soc).ok(),
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
 
         Ok(())

@@ -65,7 +65,12 @@ impl HpCooler {
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY,
-                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+                core_capabilities: CoreCapabilities::ELECTRIC
+                    | CoreCapabilities::HAS_MODE
+                    | CoreCapabilities::THERMAL
+                    | CoreCapabilities::HAS_SPEED
+                    | CoreCapabilities::HAS_SETPOINT
+                    | CoreCapabilities::HAS_COP,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
             },
             ports: inner.ports().to_vec(),

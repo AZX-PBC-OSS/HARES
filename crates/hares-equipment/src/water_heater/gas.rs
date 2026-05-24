@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
     ThermalCategory, ZoneId, telemetry_keys as tk,
@@ -565,11 +565,17 @@ impl Equipment for GasWH {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
                 }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
 
         // Reset transient ctrl_load_fraction after this step so it does not

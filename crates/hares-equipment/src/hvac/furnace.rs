@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
-    FuelPower, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -87,7 +87,10 @@ impl ElectricFurnace {
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY,
-            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::HAS_MODE
+                | CoreCapabilities::THERMAL
+                | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: electric_furnace_telemetry_fields(),
         };
 
@@ -215,15 +218,27 @@ impl Equipment for ElectricFurnace {
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry
             .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
+        // Heating-only equipment: setpoint_c is always the heating setpoint (per
+        // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
+        let active_setpoint_c = sp.heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: Some(thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.operating_mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance {
+                cop: None,
+                main_power_kw: Some(main_power_kw),
             },
         };
 
@@ -307,7 +322,10 @@ impl GasFurnace {
                 | ControlCapabilities::IDEAL_CAPACITY,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::FUEL
-                | CoreCapabilities::HAS_MODE,
+                | CoreCapabilities::HAS_MODE
+                | CoreCapabilities::THERMAL
+                | CoreCapabilities::HAS_SPEED
+                | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: gas_furnace_telemetry_fields(),
         };
 
@@ -468,6 +486,9 @@ impl Equipment for GasFurnace {
         self.telemetry.set(tk::RUNTIME_FRACTION, rtf);
         self.telemetry.set(tk::MAIN_POWER_KW, main_power_kw);
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
+        // Heating-only equipment: setpoint_c is always the heating setpoint (per
+        // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
+        let active_setpoint_c = sp.heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
@@ -476,10 +497,19 @@ impl Equipment for GasFurnace {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
                 }),
+                thermal_output_w: Some(thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.operating_mode),
                 soc: None,
+                speed_index: Some(self.hvac.runtime.last_speed_index as u8),
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance {
+                cop: None,
+                main_power_kw: Some(main_power_kw),
             },
         };
 

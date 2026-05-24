@@ -6,8 +6,8 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
     PortSlots, Telemetry, ThermalCategory, ZoneId,
 };
@@ -432,7 +432,12 @@ impl CoolingCore {
                     | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY
                     | ControlCapabilities::MAX_CAPACITY_FRACTION,
-                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+                core_capabilities: CoreCapabilities::ELECTRIC
+                    | CoreCapabilities::HAS_MODE
+                    | CoreCapabilities::THERMAL
+                    | CoreCapabilities::HAS_SPEED
+                    | CoreCapabilities::HAS_SETPOINT
+                    | CoreCapabilities::HAS_COP,
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
@@ -890,15 +895,31 @@ impl CoolingCore {
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
+        let post_dse_sensible_w = sensible_cooling_w * dse;
+        let post_dse_latent_w = latent_cooling_w * dse;
+        let active_setpoint_c = match self.operating_mode {
+            OperatingMode::Cooling => sp.cooling_c,
+            OperatingMode::Heating => sp.heating_c,
+            _ => sp.cooling_c,
+        };
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: Some(-(post_dse_sensible_w + post_dse_latent_w)),
+                sensible_cooling_w: Some(-post_dse_sensible_w),
+                latent_cooling_w: Some(-post_dse_latent_w),
             },
             state: CoreState {
                 operating_mode: Some(self.operating_mode),
                 soc: None,
+                speed_index: Some(self.hvac.runtime.last_speed_index as u8),
+                setpoint_c: Some(active_setpoint_c),
+            },
+            performance: CorePerformance {
+                cop: Some(cop),
+                main_power_kw: Some(compressor_kw * self.hvac.config.space_fraction),
             },
         };
 

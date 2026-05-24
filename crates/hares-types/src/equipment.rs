@@ -886,6 +886,15 @@ pub struct CoreFlows {
     /// Reactive power in kvar. Positive = inductive/lagging (IEEE 1547).
     pub reactive_power_kvar: Option<f64>,
     pub fuel_w: Option<FuelPower>,
+    /// Net delivered thermal output in watts (positive = heating, negative = cooling),
+    /// post-DSE. None for non-thermal equipment.
+    pub thermal_output_w: Option<f64>,
+    /// Delivered sensible cooling in watts (negative or zero). Post-DSE.
+    /// None for non-cooling equipment.
+    pub sensible_cooling_w: Option<f64>,
+    /// Delivered latent cooling in watts (negative or zero). Post-DSE.
+    /// None for non-cooling equipment.
+    pub latent_cooling_w: Option<f64>,
 }
 
 /// Discrete/continuous state outputs from one equipment step.
@@ -893,6 +902,24 @@ pub struct CoreFlows {
 pub struct CoreState {
     pub operating_mode: Option<OperatingMode>,
     pub soc: Option<Soc>,
+    /// Active compressor/heat-pump speed level (0-based). None when equipment
+    /// has no discrete speeds or is off.
+    pub speed_index: Option<u8>,
+    /// Active thermal setpoint in °C: heating setpoint when heating, cooling
+    /// setpoint when cooling, None when off or in deadband.
+    pub setpoint_c: Option<f64>,
+}
+
+/// Equipment performance metrics from one step.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CorePerformance {
+    /// Coefficient of performance. For cooling equipment this is gross cooling
+    /// (pre-DSE) over compressor-only electric input, per AHRI/SEER convention.
+    /// None for non-compressor equipment.
+    pub cop: Option<f64>,
+    /// Main (compressor or primary heat-source) power in kW, excluding fan.
+    /// OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
+    pub main_power_kw: Option<f64>,
 }
 
 /// Typed output from one equipment simulation step.
@@ -902,6 +929,7 @@ pub struct CoreState {
 pub struct CoreOutput {
     pub flows: CoreFlows,
     pub state: CoreState,
+    pub performance: CorePerformance,
 }
 
 /// Validates that CoreOutput and declared capabilities agree in both directions.
@@ -929,8 +957,8 @@ pub fn validate_core_contract(
     }
 
     // Count missing/undeclared-populated fields without allocating.
-    let mut missing_bits = 0u8;
-    let mut unexpected_bits = 0u8;
+    let mut missing_bits = 0u16;
+    let mut unexpected_bits = 0u16;
     if caps.contains(CoreCapabilities::ELECTRIC) && co.flows.electric_kw.is_none() {
         missing_bits |= 1;
     }
@@ -961,18 +989,46 @@ pub fn validate_core_contract(
     if !caps.contains(CoreCapabilities::HAS_MODE) && co.state.operating_mode.is_some() {
         unexpected_bits |= 16;
     }
+    if caps.contains(CoreCapabilities::THERMAL) && co.flows.thermal_output_w.is_none() {
+        missing_bits |= 32;
+    }
+    if !caps.contains(CoreCapabilities::THERMAL) && co.flows.thermal_output_w.is_some() {
+        unexpected_bits |= 32;
+    }
+    if caps.contains(CoreCapabilities::HAS_SPEED) && co.state.speed_index.is_none() {
+        missing_bits |= 64;
+    }
+    if !caps.contains(CoreCapabilities::HAS_SPEED) && co.state.speed_index.is_some() {
+        unexpected_bits |= 64;
+    }
+    if caps.contains(CoreCapabilities::HAS_SETPOINT) && co.state.setpoint_c.is_none() {
+        missing_bits |= 128;
+    }
+    if !caps.contains(CoreCapabilities::HAS_SETPOINT) && co.state.setpoint_c.is_some() {
+        unexpected_bits |= 128;
+    }
+    if caps.contains(CoreCapabilities::HAS_COP) && co.performance.cop.is_none() {
+        missing_bits |= 256;
+    }
+    if !caps.contains(CoreCapabilities::HAS_COP) && co.performance.cop.is_some() {
+        unexpected_bits |= 256;
+    }
 
     if missing_bits == 0 && unexpected_bits == 0 {
         return Ok(());
     }
 
     // Only build the error string on the failure path.
-    static NAMES: [(u8, &str); 5] = [
+    static NAMES: [(u16, &str); 9] = [
         (1, "flows.electric_kw"),
         (2, "flows.reactive_power_kvar"),
         (4, "flows.fuel_w"),
         (8, "state.soc"),
         (16, "state.operating_mode"),
+        (32, "flows.thermal_output_w"),
+        (64, "state.speed_index"),
+        (128, "state.setpoint_c"),
+        (256, "performance.cop"),
     ];
     let missing: String = NAMES
         .iter()
@@ -1005,12 +1061,16 @@ pub fn validate_core_contract(
 bitflags! {
     /// Capabilities declared by equipment for CoreOutput validation.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    pub struct CoreCapabilities: u8 {
-        const ELECTRIC   = 0b0000_0001;
-        const REACTIVE   = 0b0000_0010;
-        const FUEL       = 0b0000_0100;
-        const HAS_SOC    = 0b0000_1000;
-        const HAS_MODE   = 0b0001_0000;
+    pub struct CoreCapabilities: u16 {
+        const ELECTRIC     = 0b0000_0000_0000_0001;
+        const REACTIVE     = 0b0000_0000_0000_0010;
+        const FUEL         = 0b0000_0000_0000_0100;
+        const HAS_SOC      = 0b0000_0000_0000_1000;
+        const HAS_MODE     = 0b0000_0000_0001_0000;
+        const THERMAL      = 0b0000_0000_0010_0000;
+        const HAS_SPEED    = 0b0000_0000_0100_0000;
+        const HAS_SETPOINT = 0b0000_0000_1000_0000;
+        const HAS_COP      = 0b0000_0001_0000_0000;
     }
 }
 
@@ -2179,8 +2239,15 @@ mod tests {
         assert!(out.flows.electric_kw.is_none());
         assert!(out.flows.fuel_w.is_none());
         assert!(out.flows.reactive_power_kvar.is_none());
+        assert!(out.flows.thermal_output_w.is_none());
+        assert!(out.flows.sensible_cooling_w.is_none());
+        assert!(out.flows.latent_cooling_w.is_none());
         assert!(out.state.operating_mode.is_none());
         assert!(out.state.soc.is_none());
+        assert!(out.state.speed_index.is_none());
+        assert!(out.state.setpoint_c.is_none());
+        assert!(out.performance.cop.is_none());
+        assert!(out.performance.main_power_kw.is_none());
     }
 
     #[test]
@@ -2190,10 +2257,19 @@ mod tests {
                 electric_kw: Some(ElectricPower::Consumption(3.5)),
                 reactive_power_kvar: Some(0.2),
                 fuel_w: None,
+                thermal_output_w: Some(8500.0),
+                sensible_cooling_w: Some(-6000.0),
+                latent_cooling_w: Some(-2500.0),
             },
             state: CoreState {
                 operating_mode: Some(OperatingMode::Heating),
                 soc: Some(Soc::try_from(0.8).unwrap()),
+                speed_index: Some(2),
+                setpoint_c: Some(21.0),
+            },
+            performance: CorePerformance {
+                cop: Some(3.5),
+                main_power_kw: Some(2.1),
             },
         };
         let json = serde_json::to_string(&out).expect("serialize");
@@ -2228,11 +2304,15 @@ mod tests {
 
     #[test]
     fn core_capabilities_bit_values_are_stable() {
-        assert_eq!(CoreCapabilities::ELECTRIC.bits(), 1u8);
-        assert_eq!(CoreCapabilities::REACTIVE.bits(), 2u8);
-        assert_eq!(CoreCapabilities::FUEL.bits(), 4u8);
-        assert_eq!(CoreCapabilities::HAS_SOC.bits(), 8u8);
-        assert_eq!(CoreCapabilities::HAS_MODE.bits(), 16u8);
+        assert_eq!(CoreCapabilities::ELECTRIC.bits(), 1u16);
+        assert_eq!(CoreCapabilities::REACTIVE.bits(), 2u16);
+        assert_eq!(CoreCapabilities::FUEL.bits(), 4u16);
+        assert_eq!(CoreCapabilities::HAS_SOC.bits(), 8u16);
+        assert_eq!(CoreCapabilities::HAS_MODE.bits(), 16u16);
+        assert_eq!(CoreCapabilities::THERMAL.bits(), 32u16);
+        assert_eq!(CoreCapabilities::HAS_SPEED.bits(), 64u16);
+        assert_eq!(CoreCapabilities::HAS_SETPOINT.bits(), 128u16);
+        assert_eq!(CoreCapabilities::HAS_COP.bits(), 256u16);
     }
 
     #[test]
@@ -2261,11 +2341,17 @@ mod tests {
                     fuel_type: FuelType::Gas,
                     consumption_w: 500.0,
                 }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(OperatingMode::Standby),
                 soc: Some(Soc::try_from(0.5).expect("valid SOC")),
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
         assert!(validate_core_contract(&desc, &out).is_ok());
     }
@@ -2313,11 +2399,17 @@ mod tests {
                 electric_kw: Some(ElectricPower::Consumption(0.5)),
                 reactive_power_kvar: Some(0.2),
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(OperatingMode::Standby),
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
 
         let err = validate_core_contract(&desc, &out)
@@ -2346,8 +2438,12 @@ mod tests {
                 electric_kw: None,
                 reactive_power_kvar: Some(0.1),
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState::default(),
+            performance: CorePerformance::default(),
         };
 
         let err = validate_core_contract(&desc, &out)
@@ -2377,8 +2473,12 @@ mod tests {
                 electric_kw: None,
                 reactive_power_kvar: Some(0.1),
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState::default(),
+            performance: CorePerformance::default(),
         };
 
         let err = validate_core_contract(&desc, &out)

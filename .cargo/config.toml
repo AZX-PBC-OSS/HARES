@@ -1,0 +1,20 @@
+[build]
+jobs = 8
+rustc-wrapper = "sccache"
+
+# sccache caches compilation artifacts across builds.
+# `cargo clean` or deleting target/ invalidates the local cache;
+# sccache persists across clean rebuilds and workspace clones.
+[profile.test]
+opt-level = 0
+debug = 0
+lto = false
+incremental = true
+codegen-units = 256
+
+[profile.dev]
+opt-level = 0
+debug = 0
+lto = false
+incremental = true
+codegen-units = 256

@@ -7,10 +7,10 @@ use chrono::Datelike;
 
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
-    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
-    telemetry_keys as tk,
+    CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentId, ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -435,11 +435,17 @@ impl EventBasedLoad {
                         fuel_type: self.fuel_type,
                         consumption_w: fuel_consumption_w.max(0.0),
                     }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: None,
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
         Ok(())
     }
@@ -912,11 +918,17 @@ impl WetAppliance {
                         fuel_type: self.fuel_type,
                         consumption_w: fuel_consumption_w.max(0.0),
                     }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: None,
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
         Ok(())
     }

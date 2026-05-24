@@ -1737,7 +1737,6 @@ impl Dwelling {
 
         for eq in &self.equipment {
             let co = eq.core_output();
-            let telemetry = eq.telemetry();
             equipment_names.push(eq.descriptor().name.clone());
             equipment_modes.push(co.state.operating_mode.map_or(0.0, |m| m.as_code()));
             equipment_soc.push(co.state.soc.map_or(0.0, |s| s.get()));
@@ -1746,13 +1745,18 @@ impl Dwelling {
             if let Some(zone_id) = eq.descriptor().zone
                 && let Some(zone_idx) = zone_ids.iter().position(|z| *z == zone_id)
             {
-                if let Some(heat_sp) = telemetry.get(tk::HEATING_SETPOINT_C) {
-                    // allowed: thermal setpoints are telemetry-only until CoreOutput gains setpoint fields.
-                    setpoint_heat_c[zone_idx] = heat_sp;
-                }
-                if let Some(cool_sp) = telemetry.get(tk::COOLING_SETPOINT_C) {
-                    // allowed: thermal setpoints are telemetry-only until CoreOutput gains setpoint fields.
-                    setpoint_cool_c[zone_idx] = cool_sp;
+                if let Some(sp) = co.state.setpoint_c {
+                    match co.state.operating_mode {
+                        // Standard heating mode and all heat-pump-specific heating modes.
+                        Some(
+                            hares_types::OperatingMode::Heating
+                            | hares_types::OperatingMode::HeatingHP
+                            | hares_types::OperatingMode::HeatingER
+                            | hares_types::OperatingMode::HeatingHPAndER,
+                        ) => setpoint_heat_c[zone_idx] = sp,
+                        Some(hares_types::OperatingMode::Cooling) => setpoint_cool_c[zone_idx] = sp,
+                        _ => {}
+                    }
                 }
             }
         }
@@ -2568,30 +2572,25 @@ impl Dwelling {
                 row[idx] = co.state.operating_mode.map_or(0.0, |m| m.as_code());
             }
             if let Some(idx) = cols.setpoint {
-                let telemetry = eq.telemetry();
-                // allowed: setpoint remains telemetry-only until CoreOutput gains setpoint fields.
-                let setpoint = telemetry
-                    .get(tk::HEATING_SETPOINT_C) // allowed: setpoint remains telemetry-only until CoreOutput gains setpoint fields.
-                    .or_else(|| telemetry.get(tk::COOLING_SETPOINT_C)) // allowed: setpoint remains telemetry-only until CoreOutput gains setpoint fields.
-                    .unwrap_or(0.0);
-                row[idx] = setpoint;
+                row[idx] = co.state.setpoint_c.unwrap_or(0.0);
             }
             if let Some(idx) = cols.soc {
                 row[idx] = co.state.soc.map_or(0.0, |soc| soc.get());
             }
             if let Some(idx) = cols.capacity {
-                let telemetry = eq.telemetry();
-                // allowed: per-equipment capacity output is telemetry-only until CoreOutput adds capacity fields.
-                let capacity_w = telemetry
-                    .get(tk::THERMAL_OUTPUT_W) // allowed: per-equipment capacity output is telemetry-only until CoreOutput adds capacity fields.
-                    .or_else(|| telemetry.get(tk::IDEAL_CAPACITY_W)) // allowed: per-equipment capacity output is telemetry-only until CoreOutput adds capacity fields.
-                    .or_else(|| telemetry.get(tk::SENSIBLE_COOLING_W).map(f64::abs)) // allowed: per-equipment capacity output is telemetry-only until CoreOutput adds capacity fields.
+                // Capacity column is always a positive magnitude (OCHRE HVAC.py:598:
+                // `capacity_list` is asserted strictly positive). thermal_output_w uses
+                // the signed convention (negative for cooling), so take abs().
+                let capacity_w = co
+                    .flows
+                    .thermal_output_w
+                    .map(f64::abs)
+                    .or(co.flows.sensible_cooling_w.map(f64::abs))
                     .unwrap_or(0.0);
                 row[idx] = capacity_w;
             }
             if let Some(idx) = cols.cop {
-                // allowed: COP remains telemetry-only until CoreOutput gains a COP field.
-                row[idx] = eq.telemetry().get(tk::COP).unwrap_or(0.0); // allowed: COP remains telemetry-only until CoreOutput gains a COP field.
+                row[idx] = co.performance.cop.unwrap_or(0.0);
             }
             if let Some(idx) = cols.reactive_power {
                 let q = co.flows.reactive_power_kvar.unwrap_or(0.0);
@@ -2618,20 +2617,19 @@ impl Dwelling {
                 row[idx] = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
             }
             // Per-equipment HVAC performance columns at v7.
-            // All read from telemetry (not CoreOutput) since these are
-            // HVAC-specific signals that don't yet have CoreOutput fields.
+            // Some read from CoreOutput (setpoint, capacity, COP, speed, main_power),
+            // the rest remain telemetry-only until their fields are promoted.
             if let Some(idx) = cols.shr {
                 row[idx] = eq.telemetry().get(tk::SHR).unwrap_or(0.0); // allowed: SHR remains telemetry-only until CoreOutput gains an SHR field.
             }
             if let Some(idx) = cols.speed {
-                row[idx] = eq.telemetry().get(tk::SPEED_INDEX).unwrap_or(0.0); // allowed: speed index remains telemetry-only until CoreOutput gains a speed field.
+                row[idx] = co.state.speed_index.map_or(0.0, |s| s as f64);
             }
             if let Some(idx) = cols.fan_power {
                 row[idx] = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0); // allowed: fan power remains telemetry-only until CoreOutput gains a fan power field.
             }
             if let Some(idx) = cols.main_power {
-                // OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
-                row[idx] = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap_or(0.0); // allowed: main power remains telemetry-only until CoreOutput gains a main power field.
+                row[idx] = co.performance.main_power_kw.unwrap_or(0.0);
             }
             if let Some(idx) = cols.runtime_fraction {
                 row[idx] = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0); // allowed: runtime fraction remains telemetry-only until CoreOutput gains an RTF field.

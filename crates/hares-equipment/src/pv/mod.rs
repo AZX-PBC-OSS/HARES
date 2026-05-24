@@ -18,10 +18,10 @@ use std::time::Duration;
 
 use chrono::{Datelike, Timelike};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
-    FuelType, HaresError, InverterPriority, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FuelType, HaresError, InverterPriority, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -569,11 +569,17 @@ impl Equipment for PV {
                 electric_kw: Some(ElectricPower::Generation(final_p_kw.max(0.0))),
                 reactive_power_kvar: Some(final_q_kvar),
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: None,
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
 
         Ok(())

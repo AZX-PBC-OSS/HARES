@@ -230,6 +230,30 @@ fn assert_core_output_contract(desc: &EquipmentDescriptor, co: &CoreOutput) {
         "operating_mode core output presence must match capabilities for '{}'",
         desc.name
     );
+    assert_eq!(
+        co.flows.thermal_output_w.is_some(),
+        caps.contains(CoreCapabilities::THERMAL),
+        "thermal_output_w core output presence must match capabilities for '{}'",
+        desc.name
+    );
+    assert_eq!(
+        co.state.speed_index.is_some(),
+        caps.contains(CoreCapabilities::HAS_SPEED),
+        "speed_index core output presence must match capabilities for '{}'",
+        desc.name
+    );
+    assert_eq!(
+        co.state.setpoint_c.is_some(),
+        caps.contains(CoreCapabilities::HAS_SETPOINT),
+        "setpoint_c core output presence must match capabilities for '{}'",
+        desc.name
+    );
+    assert_eq!(
+        co.performance.cop.is_some(),
+        caps.contains(CoreCapabilities::HAS_COP),
+        "cop core output presence must match capabilities for '{}'",
+        desc.name
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -7,10 +7,10 @@ use chrono::{DateTime, FixedOffset};
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
-    FuelType, HaresError, IdealCapacityMode, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FuelType, HaresError, IdealCapacityMode, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -150,7 +150,10 @@ impl IdealHvac {
                 | ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::MODE_OVERRIDE,
-            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::HAS_MODE
+                | CoreCapabilities::THERMAL
+                | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: ideal_hvac_telemetry_fields(),
         };
 
@@ -622,17 +625,33 @@ impl Equipment for IdealHvac {
             .set(tk::HVAC_COOLING_CAPACITY_W, self.cooling_capacity_w);
         self.telemetry.set(tk::CAP_RATIO, cap_ratio);
         self.telemetry.set(tk::EIR_RATIO, eir_ratio);
-
+        // Ideal HVAC tracks a single active target temperature; always populate
+        // setpoint_c from current_target_c (HAS_SETPOINT requires Some per contract).
+        let active_setpoint_c = self.current_target_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw)),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: Some(capacity_w),
+                sensible_cooling_w: if capacity_w < 0.0 {
+                    Some(capacity_w * self.shr)
+                } else {
+                    None
+                },
+                latent_cooling_w: if capacity_w < 0.0 && self.shr < 1.0 {
+                    Some(capacity_w * (1.0 - self.shr))
+                } else {
+                    None
+                },
             },
             state: CoreState {
                 operating_mode: Some(operating_mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: Some(active_setpoint_c),
             },
+            performance: CorePerformance::default(),
         };
 
         Ok(())

@@ -21,11 +21,11 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
-    FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
-    telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -839,11 +839,17 @@ impl Equipment for Generator {
                     fuel_type: FuelType::Gas,
                     consumption_w: fuel_w.max(0.0),
                 }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
 
         Ok(())

@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
     telemetry_keys as tk,
@@ -398,11 +398,17 @@ impl Equipment for TanklessWH {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw_for_core)),
                 reactive_power_kvar: None,
                 fuel_w: fuel_w_for_core,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
 
         // Reset transient signals after this step so they do not carry over

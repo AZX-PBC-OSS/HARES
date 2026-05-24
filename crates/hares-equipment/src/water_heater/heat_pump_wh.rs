@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    DRLevel, DutyCycleComponent, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
-    ZoneId, telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, DRLevel, DutyCycleComponent, ElectricPower, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -824,11 +824,17 @@ impl Equipment for HeatPumpWH {
                 )),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
 
         // Reset transient ctrl_load_fraction after this step so it does not

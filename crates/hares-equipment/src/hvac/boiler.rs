@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
-    FLUID, FluidDomainPayload, FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
-    ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FLUID, FluidDomainPayload, FluidType, FuelPower, FuelType, HaresError, LoopId,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -134,7 +134,10 @@ impl ElectricBoiler {
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY,
-            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::HAS_MODE
+                | CoreCapabilities::THERMAL
+                | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: electric_boiler_telemetry_fields(),
         };
 
@@ -244,16 +247,26 @@ impl Equipment for ElectricBoiler {
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+        let sp = self.hvac.effective_setpoints();
+        // Heating-only equipment: setpoint_c is always the heating setpoint (per
+        // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
+        let active_setpoint_c = sp.heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: Some(thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.operating_mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: Some(active_setpoint_c),
             },
+            performance: CorePerformance::default(),
         };
 
         Ok(())
@@ -334,7 +347,9 @@ impl GasBoiler {
                 | ControlCapabilities::IDEAL_CAPACITY,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::FUEL
-                | CoreCapabilities::HAS_MODE,
+                | CoreCapabilities::HAS_MODE
+                | CoreCapabilities::THERMAL
+                | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: gas_boiler_telemetry_fields(),
         };
 
@@ -533,6 +548,10 @@ impl Equipment for GasBoiler {
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+        let sp = self.hvac.effective_setpoints();
+        // Heating-only equipment: setpoint_c is always the heating setpoint (per
+        // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
+        let active_setpoint_c = sp.heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -541,11 +560,17 @@ impl Equipment for GasBoiler {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
                 }),
+                thermal_output_w: Some(thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.operating_mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: Some(active_setpoint_c),
             },
+            performance: CorePerformance::default(),
         };
 
         Ok(())

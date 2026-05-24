@@ -8,8 +8,8 @@ use chrono::Datelike;
 use hares_physics::constants::GAS_THERMS_PER_HOUR_TO_W;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
-    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
+    CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
     telemetry_keys as tk,
 };
@@ -402,11 +402,17 @@ impl Equipment for ScheduledLoad {
                             fuel_type: FuelType::Gas,
                             consumption_w: 0.0,
                         }),
+                    thermal_output_w: None,
+                    sensible_cooling_w: None,
+                    latent_cooling_w: None,
                 },
                 state: CoreState {
                     operating_mode: None,
                     soc: None,
+                    speed_index: None,
+                    setpoint_c: None,
                 },
+                performance: CorePerformance::default(),
             };
             return Ok(());
         }
@@ -436,11 +442,17 @@ impl Equipment for ScheduledLoad {
                             fuel_type: FuelType::Gas,
                             consumption_w: 0.0,
                         }),
+                    thermal_output_w: None,
+                    sensible_cooling_w: None,
+                    latent_cooling_w: None,
                 },
                 state: CoreState {
                     operating_mode: None,
                     soc: None,
+                    speed_index: None,
+                    setpoint_c: None,
                 },
+                performance: CorePerformance::default(),
             };
             return Ok(());
         }
@@ -553,11 +565,17 @@ impl Equipment for ScheduledLoad {
                         fuel_type: FuelType::Gas,
                         consumption_w: gas_consumption_w.max(0.0),
                     }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: None,
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
         Ok(())
     }

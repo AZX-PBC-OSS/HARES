@@ -51,7 +51,7 @@ pub use ev::ChargingCurveLut;
 pub use ev::EvConfig;
 pub use generator::GeneratorConfig;
 pub use hares_types::Telemetry;
-pub use hares_types::{CoreFlows, CoreOutput, CoreState};
+pub use hares_types::{CoreFlows, CoreOutput, CorePerformance, CoreState};
 pub use hvac::cooling_config::{CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig};
 pub use hvac::heat_pump_config::{
     HeatPumpCommonConfig, HeatPumpConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
@@ -271,10 +271,11 @@ mod tests {
 
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
-        ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-        EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType,
-        FuelType, GridState, LoopId, OperatingMode, PortDeclaration, PortSlots, ProtocolId,
-        SurfaceIrradiance, Telemetry, TelemetryField, WeatherState, ZoneId, ZoneState,
+        ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
+        CorePerformance, CoreState, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+        ExecutionStage, FluidType, FuelType, GridState, LoopId, OperatingMode, PortDeclaration,
+        PortSlots, ProtocolId, SurfaceIrradiance, Telemetry, TelemetryField, WeatherState, ZoneId,
+        ZoneState,
     };
     use serde::{Deserialize, Serialize};
 
@@ -650,11 +651,17 @@ mod tests {
                 electric_kw: Some(ElectricPower::Consumption(1.5)),
                 reactive_power_kvar: Some(0.2),
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(OperatingMode::Charging),
                 soc: Some(std::convert::TryInto::try_into(0.8).unwrap()),
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
         let out = eq.core_output();
         assert!(

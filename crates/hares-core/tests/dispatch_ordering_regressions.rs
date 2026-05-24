@@ -20,10 +20,10 @@ use hares_core::Dwelling;
 use hares_core::actor::Actor;
 use hares_equipment::{Equipment, EquipmentConfig};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
-    FuelType, HaresError, OperatingMode, PortDeclaration, PortSlots, Telemetry, TelemetryField,
-    telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FuelType, HaresError, OperatingMode, PortDeclaration, PortSlots, Telemetry,
+    TelemetryField, telemetry_keys as tk,
 };
 
 // ---------------------------------------------------------------------------
@@ -186,6 +186,7 @@ impl Equipment for StubPowerEquipment {
                 ),
                 ..Default::default()
             },
+            performance: CorePerformance::default(),
         };
         self.telemetry.insert(tk::AC_POWER_KW, effective_kw);
         Ok(())

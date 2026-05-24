@@ -7,9 +7,10 @@ use chrono::{DateTime, FixedOffset, Timelike};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal,
-    CoreCapabilities, CoreFlows, CoreOutput, CoreState, ElectricPower, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage, FuelType, HaresError,
-    OperatingMode, PlugInPolicy, PortContribution, PortDeclaration, PortSlots, Soc, Telemetry,
+    CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, ElectricPower, EndUse,
+    EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage,
+    FuelType, HaresError, OperatingMode, PlugInPolicy, PortContribution, PortDeclaration,
+    PortSlots, Soc, Telemetry,
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
@@ -755,11 +756,17 @@ impl Equipment for Ev {
                 electric_kw: Some(ElectricPower::Bidirectional(self.active_power_kw)),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(mode),
                 soc: Soc::try_from(self.soc).ok(),
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
         Ok(())
     }

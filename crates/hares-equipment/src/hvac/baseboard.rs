@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
-    FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -64,7 +64,9 @@ impl ElectricBaseboard {
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY,
-            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::HAS_MODE
+                | CoreCapabilities::THERMAL,
             telemetry_fields: telemetry_fields(),
         };
 
@@ -156,11 +158,17 @@ impl Equipment for ElectricBaseboard {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: Some(thermal_output_w),
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.operating_mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
 
         Ok(())

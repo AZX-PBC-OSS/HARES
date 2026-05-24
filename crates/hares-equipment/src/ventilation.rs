@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use hares_physics::constants::{CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
     PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
 };
@@ -368,11 +368,17 @@ impl Equipment for Ventilation {
                     electric_kw: Some(ElectricPower::Consumption(0.0)),
                     reactive_power_kvar: None,
                     fuel_w: None,
+                    thermal_output_w: None,
+                    sensible_cooling_w: None,
+                    latent_cooling_w: None,
                 },
                 state: CoreState {
                     operating_mode: Some(self.mode),
                     soc: None,
+                    speed_index: None,
+                    setpoint_c: None,
                 },
+                performance: CorePerformance::default(),
             };
             return Ok(());
         }
@@ -394,11 +400,17 @@ impl Equipment for Ventilation {
                     electric_kw: Some(ElectricPower::Consumption(0.0)),
                     reactive_power_kvar: None,
                     fuel_w: None,
+                    thermal_output_w: None,
+                    sensible_cooling_w: None,
+                    latent_cooling_w: None,
                 },
                 state: CoreState {
                     operating_mode: Some(self.mode),
                     soc: None,
+                    speed_index: None,
+                    setpoint_c: None,
                 },
+                performance: CorePerformance::default(),
             };
             return Ok(());
         }
@@ -464,11 +476,17 @@ impl Equipment for Ventilation {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
 
         Ok(())

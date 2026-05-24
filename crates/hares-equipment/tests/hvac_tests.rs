@@ -3408,23 +3408,14 @@ fn update_mode_cooling_transition() {
 // ---------------------------------------------------------------------------
 // CoreOutput HVAC field promotion — regression tests
 //
-// These tests document the *current* (broken) state: HVAC equipment emits
-// CoreOutput that carries only electric_kw and operating_mode.  Thermal
-// output, COP, setpoint, and speed are absent from CoreOutput and live
-// exclusively in the telemetry dictionary.
-//
-// When CoreOutput field promotion is implemented the assertions marked "FAILS AFTER FIX"
-// must be inverted (or removed) and replaced with positive assertions that
-// the new fields carry the expected values.
+// These tests verify that CoreOutput carries thermal output, COP, and setpoint
+// fields after the CoreOutput field promotion (T-0018). They replace the
+// pre-fix regression sentinels that asserted the absence of these fields.
 // ---------------------------------------------------------------------------
 
-/// Furnace running at full heat: CoreOutput must carry thermal output after
-/// CoreOutput field promotion.  Today it does NOT — thermal_output_w is not a field.
-///
-/// This test verifies the *telemetry* path works (so we have a baseline) and
-/// documents that no equivalent field exists in CoreOutput.
+/// Furnace running at full heat: CoreOutput must carry thermal output.
 #[test]
-fn furnace_core_output_lacks_thermal_field() {
+fn furnace_core_output_carries_thermal_field() {
     let cfg = gas_furnace_config("furnace018");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -3458,17 +3449,16 @@ fn furnace_core_output_lacks_thermal_field() {
         telemetry_thermal,
     );
 
-    // REGRESSION SENTINEL: CoreOutput has no `thermal_output_w` field.
-    // After CoreOutput gains the thermal_output_w field, this comment
-    // must be replaced with: assert!(co.flows.thermal_output_w.unwrap_or(0.0) > 1.0)
-    // For now we assert that the telemetry key is the ONLY carrier:
-    // i.e., there is no CoreOutput field that duplicates it.
-    let _ = co; // suppress unused-variable warning; struct field access would fail to compile
+    assert!(
+        co.flows.thermal_output_w.map_or(false, |w| w > 1.0),
+        "running furnace CoreOutput must carry positive thermal_output_w (got {:?})",
+        co.flows.thermal_output_w,
+    );
 }
 
-/// AC running at full cool: COP lives only in telemetry, not CoreOutput.
+/// AC running at full cool: COP must be carried in CoreOutput.
 #[test]
-fn ac_core_output_lacks_cop_field() {
+fn ac_core_output_carries_cop() {
     let cfg = EquipmentConfig::from_typed(
         "ac018".to_string(),
         "Air Conditioner".to_string(),
@@ -3536,13 +3526,16 @@ fn ac_core_output_lacks_cop_field() {
         telemetry_cop,
     );
 
-    // REGRESSION SENTINEL: After CoreOutput gains a cop field, assert co.performance.cop.unwrap() > 0.0
-    // and that eq.telemetry().get(tk::COP) is either removed or equal to co.performance.cop.
+    assert!(
+        co.performance.cop.map_or(false, |cop| cop > 0.0),
+        "cooling AC CoreOutput must carry positive COP (got {:?})",
+        co.performance.cop,
+    );
 }
 
-/// Setpoint lives only in telemetry; CoreOutput.state has no setpoint_c field.
+/// Setpoint must be carried in CoreOutput.state.setpoint_c after field promotion.
 #[test]
-fn furnace_core_output_lacks_setpoint_field() {
+fn furnace_core_output_carries_setpoint() {
     let cfg = gas_furnace_config("furnace018sp");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -3558,11 +3551,18 @@ fn furnace_core_output_lacks_setpoint_field() {
     assert!(
         telemetry_sp.is_some(),
         "gas furnace must emit HEATING_SETPOINT_C in telemetry \
-         (got None); confirms setpoint data lives only in telemetry",
+         (got None); setpoint must be visible in both paths",
     );
 
-    // REGRESSION SENTINEL: After CoreOutput gains a setpoint_c field, assert co.state.setpoint_c == telemetry_sp
-    // and the telemetry read in record_step() is replaced with co.state.setpoint_c.
+    let co = eq.core_output();
+    assert!(
+        co.state.setpoint_c.is_some(),
+        "running furnace CoreOutput must carry setpoint_c",
+    );
+    assert_eq!(
+        co.state.setpoint_c, telemetry_sp,
+        "CoreOutput setpoint_c must match telemetry HEATING_SETPOINT_C",
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -6,10 +6,10 @@ use std::time::Duration;
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
-    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
-    FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -368,11 +368,17 @@ impl Equipment for Dehumidifier {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw)),
                 reactive_power_kvar: None,
                 fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
             },
             state: CoreState {
                 operating_mode: Some(self.operating_mode),
                 soc: None,
+                speed_index: None,
+                setpoint_c: None,
             },
+            performance: CorePerformance::default(),
         };
         Ok(())
     }

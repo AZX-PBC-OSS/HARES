@@ -28,7 +28,7 @@ run during development start with `cargo`.
 ```bash
 cargo check                  # type-check without producing a binary (fastest feedback loop)
 cargo build                  # compile the project
-cargo test                   # compile and run all tests
+cargo nextest run            # compile and run all tests (parallel test execution)
 cargo clippy -- -D warnings  # run the linter (must pass with zero warnings)
 cargo fmt --check            # check code formatting
 cargo fmt                    # auto-format code
@@ -40,7 +40,7 @@ the crates (libraries) that make up HARES. You can target a single crate
 with `-p`:
 
 ```bash
-cargo test -p hares-physics  # test only the physics crate
+cargo nextest run -p hares-physics  # test only the physics crate
 cargo bench -p hares-envelope  # benchmark only the envelope solver
 ```
 
@@ -95,7 +95,7 @@ uv run pytest -n0            # disable parallelism (easier to read output)
 
 Rust has two build profiles: **debug** and **release**.
 
-**Debug** is the default when you run `cargo build` or `cargo test`. It
+**Debug** is the default when you run `cargo build` or `cargo nextest run`. It
 compiles quickly but produces unoptimised binaries. HARES enables extra
 runtime validation in debug mode (energy balance checks, temperature
 bounds) so that physics bugs surface immediately during development.
@@ -120,6 +120,53 @@ uv run maturin develop --release   # release
 Use debug for everyday development. Use release when you need
 representative runtime performance — benchmarking, profiling, or
 comparing against OCHRE.
+
+### `.cargo/config.toml` — Build & Test Optimizations
+
+The workspace ships a `.cargo/config.toml` tuned for fast iteration
+and low disk pressure. Every setting is explained below.
+
+```toml
+[build]
+jobs = 8
+rustc-wrapper = "sccache"
+```
+
+**`jobs = 8`** — limits parallel `rustc` invocations to 8 (out of 16
+cores). Keeps CPU usage around 50% and prevents SSD overheating from
+thousands of simultaneous file writes. Bump to 12 for CI, drop to 4
+on a hot laptop.
+
+**`rustc-wrapper = "sccache"`** — routes all compilation through
+[sccache](https://github.com/mozilla/sccache), a shared compiler cache.
+Cached artifacts survive `cargo clean` and are shared across worktrees.
+Install it once: `brew install sccache` (macOS) or
+`cargo install sccache` (other platforms).
+
+```toml
+[profile.dev]
+opt-level = 0
+debug = 0
+lto = false
+incremental = true
+codegen-units = 256
+```
+
+**`[profile.dev]`** is inherited by `[profile.test]` (both use it).
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `opt-level = 0` | No optimization | Fastest compilation — the edit/compile/run loop depends on this |
+| `debug = 0` | No debug info | Dramatically reduces object file size and linking time. Stack traces on panic still work (just no line numbers). Drop to `debug = 1` temporarily if you need line numbers in a backtrace |
+| `lto = false` | No link-time optimization | LTO is expensive and provides no benefit at `opt-level = 0` |
+| `incremental = true` | Re-use unchanged compilation units | Avoids recompiling unchanged code across runs |
+| `codegen-units = 256` | Max codegen parallelism per crate | Rust's default for debug profiles; maximizes within-crate parallelism in the codegen/LLVM phase |
+
+**When to override these:**
+- Need line numbers in panics: `cargo nextest run --profile test-debug` (define a `[profile.test-debug]` with `debug = 1`)
+- Need release-speed tests: `cargo nextest run --release`
+- SSD is overheating: `export CARGO_BUILD_JOBS=4`
+- Cache isn't working: `sccache -s` shows stats; `sccache --zero-stats` resets
 
 ---
 
@@ -147,7 +194,7 @@ optimisation and correctness checking.
 
 ```bash
 cargo build --release -F check_invariants
-cargo test --release -F check_invariants
+cargo nextest run --release -F check_invariants
 ```
 
 See [Invariants & Observability](invariants-and-observability.md) for the
@@ -216,38 +263,68 @@ the Python extension.
 
 ## Running and Debugging Tests
 
-### Filtering tests
-
-Cargo runs all tests matching a name filter. The filter is a substring
-match against the full test path (module + function name):
+HARES uses **[cargo nextest](https://nexte.st/)** for test execution. Nextest
+runs test binaries in parallel (unlike `cargo test` which runs them sequentially),
+giving substantial speed improvements on multi-core machines. It is installed
+separately from Rust:
 
 ```bash
-cargo test                           # all tests in the workspace
-cargo test -p hares-physics          # all tests in one crate
-cargo test -p hares-physics solar    # tests with "solar" in the name
-cargo test thermal_balance           # tests matching "thermal_balance" across all crates
+brew install cargo-nextest     # macOS
+cargo install cargo-nextest    # other platforms
+```
+
+All ticket validation hooks and the constitution use `cargo nextest run` rather
+than `cargo test`. If you need the default test harness for any reason,
+`cargo test` still works — but `cargo nextest run` will be faster.
+
+### Filtering tests
+
+Nextest accepts the same filter syntax as `cargo test`:
+
+```bash
+cargo nextest run                           # all tests in the workspace
+cargo nextest run -p hares-physics          # all tests in one crate
+cargo nextest run -p hares-physics solar    # tests with "solar" in the name
+cargo nextest run thermal_balance           # tests matching "thermal_balance" across all crates
 ```
 
 To run a single exact test:
 
 ```bash
-cargo test -p hares-core -- --exact tests::invariants::test_electrical_balance
+cargo nextest run -p hares-core -- --exact tests::invariants::test_electrical_balance
 ```
 
 ### Seeing test output
 
-By default, Cargo captures stdout from passing tests. To see `println!`
-output from all tests (including passing ones):
+Nextest captures test output by default. Use `--no-capture` to see it:
 
 ```bash
-cargo test -- --nocapture
+cargo nextest run --no-capture
 ```
 
-Combine with a filter to focus on one test:
+For failing tests, nextest shows output automatically in the failure report.
+
+### Running ignored tests
 
 ```bash
-cargo test -p hares-envelope rc_step -- --nocapture
+cargo nextest run --run-ignored all
 ```
+
+### nextest vs cargo test
+
+| Feature | `cargo test` | `cargo nextest run` |
+|---------|-------------|---------------------|
+| Test binary parallelism | Sequential (one at a time) | Parallel (all at once) |
+| Output format | Interleaved | Structured, per-test |
+| Failure output | Mixed in stdout | Isolated per failing test |
+| Retries | Manual | `--retries N` |
+| Filtering | Package `-p`, text filter, `--test` | Same syntax |
+| `#[should_panic]` | Supported | Supported (since nextest 0.9.68) |
+| Build caching | Cargo incremental | Same Cargo incremental |
+
+The key difference: `cargo test --workspace` runs 10+ test binaries
+sequentially. `cargo nextest run --workspace` runs them all in parallel
+and schedules individual tests across available cores.
 
 ### Python tests
 
@@ -269,13 +346,13 @@ uv run pytest -n0 -s                            # sequential, show print output
 > Python tests require the Rust extension. Run `uv run maturin develop`
 > first. If you change Rust code, rebuild before re-running Python tests.
 
-### Useful Cargo flags for debugging
+### Useful flags for debugging
 
 ```bash
-cargo test -- --test-threads=1       # run tests sequentially (easier to read output)
-RUST_BACKTRACE=1 cargo test          # show backtraces on panic
-RUST_BACKTRACE=full cargo test       # show full backtraces with line numbers
-cargo test --release                 # run tests with optimisation (faster for integration tests)
+cargo nextest run --test-threads=1     # run tests sequentially (easier to read output)
+RUST_BACKTRACE=1 cargo nextest run     # show backtraces on panic
+RUST_BACKTRACE=full cargo nextest run  # show full backtraces with line numbers
+cargo nextest run --release            # run tests with optimisation (faster for integration tests)
 ```
 
 ---
@@ -331,8 +408,8 @@ the Engineering Reference provides the physics equations and model descriptions.
 |--------------|---------|
 | Type-check without compiling | `cargo check` |
 | Build for development | `cargo build` |
-| Run all Rust tests | `cargo test` |
-| Run a single crate's tests | `cargo test -p hares-physics` |
+| Run all Rust tests | `cargo nextest run` |
+| Run a single crate's tests | `cargo nextest run -p hares-physics` |
 | Lint | `cargo clippy -- -D warnings` |
 | Format code | `cargo fmt` |
 | Build optimised | `cargo build --release` |
