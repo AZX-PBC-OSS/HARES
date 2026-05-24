@@ -185,10 +185,26 @@ impl EnvironmentManager {
             return Err(EnvironmentManagerError::DstNotEnabled);
         }
 
-        // Compute start offsets: EPW files are annual starting Jan 1.
-        // The schedule CSV may also be annual. Offset into them based on
-        // the simulation start time so step 0 reads the correct row.
-        let weather_start_offset = compute_annual_offset(&weather.meta, start_time, step_secs);
+        // Validate timezone offset: mismatched offset silently produces wrong solar position.
+        // The caller is responsible for providing a correctly-offset local time; this
+        // warning makes the error detectable without a breaking API change.
+        let entry_offset_secs = start_time.offset().local_minus_utc();
+        let weather_offset_secs = (weather.meta.timezone_offset_h * 3600.0).round() as i32;
+        if (entry_offset_secs - weather_offset_secs).abs() > 1800 {
+            tracing::warn!(
+                entry_offset_h = entry_offset_secs as f64 / 3600.0,
+                weather_offset_h = weather.meta.timezone_offset_h,
+                "start_time timezone offset ({:.1}h) differs from weather file timezone offset \
+                 ({:.1}h) by more than 0.5 hours; solar position will be incorrect",
+                entry_offset_secs as f64 / 3600.0,
+                weather.meta.timezone_offset_h,
+            );
+        }
+
+        // Compute start offsets: weather and schedule time series are annual starting Jan 1.
+        // Offset into them based on the simulation start time so step 0 reads the correct row.
+        let weather_start_offset =
+            compute_annual_offset(&weather.meta, start_time, step_secs, weather.len());
         let schedule_start_offset = compute_schedule_offset(&schedule, start_time, step_secs);
         let (mains_t_annual_avg_c, mains_dt_annual_range_c) =
             compute_mains_inputs(&weather, step_secs);
@@ -214,7 +230,8 @@ impl EnvironmentManager {
         // Use the shifted offset (with midpoint_offset_secs applied) for initial conditions
         // to match OCHRE's behavior of reading weather at the period midpoint.
         // EPW hour 12 (covers 11:00-12:00) has its representative value at 11:30.
-        let init_offset = compute_annual_offset(&weather.meta, start_time, step_secs);
+        let init_offset =
+            compute_annual_offset(&weather.meta, start_time, step_secs, weather.len());
         let initial_outdoor_temp_c = weather
             .dry_bulb_c
             .get(init_offset)
@@ -642,6 +659,7 @@ fn compute_annual_offset(
     meta: &WeatherMeta,
     start_time: DateTime<FixedOffset>,
     step_secs: u32,
+    weather_len: usize,
 ) -> usize {
     if step_secs == 0 {
         return 0;
@@ -653,10 +671,11 @@ fn compute_annual_offset(
     let s = start_time.second() as u64;
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
 
-    // EPW files always have 8760 rows (365 × 24 hours); use 365 days unconditionally.
-    // Leap-year starts (ordinal0 ≥ 365) exceed 365*86400 and wrap via modulo,
-    // mapping Dec 31 to an equivalent position in the 365-row array.
-    let year_secs = 365_u64 * 86400;
+    // Year length in seconds derived from the actual weather array size.
+    // After resampling, weather_len rows at step_secs each covers one year
+    // (365 or 366 days).  EPW, PSM3, and TMY3 all support leap-year files;
+    // using the actual row count avoids mis-indexing for 8784-row (leap) files.
+    let year_secs = weather_len as u64 * step_secs as u64;
     let shifted = (seconds_into_year + year_secs - meta.midpoint_offset_secs as u64) % year_secs;
 
     (shifted / step_secs as u64) as usize
@@ -684,14 +703,20 @@ fn compute_mains_inputs(weather: &WeatherTimeSeries, step_secs: u32) -> (f64, f6
     let annual_avg_c = mean_or_default(&weather.dry_bulb_c, 20.0);
 
     let temps = &weather.dry_bulb_c;
+
+    // For annual weather (EPW-derived), compute the range of monthly average dry-bulb
+    // temperatures, as required by the Burch-Christensen mains model.
+    // EPW, PSM3, and TMY3 all support leap-year files (8784 hourly rows); use
+    // 29 days for February when the data length implies a leap year.
     let samples_per_day = usize::try_from(86_400 / step_secs.max(1)).unwrap_or(0);
     if samples_per_day == 0 {
         return (annual_avg_c, simple_range(temps));
     }
-
-    // For annual weather (EPW-derived), compute the range of monthly average dry-bulb
-    // temperatures, as required by the Burch-Christensen mains model.
-    let month_days = [31usize, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: [usize; 12] = if temps.len() == 366 * samples_per_day {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
     let year_samples: usize = month_days.iter().sum::<usize>() * samples_per_day;
     if temps.len() < year_samples {
         return (annual_avg_c, simple_range(temps));
@@ -1542,90 +1567,89 @@ mod tests {
 
     /// compute_annual_offset: leap year (2024) -- May 5 noon.
     /// Feb has 29 days so May 5 = ordinal 126, ordinal0 = 125.
-    /// Forward +30min shift: (125*86400 + 12*3600 + 1800) / 3600 = 3012.
+    /// (125*86400 + 12*3600) / 3600 = 3012.
     #[test]
     fn annual_offset_leap_year_may_5_noon() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2024, 5, 5, 12, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 3012);
+        assert_eq!(compute_annual_offset(&meta, start, 3600, 8784), 3012);
     }
 
     /// compute_annual_offset: non-leap year (2023) -- May 5 noon.
-    /// Forward +30min shift: (124*86400 + 12*3600 + 1800) / 3600 = 2988.
+    /// (124*86400 + 12*3600) / 3600 = 2988.
     #[test]
     fn annual_offset_non_leap_year_may_5_noon() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 5, 5, 12, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 2988);
+        assert_eq!(compute_annual_offset(&meta, start, 3600, 8760), 2988);
     }
 
-    /// compute_annual_offset: leap year Jan 1 00:00.
-    /// Forward +30min: (0 + 1800) / 3600 = 0.
+    /// compute_annual_offset: leap year Jan 1 00:00 → index 0.
     #[test]
     fn annual_offset_leap_year_jan_1() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 0);
+        assert_eq!(compute_annual_offset(&meta, start, 3600, 8784), 0);
     }
 
-    /// compute_annual_offset: non-leap year Jan 1 00:00.
-    /// Forward +30min: (0 + 1800) / 3600 = 0.
+    /// compute_annual_offset: non-leap year Jan 1 00:00 → index 0.
     #[test]
     fn annual_offset_non_leap_year_jan_1() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 0);
+        assert_eq!(compute_annual_offset(&meta, start, 3600, 8760), 0);
     }
 
     /// compute_annual_offset: leap year Dec 31 23:00.
-    /// With year_secs fixed at 365 days (EPW is non-leap), the Dec 31 ordinal0=365
-    /// overshoots year_secs and wraps around modulo 365*86400 to index 23.
-    /// Leap-year Dec dates wrap to an equivalent position in the 365-row array.
+    /// With 8784 hourly rows (366 days), Dec 31 ordinal0=365, seconds_into_year
+    /// = 365*86400 + 23*3600 = 31,618,800.  year_secs = 8784*3600 = 31,622,400.
+    /// shifted = 31,618,800 % 31,622,400 = 31,618,800.  31,618,800 / 3600 = 8783.
     #[test]
     fn annual_offset_leap_year_dec_31() {
         let meta = weather_series().meta;
         let start = utc_offset()
             .with_ymd_and_hms(2024, 12, 31, 23, 0, 0)
             .unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 23);
+        assert_eq!(compute_annual_offset(&meta, start, 3600, 8784), 8783);
     }
 
     /// compute_annual_offset: non-leap year Dec 31 23:00.
-    /// Forward +30min: (364*86400 + 23*3600 + 1800) / 3600 = 8759.
+    /// (364*86400 + 23*3600) / 3600 = 8759.
     #[test]
     fn annual_offset_non_leap_year_dec_31() {
         let meta = weather_series().meta;
         let start = utc_offset()
             .with_ymd_and_hms(2023, 12, 31, 23, 0, 0)
             .unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 8759);
+        assert_eq!(compute_annual_offset(&meta, start, 3600, 8760), 8759);
     }
 
     /// compute_annual_offset: leap year Feb 29 → ordinal0 = 59.
-    /// Forward +30min: (59*86400 + 6*3600 + 1800) / 3600 = 1422.
+    /// (59*86400 + 6*3600) / 3600 = 1422.
     #[test]
     fn annual_offset_leap_year_feb_29() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2024, 2, 29, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 1422);
+        assert_eq!(compute_annual_offset(&meta, start, 3600, 8784), 1422);
     }
 
     /// compute_annual_offset: non-leap year Mar 1 → ordinal0 = 59.
-    /// Forward +30min: (59*86400 + 6*3600 + 1800) / 3600 = 1422.
+    /// (59*86400 + 6*3600) / 3600 = 1422.
     #[test]
     fn annual_offset_non_leap_year_mar_1() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 3, 1, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 1422);
+        assert_eq!(compute_annual_offset(&meta, start, 3600, 8760), 1422);
     }
 
     /// compute_annual_offset: sub-hourly resolution (15-min steps).
-    /// start = 2023-01-01T01:30:00: seconds=5400, 5400/900=6.
+    /// start = 2023-01-01T01:30:00: seconds=5400.  35040 rows at 15-min.
+    /// year_secs = 35040*900 = 31,536,000 (= 365*86400).  5400/900 = 6.
     #[test]
     fn annual_offset_15min_resolution() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 1, 30, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 900), 6);
+        assert_eq!(compute_annual_offset(&meta, start, 900, 35040), 6);
     }
 
     /// Various climate offsets produce correct temperatures.
@@ -1921,44 +1945,32 @@ mod tests {
     /// Regression for Defect 1: leap-year weather (8784 hourly records)
     /// must use 29-day February when computing monthly means for the Kusuda amplitude.
     ///
-    /// The bug: `month_days` is hardcoded to `[31, 28, ...]` so February consumes only
-    /// 672 samples instead of 696.  This means the February mean is computed from 28
-    /// days of data, and the extra 24 hours are silently prepended to March's slice,
-    /// corrupting both month means.
+    /// The bug: `month_days` was hardcoded to `[31, 28, ...]` so February consumed only
+    /// 672 samples instead of 696.  With the fix, February has 29 days for leap-year data.
     ///
-    /// Fixture: 8784-record series where the first 31 days are 0°C (January), the
-    /// next 29 days alternate between +1°C and -1°C (February mean = 0°C regardless
-    /// of day count), then March has a constant +10°C.  With the bug the 29th February
-    /// day leaks into March, raising the observed March mean slightly above 10°C and
-    /// causing the overall range to widen.  With the fix, February has exactly 29 days
-    /// and the range is derived purely from monthly means.
-    ///
-    /// The test asserts the property that is violated by the bug: the annual range of
-    /// monthly means must equal the difference between the maximum monthly mean and
-    /// the minimum monthly mean when each month is assigned its correct day count.
-    ///
-    /// NOTE: this test FAILS with the current (buggy) code because `month_days` uses
-    /// 28 for February even when `temps.len() == 8784`.
-    /// Fix pending — will stop panicking when leap-year day count is corrected.
+    /// Fixture: 8784-record series where March has a constant +100°C and all other
+    /// months are 0°C.  With correct 29-day February, March mean = 100.0°C exactly,
+    /// range = 100.0°C.  With the bug, the 29th February day leaks into March, lowering
+    /// the observed March mean below 100°C and shrinking the range.
     #[test]
-    #[should_panic(expected = "expected monthly range")]
     fn leap_year_february_uses_29_days_for_monthly_mean() {
         // 8784 hours in a leap year (366 days × 24).
         let n = 8784usize;
         let step_secs = 3600u32; // hourly
 
-        // Build dry_bulb_c: set each month to a distinct constant temperature so
-        // we can detect which month's slice a given hour falls into.
-        //   Jan (31 days): 0.0°C
-        //   Feb (29 days): 100.0°C   ← large value: easy to detect if day-count is wrong
-        //   Mar (31 days): 0.0°C
-        //   Apr–Dec:       0.0°C
-        let mut dry_bulb_c = vec![0.0f64; n];
         let jan_hours = 31 * 24; // 744
-        let feb_hours_correct = 29 * 24; // 696
-        // Mark February hours with 100.0°C.
-        for h in jan_hours..(jan_hours + feb_hours_correct) {
-            dry_bulb_c[h] = 100.0;
+        let feb_hours = 29 * 24; // 696
+
+        // Build dry_bulb_c: March = 100°C, all other months = 0°C.
+        // With correct 29-day February, March's slice starts at the right offset
+        // and its mean is exactly 100°C, giving range = 100°C.
+        // With buggy 28-day February, the 29th Feb day (0°C) leaks into March,
+        // lowering the March mean below 100°C and shrinking the range.
+        let mut dry_bulb = vec![0.0f64; n];
+        let mar_start = jan_hours + feb_hours;
+        let mar_end = mar_start + 31 * 24;
+        for h in mar_start..mar_end {
+            dry_bulb[h] = 100.0;
         }
 
         let weather = WeatherTimeSeries {
@@ -1971,7 +1983,7 @@ mod tests {
                 source_step_secs: step_secs,
                 midpoint_offset_secs: 0,
             },
-            dry_bulb_c,
+            dry_bulb_c: dry_bulb,
             dew_point_c: vec![0.0; n],
             rel_humidity_pct: vec![50.0; n],
             pressure_kpa: vec![101.325; n],
@@ -1983,77 +1995,22 @@ mod tests {
             opaque_sky_cover: vec![0.0; n],
             horizontal_infrared_w_m2: vec![250.0; n],
             sky_temp_c: vec![0.0; n],
-            ground_temp_c: vec![0.0; n],
+            ground_temp_c: vec![10.0; n],
             liquid_precip_m: vec![0.0; n],
             surface_albedo: None,
         };
 
         let (_avg, range) = compute_mains_inputs(&weather, step_secs);
 
-        // With a correct 29-day February:
-        //   February mean = 100.0°C, all other months = 0.0°C
-        //   monthly_range = 100.0 - 0.0 = 100.0°C
-        //
-        // With the buggy 28-day February:
-        //   Feb slice = hours 744..1416 (28 days) — mean = 100.0°C (pure February OK)
-        //   BUT the 29th February day (hours 1416..1440) is prepended to March's slice,
-        //   making March's mean = (24*100 + 30*24*0) / (31*24) ≈ 3.23°C instead of 0°C.
-        //   The range is still 100.0 (Feb max vs 0 min), so the range passes in this
-        //   particular fixture.  However, if we instead verify the March mean indirectly
-        //   (the returned range must equal exactly 100.0 even with the leak), this test
-        //   alone does not discriminate.
-        //
-        // A better discriminating fixture: set February to 0.0 and March to 100.0.
-        // With the bug the leaked Feb-29 day (0°C) lowers the March mean below 100°C,
-        // so the detected range < 100.0.  That is the assertion below.
-        // (We rebuild the fixture here rather than above for clarity.)
-        let _ = range; // discard first result
-
-        let mut dry_bulb2 = vec![0.0f64; n];
-        let mar_start = jan_hours + feb_hours_correct; // correct Mar start with 29-day Feb
-        let mar_end = mar_start + 31 * 24;
-        for h in mar_start..mar_end {
-            dry_bulb2[h] = 100.0;
-        }
-        let weather2 = WeatherTimeSeries {
-            meta: WeatherMeta {
-                location: "Leap-034-B".to_string(),
-                latitude: 40.0,
-                longitude: 0.0,
-                timezone_offset_h: 0.0,
-                elevation_m: 0.0,
-                source_step_secs: step_secs,
-                midpoint_offset_secs: 0,
-            },
-            dry_bulb_c: dry_bulb2,
-            dew_point_c: vec![0.0; n],
-            rel_humidity_pct: vec![50.0; n],
-            pressure_kpa: vec![101.325; n],
-            ghi_w_m2: vec![0.0; n],
-            dni_w_m2: vec![0.0; n],
-            dhi_w_m2: vec![0.0; n],
-            wind_speed_m_s: vec![1.0; n],
-            wind_dir_deg: vec![180.0; n],
-            opaque_sky_cover: vec![0.0; n],
-            horizontal_infrared_w_m2: vec![250.0; n],
-            sky_temp_c: vec![0.0; n],
-            ground_temp_c: vec![0.0; n],
-            liquid_precip_m: vec![0.0; n],
-            surface_albedo: None,
-        };
-
-        let (_avg2, range2) = compute_mains_inputs(&weather2, step_secs);
-
         // With correct 29-day February, March mean = 100.0°C exactly, range = 100.0.
         // With buggy 28-day February, March slice starts 24 hours early, absorbing one
-        // day of the gap between Feb and Mar (all-zero hour 1416..1440 lands in March),
-        // so March mean = (30*24 * 100 + 1*24 * 0) / (31*24) ≈ 96.77°C, range ≈ 96.77.
-        // The correct code must return range = 100.0.
+        // day of zero temperature from the gap region, lowering the mean to ≈96.77°C
+        // and shrinking the range.
         assert!(
-            (range2 - 100.0).abs() < 0.01,
+            (range - 100.0).abs() < 0.01,
             "expected monthly range = 100.0°C when March is \
              100°C and all other months 0°C in a leap-year (8784-hour) series, \
-             but got {range2:.4} — indicates February is not using 29-day slice"
+             but got {range:.4} — indicates February is not using 29-day slice"
         );
     }
 

@@ -536,13 +536,11 @@ fn solar_irradiance_physical_bounds() {
 // Ticket 026: leap-year weather row indexing
 // ---------------------------------------------------------------------------
 
-/// `compute_annual_offset` hardcodes 365 days, so a leap-year (8784-row)
-/// weather file has its rows misindexed after February 28. On Dec 31 the
-/// 365-day modulus wraps to row 0 instead of row 8760.
-/// Fix pending on ticket 026 — will stop panicking when the bug is fixed.
+/// `compute_annual_offset` previously hardcoded 365 days, causing leap-year
+/// (8784-row) weather files to mis-index rows after February 28.
+/// Regression: verifies the fix correctly resolves Dec 31 to row 8760.
 #[test]
-#[should_panic(expected = "leap-year Dec 31 should read row 8760")]
-fn leap_year_dec31_weather_index_bug_026() {
+fn leap_year_dec31_reads_correct_weather_row() {
     let n = 8784usize;
     let seq: Vec<f64> = (0..n).map(|i| i as f64).collect();
 
