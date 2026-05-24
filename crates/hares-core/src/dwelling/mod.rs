@@ -803,7 +803,7 @@ impl Dwelling {
             sim_config,
             overrides,
             bldg_id: 0,
-            initialization_duration: None,
+            initialization_duration: Some(StdDuration::from_secs(7 * 24 * 3600)),
             resample_overrides: None,
         };
         Self::from_config(config)
@@ -1239,14 +1239,22 @@ impl Dwelling {
 
         dwelling.auto_register_actors();
 
-        if let Some(init_dur) = config.initialization_duration {
-            dwelling.run_warmup(init_dur)?;
+        if let Some(_init_dur) = config.initialization_duration {
+            dwelling.run_warmup_converged(0.5, 25)?;
             clock = SimClock::new(
                 local_start,
                 config.sim_config.time_res,
                 config.sim_config.duration,
             );
             dwelling.clock = clock;
+        } else {
+            tracing::warn!(
+                bldg_id = config.bldg_id,
+                "initialization_duration is None — no warm-up period will run; \
+                 this produces biased heat-transfer predictions for heavyweight \
+                 construction. Set initialization_duration to at least 7 days \
+                 (604800 s) for concrete/masonry buildings."
+            );
         }
 
         Ok(dwelling)
@@ -2018,19 +2026,81 @@ impl Dwelling {
         }
     }
 
-    fn run_warmup(&mut self, initialization_duration: StdDuration) -> Result<()> {
-        let warmup_steps = initialization_duration
-            .as_secs()
-            .checked_div(
-                u64::try_from(self.clock.time_res.num_seconds())
-                    .map_err(|_| HaresError::Physics("invalid time resolution".to_string()))?,
-            )
-            .unwrap_or(0);
-        for _ in 0..warmup_steps {
-            self.run_timestep(false)?;
+    /// Iterative warm-up convergence per EnergyPlus Engineering Reference §"Warmup Convergence".
+    ///
+    /// Repeatedly simulates the first 24-hour weather day until the maximum zone
+    /// temperature change across all conditioned zones between consecutive iterations
+    /// falls below `threshold_c` °C, up to `max_iter` iterations.
+    ///
+    /// EnergyPlus defaults: threshold = 0.5 °C, max_iter = 25 iterations.
+    /// EnergyPlus I/O Reference §"Building": "This value represents the number at
+    /// which the zone temperatures must agree ... before 'convergence' is reached."
+    /// Typical convergence: 1-2 iterations for lightweight construction, 4-7 for
+    /// heavyweight (concrete slab, masonry).
+    pub fn run_warmup_converged(&mut self, threshold_c: f64, max_iter: u32) -> Result<u32> {
+        let time_res_s = u64::try_from(self.clock.time_res.num_seconds())
+            .map_err(|_| HaresError::Physics("invalid time resolution".to_string()))?;
+        let steps_per_day = (24u64 * 3600).checked_div(time_res_s).unwrap_or(0);
+
+        if steps_per_day == 0 {
+            return Ok(1);
         }
+
+        let mut prev_zone_temps: Vec<f64> = Vec::new();
+
+        for iteration in 1..=max_iter {
+            // Reset clock to start of first day for weather replay.
+            // Thermal state carries forward from previous iteration:
+            // EnergyPlus §"Warmup Convergence" — initial conditions for each
+            // warmup day are the final conditions from the previous warmup day.
+            self.clock.current_step = 0;
+
+            for _ in 0..steps_per_day {
+                self.run_timestep(false)?;
+            }
+
+            // Collect conditioned zone temperatures from the environment state.
+            // Order is stable: both `latest_env.zones` and `zone_is_conditioned`
+            // are aligned by construction.
+            let zone_temps: Vec<f64> = (0..self.latest_env.zones.len())
+                .filter(|&i| self.zone_is_conditioned[i])
+                .map(|i| self.latest_env.zones[i].temperature_c)
+                .collect();
+
+            if !prev_zone_temps.is_empty() {
+                // EnergyPlus Engineering Reference §"Warmup Convergence":
+                // max |ΔT_zone| across all conditioned zones. Convergence
+                // criterion: 0.5 °C (EnergyPlus I/O Reference default).
+                let max_delta = prev_zone_temps
+                    .iter()
+                    .zip(zone_temps.iter())
+                    .map(|(prev, curr)| (prev - curr).abs())
+                    .fold(0.0_f64, f64::max);
+
+                self.simulation_results.steps.clear();
+
+                if max_delta < threshold_c {
+                    tracing::info!(
+                        iterations = iteration,
+                        max_delta_c = max_delta,
+                        threshold_c,
+                        "warm-up converged"
+                    );
+                    return Ok(iteration);
+                }
+            }
+
+            prev_zone_temps = zone_temps;
+        }
+
         self.simulation_results.steps.clear();
-        Ok(())
+        tracing::warn!(
+            iterations = max_iter,
+            "warm-up failed to converge within {} iterations; \
+             proceeding with current thermal state",
+            max_iter
+        );
+        Ok(max_iter)
     }
 
     fn run_timestep(&mut self, record_output: bool) -> Result<()> {

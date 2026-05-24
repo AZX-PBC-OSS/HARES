@@ -144,7 +144,9 @@ impl Fleet {
                         sim_config: default_resstock_sim_config(),
                         overrides: None,
                         bldg_id: building.bldg_id,
-                        initialization_duration: None,
+                        initialization_duration: Some(std::time::Duration::from_secs(
+                            7 * 24 * 3600,
+                        )),
                         resample_overrides: None,
                     },
                     sample_weight: building.sample_weight,
