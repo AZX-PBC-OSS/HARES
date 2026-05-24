@@ -187,6 +187,16 @@ pub fn parse_weather_with_elevation(
 /// (which carry their own location metadata). For ResStock CSV files,
 /// `elevation_m`, `latitude`, `longitude`, and `timezone_offset_h` are used
 /// to populate [`WeatherMeta`] for downstream solar and pressure calculations.
+///
+/// When caller-provided coordinates are non-zero and differ from the file's
+/// embedded location by more than 1.0°, a [`tracing::warn!`] is emitted
+/// but the file's embedded location remains authoritative. Use
+/// [`parse_weather_override_location`] when the file's metadata is known
+/// wrong and must be replaced.
+///
+/// The 1.0° threshold follows EnergyPlus precedent — EnergyPlus's
+/// WeatherManager.cc emits a warning for any coordinate difference between
+/// the IDF `Site:Location` and the weather file's embedded coordinates.
 pub fn parse_weather_with_location(
     path: impl AsRef<Path>,
     elevation_m: f64,
@@ -195,7 +205,7 @@ pub fn parse_weather_with_location(
     timezone_offset_h: f64,
 ) -> Result<WeatherTimeSeries, WeatherError> {
     let path = path.as_ref();
-    match detect_weather_format(path)? {
+    let result = match detect_weather_format(path)? {
         WeatherFormat::Epw => crate::epw::parse_epw(path),
         WeatherFormat::Psm3 => crate::psm3::parse_psm3(path),
         WeatherFormat::Tmy3 => crate::tmy3::parse_tmy3(path),
@@ -206,7 +216,62 @@ pub fn parse_weather_with_location(
             longitude,
             timezone_offset_h,
         ),
+    }?;
+
+    // Coordinate mismatch warning for formats with embedded location metadata.
+    // EnergyPlus WeatherManager.cc emits a warning when the IDF Site:Location
+    // coordinates differ from the EPW file's embedded location; HARES mirrors
+    // this. When caller coordinates are all zero (no HPXML site data provided),
+    // the check is skipped — the file is the sole source of location.
+    let has_caller_coords = latitude.abs() + longitude.abs() > 0.0;
+    if has_caller_coords {
+        let lat_diff = (result.meta.latitude - latitude).abs();
+        let lon_diff = (result.meta.longitude - longitude).abs();
+        if lat_diff > 1.0 || lon_diff > 1.0 {
+            tracing::warn!(
+                file_location = %result.meta.location,
+                file_latitude = result.meta.latitude,
+                file_longitude = result.meta.longitude,
+                caller_latitude = latitude,
+                caller_longitude = longitude,
+                "weather file location ({:.4}°, {:.4}°) differs from caller-provided site \
+                 location ({:.4}°, {:.4}°) by more than 1.0°; \
+                 the file's embedded location will be used",
+                result.meta.latitude,
+                result.meta.longitude,
+                latitude,
+                longitude,
+            );
+        }
     }
+
+    Ok(result)
+}
+
+/// Parse a weather file and override its embedded location metadata with
+/// caller-supplied values.
+///
+/// Use when the file's embedded latitude, longitude, elevation, or timezone
+/// are known to be incorrect and must be replaced with the HPXML/IDF site
+/// data. For the standard path (emit a warning on mismatch but keep the
+/// file's location authoritative), use [`parse_weather_with_location`].
+///
+/// Parses the file via [`parse_weather`] (auto-detecting format), then
+/// replaces `meta.latitude`, `meta.longitude`, `meta.elevation_m`, and
+/// `meta.timezone_offset_h` with the caller-provided values.
+pub fn parse_weather_override_location(
+    path: impl AsRef<Path>,
+    latitude: f64,
+    longitude: f64,
+    elevation_m: f64,
+    timezone_offset_h: f64,
+) -> Result<WeatherTimeSeries, WeatherError> {
+    let mut weather = parse_weather(path)?;
+    weather.meta.latitude = latitude;
+    weather.meta.longitude = longitude;
+    weather.meta.elevation_m = elevation_m;
+    weather.meta.timezone_offset_h = timezone_offset_h;
+    Ok(weather)
 }
 
 /// Metadata extracted from an EPW header.

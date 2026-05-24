@@ -842,6 +842,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use tracing_subscriber;
+
     use super::{
         DOE2_GROUND_DAYS_PER_YEAR, DOE2_GROUND_DIFFUSIVITY, DOE2_GROUND_HOURS_PER_YEAR,
         DOE2_GROUND_PHASE_OFFSET_RAD, DOE2_GROUND_REFERENCE_DEPTH_M, DOE2_MID_MONTH_DAYS,
@@ -1784,32 +1786,27 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Caller-provided coordinates silently discarded for EPW files.
+    // Caller-provided coordinates not silently discarded for EPW files.
     //
-    // `parse_weather_with_location` documents that EPW/PSM3 "carry their own
-    // location metadata" and ignores caller lat/lon/tz/elevation. When a caller
-    // supplies coordinates that differ from the file's embedded location by
-    // more than 1°, no warning fires and the coordinates are silently discarded.
+    // `parse_weather_with_location` emits a tracing::warn! when the caller
+    // supplies non-zero coordinates that differ from the file's embedded
+    // location by more than 1.0°. The file's location remains authoritative
+    // — coordinates are NOT overridden. Use `parse_weather_override_location`
+    // when the file's metadata is known wrong.
     //
-    // This test is a *failing* regression: it asserts the desired post-fix
-    // behaviour — that the meta latitude returned by `parse_weather_with_location`
-    // equals the CALLER-supplied value (i.e. the function has overridden the
-    // file value). Currently the function returns the FILE's latitude (39.74),
-    // so the assertion fails, demonstrating the bug.
-    //
-    // DO NOT change production code under src/ to make this pass; implement the
-    // fix for caller coordinates being silently discarded.
+    // EnergyPlus Input-Output Reference: WeatherManager.cc emits a warning
+    // when the IDF Site:Location coordinates differ from the EPW file's
+    // embedded coordinates.
     // -----------------------------------------------------------------------
     #[test]
-    #[should_panic(expected = "parse_weather_with_location silently discarded caller latitude")]
     fn epw_caller_coordinates_not_silently_discarded() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
         // Build a synthetic EPW whose LOCATION header embeds Denver, CO (39.74, -104.99).
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
         let path = write_temp_epw(&epw);
 
-        // Supply Phoenix, AZ coordinates — differ by ~4.4° lat and ~7.5° lon.
-        // If the function respected caller coordinates, meta.latitude would be 33.45.
-        // Currently it returns 39.74 (the file's value), demonstrating the bug.
+        // Supply Phoenix, AZ coordinates — differ by ~6.3° lat and ~7.1° lon.
         let caller_lat = 33.45_f64;
         let caller_lon = -112.07_f64;
         let caller_tz = -7.0_f64;
@@ -1825,21 +1822,82 @@ mod tests {
         let _ = fs::remove_file(path);
         let weather = result.expect("EPW should parse without error");
 
-        // Post-fix: the function must emit a tracing::warn! when |file_lat - caller_lat| > 1°
-        // and should NOT silently return the file's lat/lon when caller coords are non-zero.
-        // For now, assert the desired outcome: caller coords are propagated to meta.
-        // This assertion FAILS with the current implementation (returns 39.74, not 33.45).
+        // File's embedded location remains authoritative — the caller coordinates
+        // are NOT used to override meta. The function warns, not overrides.
         assert!(
-            (weather.meta.latitude - caller_lat).abs() < 0.001,
-            "parse_weather_with_location silently discarded caller latitude \
-             {caller_lat}; got file latitude {} instead",
+            (weather.meta.latitude - 39.74).abs() < 0.001,
+            "file latitude should remain authoritative (39.74°); got {}",
             weather.meta.latitude
         );
         assert!(
-            (weather.meta.longitude - caller_lon).abs() < 0.001,
-            "parse_weather_with_location silently discarded caller longitude \
-             {caller_lon}; got file longitude {} instead",
+            (weather.meta.longitude - (-104.99)).abs() < 0.001,
+            "file longitude should remain authoritative (-104.99°); got {}",
             weather.meta.longitude
+        );
+    }
+
+    #[test]
+    fn epw_zero_caller_coordinates_skip_check() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
+        let epw = build_synthetic_epw(8760, |_row, _fields| {});
+        let path = write_temp_epw(&epw);
+
+        // All-zero caller coordinates (no HPXML site data).
+        let result = crate::weather::parse_weather_with_location(&path, 0.0, 0.0, 0.0, 0.0);
+        let _ = fs::remove_file(path);
+        let weather = result.expect("EPW should parse without error");
+
+        // File coords are used since caller provided no location.
+        assert!((weather.meta.latitude - 39.74).abs() < 0.001);
+        assert!((weather.meta.longitude - (-104.99)).abs() < 0.001);
+    }
+
+    #[test]
+    fn epw_override_location_replaces_all_meta_fields() {
+        let epw = build_synthetic_epw(8760, |_row, _fields| {});
+        let path = write_temp_epw(&epw);
+
+        // Override with Phoenix, AZ coordinates and elevation.
+        let override_lat = 33.45_f64;
+        let override_lon = -112.07_f64;
+        let override_elev = 331.0_f64;
+        let override_tz = -7.0_f64;
+
+        let result = crate::weather::parse_weather_override_location(
+            &path,
+            override_lat,
+            override_lon,
+            override_elev,
+            override_tz,
+        );
+        let _ = fs::remove_file(path);
+        let weather = result.expect("EPW should parse without error");
+
+        // All four meta fields must match the caller-provided override values exactly.
+        assert!(
+            (weather.meta.latitude - override_lat).abs() < 0.001,
+            "latitude: expected {}, got {}",
+            override_lat,
+            weather.meta.latitude
+        );
+        assert!(
+            (weather.meta.longitude - override_lon).abs() < 0.001,
+            "longitude: expected {}, got {}",
+            override_lon,
+            weather.meta.longitude
+        );
+        assert!(
+            (weather.meta.elevation_m - override_elev).abs() < 0.001,
+            "elevation_m: expected {}, got {}",
+            override_elev,
+            weather.meta.elevation_m
+        );
+        assert!(
+            (weather.meta.timezone_offset_h - override_tz).abs() < 0.001,
+            "timezone_offset_h: expected {}, got {}",
+            override_tz,
+            weather.meta.timezone_offset_h
         );
     }
 }
