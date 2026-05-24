@@ -11,8 +11,9 @@ pub const CUSTOM_PAYLOAD_LEN: usize = 16;
 
 /// Classification of a thermal contribution's physical origin.
 ///
-/// Used to partition `ThermalAccumulator::sensible_by_category` without
-/// allocating. The ordinal of each variant must match its index in that array.
+/// Used to partition `ThermalAccumulator::sensible_by_category`,
+/// `radiant_by_category`, and `latent_by_category` without allocating. The
+/// ordinal of each variant must match its index in those arrays.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ThermalCategory {
     /// Intentional zone heating (HVAC systems).

@@ -426,13 +426,11 @@ fn mixed_category_totals_are_consistent() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression tests for ticket 072: latent_by_category missing
-// These tests FAIL TO COMPILE until latent_by_category is added to
-// ThermalAccumulator (per ticket 072). They demonstrate the bug.
+// Regression tests: latent_by_category per-category breakdown
 // ---------------------------------------------------------------------------
 
 /// sum(latent_by_category) must equal latent_gain_w after a sequence of
-/// mixed-category add() calls.  This is the invariant stated in ticket 072.
+/// mixed-category add() calls.
 #[test]
 fn latent_category_sum_matches_total() {
     let zone = ZoneId(3);
