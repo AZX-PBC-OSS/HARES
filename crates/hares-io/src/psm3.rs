@@ -248,9 +248,10 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     // Compute ground temperature via DOE-2 model.
     // monthly_average_dry_bulb expects hourly data, so we compute monthly means
     // directly from the sub-hourly data using the known timestep.
-    let monthly_ground_temps = compute_monthly_means_sub_hourly(&dry_bulb_c, &timestamps)
-        .map(|monthly_avg| doe2_ground_temp_from_monthly_avg(&monthly_avg))
-        .unwrap_or_else(|| doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year));
+    let monthly_ground_temps = match compute_monthly_means_sub_hourly(&dry_bulb_c, &timestamps) {
+        Some(monthly_avg) => doe2_ground_temp_from_monthly_avg(&monthly_avg),
+        None => doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year)?,
+    };
 
     let mut ground_temp_c = Vec::with_capacity(n);
     for &(month, day, hour) in &timestamps {

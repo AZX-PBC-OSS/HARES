@@ -174,7 +174,7 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
         .collect();
 
     // Ground temperature via DOE-2 sinusoidal model.
-    let monthly_ground_temps = doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year);
+    let monthly_ground_temps = doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year)?;
     let mut ground_temp_c = Vec::with_capacity(n);
     for &(month, day, hour) in &timestamps {
         ground_temp_c.push(interpolate_ground_temp_c(

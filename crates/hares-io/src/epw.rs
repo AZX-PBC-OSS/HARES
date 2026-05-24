@@ -20,8 +20,6 @@ use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
 const EXPECTED_RECORDS_LEAP: usize = 8784;
-const DEFAULT_GROUND_TEMP_C: f64 = 10.0;
-
 const LOCATION_MIN_FIELDS: usize = 10;
 const DATA_PERIOD_MIN_FIELDS: usize = 3;
 const EPW_RECORD_MIN_FIELDS: usize = 24;
@@ -221,7 +219,7 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
             opaque_sky_cover,
             horizontal_infrared_w_m2,
             sky_temp_c,
-            ground_temp_c: DEFAULT_GROUND_TEMP_C,
+            ground_temp_c: f64::NAN,
             liquid_precip_m,
         });
         record_datetimes.push((date, hour));
@@ -237,10 +235,13 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let is_leap_year = records.len() == EXPECTED_RECORDS_LEAP;
 
     // Resolve monthly ground temperatures: prefer EPW header data, fall back to DOE-2 model.
-    let monthly_ground_temps = epw_ground_temps.unwrap_or_else(|| {
-        let dry_bulb: Vec<f64> = records.iter().map(|r| r.dry_bulb_c).collect();
-        doe2_ground_temp_monthly(&dry_bulb, is_leap_year)
-    });
+    let monthly_ground_temps = match epw_ground_temps {
+        Some(gt) => gt,
+        None => {
+            let dry_bulb: Vec<f64> = records.iter().map(|r| r.dry_bulb_c).collect();
+            doe2_ground_temp_monthly(&dry_bulb, is_leap_year)?
+        }
+    };
 
     for (record, (date, hour)) in records.iter_mut().zip(&record_datetimes) {
         record.ground_temp_c = interpolate_ground_temp_c(
@@ -312,9 +313,16 @@ fn ensure_hourly_data_period(line: &str) -> Result<(), WeatherError> {
 
 /// Parses the monthly ground temperatures from the GROUND TEMPERATURES header line.
 ///
-/// Returns `None` when the header is absent or has no valid depth entries,
-/// signalling that the caller should use the DOE-2 sinusoidal fallback instead.
+/// Returns `None` when the header is absent, has no valid depth entries, or any
+/// monthly value fails to parse — signalling that the caller should use the
+/// DOE-2 sinusoidal fallback instead.
+///
+/// Selects the depth entry closest to 0.5 m per EPW Data Dictionary v9.6 §3
+/// (GROUND TEMPERATURES field): 0.5 m is the reference depth for surface
+/// boundary conditions used by GroundTemperatures:Surface.
 fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
+    const TARGET_DEPTH_M: f64 = 0.5;
+
     let fields: Vec<&str> = line.split(',').collect();
     if fields.is_empty() || fields[0].trim() != "GROUND TEMPERATURES" || fields.len() < 2 {
         return None;
@@ -325,7 +333,7 @@ fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
         return None;
     }
 
-    let mut best_depth = f64::INFINITY;
+    let mut best_dist = f64::INFINITY;
     let mut best_monthly: Option<[f64; 12]> = None;
 
     for depth_index in 0..num_depths {
@@ -338,8 +346,11 @@ fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
             continue;
         };
 
+        // Select the entry whose depth is closest to 0.5 m.
+        let dist = (depth_m - TARGET_DEPTH_M).abs();
+
         let monthly_slice = &fields[(base + 4)..(base + 16)];
-        let mut monthly = [DEFAULT_GROUND_TEMP_C; 12];
+        let mut monthly = [f64::NAN; 12];
         let mut valid = true;
         for (i, value) in monthly_slice.iter().enumerate() {
             match value.trim().parse::<f64>() {
@@ -351,8 +362,15 @@ fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
             }
         }
 
-        if valid && depth_m < best_depth {
-            best_depth = depth_m;
+        if !valid {
+            // A malformed monthly value makes this depth entry unusable.
+            // Continue searching other depth entries — don't silently substitute.
+            continue;
+        }
+
+        // All 12 values parsed successfully. Check if this is the best depth match.
+        if dist < best_dist {
+            best_dist = dist;
             best_monthly = Some(monthly);
         }
     }
@@ -367,8 +385,13 @@ const DOE2_GROUND_HOURS_PER_YEAR: f64 = 8760.0;
 const DOE2_GROUND_DAYS_PER_YEAR: f64 = 365.0;
 /// Soil thermal diffusivity [m²/hour] -- DOE-2 default for average soil.
 const DOE2_GROUND_DIFFUSIVITY: f64 = 0.025;
-/// Burial depth factor [m] used in the damping exponent.
-const DOE2_GROUND_DEPTH_FACTOR: f64 = 10.0;
+/// Reference depth [m] for shallow-foundation ground-temperature boundary.
+///
+/// Set to 0.5 m matching the EPW GroundTemperatures:Surface reference depth
+/// (EPW Data Dictionary v9.6 §3). The original DOE-2 GTEMP code used 5 ft
+/// (approximately 1.524 m); the choice of 0.5 m here is the physically
+/// motivated depth for slab/crawlspace foundations.
+const DOE2_GROUND_REFERENCE_DEPTH_M: f64 = 0.5;
 /// Phase offset [rad] aligning the ground-temperature sinusoid to peak in late summer.
 const DOE2_GROUND_PHASE_OFFSET_RAD: f64 = 0.6;
 
@@ -409,7 +432,7 @@ pub(crate) fn monthly_average_dry_bulb(
     Some(monthly)
 }
 
-/// Compute monthly ground temperatures using the DOE-2/OCHRE damped correlation:
+/// Compute monthly ground temperatures using the DOE-2 damped correlation:
 ///
 /// `T_ground(day) = T_avg - ΔT_monthly * gm * cos(2π day / 365 - 0.6 - atan(z))`
 ///
@@ -418,17 +441,23 @@ pub(crate) fn monthly_average_dry_bulb(
 /// - `ΔT_monthly` = `(max(monthly_avg) - min(monthly_avg)) / 2`
 /// - `gm`, `z` from DOE-2 GTEMP damping terms (`beta`, `x`, `y`)
 ///
-/// Returns a 12-element array of mid-month ground temperatures [°C].
-pub(crate) fn doe2_ground_temp_monthly(dry_bulb_c: &[f64], is_leap_year: bool) -> [f64; 12] {
+/// Returns a 12-element array of mid-month ground temperatures [°C],
+/// or an error if the dry-bulb series is empty.
+pub(crate) fn doe2_ground_temp_monthly(
+    dry_bulb_c: &[f64],
+    is_leap_year: bool,
+) -> Result<[f64; 12], WeatherError> {
     if dry_bulb_c.is_empty() {
-        return [DEFAULT_GROUND_TEMP_C; 12];
+        return Err(WeatherError::Parse(
+            "cannot compute DOE-2 ground temperature from empty dry-bulb series".to_string(),
+        ));
     }
 
     let monthly_avg = monthly_average_dry_bulb(dry_bulb_c, is_leap_year).unwrap_or_else(|| {
         let annual_avg = dry_bulb_c.iter().sum::<f64>() / dry_bulb_c.len() as f64;
         [annual_avg; 12]
     });
-    doe2_ground_temp_from_monthly_avg(&monthly_avg)
+    Ok(doe2_ground_temp_from_monthly_avg(&monthly_avg))
 }
 
 /// Compute DOE-2 ground temperatures from pre-computed monthly averages.
@@ -448,7 +477,7 @@ pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64
 
     let beta = (std::f64::consts::PI / (DOE2_GROUND_HOURS_PER_YEAR * DOE2_GROUND_DIFFUSIVITY))
         .sqrt()
-        * DOE2_GROUND_DEPTH_FACTOR;
+        * DOE2_GROUND_REFERENCE_DEPTH_M;
     let x = (-beta).exp();
     let cos_beta = beta.cos();
     let sin_beta = beta.sin();
@@ -784,8 +813,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        DOE2_GROUND_DAYS_PER_YEAR, DOE2_GROUND_DEPTH_FACTOR, DOE2_GROUND_DIFFUSIVITY,
-        DOE2_GROUND_HOURS_PER_YEAR, DOE2_GROUND_PHASE_OFFSET_RAD, DOE2_MID_MONTH_DAYS,
+        DOE2_GROUND_DAYS_PER_YEAR, DOE2_GROUND_DIFFUSIVITY, DOE2_GROUND_HOURS_PER_YEAR,
+        DOE2_GROUND_PHASE_OFFSET_RAD, DOE2_GROUND_REFERENCE_DEPTH_M, DOE2_MID_MONTH_DAYS,
         STEFAN_BOLTZMANN, WeatherError, berdahl_martin_sky_emissivity, brunt_sky_emissivity,
         clark_allen_sky_temp_c, compute_sky_temp_c, doe2_ground_temp_monthly, idso_sky_emissivity,
         monthly_day_counts, parse_epw, parse_epw_str, sky_temp_from_emissivity,
@@ -1154,7 +1183,8 @@ mod tests {
             -6.0, -4.0, 0.0, 5.0, 10.0, 15.0, 18.0, 17.0, 12.0, 6.0, 0.0, -4.0,
         ];
         let dry_bulb = build_hourly_from_monthly(&monthly_means, false, 12.0);
-        let monthly_ground = doe2_ground_temp_monthly(&dry_bulb, false);
+        let monthly_ground = doe2_ground_temp_monthly(&dry_bulb, false)
+            .expect("DOE-2 ground temp should succeed with valid dry-bulb data");
 
         let min_ground = monthly_ground.iter().copied().fold(f64::INFINITY, f64::min);
         let max_ground = monthly_ground
@@ -1174,12 +1204,13 @@ mod tests {
     }
 
     #[test]
-    fn doe2_ground_temp_matches_ochre_damped_formula() {
+    fn doe2_ground_temp_formula_consistency() {
         let monthly_means = [
             -5.0, -3.0, 2.0, 7.0, 12.0, 16.0, 20.0, 19.0, 14.0, 8.0, 2.0, -2.0,
         ];
         let dry_bulb = build_hourly_from_monthly(&monthly_means, false, 0.0);
-        let got = doe2_ground_temp_monthly(&dry_bulb, false);
+        let got = doe2_ground_temp_monthly(&dry_bulb, false)
+            .expect("DOE-2 ground temp should succeed with valid dry-bulb data");
 
         let t_avg = monthly_means.iter().sum::<f64>() / 12.0;
         let dt_monthly = (monthly_means
@@ -1191,7 +1222,7 @@ mod tests {
 
         let beta = (std::f64::consts::PI / (DOE2_GROUND_HOURS_PER_YEAR * DOE2_GROUND_DIFFUSIVITY))
             .sqrt()
-            * DOE2_GROUND_DEPTH_FACTOR;
+            * DOE2_GROUND_REFERENCE_DEPTH_M;
         let x = (-beta).exp();
         let y = (x * x - 2.0 * x * beta.cos() + 1.0) / (2.0 * beta * beta);
         let gm = y.sqrt();
@@ -1245,11 +1276,9 @@ mod tests {
 
     /// An EPW with depths [0.5, 2.0, 4.0] must select the 0.5 m entry.
     ///
-    /// The Denver TMY3 EPW has these exact three depths. The current code's
-    /// `depth_m < best_depth` always picks the shallowest depth, so for
-    /// [0.5, 2.0, 4.0] it happens to select 0.5 m (which is correct by
-    /// accident). The real failure manifests when the shallowest entry is NOT
-    /// 0.5 m — verified by the test below.
+    /// The Denver TMY3 EPW has these exact three depths. The closest-to-0.5-m
+    /// selection picks 0.5 m (distance 0.0) over 2.0 m (distance 1.5) and
+    /// 4.0 m (distance 3.5).
     #[test]
     fn ground_temp_depth_selection_picks_0_5_m_from_0_5_2_4_depths() {
         // Depths 0.5, 2.0, 4.0 m — all-ones at 0.5 m, all-twos at 2 m, all-threes at 4 m.
@@ -1272,10 +1301,9 @@ mod tests {
     }
 
     /// An EPW with depths [0.1, 0.5, 2.0] MUST select 0.5 m (closest to 0.5),
-    /// NOT 0.1 m (the shallowest). This is the exact scenario that
-    /// demonstrates the real bug: current code picks 0.1 m.
+    /// NOT 0.1 m (the shallowest). 0.5 m is the EPW reference depth for
+    /// surface boundary conditions.
     #[test]
-    #[should_panic]
     fn ground_temp_depth_selection_picks_0_5_m_not_0_1_m() {
         // 0.1 m entry: all-tens (diurnal layer, wrong for envelope BCs)
         // 0.5 m entry: all-fives (the correct reference depth per EPW spec)
@@ -1288,39 +1316,31 @@ mod tests {
         let epw = epw_with_ground_header(8760, &gt_line);
         let parsed = parse_epw_str(&epw).expect("EPW should parse");
 
-        // Must select the 0.5 m entry (≈5.0), NOT the shallowest 0.1 m entry (≈10.0).
-        // The current code selects depth_m < best_depth → picks 0.1 m (≈10.0).
-        // This assertion FAILS under the current implementation, confirming the bug.
+        // The fixed code selects the entry closest to 0.5 m → picks the 0.5 m entry (≈5.0),
+        // not the shallowest 0.1 m entry (≈10.0).
         for (i, &gt) in parsed.ground_temp_c.iter().enumerate() {
             assert!(
                 (gt - 5.0).abs() < 1.0,
                 "hour {i}: ground_temp {gt:.4} should come from the 0.5 m entry (≈5.0), \
-                 not the 0.1 m (shallowest) entry (≈10.0). Current code selects shallowest."
+                 not the 0.1 m (shallowest) entry (≈10.0)"
             );
         }
     }
 
-    // --- Bug 3: DOE2_GROUND_DEPTH_FACTOR = 10.0 eliminates seasonal variation ---
+    // --- Bug 3: DOE2_GROUND_REFERENCE_DEPTH_M = 0.5 m (shallow-foundation reference) ---
 
-    /// With the DOE-2 formula using `α = 0.025 m²/hr` and `τ = 8760 hr`, the
-    /// attenuation factor `gm` at depth `z = 10 m` is approximately 0.55,
-    /// while at `z = 0.5 m` it is approximately 0.97.  The original report claims these
-    /// numbers should be 0.018 and 0.82 respectively, but those values apply
-    /// only when EnergyPlus's much smaller diffusivity
-    /// (`2.3225760E-03 m²/day ≈ 9.68E-05 m²/hr`) is used.
+    /// Verifies that with the corrected reference depth (0.5 m), the DOE-2
+    /// formula preserves the seasonal ground-temperature amplitude rather than
+    /// over-damping it.
     ///
-    /// What IS wrong with `DOE2_GROUND_DEPTH_FACTOR = 10.0 m` is that the
-    /// depth factor is supposed to represent the burial depth of the
-    /// representative soil boundary for a shallow foundation (slab/crawlspace),
-    /// not a deep-soil value.  The DOE-2 original used 5 ft (≈1.524 m).
-    /// The original report asks for 0.5 m (matching the EPW reference depth).
-    ///
-    /// This test verifies that the amplitude ratio `ground_amplitude /
-    /// monthly_amplitude` is SMALLER at depth 10 m than it would be at 0.5 m,
-    /// demonstrating that the current constant over-damps relative to what a
-    /// shallow-foundation reference depth would produce.
+    /// With `α = 0.025 m²/hr` and `DOE2_GROUND_REFERENCE_DEPTH_M = 0.5 m`:
+    ///   beta = sqrt(pi / (8760 * 0.025)) * 0.5 ≈ 0.0599
+    ///   gm ≈ 0.970 (the theoretical attenuation factor at 0.5 m).
+    /// Because the 12 mid-month sampling days do not coincide exactly with
+    /// the sinusoid peak/trough, the observed amplitude ratio from the
+    /// 12-element output is slightly below gm (≈0.960 in practice).
     #[test]
-    fn doe2_ground_depth_factor_10m_overdamps_vs_0_5m() {
+    fn doe2_ground_ref_depth_0_5m_preserves_seasonal_amplitude() {
         use super::doe2_ground_temp_from_monthly_avg;
 
         let monthly_means: [f64; 12] = [
@@ -1333,44 +1353,104 @@ mod tests {
             - monthly_means.iter().copied().fold(f64::INFINITY, f64::min))
             / 2.0; // 15.0 °C
 
-        let ground_10m = doe2_ground_temp_from_monthly_avg(&monthly_means);
-        let g10_min = ground_10m.iter().copied().fold(f64::INFINITY, f64::min);
-        let g10_max = ground_10m.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let amp_10m = (g10_max - g10_min) / 2.0;
+        let ground = doe2_ground_temp_from_monthly_avg(&monthly_means);
+        let g_min = ground.iter().copied().fold(f64::INFINITY, f64::min);
+        let g_max = ground.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let ground_amplitude = (g_max - g_min) / 2.0;
 
-        // Manually compute what the formula produces at 0.5 m depth using the
-        // SAME diffusivity constant (DOE2_GROUND_DIFFUSIVITY = 0.025 m²/hr).
-        // beta_05 = sqrt(pi / (8760 * 0.025)) * 0.5 ≈ 0.0599
-        // gm_05 ≈ 0.970 → amplitude ≈ 14.55 °C
-        // beta_10 = sqrt(pi / (8760 * 0.025)) * 10.0 ≈ 1.198
-        // gm_10 ≈ 0.551 → amplitude ≈ 8.27 °C
-        //
-        // Current DOE2_GROUND_DEPTH_FACTOR = 10.0 produces gm ≈ 0.551,
-        // whereas depth 0.5 m gives gm ≈ 0.970 (the target value).
-        //
-        // The ratio should be: amplitude_10m / amplitude_0.5m ≈ 0.551 / 0.970 ≈ 0.568.
-        // We verify the current code under-estimates the seasonal signal compared
-        // to what a physically correct 0.5 m reference depth would give.
-        //
-        // Expected: amp_10m is noticeably smaller than monthly_amplitude * 0.97
-        // (the gm at 0.5 m).  Threshold chosen so only z << 0.5 m would pass.
-        let ratio = amp_10m / monthly_amplitude;
+        let ratio = ground_amplitude / monthly_amplitude;
+
+        // Compute the theoretical gm from the DOE-2 beta formula.
+        let beta = (std::f64::consts::PI / (DOE2_GROUND_HOURS_PER_YEAR * DOE2_GROUND_DIFFUSIVITY))
+            .sqrt()
+            * DOE2_GROUND_REFERENCE_DEPTH_M;
+        let x = (-beta).exp();
+        let y = (x * x - 2.0 * x * beta.cos() + 1.0) / (2.0 * beta * beta);
+        let gm = y.sqrt();
+
+        // The 12-element output samples the mid-month days; the observed
+        // amplitude ratio is gm scaled by how close the mid-month cosine
+        // values get to ±1 given the phase offset. Compute this analytically:
+        let z = (1.0 - x * (beta.cos() + beta.sin())) / (1.0 - x * (beta.cos() - beta.sin()));
+        let phase = DOE2_GROUND_PHASE_OFFSET_RAD + z.atan();
+        let cos_values: Vec<f64> = DOE2_MID_MONTH_DAYS
+            .iter()
+            .map(|&day| {
+                (2.0 * std::f64::consts::PI / DOE2_GROUND_DAYS_PER_YEAR * day - phase).cos()
+            })
+            .collect();
+        let cos_max = cos_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let cos_min = cos_values.iter().copied().fold(f64::INFINITY, f64::min);
+        // The expected amplitude from the 12 samples: dt_monthly * gm * (cos_max - cos_min) / 2
+        // So the ratio is gm * (cos_max - cos_min) / 2.
+        let expected_ratio = gm * (cos_max - cos_min) / 2.0;
+
         assert!(
-            ratio < 0.97,
-            "DOE2_GROUND_DEPTH_FACTOR = {} m gives amplitude ratio {ratio:.4} vs monthly; \
-             a 0.5 m depth would give ~0.97.  The constant is wrong for a shallow \
-             foundation reference depth.",
-            DOE2_GROUND_DEPTH_FACTOR
+            (ratio - expected_ratio).abs() < 1e-10,
+            "amplitude ratio {ratio} should equal expected {expected_ratio} (gm = {gm:.4}, \
+             cos range = {cos_min:.4} to {cos_max:.4})"
         );
 
-        // Additionally: with the correct depth (0.5 m) the amplitude ratio would
-        // be ~0.97; with depth = 10 m it is ~0.55.  The difference is substantial.
-        // Assert that the current code is more than 30% below the 0.97 target.
+        // gm at 0.5 m should be significantly above 0.5 (shallow depth preserves signal).
         assert!(
-            ratio < 0.97 - 0.30,
-            "Expected amplitude ratio < 0.67 (>30% below 0.97 target for 0.5 m), \
-             got {ratio:.4}. DOE2_GROUND_DEPTH_FACTOR = {} m is over-damping.",
-            DOE2_GROUND_DEPTH_FACTOR
+            gm > 0.5,
+            "gm = {gm:.4} should be > 0.5 for shallow reference depth"
+        );
+    }
+
+    /// An EPW with a non-numeric monthly value in the GROUND TEMPERATURES header
+    /// must return `None` from `parse_ground_temperatures`, triggering the DOE-2
+    /// fallback — not silently substitute a default value.
+    #[test]
+    fn ground_temp_malformed_monthly_triggers_doe2_fallback() {
+        // Build a header with one depth (0.5 m) where one monthly value is "N/A".
+        let mut parts = vec![
+            "GROUND TEMPERATURES".to_string(),
+            "1".to_string(),   // num_depths = 1
+            "0.5".to_string(), // depth
+            String::new(),     // soil conductivity (blank)
+            String::new(),     // soil density (blank)
+            String::new(),     // soil specific heat (blank)
+        ];
+        for i in 0..12 {
+            if i == 5 {
+                parts.push("N/A".to_string());
+            } else {
+                parts.push("15.0".to_string());
+            }
+        }
+        let gt_line = parts.join(",");
+        let epw = epw_with_ground_header(8760, &gt_line);
+        let parsed = parse_epw_str(&epw).expect("EPW should parse");
+
+        // When the GROUND TEMPERATURES header has malformed data, the DOE-2
+        // fallback computes ground temps from the dry-bulb series. Since the
+        // synthetic EPW has constant dry-bulb (20°C), the ground temps should
+        // converge to ~20°C — NOT the old 10°C default and NOT the malformed
+        // header data.
+        for (i, &gt) in parsed.ground_temp_c.iter().enumerate() {
+            assert!(
+                (gt - 20.0).abs() < 1.0,
+                "hour {i}: ground_temp {gt:.4} should be near the DOE-2 fallback (~20°C from \
+                 constant dry-bulb), not the old 10°C default"
+            );
+        }
+    }
+
+    /// Calling `doe2_ground_temp_monthly` with an empty dry-bulb slice must
+    /// return an error, not silently substitute a default temperature.
+    #[test]
+    fn doe2_ground_temp_empty_dry_bulb_returns_err() {
+        let result = doe2_ground_temp_monthly(&[], false);
+        assert!(
+            result.is_err(),
+            "empty dry-bulb should return Err, not silently substitute a default"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, WeatherError::Parse(_)));
+        assert!(
+            err.to_string().contains("empty dry-bulb"),
+            "error message should mention empty dry-bulb: {err}"
         );
     }
 
