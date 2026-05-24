@@ -1218,7 +1218,11 @@ fn attic_infiltration_method(
 
     if zone.vented {
         return Err(HaresError::Envelope(format!(
-            "Vented attic zone {zone_idx} requires explicit ventilation data (ACH or SLA)"
+            "Vented attic zone {zone_idx}: <VentilationRate> is required but absent. \
+             Add e.g. <VentilationRate><UnitofMeasure>SLA</UnitofMeasure>\
+             <Value>0.00333</Value></VentilationRate> under the zone. \
+             IRC 2021 R806.2 minimum is SLA=0.0067 (1/150 of ceiling area); \
+             ANSI/RESNET/ICC 301-2019 energy-rating default is SLA=0.00333 (1/300)."
         )));
     }
 
@@ -1710,16 +1714,18 @@ mod tests {
         let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
         assert!(matches!(err, HaresError::Envelope(_)));
         assert!(
-            err.to_string()
-                .contains("requires explicit ventilation data")
+            err.to_string().contains("VentilationRate"),
+            "error message must name <VentilationRate>: {}",
+            err
+        );
+        assert!(
+            err.to_string().contains("SLA"),
+            "error message must mention SLA: {}",
+            err
         );
     }
 
-    // Regression tests for ticket 039: vented attic with no SLA/ACH must produce
-    // an actionable error that names <VentilationRate> and SLA.
-    // Fix pending on ticket 039 — will stop panicking when error message is updated.
     #[test]
-    #[should_panic(expected = "error message must name <VentilationRate>")]
     fn attic_vented_no_sla_error_names_ventilation_rate_element() {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
         let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
