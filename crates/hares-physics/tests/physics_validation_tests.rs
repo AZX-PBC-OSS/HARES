@@ -303,8 +303,8 @@ fn tarp_h_natural_vertical_surface() {
 /// using the correct roughness class.
 #[test]
 fn roughness_class_changes_exterior_film_resistance() {
-    // VinylSiding → Smooth (Rf=1.11); BrickVeneer → VeryRough (Rf=2.17)
-    // At the same wind speed, VeryRough must produce lower R_ext than Smooth.
+    // vinyl siding → Smooth (Rf=1.11); brick veneer → Rough (Rf=1.67) per EnergyPlus material library.
+    // At the same wind speed, rougher surfaces produce lower R_ext than smoother ones.
     let tilt = 90.0_f64;
     let ground_c = 10.0_f64;
     let ambient_c = 10.0_f64;
@@ -359,13 +359,13 @@ fn roughness_class_changes_exterior_film_resistance() {
          hardcoding Rough for vinyl siding (Smooth) underestimates exterior film resistance"
     );
 
-    // Quantify: the error from hardcoding Rough for VeryRough (brick veneer) is in
-    // the opposite direction — Rough undercounts forced convection vs VeryRough.
+    // Quantify: VeryRough (Rf=2.17) produces even lower R_ext than Rough (Rf=1.67) —
+    // the ordering holds across all six roughness classes.
     let r_very_rough = r_exts[0]; // SurfaceRoughness::VeryRough
     assert!(
         r_very_rough < r_rough,
         "VeryRough (Rf=2.17) gives R_ext={r_very_rough:.5}, Rough (Rf=1.67) gives R_ext={r_rough:.5}; \
-         hardcoding Rough for brick veneer (VeryRough) overestimates exterior film resistance"
+         VeryRough must produce lower exterior film resistance than Rough"
     );
 }
 

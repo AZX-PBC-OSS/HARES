@@ -69,6 +69,47 @@ impl SurfaceRoughness {
     }
 }
 
+/// Map HPXML `<Siding>` finish type string to a [`SurfaceRoughness`] class.
+///
+/// Mapping derived from EnergyPlus Engineering Reference "DOE-2 Model"
+/// surface roughness examples and the HPXML v4.2 `<Siding>` enumeration.
+/// Unknown or absent finish types fall back to [`SurfaceRoughness::MediumRough`]
+/// with a `tracing::warn!` — bare OSB/sheathing as the conservative default.
+///
+/// # References
+/// - EnergyPlus Engineering Reference, "DOE-2 Model" section under Outside
+///   Surface Heat Balance — roughness multiplier table (Walton 1981).
+/// - HPXML Data Dictionary v4.2, `<Siding>` enumeration.
+pub fn surface_roughness_from_finish_type(finish_type: Option<&str>) -> SurfaceRoughness {
+    match finish_type {
+        // Stucco is VeryRough per EnergyPlus material library examples.
+        Some("stucco") | Some("synthetic stucco") => SurfaceRoughness::VeryRough,
+        // Brick is Rough per EnergyPlus material library (not VeryRough).
+        Some("brick veneer") => SurfaceRoughness::Rough,
+        // Wood siding, fiber cement, and other composite siding products
+        // are medium-rough: rougher than smooth vinyl/aluminum but smoother
+        // than rough-sawn lumber (Rough) or stucco (VeryRough).
+        Some("wood siding")
+        | Some("fiber cement siding")
+        | Some("asbestos siding")
+        | Some("masonite siding")
+        | Some("composite shingle siding") => SurfaceRoughness::MediumRough,
+        // Vinyl and aluminum siding are smooth manufactured products.
+        Some("vinyl siding") | Some("aluminum siding") => SurfaceRoughness::Smooth,
+        // "none" means bare sheathing/OSB; "other" is HPXML catch-all.
+        // Absent finish_type (None) likewise defaults to MediumRough.
+        None | Some("none") | Some("other") | Some(_) => {
+            let value = finish_type.unwrap_or("<absent>");
+            tracing::warn!(
+                finish_type = value,
+                roughness = ?SurfaceRoughness::MediumRough,
+                "unknown or absent exterior finish type; defaulting to MediumRough"
+            );
+            SurfaceRoughness::MediumRough
+        }
+    }
+}
+
 /// Typical zone temperatures [°C] for each [`ZoneLabel`] variant.
 ///
 /// Anchor values: Ground = `avg_ground_c`, Conditioned = 20 °C,
@@ -438,6 +479,153 @@ mod tests {
             temps[ZoneLabel::Attic.height_order() as usize],
             20.0 + (15.0 - 20.0) * 2.0 / 3.0,
             1e-12,
+        );
+    }
+
+    // --- surface_roughness_from_finish_type tests ---
+
+    #[test]
+    fn surface_roughness_vinyl_siding_maps_to_smooth() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("vinyl siding")),
+            SurfaceRoughness::Smooth
+        );
+    }
+
+    #[test]
+    fn surface_roughness_aluminum_siding_maps_to_smooth() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("aluminum siding")),
+            SurfaceRoughness::Smooth
+        );
+    }
+
+    #[test]
+    fn surface_roughness_brick_veneer_maps_to_rough() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("brick veneer")),
+            SurfaceRoughness::Rough
+        );
+    }
+
+    #[test]
+    fn surface_roughness_stucco_maps_to_very_rough() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("stucco")),
+            SurfaceRoughness::VeryRough
+        );
+    }
+
+    #[test]
+    fn surface_roughness_synthetic_stucco_maps_to_very_rough() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("synthetic stucco")),
+            SurfaceRoughness::VeryRough
+        );
+    }
+
+    #[test]
+    fn surface_roughness_wood_siding_maps_to_medium_rough() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("wood siding")),
+            SurfaceRoughness::MediumRough
+        );
+    }
+
+    #[test]
+    fn surface_roughness_fiber_cement_siding_maps_to_medium_rough() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("fiber cement siding")),
+            SurfaceRoughness::MediumRough
+        );
+    }
+
+    #[test]
+    fn surface_roughness_none_finish_defaults_to_medium_rough() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("none")),
+            SurfaceRoughness::MediumRough
+        );
+    }
+
+    #[test]
+    fn surface_roughness_absent_finish_type_defaults_to_medium_rough() {
+        assert_eq!(
+            surface_roughness_from_finish_type(None),
+            SurfaceRoughness::MediumRough
+        );
+    }
+
+    #[test]
+    fn surface_roughness_unknown_finish_defaults_to_medium_rough() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("diamond plate")),
+            SurfaceRoughness::MediumRough
+        );
+    }
+
+    #[test]
+    fn surface_roughness_other_finish_defaults_to_medium_rough() {
+        assert_eq!(
+            surface_roughness_from_finish_type(Some("other")),
+            SurfaceRoughness::MediumRough
+        );
+    }
+
+    #[test]
+    fn vinyl_siding_smooth_gives_higher_r_ext_than_brick_veneer_rough_at_same_wind() {
+        // Smooth (Rf=1.11) produces less forced convection → higher exterior R
+        // than Rough (Rf=1.67). This confirms the fix: replacing the hardcoded
+        // Rough with the correct finish-type-derived roughness class.
+        let (_, r_vinyl) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            4.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::Smooth,
+        );
+        let (_, r_brick) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            4.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::Rough,
+        );
+        assert!(
+            r_vinyl > r_brick,
+            "Vinyl (Smooth) R_ext={r_vinyl:.6} must exceed Brick (Rough) R_ext={r_brick:.6}"
+        );
+    }
+
+    #[test]
+    fn stucco_very_rough_gives_lower_r_ext_than_brick_veneer_rough_at_same_wind() {
+        // VeryRough (Rf=2.17) produces more forced convection → lower exterior R
+        // than Rough (Rf=1.67).
+        let (_, r_stucco) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            4.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::VeryRough,
+        );
+        let (_, r_brick) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            4.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::Rough,
+        );
+        assert!(
+            r_stucco < r_brick,
+            "Stucco (VeryRough) R_ext={r_stucco:.6} must be less than Brick (Rough) R_ext={r_brick:.6}"
         );
     }
 }

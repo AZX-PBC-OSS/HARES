@@ -114,7 +114,7 @@ pub fn building_to_boundary_inputs(
     use hares_envelope::PrecomputedRCLayer;
     use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
-    use hares_physics::film_coefficients::{SurfaceRoughness, film_resistances};
+    use hares_physics::film_coefficients::{film_resistances, surface_roughness_from_finish_type};
     use hares_physics::ground::f2_coefficient;
     use hares_physics::solar::window_u_factor_decomposition;
 
@@ -138,7 +138,7 @@ pub fn building_to_boundary_inputs(
                 avg_wind_m_s,
                 avg_ground_c,
                 avg_ambient_c,
-                SurfaceRoughness::Rough,
+                surface_roughness_from_finish_type(bd.finish_type.as_deref()),
             );
 
             // fallback_r is material-only R (no film). HPXML AssemblyEffectiveRValue
@@ -1427,6 +1427,88 @@ mod tests {
         assert!(
             inputs[0].r_film_exterior_m2_k_w > 0.0,
             "wall boundary must have non-zero exterior film"
+        );
+    }
+
+    /// Exterior film resistance varies with finish_type: stucco (VeryRough)
+    /// must produce lower R_ext than vinyl siding (Smooth) at the same wind speed.
+    /// This is the regression test for the hardcoded `SurfaceRoughness::Rough` bug.
+    /// If `surface_roughness_from_finish_type` were bypassed, both boundaries
+    /// would get identical R_ext and this test would fail.
+    #[test]
+    fn finish_type_roughness_changes_exterior_film_resistance() {
+        let building = hares_io::Building {
+            boundaries: vec![
+                Boundary {
+                    id: "wall-vinyl".to_string(),
+                    boundary_type: BoundaryType::Wall,
+                    area_m2: 20.0,
+                    azimuth_deg: Some(180.0),
+                    assembly_r_value_m2_k_w: Some(3.0),
+                    r_value_layers_m2_k_w: Vec::new(),
+                    interior_zone: Some(ZoneType::Conditioned),
+                    exterior_zone: Some(ZoneType::Outdoor),
+                    material_layers: Vec::new(),
+                    framing_factor: None,
+                    construction_type: None,
+                    finish_type: Some("vinyl siding".to_string()),
+                    insulation_details: None,
+                    has_radiant_barrier: false,
+                    solar_absorptance: None,
+                    emittance: None,
+                    tilt_deg: Some(90.0),
+                    lut_boundary_name: None,
+                    floor_or_ceiling: None,
+                    perimeter_m: None,
+                    perimeter_insulation_r_m2_k_w: None,
+                },
+                Boundary {
+                    id: "wall-stucco".to_string(),
+                    boundary_type: BoundaryType::Wall,
+                    area_m2: 20.0,
+                    azimuth_deg: Some(180.0),
+                    assembly_r_value_m2_k_w: Some(3.0),
+                    r_value_layers_m2_k_w: Vec::new(),
+                    interior_zone: Some(ZoneType::Conditioned),
+                    exterior_zone: Some(ZoneType::Outdoor),
+                    material_layers: Vec::new(),
+                    framing_factor: None,
+                    construction_type: None,
+                    finish_type: Some("stucco".to_string()),
+                    insulation_details: None,
+                    has_radiant_barrier: false,
+                    solar_absorptance: None,
+                    emittance: None,
+                    tilt_deg: Some(90.0),
+                    lut_boundary_name: None,
+                    floor_or_ceiling: None,
+                    perimeter_m: None,
+                    perimeter_insulation_r_m2_k_w: None,
+                },
+            ],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 4.0, 10.0, 10.0);
+        assert_eq!(inputs.len(), 2);
+        let r_vinyl = inputs[0].r_film_exterior_m2_k_w;
+        let r_stucco = inputs[1].r_film_exterior_m2_k_w;
+        assert!(
+            r_stucco < r_vinyl,
+            "stucco (VeryRough, Rf=2.17) R_ext={r_stucco:.5} must be < vinyl siding (Smooth, Rf=1.11) R_ext={r_vinyl:.5}; \
+             hardcoded Rough would give identical values"
         );
     }
 
