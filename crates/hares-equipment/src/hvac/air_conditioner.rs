@@ -323,6 +323,10 @@ impl Equipment for RoomAC {
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         self.core.apply_control_unchecked(signal)
     }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        self.core.ideal_target()
+    }
 }
 
 impl CoolingCore {
@@ -3864,17 +3868,12 @@ mod ideal_capacity_tests {
         );
     }
 
-    // Regression test for ticket #022: RoomAC missing ideal_target() implementation.
+    // Test: RoomAC ideal_target() delegation to CoolingCore.
     //
     // At a coarse timestep (>= 5 min), use_ideal_capacity() returns true for AcCooler
-    // equipment types (which RoomAC uses). AirConditioner wires ideal_target() through
-    // to CoolingCore; RoomAC does not — it falls through to the Equipment trait default
-    // which always returns None.
-    //
-    // Fix pending on ticket 022 — will stop panicking when RoomAC delegates
-    // ideal_target() to self.core.
+    // equipment types (which RoomAC uses). RoomAC delegates ideal_target() to
+    // CoolingCore, same delegation pattern as AirConditioner.
     #[test]
-    #[should_panic(expected = "RoomAC ideal_target() must return Some")]
     fn room_ac_ideal_target_returns_some_at_coarse_timestep() {
         use super::RoomAC;
         use crate::RoomAcConfig;
@@ -3919,12 +3918,11 @@ mod ideal_capacity_tests {
 
         // After update_control with a hot zone and coarse timestep, ideal_target() must
         // return Some((ZoneId(1), ~24.0)) — the zone id and cooling setpoint.
-        // This FAILS until RoomAC delegates to self.core.ideal_target().
         let target = eq.ideal_target();
         assert!(
             target.is_some(),
             "RoomAC ideal_target() must return Some at coarse timestep (900 s) when zone \
-             (26°C) is above cooling turn-on threshold; got None (ticket #022)"
+             (26°C) is above cooling turn-on threshold; got None"
         );
         let (zone_id, setpoint_c) = target.unwrap();
         assert_eq!(
@@ -3988,10 +3986,9 @@ mod ideal_capacity_tests {
         );
     }
 
-    // Fix pending on ticket 022 — will stop panicking when RoomAC's
-    // ideal_target() matches AirConditioner's.
+    // Verify RoomAC and AirConditioner return identical ideal_target() outputs
+    // for identical input conditions — the same delegation to CoolingCore.
     #[test]
-    #[should_panic(expected = "RoomAC must return Some ideal_target")]
     fn room_ac_ideal_target_matches_air_conditioner_parity() {
         use crate::{CentralAirConditionerConfig, DuctConfig, RoomAcConfig};
 
@@ -4078,14 +4075,13 @@ mod ideal_capacity_tests {
         let rac_target = rac.ideal_target();
 
         // Both must return Some with the same zone and setpoint.
-        // This fails until RoomAC implements ideal_target() (ticket #022).
         assert!(
             ac_target.is_some(),
             "AirConditioner must return Some ideal_target at coarse timestep"
         );
         assert!(
             rac_target.is_some(),
-            "RoomAC must return Some ideal_target at coarse timestep (ticket #022: currently returns None)"
+            "RoomAC must return Some ideal_target at coarse timestep"
         );
         let (ac_zone, ac_sp) = ac_target.unwrap();
         let (rac_zone, rac_sp) = rac_target.unwrap();
