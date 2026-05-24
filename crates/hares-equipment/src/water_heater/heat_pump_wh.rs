@@ -747,7 +747,14 @@ impl Equipment for HeatPumpWH {
                     sensible_gain_w: sensible_to_zone_w,
                     radiant_gain_w: 0.0,
                     latent_gain_w,
-                    category: ThermalCategory::InternalGain,
+                    // HPWH compressor waste heat and evaporator moisture removal
+                    // are mechanical equipment effects, not passive internal gains.
+                    // EnergyPlus Engineering Reference: the HP evaporator extracts
+                    // sensible + latent heat from zone air — the same physics as a
+                    // standalone dehumidifier. OCHRE WaterHeater.py folds this into
+                    // internal_sens_gain but HARES separates it for per-category
+                    // diagnostics (mechanical conditioning vs occupant/appliance heat).
+                    category: ThermalCategory::HvacDehumidification,
                 })?;
             }
             if sensible_to_wall_w != 0.0 {
@@ -756,6 +763,12 @@ impl Equipment for HeatPumpWH {
                     sensible_gain_w: sensible_to_wall_w,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
+                    // Compressor waste heat routed to interior wall face.
+                    // Shares JacketLoss with tank skin conduction (below);
+                    // the two are distinguishable in per-category diagnostics
+                    // only by telemetry (skin_loss_w, wall_sensible_gain_w).
+                    // A dedicated HvacWasteHeat variant would allow full
+                    // separation of HP-cycle losses from tank losses.
                     category: ThermalCategory::JacketLoss,
                 })?;
             }
@@ -3017,6 +3030,7 @@ mod new_feature_tests {
         eq50.step(&e, Duration::from_secs(60), &mut p50).unwrap();
         let sens50 = p50.thermal[0].sensible_gain_w;
         let internal50 = p50.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
+        let dehumid50 = p50.thermal[0].sensible_for_category(ThermalCategory::HvacDehumidification);
         let jacket50 = p50.thermal[0].sensible_for_category(ThermalCategory::JacketLoss);
 
         assert!(
@@ -3028,14 +3042,20 @@ mod new_feature_tests {
             (ratio - 1.0).abs() < 0.01,
             "total sensible gain must be preserved across the wall split: ratio={ratio:.4}"
         );
+        // InternalGain must be zero: HPWH compressor zone heat is
+        // HvacDehumidification, not a passive internal gain.
+        assert!(
+            internal50.abs() < 1e-6,
+            "InternalGain must be zero when HP is running (zone heat is HvacDehumidification): {internal50:.2} W"
+        );
         let skin_loss_w = eq50.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
         let wall_w = eq50
             .telemetry()
             .get(tk::WALL_SENSIBLE_GAIN_W)
             .unwrap_or(0.0);
         assert!(
-            (internal50 - wall_w).abs() < 1.0,
-            "internal gain must equal wall share of HP waste heat: {internal50:.2} vs {wall_w:.2}"
+            (dehumid50 - wall_w).abs() < 1.0,
+            "HvacDehumidification must equal wall share of HP waste heat (zone-half at wf=0.5): {dehumid50:.2} vs {wall_w:.2}"
         );
         assert!(
             (jacket50 - wall_w - skin_loss_w).abs() < 1.0,

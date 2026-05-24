@@ -65,28 +65,14 @@ mod tests {
     const WALL_ABSORPTANCE: f64 = 0.75;
     const ROOF_ABSORPTANCE: f64 = 0.85;
 
-    // OCHRE effective UA values [W/K] -- computed with TARP/DOE-2 film R (wind=2 m/s,
-    // T_ambient=10°C, T_ground=10°C) and same-zone halving. Like-for-like with HARES.
-    #[allow(dead_code)]
-    const OCHRE_EXTERIOR_WALL_UA: f64 = 34.34;
-    #[allow(dead_code)]
-    const OCHRE_ATTIC_WALL_UA: f64 = 27.14;
-    #[allow(dead_code)]
-    const OCHRE_ATTIC_FLOOR_UA: f64 = 17.37;
-    #[allow(dead_code)]
-    const OCHRE_FLOOR_SLAB_UA: f64 = 72.81;
-    #[allow(dead_code)]
-    const OCHRE_ATTIC_ROOF_UA: f64 = 139.31;
-    #[allow(dead_code)]
-    const OCHRE_WINDOW_UA: f64 = 5.77;
-    #[allow(dead_code)]
-    const OCHRE_DOOR_UA: f64 = 1.59;
-    #[allow(dead_code)]
-    const OCHRE_INTERIOR_WALL_UA: f64 = 215.15;
-    #[allow(dead_code)]
-    const OCHRE_INDOOR_FURNITURE_UA: f64 = 45.25;
-    #[allow(dead_code)]
-    const OCHRE_TOTAL_UA: f64 = 558.74;
+    // OCHRE per-surface UA constants removed (ticket 071). The validation baseline
+    // is tests/fixtures/parity/ashrae_rc_reference.json — derived from ASHRAE/E+
+    // first principles: ASHRAE Simple convection-only film coefficients, TARP model
+    // at design conditions, explicit interior LWR via StarMesh. OCHRE R_film differs
+    // because it uses TARP-at-actual-ΔT plus a max(12.9, |ΔT|) clamp; HARES uses
+    // orientation-dependent fixed h_conv from ASHRAE HoF 1985 Table 1 (as implemented
+    // in EnergyPlus's CalcASHRAESimpleIntConvCoeff). HARES is closer to ASHRAE/E+
+    // practice. See also: EnergyPlus Engineering Reference "Inside Surface Heat Balance".
 
     // ── Helpers ───────────────────────────────────────────────────────────
 

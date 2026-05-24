@@ -1045,6 +1045,7 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
     let sens0 = p0.thermal[0].sensible_gain_w;
     let sens50 = p50.thermal[0].sensible_gain_w;
     let internal50 = p50.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
+    let dehumid50 = p50.thermal[0].sensible_for_category(ThermalCategory::HvacDehumidification);
     let jacket50 = p50.thermal[0].sensible_for_category(ThermalCategory::JacketLoss);
     let wall_w = wh50
         .telemetry()
@@ -1060,8 +1061,12 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
         "wall fraction must preserve total sensible gain; baseline={sens0:.3}, split={sens50:.3}"
     );
     assert!(
-        (internal50 - wall_w).abs() < 1.0,
-        "internal gain must equal wall share of HP waste heat; got {internal50:.3} vs {wall_w:.3}"
+        internal50.abs() < 1e-6,
+        "InternalGain must be zero when HP is running; HvacDehumidification covers compressor zone heat; got {internal50:.3} W"
+    );
+    assert!(
+        (dehumid50 - wall_w).abs() < 1.0,
+        "HvacDehumidification must equal wall share of HP waste heat (zone-half at wf=0.5); got {dehumid50:.3} vs {wall_w:.3}"
     );
     assert!(
         (jacket50 - wall_w - skin_loss_w).abs() < 1.0,
@@ -1077,18 +1082,15 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
 // ---------------------------------------------------------------------------
 // Regression: HPWH compressor zone heat must NOT be reported as InternalGain
 //
-// Ticket 074: heat_pump_wh.rs:746 writes ThermalCategory::InternalGain for
-// HP compressor waste heat / evaporator zone interaction. HP-cycle effects are
-// mechanical conditioning, not passive gains. After ticket 071 lands and
-// ThermalCategory::HvacDehumidification exists, line 746 must be changed to
-// that category. Until then this test documents the current bug:
-// InternalGain bucket is non-zero when the HP compressor is running.
-//
-// This test FAILS when the bug is fixed (InternalGain becomes zero), which is
-// the intended failing state for driving the fix.
+// Fixed by reclassifying heat_pump_wh.rs compressor zone sensible/latent
+// from ThermalCategory::InternalGain to HvacDehumidification. HP-cycle
+// effects (evaporator extraction, compressor waste heat) are mechanical
+// equipment interactions, not passive occupant/appliance gains.
+// EnergyPlus Engineering Reference "Heat Pump Water Heater": the HP
+// evaporator extracts sensible + latent heat from zone air — same physics
+// as a standalone dehumidifier.
 // ---------------------------------------------------------------------------
 #[test]
-#[should_panic(expected = "HPWH compressor zone heat must not appear in InternalGain")]
 fn hpwh_compressor_zone_heat_not_reported_as_internal_gain() {
     use hares_equipment::water_heater::heat_pump_wh::HeatPumpWH;
 
@@ -1150,13 +1152,16 @@ fn hpwh_compressor_zone_heat_not_reported_as_internal_gain() {
     );
 
     let internal_gain_w = ports.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
-    // After ticket 074 fix: InternalGain must be 0.0 because HP zone heat
-    // is reclassified to HvacDehumidification. This assertion documents the
-    // required post-fix state. The #[should_panic] above ensures the test
-    // panics with the CURRENT (buggy) code where InternalGain is non-zero.
+    let dehumid_w = ports.thermal[0].sensible_for_category(ThermalCategory::HvacDehumidification);
     assert!(
         internal_gain_w.abs() < 1e-6,
-        "HPWH compressor zone heat must not appear in InternalGain \
-         (got {internal_gain_w:.2} W); should be in HvacDehumidification after ticket 074 fix"
+        "HPWH compressor zone heat must not appear in InternalGain (got {internal_gain_w:.2} W)"
+    );
+    // Sensible sign can be positive (compressor waste heat dominates) or negative
+    // (evaporator extraction dominates). Both are mechanical equipment effects, not
+    // passive internal gains — HvacDehumidification is the correct category.
+    assert!(
+        dehumid_w.abs() > 1.0,
+        "HvacDehumidification must carry zone sensible heat when HP is running (got {dehumid_w:.2} W)"
     );
 }
