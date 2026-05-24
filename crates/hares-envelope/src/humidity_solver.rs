@@ -158,7 +158,19 @@ impl DomainSolver for HumiditySolver {
                 .humidity_ratios
                 .get(&zone_id)
                 .copied()
-                .unwrap_or(zone.humidity_ratio);
+                .unwrap_or_else(|| {
+                    // `humidity_ratios` is pre-populated for every zone in
+                    // `HumiditySolver::new`, so the fallback to `env.zones`
+                    // should never be exercised after init. If this fires,
+                    // a zone was added after solver construction without
+                    // registering its initial humidity ratio — a code bug.
+                    debug_assert!(
+                        false,
+                        "humidity_ratios must contain every zone after init; \
+                         fallback to env.zones is dead code in steady-state"
+                    );
+                    zone.humidity_ratio
+                });
             let volume_m3 = self
                 .config
                 .zone_volumes_m3
@@ -904,12 +916,13 @@ mod tests {
         );
     }
 
-    /// Zone not present in the initial humidity_ratios map falls back to
-    /// ZoneState::humidity_ratio.  Simulate this by constructing a solver with
-    /// one zone and then resolving with an environment that includes a second zone
-    /// that was absent at construction time.
+    /// Zone registered after solver construction (inserted directly into
+    /// `humidity_ratios`) is read from the committed state, not from
+    /// `env.zones.humidity_ratio`.  In production `HumiditySolver::new`
+    /// registers all zones; this test simulates a zone added dynamically
+    /// by inserting its committed humidity ratio before the next `resolve`.
     #[test]
-    fn humidity_new_zone_fallback() {
+    fn humidity_committed_state_read_for_newly_inserted_zone() {
         let w_existing = 0.008_f64;
         let w_new_zone = 0.010_f64;
         let dt = Duration::from_secs(60);
@@ -922,10 +935,16 @@ mod tests {
         };
         let mut solver = HumiditySolver::new(config, &env_init);
 
-        // Resolve with an environment that introduces zone 2 (not in humidity_ratios).
+        // Pre-register zone 2 in humidity_ratios with its committed initial value.
+        // In production this happens in HumiditySolver::new for every zone in
+        // env.zones; the fallback to env.zones is guarded by a debug_assert!
+        // confirming it is dead code after init.
+        solver.humidity_ratios.insert(ZoneId(2), w_new_zone);
+
+        // Resolve with an environment that includes zone 2.
         let env_two = env_with_two_zones(200.0, 200.0, w_existing, w_new_zone);
 
-        // Zero latent gain so humidity_ratio stays at its initial/fallback value.
+        // Zero latent gain so humidity_ratio stays at its committed value.
         let ports = PortSlots {
             thermal: vec![
                 ThermalAccumulator::new(ZoneId(1)),
@@ -936,12 +955,11 @@ mod tests {
 
         let _ = solver.resolve_new(&ports, &env_two, dt);
 
-        // Zone 2 must have been initialised from ZoneState::humidity_ratio.
-        // With zero latent gain it should remain at or very near w_new_zone.
+        // Zone 2 must read from the committed humidity_ratios entry.
         let w2 = solver.humidity_ratio(ZoneId(2));
         assert!(
             (w2 - w_new_zone).abs() < 1e-6,
-            "new zone must fall back to ZoneState::humidity_ratio={w_new_zone}, got {w2}"
+            "committed humidity_ratio for zone 2 must equal init value {w_new_zone}, got {w2}"
         );
     }
 

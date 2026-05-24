@@ -290,9 +290,13 @@ fn humidity_solver_produces_valid_output_across_multiple_steps() {
 
     // If the humidity fallback were broken (stale w_old) the solver would
     // produce NaN or a negative humidity ratio. Verify via the latest_env zones.
-    // We can't directly access latest_env from outside, but a panic/error
-    // in the above loop would catch the failure. Additionally, verify that
-    // the dwelling successfully completed without any warnings about humidity.
-    // (No direct humidity ratio accessor exists on the public Dwelling API,
-    // so the absence of a panic is the primary assertion.)
+    let env = dwelling.latest_env();
+    for zone in &env.zones {
+        assert!(
+            zone.humidity_ratio.is_finite() && zone.humidity_ratio >= 0.0,
+            "zone {} humidity ratio must be finite and non-negative after 10 steps; got {}",
+            zone.id.0,
+            zone.humidity_ratio
+        );
+    }
 }

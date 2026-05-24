@@ -2149,6 +2149,29 @@ impl Dwelling {
         // Populate electrical summary from prior step's solver results.
         self.latest_env.electrical = self.prior_electrical_summary.clone();
 
+        // Step-start humidity invariant: confirm that the humidity ratio in
+        // `latest_env.zones` matches the humidity solver's committed state.
+        // Both are updated together at the end of each timestep by
+        // `apply_humidity_update_to_zones` → `humidity_solver.resolve`, and
+        // Step 1's environment update preserves zone state byte-for-byte via
+        // `extend_from_slice`. A mismatch here indicates a zone was added
+        // after solver construction without seeding its initial humidity ratio.
+        #[cfg(debug_assertions)]
+        for zone in &self.latest_env.zones {
+            // f64::EPSILON is safe here: both values come from the same
+            // humidity_ratios map (updated together by `resolve` and read back
+            // by `humidity_ratio` without intermediate arithmetic), so exact
+            // bitwise equality holds.
+            debug_assert!(
+                (zone.humidity_ratio - self.humidity_solver.humidity_ratio(zone.id)).abs()
+                    < f64::EPSILON,
+                "zone {} humidity ratio {:.6e} diverged from solver committed {:.6e} at start of step",
+                zone.id.0,
+                zone.humidity_ratio,
+                self.humidity_solver.humidity_ratio(zone.id),
+            );
+        }
+
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
             obs_phases.post_environment =
