@@ -236,6 +236,25 @@ impl ThermalSolver {
                     20.0
                 });
 
+            // Emit zone temperature change telemetry to make the LWR lag observable.
+            // t_zone_c is the prior-step committed value from env.zones, which lags
+            // the current-step zone temperature by one full timestep. The ScriptF
+            // (primary) path does not use t_zone_c, so the lag only affects the
+            // linearised fallback path at sub-watt magnitude.
+            if let Some(&prev) = self.prev_zone_temps_c.get(&zone_cfg.zone_id) {
+                let delta = (t_zone_c - prev).abs();
+                if delta > 1e-6 {
+                    tracing::debug!(
+                        zone_id = ?zone_cfg.zone_id,
+                        t_zone_c = t_zone_c,
+                        prev_t_zone_c = prev,
+                        delta_c = t_zone_c - prev,
+                        "interior LWR: using prior-step committed zone temperature (lag observable)"
+                    );
+                }
+            }
+            self.prev_zone_temps_c.insert(zone_cfg.zone_id, t_zone_c);
+
             tracing::trace!(
                 zone_id = ?zone_cfg.zone_id,
                 n_surfaces = zone_cfg.surfaces.len(),
@@ -311,7 +330,9 @@ impl ThermalSolver {
             }
 
             let n_iter = (self.dt_s / 300.0_f64).floor() as u32 + 3;
-            for _ in 0..n_iter {
+            // Clear previous-iteration flux buffer for this zone
+            self.lwr_net_flux_prev_buf.clear();
+            for iter_idx in 0..n_iter {
                 // Use ScriptF (exact T⁴ radiosity) when pre-computed at init,
                 // linearized h_r approximation as fallback.
                 if let Some(ref scriptf) = zone_cfg.scriptf {
@@ -325,19 +346,44 @@ impl ThermalSolver {
                     );
                 };
 
-                let mut converged = true;
+                // Check flux-residual convergence (skip on first iteration
+                // when no previous flux exists for comparison). The relative
+                // flux residual |q_new − q_old| / (|q_old| + ε) directly
+                // reflects whether the surface temperature iteration has
+                // closed the energy balance. ε = 1e-6 guards against
+                // division by zero for near-zero starting fluxes.
+                if iter_idx > 0 && !self.lwr_net_flux_prev_buf.is_empty() {
+                    let mut converged = true;
+                    for j in 0..zone_cfg.surfaces.len() {
+                        let old_q = self.lwr_net_flux_prev_buf[j];
+                        let new_q = self.lwr_net_flux_buf[j];
+                        if (new_q - old_q).abs() / (old_q.abs() + 1e-6) >= 1e-4 {
+                            converged = false;
+                            break;
+                        }
+                    }
+                    if converged {
+                        // Final flux stored in lwr_net_flux_buf by the
+                        // most recent net_flux_w_into call — no extra copy
+                        // needed; break and use current values below.
+                        break;
+                    }
+                }
+
+                // Save current flux for next iteration's convergence comparison
+                self.lwr_net_flux_prev_buf.clear();
+                self.lwr_net_flux_prev_buf
+                    .extend_from_slice(&self.lwr_net_flux_buf);
+
+                // Update surface temperatures with heavy-ball damping.
+                // OCHRE `_solve_interior_radiation` uses the same damping:
+                // 0.3 × Gauss-Seidel update + 0.2 × momentum.
                 for (j, info) in zone_cfg.surfaces.iter().enumerate() {
                     let t_new = base_buf[j] + self.lwr_net_flux_buf[j] * info.rad_res_k_w;
                     let t_new = t_new.clamp(t_surf_min, t_surf_max);
                     let t_next = buf[j] + 0.3 * (t_new - buf[j]) + 0.2 * (buf[j] - prev_buf[j]);
                     prev_buf[j] = buf[j];
                     buf[j] = t_next;
-                    if (buf[j] - prev_buf[j]).abs() >= 0.01 {
-                        converged = false;
-                    }
-                }
-                if converged {
-                    break;
                 }
             }
 

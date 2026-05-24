@@ -87,6 +87,12 @@ pub struct ThermalSolver {
     window_exterior_lwr_w: f64,
     /// Pre-allocated buffer for interior LWR net flux results per surface.
     lwr_net_flux_buf: Vec<f64>,
+    /// Pre-allocated buffer for previous-iteration interior LWR net flux values.
+    /// Used for relative flux-residual convergence checking.
+    lwr_net_flux_prev_buf: Vec<f64>,
+    /// Prior-step zone-air temperatures [°C] used to emit telemetry about the
+    /// LWR zone temperature lag (the last committed value from a completed step).
+    prev_zone_temps_c: HashMap<ZoneId, f64>,
     /// Pre-allocated buffer for radiant distribution weight vectors.
     /// Reused across `distribute_radiant_lwr_surfaces` and
     /// `distribute_radiant_solar_surfaces` to avoid per-timestep allocation.
@@ -383,6 +389,8 @@ impl ThermalSolver {
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
             window_exterior_lwr_w: 0.0,
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
+            lwr_net_flux_prev_buf: Vec::with_capacity(max_interior_surfaces),
+            prev_zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
             radiant_weights_buf: Vec::with_capacity(max_radiant_surfaces),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_linearised_warned_zones: HashSet::new(),
@@ -1292,8 +1300,26 @@ mod tests {
             .as_ref()
             .expect("scriptf factors must be pre-computed");
         let mut expected_flux = vec![0.0; 2];
-        for _ in 0..3 {
+        let mut expected_flux_prev: Vec<f64> = Vec::with_capacity(2);
+        for iter_idx in 0..3u32 {
             scriptf.net_flux_w_into(&expected_buf, &mut expected_flux);
+            // Replicate flux-residual convergence check (skip first iteration)
+            if iter_idx > 0 && !expected_flux_prev.is_empty() {
+                let mut converged = true;
+                for j in 0..expected_buf.len() {
+                    let old_q = expected_flux_prev[j];
+                    let new_q = expected_flux[j];
+                    if (new_q - old_q).abs() / (old_q.abs() + 1e-6) >= 1e-4 {
+                        converged = false;
+                        break;
+                    }
+                }
+                if converged {
+                    break;
+                }
+            }
+            expected_flux_prev.clear();
+            expected_flux_prev.extend_from_slice(&expected_flux);
             for (j, info) in surfaces.iter().enumerate() {
                 let t_new = base_buf[j] + expected_flux[j] * info.rad_res_k_w;
                 let t_new = t_new.clamp(t_surf_min, t_surf_max);

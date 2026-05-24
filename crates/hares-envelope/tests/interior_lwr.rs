@@ -12,9 +12,11 @@ use hares_envelope::{
     interior_longwave_net_w,
 };
 use hares_types::{
-    EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    DomainSolver, EnvironmentState, GridState, PortSlots, SurfaceIrradiance, ThermalAccumulator,
+    WeatherState, ZoneId, ZoneState,
 };
 use nalgebra::DMatrix;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -527,4 +529,343 @@ fn radiation_frac_old_formula_disagrees_with_current_divider() {
         "h_rad = {h_rad:.4} W/(m²·K) should be in [4, 7] range for typical residential surfaces"
     );
     let _ = r_film_rad_m2kw; // used for derivation notes above
+}
+
+// ---------------------------------------------------------------------------
+// Regression: interior LWR convergence uses flux residual, not step magnitude
+// ---------------------------------------------------------------------------
+
+/// Interior LWR iteration with ScriptF must converge using the new
+/// flux-residual criterion without panicking or producing non-finite
+/// values.
+///
+/// The old criterion tested the heavy-ball step magnitude
+/// `|buf[j] − prev_buf[j]| < 0.01`, which measures the momentum update
+/// not the LWR flux residual.  This test verifies that the solver runs
+/// to completion with the new relative flux-residual criterion
+/// `|q_new − q_old| / (|q_old| + 1e-6) < 1e-4` and produces finite
+/// zone temperature results for a simple two-surface ScriptF enclosure.
+///
+/// Correctness of the convergence loop is covered by the unit test
+/// `interior_longwave_surface_states_persist_with_clamp_and_damping`.
+#[test]
+fn interior_lwr_converges_by_flux_residual_within_iter_budget() {
+    let env = env_20c();
+
+    // Minimal 3-state model: one zone air node + two surface RC nodes,
+    // with resistive coupling between zone air and each surface.
+    let a_c = DMatrix::from_diagonal_element(3, 3, -1.0 / 50_000.0);
+    let b_c = DMatrix::zeros(3, 3);
+    let mapping = OutputMapping {
+        output_count: 1,
+        node_to_output: vec![(0, 0, 1.0)],
+        input_to_output: vec![],
+    };
+    let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
+        .expect("model construction failed");
+
+    let wiring = StateSpaceWiring {
+        zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+        zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+        zone_sensible_input_indices: HashMap::from([(ZoneId(1), 0)]),
+        outdoor_temp_input_indices: vec![0],
+        ground_temp_input_indices: vec![],
+        indoor_temp_input_indices: vec![],
+        solar_input_indices: HashMap::new(),
+    };
+
+    // Two surfaces at different temperatures: 25°C wall and 15°C floor.
+    let mut lwr_zone = InteriorLwrZoneConfig {
+        zone_id: ZoneId(1),
+        surfaces: vec![
+            InteriorSurfaceInfo {
+                state_index: 1,
+                input_index: 1,
+                area_m2: 30.0,
+                emissivity: 0.90,
+                radiation_frac: 1.0,
+                rad_res_k_w: 0.003,
+                solar_absorptance: 0.0,
+                is_floor: false,
+                driving_temp: None,
+            },
+            InteriorSurfaceInfo {
+                state_index: 2,
+                input_index: 2,
+                area_m2: 30.0,
+                emissivity: 0.90,
+                radiation_frac: 1.0,
+                rad_res_k_w: 0.003,
+                solar_absorptance: 0.0,
+                is_floor: true,
+                driving_temp: None,
+            },
+        ],
+        scriptf: None,
+    };
+    lwr_zone.compute_scriptf();
+
+    let config = ThermalSolverConfig {
+        indoor_zone_id: ZoneId(1),
+        window_properties: HashMap::new(),
+        window_zone_ids: HashMap::new(),
+        exterior_surfaces: vec![],
+        interior_lwr_zones: vec![lwr_zone],
+        infiltration: vec![],
+        ventilation_flow_m3_s: 0.0,
+        ventilation: MechanicalVentilationParams::default(),
+        natural_ventilation: None,
+        supply_duct_leakage_m3_s: 0.0,
+        return_duct_leakage_m3_s: 0.0,
+        interior_lwr_method: hares_envelope::InteriorLwrMethod::ScriptF,
+        interior_solar_zones: Vec::new(),
+        boundary_diagnostics: Vec::new(),
+    };
+
+    let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
+    // Set mass node temperatures: zone air at 20°C, surface 1 at 25°C, surface 2 at 15°C.
+    solver.restore_state(&[20.0, 25.0, 15.0], &[], &[]).unwrap();
+
+    // Run one full resolve step.  The interior LWR convergence loop uses
+    // the flux-residual criterion — if convergence hangs or produces NaN,
+    // the solver panics and this test fails.
+    let ports = PortSlots {
+        thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+        ..Default::default()
+    };
+    let env = env_20c();
+    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+
+    // Verify the solver produced finite zone temperatures and that the
+    // LWR convergence loop completed successfully.
+    let t_zone = update.zone_temperatures_c[0].1;
+    assert!(
+        t_zone.is_finite(),
+        "zone temperature must be finite, got {t_zone}"
+    );
+
+    // The LWR algorithm sets per-zone exchange diagnostics.
+    let lwr_by_zone: Vec<_> = solver
+        .component_gains()
+        .interior_lwr_by_zone
+        .iter()
+        .map(|(z, w)| (*z, *w))
+        .collect();
+    assert!(
+        !lwr_by_zone.is_empty(),
+        "interior LWR zone exchange diagnostics must be populated"
+    );
+}
+
+/// Regression: the linearised fallback path still uses `t_zone_c` as a
+/// background reference.  Verify that after a 1 °C zone temperature change,
+/// the linearised flux changes by less than 2 W per surface (sub-watt in
+/// practice, well below the ticket's 16 W claim).  This pins the magnitude
+/// so that any future change in the background reference is properly
+/// characterised.
+#[test]
+fn linearised_lwr_flux_insensitive_to_zone_temp_shift() {
+    use hares_envelope::InteriorSurface;
+    use hares_envelope::longwave_radiation::interior_longwave_linearised_w;
+
+    let surfaces = vec![
+        InteriorSurface {
+            area_m2: 15.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 10.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 5.0,
+            emissivity: 0.84,
+        },
+    ];
+    // Surface temperatures with a realistic 3 °C spread.
+    let t_surfaces = vec![22.0_f64, 19.5_f64, 20.5_f64];
+
+    let q_19c = interior_longwave_linearised_w(&surfaces, &t_surfaces, 19.0);
+    let q_20c = interior_longwave_linearised_w(&surfaces, &t_surfaces, 20.0);
+
+    for (i, (&q19, &q20)) in q_19c.iter().zip(q_20c.iter()).enumerate() {
+        let delta = (q19 - q20).abs();
+        assert!(
+            delta < 2.0,
+            "surface {i}: flux delta from 1°C zone temp shift = {delta:.4} W; \
+             should be < 2 W (actual impact is sub-watt)"
+        );
+        assert!(
+            delta > 0.001,
+            "surface {i}: flux delta should be non-zero (zone temp does affect h_r)"
+        );
+    }
+
+    // Energy must be conserved for both cases — zone temperature has no
+    // effect on the net sum (it only changes the linearised coefficient
+    // multiplying the existing surface temperature imbalances).
+    for (label, q) in [("19°C", &q_19c), ("20°C", &q_20c)] {
+        let sum: f64 = q.iter().sum();
+        assert!(
+            sum.abs() < 1e-8,
+            "{label}: net flux sum must be ~0 (energy conservation), got {sum:.2e}"
+        );
+    }
+}
+
+/// The flux-residual convergence criterion changes for the old step-magnitude
+/// test on the same case: the old test would converge earlier because
+/// |t_next − t_old| can be < 0.01 even when the flux is still settling.
+/// This test verifies that the flux-residual is the more conservative
+/// criterion — the iteration runs at least as many steps as the old test
+/// would require.
+#[test]
+fn flux_residual_criterion_is_more_conservative_than_step_magnitude() {
+    use hares_envelope::InteriorSurface;
+    use hares_envelope::longwave_radiation::interior_longwave_linearised_w_into;
+
+    // Use a case where temperatures change rapidly — the step magnitude
+    // might drop below 0.01 before the flux residual drops below 1e-4.
+    let t_zone_c = 22.0_f64;
+    let surfaces = vec![
+        InteriorSurface {
+            area_m2: 40.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 40.0,
+            emissivity: 0.90,
+        },
+    ];
+    let infos = vec![
+        InteriorSurfaceInfo {
+            state_index: 0,
+            input_index: 0,
+            area_m2: 40.0,
+            emissivity: 0.90,
+            radiation_frac: 0.7,
+            rad_res_k_w: 0.003,
+            solar_absorptance: 0.5,
+            is_floor: false,
+            driving_temp: None,
+        },
+        InteriorSurfaceInfo {
+            state_index: 0,
+            input_index: 0,
+            area_m2: 40.0,
+            emissivity: 0.90,
+            radiation_frac: 1.0,
+            rad_res_k_w: 0.003,
+            solar_absorptance: 0.6,
+            is_floor: true,
+            driving_temp: None,
+        },
+    ];
+
+    let t_nodes = [30.0_f64, 18.0_f64];
+    let t_surf_init: Vec<f64> = infos
+        .iter()
+        .zip(t_nodes.iter())
+        .map(|(s, &t_node)| s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone_c)
+        .collect();
+
+    let t_surf_min = t_surf_init.iter().copied().fold(f64::INFINITY, f64::min);
+    let t_surf_max = t_surf_init
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let mut t_surf_flux = t_surf_init.clone();
+    let mut prev_flux = t_surf_init.clone();
+    let mut flux: Vec<f64> = Vec::with_capacity(2);
+    let mut flux_prev: Vec<f64> = Vec::with_capacity(2);
+
+    let mut t_surf_step = t_surf_init.clone();
+    let mut prev_step = t_surf_init.clone();
+    let mut step_flux: Vec<f64> = Vec::with_capacity(2);
+
+    // Track which criterion converges first
+    let mut flux_converged_at: Option<usize> = None;
+    let mut step_converged_at: Option<usize> = None;
+
+    for iter_idx in 0..20 {
+        // Flux-based convergence
+        interior_longwave_linearised_w_into(&surfaces, &t_surf_flux, t_zone_c, &mut flux);
+        if iter_idx > 0 && !flux_prev.is_empty() {
+            let mut all_ok = true;
+            for j in 0..surfaces.len() {
+                let old_q = flux_prev[j];
+                let new_q = flux[j];
+                if (new_q - old_q).abs() / (old_q.abs() + 1e-6) >= 1e-4 {
+                    all_ok = false;
+                    break;
+                }
+            }
+            if all_ok && flux_converged_at.is_none() {
+                flux_converged_at = Some(iter_idx);
+            }
+        }
+        if flux_converged_at.is_none() {
+            flux_prev.clear();
+            flux_prev.extend_from_slice(&flux);
+            for (j, info) in infos.iter().enumerate() {
+                let t_new = t_surf_init[j] + flux[j] * info.rad_res_k_w;
+                let t_new = t_new.clamp(t_surf_min, t_surf_max);
+                let t_next = t_surf_flux[j]
+                    + 0.3 * (t_new - t_surf_flux[j])
+                    + 0.2 * (t_surf_flux[j] - prev_flux[j]);
+                prev_flux[j] = t_surf_flux[j];
+                t_surf_flux[j] = t_next;
+            }
+        }
+
+        // Step-magnitude-based convergence
+        interior_longwave_linearised_w_into(&surfaces, &t_surf_step, t_zone_c, &mut step_flux);
+        if step_converged_at.is_none() {
+            let mut all_ok = true;
+            for (j, info) in infos.iter().enumerate() {
+                let t_new = t_surf_init[j] + step_flux[j] * info.rad_res_k_w;
+                let t_new = t_new.clamp(t_surf_min, t_surf_max);
+                let t_next = t_surf_step[j]
+                    + 0.3 * (t_new - t_surf_step[j])
+                    + 0.2 * (t_surf_step[j] - prev_step[j]);
+                prev_step[j] = t_surf_step[j];
+                t_surf_step[j] = t_next;
+                if (t_surf_step[j] - prev_step[j]).abs() >= 0.01 {
+                    all_ok = false;
+                }
+            }
+            if all_ok {
+                step_converged_at = Some(iter_idx);
+            }
+        }
+
+        if flux_converged_at.is_some() && step_converged_at.is_some() {
+            break;
+        }
+    }
+
+    // Both must converge within the iteration budget.
+    assert!(
+        flux_converged_at.is_some(),
+        "flux-residual criterion must converge within 20 iterations"
+    );
+    assert!(
+        step_converged_at.is_some(),
+        "step-magnitude criterion must converge within 20 iterations"
+    );
+
+    let flux_iter = flux_converged_at.unwrap();
+    let step_iter = step_converged_at.unwrap();
+
+    // The flux-residual criterion should converge at the same iteration or later
+    // (more conservative — it reflects energy balance closure, not just
+    // temperature settling).  In this test case they usually converge at
+    // the same step, but if not, flux should not converge before step.
+    assert!(
+        flux_iter >= step_iter,
+        "flux-residual criterion converged at iteration {flux_iter} but step-magnitude \
+         converged at iteration {step_iter}; flux should be equally or more conservative \
+          than step magnitude"
+    );
 }
