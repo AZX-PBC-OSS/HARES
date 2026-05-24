@@ -273,8 +273,8 @@ pub enum ResampleMethod {
     /// hourly value at the midpoint of its hour.
     ///
     /// For fractional position `frac` within hour `i` (frac ∈ [0, 1)):
-    /// - frac < 0.5: `values[prev] × (0.5 - frac) + values[i] × (0.5 + frac)`
-    /// - frac ≥ 0.5: `values[i] × (1.5 - frac) + values[next] × (frac - 0.5)`
+    ///   frac < 0.5: `values[prev] × (0.5 - frac) + values[i] × (0.5 + frac)`
+    ///   frac ≥ 0.5: `values[i] × (1.5 - frac) + values[next] × (frac - 0.5)`
     ///
     /// Where `prev = (i - 1 + n) % n` and `next = (i + 1) % n` for cyclic wrap
     /// at the year boundary.
@@ -286,10 +286,23 @@ pub enum ResampleMethod {
     /// - At frac → 1 (hour end): value → (values[i] + values[next]) / 2
     ///   — matches start of next hour → C0 continuous.
     ///
-    /// The E+ approach (`SetupInterpolationValues`, WeatherManager.cc:8328-8380)
-    /// uses a weighted blend of current/previous hours; this implementation uses
-    /// midpoint interpolation which achieves the same goals (smooth transitions,
-    /// hourly mean preservation) with a different algorithm.
+    /// ---
+    /// WARNING: This method does **not** preserve hourly energy integrals.
+    /// The continuous-limit hourly mean over hour `i` is a weighted blend:
+    ///   mean = 0.125·values[prev] + 0.75·values[i] + 0.125·values[next]
+    /// This equals `values[i]` only when `prev = next = i` (constant or
+    /// symmetric signal). At a sunrise step `prev=0, cur=800, next=800` the
+    /// mean is 700 W/m² — a 12.5% shortfall against the true hourly average
+    /// of 800 W/m². At 15-minute resolution (`factor=4`) the error reaches
+    /// 18.8%. Boundary leakage at sunset transitions can inject up to 75 W/m²
+    /// into a zero-irradiance nighttime hour (e.g. `prev=400, cur=0, next=0`
+    /// produces sub-hourly values [200, 100, 0, 0] → mean=75).
+    ///
+    /// Use `Zoh` (zero-order hold) for solar fields when hourly energy
+    /// conservation is required. `Triangular` is provided as an explicit
+    /// override via `ResampleOverrides` for users who prioritise sub-hourly
+    /// smoothness over energy conservation.
+    /// ---
     Triangular,
 }
 
@@ -551,23 +564,33 @@ impl WeatherTimeSeries {
                 sky_temp_c,
                 ground_temp_c,
                 opaque_sky_cover,
-                // Solar radiation defaults to Triangular (midpoint-interpolation
-                // resampling): smoother than ZOH, passes through the hourly value
-                // at the midpoint of each hour, C0-continuous at boundaries.
+                // Solar irradiance defaults to ZOH (zero-order hold): holds each
+                // hourly period-average value constant across all sub-steps,
+                // preserving the hourly energy integral exactly.
+                // Hourly EPW solar values are period averages (not instantaneous
+                // midpoints), so ZOH is the conservative default that does not
+                // leak energy across hour boundaries at sunrise/sunset.
+                // EnergyPlus Engineering Reference: Weather File Solar Interpolation
+                // (Climate Calculations chapter) — confirms EPW solar values are
+                // hourly averages; OCHRE schedule.py:553 uses resample().ffill()
+                // (equivalent to ZOH) for all weather columns.
+                // Triangular resampling is available via ResampleOverrides for users
+                // who explicitly want sub-hourly smoothness and accept the energy
+                // conservation deviation.
                 ghi_w_m2: resample_field(
                     &self.ghi_w_m2,
                     factor,
-                    overrides.ghi.unwrap_or(ResampleMethod::Triangular),
+                    overrides.ghi.unwrap_or(ResampleMethod::Zoh),
                 ),
                 dni_w_m2: resample_field(
                     &self.dni_w_m2,
                     factor,
-                    overrides.dni.unwrap_or(ResampleMethod::Triangular),
+                    overrides.dni.unwrap_or(ResampleMethod::Zoh),
                 ),
                 dhi_w_m2: resample_field(
                     &self.dhi_w_m2,
                     factor,
-                    overrides.dhi.unwrap_or(ResampleMethod::Triangular),
+                    overrides.dhi.unwrap_or(ResampleMethod::Zoh),
                 ),
                 // Turbulent/stochastic → ZOH.
                 wind_speed_m_s: resample_field(
@@ -1050,10 +1073,10 @@ fn circular_linear_resample(values: &[f64], factor: usize) -> Vec<f64> {
 /// - At frac → 1 (hour end): value → (values[i] + values[next]) / 2
 ///   — C0 continuous: matches frac = 0 of the next hour.
 ///
-/// The E+ approach (`SetupInterpolationValues`, WeatherManager.cc:8328-8380)
-/// uses a weighted blend of current/previous hours; this implementation uses
-/// midpoint interpolation which achieves the same goals (smooth transitions,
-/// hourly mean preservation) with a different algorithm.
+/// This algorithm produces smooth, C0-continuous sub-hourly profiles but
+/// does **not** preserve hourly energy integrals — the hourly mean is a
+/// weighted blend of neighbouring hours (see `ResampleMethod::Triangular`
+/// docstring for the exact formula and boundary error quantification).
 ///
 /// Edge cases:
 /// - Empty input: returns empty vector.
@@ -1487,31 +1510,20 @@ mod tests {
     }
 
     #[test]
-    fn resample_solar_fields_use_triangular_by_default() {
+    fn resample_solar_fields_use_zoh_by_default() {
         let series = sample_series();
         let resampled = series.resample(60).expect("resample should succeed");
-        // GHI now uses Triangular by default (not ZOH).
+        // GHI defaults to ZOH: each sub-step holds the source hourly value.
         // With values [0.0, 500.0] and factor=60:
-        // At the midpoint of hour 0 (index 30, frac=0.5): value = values[0] = 0.0.
-        // At the midpoint of hour 1 (index 90, frac=0.5): value = values[1] = 500.0.
-        assert!(
-            (resampled.ghi_w_m2[30] - 0.0).abs() < 1e-12,
-            "midpoint of hour 0 should be values[0]=0, got {}",
-            resampled.ghi_w_m2[30]
-        );
-        assert!(
-            (resampled.ghi_w_m2[90] - 500.0).abs() < 1e-12,
-            "midpoint of hour 1 should be values[1]=500, got {}",
-            resampled.ghi_w_m2[90]
-        );
-        // Verify NOT using ZOH: the sub-hourly values should NOT be constant
-        // within each hour (triangular produces variation within the hour).
-        let first_hour: Vec<f64> = resampled.ghi_w_m2.iter().take(60).copied().collect();
-        let all_same = first_hour.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
-        assert!(
-            !all_same,
-            "triangular should produce varying sub-hourly values, not constant ZOH"
-        );
+        // All 60 sub-steps of hour 0 must be 0.0.
+        assert!(resampled.ghi_w_m2.iter().take(60).all(|&x| x == 0.0));
+        // All 60 sub-steps of hour 1 must be 500.0.
+        assert!(resampled.ghi_w_m2.iter().skip(60).all(|&x| x == 500.0));
+        // Same for DNI (source: [0.0, 700.0]) and DHI (source: [0.0, 100.0]).
+        assert!(resampled.dni_w_m2.iter().take(60).all(|&x| x == 0.0));
+        assert!(resampled.dni_w_m2.iter().skip(60).all(|&x| x == 700.0));
+        assert!(resampled.dhi_w_m2.iter().take(60).all(|&x| x == 0.0));
+        assert!(resampled.dhi_w_m2.iter().skip(60).all(|&x| x == 100.0));
     }
 
     #[test]
@@ -2368,19 +2380,28 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
     }
 
     #[test]
-    fn triangular_solar_override_back_to_zoh() {
-        // Users should be able to override Triangular back to ZOH for parity testing.
+    fn solar_override_zoh_to_triangular_via_resample_overrides() {
+        // ZOH is the default for solar fields. Users can override to Triangular
+        // to get smooth sub-hourly profiles (accepting the energy non-conservation).
         let series = sample_series();
         let overrides = ResampleOverrides {
-            ghi: Some(ResampleMethod::Zoh),
+            ghi: Some(ResampleMethod::Triangular),
             ..Default::default()
         };
         let resampled = series
             .resample_with(60, &overrides)
             .expect("resample should succeed");
-        // ZOH: first 60 slots are values[0]=0.0, next 60 are values[1]=500.0.
-        assert!(resampled.ghi_w_m2.iter().take(60).all(|&x| x == 0.0));
-        assert!(resampled.ghi_w_m2.iter().skip(60).all(|&x| x == 500.0));
+        // Triangular: midpoint of hour 0 (index 30, frac=0.5) = values[0] = 0.0.
+        // Midpoint of hour 1 (index 90, frac=0.5) = values[1] = 500.0.
+        assert!((resampled.ghi_w_m2[30] - 0.0).abs() < 1e-12);
+        assert!((resampled.ghi_w_m2[90] - 500.0).abs() < 1e-12);
+        // Confirm it is NOT ZOH: sub-hourly values vary within the hour.
+        let first_hour: Vec<f64> = resampled.ghi_w_m2.iter().take(60).copied().collect();
+        let all_same = first_hour.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+        assert!(
+            !all_same,
+            "Triangular should produce varying sub-hourly values"
+        );
     }
 
     #[test]

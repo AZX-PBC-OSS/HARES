@@ -677,10 +677,10 @@ fn pchip_handles_all_nan() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn solar_fields_use_triangular_by_default() {
-    // Solar fields (GHI, DNI, DHI) default to Triangular resampling,
-    // NOT ZOH. At the midpoint of each hour (frac = 0.5), the value
-    // must equal the original hourly value.
+fn solar_fields_use_zoh_by_default() {
+    // Solar fields (GHI, DNI, DHI) default to ZOH resampling to preserve
+    // the hourly energy integral. Every sub-step within an hour must equal
+    // the source hourly value.
     let n = 5;
     let ghi = vec![0.0, 200.0, 500.0, 300.0, 0.0];
     let dni = vec![0.0, 400.0, 800.0, 600.0, 0.0];
@@ -701,34 +701,62 @@ fn solar_fields_use_triangular_by_default() {
         .resample(3600 / factor as u32)
         .expect("resample should succeed");
 
-    // Verify triangular behavior: midpoint of each hour = hourly value.
+    // Verify ZOH: every sub-step equals the source hourly value.
     for (field_name, source, resampled_field) in [
         ("GHI", &ghi, &resampled.ghi_w_m2),
         ("DNI", &dni, &resampled.dni_w_m2),
         ("DHI", &dhi, &resampled.dhi_w_m2),
     ] {
         for (k, &src_val) in source.iter().enumerate() {
-            let mid_idx = k * factor + factor / 2;
-            assert!(
-                (resampled_field[mid_idx] - src_val).abs() < 1e-12,
-                "{field_name} midpoint violated at hour {k}: \
-                 expected {src_val}, got {}",
-                resampled_field[mid_idx]
-            );
-        }
-        // Verify NOT ZOH: sub-hourly values should vary within the hour.
-        for k in 0..n {
-            let hour_slice = &resampled_field[k * factor..(k + 1) * factor];
-            let min = hour_slice.iter().cloned().fold(f64::INFINITY, f64::min);
-            let max = hour_slice.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            // Triangular produces variation unless the hour and both neighbors are equal.
-            // For our test data, at least some hours must show variation.
-            if source.iter().any(|&v| v != source[0]) {
+            for j in 0..factor {
+                let idx = k * factor + j;
                 assert!(
-                    max - min > 1e-12 || source.iter().all(|&v| v == source[0]),
-                    "{field_name} at hour {k}: no variation detected (looks like ZOH), min={min}, max={max}"
+                    (resampled_field[idx] - src_val).abs() < 1e-12,
+                    "{field_name} hour {k}, sub-step {j}: expected {src_val}, got {}",
+                    resampled_field[idx]
                 );
             }
+        }
+    }
+}
+
+/// ZOH default preserves hourly energy integral at sunset boundary.
+///
+/// Sequence: [400, 0, 0] W/m² at 15-minute resolution (factor=4).
+/// With ZOH default, the first nighttime hour must have mean zero — no energy leak.
+#[test]
+fn zoh_default_preserves_hourly_energy_integral_at_sunset_boundary() {
+    let values = vec![400.0_f64, 0.0, 0.0];
+    let n = values.len();
+    let series = make_series_full(
+        n,
+        vec![50.0; n],
+        vec![5.0; n],
+        vec![101.325; n],
+        values.clone(), // ghi
+        values.clone(), // dni
+        values.clone(), // dhi
+        vec![3.0; n],
+        vec![180.0; n],
+    );
+    let factor: usize = 4; // 15-minute sub-steps
+    let resampled = series
+        .resample(3600 / factor as u32)
+        .expect("resample should succeed");
+    // Default for solar is ZOH — no override needed.
+
+    for (field_name, src, resampled_field) in [
+        ("GHI", &values, &resampled.ghi_w_m2),
+        ("DNI", &values, &resampled.dni_w_m2),
+        ("DHI", &values, &resampled.dhi_w_m2),
+    ] {
+        for (k, &src_val) in src.iter().enumerate() {
+            let hour_slice = &resampled_field[k * factor..(k + 1) * factor];
+            let mean = hour_slice.iter().sum::<f64>() / factor as f64;
+            assert!(
+                (mean - src_val).abs() < 1e-12,
+                "{field_name} hour {k}: ZOH mean {mean} != source {src_val}"
+            );
         }
     }
 }
@@ -817,10 +845,17 @@ fn triangular_sunset_boundary_bleeds_into_nighttime_hour() {
         vec![180.0; n],
     );
     let factor: usize = 4; // 15-minute sub-steps
+    // Explicit Triangular override — ZOH is now the default for solar fields.
+    use hares_io::{ResampleMethod, ResampleOverrides};
+    let overrides = ResampleOverrides {
+        ghi: Some(ResampleMethod::Triangular),
+        dni: Some(ResampleMethod::Triangular),
+        dhi: Some(ResampleMethod::Triangular),
+        ..Default::default()
+    };
     let resampled = series
-        .resample(3600 / factor as u32)
-        .expect("resample should succeed");
-    // Default method for GHI is Triangular.
+        .resample_with(3600 / factor as u32, &overrides)
+        .expect("resample_with should succeed");
 
     for (field_name, resampled_field) in [
         ("GHI", &resampled.ghi_w_m2),
