@@ -6,9 +6,24 @@ use nalgebra::DVector;
 use super::ThermalSolver;
 use super::config::{InteriorSolarSurfaceInfo, InteriorSurfaceInfo};
 
+/// Fraction of transmitted beam solar that strikes the floor, as a function of
+/// solar altitude.
+///
+/// Uses `sin(altitude)` as a monotone heuristic: at 0° (horizontal beam, sunrise/
+/// sunset) beam enters nearly parallel to the floor and strikes walls, giving a
+/// floor fraction of 0.0. At 90° (solar zenith) beam strikes the floor
+/// predominantly. Upper clamp 0.9: even overhead sun leaves some beam on walls
+/// and ceiling through window reveals and diffuse scattering.
+///
+/// **This is a heuristic approximation, not a physics-derived model.** The
+/// authoritative approach is the EnergyPlus FullInteriorAndExterior polygon-overlap
+/// method (EnergyPlus Engineering Reference, Shading Module), which projects sun
+/// rays geometrically onto each interior surface. That refactor is deferred; this
+/// function is the immediate deliverable and must at minimum be physically monotone
+/// and pass through zero, which it now does.
 #[inline]
 fn beam_floor_fraction(solar_altitude_deg: f64) -> f64 {
-    solar_altitude_deg.to_radians().sin().clamp(0.3, 0.9)
+    solar_altitude_deg.to_radians().sin().clamp(0.0, 0.9)
 }
 
 impl ThermalSolver {
@@ -221,15 +236,60 @@ pub(crate) fn compute_solar_distribution(
     (absorbed, reflected)
 }
 
-/// Like `compute_solar_distribution` but writes into a caller-owned buffer.
+/// Common interface for surface types in solar distribution calculations.
 ///
-/// `absorbed_buf` is resized and zeroed as needed. Returns total reflected [W].
+/// Both `InteriorSurfaceInfo` (ScriptF mode) and `InteriorSolarSurfaceInfo`
+/// (StarMesh mode) implement this, enabling a single generic distribution
+/// function that eliminates the ~60-line duplication between the two paths.
+pub(crate) trait SolarDistributableSurface {
+    fn area_m2(&self) -> f64;
+    fn solar_absorptance(&self) -> f64;
+    fn is_floor(&self) -> bool;
+}
+
+impl SolarDistributableSurface for InteriorSurfaceInfo {
+    #[inline]
+    fn area_m2(&self) -> f64 {
+        self.area_m2
+    }
+    #[inline]
+    fn solar_absorptance(&self) -> f64 {
+        self.solar_absorptance
+    }
+    #[inline]
+    fn is_floor(&self) -> bool {
+        self.is_floor
+    }
+}
+
+impl SolarDistributableSurface for InteriorSolarSurfaceInfo {
+    #[inline]
+    fn area_m2(&self) -> f64 {
+        self.area_m2
+    }
+    #[inline]
+    fn solar_absorptance(&self) -> f64 {
+        self.solar_absorptance
+    }
+    #[inline]
+    fn is_floor(&self) -> bool {
+        self.is_floor
+    }
+}
+
+/// Generic solar distribution into a caller-owned buffer.
+///
+/// Parameterised over `S: SolarDistributableSurface` so that both
+/// [`InteriorSurfaceInfo`] (ScriptF) and [`InteriorSolarSurfaceInfo`] (StarMesh)
+/// paths share a single implementation. Returns total reflected [W].
+///
+/// `absorbed_buf` is resized and zeroed as needed.
 ///
 /// View factors are normalized by `area × absorptance / Σ(area × absorptance)`.
 /// When all surfaces have nonzero absorptance, all solar is distributed. When
 /// absorptance sums to zero, all solar is returned as reflected to zone air.
-pub(crate) fn compute_solar_distribution_into(
-    surfaces: &[InteriorSurfaceInfo],
+fn compute_solar_distribution_into_generic<S: SolarDistributableSurface>(
+    surfaces: &[S],
     beam_w: f64,
     diffuse_w: f64,
     beam_floor_frac: f64,
@@ -241,13 +301,13 @@ pub(crate) fn compute_solar_distribution_into(
 
     let floor_wa: f64 = surfaces
         .iter()
-        .filter(|s| s.is_floor)
-        .map(|s| s.area_m2 * s.solar_absorptance)
+        .filter(|s| s.is_floor())
+        .map(|s| s.area_m2() * s.solar_absorptance())
         .sum();
     let nonfloor_wa: f64 = surfaces
         .iter()
-        .filter(|s| !s.is_floor)
-        .map(|s| s.area_m2 * s.solar_absorptance)
+        .filter(|s| !s.is_floor())
+        .map(|s| s.area_m2() * s.solar_absorptance())
         .sum();
     let total_wa: f64 = floor_wa + nonfloor_wa;
 
@@ -263,14 +323,14 @@ pub(crate) fn compute_solar_distribution_into(
             (0.0, 0.0)
         };
         for (i, s) in surfaces.iter().enumerate() {
-            let factor = if s.is_floor && floor_wa > 0.0 {
-                s.area_m2 * s.solar_absorptance / floor_wa
-            } else if !s.is_floor && nonfloor_wa > 0.0 {
-                s.area_m2 * s.solar_absorptance / nonfloor_wa
+            let factor = if s.is_floor() && floor_wa > 0.0 {
+                s.area_m2() * s.solar_absorptance() / floor_wa
+            } else if !s.is_floor() && nonfloor_wa > 0.0 {
+                s.area_m2() * s.solar_absorptance() / nonfloor_wa
             } else {
                 0.0
             };
-            absorbed[i] += if s.is_floor {
+            absorbed[i] += if s.is_floor() {
                 beam_to_floors * factor
             } else {
                 beam_to_walls * factor
@@ -281,7 +341,7 @@ pub(crate) fn compute_solar_distribution_into(
     // Diffuse: all surfaces by area × absorptance, normalized to sum to 1.
     if diffuse_w > 0.0 && total_wa > 0.0 {
         for (i, s) in surfaces.iter().enumerate() {
-            let factor = s.area_m2 * s.solar_absorptance / total_wa;
+            let factor = s.area_m2() * s.solar_absorptance() / total_wa;
             absorbed[i] += diffuse_w * factor;
         }
     }
@@ -290,6 +350,20 @@ pub(crate) fn compute_solar_distribution_into(
     // This handles zero-absorptance surfaces and numerical edge cases.
     let total_distributed: f64 = absorbed.iter().sum();
     (beam_w + diffuse_w) - total_distributed
+}
+
+/// Like `compute_solar_distribution` but writes into a caller-owned buffer.
+///
+/// Delegates to [`compute_solar_distribution_into_generic`] with
+/// [`InteriorSurfaceInfo`] (ScriptF mode).
+pub(crate) fn compute_solar_distribution_into(
+    surfaces: &[InteriorSurfaceInfo],
+    beam_w: f64,
+    diffuse_w: f64,
+    beam_floor_frac: f64,
+    absorbed: &mut Vec<f64>,
+) -> f64 {
+    compute_solar_distribution_into_generic(surfaces, beam_w, diffuse_w, beam_floor_frac, absorbed)
 }
 
 /// Deposit per-surface absorbed solar [W] into the state-space input vector `u`.
@@ -316,6 +390,8 @@ fn deposit_solar_to_surface_nodes(
 }
 
 /// Solar distribution for [`InteriorSolarSurfaceInfo`] (StarMesh mode).
+///
+/// Delegates to [`compute_solar_distribution_into_generic`].
 pub(crate) fn compute_solar_distribution_into_solar(
     surfaces: &[InteriorSolarSurfaceInfo],
     beam_w: f64,
@@ -323,57 +399,7 @@ pub(crate) fn compute_solar_distribution_into_solar(
     beam_floor_frac: f64,
     absorbed: &mut Vec<f64>,
 ) -> f64 {
-    let n = surfaces.len();
-    absorbed.clear();
-    absorbed.resize(n, 0.0);
-
-    let floor_wa: f64 = surfaces
-        .iter()
-        .filter(|s| s.is_floor)
-        .map(|s| s.area_m2 * s.solar_absorptance)
-        .sum();
-    let nonfloor_wa: f64 = surfaces
-        .iter()
-        .filter(|s| !s.is_floor)
-        .map(|s| s.area_m2 * s.solar_absorptance)
-        .sum();
-    let total_wa: f64 = floor_wa + nonfloor_wa;
-
-    if beam_w > 0.0 {
-        let (beam_to_floors, beam_to_walls) = if floor_wa > 0.0 && nonfloor_wa > 0.0 {
-            (beam_w * beam_floor_frac, beam_w * (1.0 - beam_floor_frac))
-        } else if floor_wa > 0.0 {
-            (beam_w, 0.0)
-        } else if nonfloor_wa > 0.0 {
-            (0.0, beam_w)
-        } else {
-            (0.0, 0.0)
-        };
-        for (i, s) in surfaces.iter().enumerate() {
-            let factor = if s.is_floor && floor_wa > 0.0 {
-                s.area_m2 * s.solar_absorptance / floor_wa
-            } else if !s.is_floor && nonfloor_wa > 0.0 {
-                s.area_m2 * s.solar_absorptance / nonfloor_wa
-            } else {
-                0.0
-            };
-            absorbed[i] += if s.is_floor {
-                beam_to_floors * factor
-            } else {
-                beam_to_walls * factor
-            };
-        }
-    }
-
-    if diffuse_w > 0.0 && total_wa > 0.0 {
-        for (i, s) in surfaces.iter().enumerate() {
-            let factor = s.area_m2 * s.solar_absorptance / total_wa;
-            absorbed[i] += diffuse_w * factor;
-        }
-    }
-
-    let total_distributed: f64 = absorbed.iter().sum();
-    (beam_w + diffuse_w) - total_distributed
+    compute_solar_distribution_into_generic(surfaces, beam_w, diffuse_w, beam_floor_frac, absorbed)
 }
 
 /// Deposit per-surface absorbed solar into `u` for [`InteriorSolarSurfaceInfo`].
@@ -711,16 +737,11 @@ mod tests {
 
     #[test]
     fn beam_floor_fraction_boundaries() {
-        assert_eq!(beam_floor_fraction(0.0), 0.3);
+        assert_eq!(beam_floor_fraction(0.0), 0.0);
         assert_eq!(beam_floor_fraction(90.0), 0.9);
         assert!((beam_floor_fraction(30.0) - 0.5).abs() < 1e-9);
-        assert_eq!(beam_floor_fraction(-10.0), 0.3);
+        assert_eq!(beam_floor_fraction(-10.0), 0.0);
 
-        let alt_sin_03 = (0.3_f64).asin().to_degrees();
-        assert!(
-            (beam_floor_fraction(alt_sin_03) - 0.3).abs() < 1e-9,
-            "clamp should engage at lower bound (sin ≈ 0.3)"
-        );
         let alt_sin_09 = (0.9_f64).asin().to_degrees();
         assert!(
             (beam_floor_fraction(alt_sin_09) - 0.9).abs() < 1e-9,
@@ -748,12 +769,10 @@ mod tests {
         );
     }
 
-    // Regression test for ticket 043: lower clamp of 0.3 is physically wrong.
-    // At zero altitude (horizontal beam) the floor fraction must be 0.0, not 0.3.
-    // This test FAILS with the current clamp(0.3, 0.9) implementation and
-    // will PASS after the fix changes it to clamp(0.0, 0.9).
+    // Regression guard: lower clamp was historically 0.3, which was physically wrong.
+    // At zero altitude (horizontal beam) the floor fraction must be 0.0 (sin(0°) = 0).
+    // The 0.3 clamp deposited phantom heat to floor RC nodes at low solar angles.
     #[test]
-    #[should_panic]
     fn beam_floor_fraction_zero_altitude_must_be_zero() {
         let frac = beam_floor_fraction(0.0);
         assert_eq!(
@@ -763,13 +782,10 @@ mod tests {
     }
 
     // Direction-reversal guard: at very low solar altitude (5°) the non-floor
-    // fraction must exceed the floor fraction.  With the current lower clamp of
-    // 0.3 this test also fails because beam_floor_fraction(5°) ≈ 0.087, which
-    // is clamped up to 0.3, assigning 30% to floor and 70% to walls — correct
-    // direction numerically, but with an inflated floor share.
-    // Fix pending — will stop panicking when the 0.3 lower clamp is removed.
+    // fraction must exceed the floor fraction.
+    // sin(5°) ≈ 0.087 — a tight upper bound of 0.15 catches any reintroduction
+    // of the old 0.3 lower clamp, which inflated the floor share at low angles.
     #[test]
-    #[should_panic(expected = "beam_floor_fraction(5°)")]
     fn beam_floor_fraction_low_altitude_walls_dominate() {
         let frac = beam_floor_fraction(5.0);
         assert!(

@@ -224,8 +224,10 @@ pub struct InteriorSurfaceInfo {
     pub solar_absorptance: f64,
     /// Whether this surface is a floor (receives beam solar preferentially).
     ///
-    /// Per EnergyPlus FullInteriorAndExterior: beam solar strikes floors first
-    /// (60% default for residential single-storey), remainder goes to walls/ceiling.
+    /// Beam solar is split between floors and non-floors via [`beam_floor_fraction`]
+    /// (a `sin(altitude)` heuristic); within each group, absorbed energy is
+    /// weighted by `area × solar_absorptance`. Floors receive more beam at
+    /// high solar altitudes, walls/ceiling more at low altitudes.
     pub is_floor: bool,
     /// Optional driving temperature for surface temperature computation.
     ///
