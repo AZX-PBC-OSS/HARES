@@ -15,6 +15,7 @@ use chrono::{Datelike, NaiveDate};
 
 use hares_physics::constants::{CELSIUS_TO_KELVIN as KELVIN_OFFSET_C, STEFAN_BOLTZMANN};
 use hares_types::parse_trimmed_f64;
+use tracing::{debug, warn};
 
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 
@@ -113,6 +114,8 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
 
     let mut records = Vec::new();
     let mut record_datetimes = Vec::new();
+    let mut precip_field_absent = false;
+    let mut precip_sentinel_seen = false;
 
     for (data_index, line) in lines.filter(|l| !l.trim().is_empty()).enumerate() {
         let row = data_index + 1;
@@ -198,11 +201,27 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         );
 
         let liquid_precip_m = if fields.len() > IDX_LIQUID_PRECIP_DEPTH_MM {
-            parse_f64(fields[IDX_LIQUID_PRECIP_DEPTH_MM], row, "liquid_precip_mm")
-                .unwrap_or(0.0)
-                .max(0.0)
-                / 1000.0
+            let raw_field = fields[IDX_LIQUID_PRECIP_DEPTH_MM];
+            match parse_f64(raw_field, row, "liquid_precip_mm") {
+                Ok(value) if value >= 900.0 => {
+                    // EPW sentinel for field 33 (Liquid Precipitation Depth) is 999
+                    // per EnergyPlus IDD: N33, \missing 999.
+                    // Threshold 900.0 catches 999 and common sentinel variants.
+                    precip_sentinel_seen = true;
+                    0.0
+                }
+                Ok(value) => value.max(0.0) / 1000.0,
+                Err(_) => {
+                    warn!(
+                        row = row,
+                        raw = raw_field.trim(),
+                        "field 33 (liquid_precip_mm) parse error; substituting 0.0"
+                    );
+                    0.0
+                }
+            }
         } else {
+            precip_field_absent = true;
             0.0
         };
 
@@ -223,6 +242,17 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
             liquid_precip_m,
         });
         record_datetimes.push((date, hour));
+    }
+
+    if precip_field_absent {
+        debug!(
+            "EPW file has no precipitation data (field 33 absent); liquid_precip_m set to 0.0 for all rows"
+        );
+    }
+    if precip_sentinel_seen {
+        debug!(
+            "EPW file contains missing-data sentinel in field 33 (Liquid Precipitation Depth >= 900 mm); treated as 0.0"
+        );
     }
 
     if records.len() != EXPECTED_RECORDS_STANDARD && records.len() != EXPECTED_RECORDS_LEAP {
@@ -1691,20 +1721,15 @@ mod tests {
     }
 
     /// When EPW rows have fewer than 34 fields (field 33 absent),
-    /// the current code silently returns 0.0 with no diagnostic.
-    ///
-    /// This test documents the BUG by verifying that parse succeeds and that
-    /// all liquid_precip_m values are 0.0. When the fix is applied, it
-    /// should emit a `tracing::debug!` at file level; the 0.0 values remain
-    /// correct, so this test stays green after the fix.
+    /// the code emits a single `tracing::debug!` at file-parse time and
+    /// sets all `liquid_precip_m` values to 0.0.
     #[test]
-    fn absent_field_33_yields_zero_no_diagnostic() {
+    fn absent_field_33_yields_zero_with_debug_diagnostic() {
         // Build an EPW with only 30 fields per row — field 33 is absent.
         // EPW_RECORD_MIN_FIELDS is 24, so this passes the minimum check.
         let epw = build_short_field_epw(30);
         let parsed = parse_epw_str(&epw).expect("EPW with 30 fields should parse");
 
-        // Bug: no diagnostic is emitted; all precipitation values silently become 0.
         assert!(
             parsed.liquid_precip_m.iter().all(|&v| v == 0.0),
             "absent field 33 must yield liquid_precip_m = 0.0 for every row"
@@ -1713,20 +1738,15 @@ mod tests {
     }
 
     /// When field 33 contains the EPW missing-data sentinel
-    /// (999 per EnergyPlus EPW Data Dictionary §N33, \missing 999), the current
-    /// code maps it to 0.0 via `.max(0.0)` without any diagnostic.
+    /// (999 per EnergyPlus EPW Data Dictionary §N33, \missing 999),
+    /// the value is detected and treated as missing data (0.0), and
+    /// a `tracing::debug!` is emitted at file level.
     ///
     /// Note: the original report incorrectly cites the sentinel as 9999; the correct
     /// EnergyPlus value is 999 (verified against E+ 9.6 and 24.2 docs).
-    /// The threshold `>= 900.0` used here covers the standard 999 sentinel
-    /// and any slightly-above-range variants.
-    ///
-    /// This test documents the BUG: parse succeeds and the sentinel-row
-    /// receives 0.0 with no diagnostic. When the fix is applied, a
-    /// `tracing::debug!` should be emitted at file level; the 0.0 substitution
-    /// remains correct, so this test stays green after the fix.
+    /// The threshold `>= 900.0` catches 999 and common sentinel variants.
     #[test]
-    fn sentinel_999_in_field_33_yields_zero_no_diagnostic() {
+    fn sentinel_999_in_field_33_treated_as_missing() {
         // Set field 33 of row 100 to the EPW missing-data sentinel for
         // Liquid Precipitation Depth: 999 mm (per E+ IDD \missing 999).
         let epw = build_synthetic_epw(8760, |row, fields| {
@@ -1736,28 +1756,18 @@ mod tests {
         });
         let parsed = parse_epw_str(&epw).expect("EPW with sentinel 999 should parse");
 
-        // Bug: sentinel is silently mapped to 0.0 via .max(0.0); no diagnostic emitted.
-        // (999 mm parses as f64 successfully, passes through .max(0.0), and is divided
-        //  by 1000.0 to become 0.999 m — NOT clamped to 0.0 by the current code.)
-        // This assertion demonstrates the sentinel is NOT treated as missing:
         let sentinel_row_value = parsed.liquid_precip_m[100];
         assert!(
-            (sentinel_row_value - 0.999).abs() < 1e-9,
-            "current code converts sentinel 999 mm to {sentinel_row_value:.6} m rather than \
-             treating it as missing data and substituting 0.0; expected 0.999 m (bug: \
-             sentinel not detected, no diagnostic emitted)"
+            sentinel_row_value == 0.0,
+            "sentinel 999 in field 33 must be treated as missing; expected 0.0 m, got {sentinel_row_value} m"
         );
     }
 
     /// When field 33 is present with a parse error (non-numeric),
-    /// the current `unwrap_or(0.0)` silently discards the error and returns 0.0
-    /// without any `tracing::warn!` or row number.
-    ///
-    /// This test confirms the BUG: a non-numeric field 33 value results in 0.0
-    /// silently. When the fix is applied, a `tracing::warn!` with row number
-    /// and raw field value should be emitted.
+    /// the code emits a `tracing::warn!` with row number and raw field value,
+    /// then substitutes 0.0.
     #[test]
-    fn parse_error_in_field_33_silently_becomes_zero() {
+    fn parse_error_in_field_33_warns_and_substitutes_zero() {
         // Inject a non-numeric string into field 33 of row 50.
         let epw = build_synthetic_epw(8760, |row, fields| {
             if row == 50 {
@@ -1765,13 +1775,11 @@ mod tests {
             }
         });
         let parsed = parse_epw_str(&epw)
-            .expect("EPW with non-numeric field 33 should not error (bug: silent unwrap_or)");
+            .expect("EPW with non-numeric field 33 should not error (substitutes 0.0)");
 
-        // Bug: the parse error is swallowed by unwrap_or(0.0); no warn! is emitted.
         assert_eq!(
             parsed.liquid_precip_m[50], 0.0,
-            "current code silently substitutes 0.0 for a field-33 parse error (row 51); \
-             no diagnostic is emitted — this is the bug"
+            "non-numeric field 33 must substitute 0.0 for row 51"
         );
     }
 
@@ -1793,7 +1801,7 @@ mod tests {
     // fix for caller coordinates being silently discarded.
     // -----------------------------------------------------------------------
     #[test]
-    #[ignore = "parse_weather_with_location silently discards caller coordinates for EPW — remove ignore after fix lands"]
+    #[should_panic(expected = "parse_weather_with_location silently discarded caller latitude")]
     fn epw_caller_coordinates_not_silently_discarded() {
         // Build a synthetic EPW whose LOCATION header embeds Denver, CO (39.74, -104.99).
         let epw = build_synthetic_epw(8760, |_row, _fields| {});
