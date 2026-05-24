@@ -115,7 +115,13 @@ pub struct StateSpaceModel {
     b_eff: DMatrix<f64>,
     pub c: DMatrix<f64>,
     pub d: DMatrix<f64>,
-    max_discrete_eigenvalue_magnitude: Option<f64>,
+    /// Gershgorin spectral radius upper bound for the discrete state matrix `A_d`.
+    ///
+    /// Always set for all construction paths; `bound < 1.0` does not guarantee
+    /// stability (Gershgorin is conservative) but `bound >= 1.0` is a strong
+    /// instability signal. `tracing::warn!` is emitted at construction when
+    /// `bound >= 1.0 + 1e-10`.
+    max_discrete_eigenvalue_magnitude: f64,
 }
 
 impl std::fmt::Debug for StateSpaceModel {
@@ -169,6 +175,13 @@ impl StateSpaceModel {
         let eye = DMatrix::<f64>::identity(n, n);
         let m_lu = eye.clone().lu();
 
+        let gershgorin_bound = gershgorin_spectral_radius(&a_d);
+        if gershgorin_bound >= 1.0 + 1e-10 {
+            tracing::warn!(
+                gershgorin_bound,
+                "Gershgorin discrete spectral bound exceeds unity; system may be unstable"
+            );
+        }
         Ok(Self {
             a_c: None,
             b_c: None,
@@ -178,7 +191,7 @@ impl StateSpaceModel {
             b_eff: b_d,
             c,
             d,
-            max_discrete_eigenvalue_magnitude: None,
+            max_discrete_eigenvalue_magnitude: gershgorin_bound,
         })
     }
 
@@ -197,9 +210,13 @@ impl StateSpaceModel {
         self.c.nrows()
     }
 
-    /// Max discrete eigenvalue magnitude computed at construction.
-    /// `None` for large matrices (n > 20) where eigenvalue decomposition is skipped.
-    pub fn max_discrete_eigenvalue_magnitude(&self) -> Option<f64> {
+    /// Gershgorin spectral radius upper bound for the discrete state matrix `A_d`.
+    ///
+    /// Always set for all construction paths; `bound < 1.0` does not guarantee
+    /// stability (Gershgorin is conservative) but `bound >= 1.0` is a strong
+    /// instability signal. `tracing::warn!` is emitted at construction when
+    /// `bound >= 1.0 + 1e-10`.
+    pub fn max_discrete_eigenvalue_magnitude(&self) -> f64 {
         self.max_discrete_eigenvalue_magnitude
     }
 
@@ -282,7 +299,6 @@ impl StateSpaceModel {
         let continuous_stable = gershgorin_continuous_stable(a_c);
         let gershgorin_bound = gershgorin_spectral_radius(&a_d);
         let discrete_stable = gershgorin_bound < 1.0 + 1e-10;
-        let max_discrete_eigenvalue_magnitude = Some(gershgorin_bound);
 
         if !continuous_stable || !discrete_stable {
             let a_c_singular = is_singular(a_c);
@@ -313,7 +329,7 @@ impl StateSpaceModel {
             b_eff: b_d,
             c,
             d,
-            max_discrete_eigenvalue_magnitude,
+            max_discrete_eigenvalue_magnitude: gershgorin_bound,
         })
     }
 
@@ -841,6 +857,13 @@ pub fn discretize_auto(
         if rcond > RCOND_THRESHOLD {
             return discretize_zoh(a_c, b_c, dt);
         }
+        tracing::warn!(
+            rcond,
+            threshold = RCOND_THRESHOLD,
+            "A_c is severely ill-conditioned; using Van Loan fallback for discretization"
+        );
+    } else {
+        tracing::warn!("A_c is singular; using Van Loan fallback for discretization");
     }
 
     van_loan_discretize(a_c, b_c, dt)
@@ -1627,16 +1650,12 @@ mod tests {
         );
     }
 
-    // --- Regression tests for ticket 046 ---
-
-    /// `from_discrete` accepts an unstable matrix (diagonal entry > 1) without
-    /// computing a Gershgorin bound.  After ticket 046 is applied the model must
-    /// store `Some(bound)` with `bound >= 1.0`.  Until then this test documents
-    /// the gap: the accessor returns `None`.
+    /// `from_discrete` computes a Gershgorin bound on the caller-supplied `A_d`
+    /// and stores it in `max_discrete_eigenvalue_magnitude`. For a clearly
+    /// unstable diagonal matrix, the bound must equal the max absolute diagonal
+    /// entry and exceed 1.0.
     #[test]
-    fn from_discrete_unstable_matrix_eigenvalue_magnitude_is_none() {
-        // Diagonal matrix with entry 1.5 is clearly unstable (|λ| = 1.5 > 1).
-        // Gershgorin bound for a diagonal matrix equals max |a_ii| = 1.5.
+    fn from_discrete_gershgorin_bound_stored_for_all_paths() {
         let a_d = DMatrix::from_row_slice(2, 2, &[1.5, 0.0, 0.0, 0.3]);
         let b_d = DMatrix::from_row_slice(2, 1, &[0.0, 0.0]);
         let c = DMatrix::identity(2, 2);
@@ -1645,29 +1664,28 @@ mod tests {
         let model = StateSpaceModel::from_discrete(a_d, b_d, c, d)
             .expect("from_discrete should accept any well-formed matrices");
 
-        // BUG (ticket 046 Gap 1): max_discrete_eigenvalue_magnitude is None even
-        // though the matrix is clearly unstable.  After the fix this must become
-        // Some(bound) where bound >= 1.0.
+        let bound = model.max_discrete_eigenvalue_magnitude();
         assert!(
-            model.max_discrete_eigenvalue_magnitude().is_none(),
-            "expected None (unfixed gap); got Some — ticket 046 may already be applied"
+            bound >= 1.0,
+            "Gershgorin bound for unstable matrix should exceed 1.0: got {bound}"
+        );
+        // For a diagonal matrix, Gershgorin radii are zero, so the bound
+        // equals the max absolute diagonal entry = 1.5.
+        assert!(
+            (bound - 1.5).abs() < 1e-14,
+            "Gershgorin bound for diagonal [[1.5, 0], [0, 0.3]] should be 1.5: got {bound}"
         );
     }
 
-    /// `from_continuous` already calls `reciprocal_condition_estimate_1_norm` inside
-    /// `discretize_auto`, but only to branch between ZOH and Van Loan; it does NOT
-    /// emit a `tracing::warn!`.  This test constructs a severely ill-conditioned
-    /// `A_c` and verifies that `from_continuous` still succeeds (no panic/error).
-    /// After ticket 046 Gap 2 is fixed a warning should be emitted — this test
-    /// remains a compile-time guard that the ill-conditioned path continues to
-    /// succeed rather than panic.
+    /// `from_continuous` calls `reciprocal_condition_estimate_1_norm` inside
+    /// `discretize_auto` and emits `tracing::warn!` when `rcond < RCOND_THRESHOLD`,
+    /// then falls back to Van Loan discretization. This test verifies the ill-conditioned
+    /// path succeeds rather than panics; the warning cannot be asserted without a
+    /// tracing subscriber but the behavioral contract (success via fallback) is tested.
     #[test]
     fn from_continuous_ill_conditioned_a_c_succeeds_without_panic() {
-        // Condition number ≈ 1e14 / 1 = 1e14 >> 1/RCOND_THRESHOLD (1e12).
-        // The matrix [[1e-7, 0], [0, 1.0]] has 1-norm condition number = 1e7,
-        // which is above RCOND_THRESHOLD (1e-12) so ZOH is used but the matrix
-        // is still well-enough conditioned for the inv solve.  Use a more extreme
-        // diagonal to guarantee rcond < 1e-12: ratio 1e-13.
+        // A_c = diag(-1e-13, -1.0): 1-norm rcond = 1e-13, well below RCOND_THRESHOLD (1e-12).
+        // discretize_auto emits tracing::warn! and falls back to van_loan_discretize.
         let a_c = DMatrix::from_row_slice(2, 2, &[-1.0e-13_f64, 0.0, 0.0, -1.0]);
         let b_c = DMatrix::from_row_slice(2, 1, &[1.0e-13, 1.0]);
 
@@ -1683,9 +1701,6 @@ mod tests {
             result.is_ok(),
             "from_continuous should succeed for ill-conditioned A_c via van_loan fallback"
         );
-        // After ticket 046 Gap 2 is fixed a tracing::warn! should be emitted
-        // when rcond < RCOND_THRESHOLD.  This test cannot easily assert on
-        // tracing output without a subscriber, but it guards against regression.
     }
 
     #[test]
