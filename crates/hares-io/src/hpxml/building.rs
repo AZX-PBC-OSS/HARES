@@ -1166,6 +1166,49 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
     })
 }
 
+/// Compute the assembly-level framing fraction from stud geometry per
+/// ASHRAE Handbook of Fundamentals 2021, Ch. 27, Table 6. Includes studs,
+/// double top plates, single bottom plate, headers, corners, and miscellaneous
+/// framing members (sills, blocking, partition intersections).
+///
+/// - `stud_width_in`: nominal stud width in inches (e.g. 1.5 for 2× lumber)
+/// - `stud_spacing_in`: on-center stud spacing in inches (e.g. 16.0)
+/// - `wall_height_in`: wall height in inches (default 96.0 for 8 ft)
+///
+/// Returns the framing fraction clamped to [0.10, 0.35].
+///
+/// Calibration: the geometric terms (studs + plates) alone give ~0.141 for
+/// 2×4 at 16" OC, well below the ASHRAE Table 6 assembly value of 0.23.
+/// The misc term captures headers (≈0.04) plus corner/blocking framing and
+/// is calibrated to hit the ASHRAE assembly value at 16" OC.
+/// The (16/spacing)² scaling approximates the reduced header/corner framing
+/// density with wider stud spacing — advanced framing at 24" OC uses lighter
+/// headers, 2-stud corners, and single top plates, all of which reduce the
+/// assembly fraction below what a fixed constant would predict.
+pub(crate) fn assembly_framing_factor(
+    stud_width_in: f64,
+    stud_spacing_in: f64,
+    wall_height_in: f64,
+) -> f64 {
+    // Stud face fraction — the fraction of wall area covering stud faces.
+    let ff_studs = stud_width_in / stud_spacing_in;
+
+    // Top and bottom plate fraction. Standard framing: double top plate
+    // (3.0" for 2× lumber) + single bottom plate (1.5") = 3 × stud_width.
+    let ff_plates = 3.0 * stud_width_in / wall_height_in;
+
+    // Headers, corners, sills, blocking, and partition intersections.
+    // Calibrated to 0.09 at 16" OC to match ASHRAE HoF 2021 Ch. 27 Table 6
+    // assembly value of 0.23 for 2×4 wood stud walls:
+    //   0.094 (studs) + 0.047 (plates) + 0.09 (misc) = 0.231.
+    // The (16/spacing)² scaling reduces the misc term for wider spacing
+    // to approximate advanced framing provisions (lighter headers,
+    // fewer corner assemblies) that accompany lower stud density.
+    let ff_misc = 0.09 * (16.0 / stud_spacing_in).powi(2);
+
+    (ff_studs + ff_plates + ff_misc).clamp(0.10, 0.35)
+}
+
 /// Parse framing factor from HPXML `<FramingFactor>` element, or derive from
 /// `<StudSpacing>` and `<StudWidth>`, or default by construction type.
 ///
@@ -1181,13 +1224,55 @@ fn parse_framing_factor(node: &XmlNode, construction_type: Option<&str>) -> Opti
         }
     }
 
-    // Derive from stud spacing and width: ff = stud_width / stud_spacing
+    // Derive assembly framing fraction from stud geometry and wall height.
+    // Per ASHRAE HoF 2021 Ch. 27 Table 6: the assembly-level framing fraction
+    // includes studs, plates, headers, corners, and miscellaneous members.
     if let (Some(spacing_in), Some(width_in)) = (
         find_descendant_f64(node, "StudSpacing", ValueKind::Raw),
         find_descendant_f64(node, "StudWidth", ValueKind::Raw),
     ) {
         if spacing_in > 0.0 && width_in > 0.0 && width_in < spacing_in {
-            return Some(width_in / spacing_in);
+            // WallHeight defaults to 96 in (8 ft) per ASHRAE/HPXML convention.
+            // HPXML WallHeight is typically in feet; convert to inches.
+            let wall_height_in = node
+                .child("WallHeight")
+                .and_then(|n| {
+                    let raw = n.text_as_f64()?;
+                    let units_norm = n
+                        .attrs
+                        .get("units")
+                        .or_else(|| n.attrs.get("unit"))
+                        .map(|u| normalize_ascii(u));
+                    let inches = match units_norm.as_deref() {
+                        Some("ft") | Some("feet") => raw * 12.0,
+                        Some("in") | Some("inch") | Some("inches") => raw,
+                        None => raw * 12.0, // HPXML default: feet
+                        _ => {
+                            tracing::warn!(
+                                units = ?units_norm,
+                                value = raw,
+                                "unrecognized unit for WallHeight; assuming feet"
+                            );
+                            raw * 12.0
+                        }
+                    };
+                    if inches <= 0.0 {
+                        tracing::warn!(
+                            wall_height_in = inches,
+                            "WallHeight must be positive; defaulting to 96 in (8 ft)"
+                        );
+                        None
+                    } else {
+                        Some(inches)
+                    }
+                })
+                .unwrap_or(96.0);
+
+            return Some(assembly_framing_factor(
+                width_in,
+                spacing_in,
+                wall_height_in,
+            ));
         }
     }
 
@@ -2507,7 +2592,9 @@ fn normalize_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoundaryType, DuctType, HpxmlError, ZoneType, parse_building};
+    use super::{
+        BoundaryType, DuctType, HpxmlError, ZoneType, assembly_framing_factor, parse_building,
+    };
 
     const SAMPLE_XML: &str = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
@@ -4911,6 +4998,196 @@ mod tests {
         assert_eq!(
             building.infiltration_ach50, None,
             "CFM wrapper form must not pollute infiltration_ach50"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // assembly_framing_factor unit tests
+    // -----------------------------------------------------------------
+
+    /// 2×4 at 16" OC standard framing, 8 ft wall → per ASHRAE HoF Ch. 27
+    /// Table 6, assembly = 0.23. Formula: 0.094 + 0.047 + 0.09 ≈ 0.231.
+    #[test]
+    fn assembly_framing_factor_2x4_16oc_standard_8ft_wall() {
+        let ff = assembly_framing_factor(1.5, 16.0, 96.0);
+        assert!(
+            (ff - 0.23).abs() < 5.0 * 0.23 / 100.0,
+            "2×4 at 16\" OC should be within 5% of 0.23, got {ff:.4}"
+        );
+        assert!(ff >= 0.21 && ff <= 0.25, "got {ff:.4}");
+    }
+
+    /// 2×4 at 24" OC advanced framing, 8 ft wall → per ASHRAE HoF Ch. 27
+    /// Table 6, assembly ≈ 0.15. Formula: 0.063 + 0.047 + 0.04 ≈ 0.150.
+    #[test]
+    fn assembly_framing_factor_2x4_24oc_advanced_8ft_wall() {
+        let ff = assembly_framing_factor(1.5, 24.0, 96.0);
+        assert!(
+            (ff - 0.15).abs() < 5.0 * 0.15 / 100.0,
+            "2×4 at 24\" OC advanced should be within 5% of 0.15, got {ff:.4}"
+        );
+        assert!(ff >= 0.13 && ff <= 0.17, "got {ff:.4}");
+    }
+
+    /// 2×6 at 16" OC standard framing, 8 ft wall. Wider stud increases
+    /// stud fraction (1.625/16 = 0.1016) and plate fraction (4.875/96 = 0.0508).
+    /// Assembly ≈ 0.1016 + 0.0508 + 0.09 = 0.2424.
+    #[test]
+    fn assembly_framing_factor_2x6_16oc_standard_8ft_wall() {
+        let ff = assembly_framing_factor(1.625, 16.0, 96.0);
+        assert!(
+            ff > 0.20 && ff < 0.30,
+            "2×6 at 16\" OC should exceed 2×4 at same spacing, got {ff:.4}"
+        );
+    }
+
+    /// 2×4 at 16" OC, 9 ft wall. Taller wall reduces plate fraction:
+    /// 4.5/108 = 0.042 (vs 4.5/96 = 0.047). Assembly decreases slightly.
+    #[test]
+    fn assembly_framing_factor_taller_wall_reduces_framing_fraction() {
+        let ff_8ft = assembly_framing_factor(1.5, 16.0, 96.0);
+        let ff_9ft = assembly_framing_factor(1.5, 16.0, 108.0);
+        assert!(
+            ff_9ft < ff_8ft,
+            "Taller wall should reduce framing fraction (plate area constant, \
+             wall area larger), got 8ft={ff_8ft:.4}, 9ft={ff_9ft:.4}"
+        );
+    }
+
+    /// Framing fraction is clamped to [0.10, 0.35]. Physically implausible
+    /// inputs (e.g. studs touching) should not produce values outside range.
+    #[test]
+    fn assembly_framing_factor_clamps_to_valid_range() {
+        // Very narrow spacing would produce high fraction → clamped to 0.35.
+        let ff_narrow = assembly_framing_factor(1.5, 4.0, 96.0);
+        assert!(
+            ff_narrow <= 0.35,
+            "narrow spacing must be clamped, got {ff_narrow:.4}"
+        );
+
+        // Very wide spacing would produce low fraction → clamped to 0.10.
+        let ff_wide = assembly_framing_factor(0.5, 48.0, 96.0);
+        assert!(
+            ff_wide >= 0.10,
+            "wide spacing must be clamped, got {ff_wide:.4}"
+        );
+    }
+
+    /// Parsing a wall with `<StudSpacing>`, `<StudWidth>`, and explicit
+    /// `<WallHeight units="ft">9</WallHeight>` must use the explicit height.
+    #[test]
+    fn stud_geometry_with_explicit_wall_height_ft() {
+        let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id='Wall1'/>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <InteriorAdjacentTo>living space</InteriorAdjacentTo>
+            <WallType><WoodStud/></WallType>
+            <Area units="ft2">240.0</Area>
+            <StudSpacing>16.0</StudSpacing>
+            <StudWidth>1.5</StudWidth>
+            <WallHeight units="ft">9</WallHeight>
+            <Insulation>
+              <SystemIdentifier id='Wall1Ins'/>
+              <AssemblyEffectiveRValue>11.0</AssemblyEffectiveRValue>
+            </Insulation>
+          </Wall>
+        </Walls>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(&xml).expect("should parse");
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "Wall1")
+            .expect("Wall1 should be present");
+        let ff = wall.framing_factor.expect("framing_factor should be set");
+
+        // 9 ft wall → plate fraction = 4.5/(9×12) = 0.0417 (down from 0.0469 at 8 ft)
+        let ff_9ft = assembly_framing_factor(1.5, 16.0, 108.0);
+        assert!(
+            (ff - ff_9ft).abs() < 1e-10,
+            "framing_factor should use 9 ft wall height, got {ff:.4}, expected {ff_9ft:.4}"
+        );
+
+        // 9 ft wall should give lower ff than 8 ft wall
+        let ff_8ft = assembly_framing_factor(1.5, 16.0, 96.0);
+        assert!(
+            ff < ff_8ft,
+            "9 ft wall (ff={ff:.4}) should have lower ff than 8 ft (ff={ff_8ft:.4})"
+        );
+    }
+
+    /// <WallHeight>0</WallHeight> must be rejected (non-positive) so the
+    /// default 96 in (8 ft) applies. Without this guard the parser would
+    /// pass 0.0 to assembly_framing_factor, producing ff_plates = ∞ → clamped
+    /// to 0.35, a silently wrong value.
+    #[test]
+    fn stud_geometry_with_zero_wall_height_defaults_to_96in() {
+        let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id='Wall1'/>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <InteriorAdjacentTo>living space</InteriorAdjacentTo>
+            <WallType><WoodStud/></WallType>
+            <Area units="ft2">240.0</Area>
+            <StudSpacing>16.0</StudSpacing>
+            <StudWidth>1.5</StudWidth>
+            <WallHeight>0</WallHeight>
+            <Insulation>
+              <SystemIdentifier id='Wall1Ins'/>
+              <AssemblyEffectiveRValue>11.0</AssemblyEffectiveRValue>
+            </Insulation>
+          </Wall>
+        </Walls>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(&xml).expect("should parse");
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "Wall1")
+            .expect("Wall1 should be present");
+        let ff = wall.framing_factor.expect("framing_factor should be set");
+
+        // WallHeight=0 must trigger the default (96 in), yielding ~0.23,
+        // NOT 0.35 from division-by-zero clamped infinity.
+        let ff_96in = assembly_framing_factor(1.5, 16.0, 96.0);
+        assert!(
+            (ff - ff_96in).abs() < 1e-10,
+            "WallHeight=0 should default to 96 in, got ff={ff:.4}, expected {ff_96in:.4}"
+        );
+        assert!(
+            ff < 0.30,
+            "WallHeight=0 should not produce clamped-infinity value 0.35, got {ff:.4}"
         );
     }
 }

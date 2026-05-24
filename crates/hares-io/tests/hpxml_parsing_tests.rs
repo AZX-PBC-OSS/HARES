@@ -979,11 +979,10 @@ fn wall_xml_with_stud_geometry(spacing_in: f64, width_in: f64) -> String {
 }
 
 #[test]
-#[should_panic(expected = "2×4 at 16\" OC assembly framing fraction should be in [0.21, 0.25]")]
 fn stud_geometry_framing_fraction_2x4_16oc_includes_plates_and_headers() {
-    // 2×4 at 16" OC: stud face alone = 1.5/16 = 0.094 (the current buggy value).
-    // Assembly-level per ASHRAE HOF = ~0.23. This test asserts the correct
-    // range; it should fail until ticket 037 is fixed.
+    // 2×4 at 16" OC standard framing: per ASHRAE HoF 2021 Ch. 27 Table 6,
+    // the assembly-level framing fraction is ~0.23.
+    // assembly_framing_factor(1.5, 16.0, 96.0) = 0.094 + 0.047 + 0.09 ≈ 0.231.
     let xml = wall_xml_with_stud_geometry(16.0, 1.5);
     let building = parse_building(&xml).expect("should parse");
     let wall = building
@@ -998,18 +997,16 @@ fn stud_geometry_framing_fraction_2x4_16oc_includes_plates_and_headers() {
     assert!(
         ff >= 0.21 && ff <= 0.25,
         "2×4 at 16\" OC assembly framing fraction should be in [0.21, 0.25] per ASHRAE HOF \
-         (studs + plates + headers + corners), got {ff:.4} — \
-         current code returns stud-face-only value {:.4}",
-        1.5_f64 / 16.0
+         (studs + plates + headers + corners), got {ff:.4}",
     );
 }
 
 #[test]
-#[should_panic(expected = "2×4 at 24\" OC assembly framing fraction should be in [0.13, 0.17]")]
 fn stud_geometry_framing_fraction_2x4_24oc_advanced_framing() {
-    // 2×4 at 24" OC advanced framing: stud face alone = 1.5/24 = 0.0625.
-    // Assembly-level per ASHRAE HOF = ~0.15 (advanced framing).
-    // This test will fail until ticket 037 is fixed.
+    // 2×4 at 24" OC advanced framing: per ASHRAE HoF 2021 Ch. 27 Table 6,
+    // the assembly-level framing fraction is ~0.15 (single top plate,
+    // 2-stud corners, insulated headers).
+    // assembly_framing_factor(1.5, 24.0, 96.0) = 0.063 + 0.047 + 0.04 ≈ 0.150.
     let xml = wall_xml_with_stud_geometry(24.0, 1.5);
     let building = parse_building(&xml).expect("should parse");
     let wall = building
@@ -1024,9 +1021,7 @@ fn stud_geometry_framing_fraction_2x4_24oc_advanced_framing() {
     assert!(
         ff >= 0.13 && ff <= 0.17,
         "2×4 at 24\" OC assembly framing fraction should be in [0.13, 0.17] per ASHRAE HOF \
-         (advanced framing — studs + plates + headers), got {ff:.4} — \
-         current code returns stud-face-only value {:.4}",
-        1.5_f64 / 24.0
+         (advanced framing — studs + plates + headers), got {ff:.4}",
     );
 }
 
