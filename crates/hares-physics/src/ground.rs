@@ -1,8 +1,8 @@
 //! Ground heat transfer models.
 //!
 //! Implements the Kusuda-Achenbach undisturbed ground temperature model
-//! (EnergyPlus Engineering Reference Ch. 3.17) and ASHRAE perimeter
-//! conduction factor (F2) method for slab-on-grade heat loss.
+//! (EnergyPlus Engineering Reference Ch. 3.17) and the ASHRAE 90.1-2022
+//! perimeter conduction factor (F2) method for slab-on-grade heat loss.
 //!
 //! Reference:
 //! - Kusuda, T. and Achenbach, P.R. (1965), "Earth Temperatures and Thermal
@@ -11,6 +11,8 @@
 //! - ASHRAE Handbook of Fundamentals 2021, Ch. 27 (Heat, Air, and Moisture Control
 //!   in Building Assemblies — Examples) — below-grade heat transfer boundary
 //!   conditions for basement walls, slab-on-grade, and crawlspace floors.
+//! - ASHRAE 90.1-2022, Table A6.3.1 — slab-on-grade F-factor perimeter heat loss
+//!   coefficients, converted Btu/(h·ft·°F) → W/(m·K) via factor 1.73074.
 //! - EnergyPlus Engineering Reference: Ground Heat Transfer, "Undisturbed Ground
 //!   Temperature Model: Kusuda-Achenbach".
 
@@ -95,7 +97,7 @@ pub fn kusuda_achenbach_temp(
 ///
 /// * `perimeter_m` -- Exposed perimeter length [m].
 /// * `f2_w_per_m_k` -- Perimeter heat loss coefficient [W/(m·K)].
-///   Typical: 1.17 uninsulated, 0.86 with R-5 perimeter insulation.
+///   See [`f2_coefficient`] for ASHRAE 90.1-2022 Table A6.3.1 values.
 /// * `t_indoor_c` -- Indoor zone temperature [°C].
 /// * `t_ground_surface_c` -- Ground surface temperature [°C].
 #[must_use]
@@ -135,22 +137,31 @@ pub fn foundation_wall_loss_w(
     below_grade_area_m2 * (t_indoor_c - t_ground_c) / r_wall_m2_k_w
 }
 
-/// Simplified perimeter loss coefficient [W/(m·K)] for common slab configurations.
+/// Perimeter loss coefficient F2 [W/(m·K)] per ASHRAE 90.1-2022 Table A6.3.1.
 ///
-/// Based on ASHRAE Handbook of Fundamentals Ch. 27 simplified perimeter
-/// method. These are approximate values for typical residential slabs; for
-/// code-compliance F-factors use ASHRAE 90.1 Table A6.3.1 instead.
+/// Returns the F2 heat loss coefficient for slab-on-grade per unit length of
+/// exposed perimeter.  Values are derived from the ASHRAE 90.1-2022 F-factor
+/// table (Table A6.3.1) via the conversion `Btu/(h·ft·°F) × 1.73074 = W/(m·K)`.
+///
+/// # Arguments
+///
+/// * `insulation_r_m2_k_w` -- Perimeter insulation nominal R-value [m²·K/W].
+///   Domestic slabs are assumed uninsulated when this is missing/zero.
+/// * `heated` -- Whether the slab is heated (`true`) or unheated (`false`).
+///   Heated slabs have significantly higher perimeter loss because they
+///   maintain a higher temperature at the slab edge.  Typical residential
+///   slabs-on-grade are unheated.
 #[must_use]
-pub fn f2_coefficient(insulation_r_m2_k_w: f64) -> f64 {
+pub fn f2_coefficient(insulation_r_m2_k_w: f64, heated: bool) -> f64 {
     if insulation_r_m2_k_w >= 1.76 {
         // R-10+ perimeter insulation
-        0.74
+        if heated { 2.250 } else { 1.229 }
     } else if insulation_r_m2_k_w >= 0.88 {
         // R-5 perimeter insulation
-        0.86
+        if heated { 2.267 } else { 1.246 }
     } else {
         // Uninsulated slab
-        1.17
+        if heated { 2.336 } else { 1.263 }
     }
 }
 
@@ -225,9 +236,9 @@ mod tests {
 
     #[test]
     fn insulated_slab_loses_less_than_uninsulated() {
-        let q_uninsulated = slab_perimeter_loss_w(40.0, f2_coefficient(0.0), 20.0, 5.0);
-        let q_r5 = slab_perimeter_loss_w(40.0, f2_coefficient(0.88), 20.0, 5.0);
-        let q_r10 = slab_perimeter_loss_w(40.0, f2_coefficient(1.76), 20.0, 5.0);
+        let q_uninsulated = slab_perimeter_loss_w(40.0, f2_coefficient(0.0, false), 20.0, 5.0);
+        let q_r5 = slab_perimeter_loss_w(40.0, f2_coefficient(0.88, false), 20.0, 5.0);
+        let q_r10 = slab_perimeter_loss_w(40.0, f2_coefficient(1.76, false), 20.0, 5.0);
 
         assert!(q_uninsulated > q_r5, "R-5 should reduce loss");
         assert!(q_r5 > q_r10, "R-10 should reduce further");
@@ -259,21 +270,21 @@ mod tests {
     }
 
     /// Regression test: verifies the Definition-of-Done
-    /// numerical example (140 m² slab, P=50 m, uninsulated F2≈1.17, ΔT=15°C → ~878 W).
+    /// numerical example (140 m² slab, P=50 m, uninsulated unheated F2≈1.263, ΔT=15°C → ~947 W).
     ///
     /// This test exercises slab_perimeter_loss_w and f2_coefficient in isolation.
     /// It will keep passing regardless of whether those functions are wired into
     /// the solver — use it to confirm the physics is correct, not that the
     /// integration is done.
     #[test]
-    fn slab_140m2_p50_uninsulated_15k_delta_approx_878w() {
+    fn slab_140m2_p50_uninsulated_15k_delta_approx_947w() {
         let perimeter_m = 50.0;
-        let f2 = f2_coefficient(0.0); // uninsulated → 1.17 W/(m·K)
+        let f2 = f2_coefficient(0.0, false); // uninsulated unheated → 1.263 W/(m·K)
         let t_indoor_c = 20.0;
         let t_ground_c = 5.0; // ΔT = 15 K
         let q = slab_perimeter_loss_w(perimeter_m, f2, t_indoor_c, t_ground_c);
-        // Expected: 1.17 × 50 × 15 = 877.5 W (~878 W, ±5%)
-        let expected = 877.5;
+        // Expected: 1.263 × 50 × 15 = 947.25 W (~947 W, ±5%)
+        let expected = 947.25;
         let tolerance = expected * 0.05;
         assert!(
             (q - expected).abs() <= tolerance,
@@ -289,8 +300,8 @@ mod tests {
         let delta_t = 15.0;
         let t_indoor = 20.0;
         let t_ground = t_indoor - delta_t;
-        let q_unins = slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.0), t_indoor, t_ground);
-        let q_r5 = slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.88), t_indoor, t_ground);
+        let q_unins = slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.0, false), t_indoor, t_ground);
+        let q_r5 = slab_perimeter_loss_w(perimeter_m, f2_coefficient(0.88, false), t_indoor, t_ground);
         assert!(
             q_r5 < q_unins,
             "R-5 perimeter insulation should reduce loss: unins={q_unins} W, R-5={q_r5} W"

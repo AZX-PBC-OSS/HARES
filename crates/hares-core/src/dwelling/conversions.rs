@@ -178,7 +178,7 @@ pub fn building_to_boundary_inputs(
                     derived
                 });
                 let insulation_r = bd.perimeter_insulation_r_m2_k_w.unwrap_or(0.0);
-                let f2 = f2_coefficient(insulation_r);
+                let f2 = f2_coefficient(insulation_r, false); // unheated residential slab
                 let g_w_per_k = f2 * perimeter_m;
 
                 // Q = F2 × P × (T_indoor - T_ground) → G = F2 × P [W/K].
@@ -1291,7 +1291,7 @@ mod tests {
         );
         // The resistance should combine with film_int to give total R ≈ 1/(F2 × P)
         let expected_p = 4.0 * 100.0_f64.sqrt(); // derived perimeter ≈ 40 m
-        let f2 = 1.17; // uninsulated F2
+        let f2 = 1.263; // uninsulated unheated F2 per ASHRAE 90.1-2022 Table A6.3.1
         let g = f2 * expected_p;
         let expected_r_total = 1.0 / g; // total K/W from interior to ground
         let r_int_abs = slab_input.r_film_interior_m2_k_w / slab_input.area_m2;
@@ -1334,8 +1334,8 @@ mod tests {
         let slab_input = &inputs[0];
         assert_eq!(slab_input.r_film_exterior_m2_k_w, 0.0);
 
-        // G = F2 × P = 1.17 × 30 = 35.1 W/K
-        let f2 = 1.17;
+        // G = F2 × P = 1.263 × 30 = 37.89 W/K per ASHRAE 90.1-2022 Table A6.3.1
+        let f2 = 1.263;
         let g = f2 * perimeter_m;
         let expected_r_total = 1.0 / g;
         let r_int_abs = slab_input.r_film_interior_m2_k_w / slab_input.area_m2;
