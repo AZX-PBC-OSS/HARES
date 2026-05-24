@@ -95,11 +95,11 @@ fn write_parquet(path: &Path, batch: &RecordBatch) {
 
 #[test]
 fn build_schema_output_accepted_by_metrics_calculator_verbosity_0() {
-    let schema = build_schema(&[], 0);
+    let schema = build_schema(&[], 0, &[]);
     let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
     assert!(
         result.is_ok(),
-        "MetricsCalculator::new must accept build_schema([], 0) output: {:?}",
+        "MetricsCalculator::new must accept build_schema([], 0, &[]) output: {:?}",
         result.err()
     );
 }
@@ -110,11 +110,11 @@ fn build_schema_output_accepted_by_metrics_calculator_verbosity_1() {
         make_spec("ASHP Heater", FuelType::Electric),
         make_spec("Gas Furnace", FuelType::Gas),
     ];
-    let schema = build_schema(&specs, 1);
+    let schema = build_schema(&specs, 1, &[]);
     let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
     assert!(
         result.is_ok(),
-        "MetricsCalculator::new must accept build_schema(specs, 1) output: {:?}",
+        "MetricsCalculator::new must accept build_schema(specs, 1, &[]) output: {:?}",
         result.err()
     );
 }
@@ -127,7 +127,7 @@ fn build_schema_output_accepted_by_metrics_calculator_all_verbosity_levels() {
         make_spec("Battery", FuelType::Electric),
     ];
     for v in 0..=8 {
-        let schema = build_schema(&specs, v);
+        let schema = build_schema(&specs, v, &[]);
         let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
         assert!(
             result.is_ok(),
@@ -143,7 +143,7 @@ fn build_schema_output_accepted_by_metrics_calculator_all_verbosity_levels() {
 
 #[test]
 fn verbosity_2_produces_ochre_temperature_format() {
-    let schema = build_schema(&[], 2);
+    let schema = build_schema(&[], 2, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"Temperature - Indoor (C)"),
@@ -158,7 +158,7 @@ fn verbosity_2_produces_ochre_temperature_format() {
 
 #[test]
 fn verbosity_0_column_names_match_ochre() {
-    let schema = build_schema(&[], 0);
+    let schema = build_schema(&[], 0, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"Total Electric Power (kW)"),
@@ -186,7 +186,7 @@ fn expected_columns_at_verbosity_2_includes_ochre_temp_format() {
 #[test]
 fn context_columns_present_at_all_verbosity_levels() {
     for v in 0..=8u8 {
-        let schema = build_schema(&[], v);
+        let schema = build_schema(&[], v, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
             names.contains(&"Outdoor Dry Bulb (C)"),
@@ -225,8 +225,8 @@ fn expected_columns_at_verbosity_includes_context_columns_at_all_levels() {
 #[test]
 fn verbosity_6_produces_additional_columns_beyond_level_5() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema_5 = build_schema(&specs, 5);
-    let schema_6 = build_schema(&specs, 6);
+    let schema_5 = build_schema(&specs, 5, &[]);
+    let schema_6 = build_schema(&specs, 6, &[]);
     assert!(
         schema_6.fields().len() > schema_5.fields().len(),
         "verbosity 6 ({}) must produce more columns than verbosity 5 ({})",
@@ -238,8 +238,8 @@ fn verbosity_6_produces_additional_columns_beyond_level_5() {
 #[test]
 fn verbosity_7_produces_additional_columns_beyond_level_6() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema_6 = build_schema(&specs, 6);
-    let schema_7 = build_schema(&specs, 7);
+    let schema_6 = build_schema(&specs, 6, &[]);
+    let schema_7 = build_schema(&specs, 7, &[]);
     assert!(
         schema_7.fields().len() > schema_6.fields().len(),
         "verbosity 7 ({}) must produce more columns than verbosity 6 ({})",
@@ -254,8 +254,8 @@ fn verbosity_8_produces_at_least_as_many_columns_as_level_7() {
     // promoted from v8 to v7 per OCHRE HVAC.py:584,598). v8 may gain
     // additional columns in future; for now it must not lose any.
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema_7 = build_schema(&specs, 7);
-    let schema_8 = build_schema(&specs, 8);
+    let schema_7 = build_schema(&specs, 7, &[]);
+    let schema_8 = build_schema(&specs, 8, &[]);
     assert!(
         schema_8.fields().len() >= schema_7.fields().len(),
         "verbosity 8 ({}) must produce at least as many columns as verbosity 7 ({})",
@@ -267,7 +267,7 @@ fn verbosity_8_produces_at_least_as_many_columns_as_level_7() {
 #[test]
 fn verbosity_6_includes_envelope_component_columns() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema = build_schema(&specs, 6);
+    let schema = build_schema(&specs, 6, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"Window Transmitted Solar Gain (W)"),
@@ -278,7 +278,7 @@ fn verbosity_6_includes_envelope_component_columns() {
 #[test]
 fn verbosity_7_includes_schedule_columns() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema = build_schema(&specs, 7);
+    let schema = build_schema(&specs, 7, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"ASHP Heater Schedule (-)"),
@@ -289,7 +289,7 @@ fn verbosity_7_includes_schedule_columns() {
 #[test]
 fn verbosity_8_includes_capacity_and_cop_columns() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema = build_schema(&specs, 8);
+    let schema = build_schema(&specs, 8, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"ASHP Heater Capacity (W)"),

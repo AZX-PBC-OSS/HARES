@@ -6,7 +6,7 @@
 use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::hpxml::EquipmentSpec;
-use hares_types::{FuelType, OperatingMode};
+use hares_types::{FuelType, OperatingMode, ZoneId};
 
 /// Timestamp column included at every verbosity level.
 const TIMESTAMP_COL: &str = "Time";
@@ -52,11 +52,16 @@ const DEFROST_STATE_SUFFIX: &str = "Defrost State (-)";
 /// Duct losses column for verbosity 5.
 const HVAC_DUCT_LOSSES_COL: &str = "HVAC Duct Losses (W)";
 
-/// Builds an Arrow schema for the output based on equipment list and verbosity.
+/// Builds an Arrow schema for the output based on equipment list, zone names,
+/// and verbosity.
 ///
 /// The schema always includes a timestamp column, followed by columns
 /// appropriate for the requested verbosity level.
-pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
+pub fn build_schema(
+    equipment_list: &[EquipmentSpec],
+    verbosity: u8,
+    zone_names: &[(ZoneId, String)],
+) -> Schema {
     let mut fields = vec![Field::new(TIMESTAMP_COL, DataType::Utf8, false)];
 
     // Level 0: total power
@@ -201,6 +206,21 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
             "Interior LWR Exchange - Attic (W)",
         ] {
             fields.push(Field::new(*label, DataType::Float64, true));
+        }
+        // Per-zone HVAC thermal attribution columns.
+        // Enables diagnosing how much heating/cooling went to each zone
+        // (conditioned, basement, duct) in multi-zone buildings.
+        for (_zone_id, zone_name) in zone_names {
+            fields.push(Field::new(
+                format!("HVAC Heating Delivered - {zone_name} (W)"),
+                DataType::Float64,
+                true,
+            ));
+            fields.push(Field::new(
+                format!("HVAC Cooling Delivered - {zone_name} (W)"),
+                DataType::Float64,
+                true,
+            ));
         }
     }
 
@@ -454,7 +474,7 @@ mod tests {
 
     #[test]
     fn verbosity_0_has_timestamp_total_power_and_context_columns() {
-        let schema = build_schema(&[], 0);
+        let schema = build_schema(&[], 0, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
             names,
@@ -482,7 +502,7 @@ mod tests {
             make_spec("ASHP Heater", FuelType::Electric),
             make_spec("Gas Furnace", FuelType::Gas),
         ];
-        let schema = build_schema(&specs, 1);
+        let schema = build_schema(&specs, 1, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"ASHP Heater Electric Power (kW)"));
         assert!(names.contains(&"Gas Furnace Electric Power (kW)"));
@@ -495,7 +515,7 @@ mod tests {
             make_spec("Battery", FuelType::Electric),
             make_spec("Battery", FuelType::Electric),
         ];
-        let schema = build_schema(&specs, 1);
+        let schema = build_schema(&specs, 1, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Battery #1 Electric Power (kW)"));
         assert!(names.contains(&"Battery #2 Electric Power (kW)"));
@@ -503,7 +523,7 @@ mod tests {
 
     #[test]
     fn verbosity_2_adds_attic_and_ground_temp_columns() {
-        let schema = build_schema(&[], 2);
+        let schema = build_schema(&[], 2, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Temperature - Attic (C)"));
         assert!(names.contains(&"Unmet HVAC Load (C)"));
@@ -512,14 +532,14 @@ mod tests {
 
     #[test]
     fn verbosity_5_adds_net_sensible_heat_gain_column() {
-        let schema = build_schema(&[], 5);
+        let schema = build_schema(&[], 5, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Net Sensible Heat Gain - Indoor (W)"));
     }
 
     #[test]
     fn verbosity_7_adds_hot_water_mains_temperature_column() {
-        let schema = build_schema(&[], 7);
+        let schema = build_schema(&[], 7, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Hot Water Mains Temperature (C)"));
     }
@@ -527,7 +547,7 @@ mod tests {
     #[test]
     fn all_verbosity_levels_include_outdoor_temp_and_indoor_temp() {
         for v in 0..=8u8 {
-            let schema = build_schema(&[], v);
+            let schema = build_schema(&[], v, &[]);
             let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             assert!(
                 names.contains(&"Outdoor Dry Bulb (C)"),
@@ -546,7 +566,7 @@ mod tests {
             make_spec("ASHP Heater", FuelType::Electric),
             make_spec("Battery", FuelType::Electric),
         ];
-        let schema = build_schema(&specs, 3);
+        let schema = build_schema(&specs, 3, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"ASHP Heater Mode (-)"));
         assert!(names.contains(&"ASHP Heater Setpoint (C)"));
@@ -556,7 +576,7 @@ mod tests {
 
     #[test]
     fn schema_metadata_includes_mode_map() {
-        let schema = build_schema(&[], 0);
+        let schema = build_schema(&[], 0, &[]);
         let meta = schema.metadata();
         assert!(meta.contains_key("hares_mode_map"));
         let json: serde_json::Value =
@@ -575,7 +595,7 @@ mod tests {
 
     #[test]
     fn expected_columns_at_verbosity_0_is_subset_of_schema() {
-        let schema = build_schema(&[], 0);
+        let schema = build_schema(&[], 0, &[]);
         let schema_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         for col in expected_columns_at_verbosity(0) {
             assert!(
@@ -591,8 +611,8 @@ mod tests {
     /// OCHRE HVAC.py:595-596.
     #[test]
     fn cooling_equipment_gets_shr_and_latent_gains_at_v7_heating_does_not() {
-        let cool = build_schema(&[make_spec("Air Conditioner", FuelType::Electric)], 7);
-        let heat = build_schema(&[make_spec("Gas Furnace", FuelType::Gas)], 7);
+        let cool = build_schema(&[make_spec("Air Conditioner", FuelType::Electric)], 7, &[]);
+        let heat = build_schema(&[make_spec("Gas Furnace", FuelType::Gas)], 7, &[]);
         let cool_names: Vec<&str> = cool.fields().iter().map(|f| f.name().as_str()).collect();
         let heat_names: Vec<&str> = heat.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(cool_names.contains(&"Air Conditioner SHR (-)"));
@@ -606,8 +626,8 @@ mod tests {
     /// OCHRE HVAC.py:592-599.
     #[test]
     fn hvac_equipment_gets_performance_columns_non_hvac_does_not() {
-        let hvac = build_schema(&[make_spec("Gas Furnace", FuelType::Gas)], 7);
-        let non = build_schema(&[make_spec("Battery", FuelType::Electric)], 7);
+        let hvac = build_schema(&[make_spec("Gas Furnace", FuelType::Gas)], 7, &[]);
+        let non = build_schema(&[make_spec("Battery", FuelType::Electric)], 7, &[]);
         let hvac_names: Vec<&str> = hvac.fields().iter().map(|f| f.name().as_str()).collect();
         let non_names: Vec<&str> = non.fields().iter().map(|f| f.name().as_str()).collect();
         let hvac_only = [
@@ -631,8 +651,8 @@ mod tests {
     #[test]
     fn capacity_and_cop_promoted_to_v7_not_duplicated_at_v8() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
-        let s7 = build_schema(&specs, 7);
-        let s8 = build_schema(&specs, 8);
+        let s7 = build_schema(&specs, 7, &[]);
+        let s8 = build_schema(&specs, 8, &[]);
         let n7: Vec<&str> = s7.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(n7.contains(&"Air Conditioner Capacity (W)"));
         assert!(n7.contains(&"Air Conditioner COP (-)"));
@@ -643,7 +663,7 @@ mod tests {
     /// HVAC Duct Losses column present at v5 (OCHRE HVAC.py:588).
     #[test]
     fn hvac_duct_losses_column_present_at_verbosity_5() {
-        let schema = build_schema(&[], 5);
+        let schema = build_schema(&[], 5, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
             names.contains(&"HVAC Duct Losses (W)"),
@@ -651,56 +671,57 @@ mod tests {
         );
     }
 
-    // ── Regression tests for verbosity 6 per-zone gaps ───────────────────────
-    // These tests are EXPECTED TO FAIL until per-zone HVAC attribution columns
-    // are implemented at verbosity 6.
-    // They document the gap: per-zone HVAC attribution columns are not present
-    // at verbosity 6, even though zone_heat_fractions already distributes heat
-    // across conditioned / basement / duct zones in duct_distribution.rs.
+    // ── Per-zone HVAC attribution column tests ────────────────────────────
 
-    /// At verbosity 6, per-zone HVAC heating columns must exist for each zone
-    /// name supplied. With three zones (conditioned, basement, duct) the schema
-    /// must include all three "HVAC Heating Delivered - {zone} (W)" columns.
-    ///
-    /// The proposal is passing `zone_names: Vec<(ZoneId, String)>` to
-    /// `build_schema()`. Until that API change is made, this test fails because
-    /// `build_schema()` does not accept zone names.
-    /// Will stop panicking when per-zone HVAC heating columns appear at verbosity 6
-    #[should_panic(expected = "HVAC Heating Delivered - Indoor (W)")]
+    /// At verbosity 6, per-zone HVAC heating columns exist for each zone name supplied.
     #[test]
     fn verbosity_6_has_per_zone_hvac_heating_columns() {
-        // Once per-zone HVAC columns are implemented, build_schema will accept zone_names.
-        // For now we verify the gap: the column is absent at verbosity 6.
-        let schema = build_schema(&[], 6);
+        let zone_names = vec![
+            (ZoneId(1), "Indoor".to_string()),
+            (ZoneId(2), "Basement".to_string()),
+            (ZoneId(3), "Attic".to_string()),
+        ];
+        let schema = build_schema(&[], 6, &zone_names);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        // This assertion documents the DESIRED behaviour and currently fails.
         assert!(
             names.contains(&"HVAC Heating Delivered - Indoor (W)"),
-            "verbosity 6 must include per-zone 'HVAC Heating Delivered - Indoor (W)'; \
-             column is absent, confirming the gap; got: {names:?}"
+            "verbosity 6 must include per-zone 'HVAC Heating Delivered - Indoor (W)'; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"HVAC Heating Delivered - Basement (W)"),
+            "verbosity 6 must include per-zone 'HVAC Heating Delivered - Basement (W)'; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"HVAC Heating Delivered - Attic (W)"),
+            "verbosity 6 must include per-zone 'HVAC Heating Delivered - Attic (W)'; got: {names:?}"
         );
     }
 
-    /// At verbosity 6, per-zone HVAC cooling columns must exist for each zone.
-    /// Will stop panicking when per-zone HVAC cooling columns appear at verbosity 6
-    #[should_panic(expected = "HVAC Cooling Delivered - Indoor (W)")]
+    /// At verbosity 6, per-zone HVAC cooling columns exist for each zone.
     #[test]
     fn verbosity_6_has_per_zone_hvac_cooling_columns() {
-        let schema = build_schema(&[], 6);
+        let zone_names = vec![
+            (ZoneId(1), "Indoor".to_string()),
+            (ZoneId(2), "Basement".to_string()),
+        ];
+        let schema = build_schema(&[], 6, &zone_names);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
             names.contains(&"HVAC Cooling Delivered - Indoor (W)"),
-            "verbosity 6 must include per-zone 'HVAC Cooling Delivered - Indoor (W)'; \
-             column is absent, confirming the gap; got: {names:?}"
+            "verbosity 6 must include per-zone 'HVAC Cooling Delivered - Indoor (W)'; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"HVAC Cooling Delivered - Basement (W)"),
+            "verbosity 6 must include per-zone 'HVAC Cooling Delivered - Basement (W)'; got: {names:?}"
         );
     }
 
     /// Verbosity 5 must NOT include per-zone attribution columns (those live at v6).
-    /// This documents that the threshold is verbosity 6, not 5.
     #[test]
     fn per_zone_hvac_columns_not_present_below_verbosity_6() {
+        let zone_names = vec![(ZoneId(1), "Indoor".to_string())];
         for v in 0..=5u8 {
-            let schema = build_schema(&[], v);
+            let schema = build_schema(&[], v, &zone_names);
             let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             assert!(
                 !names
@@ -708,6 +729,24 @@ mod tests {
                     .any(|n| n.starts_with("HVAC Heating Delivered - ")),
                 "verbosity {v} must NOT include per-zone HVAC heating columns; got: {names:?}"
             );
+            assert!(
+                !names
+                    .iter()
+                    .any(|n| n.starts_with("HVAC Cooling Delivered - ")),
+                "verbosity {v} must NOT include per-zone HVAC cooling columns; got: {names:?}"
+            );
         }
+    }
+
+    /// Single-zone buildings produce exactly 2 per-zone columns (heating + cooling).
+    #[test]
+    fn single_zone_produces_one_pair_of_per_zone_hvac_columns() {
+        let zone_names = vec![(ZoneId(1), "Indoor".to_string())];
+        let schema = build_schema(&[], 6, &zone_names);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"HVAC Heating Delivered - Indoor (W)"));
+        assert!(names.contains(&"HVAC Cooling Delivered - Indoor (W)"));
+        // No stray zone columns for zones that don't exist.
+        assert!(!names.contains(&"HVAC Heating Delivered - Attic (W)"));
     }
 }

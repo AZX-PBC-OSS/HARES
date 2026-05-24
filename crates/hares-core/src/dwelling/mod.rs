@@ -226,6 +226,8 @@ struct ZoneColumnCaches {
     infiltration_columns: HashMap<ZoneId, usize>,
     /// ZoneId → column_index for per-zone interior LWR columns.
     lwr_columns: HashMap<ZoneId, usize>,
+    /// ZoneId → (heating_col, cooling_col) for per-zone HVAC thermal attribution columns.
+    hvac_columns: HashMap<ZoneId, (usize, usize)>,
     /// Zone IDs in sorted order for StepResult construction.
     sorted_zone_ids: Vec<ZoneId>,
     /// For each entry in sorted_zone_ids, the index into EnvironmentState::zones where
@@ -248,6 +250,7 @@ fn build_zone_column_caches(
     let mut temp_columns = Vec::new();
     let mut infiltration_columns = HashMap::new();
     let mut lwr_columns = HashMap::new();
+    let mut hvac_columns = HashMap::new();
     let mut zone_env_indices = Vec::with_capacity(sorted_zone_ids.len());
     let mut zone_temp_col_indices = Vec::with_capacity(sorted_zone_ids.len());
 
@@ -271,6 +274,13 @@ fn build_zone_column_caches(
         if let Some(&idx) = column_index.get(&lwr_key) {
             lwr_columns.insert(zone_id, idx);
         }
+        let heat_key = format!("HVAC Heating Delivered - {label} (W)");
+        let cool_key = format!("HVAC Cooling Delivered - {label} (W)");
+        if let (Some(&heat_idx), Some(&cool_idx)) =
+            (column_index.get(&heat_key), column_index.get(&cool_key))
+        {
+            hvac_columns.insert(zone_id, (heat_idx, cool_idx));
+        }
         zone_env_indices.push(env_idx);
         zone_temp_col_indices.push(temp_col);
     }
@@ -279,6 +289,7 @@ fn build_zone_column_caches(
         temp_columns,
         infiltration_columns,
         lwr_columns,
+        hvac_columns,
         sorted_zone_ids,
         zone_env_indices,
         zone_temp_col_indices,
@@ -665,6 +676,9 @@ pub struct Dwelling {
     zone_infiltration_columns: HashMap<ZoneId, usize>,
     /// Pre-resolved per-zone interior LWR column indices.
     zone_lwr_columns: HashMap<ZoneId, usize>,
+    /// Pre-resolved per-zone HVAC thermal attribution column indices.
+    /// (heating_column, cooling_column) for each zone in the building.
+    zone_hvac_columns: HashMap<ZoneId, (usize, usize)>,
     /// Pre-sorted zone ID order for StepResult, computed once at init.
     sorted_zone_ids: Vec<ZoneId>,
     /// For each entry in sorted_zone_ids, the index into EnvironmentState::zones.
@@ -1065,7 +1079,25 @@ impl Dwelling {
         }
         let ports = PortSlots::from_declarations(&declarations);
 
-        let schema = build_schema(&equipment_specs, config.sim_config.output_verbosity);
+        let zone_types = environment.zone_types().to_vec();
+        let indoor_zone = solvers.thermal.config().indoor_zone_id;
+        let zone_names: Vec<(ZoneId, String)> = initial_env
+            .zones
+            .iter()
+            .map(|z| {
+                let zone_type = initial_env
+                    .zones
+                    .iter()
+                    .position(|zt| zt.id == z.id)
+                    .and_then(|idx| zone_types.get(idx));
+                (z.id, zone_display_name(z.id, indoor_zone, zone_type))
+            })
+            .collect();
+        let schema = build_schema(
+            &equipment_specs,
+            config.sim_config.output_verbosity,
+            &zone_names,
+        );
         let output_value_count = schema.fields().len() - 1; // exclude timestamp
         let output_column_index = build_output_column_index(&schema);
         let output_path = config
@@ -1152,6 +1184,7 @@ impl Dwelling {
             zone_temp_columns: zone_caches.temp_columns,
             zone_infiltration_columns: zone_caches.infiltration_columns,
             zone_lwr_columns: zone_caches.lwr_columns,
+            zone_hvac_columns: zone_caches.hvac_columns,
             zone_temp_scratch: zone_caches
                 .sorted_zone_ids
                 .iter()
@@ -1597,7 +1630,31 @@ impl Dwelling {
                 })
                 .collect();
 
-            let schema = build_schema(&specs, self.output_verbosity);
+            let schema = build_schema(
+                &specs,
+                self.output_verbosity,
+                &self
+                    .latest_env
+                    .zones
+                    .iter()
+                    .map(|z| {
+                        let zone_type = self
+                            .latest_env
+                            .zones
+                            .iter()
+                            .position(|zt| zt.id == z.id)
+                            .and_then(|idx| self.environment.zone_types().get(idx));
+                        (
+                            z.id,
+                            zone_display_name(
+                                z.id,
+                                self.thermal_solver.config().indoor_zone_id,
+                                zone_type,
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
             self.output_value_count = schema.fields().len() - 1;
             self.output_column_index = build_output_column_index(&schema);
             self.equipment_column_map =
@@ -1612,6 +1669,7 @@ impl Dwelling {
             self.zone_temp_columns = zone_caches.temp_columns;
             self.zone_infiltration_columns = zone_caches.infiltration_columns;
             self.zone_lwr_columns = zone_caches.lwr_columns;
+            self.zone_hvac_columns = zone_caches.hvac_columns;
             self.zone_temp_scratch = zone_caches
                 .sorted_zone_ids
                 .iter()
@@ -2733,6 +2791,22 @@ impl Dwelling {
         for &(zone, value) in &gains.interior_lwr_by_zone {
             if let Some(&idx) = self.zone_lwr_columns.get(&zone) {
                 row[idx] = value;
+            }
+        }
+
+        // Per-zone HVAC thermal attribution: read sensible gains by category
+        // from the thermal port accumulators. Ports still hold equipment-step
+        // values because ports.zero() runs AFTER record_step.
+        // The basement zone receives HvacHeating/HvacCooling directly
+        // (not merged into conditioned); duct zones are tagged DuctLoss which
+        // is reported in the separate "HVAC Duct Losses (W)" column at
+        // verbosity 5, not here.
+        for thermal in &self.ports.thermal {
+            if let Some(&(heat_idx, cool_idx)) = self.zone_hvac_columns.get(&thermal.zone) {
+                row[heat_idx] = thermal.sensible_for_category(ThermalCategory::HvacHeating);
+                row[cool_idx] = thermal
+                    .sensible_for_category(ThermalCategory::HvacCooling)
+                    .abs();
             }
         }
 
@@ -5571,7 +5645,7 @@ occupancy = 1.0
             },
         ];
         let zone_types = vec![ZoneType::Conditioned, ZoneType::Attic];
-        let schema = hares_io::build_schema(&[], 2);
+        let schema = hares_io::build_schema(&[], 2, &[]);
         let column_index = build_output_column_index(&schema);
         let caches = build_zone_column_caches(&zones, &zone_types, ZoneId(10), &column_index);
 
@@ -5591,5 +5665,73 @@ occupancy = 1.0
             ],
             "zone temperatures should be mapped by zone type, not zone number"
         );
+    }
+
+    #[test]
+    fn per_zone_hvac_columns_written_from_port_accumulators() {
+        use hares_io::hpxml::ZoneType;
+        use hares_types::ports::PortContribution;
+
+        let zones = vec![ZoneState {
+            id: ZoneId(1),
+            temperature_c: 21.0,
+            humidity_ratio: 0.008,
+            relative_humidity: 0.45,
+            wet_bulb_c: 14.0,
+            volume_m3: 200.0,
+        }];
+        let zone_types = vec![ZoneType::Conditioned];
+        let schema = hares_io::build_schema(&[], 6, &[(ZoneId(1), "Indoor".to_string())]);
+        let column_index = build_output_column_index(&schema);
+        let caches = build_zone_column_caches(&zones, &zone_types, ZoneId(1), &column_index);
+
+        let (heat_idx, cool_idx) = caches
+            .hvac_columns
+            .get(&ZoneId(1))
+            .copied()
+            .expect("Indoor zone must have HVAC column indices at verbosity 6");
+        assert_ne!(
+            heat_idx, cool_idx,
+            "heating and cooling column indices must differ"
+        );
+
+        // Simulate equipment writing HvacHeating and HvacCooling to ports.
+        let mut ports = PortSlots::from_declarations(&[PortDeclaration::thermal(ZoneId(1))]);
+        ports
+            .accumulate(&PortContribution::Thermal {
+                zone: ZoneId(1),
+                sensible_gain_w: 500.0,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::HvacHeating,
+            })
+            .expect("accumulate must succeed");
+        ports
+            .accumulate(&PortContribution::Thermal {
+                zone: ZoneId(1),
+                sensible_gain_w: -200.0,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::HvacCooling,
+            })
+            .expect("accumulate must succeed");
+
+        let indoor_heating = ports.thermal[0].sensible_for_category(ThermalCategory::HvacHeating);
+        let indoor_cooling = ports.thermal[0].sensible_for_category(ThermalCategory::HvacCooling);
+        assert!(
+            (indoor_heating - 500.0).abs() < 1e-9,
+            "expected 500.0 W heating, got {indoor_heating}"
+        );
+        assert!(
+            (indoor_cooling - (-200.0)).abs() < 1e-9,
+            "expected -200.0 W cooling, got {indoor_cooling}"
+        );
+
+        // Build a minimal record context and write to scratch.
+        let mut record_scratch = vec![0.0; column_index.len()];
+        record_scratch[heat_idx] = indoor_heating;
+        record_scratch[cool_idx] = indoor_cooling.abs();
+        assert!((record_scratch[heat_idx] - 500.0).abs() < 1e-9);
+        assert!((record_scratch[cool_idx] - 200.0).abs() < 1e-9);
     }
 }
