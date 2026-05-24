@@ -79,6 +79,7 @@ fn empty_weather_ts() -> WeatherTimeSeries {
         ground_temp_c: vec![10.0],
         liquid_precip_m: vec![0.0],
         surface_albedo: None,
+        design_conditions: None,
     }
 }
 

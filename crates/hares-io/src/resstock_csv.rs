@@ -342,6 +342,7 @@ pub fn parse_resstock_csv_str(
 
     Ok(WeatherTimeSeries {
         meta,
+        design_conditions: None,
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,

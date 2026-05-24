@@ -8,6 +8,7 @@ use thiserror::Error;
 // Re-export from hares-types for use in this crate's fallback logic.
 use hares_types::DEFAULT_GROUND_ALBEDO;
 
+use crate::epw::DesignConditions;
 use crate::epw::compute_sky_temp_c;
 
 /// Supported weather file formats.
@@ -458,6 +459,9 @@ pub enum WeatherError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WeatherTimeSeries {
     pub meta: WeatherMeta,
+    /// Design conditions parsed from the EPW header line 2, or `None`
+    /// for formats that lack them (PSM3, TMY3, ResStock CSV).
+    pub design_conditions: Option<DesignConditions>,
     pub dry_bulb_c: Vec<f64>,
     pub dew_point_c: Vec<f64>,
     pub rel_humidity_pct: Vec<f64>,
@@ -617,6 +621,7 @@ impl WeatherTimeSeries {
                     source_step_secs: target_step_secs,
                     ..self.meta.clone()
                 },
+                design_conditions: self.design_conditions,
                 // Continuous instantaneous fields: smooth diurnal/seasonal curves
                 // default to PchipCyclic (smooth year-boundary wrap); others use
                 // Pchip (flat extrapolation at boundary). Override to ZOH for OCHRE
@@ -717,6 +722,7 @@ impl WeatherTimeSeries {
                     source_step_secs: target_step_secs,
                     ..self.meta.clone()
                 },
+                design_conditions: self.design_conditions,
                 dry_bulb_c,
                 dew_point_c,
                 rel_humidity_pct,
@@ -1254,6 +1260,7 @@ mod tests {
                 source_step_secs: 3600,
                 midpoint_offset_secs: 0,
             },
+            design_conditions: None,
             dry_bulb_c: vec![10.0, 11.0],
             dew_point_c: vec![5.0, 6.0],
             rel_humidity_pct: vec![40.0, 45.0],
@@ -1284,6 +1291,7 @@ mod tests {
                 source_step_secs: 3600,
                 midpoint_offset_secs: 0,
             },
+            design_conditions: None,
             dry_bulb_c: vec![10.0, 12.0, 15.0, 13.0, 11.0],
             dew_point_c: vec![5.0, 6.0, 8.0, 7.0, 5.0],
             rel_humidity_pct: vec![40.0, 45.0, 60.0, 50.0, 42.0],

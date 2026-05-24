@@ -5806,7 +5806,12 @@ mod tests {
     }
 
     #[test]
-    fn charge_defect_reduces_rated_heating_capacity_and_eir() {
+    fn charge_defect_reduces_rated_heating_capacity_and_raises_eir() {
+        // r = -0.10 (10% undercharge):
+        //   capacity × (1 + 0.9 × (−0.10)) = × 0.91 — heating output falls 9 %
+        //   EIR     × (1 + (−0.9) × (−0.10)) = × 1.09 — efficiency degrades 9 %
+        // An undercharged heat pump compressor moves less refrigerant and works
+        // harder per unit of heating, so COP falls (EIR rises).
         let cfg = hp_charge_defect_config(Some(-0.10));
         let mut hp = ASHPHeater::new(cfg.clone());
         let e = env(18.0, 8.0, 0.004);
@@ -5820,10 +5825,10 @@ mod tests {
         );
 
         let eir = hp.core.hvac.config.eir_by_stage[0];
-        let expected_eir = 0.33 * 0.91;
+        let expected_eir = 0.33 * 1.09;
         assert!(
             (eir - expected_eir).abs() / expected_eir < 1e-3,
-            "charge_defect_ratio=-0.10 must reduce heating EIR by 9%; expected {expected_eir} got {eir}"
+            "charge_defect_ratio=-0.10 must raise heating EIR by 9% (efficiency degrades); expected {expected_eir} got {eir}"
         );
     }
 }

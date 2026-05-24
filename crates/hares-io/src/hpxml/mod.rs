@@ -8,7 +8,7 @@ use thiserror::Error;
 pub mod building;
 pub mod equipment;
 mod resolve_der;
-mod resolve_hvac;
+pub mod resolve_hvac;
 mod resolve_loads;
 mod resolve_water_heater;
 pub mod validation;

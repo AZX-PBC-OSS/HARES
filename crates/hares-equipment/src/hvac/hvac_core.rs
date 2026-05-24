@@ -97,18 +97,14 @@ pub const AIRFLOW_ROOM_AC_M3_S_PER_W: f64 = 4.294_270_780_782_807e-5;
 /// Capacity multiplier = 1.0 + CC_CHARGE_DEFECT * r
 /// where r = (InstalledCharge - DesignCharge) / DesignCharge.
 ///
-/// For cooling DX coils: ANSI/RESNET/ACCA 310-2020.
-/// Both Cc and Ce use the same magnitude; the verification audit was unable to
-/// confirm the exact coefficient values from publicly available sources; the
-/// coefficients should be confirmed against the standard when accessible.
+/// CC_CHARGE_DEFECT = +0.9 so that undercharge (r < 0) reduces capacity:
+///   r = −0.10 → 1.0 + 0.9 × (−0.10) = 0.91 ✓ (capacity falls 9%)
 ///
-/// Note: this constant is the absolute value (magnitude) of the coefficient.
-/// The sign convention separates the constant magnitude from the physical
-/// direction encoded in r: an undercharge (r < 0) yields a multiplier < 1.0
-/// (capacity reduction), while the coefficient itself is stored as positive.
-/// Some sources (e.g. ANSI/RESNET reports) quote Cc ≈ −0.9 with the negative
-/// sign embedded; the formula 1.0 + CC_CHARGE_DEFECT * r produces the same
-/// numeric result — for r = −0.10, both formulations give 0.91.
+/// Source: ANSI/RESNET/ACCA 310-2020 (paywalled; magnitude unverified from
+/// public sources — see Known Limitations in T-0062 implementation notes).
+/// Sign and approximate magnitude are consistent with OpenStudio-HPXML (NREL)
+/// hvac_sizing.rb: `cool_qgr_values[0] = −9.46e-1` drives a ~0.9× capacity
+/// multiplier at rated conditions for a 10% charge defect.
 pub const CC_CHARGE_DEFECT: f64 = 0.9;
 
 /// Refrigerant charge defect EIR correction coefficient (Ce).
@@ -117,12 +113,34 @@ pub const CC_CHARGE_DEFECT: f64 = 0.9;
 /// where r = (InstalledCharge - DesignCharge) / DesignCharge.
 ///
 /// For cooling DX coils: ANSI/RESNET/ACCA 310-2020.
-pub const CE_CHARGE_DEFECT: f64 = 0.9;
+///
+/// Ce is **negative** so that undercharge (r < 0) raises EIR (degrades efficiency):
+///   r = −0.10 → 1.0 + (−0.9)(−0.10) = 1.09 — EIR increases 9%, COP falls 9%.
+///
+/// Physical motivation: an undercharged system moves less refrigerant, the
+/// compressor works harder per unit of cooling, and COP degrades.
+/// This is consistent with the OpenStudio-HPXML simulation EMS model
+/// (NREL hvac.rb `add_installation_quality_ems_program_equations`) where
+/// `Y_CH_COP = Y_CH_Q / (1 + P_terms * F_CH)` and the p_values produce a
+/// net power correction such that COP falls for undercharge, meaning EIR rises.
+///
+/// The verification audit was unable to confirm the exact magnitude from
+/// publicly available sources of ANSI/RESNET/ACCA 310-2020 (paywalled).
+/// The magnitude 0.9 is a linearization of the OS-HPXML polynomial at rated
+/// conditions; the sign (negative) is physically and numerically motivated.
+pub const CE_CHARGE_DEFECT: f64 = -0.9;
 
 /// Apply refrigerant charge defect correction to rated capacity and EIR values.
 ///
-/// Multiplies each capacity by `1.0 + CC_CHARGE_DEFECT * r` and each EIR by
-/// `1.0 + CE_CHARGE_DEFECT * r` where r is the charge defect ratio.
+/// For a charge defect ratio r = (InstalledCharge − DesignCharge) / DesignCharge:
+///
+/// - Capacity multiplier = 1.0 + CC_CHARGE_DEFECT × r  (CC = +0.9)
+///   Undercharge (r < 0) → multiplier < 1.0: capacity falls. ✓
+/// - EIR multiplier     = 1.0 + CE_CHARGE_DEFECT × r  (CE = −0.9)
+///   Undercharge (r < 0) → multiplier > 1.0: EIR rises, efficiency degrades. ✓
+///
+/// Example r = −0.10: capacity × 0.91, EIR × 1.09.
+/// Example r =  0.0:  no correction.
 pub fn apply_charge_defect_correction(
     capacities: &mut [f64],
     eirs: &mut [f64],

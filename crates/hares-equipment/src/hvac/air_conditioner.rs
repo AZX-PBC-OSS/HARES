@@ -2922,7 +2922,15 @@ mod tests {
     }
 
     #[test]
-    fn charge_defect_reduces_rated_cooling_capacity_and_eir() {
+    fn charge_defect_reduces_rated_cooling_capacity_and_raises_eir() {
+        // r = -0.10 (10% undercharge):
+        //   capacity × (1 + 0.9 × (−0.10)) = × 0.91 — cooling output falls 9 %
+        //   EIR     × (1 + (−0.9) × (−0.10)) = × 1.09 — efficiency degrades 9 %
+        // This matches the physics: an undercharged compressor moves less
+        // refrigerant and works harder per unit of cooling, so COP falls.
+        // Reference: OpenStudio-HPXML (NREL) hvac.rb installation-quality EMS
+        // model confirms EIR rises for undercharge (p_values give Y_CH_COP < 1
+        // relative to Y_CH_Q for negative f_ch).
         let cfg = ac_charge_defect_config(Some(-0.10));
         let mut ac = AirConditioner::new(cfg.clone());
         let e = env(26.0, 0.010, 19.0, 35.0);
@@ -2936,10 +2944,10 @@ mod tests {
         );
 
         let eir = ac.core.hvac.config.eir_by_stage[0];
-        let expected_eir = 0.25 * 0.91;
+        let expected_eir = 0.25 * 1.09;
         assert!(
             (eir - expected_eir).abs() / expected_eir < 1e-3,
-            "charge_defect_ratio=-0.10 must reduce EIR by 9%; expected {expected_eir} got {eir}"
+            "charge_defect_ratio=-0.10 must raise EIR by 9% (efficiency degrades); expected {expected_eir} got {eir}"
         );
     }
 

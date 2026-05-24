@@ -196,6 +196,7 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
 
     Ok(WeatherTimeSeries {
         meta,
+        design_conditions: None,
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,

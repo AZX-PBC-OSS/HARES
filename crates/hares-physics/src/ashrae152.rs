@@ -326,6 +326,18 @@ fn zone_temps(
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Look up the nearest ASHRAE 152 climate station and return its
+/// heating and cooling design dry-bulb temperatures in °F.
+///
+/// Returns `None` when lat/lon are both 0.0 (unset site location).
+pub fn design_temperatures_f(lat: f64, lon: f64) -> Option<(f64, f64)> {
+    if lat.abs() < f64::EPSILON && lon.abs() < f64::EPSILON {
+        return None;
+    }
+    let station = nearest_station(lat, lon);
+    Some((station.heating_design_temp_f, station.cooling_design_temp_f))
+}
+
 /// Calculate the ASHRAE 152 Duct Distribution System Efficiency.
 ///
 /// Returns a DSE clamped to `(0.0, 1.0]`.  All inputs must be in SI units;

@@ -45,6 +45,17 @@ const IDX_WIND_SPEED_M_S: usize = 21;
 const IDX_OPAQUE_SKY_COVER: usize = 23;
 const IDX_LIQUID_PRECIP_DEPTH_MM: usize = 33;
 
+/// Parsed design conditions from EPW header line 2.
+///
+/// Extracted from the "Extremes" section at the end of the design conditions line.
+/// `heating_design_db_c` is the minimum of all extreme low dry-bulb temperatures;
+/// `cooling_design_db_c` is the maximum of all extreme high dry-bulb temperatures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DesignConditions {
+    pub heating_design_db_c: f64,
+    pub cooling_design_db_c: f64,
+}
+
 /// One parsed EPW weather row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EpwRecord {
@@ -104,7 +115,7 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         .next()
         .ok_or_else(|| WeatherError::Parse("missing EPW data-period header".to_string()))?;
 
-    let _ = design_conditions_line;
+    let design_conditions = parse_design_conditions(design_conditions_line);
     let _ = typical_extreme_line;
     let _ = holidays_daylight_line;
     let _ = comments_1_line;
@@ -285,7 +296,7 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         )?;
     }
 
-    Ok(records_to_series(meta, &records))
+    Ok(records_to_series(meta, design_conditions, &records))
 }
 
 fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
@@ -784,7 +795,11 @@ fn parse_u32_field(raw: &str, name: &str) -> Result<u32, WeatherError> {
     })
 }
 
-fn records_to_series(meta: WeatherMeta, records: &[EpwRecord]) -> WeatherTimeSeries {
+fn records_to_series(
+    meta: WeatherMeta,
+    design_conditions: Option<DesignConditions>,
+    records: &[EpwRecord],
+) -> WeatherTimeSeries {
     let len = records.len();
     let mut dry_bulb_c = Vec::with_capacity(len);
     let mut dew_point_c = Vec::with_capacity(len);
@@ -820,6 +835,7 @@ fn records_to_series(meta: WeatherMeta, records: &[EpwRecord]) -> WeatherTimeSer
 
     WeatherTimeSeries {
         meta,
+        design_conditions,
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,
@@ -836,6 +852,81 @@ fn records_to_series(meta: WeatherMeta, records: &[EpwRecord]) -> WeatherTimeSer
         liquid_precip_m,
         surface_albedo: None,
     }
+}
+
+/// Parse the EPW design-conditions header (line 2) to extract extreme
+/// heating and cooling dry-bulb temperatures.
+///
+/// The EPW design-conditions line format varies by data source. This parser
+/// handles the common pattern where the line ends with an "Extremes" section
+/// containing pairs of (extreme low, extreme high) temperatures. When the
+/// "Extremes" section is present, `heating_design_db_c` is set to the minimum
+/// of all extreme low dry-bulb temperatures and `cooling_design_db_c` is set
+/// to the maximum of all extreme high dry-bulb temperatures.
+///
+/// Returns `None` when:
+/// - The line does not contain an "Extremes" token.
+/// - No parseable numeric values follow the "Extremes" token.
+/// - The header line has zero design conditions (common for synthetic/test EPWs).
+///
+/// # EPW Data Dictionary v9.6
+///
+/// The design-conditions line is an informational header. The authoritative
+/// design-day data lives in separate DDY (Design Day) files. The "Extremes"
+/// summary here provides a fallback design temperature when ASHRAE 152
+/// climate station data is unavailable.
+fn parse_design_conditions(line: &str) -> Option<DesignConditions> {
+    let fields: Vec<&str> = line.split(',').collect();
+    if fields.is_empty() {
+        return None;
+    }
+
+    // Find the "Extremes" token in the comma-separated fields.
+    let extremes_idx = fields
+        .iter()
+        .position(|f| f.trim().eq_ignore_ascii_case("Extremes"))?;
+
+    // Parse numeric values after the "Extremes" token.
+    // Format: Extremes,{n},{low1},{high1},{low2},{high2},...
+    // We collect all extreme low and high values.
+    let mut heating_candidates: Vec<f64> = Vec::new();
+    let mut cooling_candidates: Vec<f64> = Vec::new();
+    let mut is_low = true; // Toggle: low, high, low, high, ...
+
+    for raw in fields.iter().skip(extremes_idx + 1) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(val) = trimmed.parse::<f64>() {
+            if val.is_finite() {
+                if is_low {
+                    heating_candidates.push(val);
+                } else {
+                    cooling_candidates.push(val);
+                }
+            }
+            is_low = !is_low;
+        }
+    }
+
+    let heating_design_db_c = heating_candidates
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let cooling_design_db_c = cooling_candidates
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    if !heating_design_db_c.is_finite() || !cooling_design_db_c.is_finite() {
+        return None;
+    }
+
+    Some(DesignConditions {
+        heating_design_db_c,
+        cooling_design_db_c,
+    })
 }
 
 #[cfg(test)]

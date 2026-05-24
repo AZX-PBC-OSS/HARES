@@ -828,6 +828,7 @@ pub(crate) fn build_synthetic_weather(
 
     Ok(WeatherTimeSeries {
         meta,
+        design_conditions: None,
         dry_bulb_c: vec![outdoor_temp_c; n],
         dew_point_c: vec![dew_point_c; n],
         rel_humidity_pct: vec![config.weather.rel_humidity_pct; n],

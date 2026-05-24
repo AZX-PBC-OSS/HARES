@@ -1,5 +1,6 @@
 //! Dwelling orchestrator: integrates environment, equipment, solvers, and output.
 
+mod autosize;
 mod conversions;
 mod solver_builder;
 mod synthetic;
@@ -921,6 +922,9 @@ impl Dwelling {
 
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
+        let weather_design_conditions = weather.design_conditions;
+        let weather_lat = weather.meta.latitude;
+        let weather_lon = weather.meta.longitude;
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
         let mut environment = EnvironmentManager::new_with_resample(
             weather,

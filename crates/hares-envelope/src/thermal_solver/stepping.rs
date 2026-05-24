@@ -9,9 +9,85 @@
 
 use hares_types::{DomainUpdate, EnvironmentState, PortSlots, ZoneId};
 
+use super::config::StateSpaceWiring;
 use super::ThermalSolver;
 
 impl ThermalSolver {
+    /// Compute the HVAC capacity (W) required to maintain `target_c` at
+    /// design outdoor conditions.
+    ///
+    /// Sets all non-outdoor inputs to zero (no solar, no internal gains),
+    /// sets the outdoor temperature to `design_outdoor_c`, clears infiltration
+    /// coupling, and solves for the zone sensible input that drives the zone
+    /// temperature to `target_c`.
+    ///
+    /// Returns the required capacity in watts (positive = heating needed),
+    /// or 0.0 if the zone is unknown or solving fails.
+    ///
+    /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
+    /// or `last_coupled_lu`). It constructs temporary vectors for the autosizing
+    /// solve and restores the original input afterward.
+    pub fn autosize_capacity(
+        &self,
+        zone: ZoneId,
+        target_c: f64,
+        design_outdoor_c: f64,
+    ) -> f64 {
+        let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
+            return 0.0;
+        };
+        let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
+            return 0.0;
+        };
+
+        // Build a design-condition input vector: outdoor temp = design_outdoor_c,
+        // all other inputs (solar, ground, internal gains) = 0.0.
+        let mut u_design = self.last_u.clone();
+        u_design.fill(0.0);
+
+        // Set outdoor temperature at the outdoor temp column(s).
+        for &col in &self.wiring.outdoor_temp_input_indices {
+            if col < u_design.len() {
+                u_design[col] = design_outdoor_c;
+            }
+        }
+
+        // Ground temperature columns: approximate as design_outdoor_c for
+        // conservative sizing (cold ground in heating, warm ground in cooling).
+        for &col in &self.wiring.ground_temp_input_indices {
+            if col < u_design.len() {
+                u_design[col] = design_outdoor_c;
+            }
+        }
+
+        // Solve without coupling (no infiltration at design conditions).
+        let total = self.model.solve_for_output_input(
+            &self.x,
+            &u_design,
+            target_c,
+            output_idx,
+            input_idx,
+        );
+
+        total
+            .map(|raw| raw - u_design[input_idx])
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    ?zone,
+                    ?e,
+                    target_c,
+                    design_outdoor_c,
+                    "autosize_capacity: solve failed, returning 0"
+                );
+                0.0
+            })
+    }
+
+    /// Access the wiring (zone ↔ state-space index mappings) for autosizing.
+    pub fn wiring(&self) -> &StateSpaceWiring {
+        &self.wiring
+    }
+
     /// Estimate the ideal HVAC capacity needed to reach an explicit target temperature.
     ///
     /// Uses `last_u`, `last_coupling`, and `last_coupled_lu` as background.

@@ -400,6 +400,7 @@ fn make_series_full(
         ground_temp_c: vec![10.0; n],
         liquid_precip_m: vec![0.0; n],
         surface_albedo: None,
+        design_conditions: None,
     }
 }
 

@@ -74,7 +74,7 @@ fn airflow_m3_s_per_w_from_explicit_cfm(
 }
 
 #[derive(Debug, Clone, Default)]
-struct DuctDseParams {
+pub struct DuctDseParams {
     zone_id: Option<u16>,
     zone_type: Option<String>,
     house_volume_m3: f64,
@@ -146,7 +146,7 @@ impl DuctDseParams {
 /// conditioned space. Returns `Err(HpxmlError::MissingField)` when ducts do
 /// exist but the building lacks any of the three inputs that drive ASHRAE
 /// 152 DSE: conditioned volume, site latitude, site longitude.
-fn compute_duct_dse_params(building: &Building) -> std::result::Result<DuctDseParams, HpxmlError> {
+pub fn compute_duct_dse_params(building: &Building) -> std::result::Result<DuctDseParams, HpxmlError> {
     use super::building::DuctType;
 
     // Aggregate supply vs return duct data from unconditioned zones.
@@ -265,6 +265,38 @@ fn compute_duct_dse_params(building: &Building) -> std::result::Result<DuctDsePa
         latitude_deg,
         longitude_deg,
     })
+}
+
+/// Rebuild an HVAC equipment typed config using updated parameters.
+///
+/// Called after autosizing to replace placeholder capacities with computed
+/// values. Matches on the canonical equipment name to select the correct
+/// config builder.
+pub fn rebuild_hvac_typed_config(
+    name: &str,
+    params: &Map<String, Value>,
+    duct_params: &DuctDseParams,
+) -> Option<EquipmentConfig> {
+    match name {
+        "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params).ok().flatten(),
+        "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params),
+        "Gas Boiler" => try_build_gas_boiler_config(name, params).ok().flatten(),
+        "Electric Boiler" => try_build_electric_boiler_config(name, params),
+        "Electric Baseboard" => try_build_electric_baseboard_config(name, params),
+        "Ideal HVAC" => try_build_ideal_hvac_config(name, params),
+        "Air Conditioner" => try_build_central_ac_config(name, params, duct_params),
+        "Room AC" => try_build_room_ac_config(name, params),
+        "ASHP Heater" | "MSHP Heater" => {
+            let is_mini_split = name.starts_with("MSHP");
+            try_build_heat_pump_heater_config(name, params, duct_params, is_mini_split)
+        }
+        "ASHP Cooler" | "MSHP Cooler" => {
+            let is_mini_split = name.starts_with("MSHP");
+            try_build_heat_pump_cooler_config(name, params, duct_params, is_mini_split)
+        }
+        "Dehumidifier" => try_build_dehumidifier_config(name, params),
+        _ => None,
+    }
 }
 
 /// Compute a `DuctConfig` from the duct parameter bundle produced by
@@ -1920,6 +1952,18 @@ fn insert_capacity_kbtu_h(params: &mut Map<String, Value>, node: &XmlNode, tag: 
 fn insert_capacity_w(params: &mut Map<String, Value>, node: &XmlNode, tag: &str, key: &str) {
     if let Some(cap_btu_h) = child_f64(node, tag) {
         params.insert(key.to_string(), json!(conv::power_btu_h_to_w(cap_btu_h)));
+    } else {
+        // Mark for autosizing: capacity was omitted from HPXML.
+        // The dwelling builder will back-calculate the required capacity
+        // from the building envelope model and design weather conditions.
+        let autosize_key = if key.contains("heating") {
+            "autosize_heating"
+        } else {
+            "autosize_cooling"
+        };
+        params.insert(autosize_key.to_string(), json!(true));
+        // Insert a placeholder capacity of 0.0 so config builders can proceed.
+        params.insert(key.to_string(), json!(0.0));
     }
 }
 
