@@ -93,6 +93,19 @@ pub(crate) struct SyntheticWeatherConfig {
     pub(crate) pressure_kpa: f64,
     #[serde(default)]
     pub(crate) epw_path: Option<String>,
+    /// Constant deep-ground temperature override [°C].
+    ///
+    /// When `Some(t)`, overrides the temporal-mean ground temperature
+    /// approximation. When `None` (default), ground temperature is the
+    /// temporal mean of the dry-bulb series — which, for a constant synthetic
+    /// profile, equals `outdoor_temp_c`.
+    ///
+    /// This approximates an undisturbed deep-ground temperature with zero
+    /// seasonal amplitude per the Kusuda-Achenbach (1965) model:
+    /// T(z,t) → T̄_s as ΔT̄_s → 0.
+    /// Cite: Kusuda, T. and Achenbach, P.R. (1965), ASHRAE Trans. 71(1):61-74.
+    #[serde(default)]
+    pub(crate) ground_temp_c: Option<f64>,
 }
 
 impl Default for SyntheticWeatherConfig {
@@ -103,6 +116,7 @@ impl Default for SyntheticWeatherConfig {
             rel_humidity_pct: default_rel_humidity_pct(),
             pressure_kpa: default_pressure_kpa(),
             epw_path: None,
+            ground_temp_c: None,
         }
     }
 }
@@ -784,20 +798,17 @@ pub(crate) fn build_synthetic_weather(
         0.0, // opaque_sky_cover = 0 (clear sky)
     );
 
-    // Ground temperature: use outdoor air temperature.
+    // Ground temperature: temporal mean of the dry-bulb series, or an explicit
+    // TOML override via `weather.ground_temp_c`.
     //
-    // The DOE-2 ground temperature model (used in the EPW pipeline) gives
-    // T_ground ≈ T_annual_mean for constant weather (zero seasonal amplitude),
-    // so T_ground = T_outdoor is consistent when the outdoor temperature equals
-    // the annual mean. For the default synthetic config (10 °C) this matches
-    // Denver's deep-ground temperature (~10 °C).
-    //
-    // LIMITATION: in real winter conditions the ground surface stays warmer
-    // than air due to thermal inertia, but without a full annual temperature
-    // profile we cannot apply the DOE-2 damping model. Users modelling
-    // extreme cold snaps (e.g. −20 °C) should supply an EPW file for
-    // accurate ground temperatures.
-    let ground_temp_c = outdoor_temp_c;
+    // For a constant dry-bulb profile the temporal mean equals the per-record
+    // value (outdoor_temp_c), making this a no-op for all existing callers.
+    // For future time-varying synthetic profiles the temporal mean is the
+    // physically correct zero-amplitude limit of the Kusuda-Achenbach model:
+    // T(z,t) → T̄_s as ΔT̄_s → 0.
+    // Cite: Kusuda, T. and Achenbach, P.R. (1965), ASHRAE Trans. 71(1):61-74.
+    let temporal_mean_c = outdoor_temp_c;
+    let ground_temp_c = config.weather.ground_temp_c.unwrap_or(temporal_mean_c);
 
     Ok(WeatherTimeSeries {
         meta,
@@ -1068,18 +1079,13 @@ dew_point_c = 5.0
     }
 
     // -------------------------------------------------------------------------
-    // Ticket 050 regression tests: ground temperature in synthetic weather
+    // Ground temperature in synthetic weather
     // -------------------------------------------------------------------------
 
-    /// Ticket 050 – Case A: constant-temperature profile.
-    ///
     /// For a constant synthetic dry-bulb series the temporal mean equals the
     /// per-record value, so ground_temp_c should equal outdoor_temp_c. This
-    /// confirms the fix introduces no regression for existing callers.
-    ///
-    /// This test passes against the *current* (buggy) code because when
-    /// outdoor_temp_c is constant, `ground_temp_c = outdoor_temp_c` happens
-    /// to equal the temporal mean. It should continue to pass after the fix.
+    /// confirms no regression for existing callers that rely on the default
+    /// temporal-mean approximation.
     #[test]
     fn synthetic_ground_temp_equals_outdoor_temp_for_constant_profile() {
         let toml = r#"
@@ -1117,35 +1123,38 @@ dew_point_c = -25.0
         }
     }
 
-    // Ticket 050 – Case B: explicit ground_temp_c override in config.
-    // Commented out: `SyntheticWeatherConfig` has no `ground_temp_c` field —
-    // fix pending on ticket 050. Uncomment when ticket 050 is resolved.
-    //
-    // #[test]
-    // fn synthetic_ground_temp_override_takes_precedence_over_outdoor_temp() {
-    //     let toml = r#"
-    // building_id = 1
-    // [simulation]
-    // start_time = "2024-01-01T00:00:00Z"
-    // time_res_s = 3600
-    // duration_s = 86400
-    // [geometry]
-    // floor_area_m2 = 48.0
-    // zone_volume_m3 = 120.0
-    // [materials]
-    // wall_r_value_m2_k_w = 2.0
-    // [hvac]
-    // equipment_name = "None"
-    // [weather]
-    // outdoor_temp_c = -20.0
-    // dew_point_c = -25.0
-    // ground_temp_c = 8.0
-    // "#;
-    //     let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-    //     assert_eq!(config.weather.ground_temp_c, Some(8.0));
-    //     let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
-    //     for (i, &gt) in weather.ground_temp_c.iter().enumerate() {
-    //         assert!((gt - 8.0_f64).abs() < 0.01, "step {i}: ground_temp_c ({gt}) should be 8.0");
-    //     }
-    // }
+    /// When `weather.ground_temp_c = Some(8.0)` is set in config alongside
+    /// `outdoor_temp_c = -20.0`, the explicit override takes precedence:
+    /// deserialization yields `Some(8.0)`, and every weather record carries
+    /// 8.0 regardless of the outdoor temperature.
+    #[test]
+    fn synthetic_ground_temp_override_takes_precedence_over_outdoor_temp() {
+        let toml = r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+[weather]
+outdoor_temp_c = -20.0
+dew_point_c = -25.0
+ground_temp_c = 8.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(config.weather.ground_temp_c, Some(8.0));
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        for (i, &gt) in weather.ground_temp_c.iter().enumerate() {
+            assert!(
+                (gt - 8.0_f64).abs() < 0.01,
+                "step {i}: ground_temp_c ({gt}) should be 8.0"
+            );
+        }
+    }
 }
