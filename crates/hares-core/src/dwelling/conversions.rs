@@ -110,7 +110,7 @@ pub fn building_to_boundary_inputs(
     avg_wind_m_s: f64,
     avg_ambient_c: f64,
     avg_ground_c: f64,
-) -> Vec<BoundaryInput> {
+) -> Result<Vec<BoundaryInput>> {
     use hares_envelope::PrecomputedRCLayer;
     use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
@@ -323,7 +323,27 @@ pub fn building_to_boundary_inputs(
                 bd.emittance.unwrap_or(EMISSIVITY_DEFAULT)
             };
 
-            BoundaryInput {
+            // Guard: SteelFrame without geometry on LUT-miss path.
+            // ASHRAE HoF 2021 Ch. 27 requires the zone method for metal
+            // framing. Without explicit <StudSpacing>, <StudWidth>, or
+            // <FramingFactor>, and when the pre-computed construction LUT
+            // does not match, the parallel-path method (which uses softwood
+            // conductivity) cannot be applied correctly. Fail loudly rather
+            // than silently understate the steel thermal bridge.
+            if bd.construction_type.as_deref() == Some("SteelFrame")
+                && bd.framing_factor.is_none()
+                && precomputed_rc.is_empty()
+            {
+                return Err(HaresError::Io(format!(
+                    "SteelFrame boundary '{}' requires explicit <StudSpacing> and <StudWidth> \
+                     for the ASHRAE zone method (HoF 2021 Ch. 27); no stud geometry provided, \
+                     no explicit <FramingFactor> found, and the pre-computed construction LUT \
+                     did not match this assembly",
+                    bd.id,
+                )));
+            }
+
+            Ok(BoundaryInput {
                 area_m2: bd.area_m2,
                 interior_zone_idx,
                 exterior,
@@ -344,9 +364,9 @@ pub fn building_to_boundary_inputs(
                 r_film_exterior_m2_k_w: r_film_ext,
                 framing_factor: bd.framing_factor,
                 interior_emissivity,
-            }
+            })
         })
-        .collect()
+        .collect::<std::result::Result<Vec<_>, HaresError>>()
 }
 
 /// Map HPXML ZoneType to film-coefficient ZoneLabel.
@@ -1243,7 +1263,8 @@ mod tests {
             )
         };
         let store = load_defaults_store();
-        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs");
 
         assert_eq!(inputs.len(), 1);
         let slab_input = &inputs[0];
@@ -1301,7 +1322,8 @@ mod tests {
             )
         };
         let store = load_defaults_store();
-        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs");
 
         assert_eq!(inputs.len(), 1);
         let slab_input = &inputs[0];
@@ -1365,8 +1387,10 @@ mod tests {
         };
 
         let store = load_defaults_store();
-        let unins = super::building_to_boundary_inputs(&building_unins, 1, &store, 2.0, 10.0, 10.0);
-        let r5 = super::building_to_boundary_inputs(&building_r5, 1, &store, 2.0, 10.0, 10.0);
+        let unins = super::building_to_boundary_inputs(&building_unins, 1, &store, 2.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs unins");
+        let r5 = super::building_to_boundary_inputs(&building_r5, 1, &store, 2.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs r5");
 
         // Insulated slab should have higher layer resistance
         let unins_r = unins[0].precomputed_rc[0].resistance_m2_k_w;
@@ -1420,13 +1444,75 @@ mod tests {
         };
 
         let store = load_defaults_store();
-        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs");
 
         assert_eq!(inputs.len(), 1);
         // Wall should have a non-zero exterior film (outdoor convection)
         assert!(
             inputs[0].r_film_exterior_m2_k_w > 0.0,
             "wall boundary must have non-zero exterior film"
+        );
+    }
+
+    /// SteelFrame without framing factor on the LUT-miss path must error.
+    /// Regression for ticket 051 Defect 2: ASHRAE HoF 2021 Ch. 27 requires
+    /// the zone method for metal framing. When no <StudSpacing>, <StudWidth>,
+    /// <FramingFactor>, or LUT match is available, the boundary must fail
+    /// loudly rather than silently applying the softwood parallel-path formula.
+    #[test]
+    fn steel_frame_lut_miss_without_framing_factor_errors() {
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "steel-wall".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 20.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: Some(3.0),
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: Vec::new(),
+                framing_factor: None,
+                construction_type: Some("SteelFrame".to_string()),
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                lut_boundary_name: Some("__test_no_match__".to_string()),
+                floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let result = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+
+        let err =
+            result.expect_err("SteelFrame without framing factor on LUT-miss path must return Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("<StudSpacing>"),
+            "error message must cite <StudSpacing>: {msg}",
+        );
+        assert!(
+            msg.contains("<StudWidth>"),
+            "error message must cite <StudWidth>: {msg}",
         );
     }
 
@@ -1501,7 +1587,8 @@ mod tests {
             )
         };
         let store = load_defaults_store();
-        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 4.0, 10.0, 10.0);
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 4.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs");
         assert_eq!(inputs.len(), 2);
         let r_vinyl = inputs[0].r_film_exterior_m2_k_w;
         let r_stucco = inputs[1].r_film_exterior_m2_k_w;

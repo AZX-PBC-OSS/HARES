@@ -1279,9 +1279,15 @@ fn parse_framing_factor(node: &XmlNode, construction_type: Option<&str>) -> Opti
     // Default by construction type per ASHRAE Handbook of Fundamentals.
     // 25% for 16" OC (standard), 22% for 24" OC (advanced framing).
     // HPXML WallType first-child element names.
+    //
+    // SteelFrame is intentionally excluded from the default branch:
+    // ASHRAE HoF 2021 Ch. 27 requires the zone method (series-parallel)
+    // for metal framing, not the parallel-path method with softwood
+    // conductivity. Without explicit <StudSpacing> and <StudWidth>
+    // the zone method cannot be applied, so we return None to prevent
+    // the silent use of wood-based parallel-path correction.
     match construction_type {
         Some("WoodStud") => Some(0.25),
-        Some("SteelFrame") => Some(0.25),
         _ => None,
     }
 }

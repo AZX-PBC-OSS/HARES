@@ -298,7 +298,8 @@ mod tests {
         let n_zones = building.zones.len();
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
-            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
+            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0)
+                .expect("building_to_boundary_inputs");
 
         assert_eq!(
             zone_inputs.len(),
@@ -387,7 +388,8 @@ mod tests {
         let n_zones = building.zones.len();
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
-            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
+            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0)
+                .expect("building_to_boundary_inputs");
         let zone_caps =
             derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
 
@@ -529,7 +531,8 @@ mod tests {
         let n_zones = building.zones.len();
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
-            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
+            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0)
+                .expect("building_to_boundary_inputs");
         let zone_caps =
             derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
 
@@ -685,7 +688,8 @@ mod tests {
         let n_zones = building.zones.len();
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
         let boundary_inputs =
-            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
+            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0)
+                .expect("building_to_boundary_inputs");
         let zone_caps =
             derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
 

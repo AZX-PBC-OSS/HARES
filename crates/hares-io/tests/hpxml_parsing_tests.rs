@@ -1039,8 +1039,8 @@ fn stud_geometry_framing_fraction_2x4_24oc_advanced_framing() {
 // The existing 0.25 value is correct. This test therefore asserts the current
 // WoodStud default is 0.25, not 0.23, as the ticket claims.
 //
-// These tests will PASS once ticket 051 Defect 2 is fixed (SteelFrame must
-// not silently return a wood-based default).
+// These tests verify the fix for ticket 051 Defect 2 (SteelFrame must not
+// return a wood-based default framing factor).
 // ===========================================================================
 
 fn wall_xml_with_construction_type(construction_type_element: &str) -> String {
@@ -1100,17 +1100,15 @@ fn wood_stud_default_framing_factor_is_0_25_per_ashrae() {
 }
 
 #[test]
-fn steel_frame_default_silently_applies_softwood_conductivity() {
-    // Regression for ticket 051 Defect 2: SteelFrame falls through to the
-    // same Some(0.25) path as WoodStud, which then calls
-    // parallel_path_conductivity() using SOFTWOOD_CONDUCTIVITY_W_M_K
-    // (0.144 W/m·K). Steel conductivity is ~50 W/m·K, so this
-    // under-corrects the thermal bridge by ~350×.
-    //
-    // This test documents the current (buggy) behaviour: SteelFrame produces
-    // a framing_factor of Some(0.25) instead of None / Err. It will need to
-    // be updated once the fix is applied (the corrected behaviour is that
-    // SteelFrame with no stud geometry should return None or error).
+fn steel_frame_default_returns_none_not_softwood() {
+    // Regression for ticket 051 Defect 2: SteelFrame without explicit
+    // <StudSpacing> and <StudWidth> must NOT return a framing factor.
+    // ASHRAE HoF 2021 Ch. 27 requires the zone method for metal framing;
+    // the parallel-path method with softwood conductivity (0.144 W/(m·K))
+    // understates the steel thermal bridge by orders of magnitude.
+    // Without stud geometry, the zone method cannot be applied, so we
+    // return None. The boundary construction will error if the LUT does
+    // not match this assembly.
     let xml = wall_xml_with_construction_type("<SteelFrame/>");
     let building = parse_building(&xml).expect("should parse");
     let wall = building
@@ -1119,14 +1117,11 @@ fn steel_frame_default_silently_applies_softwood_conductivity() {
         .find(|b| b.id == "Wall1")
         .expect("Wall1 should be present");
 
-    // Current buggy behaviour: SteelFrame returns Some(0.25).
-    // After the fix this should be None (or result in a parse error).
     assert_eq!(
-        wall.framing_factor,
-        Some(0.25),
-        "BUG (ticket 051): SteelFrame default incorrectly returns Some(0.25) \
-         using softwood conductivity; should return None or error requiring \
-         explicit stud dimensions for the zone method"
+        wall.framing_factor, None,
+        "SteelFrame default must return None (not 0.25): the parallel-path method \
+         with softwood conductivity is inappropriate for steel; <StudSpacing> and \
+         <StudWidth> are required for the ASHRAE zone method"
     );
 }
 

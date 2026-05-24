@@ -475,7 +475,7 @@ pub(crate) fn build_default_solvers(
         weather_avgs.avg_wind_m_s,
         weather_avgs.avg_ambient_c,
         weather_avgs.avg_ground_c,
-    );
+    )?;
 
     // Zone air node capacitances [J/K].
     // Use ISA standard atmosphere pressure from building site elevation.
