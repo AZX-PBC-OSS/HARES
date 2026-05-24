@@ -306,17 +306,12 @@ fn env_20c() -> EnvironmentState {
     }
 }
 
-/// Primary defect regression test.
-///
-/// `ThermalSolver::new` must return `Err` when `interior_lwr_zones` is
-/// non-empty and any zone has `scriptf == None`.  The current code silently
-/// accepts this configuration and falls through to the linearised h_r path;
-/// this test will fail until the solver-construction guard is implemented.
-///
-/// Fix pending — will stop panicking when ThermalSolver::new
-/// returns Err for zones with scriptf == None.
+/// Regression test: `ThermalSolver::new` must return `Err` when
+/// `interior_lwr_zones` contains a zone with `scriptf == None` and
+/// at least 2 surfaces.  A silent fallback to the linearised h_r path
+/// is a configuration error — ScriptF factors must be pre-computed
+/// via `compute_scriptf()` before construction.
 #[test]
-#[should_panic(expected = "ThermalSolver::new must return Err when interior_lwr_zones contains")]
 fn lwr_zone_without_scriptf_must_error_at_construction() {
     let env = env_20c();
 

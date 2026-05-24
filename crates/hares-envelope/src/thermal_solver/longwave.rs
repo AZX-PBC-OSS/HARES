@@ -282,6 +282,34 @@ impl ThermalSolver {
             let t_surf_min = base_buf.iter().copied().fold(f64::INFINITY, f64::min);
             let t_surf_max = base_buf.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
+            // Build the InteriorSurface list once outside the convergence loop
+            // when ScriptF factors are not available (surface geometry does not
+            // change between iterations). Eliminates (n_iter − 1) redundant
+            // clear+extend allocations per timestep.
+            if zone_cfg.scriptf.is_none() {
+                // Emit a one-time warning per zone when the linearised h_r ≈ 4εσT³
+                // fallback engages. The construction-time guard in ThermalSolver::new
+                // rejects this for the normal code path, so this fires only for
+                // unusual construction paths (e.g. from_discrete).
+                // Linearisation error grows as (ΔT/2T_mean)²: ~0.12 % at ΔT = 20 K,
+                // ~0.5 % at ΔT = 40 K (Siegel & Howell 4th ed. Ch. 4).
+                if !self.lwr_linearised_warned_zones.contains(&zone_cfg.zone_id) {
+                    self.lwr_linearised_warned_zones.insert(zone_cfg.zone_id);
+                    tracing::warn!(
+                        zone_id = ?zone_cfg.zone_id,
+                        "interior LWR: ScriptF factors not available — \
+                         falling back to linearised h_r ≈ 4εσT³; \
+                         reduced physics fidelity (~0.1–0.5 % error depending on ΔT)"
+                    );
+                }
+                self.lwr_surfaces_buf.clear();
+                self.lwr_surfaces_buf
+                    .extend(zone_cfg.surfaces.iter().map(|s| InteriorSurface {
+                        area_m2: s.area_m2,
+                        emissivity: s.emissivity,
+                    }));
+            }
+
             let n_iter = (self.dt_s / 300.0_f64).floor() as u32 + 3;
             for _ in 0..n_iter {
                 // Use ScriptF (exact T⁴ radiosity) when pre-computed at init,
@@ -289,12 +317,6 @@ impl ThermalSolver {
                 if let Some(ref scriptf) = zone_cfg.scriptf {
                     scriptf.net_flux_w_into(buf, &mut self.lwr_net_flux_buf);
                 } else {
-                    self.lwr_surfaces_buf.clear();
-                    self.lwr_surfaces_buf
-                        .extend(zone_cfg.surfaces.iter().map(|s| InteriorSurface {
-                            area_m2: s.area_m2,
-                            emissivity: s.emissivity,
-                        }));
                     interior_longwave_linearised_w_into(
                         &self.lwr_surfaces_buf,
                         buf,
@@ -323,12 +345,6 @@ impl ThermalSolver {
             if let Some(ref scriptf) = zone_cfg.scriptf {
                 scriptf.net_flux_w_into(buf, &mut self.lwr_net_flux_buf);
             } else {
-                self.lwr_surfaces_buf.clear();
-                self.lwr_surfaces_buf
-                    .extend(zone_cfg.surfaces.iter().map(|s| InteriorSurface {
-                        area_m2: s.area_m2,
-                        emissivity: s.emissivity,
-                    }));
                 interior_longwave_linearised_w_into(
                     &self.lwr_surfaces_buf,
                     buf,

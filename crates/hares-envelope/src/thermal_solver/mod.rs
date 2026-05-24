@@ -17,7 +17,7 @@ pub use config::{
     WindowSolarProperties,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
@@ -97,6 +97,9 @@ pub struct ThermalSolver {
     custom_payload_buf: Vec<f64>,
     /// Pre-allocated fallback buffer for InteriorSurface structs in non-ScriptF path.
     lwr_surfaces_buf: Vec<crate::longwave_radiation::InteriorSurface>,
+    /// Zones for which the linearised interior LWR fallback has already emitted
+    /// a one-time warning. Guards against per-timestep log spam.
+    lwr_linearised_warned_zones: HashSet<ZoneId>,
     /// Cached outdoor temperature [°C] from the most recent input vector.
     /// Used by boundary diagnostics for non-RC boundaries.
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -267,6 +270,16 @@ impl ThermalSolver {
         env: &EnvironmentState,
         indoor_temp_c: f64,
     ) -> Result<Self> {
+        for zone_cfg in &config.interior_lwr_zones {
+            if zone_cfg.surfaces.len() >= 2 && zone_cfg.scriptf.is_none() {
+                return Err(ThermalSolverError::Configuration(format!(
+                    "zone {}: interior LWR requires ScriptF factors; \
+                     call compute_scriptf() on InteriorLwrZoneConfig before constructing ThermalSolver \
+                     — no linearised fallback is permitted",
+                    zone_cfg.zone_id.0
+                )));
+            }
+        }
         let x = initialize_steady_state(
             &model,
             &wiring,
@@ -372,6 +385,7 @@ impl ThermalSolver {
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             radiant_weights_buf: Vec::with_capacity(max_radiant_surfaces),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
+            lwr_linearised_warned_zones: HashSet::new(),
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
             custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 4),
@@ -783,10 +797,7 @@ mod tests {
     };
     use nalgebra::{DMatrix, DVector};
 
-    use crate::longwave_radiation::{
-        InteriorSurface, SOLAR_ABSORPTANCE_DEFAULT, beta_factor,
-        interior_longwave_linearised_w_into,
-    };
+    use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
         DrivingTemp, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
@@ -924,7 +935,7 @@ mod tests {
             solar_input_indices: HashMap::new(),
         };
 
-        let interior_lwr_zone = InteriorLwrZoneConfig {
+        let mut interior_lwr_zone = InteriorLwrZoneConfig {
             zone_id: ZoneId(1),
             surfaces: vec![
                 InteriorSurfaceInfo {
@@ -952,6 +963,7 @@ mod tests {
             ],
             scriptf: None,
         };
+        interior_lwr_zone.compute_scriptf();
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
@@ -1275,24 +1287,13 @@ mod tests {
         let mut expected_prev = initial_prev_temps;
         let t_surf_min = base_buf.iter().copied().fold(f64::INFINITY, f64::min);
         let t_surf_max = base_buf.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let lwr_surfaces = vec![
-            InteriorSurface {
-                area_m2: surfaces[0].area_m2,
-                emissivity: surfaces[0].emissivity,
-            },
-            InteriorSurface {
-                area_m2: surfaces[1].area_m2,
-                emissivity: surfaces[1].emissivity,
-            },
-        ];
+        let scriptf = solver.config.interior_lwr_zones[0]
+            .scriptf
+            .as_ref()
+            .expect("scriptf factors must be pre-computed");
         let mut expected_flux = vec![0.0; 2];
         for _ in 0..3 {
-            interior_longwave_linearised_w_into(
-                &lwr_surfaces,
-                &expected_buf,
-                zone_temp_c,
-                &mut expected_flux,
-            );
+            scriptf.net_flux_w_into(&expected_buf, &mut expected_flux);
             for (j, info) in surfaces.iter().enumerate() {
                 let t_new = base_buf[j] + expected_flux[j] * info.rad_res_k_w;
                 let t_new = t_new.clamp(t_surf_min, t_surf_max);
@@ -1303,12 +1304,7 @@ mod tests {
                 expected_buf[j] = t_next;
             }
         }
-        interior_longwave_linearised_w_into(
-            &lwr_surfaces,
-            &expected_buf,
-            zone_temp_c,
-            &mut expected_flux,
-        );
+        scriptf.net_flux_w_into(&expected_buf, &mut expected_flux);
 
         for (actual, expected) in solver.interior_surface_temps[0]
             .iter()
@@ -4430,7 +4426,7 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
-        let interior_lwr_zone = InteriorLwrZoneConfig {
+        let mut interior_lwr_zone = InteriorLwrZoneConfig {
             zone_id: ZoneId(1),
             surfaces: vec![
                 InteriorSurfaceInfo {
@@ -4469,6 +4465,7 @@ mod tests {
             ],
             scriptf: None,
         };
+        interior_lwr_zone.compute_scriptf();
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
@@ -4572,7 +4569,7 @@ mod tests {
         // Window radiation_frac from EnergyPlus interior film decomposition
         // for U=3.0 W/(m²·K): res_int ≈ 0.120, R_total ≈ 0.333, rad_frac ≈ 0.36.
         let rad_frac_window = 0.36;
-        let interior_lwr_zone = InteriorLwrZoneConfig {
+        let mut interior_lwr_zone = InteriorLwrZoneConfig {
             zone_id: zone,
             surfaces: vec![
                 InteriorSurfaceInfo {
@@ -4600,6 +4597,7 @@ mod tests {
             ],
             scriptf: None,
         };
+        interior_lwr_zone.compute_scriptf();
         let config = ThermalSolverConfig {
             indoor_zone_id: zone,
             window_properties: HashMap::new(),

@@ -467,6 +467,8 @@ pub enum ThermalSolverError {
     MissingZoneMapping { zone: ZoneId, field: &'static str },
     #[error("failed to initialize steady-state vector: {0}")]
     Initialization(String),
+    #[error("{0}")]
+    Configuration(String),
 }
 
 pub type Result<T> = std::result::Result<T, ThermalSolverError>;
