@@ -1628,10 +1628,14 @@ pub(super) fn resolve_hvac(
         if let Some(shr) = child_f64(heat_pump, "CoolingSensibleHeatFraction") {
             params.insert("shr".to_string(), json!(shr));
         }
-        if let Some(frac) = child_f64(heat_pump, "FractionHeatingLoadServed") {
+        if let Some(frac) = child_f64(heat_pump, "FractionHeatLoadServed")
+            .or_else(|| child_f64(heat_pump, "FractionHeatingLoadServed"))
+        {
             params.insert("fraction_heating_load_served".to_string(), json!(frac));
         }
-        if let Some(frac) = child_f64(heat_pump, "FractionCoolingLoadServed") {
+        if let Some(frac) = child_f64(heat_pump, "FractionCoolLoadServed")
+            .or_else(|| child_f64(heat_pump, "FractionCoolingLoadServed"))
+        {
             params.insert("fraction_cooling_load_served".to_string(), json!(frac));
         }
         if let Some(ext) = heat_pump.child("extension") {
@@ -4425,7 +4429,7 @@ mod tests {
         assert_eq!(cfg.common.number_of_speeds, 4);
     }
 
-    // ---- Ticket 076: HeatPump FractionHeatLoadServed / FractionCoolLoadServed ----
+    // ---- HeatPump FractionHeatLoadServed / FractionCoolLoadServed ----
 
     /// Regression: HeatPump resolver must read the canonical HPXML 4.x element names
     /// `FractionHeatLoadServed` and `FractionCoolLoadServed`.  Prior to the fix the
@@ -4434,8 +4438,6 @@ mod tests {
     /// real OS-HPXML files were silently dropped and both typed configs defaulted to
     /// `None` (interpreted downstream as 100 % load served regardless of the actual
     /// fraction).
-    /// Fix pending on ticket — will stop panicking when canonical fraction element names are read
-    #[should_panic(expected = "FractionHeatLoadServed (canonical) must be parsed")]
     #[test]
     fn heat_pump_reads_canonical_fraction_element_names() {
         // Canonical names as used in every OS-HPXML sample file.
@@ -4615,7 +4617,7 @@ mod tests {
         );
     }
 
-    // ---- Ticket 077: BackupAnnualHeatingEfficiency Units element ignored ----
+    // ---- BackupAnnualHeatingEfficiency Units element ignored ----
 
     /// Helper: build a minimal HeatPump XML fragment with the given backup efficiency
     /// units and value, run resolve_hvac, and return the `backup_eir` from the heater
