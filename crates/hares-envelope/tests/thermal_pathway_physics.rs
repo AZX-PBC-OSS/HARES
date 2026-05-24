@@ -125,6 +125,7 @@ fn ground_temperature_drives_zone() {
         ground_temp_input_indices: vec![1],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
+        c_zone_j_k: HashMap::new(),
     };
 
     let config = ThermalSolverConfig {
@@ -274,6 +275,7 @@ fn interior_solar_distribution_damps_peak_temp() {
         ground_temp_input_indices: vec![],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
+        c_zone_j_k: HashMap::new(),
     };
 
     let outdoor = 20.0;
@@ -468,6 +470,7 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         ground_temp_input_indices: vec![],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
+        c_zone_j_k: HashMap::new(),
     };
 
     // One interior surface: area=10 m², emissivity=0.9, radiation_frac=0.5,

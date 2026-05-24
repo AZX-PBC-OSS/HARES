@@ -107,6 +107,7 @@ fn build_1r1c_solver(
         ground_temp_input_indices: vec![],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
+        c_zone_j_k: HashMap::new(),
     };
 
     ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)

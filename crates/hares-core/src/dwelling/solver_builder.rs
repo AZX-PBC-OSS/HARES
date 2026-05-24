@@ -613,6 +613,18 @@ pub(crate) fn build_default_solvers(
         wiring.ground_temp_input_indices = vec![];
     }
 
+    // Populate per-zone thermal capacitances [J/K] for energy balance closure check.
+    for (zone_idx, zone) in env.zones.iter().enumerate() {
+        let cap = zone_capacitances
+            .get(zone_idx)
+            .copied()
+            .unwrap_or(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
+        wiring.c_zone_j_k.insert(
+            zone.id,
+            cap.max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K),
+        );
+    }
+
     // Match OCHRE: iterations = floor(dt / 300 s) + 1.
     let n_iter = (dt_s / 300.0).floor() as u32 + 1;
 

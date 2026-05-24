@@ -185,6 +185,15 @@ pub const WALL_SENSIBLE_GAIN_W: &str = "wall_sensible_gain_w";
 pub const UNMET_LOAD_W: &str = "unmet_load_w";
 pub const PARASITIC_ELECTRIC_W: &str = "parasitic_electric_w";
 
+// ── Envelope energy balance ─────────────────────────────────────────────────
+/// Per-zone energy balance residual [W] from the zone-air first-law check.
+///
+/// Published every timestep by the thermal solver's `format_domain_update`.
+/// Values near zero indicate the zone air energy balance closes; large values
+/// may indicate port-wiring bugs, incorrect B_d entries, or wall-mass energy
+/// redistribution in multi-node models.
+pub const ENERGY_BALANCE_RESIDUAL_W: &str = "energy_balance_residual_w";
+
 // ── Ventilation / recovery ──────────────────────────────────────────────────
 pub const SENSIBLE_RECOVERY_W: &str = "sensible_recovery_w";
 pub const LATENT_RECOVERY_W: &str = "latent_recovery_w";

@@ -101,6 +101,9 @@ pub struct ThermalSolver {
     zone_temps_buf: Vec<(ZoneId, f64)>,
     latent_pairs_buf: Vec<(ZoneId, f64)>,
     custom_payload_buf: Vec<f64>,
+    /// Per-zone energy balance residuals [W] from the current timestep's closure check.
+    /// Populated by `integrate_inner`, consumed by `format_domain_update` for telemetry.
+    energy_balance_residuals: HashMap<ZoneId, f64>,
     /// Pre-allocated fallback buffer for InteriorSurface structs in non-ScriptF path.
     lwr_surfaces_buf: Vec<crate::longwave_radiation::InteriorSurface>,
     /// Zones for which the linearised interior LWR fallback has already emitted
@@ -394,9 +397,10 @@ impl ThermalSolver {
             radiant_weights_buf: Vec::with_capacity(max_radiant_surfaces),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_linearised_warned_zones: HashSet::new(),
+            energy_balance_residuals: HashMap::with_capacity(n_zones_for_latent),
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
-            custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 4),
+            custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 5),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -698,13 +702,20 @@ impl ThermalSolver {
                 .find(|c| c.zone == zone)
                 .map(|c| (c.m_dot_lat_kg_s, c.w_outdoor))
                 .unwrap_or((0.0, 0.0));
-            // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor]
-            // per zone, extending the original 2-float format to carry moisture coupling
-            // data for semi-implicit humidity solver treatment.
+            // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor,
+            // energy_balance_residual_w] per zone, extending the original 2-float format to carry
+            // moisture coupling data for semi-implicit humidity solver treatment and the per-step
+            // energy balance residual for observability.
             self.custom_payload_buf.push(f64::from(zone.0));
             self.custom_payload_buf.push(latent);
             self.custom_payload_buf.push(m_dot_inf_kg_s);
             self.custom_payload_buf.push(w_outdoor);
+            self.custom_payload_buf.push(
+                self.energy_balance_residuals
+                    .get(&zone)
+                    .copied()
+                    .unwrap_or(0.0),
+            );
         }
 
         self.latent_buf = latent_by_zone;
@@ -888,6 +899,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -941,6 +953,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
 
         let mut interior_lwr_zone = InteriorLwrZoneConfig {
@@ -1101,6 +1114,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![1],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1191,6 +1205,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1646,6 +1661,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1694,6 +1710,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1864,6 +1881,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1929,6 +1947,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1978,6 +1997,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -2031,6 +2051,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -2105,6 +2126,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -2221,6 +2243,7 @@ mod tests {
                 ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+                c_zone_j_k: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -2370,6 +2393,7 @@ mod tests {
                 ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+                c_zone_j_k: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -2529,6 +2553,7 @@ mod tests {
                 ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+                c_zone_j_k: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -2875,6 +2900,7 @@ mod tests {
                 ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+                c_zone_j_k: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -2997,6 +3023,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -3080,6 +3107,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -3176,6 +3204,7 @@ mod tests {
                 ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+                c_zone_j_k: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -3324,6 +3353,7 @@ mod tests {
                 ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
+                c_zone_j_k: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -3436,6 +3466,7 @@ mod tests {
                     ground_temp_input_indices: vec![],
                     indoor_temp_input_indices: vec![],
                     solar_input_indices: HashMap::new(),
+                    c_zone_j_k: HashMap::new(),
                 };
                 let cfg = ThermalSolverConfig {
                     indoor_zone_id: ZoneId(1),
@@ -3775,6 +3806,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -3838,6 +3870,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -4019,6 +4052,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -4179,6 +4213,7 @@ mod tests {
                 ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
+                c_zone_j_k: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -4451,6 +4486,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let mut interior_lwr_zone = InteriorLwrZoneConfig {
             zone_id: ZoneId(1),
@@ -4590,6 +4626,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
         let rad_frac_opaque = 0.7;
         // Window radiation_frac from EnergyPlus interior film decomposition
@@ -4849,6 +4886,7 @@ mod tests {
             ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
         };
 
         // Use the solar-surface (StarMesh) path: no interior_lwr_zones, only interior_solar_zones.

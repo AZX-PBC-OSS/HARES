@@ -3043,12 +3043,15 @@ impl Dwelling {
                 .find(|u| u.domain_id == hares_types::THERMAL)
                 && let Some(payload) = &thermal_update.custom_payload
             {
-                // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor]
-                for quad in payload.chunks_exact(4) {
-                    let zone_raw = quad[0];
-                    let latent = quad[1];
-                    let m_dot_inf = quad[2];
-                    let w_outdoor = quad[3];
+                // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor,
+                // energy_balance_residual_w] per zone. The 5-float format carries moisture
+                // coupling data and the per-step energy balance residual for observability.
+                for quint in payload.chunks_exact(5) {
+                    let zone_raw = quint[0];
+                    let latent = quint[1];
+                    let m_dot_inf = quint[2];
+                    let w_outdoor = quint[3];
+                    let _residual = quint[4];
                     if zone_raw.is_finite() && zone_raw >= 0.0 {
                         let zone_id = ZoneId(zone_raw as u16);
                         self.invariant_infiltration_latent.push((zone_id, latent));

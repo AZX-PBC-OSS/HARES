@@ -103,15 +103,17 @@ impl DomainSolver for HumiditySolver {
                 self.zone_temp_buf.insert(zone_id, t_c);
             }
             if let Some(payload) = &thermal_update.custom_payload {
-                // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor]
-                // per zone. The 4-float format carries moisture coupling data for
-                // semi-implicit humidity treatment. Zones without infiltration have
+                // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor,
+                // energy_balance_residual_w] per zone. The 5-float format carries moisture
+                // coupling data for semi-implicit humidity treatment and the per-step energy
+                // balance residual for observability. Zones without infiltration have
                 // m_dot_inf_kg_s = 0.0 and w_outdoor = 0.0.
-                for quad in payload.chunks_exact(4) {
-                    let zone_raw = quad[0];
-                    let latent = quad[1];
-                    let m_dot_inf = quad[2];
-                    let w_outdoor = quad[3];
+                for quint in payload.chunks_exact(5) {
+                    let zone_raw = quint[0];
+                    let latent = quint[1];
+                    let m_dot_inf = quint[2];
+                    let w_outdoor = quint[3];
+                    let _residual = quint[4];
                     if zone_raw.is_finite() && zone_raw >= 0.0 && zone_raw <= f64::from(u16::MAX) {
                         let zone = ZoneId(zone_raw as u16);
                         *self.latent_buf.entry(zone).or_insert(0.0) += latent;
@@ -491,7 +493,7 @@ mod tests {
         env.custom_domains.push(DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone_id, 22.0)],
-            custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, 0.0, 0.0]),
+            custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, 0.0, 0.0, 0.0]),
         });
 
         // Use multiplier=1.0 so the full latent energy maps directly to moisture mass,
@@ -525,6 +527,78 @@ mod tests {
             "moisture mass mismatch: actual={delta_m_actual_kg:.9} kg, \
              expected={delta_m_expected_kg:.9} kg -- latent heat values likely \
              differ between thermal and humidity solvers"
+        );
+    }
+
+    /// Multi-zone thermal custom payload: 5-float format `[zone_id, q_latent_w,
+    /// m_dot_inf_kg_s, w_outdoor, residual_w]` per zone. A prior bug used
+    /// `chunks_exact(4)` which silently misaligned zone records for N > 1.
+    /// This test injects different latent gains into two zones via a single
+    /// 10-element payload vector and verifies that each zone receives its
+    /// own latent value — not a value from an adjacent zone's slot.
+    #[test]
+    fn multi_zone_thermal_payload_parses_each_zone_independently() {
+        let w_init = 0.008_f64;
+        let zone1_id = ZoneId(1);
+        let zone2_id = ZoneId(2);
+        let latent_zone1_w = 300.0_f64;
+        let latent_zone2_w = 700.0_f64;
+        let dt = Duration::from_secs(60);
+
+        let env = env_with_two_zones(200.0, 200.0, w_init, w_init);
+
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+        let mut solver = HumiditySolver::new(config, &env);
+
+        // 5-float per-zone thermal payload: [zone_id, latent, m_dot, w_out, residual]
+        let mut thermal_env = env_with_zone(22.0, w_init);
+        thermal_env.zones = env.zones.clone(); // two zones
+        thermal_env.custom_domains.push(DomainUpdate {
+            domain_id: THERMAL,
+            zone_temperatures_c: vec![(zone1_id, 22.0), (zone2_id, 22.0)],
+            custom_payload: Some(vec![
+                f64::from(zone1_id.0),
+                latent_zone1_w,
+                0.0,
+                0.0,
+                0.0, // residual zone 1
+                f64::from(zone2_id.0),
+                latent_zone2_w,
+                0.0,
+                0.0,
+                0.0, // residual zone 2
+            ]),
+        });
+
+        let ports = PortSlots::default();
+        let _ = solver.resolve_new(&ports, &thermal_env, dt);
+
+        let w1 = solver.humidity_ratio(zone1_id);
+        let w2 = solver.humidity_ratio(zone2_id);
+
+        // Both zones should have moved from w_init, each by an amount
+        // commensurate with its own latent gain.
+        assert!(
+            w1 > w_init,
+            "zone 1 humidity must rise from {w_init} (got {w1})"
+        );
+        assert!(
+            w2 > w_init,
+            "zone 2 humidity must rise from {w_init} (got {w2})"
+        );
+
+        // dW scales linearly with latent gain (same volume, same dt).
+        let dw1 = w1 - w_init;
+        let dw2 = w2 - w_init;
+        let expected_ratio = latent_zone2_w / latent_zone1_w; // 700/300 ≈ 2.333
+        let actual_ratio = dw2 / dw1;
+        assert!(
+            (actual_ratio - expected_ratio).abs() < 1e-6,
+            "humidity ratio change must scale with latent gain: \
+             expected dw2/dw1={expected_ratio:.6}, got {actual_ratio:.6}"
         );
     }
 
@@ -1435,7 +1509,13 @@ mod tests {
             env_step.custom_domains.push(DomainUpdate {
                 domain_id: THERMAL,
                 zone_temperatures_c: vec![(zone_id, t_c)],
-                custom_payload: Some(vec![f64::from(zone_id.0), q_latent_step, m_dot, w_outdoor]),
+                custom_payload: Some(vec![
+                    f64::from(zone_id.0),
+                    q_latent_step,
+                    m_dot,
+                    w_outdoor,
+                    0.0,
+                ]),
             });
             let ports = PortSlots::default();
             let _ = solver.resolve_new(&ports, &env_step, Duration::from_secs(dt_s as u64));
@@ -1493,7 +1573,13 @@ mod tests {
         env_semi.custom_domains.push(DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone_id, t_c)],
-            custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, m_dot, w_outdoor]),
+            custom_payload: Some(vec![
+                f64::from(zone_id.0),
+                q_latent_w,
+                m_dot,
+                w_outdoor,
+                0.0,
+            ]),
         });
         let ports = PortSlots::default();
         let _ = solver_semi.resolve_new(&ports, &env_semi, Duration::from_secs(dt_s as u64));
@@ -1503,7 +1589,7 @@ mod tests {
         env_explicit.custom_domains.push(DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone_id, t_c)],
-            custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, 0.0, 0.0]),
+            custom_payload: Some(vec![f64::from(zone_id.0), q_latent_w, 0.0, 0.0, 0.0]),
         });
         let mut solver_explicit = HumiditySolver::new(config, &env);
         let _ =
@@ -1551,7 +1637,13 @@ mod tests {
         env_step.custom_domains.push(DomainUpdate {
             domain_id: THERMAL,
             zone_temperatures_c: vec![(zone_id, t_c)],
-            custom_payload: Some(vec![f64::from(zone_id.0), q_inf_latent_w, m_dot, w_outdoor]),
+            custom_payload: Some(vec![
+                f64::from(zone_id.0),
+                q_inf_latent_w,
+                m_dot,
+                w_outdoor,
+                0.0,
+            ]),
         });
         let ports = PortSlots {
             thermal: vec![ThermalAccumulator {

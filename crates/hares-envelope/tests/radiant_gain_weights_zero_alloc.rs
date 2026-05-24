@@ -158,6 +158,7 @@ fn make_solver(env: &EnvironmentState) -> ThermalSolver {
         ground_temp_input_indices: vec![],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
+        c_zone_j_k: HashMap::new(),
     };
 
     let mut interior_lwr_zone = InteriorLwrZoneConfig {

@@ -201,6 +201,65 @@ impl ThermalSolver {
             }
         }
 
+        // ── Zone energy balance closure check ────────────────────────────────────
+        //
+        // Per-zone first-law check: compare C_zone × ΔT / dt against the direct
+        // port sensible injection for each conditioned zone. EnergyPlus Engineering
+        // Reference (2024) "Basis for the Zone and Air System Integration" states
+        // that the heat balance method must conserve energy; ASHRAE HoF 2021 Ch.18
+        // codifies this as the fundamental requirement of any zone heat balance.
+        //
+        // This check is intentionally loose: wall-mass energy redistribution
+        // (multi-node RC models) and envelope conduction losses are not accounted
+        // for here — they flow through the A-matrix coupling and are balanced
+        // by construction of the ZOH state equation. The check catches gross
+        // errors: sign flips in port injection, wrong B_d columns, mis-wired
+        // port indices. A properly configured model should not approach the
+        // assertion threshold; the warning threshold will fire on multi-node
+        // models during transient conditions where wall-mass exchange dominates
+        // the zone air energy balance (~kW-range residuals).
+        //
+        // Thresholds are wider than the EnergyPlus 0.001 W check because HARES
+        // multi-node models distribute energy across wall-mass nodes. The actual
+        // residual for a working multi-node model can approach 6 kW during step
+        // changes (see invariants.rs:2770-2777 comment).
+        self.energy_balance_residuals.clear();
+        for (&zone, &state_idx) in &self.wiring.zone_state_indices {
+            let Some(&c_zone) = self.wiring.c_zone_j_k.get(&zone) else {
+                continue;
+            };
+            let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
+                continue;
+            };
+            let t_prev = self.rhs_buf[state_idx];
+            let t_next = self.x[state_idx];
+            let delta_stored = c_zone * (t_next - t_prev) / self.dt_s;
+            let q_port = u[input_idx];
+            let residual = (delta_stored - q_port).abs();
+
+            self.energy_balance_residuals.insert(zone, residual);
+
+            // Diagnostic: residual above 5 kW may indicate port-wiring errors.
+            // Wall-mass energy redistribution in multi-node RC models can produce
+            // residuals of several kW when q_port is large and zone air capacitance
+            // is small relative to wall-node capacitances (see invariants.rs:2770-2777).
+            // The 5 kW threshold is a practical compromise: catches gross errors
+            // (sign flips, missing B_d entries) while tolerating transient wall-mass
+            // exchange in models with realistic envelope construction.
+            // No assertion is performed — the residual magnitude depends on model
+            // complexity and cannot be bounded by a single constant.
+            if residual > 5000.0 {
+                tracing::warn!(
+                    zone = zone.0,
+                    residual_w = residual,
+                    delta_stored_w = delta_stored,
+                    q_port_w = q_port,
+                    "zone energy balance residual exceeds 5000 W — \
+                     possible port wiring or sign error"
+                );
+            }
+        }
+
         self.last_u.clone_from(&u);
         self.last_coupling.clone_from(&self.coupling_buf);
         self.u_buf = u;

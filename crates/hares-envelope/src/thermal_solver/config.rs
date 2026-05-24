@@ -382,6 +382,12 @@ pub struct StateSpaceWiring {
     /// Used by `initialize_steady_state()` to set initial boundary conditions.
     pub indoor_temp_input_indices: Vec<usize>,
     pub solar_input_indices: HashMap<u32, usize>,
+    /// Zone air node thermal capacitance [J/K] per conditioned zone.
+    ///
+    /// Populated from the zone air node's diagonal capacitance in the RC network
+    /// during model assembly. Used by `integrate_inner` to compute per-step energy
+    /// balance residuals without re-deriving from the A/C matrices each timestep.
+    pub c_zone_j_k: HashMap<ZoneId, f64>,
 }
 
 #[derive(Debug, Clone)]
