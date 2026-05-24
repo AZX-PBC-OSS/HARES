@@ -376,7 +376,8 @@ fn parse_water_heater_fuel(wh: &XmlNode) -> std::result::Result<FuelType, super:
         "electricity" | "electric" | "none" => Ok(FuelType::Electric),
         "natural gas" | "natural_gas" | "gas" => Ok(FuelType::Gas),
         "propane" => Ok(FuelType::Propane),
-        "oil" | "fuel oil" | "fuel_oil" => Ok(FuelType::Oil),
+        "oil" | "fuel oil" | "fuel_oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
+        | "fuel oil 5/6" | "kerosene" | "diesel" => Ok(FuelType::Oil),
         other => Err(super::HpxmlError::Parse(format!(
             "unsupported water-heater FuelType '{other}'"
         ))),

@@ -1179,8 +1179,6 @@ fn low_power_hpwh_sets_ochre_hp_only_mode_and_defaults() {
 // Regression tests for ticket #079: propane / oil furnaces and boilers
 // ===========================================================================
 
-/// Fix pending on ticket #079
-#[should_panic(expected = "unsupported HPXML heating system type/fuel combination")]
 #[test]
 fn propane_furnace_resolves_to_gas_furnace_config_with_propane_fuel() {
     let xml = minimal_xml(
@@ -1220,8 +1218,6 @@ fn propane_furnace_resolves_to_gas_furnace_config_with_propane_fuel() {
     let _ = typed_cfg; // structure check is sufficient
 }
 
-/// Fix pending on ticket #079
-#[should_panic(expected = "fuel oil 2 boiler should map to 'Gas Boiler'")]
 #[test]
 fn fuel_oil_2_boiler_resolves_to_gas_boiler_config_with_oil_fuel() {
     let xml = minimal_xml(

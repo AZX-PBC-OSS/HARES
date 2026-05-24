@@ -97,7 +97,8 @@ pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
         "electric" | "electricity" | "elec" => Some(FuelType::Electric),
         "gas" | "natural_gas" | "natural gas" => Some(FuelType::Gas),
         "propane" => Some(FuelType::Propane),
-        "oil" | "fuel_oil" | "fuel oil" => Some(FuelType::Oil),
+        "oil" | "fuel_oil" | "fuel oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
+        | "fuel oil 5/6" | "kerosene" | "diesel" => Some(FuelType::Oil),
         "none" | "no_fuel" | "no fuel" => Some(FuelType::None),
         _ => None,
     }

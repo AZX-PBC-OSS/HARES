@@ -1830,6 +1830,10 @@ fn canonical_hvac_heating_name(
         | ("WallFurnace", FuelType::Gas)
         | ("FloorFurnace", FuelType::Gas) => "Gas Furnace",
         ("Boiler", FuelType::Gas) => "Gas Boiler",
+        ("Furnace", FuelType::Propane | FuelType::Oil)
+        | ("WallFurnace", FuelType::Propane | FuelType::Oil)
+        | ("FloorFurnace", FuelType::Propane | FuelType::Oil) => "Gas Furnace",
+        ("Boiler", FuelType::Propane | FuelType::Oil) => "Gas Boiler",
         _ => {
             return Err(HpxmlError::Parse(format!(
                 "unsupported HPXML heating system type/fuel combination: \
