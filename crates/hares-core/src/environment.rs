@@ -6,7 +6,7 @@ use std::time::Duration as StdDuration;
 use chrono::Duration;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use hares_io::hpxml::building::{BoundaryType, ZoneType};
-use hares_io::{Building, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
+use hares_io::{Building, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries, monthly_day_counts};
 use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
     psychrometrics::{humidity_ratio_from_tdp, moist_air_enthalpy, wet_bulb_from_humidity_ratio},
@@ -718,30 +718,39 @@ fn compute_mains_inputs(weather: &WeatherTimeSeries, step_secs: u32) -> (f64, f6
     // 29 days for February when the data length implies a leap year.
     let samples_per_day = usize::try_from(86_400 / step_secs.max(1)).unwrap_or(0);
     if samples_per_day == 0 {
-        return (annual_avg_c, simple_range(temps));
+        return (annual_avg_c, 0.0);
     }
-    let month_days: [usize; 12] = if temps.len() == 366 * samples_per_day {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let year_samples: usize = month_days.iter().sum::<usize>() * samples_per_day;
-    if temps.len() < year_samples {
-        return (annual_avg_c, simple_range(temps));
-    }
+    let is_leap = temps.len() == 366 * samples_per_day;
+    let month_days = monthly_day_counts(is_leap);
 
+    // Accumulate month means for months fully covered by the available data.
+    // For a full year this processes all 12 months. For short or synthetic
+    // weather this processes as many complete months as the data allows.
     let mut month_means = Vec::with_capacity(12);
     let mut cursor = 0usize;
     for days in month_days {
         let month_samples = days * samples_per_day;
         let end = cursor + month_samples;
+        if end > temps.len() {
+            break;
+        }
         let slice = &temps[cursor..end];
         month_means.push(mean_or_default(slice, annual_avg_c));
         cursor = end;
     }
 
-    let monthly_range_c = simple_range(&month_means);
-    (annual_avg_c, monthly_range_c.max(1.0))
+    if month_means.len() >= 2 {
+        let monthly_range_c = simple_range(&month_means);
+        return (annual_avg_c, monthly_range_c.max(1.0));
+    }
+
+    // Fewer than 2 full months: conservative fallback.
+    // Per Kusuda & Achenbach (1965) ASHRAE Trans. 71(1):61-74, T_amplitude
+    // is half the range of monthly mean temperatures. When fewer than 2
+    // monthly means can be computed from the available data, use 0.0
+    // amplitude (constant ground temperature equal to annual mean), which is
+    // physically conservative and matches the synthetic weather case.
+    (annual_avg_c, 0.0)
 }
 
 fn mean_or_default(values: &[f64], default: f64) -> f64 {
@@ -2072,16 +2081,11 @@ mod tests {
     /// available, NOT from the instantaneous min/max of the raw hourly series.
     ///
     /// Fixture: 48-hour series (2 days) where values alternate between -20°C and
-    /// +20°C, giving `simple_range(temps) = 40°C`.  No full calendar month can be
+    /// +20°C, giving an instantaneous range of 40°C.  No full calendar month can be
     /// assembled (31 days minimum), so the correct behaviour is to return amplitude = 0.0
     /// (constant ground temperature equal to annual mean, the physically conservative
-    /// choice per the ticket).  The buggy code returns 40°C.
-    ///
-    /// NOTE: this test FAILS with the current (buggy) code.
-    /// Fix pending — will stop panicking when short-weather
-    /// fallback uses monthly means instead of instantaneous extremes.
+    /// choice per Kusuda & Achenbach 1965).
     #[test]
-    #[should_panic(expected = "expected amplitude")]
     fn short_weather_fallback_uses_monthly_means_not_instantaneous_extremes() {
         let step_secs = 3600u32;
         let n = 48usize; // 2 days — far less than one full calendar month
@@ -2123,14 +2127,85 @@ mod tests {
         // The Burch-Christensen model requires the monthly-mean range.  When fewer
         // than 2 full months are available, the amplitude should be 0.0 (constant
         // ground temperature = annual mean), not the instantaneous 40°C range.
-        // Buggy code: simple_range(temps) = 40.0.
-        // Fixed code: no full months available → amplitude = 0.0.
+        // The fallback path uses monthly means only (never simple_range on raw temps).
         assert!(
-            range < 5.0,
+            (range - 0.0).abs() < 1e-9,
             "expected amplitude ≈ 0.0 for 48-hour weather \
              (fewer than one full calendar month), but got {range:.4} — \
-             indicates fallback is using instantaneous hourly extremes (simple_range) \
+             indicates amplitude is derived from instantaneous hourly extremes \
              instead of monthly means"
+        );
+    }
+
+    /// DoD requirement: a weather series with exactly 2 full months of data
+    /// must derive the amplitude from monthly means, not from instantaneous
+    /// hourly extremes.  Additionally, a partial third month must not be
+    /// included in the accumulation.
+    ///
+    /// Fixture: 1416-hour series (31 + 28 = 59 days, non-leap 2 months).
+    /// January alternates −10°C / +10°C (mean = 0°C, hourly extremes −10..+10).
+    /// February alternates +20°C / +40°C (mean = 30°C, hourly extremes +20..+40).
+    /// Old Defect-2 code: `simple_range(&temps)` = 40 − (−10) = 50°C.
+    /// Correct code: `simple_range(&month_means)` = 30 − 0 = 30°C.
+    #[test]
+    fn partial_year_two_months_uses_monthly_mean_range() {
+        let step_secs = 3600u32;
+        let samples_per_day = 24usize;
+        let jan_days = 31usize;
+        let feb_days = 28usize;
+        let jan_samples = jan_days * samples_per_day;
+        let feb_samples = feb_days * samples_per_day;
+        let n = jan_samples + feb_samples; // 1416 — exactly 2 calendar months
+
+        // January: alternating −10/+10 °C → mean 0 °C, hourly extremes −10..+10
+        // February: alternating +20/+40 °C → mean 30 °C, hourly extremes +20..+40
+        let mut dry_bulb = vec![0.0f64; n];
+        for h in 0..jan_samples {
+            dry_bulb[h] = if h % 2 == 0 { -10.0 } else { 10.0 };
+        }
+        for h in jan_samples..n {
+            dry_bulb[h] = if h % 2 == 0 { 20.0 } else { 40.0 };
+        }
+
+        let weather = WeatherTimeSeries {
+            meta: WeatherMeta {
+                location: "TwoMonths-034".to_string(),
+                latitude: 40.0,
+                longitude: 0.0,
+                timezone_offset_h: 0.0,
+                elevation_m: 0.0,
+                source_step_secs: step_secs,
+                midpoint_offset_secs: 0,
+            },
+            dry_bulb_c: dry_bulb,
+            dew_point_c: vec![0.0; n],
+            rel_humidity_pct: vec![50.0; n],
+            pressure_kpa: vec![101.325; n],
+            ghi_w_m2: vec![0.0; n],
+            dni_w_m2: vec![0.0; n],
+            dhi_w_m2: vec![0.0; n],
+            wind_speed_m_s: vec![1.0; n],
+            wind_dir_deg: vec![180.0; n],
+            opaque_sky_cover: vec![0.0; n],
+            horizontal_infrared_w_m2: vec![250.0; n],
+            sky_temp_c: vec![0.0; n],
+            ground_temp_c: vec![10.0; n],
+            liquid_precip_m: vec![0.0; n],
+            surface_albedo: None,
+        };
+
+        let (_avg, range) = compute_mains_inputs(&weather, step_secs);
+
+        // With two full months available, the loop processes Jan and Feb
+        // (cursor advances through each), then breaks on March because
+        // cursor + 31*24 > n.  Jan mean = 0 °C, Feb mean = 30 °C,
+        // range = 30 °C.  The old Defect-2 path returned 50 °C
+        // (instantaneous extremes −10..+40); the fix returns 30 °C.
+        assert!(
+            (range - 30.0).abs() < 0.01,
+            "expected 2-month range = 30.0 °C (Jan mean = 0 °C, Feb mean = 30 °C), \
+             but got {range:.4} — indicates amplitude derivation for partial-year \
+             data is not using monthly means"
         );
     }
 

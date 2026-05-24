@@ -431,7 +431,7 @@ const DOE2_MID_MONTH_DAYS: [f64; 12] = [
     15.0, 46.0, 74.0, 95.0, 135.0, 166.0, 196.0, 227.0, 258.0, 288.0, 319.0, 349.0,
 ];
 
-pub(crate) fn monthly_day_counts(is_leap_year: bool) -> [usize; 12] {
+pub fn monthly_day_counts(is_leap_year: bool) -> [usize; 12] {
     if is_leap_year {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
