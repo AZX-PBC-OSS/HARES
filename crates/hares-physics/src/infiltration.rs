@@ -534,6 +534,10 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     // OCHRE envelope.py:521: inf_sft = f_t * (shelter * (1-y_i) + s_wflue * 1.5 * y_i)
     let shelter_coeff = f_t * (params.shielding.raw() * (1.0 - y_i) + s_wflue * 1.5 * y_i);
 
+    // The returned coefficients are calibrated for raw EPW/met-station wind speed
+    // input (10 m, open-country terrain). Terrain/height correction is embedded in
+    // shelter_coeff via f_t at line 527. The caller must pass the raw met-station
+    // wind speed — applying a second terrain correction at runtime would double-correct.
     Aim2Coefficients {
         c_s,
         c_w,
@@ -628,6 +632,11 @@ pub fn calculate_ela_coefficients(
     // Wind coefficient: Cw = f_w² / 100 [(L/s)²/(cm⁴·(m/s)²)].
     let wind_coeff = f_w * f_w / 100.0;
 
+    // The returned coefficients are calibrated for raw EPW/met-station wind speed
+    // input (10 m, open-country terrain). Terrain/height correction is embedded in
+    // wind_coeff via f_t (the ASHRAE power-law terrain correction at lines 622–623).
+    // The caller must pass the raw met-station wind speed — applying a second
+    // terrain correction at runtime would double-correct.
     (stack_coeff, wind_coeff)
 }
 
