@@ -5,6 +5,7 @@ use std::time::Duration as StdDuration;
 #[cfg(test)]
 use chrono::Duration;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
+use hares_io::hpxml::building::{BoundaryType, ZoneType};
 use hares_io::{Building, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
 use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
@@ -57,6 +58,13 @@ pub enum EnvironmentManagerError {
         "attic zone {zone_idx} is missing volume_m3; provide attic geometry or explicit ventilation data"
     )]
     MissingAtticVolume { zone_idx: usize },
+    #[error(
+        "surface {surface_type} at boundary index {boundary_idx} is missing azimuth; orientation is required for solar-receiving surfaces"
+    )]
+    MissingAzimuth {
+        boundary_idx: usize,
+        surface_type: String,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -226,7 +234,7 @@ impl EnvironmentManager {
             .iter()
             .map(|zone| zone.zone_type.clone())
             .collect();
-        let surfaces = build_surface_geometry(building);
+        let surfaces = build_surface_geometry(building)?;
         // Use the shifted offset (with midpoint_offset_secs applied) for initial conditions
         // to match OCHRE's behavior of reading weather at the period midpoint.
         // EPW hour 12 (covers 11:00-12:00) has its representative value at 11:30.
@@ -753,19 +761,64 @@ fn simple_range(values: &[f64]) -> f64 {
     (max - min).max(0.0)
 }
 
-fn build_surface_geometry(building: &Building) -> Vec<SurfaceGeometry> {
+fn build_surface_geometry(
+    building: &Building,
+) -> Result<Vec<SurfaceGeometry>, EnvironmentManagerError> {
     building
         .boundaries
         .iter()
         .enumerate()
         .map(|(idx, boundary)| {
             let tilt_deg = boundary.tilt_deg.unwrap_or(90.0);
-            SurfaceGeometry {
+            let azimuth_deg = match boundary.azimuth_deg {
+                Some(az) => az,
+                None => {
+                    let is_exterior = matches!(boundary.exterior_zone, Some(ZoneType::Outdoor));
+                    match (&boundary.boundary_type, is_exterior) {
+                        (BoundaryType::Window, _) => {
+                            return Err(EnvironmentManagerError::MissingAzimuth {
+                                boundary_idx: idx,
+                                surface_type: "Window".to_string(),
+                            });
+                        }
+                        (BoundaryType::Wall, true) => {
+                            tracing::warn!(
+                                boundary_idx = idx,
+                                surface_type = "Wall",
+                                "wall surface has no azimuth; treating as 180° (south-facing) \
+                                 — HPXML does not require azimuth on walls, so this is a \
+                                 valid if physically ambiguous input; the surface will receive \
+                                 south-facing solar gain which may over- or under-estimate \
+                                 actual solar load"
+                            );
+                            180.0
+                        }
+                        (BoundaryType::Roof, true) => {
+                            tracing::warn!(
+                                boundary_idx = idx,
+                                surface_type = "Roof",
+                                "roof surface has no azimuth; treating as 180° (south-facing) \
+                                 — hip and flat roofs receive solar from all azimuth angles; \
+                                 this approximation is not physically correct and will be \
+                                 replaced by a hemispherical model"
+                            );
+                            180.0
+                        }
+                        _ => {
+                            // Interior surfaces (inside walls, furniture) or
+                            // non-sky-facing boundaries (foundation, slab, floor,
+                            // rim joist): azimuth is irrelevant for solar.
+                            180.0
+                        }
+                    }
+                }
+            };
+            Ok(SurfaceGeometry {
                 surface_id: u32::try_from(idx).unwrap_or(u32::MAX),
-                azimuth_deg: boundary.azimuth_deg.unwrap_or(180.0),
+                azimuth_deg,
                 tilt_deg,
                 area_m2: boundary.area_m2,
-            }
+            })
         })
         .collect()
 }

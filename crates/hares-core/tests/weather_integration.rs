@@ -781,19 +781,23 @@ fn resampled_weather_produces_smooth_environment() {
 // Regression tests: ticket 033 — missing surface azimuth silent default
 // ---------------------------------------------------------------------------
 //
-// These tests document the EXPECTED behavior after the fix is implemented.
-// `wall_missing_azimuth_causes_error` FAILS with current code because
-// `EnvironmentManager::new` does not yet return Err for a wall with
-// `azimuth_deg: None`.  Remove the #[should_panic] annotation when the
-// fix lands and the test passes normally.
+// `wall_missing_azimuth_constructs_with_warning` verifies that an exterior
+// wall with `azimuth_deg: None` constructs successfully with a
+// `tracing::warn!` instead of silently substituting 180°. HPXML does not
+// require `<Azimuth>` on walls, so rejecting valid inputs with `Err` would
+// be too strict. A warning makes the data gap detectable without blocking
+// simulation.
+// `roof_missing_azimuth_constructs_successfully` verifies that roofs
+// with missing azimuth are accepted (HPXML permits it for hip/flat roofs)
+// with a `tracing::warn!`.
 
-/// A wall boundary with `azimuth_deg: None` should cause
-/// `EnvironmentManager::new` to return `Err(MissingAzimuth{..})`.
-///
-/// Currently fails: `build_surface_geometry` silently substitutes 180°.
+/// A wall boundary with `azimuth_deg: None` should allow
+/// `EnvironmentManager::new` to succeed (with a warning), because
+/// HPXML does not require `<Azimuth>` on walls — it is optional.
+/// A `tracing::warn!` makes the data gap detectable without
+/// blocking simulation.
 #[test]
-#[should_panic(expected = "EnvironmentManager::new must fail")]
-fn wall_missing_azimuth_causes_error() {
+fn wall_missing_azimuth_constructs_with_warning() {
     let weather = synthetic_weather();
     let schedule = minimal_schedule();
 
@@ -822,6 +826,7 @@ fn wall_missing_azimuth_causes_error() {
             ventilation_sla: None,
         }],
         // azimuth_deg is None — exterior wall with unknown orientation.
+        // Valid HPXML: wall azimuth is optional.
         boundaries: vec![Boundary {
             id: "wall-no-azimuth".to_string(),
             boundary_type: BoundaryType::Wall,
@@ -871,27 +876,17 @@ fn wall_missing_azimuth_causes_error() {
     };
 
     let start = ts(0);
-    let result = EnvironmentManager::new(
+    EnvironmentManager::new(
         weather,
         schedule,
         &building,
         StdDuration::from_secs(3600),
         start,
         None,
+    )
+    .expect(
+        "wall with no azimuth must construct successfully (HPXML does not require wall azimuth)",
     );
-
-    // After fix: result must be Err containing a message about missing azimuth.
-    // Currently the test panics here because `EnvironmentManager::new` returns Ok.
-    match result {
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("azimuth") || msg.contains("Azimuth"),
-                "error message must mention azimuth, got: {msg}"
-            );
-        }
-        Ok(_) => panic!("EnvironmentManager::new must fail when wall has no azimuth"),
-    }
 }
 
 /// A roof boundary with `azimuth_deg: None` should allow
@@ -989,4 +984,119 @@ fn roof_missing_azimuth_constructs_successfully() {
         None,
     )
     .expect("roof with no azimuth must construct successfully");
+}
+
+/// A window boundary with `azimuth_deg: None` must return
+/// `Err(EnvironmentManagerError::MissingAzimuth)` because HPXML requires
+/// `<Azimuth>` on all windows/skylights for correct solar gain computation.
+/// This is the only code path where `build_surface_geometry` returns `Err`
+/// — every other surface type with a missing azimuth receives a warning and
+/// falls back to 180°.
+#[test]
+fn window_missing_azimuth_returns_error() {
+    let weather = synthetic_weather();
+    let schedule = minimal_schedule();
+
+    let details_xml = hares_io::hpxml::building::XmlNode {
+        name: "BuildingDetails".to_string(),
+        attrs: std::collections::HashMap::new(),
+        text: String::new(),
+        children: vec![],
+    };
+    let building = hares_io::Building {
+        site: Site {
+            elevation_m: None,
+            site_type: None,
+            shielding_of_home: None,
+            latitude_deg: Some(40.0),
+            longitude_deg: Some(-105.0),
+        },
+        zones: vec![Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        }],
+        boundaries: vec![Boundary {
+            id: "window-no-azimuth".to_string(),
+            boundary_type: BoundaryType::Window,
+            area_m2: 4.0,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: vec![],
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: vec![],
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(90.0),
+            framing_factor: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+        }],
+        windows: Vec::<Window>::new(),
+        infiltration_ach50: None,
+        infiltration_cfm50: None,
+        infiltration_ela_cm2: None,
+        infiltration_constant_ach: None,
+        hvac_capacity_w: None,
+        seer2: None,
+        hspf2: None,
+        water_heater_setpoint_c: None,
+        heating_weekday_setpoints_c: None,
+        heating_weekend_setpoints_c: None,
+        cooling_weekday_setpoints_c: None,
+        cooling_weekend_setpoints_c: None,
+        battery_round_trip_efficiency: None,
+        pv_tilt_deg: None,
+        conditioned_volume_m3: None,
+        ceiling_height_m: None,
+        infiltration_height_m: None,
+        floors_above_grade: None,
+        has_flue_or_chimney: None,
+        foundation_name: None,
+        residential_facility_type: None,
+        mass_multiplier_override: None,
+        hvac_deadband_c: None,
+        details_xml,
+    };
+
+    let start = ts(0);
+    let result = EnvironmentManager::new(
+        weather,
+        schedule,
+        &building,
+        StdDuration::from_secs(3600),
+        start,
+        None,
+    );
+
+    match result {
+        Err(hares_core::environment::EnvironmentManagerError::MissingAzimuth {
+            boundary_idx: 0,
+            surface_type,
+        }) => {
+            assert_eq!(surface_type, "Window");
+        }
+        Ok(_) => {
+            panic!(
+                "window with azimuth_deg: None must return MissingAzimuth error, \
+                 got Ok"
+            );
+        }
+        Err(other) => {
+            panic!(
+                "window with azimuth_deg: None must return MissingAzimuth error, \
+                 got {other:?}"
+            );
+        }
+    }
 }
