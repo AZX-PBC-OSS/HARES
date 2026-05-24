@@ -192,8 +192,9 @@ pub(super) fn resolve_water_heaters(
                 // Scale factor mapping UEF to rated COP for HPWH.
                 // Source: OCHRE WaterHeater.py; derived from GE GeoSpring calibration.
                 const HPWH_UEF_TO_COP: f64 = 1.174_536_058;
-                let uef = uniform_energy_factor
-                    .or_else(|| energy_factor.map(|ef| (HPWH_UEF_TO_EF_SLOPE + ef) / HPWH_UEF_TO_EF_DENOM));
+                let uef = uniform_energy_factor.or_else(|| {
+                    energy_factor.map(|ef| (HPWH_UEF_TO_EF_SLOPE + ef) / HPWH_UEF_TO_EF_DENOM)
+                });
                 let low_power = uef.is_some_and(|u| (u - 4.9).abs() < 1e-9);
                 let (cop, setpoint_c, tempering_valve_setpoint_c) = if low_power {
                     // Low-power OCHRE preset (UEF ≈ 4.9): fixed 60 °C storage,
@@ -970,7 +971,9 @@ mod tests {
         );
         let cfg = parse_gas_wh_config(&xml);
         let expected_w = 600.0 * 0.293_071_07;
-        let pw = cfg.pilot_power_w.expect("pilot_power_w must be set when PilotPower is in HPXML");
+        let pw = cfg
+            .pilot_power_w
+            .expect("pilot_power_w must be set when PilotPower is in HPXML");
         assert!(
             (pw - expected_w).abs() < 0.01,
             "PilotPower=600 BTU/h must convert to ~{expected_w:.2} W, got {pw:.2}"

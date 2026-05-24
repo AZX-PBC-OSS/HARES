@@ -49,5 +49,6 @@ conditioned_oracle
 .shipwright
 
 docs/eplus/
+docs/hpxml/
 
 .verify*

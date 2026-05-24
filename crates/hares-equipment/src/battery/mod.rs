@@ -1703,7 +1703,8 @@ mod tests {
         for _ in 0..10 {
             let mut ports = default_ports();
             bat.step(&env, dt, &mut ports).unwrap();
-            total_charge_energy += ports.electrical.net_active_kw() * dt.as_secs_f64() / SECONDS_PER_HOUR;
+            total_charge_energy +=
+                ports.electrical.net_active_kw() * dt.as_secs_f64() / SECONDS_PER_HOUR;
         }
         let soc_after_charge = bat.soc;
 

@@ -180,7 +180,11 @@ pub fn distribution_daily_hot_water_l(
             piping_length_m,
             default_piping_length_m,
         } => {
-            let dist_factor = if *pipe_r_value >= PIPE_INSULATION_R_THRESHOLD_M2_K_W { 0.9 } else { 1.0 };
+            let dist_factor = if *pipe_r_value >= PIPE_INSULATION_R_THRESHOLD_M2_K_W {
+                0.9
+            } else {
+                1.0
+            };
             // Default piping length expressed in metres; ratio is dimensionless.
             let actual_m = piping_length_m.unwrap_or(*default_piping_length_m);
             let ratio = if *default_piping_length_m > 0.0 {
@@ -194,7 +198,11 @@ pub fn distribution_daily_hot_water_l(
             pipe_r_value,
             branch_loop_length_m,
         } => {
-            let dist_factor = if *pipe_r_value >= PIPE_INSULATION_R_THRESHOLD_M2_K_W { 1.0 } else { 1.11 };
+            let dist_factor = if *pipe_r_value >= PIPE_INSULATION_R_THRESHOLD_M2_K_W {
+                1.0
+            } else {
+                1.11
+            };
             // Default branch loop length = 10 ft ≈ 3.048 m.
             const DEFAULT_BRANCH_M: f64 = 3.048;
             let actual_m = branch_loop_length_m.unwrap_or(DEFAULT_BRANCH_M);

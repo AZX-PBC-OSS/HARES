@@ -333,8 +333,7 @@ impl Equipment for TanklessWH {
                     // instantaneous rated power -- the heater fires at rated capacity during
                     // its on-fraction regardless of duty or power-limit accounting.
                     let outlet_c = inlet_temp_c
-                        + self.rated_thermal_power_w
-                            / (total_draw_kg_s * CP_LIQUID_WATER_J_KG_K);
+                        + self.rated_thermal_power_w / (total_draw_kg_s * CP_LIQUID_WATER_J_KG_K);
                     (capacity_w, outlet_c)
                 }
             } else if mode == OperatingMode::Heating {

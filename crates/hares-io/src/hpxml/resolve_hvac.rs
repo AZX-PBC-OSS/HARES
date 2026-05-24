@@ -1583,8 +1583,43 @@ pub(super) fn resolve_hvac(
         }
         if let Some(eff_node) = heat_pump.child("BackupAnnualHeatingEfficiency") {
             if let Some(val) = child_f64(eff_node, "Value") {
-                // EIR = 1/efficiency for resistance backup
-                params.insert("backup_eir".to_string(), json!(1.0 / val.max(0.01)));
+                let units_raw = child_text(eff_node, "Units").unwrap_or_default();
+                let units = units_raw.to_ascii_uppercase();
+                let eir = match units.as_str() {
+                    "PERCENT" if val > 1.0 => {
+                        // Value expressed as percent-out-of-100 (e.g. 95 → 95%).
+                        // Divide by 100 before inverting so 100% efficiency yields EIR = 1.0.
+                        // OpenStudio-HPXML (NREL reference implementation) treats Percent
+                        // values as fractions 0–1, but HARES guards against the
+                        // percent-out-of-100 form to be robust to all valid HPXML inputs.
+                        100.0 / val.max(0.01)
+                    }
+                    "PERCENT" => {
+                        // Value is already a fraction (0–1) — the conventional HPXML form.
+                        1.0 / val.max(0.01)
+                    }
+                    // AFUE is always a fraction (0–1). Absent units default to fraction
+                    // form per HPXML convention.
+                    "AFUE" | "" => 1.0 / val.max(0.01),
+                    // COP is already a COP; EIR = 1/COP.
+                    "COP" => 1.0 / val.max(0.01),
+                    // HSPF and HSPF2 are seasonal metrics valid per the HPXML XSD
+                    // HeatingEfficiencyUnits_simple type, but they do not apply to a
+                    // backup resistance or gas strip. Reject loudly.
+                    "HSPF" | "HSPF2" => {
+                        return Err(HpxmlError::Parse(format!(
+                            "BackupAnnualHeatingEfficiency: '{units_raw}' is a seasonal metric, \
+                             not supported for backup heating"
+                        )));
+                    }
+                    _ => {
+                        return Err(HpxmlError::Parse(format!(
+                            "BackupAnnualHeatingEfficiency: unrecognized or unsupported units \
+                             '{units_raw}'"
+                        )));
+                    }
+                };
+                params.insert("backup_eir".to_string(), json!(eir));
             }
         }
         if let Some(fuel) = child_text(heat_pump, "BackupSystemFuel") {
@@ -4684,8 +4719,8 @@ mod tests {
         heater.parameters.get("backup_eir").and_then(Value::as_f64)
     }
 
-    /// Regression (ticket 077): Percent with value 1.0 (fraction form) → EIR = 1.0 (COP = 1).
-    /// This is the common case produced by all OS-HPXML sample files.
+    /// Percent with value 1.0 (fraction form, 0–1) → EIR = 1.0 (COP = 1).
+    /// This is the conventional form used by all OpenStudio-HPXML sample files.
     #[test]
     fn backup_eir_percent_fraction_form_yields_eir_one() {
         // <Units>Percent</Units><Value>1.0</Value> means 100% efficiency as a fraction.
@@ -4697,28 +4732,20 @@ mod tests {
         );
     }
 
-    /// Regression (ticket 077): Percent with value 100.0 (percent-out-of-100 form) currently
-    /// produces EIR = 1/100 = 0.01 (COP = 100 — physically impossible for resistance heat).
-    /// After the fix the Units element must be read and the value divided by 100 before
-    /// inverting, yielding EIR = 1.0.
-    ///
-    /// This test is expected to FAIL until the fix in ticket 077 is applied.
-    /// Fix pending on ticket 077 — will stop panicking when Percent efficiency is normalized before inverting to EIR
-    #[should_panic(expected = "must yield EIR=1.0 after normalization")]
+    /// Regression: Percent with value 100.0 (percent-out-of-100 form) must be normalized
+    /// by dividing by 100 before inverting, yielding EIR = 1.0 (COP = 1).
     #[test]
     fn backup_eir_percent_out_of_100_must_normalize_to_eir_one() {
-        // <Units>Percent</Units><Value>100.0</Value>: a real file expressing 100% efficiency
-        // as a percentage rather than a fraction.
+        // <Units>Percent</Units><Value>100.0</Value> expressing 100% efficiency
+        // as percent-out-of-100 must be normalized to fraction before EIR inversion.
         let eir = resolve_backup_eir("Percent", 100.0).expect("backup_eir must be present");
-        // Without the fix: eir = 1/100.0 = 0.01 (COP = 100 — wrong).
-        // With the fix:    eir = (100.0 / 100.0)⁻¹ = 1.0.
         assert!(
             (eir - 1.0).abs() < 1e-9,
-            "Percent/100.0 must yield EIR=1.0 after normalization (currently {eir} — bug 077)"
+            "Percent/100.0 must yield EIR=1.0 after normalization, got {eir}"
         );
     }
 
-    /// Regression (ticket 077): AFUE with value 0.95 → EIR ≈ 1.0526 (gas backup at 95% AFUE).
+    /// AFUE with value 0.95 → EIR ≈ 1.0526 (gas backup at 95% AFUE).
     #[test]
     fn backup_eir_afue_fraction_yields_correct_eir() {
         let eir = resolve_backup_eir("AFUE", 0.95).expect("backup_eir must be present");
@@ -4729,7 +4756,7 @@ mod tests {
         );
     }
 
-    /// Regression (ticket 077): COP with value 3.5 → EIR ≈ 0.2857.
+    /// COP with value 3.5 → EIR ≈ 0.2857.
     #[test]
     fn backup_eir_cop_yields_correct_eir() {
         let eir = resolve_backup_eir("COP", 3.5).expect("backup_eir must be present");
@@ -4737,6 +4764,98 @@ mod tests {
         assert!(
             (eir - expected).abs() < 1e-6,
             "COP/3.5 must yield EIR≈{expected:.4}, got {eir}"
+        );
+    }
+
+    /// Helper: build a minimal HeatPump XML fragment with the given backup efficiency
+    /// units and value, run resolve_hvac, and return the `Result<backup_eir>` — propagating
+    /// parse errors so error-path tests can assert on the error.
+    fn resolve_backup_eir_result(units: &str, value: f64) -> Result<Option<f64>, HpxmlError> {
+        let xml = format!(
+            r#"
+            <HPXML>
+              <Building>
+                <BuildingDetails>
+                  <Systems>
+                    <HVAC>
+                      <HVACPlant>
+                        <HeatPump>
+                          <SystemIdentifier id="hp1"/>
+                          <HeatPumpType>air-to-air</HeatPumpType>
+                          <HeatPumpFuel>electricity</HeatPumpFuel>
+                          <HeatingCapacity>36000.0</HeatingCapacity>
+                          <CoolingCapacity>36000.0</CoolingCapacity>
+                          <AnnualHeatingEfficiency>
+                            <Units>HSPF</Units>
+                            <Value>8.5</Value>
+                          </AnnualHeatingEfficiency>
+                          <AnnualCoolingEfficiency>
+                            <Units>SEER</Units>
+                            <Value>16.0</Value>
+                          </AnnualCoolingEfficiency>
+                          <BackupType>integrated</BackupType>
+                          <BackupSystemFuel>electricity</BackupSystemFuel>
+                          <BackupAnnualHeatingEfficiency>
+                            <Units>{units}</Units>
+                            <Value>{value}</Value>
+                          </BackupAnnualHeatingEfficiency>
+                          <BackupHeatingCapacity>10000.0</BackupHeatingCapacity>
+                          <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+                          <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+                        </HeatPump>
+                      </HVACPlant>
+                    </HVAC>
+                  </Systems>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+            "#
+        );
+        let root = parse_xml_document(&xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details must exist");
+        let mut building = empty_building(vec![conditioned_zone()]);
+        building.details_xml = details.clone();
+        let defaults = DefaultsStore::empty();
+        let mut specs = Vec::new();
+        resolve_hvac(&building, &defaults, &mut specs)?;
+        let heater = specs
+            .iter()
+            .find(|s| s.name.contains("Heater"))
+            .ok_or_else(|| HpxmlError::Parse("no heater spec found".into()))?;
+        Ok(heater.parameters.get("backup_eir").and_then(Value::as_f64))
+    }
+
+    /// Unrecognized units (e.g. "Joules") must produce a loud parse error, not a silent default.
+    #[test]
+    fn backup_eir_unknown_units_produces_parse_error() {
+        let err = resolve_backup_eir_result("Joules", 1.0).unwrap_err();
+        assert!(
+            matches!(err, HpxmlError::Parse(_)),
+            "unrecognized units must produce HpxmlError::Parse, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Joules"),
+            "error message must name the unrecognized unit, got: {msg}"
+        );
+    }
+
+    /// HSPF and HSPF2 are valid HeatingEfficiencyUnits per the HPXML XSD, but are seasonal
+    /// metrics that do not apply to a backup resistance or gas strip. They must be rejected
+    /// with a loud parse error.
+    #[test]
+    fn backup_eir_hspf_rejected_for_backup_strip() {
+        let err = resolve_backup_eir_result("HSPF", 8.5).unwrap_err();
+        assert!(
+            matches!(err, HpxmlError::Parse(_)),
+            "HSPF for backup must produce HpxmlError::Parse, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("HSPF"),
+            "error message must name HSPF, got: {msg}"
         );
     }
 
@@ -4806,7 +4925,10 @@ mod tests {
             (eer - expected).abs() < expected * 0.001,
             "EER2=10.0 must convert to EER≈{expected:.4} (factor 1/0.92), got {eer:.4}"
         );
-        assert!(eer > 10.0, "EER2=10.0 must yield EER > 10.0 since EER2 < EER for same unit");
+        assert!(
+            eer > 10.0,
+            "EER2=10.0 must yield EER > 10.0 since EER2 < EER for same unit"
+        );
     }
 
     // Regression (ticket 088): plain EER must remain unchanged through normalize_efficiency_units.

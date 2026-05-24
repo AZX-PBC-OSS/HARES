@@ -13,7 +13,9 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 
-use hares_physics::constants::{CELSIUS_TO_KELVIN as KELVIN_OFFSET_C, HOURS_PER_YEAR, STEFAN_BOLTZMANN};
+use hares_physics::constants::{
+    CELSIUS_TO_KELVIN as KELVIN_OFFSET_C, HOURS_PER_YEAR, STEFAN_BOLTZMANN,
+};
 use hares_types::parse_trimmed_f64;
 use tracing::{debug, warn};
 

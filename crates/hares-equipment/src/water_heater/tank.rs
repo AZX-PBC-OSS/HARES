@@ -433,8 +433,8 @@ impl StratifiedTank {
             }
             validate_finite("heat_injection_power_w", power_w)?;
             let volume_m3 = self.node_volume(node)?;
-            let delta_t_c = power_w * seconds
-                / (WATER_DENSITY_KG_PER_M3 * volume_m3 * CP_LIQUID_WATER_J_KG_K);
+            let delta_t_c =
+                power_w * seconds / (WATER_DENSITY_KG_PER_M3 * volume_m3 * CP_LIQUID_WATER_J_KG_K);
             self.node_temps_c[node] += delta_t_c;
         }
         Ok(())
@@ -450,8 +450,8 @@ impl StratifiedTank {
         let seconds = dt.as_secs_f64();
         validate_nonnegative("dt_seconds", seconds)?;
         let volume_m3 = self.node_volume(node)?;
-        let delta_t_c = power_w * seconds
-            / (WATER_DENSITY_KG_PER_M3 * volume_m3 * CP_LIQUID_WATER_J_KG_K);
+        let delta_t_c =
+            power_w * seconds / (WATER_DENSITY_KG_PER_M3 * volume_m3 * CP_LIQUID_WATER_J_KG_K);
         self.node_temps_c[node] += delta_t_c;
         Ok(())
     }
@@ -572,9 +572,8 @@ impl StratifiedTank {
         self.last_skin_loss_w = total_skin_loss_w;
 
         for (idx, node_temp_c) in self.node_temps_c.iter_mut().enumerate() {
-            let thermal_mass_j_per_k = WATER_DENSITY_KG_PER_M3
-                * self.node_volumes_m3[idx]
-                * CP_LIQUID_WATER_J_KG_K;
+            let thermal_mass_j_per_k =
+                WATER_DENSITY_KG_PER_M3 * self.node_volumes_m3[idx] * CP_LIQUID_WATER_J_KG_K;
             *node_temp_c += self.scratch_delta_energy[idx] / thermal_mass_j_per_k;
         }
 
@@ -612,10 +611,8 @@ impl StratifiedTank {
                 top_segment_edges_m3[1],
             )
             * draw_volume_m3;
-        let energy_in_j = WATER_DENSITY_KG_PER_M3
-            * CP_LIQUID_WATER_J_KG_K
-            * mains_temp_c
-            * draw_volume_m3;
+        let energy_in_j =
+            WATER_DENSITY_KG_PER_M3 * CP_LIQUID_WATER_J_KG_K * mains_temp_c * draw_volume_m3;
 
         let mains_start_m3 = self.total_volume_m3 - draw_volume_m3;
         self.scratch_new_temps.fill(0.0);
@@ -804,8 +801,7 @@ mod tests {
         let mut tank = test_tank(1, 50.0);
         let power_w = 4_500.0;
         let dt = Duration::from_secs(60);
-        let mcp =
-            WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
+        let mcp = WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
         let expected_delta_t = power_w * dt.as_secs_f64() / mcp;
 
         tank.heat_node(0, power_w, dt).expect("heat top node");
@@ -856,8 +852,7 @@ mod tests {
 
         let dt = Duration::from_secs(30);
         let ambient = 20.0;
-        let mcp =
-            WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
+        let mcp = WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
         // Use the actual per-node UA (includes end-cap contribution) for the expected value.
         let effective_ua = tank.ua_per_node[0];
         let expected = 60.0 - (effective_ua * (60.0 - ambient) * dt.as_secs_f64()) / mcp;
@@ -1209,8 +1204,7 @@ mod tests {
         );
         // Rough sanity: unmet load ≈ flow_kg_s * Cp * deficit
         let deficit = (tmv.tempered_draw_temp_c - draw.outlet_temp_c).max(0.0);
-        let expected =
-            flow_m3_s * WATER_DENSITY_KG_PER_M3 * CP_LIQUID_WATER_J_KG_K * deficit;
+        let expected = flow_m3_s * WATER_DENSITY_KG_PER_M3 * CP_LIQUID_WATER_J_KG_K * deficit;
         assert!(
             (draw.unmet_load_w - expected).abs() < 1.0,
             "unmet_load_w {:.2} should be close to {expected:.2}",
@@ -1659,11 +1653,8 @@ mod tests {
             "cumulative energy_out must be positive, got {cumulative_energy_out:.0}"
         );
         // 50 draw steps each inject mains water: cumulative_energy_in is exactly ρ·V_draw·Cp·T_mains·50.
-        let expected_energy_in = WATER_DENSITY_KG_PER_M3
-            * CP_LIQUID_WATER_J_KG_K
-            * draw_vol
-            * mains_temp_c
-            * 50.0;
+        let expected_energy_in =
+            WATER_DENSITY_KG_PER_M3 * CP_LIQUID_WATER_J_KG_K * draw_vol * mains_temp_c * 50.0;
         assert!(
             (cumulative_energy_in - expected_energy_in).abs() <= 1.0,
             "cumulative energy_in {cumulative_energy_in:.0} must equal analytic {expected_energy_in:.0} ± 1 J"

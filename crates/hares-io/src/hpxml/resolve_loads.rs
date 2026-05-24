@@ -194,8 +194,16 @@ pub(super) fn resolve_scheduled_loads(
                         // The 0.89 gas factor approximates OCHRE's BTU-weighted blend of
                         // 0.90 (electric parasitic) and 0.8894 (gas combustion), stable
                         // across CEF values (~7%/93% electric/gas split).
-                        let frac_lost = if vented { DRYER_EXHAUST_FRACTION_VENTED } else { 0.0 };
-                        let gain_factor = if fuel == FuelType::Gas { DRYER_GAS_SENSIBLE_GAIN } else { DRYER_ELECTRIC_SENSIBLE_GAIN };
+                        let frac_lost = if vented {
+                            DRYER_EXHAUST_FRACTION_VENTED
+                        } else {
+                            0.0
+                        };
+                        let gain_factor = if fuel == FuelType::Gas {
+                            DRYER_GAS_SENSIBLE_GAIN
+                        } else {
+                            DRYER_ELECTRIC_SENSIBLE_GAIN
+                        };
                         let frac_sens = (1.0 - frac_lost) * gain_factor;
                         let frac_lat = 1.0 - frac_sens - frac_lost;
                         params.insert("sensible_gain_fraction".to_string(), json!(frac_sens));
@@ -239,9 +247,10 @@ pub(super) fn resolve_scheduled_loads(
                                 // Gas dryer: ~7% electric parasitic, ~93% gas combustion
                                 // OCHRE hpxml.py:1312-1313
                                 let annual_kwh = base_kwh * 0.07 * (3.73 / 3.30) * multiplier;
-                                let annual_therm = base_kwh * BTU_PER_KWH * (1.0 - 0.07) * (3.73 / 3.30)
-                                    / 100_000.0
-                                    * multiplier;
+                                let annual_therm =
+                                    base_kwh * BTU_PER_KWH * (1.0 - 0.07) * (3.73 / 3.30)
+                                        / 100_000.0
+                                        * multiplier;
                                 params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
                                 params.insert("annual_gas_therms".to_string(), json!(annual_therm));
                             }
