@@ -725,8 +725,9 @@ pub fn assemble_building_rc(
                     graph.add_resistance(interior_node, window_node, r_conv_abs.max(1e-6));
 
                     // window_node ↔ outdoor via glass + exterior film.
-                    // For windows: r_film_ext is 0 (already in r_glass from
-                    // U-factor decomposition), so this is just r_glass / A.
+                    // fallback_r is glass-only R (Ro,w subtracted per E+ Step 1);
+                    // r_film_ext = Ro,w is the standard winter exterior film.
+                    // Together they reconstruct 1/U − Ri,w.
                     let r_glass_ext_abs = (bd.fallback_r_m2_k_w + bd.r_film_exterior_m2_k_w) / a;
                     graph.add_resistance(window_node, exterior_node, r_glass_ext_abs.max(1e-6));
 

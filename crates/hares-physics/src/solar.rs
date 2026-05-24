@@ -550,26 +550,43 @@ pub fn window_iam(theta_rad: f64, curve: GlazingCurve) -> f64 {
 
 /// EnergyPlus Simple Window Model Step 1: decompose U-factor into glass and film R.
 ///
-/// Returns `(r_glass, r_film_interior)` in m²·K/W.
-/// Exterior film resistance is 0 for windows per EnergyPlus convention.
+/// Returns `(r_glass, r_film_interior, r_film_exterior)` in m²·K/W.
+///
+/// Per EnergyPlus Engineering Reference (Window Calculation Module, Step 1):
+///  1/U = Ri,w + Ro,w + Rl,w
+///  Ri,w = 1/(0.359073·ln(U) + 6.949915)  for U < 5.85
+///  Ri,w = 1/(1.788041·U − 2.886625)       for U ≥ 5.85
+///  Ro,w = 1/(0.025342·U + 29.163853)      (standard winter exterior film)
+///  Rl,w = 1/U − Ri,w − Ro,w               (glass-only resistance)
+///
+/// The exterior film resistance Ro,w (≈0.034 m²·K/W) was previously absorbed
+/// into r_glass; separating it enables accurate solar parameter computation
+/// in `calculate_window_parameters`, which requires the true glass-only R.
 ///
 /// # References
 /// - EnergyPlus Engineering Reference, Window Calculation Module, Step 1.
-/// - OCHRE `ochre/utils/envelope.py:294–304` (`create_rc_data` with `u_window`).
+///   https://bigladdersoftware.com/epx/docs/9-5/engineering-reference/window-calculation-module.html
+/// - OCHRE `ochre/utils/envelope.py:294–304` sets res_ext_w = 0, absorbing Ro,w
+///   into r_window. HARES diverges from OCHRE here for correctness.
 #[must_use]
-pub fn window_u_factor_decomposition(u_factor_w_m2_k: f64) -> (f64, f64) {
+pub fn window_u_factor_decomposition(u_factor_w_m2_k: f64) -> (f64, f64, f64) {
     if !u_factor_w_m2_k.is_finite() || u_factor_w_m2_k <= 0.0 {
-        return (0.0, 0.12); // safe defaults: no glass R, standard interior film
+        // Safe defaults: no glass R, standard interior film, typical exterior film.
+        return (0.0, 0.12, 0.034);
     }
     let r_int = if u_factor_w_m2_k < 5.85 {
         1.0 / (0.359073 * u_factor_w_m2_k.ln() + 6.949915)
     } else {
         1.0 / (1.788041 * u_factor_w_m2_k - 2.886625)
     };
-    let r_glass = (1.0 / u_factor_w_m2_k - r_int).max(0.0);
+    // Exterior film per EnergyPlus Ro,w correlation (standard winter conditions).
+    // Ro,w ≈ 0.034 m²·K/W across the full U-factor range.
+    let r_ext = 1.0 / (0.025342 * u_factor_w_m2_k + 29.163853);
+    let r_glass = (1.0 / u_factor_w_m2_k - r_int - r_ext).max(0.0);
     debug_assert!(r_glass >= 0.0, "r_glass must be non-negative");
     debug_assert!(r_int > 0.0, "r_film_int must be positive");
-    (r_glass, r_int)
+    debug_assert!(r_ext > 0.0, "r_film_ext must be positive");
+    (r_glass, r_int, r_ext)
 }
 
 /// Pre-computed window optical parameters from EnergyPlus Simple Window Model.

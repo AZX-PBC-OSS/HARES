@@ -273,8 +273,8 @@ pub fn building_to_boundary_inputs(
                     .find(|w| w.id == bd.id)
                     .and_then(|w| w.u_factor_w_m2_k);
                 if let Some(u) = u_factor.filter(|&u| u > 0.0) {
-                    let (r_glass, r_int) = window_u_factor_decomposition(u);
-                    (r_glass, r_int, 0.0)
+                    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u);
+                    (r_glass, r_int, r_ext)
                 } else {
                     tracing::warn!(
                         boundary = %bd.id,

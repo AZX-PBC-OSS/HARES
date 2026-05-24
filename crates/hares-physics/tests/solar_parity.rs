@@ -389,51 +389,59 @@ fn extraterrestrial_irradiance_peaks_near_perihelion() {
 use hares_physics::solar::window_u_factor_decomposition;
 
 /// BEopt example window: U=2.1 W/m²K (low-e double-pane).
-/// OCHRE: res_int_w = 1/(0.359073*ln(2.1) + 6.949915) ≈ 0.1318 m²K/W
-///        r_window  = 1/2.1 - 0.1318 ≈ 0.3443 m²K/W
+/// E+ Step 1: Ri,w = 1/(0.359073·ln(U) + 6.949915), Ro,w = 1/(0.025342·U + 29.163853).
+/// Rl,w = 1/U − Ri,w − Ro,w; full assembly = Rl,w + Ri,w + Ro,w = 1/U.
 #[test]
 fn window_decomposition_low_e_double_pane() {
-    let (r_glass, r_int) = window_u_factor_decomposition(2.1);
-    let r_total = r_glass + r_int;
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(2.1);
+    let r_total = r_glass + r_int + r_ext;
     assert!(
         (r_total - 1.0 / 2.1).abs() < 1e-10,
-        "r_glass + r_int must equal 1/U: {r_total:.6} vs {:.6}",
+        "r_glass + r_int + r_ext must equal 1/U: {r_total:.6} vs {:.6}",
         1.0 / 2.1
     );
     assert!(r_glass > 0.0, "r_glass must be positive: {r_glass}");
     assert!(r_int > 0.0, "r_int must be positive: {r_int}");
-    // Cross-check against OCHRE computed value.
+    assert!(r_ext > 0.0, "r_ext must be positive (Ro,w): {r_ext}");
+    // Cross-check against EnergyPlus formula.
+    let ep_ro_w = 1.0 / (0.025342 * 2.1 + 29.163853);
+    assert!(
+        (r_ext - ep_ro_w).abs() < 1e-10,
+        "r_ext must match E+ Ro,w: {r_ext:.6} vs {ep_ro_w:.6}"
+    );
     let ochre_r_int = 1.0 / (0.359073 * 2.1_f64.ln() + 6.949915);
     assert!(
         (r_int - ochre_r_int).abs() < 1e-10,
-        "r_int must match OCHRE: {r_int:.6} vs {ochre_r_int:.6}"
+        "r_int must match E+ Ri,w: {r_int:.6} vs {ochre_r_int:.6}"
     );
 }
 
-/// Single-pane window: U=5.5 W/m²K (above 5.85 threshold uses linear fit).
+/// Single-pane window: U=5.5 W/m²K (< 5.85 threshold, logarithmic fit).
 #[test]
 fn window_decomposition_single_pane() {
-    let (r_glass, r_int) = window_u_factor_decomposition(5.5);
-    let r_total = r_glass + r_int;
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(5.5);
+    let r_total = r_glass + r_int + r_ext;
     assert!(
         (r_total - 1.0 / 5.5).abs() < 1e-10,
-        "r_glass + r_int must equal 1/U"
+        "r_glass + r_int + r_ext must equal 1/U"
     );
     assert!(r_glass > 0.0);
+    assert!(r_ext > 0.0);
     // U=5.5 < 5.85 so uses logarithmic fit.
     let ochre_r_int = 1.0 / (0.359073 * 5.5_f64.ln() + 6.949915);
     assert!((r_int - ochre_r_int).abs() < 1e-10);
 }
 
-/// High-U single-pane: U=6.5 W/m²K (above 5.85 threshold uses linear fit).
+/// High-U single-pane: U=6.5 W/m²K (≥ 5.85 threshold, linear fit).
 #[test]
 fn window_decomposition_high_u_linear_fit() {
-    let (r_glass, r_int) = window_u_factor_decomposition(6.5);
-    let r_total = r_glass + r_int;
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(6.5);
+    let r_total = r_glass + r_int + r_ext;
     assert!(
         (r_total - 1.0 / 6.5).abs() < 1e-10,
-        "r_glass + r_int must equal 1/U"
+        "r_glass + r_int + r_ext must equal 1/U"
     );
+    assert!(r_ext > 0.0);
     // U=6.5 >= 5.85 so uses linear fit.
     let ochre_r_int = 1.0 / (1.788041 * 6.5 - 2.886625);
     assert!((r_int - ochre_r_int).abs() < 1e-10);
@@ -442,102 +450,125 @@ fn window_decomposition_high_u_linear_fit() {
 /// Triple-pane: U=1.0 W/m²K.
 #[test]
 fn window_decomposition_triple_pane() {
-    let (r_glass, r_int) = window_u_factor_decomposition(1.0);
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(1.0);
     assert!(
         r_glass > 0.5,
         "triple-pane glass R should be substantial: {r_glass}"
     );
-    assert!((r_glass + r_int - 1.0).abs() < 1e-10, "must equal 1/U=1.0");
+    assert!(r_ext > 0.0, "exterior film R must be positive: {r_ext}");
+    assert!(
+        (r_glass + r_int + r_ext - 1.0).abs() < 1e-10,
+        "r_glass + r_int + r_ext must equal 1/U=1.0"
+    );
 }
 
 /// U=0 and negative U must not panic or produce NaN/infinity.
 #[test]
 fn window_decomposition_zero_and_negative_u() {
-    let (r_glass, r_int) = window_u_factor_decomposition(0.0);
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(0.0);
     assert!(r_glass.is_finite(), "r_glass must be finite for U=0");
     assert!(r_int.is_finite(), "r_int must be finite for U=0");
+    assert!(r_ext.is_finite(), "r_ext must be finite for U=0");
 
-    let (r_glass, r_int) = window_u_factor_decomposition(-1.0);
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(-1.0);
     assert!(r_glass.is_finite(), "r_glass must be finite for U<0");
     assert!(r_int.is_finite(), "r_int must be finite for U<0");
+    assert!(r_ext.is_finite(), "r_ext must be finite for U<0");
 }
 
 /// Log/linear fit should be approximately continuous at U=5.85 threshold.
 #[test]
 fn window_decomposition_continuity_at_threshold() {
-    let (_, r_int_below) = window_u_factor_decomposition(5.8499);
-    let (_, r_int_above) = window_u_factor_decomposition(5.85);
+    let (_, r_int_below, _) = window_u_factor_decomposition(5.8499);
+    let (_, r_int_above, _) = window_u_factor_decomposition(5.85);
     assert!(
         (r_int_below - r_int_above).abs() < 0.005,
         "film R should be continuous at threshold: below={r_int_below:.4} above={r_int_above:.4}"
     );
 }
 
-// ── Regression: exterior film handling ────────────────────────────
+// ── Round-trip and film separation (EnergyPlus Simple Window Model Step 1) ──
 //
-// window_u_factor_decomposition returns (r_glass, r_int) where r_glass absorbs
-// the exterior film resistance (Ro,w ≈ 0.034 m²·K/W per EnergyPlus).  The
-// caller in conversions.rs sets r_film_ext = 0.0, so the assembled path is:
+// window_u_factor_decomposition returns (r_glass, r_film_int, r_film_ext) where:
+//   r_film_int = Ri,w  (E+ interior film, combined h_si)
+//   r_film_ext = Ro,w  (E+ exterior film, standard winter conditions)
+//   r_glass    = Rl,w  (glass-only resistance)
+//   r_glass + r_int + r_ext ≡ 1/U  (full assembly round-trip)
 //
-//   r_glass(HARES) + r_int + 0.0 = (1/U − Ri,w) + Ri,w = 1/U  ✓
-//
-// This matches OCHRE exactly (res_ext_w = 0 in ochre/utils/envelope.py:302).
-// The EnergyPlus formula for Ro,w is:
-//   Ro,w = 1 / (0.025342·U + 29.163853)  ≈ 0.034 m²·K/W  (not 0.044 as ticket states)
-// The ticket's claimed NFRC value of 0.0440 m²·K/W (h_o = 22.7 W/(m²·K)) is incorrect;
-// the correct NFRC combined exterior coefficient is ~34 W/(m²·K) (R ≈ 0.029 m²·K/W)
-// or the E+ Ro,w correlation value of ~0.034 m²·K/W.
+// This diverges from OCHRE which sets res_ext_w = 0, absorbing Ro,w into r_window.
+// The separation enables accurate solar parameter computation in
+// calculate_window_parameters, which requires the true glass-only R.
 
-/// The function must NOT subtract Ro,w from r_glass.
-/// If it did, r_glass + r_int would be less than 1/U by Ro,w ≈ 0.034 m²·K/W.
-/// This test pins the current HARES/OCHRE behaviour: r_glass + r_int == 1/U.
+/// Full assembly round-trip: r_glass + r_int + r_ext must equal 1/U exactly.
+/// Covers U-factors from 0.2 to 6.0 W/m²·K as required by the Definition of Done.
 #[test]
-fn exterior_film_absorbed_into_r_glass_matches_ochre() {
-    let ep_ro_w = |u: f64| 1.0 / (0.025342 * u + 29.163853); // E+ formula, ~0.034
-
-    for &u in &[0.5_f64, 1.0, 2.0, 3.0, 5.0, 5.85, 6.5] {
-        let (r_glass, r_int) = window_u_factor_decomposition(u);
-        let assembled = r_glass + r_int;
-
-        // HARES/OCHRE: exterior film is zero at call site, glass absorbs it.
+fn window_u_factor_round_trip() {
+    for &u in &[0.2_f64, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 5.85, 6.0] {
+        let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u);
+        let assembled = r_glass + r_int + r_ext;
         assert!(
             (assembled - 1.0 / u).abs() < 1e-10,
-            "U={u}: r_glass + r_int must equal 1/U (OCHRE parity); got {assembled:.8} vs {:.8}",
+            "U={u}: r_glass + r_int + r_ext = {assembled:.10} must equal 1/U = {:.10}",
             1.0 / u
         );
-
-        // r_glass in HARES is inflated relative to true glass-only R by ~Ro,w.
-        let ro_w = ep_ro_w(u);
-        let r_glass_excess = r_glass - (1.0 / u - r_int - ro_w); // should ≈ Ro,w
         assert!(
-            (r_glass_excess - ro_w).abs() < 1e-9,
-            "U={u}: r_glass excess over E+ Rl,w should equal Ro,w={ro_w:.6}; got {r_glass_excess:.6}"
+            r_glass >= 0.0,
+            "U={u}: r_glass must be non-negative, got {r_glass}"
+        );
+        assert!(r_int > 0.0, "U={u}: r_int must be positive, got {r_int}");
+        assert!(r_ext > 0.0, "U={u}: r_ext must be positive, got {r_ext}");
+    }
+}
+
+/// Exterior film matches the EnergyPlus Ro,w correlation formula.
+/// Ro,w = 1/(0.025342·U + 29.163853) for all U-factors.
+#[test]
+fn exterior_film_matches_energyplus_ro_w() {
+    let ep_ro_w = |u: f64| 1.0 / (0.025342 * u + 29.163853);
+
+    for &u in &[0.5_f64, 1.0, 2.0, 3.0, 5.0, 5.85, 6.5] {
+        let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u);
+        let ro_w = ep_ro_w(u);
+
+        assert!(
+            (r_ext - ro_w).abs() < 1e-10,
+            "U={u}: r_ext={r_ext:.8} must equal E+ Ro,w={ro_w:.8}"
         );
 
-        // Ticket's claimed fixed value 0.0440 is NOT what E+ Ro,w gives.
+        // r_glass must be the true glass-only resistance: 1/U − Ri,w − Ro,w.
+        let r_glass_expected = (1.0 / u - r_int - r_ext).max(0.0);
+        assert!(
+            (r_glass - r_glass_expected).abs() < 1e-10,
+            "U={u}: r_glass={r_glass:.8} must equal 1/U − Ri,w − Ro,w = {r_glass_expected:.8}"
+        );
+
+        // E+ Ro,w ≈ 0.034, NOT 0.044 as the ticket originally claimed.
+        // The NFRC 100-2020 fixed value (0.044 m²·K/W) is incorrect for E+ conditions.
         assert!(
             (ro_w - 0.0440).abs() > 0.005,
-            "U={u}: E+ Ro,w={ro_w:.5} should not match ticket's claimed 0.0440"
+            "U={u}: E+ Ro,w={ro_w:.5} differs from ticket's claimed 0.0440"
         );
     }
 }
 
-/// OCHRE sets res_ext_w = 0 and computes r_window = 1/U - res_int_w.
-/// HARES window_u_factor_decomposition does the same: r_glass = 1/U - r_int.
-/// This ensures full OCHRE parity.
+/// Definition-of-done round-trip test: U=2.0 → R_total = 0.500 m²·K/W.
 #[test]
-fn hares_r_glass_matches_ochre_r_window() {
-    for &u in &[1.0_f64, 2.0, 3.0] {
-        let (r_glass, _r_int) = window_u_factor_decomposition(u);
-        let ochre_res_int = if u < 5.85 {
-            1.0 / (0.359073 * u.ln() + 6.949915)
-        } else {
-            1.0 / (1.788041 * u - 2.886625)
-        };
-        let ochre_r_window = 1.0 / u - ochre_res_int; // ochre: res_ext_w = 0
-        assert!(
-            (r_glass - ochre_r_window).abs() < 1e-12,
-            "U={u}: HARES r_glass={r_glass:.8} must equal OCHRE r_window={ochre_r_window:.8}"
-        );
-    }
+fn window_u_2_round_trip_to_0_5() {
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(2.0);
+    let r_total = r_glass + r_int + r_ext;
+    assert!(
+        (r_total - 0.5).abs() < 1e-10,
+        "U=2.0 must round-trip to R=0.500; got {r_total:.10}"
+    );
+}
+
+/// Definition-of-done round-trip test: U=0.5 → R_total = 2.000 m²·K/W.
+#[test]
+fn window_u_0_5_round_trip_to_2_0() {
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(0.5);
+    let r_total = r_glass + r_int + r_ext;
+    assert!(
+        (r_total - 2.0).abs() < 1e-10,
+        "U=0.5 must round-trip to R=2.000; got {r_total:.10}"
+    );
 }
