@@ -27,7 +27,7 @@ use std::path::Path;
 use chrono::{Datelike, NaiveDateTime, Timelike};
 
 use crate::epw::{
-    clark_allen_sky_temp_c, doe2_ground_temp_from_monthly_avg, interpolate_ground_temp_c,
+    compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, interpolate_ground_temp_c,
     monthly_average_dry_bulb,
 };
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
@@ -302,7 +302,7 @@ pub fn parse_resstock_csv_str(
 
     for row in &raw_rows {
         let t_dp = magnus_dew_point_c(row.dry_bulb_c, row.rh_pct);
-        let t_sky = clark_allen_sky_temp_c(row.dry_bulb_c, t_dp);
+        let t_sky = compute_sky_temp_c(0.0, row.dry_bulb_c, t_dp, 0.0);
         let t_ground = interpolate_ground_temp_c(
             &monthly_ground_temps,
             row.month,
@@ -416,6 +416,7 @@ pub(crate) fn is_resstock_csv_header(first_line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::epw::clark_allen_sky_temp_c;
 
     /// Build a synthetic ResStock CSV with the given number of hourly rows.
     ///

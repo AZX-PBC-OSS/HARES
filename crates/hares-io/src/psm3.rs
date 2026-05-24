@@ -14,7 +14,7 @@ use chrono::{Datelike, NaiveDate};
 #[cfg(test)]
 use crate::epw::monthly_day_counts;
 use crate::epw::{
-    clark_allen_sky_temp_c, doe2_ground_temp_from_monthly_avg, doe2_ground_temp_monthly,
+    compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, doe2_ground_temp_monthly,
     interpolate_ground_temp_c,
 };
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
@@ -35,7 +35,8 @@ const RECORDS_PER_YEAR_LEAP: [usize; 4] = [105_408, 35_136, 17_568, 8_784];
 ///
 /// Unit conversions applied:
 /// - Pressure: millibar (mbar) to kilopascal (kPa), divided by 10.
-/// - Sky temperature: computed via Clark-Allen empirical correlation (no IR data in PSM3).
+/// - Sky temperature: computed via compute_sky_temp_c (Stefan-Boltzmann when
+///   an optional IR column is present; Clark-Allen fallback otherwise).
 /// - Ground temperature: DOE-2 sinusoidal model with monthly dry-bulb averages.
 ///
 /// Reference: <https://developer.nrel.gov/docs/solar/nsrdb/psm3-download/>
@@ -136,6 +137,7 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     } else {
         None
     };
+    let mut horizontal_infrared_w_m2 = Vec::with_capacity(n);
     let mut timestamps: Vec<(u32, u32, u32)> = Vec::with_capacity(n); // (month, day, hour)
 
     for (data_idx, line) in data_lines.iter().enumerate() {
@@ -216,6 +218,23 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
                 .push(val.clamp(0.0, 1.0));
         }
 
+        // Read optional longwave infrared downwelling radiation.
+        // When the column is present, validate that values are finite and
+        // populate horizontal_infrared_w_m2. When absent, fill with 0.0 so
+        // compute_sky_temp_c falls through to the Clark-Allen fallback.
+        let ir = if let Some(idx) = col_map.lwdown {
+            let val = parse_data_f64(&fields, idx, row, "Lwdown")?;
+            if !val.is_finite() {
+                return Err(WeatherError::Validation(format!(
+                    "row {row}: Lwdown value is non-finite: {val}"
+                )));
+            }
+            val
+        } else {
+            0.0
+        };
+        horizontal_infrared_w_m2.push(ir);
+
         dry_bulb_c.push(db);
         dew_point_c.push(dp);
         rel_humidity_pct.push(rh);
@@ -238,11 +257,16 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         .expect("validated step");
     let is_leap_year = n == RECORDS_PER_YEAR_LEAP[step_idx];
 
-    // Compute sky temperature via Clark-Allen (PSM3 has no horizontal IR data).
+    // Compute sky temperature via compute_sky_temp_c — routes through
+    // Stefan-Boltzmann inversion when measured IR ≥ 50 W/m², falls back to
+    // Clark-Allen when IR is absent. Uses the now-populated
+    // horizontal_infrared_w_m2 vector so that future PSM3 files with an IR
+    // column automatically activate the correct physics path.
     let sky_temp_c: Vec<f64> = dry_bulb_c
         .iter()
         .zip(dew_point_c.iter())
-        .map(|(&db, &dp)| clark_allen_sky_temp_c(db, dp))
+        .zip(horizontal_infrared_w_m2.iter())
+        .map(|((&db, &dp), &ir)| compute_sky_temp_c(ir, db, dp, 0.0))
         .collect();
 
     // Compute ground temperature via DOE-2 model.
@@ -267,8 +291,7 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         )?);
     }
 
-    // PSM3 has no horizontal infrared or opaque sky cover data; fill with zeros.
-    let horizontal_infrared_w_m2 = vec![0.0; n];
+    // PSM3 has no opaque sky cover or precipitation data; fill with zeros.
     let opaque_sky_cover = vec![0.0; n];
     let liquid_precip_m = vec![0.0; n];
 
@@ -320,6 +343,9 @@ struct Psm3ColumnMap {
     wind_direction: usize,
     /// Optional: not all PSM3 files include Surface Albedo.
     surface_albedo: Option<usize>,
+    /// Optional longwave infrared downwelling radiation column.
+    /// PSM3 product variants may include Dhi_Modeled, Lwdown, or Radiation Modeled.
+    lwdown: Option<usize>,
 }
 
 fn build_column_map(col_names: &[&str]) -> Result<Psm3ColumnMap, WeatherError> {
@@ -334,6 +360,14 @@ fn build_column_map(col_names: &[&str]) -> Result<Psm3ColumnMap, WeatherError> {
     let surface_albedo = col_names
         .iter()
         .position(|c| c.eq_ignore_ascii_case("Surface Albedo"));
+
+    // Longwave IR columns are optional. PSM3 product variants may include
+    // Dhi_Modeled, Lwdown, or Radiation Modeled columns at irregular positions.
+    let lwdown = col_names.iter().position(|c| {
+        c.eq_ignore_ascii_case("Dhi_Modeled")
+            || c.eq_ignore_ascii_case("Lwdown")
+            || c.eq_ignore_ascii_case("Radiation Modeled")
+    });
 
     Ok(Psm3ColumnMap {
         year: find("Year")?,
@@ -351,6 +385,7 @@ fn build_column_map(col_names: &[&str]) -> Result<Psm3ColumnMap, WeatherError> {
         wind_speed: find("Wind Speed")?,
         wind_direction: find("Wind Direction")?,
         surface_albedo,
+        lwdown,
     })
 }
 
@@ -493,6 +528,7 @@ fn parse_data_u32(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::epw::clark_allen_sky_temp_c;
 
     /// Build a minimal PSM3 CSV string for testing.
     fn make_psm3_csv(step_minutes: u32, is_leap: bool) -> String {
@@ -729,11 +765,9 @@ mod tests {
     /// temperatures derived from the Stefan-Boltzmann inversion, not
     /// Clark-Allen.
     ///
-    /// This test FAILS on current code (the parser ignores the Lwdown column
-    /// and always calls clark_allen_sky_temp_c).  It will pass once the fix
-    /// is applied.
-    /// Will stop panicking when PSM3 Lwdown column activates Stefan-Boltzmann path
-    #[should_panic(expected = "Stefan-Boltzmann inversion")]
+    /// This test verifies that when a PSM3 file includes an Lwdown column,
+    /// sky temperature is computed via Stefan-Boltzmann inversion (not Clark-Allen)
+    /// and horizontal_infrared_w_m2 is populated from the column.
     #[test]
     fn psm3_lwdown_column_activates_stefan_boltzmann_path() {
         use crate::epw::compute_sky_temp_c;
@@ -791,6 +825,27 @@ mod tests {
             "PSM3 Lwdown column must populate horizontal_infrared_w_m2 \
              (expected {lwdown}) but got {}",
             ts.horizontal_infrared_w_m2[0]
+        );
+    }
+
+    /// Non-finite values (NaN, infinity) in an Lwdown column must produce a
+    /// parse error identifying the row and that the value is non-finite.
+    #[test]
+    fn psm3_rejects_non_finite_lwdown() {
+        let csv = "Source,Location ID,City,State,Country,Latitude,Longitude,Time Zone,Elevation,Local Time Zone\n\
+                   NSRDB,1,City,-,-,39.74,-104.99,-7,1609.0,-7\n\
+                   Year,Month,Day,Hour,Minute,GHI,DNI,DHI,Temperature,Pressure,Dew Point,Relative Humidity,Wind Speed,Wind Direction,Lwdown\n\
+                   2021,1,1,0,0,100,200,50,20.0,1013.25,10.0,50.0,3.0,180,NaN\n\
+                   2021,1,1,1,0,100,200,50,20.0,1013.25,10.0,50.0,3.0,180,300";
+        let err = parse_psm3_str(csv).expect_err("should reject non-finite Lwdown");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-finite"),
+            "error should mention non-finite, got: {msg}"
+        );
+        assert!(
+            msg.contains("row 1:"),
+            "error should identify row 1, got: {msg}"
         );
     }
 }

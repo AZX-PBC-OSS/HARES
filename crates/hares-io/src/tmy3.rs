@@ -31,7 +31,7 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 
-use crate::epw::{clark_allen_sky_temp_c, doe2_ground_temp_monthly, interpolate_ground_temp_c};
+use crate::epw::{compute_sky_temp_c, doe2_ground_temp_monthly, interpolate_ground_temp_c};
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
@@ -166,11 +166,14 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
         timestamps.push((month, day, hour));
     }
 
-    // Sky temperature via Clark-Allen (TMY3 has no horizontal IR data).
+    // Sky temperature via compute_sky_temp_c — passes IR=0.0 so the function
+    // falls through to the Clark-Allen fallback (TMY3 has no horizontal IR data).
+    // When a future TMY3 variant includes IR data, the correct physics path
+    // activates automatically via the function's internal branching.
     let sky_temp_c: Vec<f64> = dry_bulb_c
         .iter()
         .zip(dew_point_c.iter())
-        .map(|(&db, &dp)| clark_allen_sky_temp_c(db, dp))
+        .map(|(&db, &dp)| compute_sky_temp_c(0.0, db, dp, 0.0))
         .collect();
 
     // Ground temperature via DOE-2 sinusoidal model.
