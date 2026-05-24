@@ -2188,9 +2188,6 @@ fn apply_multispeed_parameters(
         .get("number_of_speeds")
         .and_then(Value::as_u64)
         .unwrap_or(1) as usize;
-    if n_speeds <= 1 {
-        return;
-    }
 
     let is_mshp = matches!(equipment_name, "MSHP Heater" | "MSHP Cooler");
 
