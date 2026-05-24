@@ -14,13 +14,17 @@
 //! | GHI [W/m²]          | **Measured** -- CSV column                               |
 //! | DNI [W/m²]          | **Measured** -- CSV column                               |
 //! | DHI [W/m²]          | **Measured** -- CSV column                               |
-//! | Pressure [kPa]      | **Estimated** -- ISA standard atmosphere from elevation  |
+//! | Pressure [kPa]      | **Estimated** -- ISA standard atmosphere from elevation (ISO 2533:1975 §5) |
 //! | Dew point [°C]      | **Estimated** -- Magnus formula from dry bulb + RH       |
 //! | Horizontal IR [W/m²]| **Placeholder** -- set to 0.0 (triggers Clark-Allen)     |
 //! | Sky temperature [°C]| **Estimated** -- Clark-Allen from dry bulb + dew point   |
 //! | Opaque sky cover    | **Placeholder** -- set to 0.0 (unavailable)              |
 //! | Precipitation [m]   | **Placeholder** -- set to 0.0 (unavailable)              |
 //! | Ground temp [°C]    | **Estimated** -- DOE-2 model from monthly dry-bulb avg   |
+//!
+//! ResStock CSV pressure is a constant ISA estimate derived from site elevation.
+//! The 8-column format contains no measured pressure data; per-row pressure
+//! variation is not achievable. See ISO 2533:1975 §5 for the ISA model.
 
 use std::path::Path;
 
@@ -248,20 +252,6 @@ pub fn parse_resstock_csv_str(
         ));
     }
 
-    // Auto-detect timestep from first two rows.
-    let source_step_secs = if raw_rows.len() >= 2 {
-        // Infer from row count assuming a full year.
-        let n = raw_rows.len();
-        let total_seconds_in_year = 8760 * 3600;
-        if total_seconds_in_year % n == 0 {
-            (total_seconds_in_year / n) as u32
-        } else {
-            3600 // default to hourly
-        }
-    } else {
-        3600
-    };
-
     // Determine if this is a leap year from the first timestamp's year.
     let first_dt_str = contents
         .lines()
@@ -274,6 +264,19 @@ pub fn parse_resstock_csv_str(
             y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
         })
         .unwrap_or(false);
+
+    // Auto-detect timestep from first two rows using leap-year-aware year length.
+    let source_step_secs = if raw_rows.len() >= 2 {
+        let n = raw_rows.len() as u64;
+        let total_seconds_in_year = (if is_leap_year { 8_784_u64 } else { 8_760_u64 }) * 3_600_u64;
+        if total_seconds_in_year.is_multiple_of(n) {
+            (total_seconds_in_year / n) as u32
+        } else {
+            3600 // default to hourly
+        }
+    } else {
+        3600
+    };
 
     // Compute monthly dry-bulb averages for ground temperature.
     let dry_bulb_all: Vec<f64> = raw_rows.iter().map(|r| r.dry_bulb_c).collect();
@@ -791,14 +794,8 @@ Diffuse Horizontal Radiation [W/m2]
         lines.join("\n")
     }
 
-    // Regression test for the leap-year timestep inference bug (ticket #029).
     // A 30-minute sub-hourly leap-year file has 17568 rows.
-    // The buggy code uses `8760 * 3600` as the year length, so
-    // `31536000 % 17568 == 1440 != 0` and it falls back to 3600 s.
-    // The correct answer is 8784 * 3600 / 17568 = 1800 s.
-    // This test FAILS until the fix in ticket #029 is applied.
-    /// Fix pending on ticket 029 — will stop panicking when leap-year 30-min timestep is inferred correctly
-    #[should_panic(expected = "should infer 1800 s step")]
+    // 8784 * 3600 / 17568 = 1800 s.
     #[test]
     fn leap_year_30min_step_inferred_correctly() {
         let csv = build_test_csv_leap_year(30);
@@ -807,15 +804,12 @@ Diffuse Horizontal Radiation [W/m2]
         assert_eq!(result.len(), 17568);
         assert_eq!(
             result.meta.source_step_secs, 1800,
-            "30-min sub-hourly leap-year file should infer 1800 s step, \
-             got {} s (leap-year fix not applied)",
+            "30-min sub-hourly leap-year file should infer 1800 s step, got {} s",
             result.meta.source_step_secs
         );
     }
 
-    // Regression test: hourly leap-year file (8784 rows) should still
-    // infer 3600 s even though the fix changes how the year length is computed.
-    // With the fix applied this must also pass.
+    // Hourly leap-year file (8784 rows) infers 3600 s with leap-year-aware math.
     #[test]
     fn leap_year_hourly_step_inferred_correctly() {
         let csv = build_test_csv_leap_year(60);
