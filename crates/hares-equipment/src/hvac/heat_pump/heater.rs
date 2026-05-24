@@ -951,6 +951,21 @@ impl HeatPumpHeaterCore {
             sp.heating_c + self.dr_setpoint_offset_c,
         );
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
+        let schedule_stage = self
+            .hvac
+            .thermostat_fsm
+            .static_setpoints
+            .with_schedule_override(self.hvac.thermostat_fsm.schedule_setpoints);
+        self.telemetry
+            .set(tk::SCHEDULE_HEATING_SETPOINT_C, schedule_stage.heating_c);
+        self.telemetry
+            .set(tk::SCHEDULE_COOLING_SETPOINT_C, schedule_stage.cooling_c);
+        if let Some(ref rt) = self.hvac.thermostat_fsm.runtime_setpoints {
+            self.telemetry
+                .set(tk::RUNTIME_HEATING_SETPOINT_C, rt.heating_c.unwrap_or(0.0));
+            self.telemetry
+                .set(tk::RUNTIME_COOLING_SETPOINT_C, rt.cooling_c.unwrap_or(0.0));
+        }
         self.telemetry
             .set(tk::FAN_KW, step.fan_kw * self.hvac.config.space_fraction);
         self.telemetry.set(

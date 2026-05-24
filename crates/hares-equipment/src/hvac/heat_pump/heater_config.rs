@@ -27,6 +27,10 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::DEFROST_CAPACITY_MULTIPLIER, 1.0);
     telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
     telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SCHEDULE_HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SCHEDULE_COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::RUNTIME_HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::RUNTIME_COOLING_SETPOINT_C, 0.0);
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::BACKUP_ER_KW, 0.0);
     telemetry.insert(tk::PAN_HEATER_KW, 0.0);
@@ -142,6 +146,26 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::COOLING_SETPOINT_C.to_string(),
             unit: "C".to_string(),
             description: "Active cooling setpoint from shared thermostat state".to_string(),
+        },
+        TelemetryField {
+            name: tk::SCHEDULE_HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Schedule-stage heating setpoint (before runtime override)".to_string(),
+        },
+        TelemetryField {
+            name: tk::SCHEDULE_COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Schedule-stage cooling setpoint (before runtime override)".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Runtime override heating setpoint (0.0 when no override active)".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Runtime override cooling setpoint (0.0 when no override active)".to_string(),
         },
         TelemetryField {
             name: tk::FAN_KW.to_string(),

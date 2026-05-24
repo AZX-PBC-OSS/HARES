@@ -3729,19 +3729,17 @@ fn single_speed_duty_cycle_equals_part_load_ratio() {
 // ---------------------------------------------------------------------------
 // Setpoint Resolution Chain Visibility
 //
-// These tests assert that, after the setpoint resolution chain is implemented, schedule-stage and
-// runtime-override setpoints are each visible in telemetry as distinct keys.
-// All tests are written to FAIL today (keys absent) and PASS once implemented.
+// These tests assert that schedule-stage and runtime-override setpoints are
+// each visible in telemetry as distinct keys, enabling diagnosis of "why did
+// the setpoint change?" from output data.
 // ---------------------------------------------------------------------------
 
 /// After one step without any runtime override, the schedule-stage setpoints
 /// must appear in telemetry as `schedule_heating_setpoint_c` and
-/// `schedule_cooling_setpoint_c`.
-///
-/// Expected to FAIL until the setpoint resolution chain is implemented (keys are absent today).
+/// `schedule_cooling_setpoint_c` and equal the static setpoints when no
+/// schedule source is configured.
 #[test]
-#[should_panic(expected = "schedule_heating_setpoint_c not in telemetry")]
-fn schedule_setpoint_keys_absent_from_telemetry() {
+fn schedule_setpoint_keys_reflect_static_when_no_schedule_source() {
     // AC with explicit static setpoints; no schedule source, no runtime override.
     // The schedule-stage equals the static setpoints (no override applied).
     let cfg = EquipmentConfig::from_typed(
@@ -3814,15 +3812,14 @@ fn schedule_setpoint_keys_absent_from_telemetry() {
     );
 }
 
-/// After applying a runtime setpoint override then clearing it (no override
-/// active), `runtime_heating_setpoint_c` must be absent; and after re-applying
-/// an override it must be present.  This round-trip verifies both halves of
-/// the absent-means-no-override invariant.
+/// Round-trip: apply a runtime setpoint override, clear it (None on both axes), step —
+/// `runtime_heating_setpoint_c` must be 0.0 (no-override sentinel); then re-apply an
+/// override and step — key must reflect the override value.
 ///
-/// Expected to FAIL until the setpoint resolution chain is implemented (key is never written today).
+/// Note: RUNTIME_* keys use 0.0 as a sentinel for "no override active" because the
+/// `Telemetry::set` API requires all keys to be pre-registered at init time.
 #[test]
-#[should_panic(expected = "runtime_heating_setpoint_c must be present")]
-fn runtime_setpoint_key_absent_when_no_override() {
+fn runtime_setpoint_key_resets_to_zero_after_clearing_override() {
     // Gas furnace with a runtime override, then cleared.
     let cfg = gas_furnace_config("furnace020rt");
     let registry = EquipmentRegistry::new();
@@ -3831,7 +3828,7 @@ fn runtime_setpoint_key_absent_when_no_override() {
     eq.init(&cfg, &env).unwrap();
 
     // Apply override then immediately clear it by applying a no-op override with None fields,
-    // then step.  After step, key must be absent.
+    // then step. After step, key must be at default (0.0 = no override).
     eq.apply_control(&ControlSignal::ThermalSetpoint {
         heating_setpoint_c: Some(25.0),
         cooling_setpoint_c: None,
@@ -3850,17 +3847,18 @@ fn runtime_setpoint_key_absent_when_no_override() {
     eq.update_control(&env);
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-    // No override active: runtime key must be absent.
+    // No override active: runtime key must be at default (0.0).
+    let rt_cleared = eq
+        .telemetry()
+        .get("runtime_heating_setpoint_c")
+        .expect("runtime_heating_setpoint_c must be present (pre-populated)");
     assert!(
-        eq.telemetry().get("runtime_heating_setpoint_c").is_none(),
-        "runtime_heating_setpoint_c must be ABSENT when no override is active \
-         (got Some({:.4}))",
-        eq.telemetry()
-            .get("runtime_heating_setpoint_c")
-            .unwrap_or(f64::NAN),
+        (rt_cleared - 0.0).abs() < 1e-9,
+        "runtime_heating_setpoint_c must be 0.0 (no override) after clearing, \
+         got {rt_cleared:.4}",
     );
 
-    // Now apply a fresh override and re-step; key must appear.
+    // Now apply a fresh override and re-step; key must equal the override value.
     eq.apply_control(&ControlSignal::ThermalSetpoint {
         heating_setpoint_c: Some(25.0),
         cooling_setpoint_c: None,
@@ -3885,11 +3883,8 @@ fn runtime_setpoint_key_absent_when_no_override() {
 /// must be present and equal to the overridden value.  The schedule-stage key
 /// must reflect the pre-override (schedule/static) value, distinct from the
 /// effective setpoint.
-///
-/// Expected to FAIL until the setpoint resolution chain is implemented.
 #[test]
-#[should_panic(expected = "runtime_heating_setpoint_c must be present")]
-fn runtime_setpoint_key_present_when_override_active() {
+fn runtime_setpoint_key_reflects_active_override_value() {
     let cfg = gas_furnace_config("furnace020rt2");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -3939,14 +3934,11 @@ fn runtime_setpoint_key_present_when_override_active() {
     );
 }
 
-/// IdealHvac must also expose the setpoint chain in telemetry.
-/// Today it writes no setpoint keys at all; once the setpoint resolution chain
-/// is implemented it must write all six (schedule_*, runtime_* when active, effective).
-///
-/// Expected to FAIL until the setpoint resolution chain is implemented.
+/// IdealHvac must expose the setpoint chain in telemetry: schedule-stage setpoints
+/// (`schedule_heating_setpoint_c`, `schedule_cooling_setpoint_c`) and the effective
+/// setpoints (`heating_setpoint_c`, `cooling_setpoint_c`) must all be present after a step.
 #[test]
-#[should_panic(expected = "schedule_heating_setpoint_c not in telemetry")]
-fn ideal_hvac_setpoint_chain_absent() {
+fn ideal_hvac_exposes_setpoint_chain_in_telemetry() {
     let cfg = ideal_hvac_config("ideal020", IdealCapacityModeConfig::On);
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Ideal HVAC", cfg.clone()).unwrap();

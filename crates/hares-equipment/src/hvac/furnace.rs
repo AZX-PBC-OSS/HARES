@@ -213,6 +213,21 @@ impl Equipment for ElectricFurnace {
             .set(tk::SUPPLY_AIR_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
+        let schedule_stage = self
+            .hvac
+            .thermostat_fsm
+            .static_setpoints
+            .with_schedule_override(self.hvac.thermostat_fsm.schedule_setpoints);
+        self.telemetry
+            .set(tk::SCHEDULE_HEATING_SETPOINT_C, schedule_stage.heating_c);
+        self.telemetry
+            .set(tk::SCHEDULE_COOLING_SETPOINT_C, schedule_stage.cooling_c);
+        if let Some(ref rt) = self.hvac.thermostat_fsm.runtime_setpoints {
+            self.telemetry
+                .set(tk::RUNTIME_HEATING_SETPOINT_C, rt.heating_c.unwrap_or(0.0));
+            self.telemetry
+                .set(tk::RUNTIME_COOLING_SETPOINT_C, rt.cooling_c.unwrap_or(0.0));
+        }
         self.telemetry.set(tk::RUNTIME_FRACTION, rtf);
         self.telemetry.set(tk::MAIN_POWER_KW, main_power_kw);
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
@@ -507,6 +522,21 @@ impl Equipment for GasFurnace {
             .set(tk::SUPPLY_AIR_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
+        let schedule_stage = self
+            .hvac
+            .thermostat_fsm
+            .static_setpoints
+            .with_schedule_override(self.hvac.thermostat_fsm.schedule_setpoints);
+        self.telemetry
+            .set(tk::SCHEDULE_HEATING_SETPOINT_C, schedule_stage.heating_c);
+        self.telemetry
+            .set(tk::SCHEDULE_COOLING_SETPOINT_C, schedule_stage.cooling_c);
+        if let Some(ref rt) = self.hvac.thermostat_fsm.runtime_setpoints {
+            self.telemetry
+                .set(tk::RUNTIME_HEATING_SETPOINT_C, rt.heating_c.unwrap_or(0.0));
+            self.telemetry
+                .set(tk::RUNTIME_COOLING_SETPOINT_C, rt.cooling_c.unwrap_or(0.0));
+        }
         self.telemetry
             .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
         self.telemetry.set(tk::RUNTIME_FRACTION, rtf);
@@ -645,7 +675,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn electric_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(18);
+    let mut telemetry = Telemetry::with_capacity(22);
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
@@ -653,6 +683,10 @@ fn electric_furnace_default_telemetry() -> Telemetry {
     telemetry.insert(tk::SUPPLY_AIR_TEMP_C, 0.0);
     telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
     telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SCHEDULE_HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SCHEDULE_COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::RUNTIME_HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::RUNTIME_COOLING_SETPOINT_C, 0.0);
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::MAIN_POWER_KW, 0.0);
     telemetry.insert(tk::DUCT_LOSS_W, 0.0);
@@ -668,7 +702,7 @@ fn electric_furnace_default_telemetry() -> Telemetry {
 }
 
 fn gas_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(20);
+    let mut telemetry = Telemetry::with_capacity(24);
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
@@ -677,6 +711,10 @@ fn gas_furnace_default_telemetry() -> Telemetry {
     telemetry.insert(tk::SUPPLY_AIR_TEMP_C, 0.0);
     telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
     telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SCHEDULE_HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SCHEDULE_COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::RUNTIME_HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::RUNTIME_COOLING_SETPOINT_C, 0.0);
     telemetry.insert(tk::SPEED_INDEX, 0.0);
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::MAIN_POWER_KW, 0.0);
@@ -702,6 +740,28 @@ fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::COOLING_SETPOINT_C.to_string(),
             unit: "C".to_string(),
             description: "Active cooling setpoint from thermostat schedule".to_string(),
+        },
+        TelemetryField {
+            name: tk::SCHEDULE_HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Schedule-stage heating setpoint (before runtime override)".to_string(),
+        },
+        TelemetryField {
+            name: tk::SCHEDULE_COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Schedule-stage cooling setpoint (before runtime override)".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Runtime override heating setpoint (0.0 when no override active)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Runtime override cooling setpoint (0.0 when no override active)"
+                .to_string(),
         },
     ]
 }

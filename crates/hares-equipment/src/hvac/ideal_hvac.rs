@@ -619,6 +619,23 @@ impl Equipment for IdealHvac {
         self.telemetry
             .set(tk::CURRENT_TARGET_C, self.current_target_c);
         self.telemetry.set(tk::FAN_KW, fan_kw);
+        let sp = self.thermostat_fsm.effective_setpoints();
+        self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
+        self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
+        let schedule_stage = self
+            .thermostat_fsm
+            .static_setpoints
+            .with_schedule_override(self.thermostat_fsm.schedule_setpoints);
+        self.telemetry
+            .set(tk::SCHEDULE_HEATING_SETPOINT_C, schedule_stage.heating_c);
+        self.telemetry
+            .set(tk::SCHEDULE_COOLING_SETPOINT_C, schedule_stage.cooling_c);
+        if let Some(ref rt) = self.thermostat_fsm.runtime_setpoints {
+            self.telemetry
+                .set(tk::RUNTIME_HEATING_SETPOINT_C, rt.heating_c.unwrap_or(0.0));
+            self.telemetry
+                .set(tk::RUNTIME_COOLING_SETPOINT_C, rt.cooling_c.unwrap_or(0.0));
+        }
         self.telemetry
             .set(tk::HVAC_HEATING_CAPACITY_W, self.rated_capacity_w);
         self.telemetry
@@ -779,7 +796,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn ideal_hvac_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(11);
+    let mut telemetry = Telemetry::with_capacity(17);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::IDEAL_CAPACITY_W, 0.0);
@@ -791,6 +808,12 @@ fn ideal_hvac_default_telemetry() -> Telemetry {
     telemetry.insert(tk::HVAC_COOLING_CAPACITY_W, 0.0);
     telemetry.insert(tk::CAP_RATIO, 1.0);
     telemetry.insert(tk::EIR_RATIO, 1.0);
+    telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SCHEDULE_HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SCHEDULE_COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::RUNTIME_HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::RUNTIME_COOLING_SETPOINT_C, 0.0);
     telemetry
 }
 
@@ -852,6 +875,36 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::EIR_RATIO.to_string(),
             unit: "ratio".to_string(),
             description: "Biquadratic EIR correction factor (1.0 = rated)".to_string(),
+        },
+        TelemetryField {
+            name: tk::HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active heating setpoint temperature".to_string(),
+        },
+        TelemetryField {
+            name: tk::COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active cooling setpoint temperature".to_string(),
+        },
+        TelemetryField {
+            name: tk::SCHEDULE_HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Schedule-stage heating setpoint (before runtime override)".to_string(),
+        },
+        TelemetryField {
+            name: tk::SCHEDULE_COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Schedule-stage cooling setpoint (before runtime override)".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Runtime override heating setpoint (0.0 when no override active)".to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Runtime override cooling setpoint (0.0 when no override active)".to_string(),
         },
     ]
 }

@@ -50,6 +50,23 @@ pub const CURRENT_TARGET_C: &str = "current_target_c";
 pub const HEATING_SETPOINT_C: &str = "heating_setpoint_c";
 pub const COOLING_SETPOINT_C: &str = "cooling_setpoint_c";
 
+// ── Setpoint chain ──────────────────────────────────────────────────────────
+/// Schedule-stage heating setpoint (static base + schedule override, before runtime override).
+/// Always written — reflects the schedule-derived setpoint at each timestep.
+pub const SCHEDULE_HEATING_SETPOINT_C: &str = "schedule_heating_setpoint_c";
+/// Schedule-stage cooling setpoint (static base + schedule override, before runtime override).
+/// Always written — reflects the schedule-derived setpoint at each timestep.
+pub const SCHEDULE_COOLING_SETPOINT_C: &str = "schedule_cooling_setpoint_c";
+/// Runtime override heating setpoint. Uses 0.0 as a sentinel for "no override active"
+/// because `Telemetry::set` requires keys to be pre-registered at init.
+/// Non-zero means an override is in effect; 0.0 means no override (or override to exactly 0°C,
+/// which is unreachable for heating setpoints in practice).
+/// See `RUNTIME_COOLING_SETPOINT_C` for the same convention on the cooling axis.
+pub const RUNTIME_HEATING_SETPOINT_C: &str = "runtime_heating_setpoint_c";
+/// Runtime override cooling setpoint. Uses 0.0 as a sentinel for "no override active".
+/// Same convention as `RUNTIME_HEATING_SETPOINT_C`.
+pub const RUNTIME_COOLING_SETPOINT_C: &str = "runtime_cooling_setpoint_c";
+
 // ── Operating state ─────────────────────────────────────────────────────────
 pub const OPERATING_MODE: &str = "operating_mode";
 pub const STATE: &str = "state";
