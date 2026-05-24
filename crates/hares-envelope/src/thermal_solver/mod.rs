@@ -166,6 +166,13 @@ impl ThermalSolver {
         &self.config
     }
 
+    /// Mutable access to the solver configuration for per-timestep
+    /// updates (e.g. ventilation recovery effectiveness from equipment
+    /// bypass/defrost state).
+    pub fn config_mut(&mut self) -> &mut ThermalSolverConfig {
+        &mut self.config
+    }
+
     /// Per-component envelope gains from the most recent `resolve()` call.
     pub fn component_gains(&self) -> &EnvelopeComponentGains {
         &self.component_gains

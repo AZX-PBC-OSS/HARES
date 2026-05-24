@@ -114,6 +114,10 @@ pub struct DwellingConfig {
 /// Snapshot of accumulated port totals at a stage boundary.
 #[derive(Debug, Clone)]
 struct StageSnapshot {
+    // Why: field is written in debug_assertions builds to snapshot port
+    // state at each stage boundary; not yet consumed by any assertion,
+    // retained for future invariant checks once the verification path is
+    // added.
     #[allow(dead_code)]
     ports: PortSlots,
 }
@@ -2422,6 +2426,26 @@ impl Dwelling {
                 .profiling
                 .memory_high_water_kb
                 .max(current_process_hwm_kb());
+        }
+
+        // Step 3c: propagate per-timestep ventilation recovery effectiveness
+        // from equipment to the thermal solver config.  The Ventilation equipment
+        // computes effective sensible/latent effectiveness accounting for bypass
+        // and defrost derating; the thermal solver's infiltration module must see
+        // these dynamic values (not the static rated ones) to correctly compute
+        // the ventilation sensible/latent load.
+        //
+        // EnergyPlus Engineering Reference, "Heat Exchangers" chapter:
+        // per-timestep effectiveness application with bypass suspending heat
+        // transfer (effectiveness = 0).  Using stale rated values during bypass
+        // underestimates the ventilation load by a factor equal to
+        // 1 / (1 - rated_eff), e.g. 4× for a 75% effective HRV.
+        for eq in &self.equipment {
+            if let Some((eff_s, eff_l)) = eq.effective_ventilation_effectiveness() {
+                let vent = &mut self.thermal_solver.config_mut().ventilation;
+                vent.sensible_recovery_efficiency = eff_s;
+                vent.latent_recovery_efficiency = eff_l;
+            }
         }
 
         // Step 4: envelope/domain resolution.

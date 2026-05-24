@@ -161,6 +161,16 @@ pub trait Equipment: Send + Sync {
         None
     }
 
+    /// Returns the per-timestep effective ventilation recovery efficiencies
+    /// `(sensible, latent)` if this equipment is a ventilation device (HRV/ERV).
+    ///
+    /// These values account for bypass and defrost derating and must be
+    /// propagated to `ThermalSolverConfig.ventilation` before each thermal
+    /// solver integration step.  Returns `None` for non-ventilation equipment.
+    fn effective_ventilation_effectiveness(&self) -> Option<(f64, f64)> {
+        None
+    }
+
     // -----------------------------------------------------------------
     // LUT injection (overridden by Battery and EV)
     // -----------------------------------------------------------------

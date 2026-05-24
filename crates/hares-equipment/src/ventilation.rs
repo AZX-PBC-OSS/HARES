@@ -164,6 +164,13 @@ pub struct Ventilation {
     sensible_effectiveness: f64,
     latent_effectiveness: f64,
 
+    // Per-timestep effective values (accounting for bypass and defrost).
+    // Initialised to rated values; overwritten each step by step().
+    // Read by the dwelling orchestration layer to update ThermalSolverConfig.ventilation
+    // before the thermal solver integrates.
+    effective_sensible_effectiveness: f64,
+    effective_latent_effectiveness: f64,
+
     // Bypass: when outdoor temp is within comfort range, bypass recovery (free cooling).
     bypass_temp_min_c: f64,
     bypass_temp_max_c: f64,
@@ -230,6 +237,8 @@ impl Ventilation {
             flow_rate_m3_s: DEFAULT_FLOW_RATE_M3_S,
             sensible_effectiveness: DEFAULT_SENSIBLE_EFFECTIVENESS,
             latent_effectiveness: DEFAULT_LATENT_EFFECTIVENESS,
+            effective_sensible_effectiveness: DEFAULT_SENSIBLE_EFFECTIVENESS,
+            effective_latent_effectiveness: DEFAULT_LATENT_EFFECTIVENESS,
             bypass_temp_min_c: DEFAULT_BYPASS_TEMP_MIN_C,
             bypass_temp_max_c: DEFAULT_BYPASS_TEMP_MAX_C,
             defrost_temp_c: DEFAULT_DEFROST_TEMP_C,
@@ -242,7 +251,7 @@ impl Ventilation {
     }
 
     /// Effective sensible effectiveness after bypass and defrost adjustments.
-    fn effective_sensible_effectiveness(&self, t_outdoor_c: f64) -> f64 {
+    fn compute_effective_sensible_effectiveness(&self, t_outdoor_c: f64) -> f64 {
         if self.ventilation_type == VentilationType::ExhaustFan {
             return 0.0;
         }
@@ -260,7 +269,7 @@ impl Ventilation {
     }
 
     /// Effective latent effectiveness (ERV only).
-    fn effective_latent_effectiveness(&self, t_outdoor_c: f64) -> f64 {
+    fn compute_effective_latent_effectiveness(&self, t_outdoor_c: f64) -> f64 {
         if self.ventilation_type != VentilationType::Erv {
             return 0.0;
         }
@@ -319,6 +328,14 @@ impl Ventilation {
 
         self.mode = OperatingMode::Standby;
         self.core_output = CoreOutput::default();
+
+        // Sync effective fields to the configured rated values so that
+        // consumers calling effective_ventilation_effectiveness() before
+        // the first step() (e.g. during pre-run diagnostics) see the
+        // correct rated defaults rather than the hard-coded new() values.
+        self.effective_sensible_effectiveness = self.sensible_effectiveness;
+        self.effective_latent_effectiveness = self.latent_effectiveness;
+
         Ok(())
     }
 }
@@ -421,11 +438,16 @@ impl Equipment for Ventilation {
         let w_indoor = zone.map(|z| z.humidity_ratio).unwrap_or(0.008);
         let w_outdoor = env.weather.outdoor_humidity_ratio;
 
-        let eff_s = self.effective_sensible_effectiveness(t_outdoor_c);
-        let eff_l = self.effective_latent_effectiveness(t_outdoor_c);
+        let eff_s = self.compute_effective_sensible_effectiveness(t_outdoor_c);
+        let eff_l = self.compute_effective_latent_effectiveness(t_outdoor_c);
         let bypass_active = self.ventilation_type != VentilationType::ExhaustFan
             && t_outdoor_c >= self.bypass_temp_min_c
             && t_outdoor_c <= self.bypass_temp_max_c;
+
+        // Store effective values so the dwelling orchestration can propagate them
+        // to ThermalSolverConfig.ventilation before the thermal solver integrates.
+        self.effective_sensible_effectiveness = eff_s;
+        self.effective_latent_effectiveness = eff_l;
 
         // Supply air conditions after heat recovery
         let t_supply_c = t_outdoor_c + eff_s * (t_indoor_c - t_outdoor_c);
@@ -498,6 +520,13 @@ impl Equipment for Ventilation {
 
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
+    }
+
+    fn effective_ventilation_effectiveness(&self) -> Option<(f64, f64)> {
+        Some((
+            self.effective_sensible_effectiveness,
+            self.effective_latent_effectiveness,
+        ))
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -861,23 +890,24 @@ mod tests {
         let mild_env = env(0.0, 20.0); // above defrost threshold
         hrv.init(&cfg, &cold_env).expect("init");
 
-        let mut ports_cold = PortSlots {
+        let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv.step(&cold_env, Duration::from_secs(300), &mut ports_cold)
+        hrv.step(&cold_env, Duration::from_secs(300), &mut ports)
             .expect("step cold");
-        let _recovery_cold = hrv.telemetry().get(tk::SENSIBLE_RECOVERY_W).expect("cold");
+        let eff_cold = hrv
+            .effective_ventilation_effectiveness()
+            .expect("effectiveness after cold step")
+            .0;
 
-        let mut ports_mild = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        };
-        hrv.step(&mild_env, Duration::from_secs(300), &mut ports_mild)
+        hrv.step(&mild_env, Duration::from_secs(300), &mut ports)
             .expect("step mild");
+        let eff_mild = hrv
+            .effective_ventilation_effectiveness()
+            .expect("effectiveness after mild step")
+            .0;
 
-        let eff_cold = hrv.effective_sensible_effectiveness(-20.0);
-        let eff_mild = hrv.effective_sensible_effectiveness(0.0);
         assert!(
             eff_cold < eff_mild,
             "defrost should reduce effectiveness: cold={eff_cold}, mild={eff_mild}"
@@ -1143,6 +1173,79 @@ mod tests {
         assert!(
             (bypass - 0.0).abs() < 1e-9,
             "exhaust fan should never report bypass active, got {bypass}"
+        );
+    }
+
+    /// Verifies that after `step()` the stored effective effectiveness fields
+    /// match the expected per-timestep values — zero during bypass, derated
+    /// during defrost, and rated otherwise.
+    #[test]
+    fn effective_effectiveness_stored_after_step() {
+        // Mild outdoor temp (above defrost, outside bypass range): rated effectiveness.
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e_mild = env(10.0, 20.0); // below bypass min (18°C), above defrost (-5°C)
+        hrv.init(&cfg, &e_mild).expect("init");
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e_mild, Duration::from_secs(300), &mut ports)
+            .expect("step");
+        let (eff_s, eff_l) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("HRV provides effectiveness");
+        assert!(
+            (eff_s - 0.70).abs() < 0.01,
+            "mild weather: rated sensible eff should be 0.70, got {eff_s}"
+        );
+        assert!(
+            (eff_l - 0.0).abs() < 0.01,
+            "HRV: latent eff should be 0.0, got {eff_l}"
+        );
+
+        // Bypass range: effectiveness must be zero.
+        let e_bypass = env(21.0, 22.0);
+        hrv.step(&e_bypass, Duration::from_secs(300), &mut ports)
+            .expect("step bypass");
+        let (eff_s, eff_l) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("HRV provides effectiveness");
+        assert!(
+            (eff_s - 0.0).abs() < 0.01,
+            "bypass: sensible eff should be 0.0, got {eff_s}"
+        );
+        assert!(
+            (eff_l - 0.0).abs() < 0.01,
+            "bypass: latent eff should be 0.0, got {eff_l}"
+        );
+
+        // Defrost range: effectiveness must be derated (35% = 0.50 × 0.70 = 0.35).
+        let e_cold = env(-20.0, 20.0);
+        hrv.step(&e_cold, Duration::from_secs(300), &mut ports)
+            .expect("step defrost");
+        let (eff_s, _eff_l) = hrv
+            .effective_ventilation_effectiveness()
+            .expect("HRV provides effectiveness");
+        assert!(
+            (eff_s - 0.35).abs() < 0.01,
+            "defrost: sensible eff should be ~0.35 (50% derating), got {eff_s}"
+        );
+    }
+
+    /// Ventilation equipment returns Some(eff_s, eff_l) via the trait method.
+    #[test]
+    fn ventilation_effectiveness_returns_some_for_hrv() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(10.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+        let result = hrv.effective_ventilation_effectiveness();
+        assert!(result.is_some(), "Ventilation must return Some");
+        let (eff_s, _eff_l) = result.unwrap();
+        assert!(
+            eff_s >= 0.0 && eff_s <= 1.0,
+            "sensible effectiveness in range"
         );
     }
 }
