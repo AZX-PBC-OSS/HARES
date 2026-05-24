@@ -31,7 +31,7 @@ impl ThermalSolver {
     ///
     /// Uses `interior_lwr_zones` surfaces when available (ScriptF mode),
     /// falls back to `interior_solar_zones` surfaces (StarMesh mode).
-    pub(super) fn apply_port_radiant_inputs(&self, u: &mut DVector<f64>, ports: &PortSlots) {
+    pub(super) fn apply_port_radiant_inputs(&mut self, u: &mut DVector<f64>, ports: &PortSlots) {
         let indoor_zone = self.config.indoor_zone_id;
         let total_radiant_w: f64 = ports
             .thermal
@@ -44,6 +44,12 @@ impl ThermalSolver {
             return;
         }
 
+        let zone_air_idx = self
+            .wiring
+            .zone_sensible_input_indices
+            .get(&indoor_zone)
+            .copied();
+
         // Prefer interior_lwr_zones (ScriptF mode, has full surface info with
         // emissivity and driving_temp), fall back to interior_solar_zones
         // (StarMesh mode, has area/absorptance/radiation_frac).
@@ -54,11 +60,12 @@ impl ThermalSolver {
             .find(|z| z.zone_id == indoor_zone);
 
         if let Some(zone_cfg) = lwr_zone {
-            self.distribute_radiant_lwr_surfaces(
+            distribute_radiant_lwr_surfaces(
                 u,
                 total_radiant_w,
-                indoor_zone,
+                zone_air_idx,
                 &zone_cfg.surfaces,
+                &mut self.radiant_weights_buf,
             );
             return;
         }
@@ -71,104 +78,114 @@ impl ThermalSolver {
 
         let Some(zone_cfg) = solar_zone else {
             // No surface info at all: dump all radiant gain to zone air.
-            if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&indoor_zone) {
+            if let Some(idx) = zone_air_idx {
                 u[idx] += total_radiant_w;
             }
             return;
         };
 
-        self.distribute_radiant_solar_surfaces(u, total_radiant_w, indoor_zone, &zone_cfg.surfaces);
+        distribute_radiant_solar_surfaces(
+            u,
+            total_radiant_w,
+            zone_air_idx,
+            &zone_cfg.surfaces,
+            &mut self.radiant_weights_buf,
+        );
+    }
+}
+
+/// Distribute radiant gains using InteriorSurfaceInfo (ScriptF/LWR path).
+fn distribute_radiant_lwr_surfaces(
+    u: &mut DVector<f64>,
+    total_radiant_w: f64,
+    zone_air_idx: Option<usize>,
+    surfaces: &[super::config::InteriorSurfaceInfo],
+    buf: &mut Vec<f64>,
+) {
+    buf.clear();
+    buf.resize(surfaces.len(), 0.0);
+
+    let mut total_weight = 0.0;
+    for (i, s) in surfaces.iter().enumerate() {
+        let w = if s.driving_temp.is_none() {
+            s.area_m2 * s.emissivity
+        } else {
+            0.0
+        };
+        buf[i] = w;
+        total_weight += w;
     }
 
-    /// Distribute radiant gains using InteriorSurfaceInfo (ScriptF/LWR path).
-    fn distribute_radiant_lwr_surfaces(
-        &self,
-        u: &mut DVector<f64>,
-        total_radiant_w: f64,
-        indoor_zone: hares_types::ZoneId,
-        surfaces: &[super::config::InteriorSurfaceInfo],
-    ) {
-        let mut total_weight = 0.0;
-        let mut weights = Vec::with_capacity(surfaces.len());
-        for s in surfaces.iter() {
-            let w = if s.driving_temp.is_none() {
-                s.area_m2 * s.emissivity
-            } else {
-                0.0
-            };
-            weights.push(w);
-            total_weight += w;
-        }
-
-        let mut air_from_radiant = 0.0;
-        if total_weight > 0.0 {
-            for (s, &w) in surfaces.iter().zip(weights.iter()) {
-                if w > 0.0 {
-                    let q = total_radiant_w * w / total_weight;
-                    if s.input_index < u.len() {
-                        u[s.input_index] += q * s.radiation_frac;
-                    }
-                    air_from_radiant += q * (1.0 - s.radiation_frac);
+    let mut air_from_radiant = 0.0;
+    if total_weight > 0.0 {
+        for (s, &w) in surfaces.iter().zip(buf.iter()) {
+            if w > 0.0 {
+                let q = total_radiant_w * w / total_weight;
+                if s.input_index < u.len() {
+                    u[s.input_index] += q * s.radiation_frac;
                 }
-            }
-        } else {
-            air_from_radiant = total_radiant_w;
-        }
-
-        if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&indoor_zone) {
-            if idx < u.len() {
-                u[idx] += air_from_radiant;
+                air_from_radiant += q * (1.0 - s.radiation_frac);
             }
         }
+    } else {
+        air_from_radiant = total_radiant_w;
     }
 
-    /// Distribute radiant gains using InteriorSolarSurfaceInfo (StarMesh/solar path).
-    ///
-    /// Uses solar_absorptance as a proxy for thermal absorptance (Kirchhoff's
-    /// law: α_thermal ≈ ε for opaque surfaces in the LW band). Windows have
-    /// `input_index: None` and are excluded from the TMULT weighting.
-    fn distribute_radiant_solar_surfaces(
-        &self,
-        u: &mut DVector<f64>,
-        total_radiant_w: f64,
-        indoor_zone: hares_types::ZoneId,
-        surfaces: &[super::config::InteriorSolarSurfaceInfo],
-    ) {
-        let mut total_weight = 0.0;
-        let mut weights = Vec::with_capacity(surfaces.len());
-        for s in surfaces.iter() {
-            // Windows (input_index=None) can't absorb radiant gain into an
-            // RC node; skip them from the TMULT weighting.
-            let w = if s.input_index.is_some() {
-                s.area_m2 * s.solar_absorptance
-            } else {
-                0.0
-            };
-            weights.push(w);
-            total_weight += w;
+    if let Some(idx) = zone_air_idx {
+        if idx < u.len() {
+            u[idx] += air_from_radiant;
         }
+    }
+}
 
-        let mut air_from_radiant = 0.0;
-        if total_weight > 0.0 {
-            for (s, &w) in surfaces.iter().zip(weights.iter()) {
-                if w > 0.0 && s.input_index.is_some() {
-                    let q = total_radiant_w * w / total_weight;
-                    if let Some(idx) = s.input_index {
-                        if idx < u.len() {
-                            u[idx] += q * s.radiation_frac;
-                        }
-                    }
-                    air_from_radiant += q * (1.0 - s.radiation_frac);
-                }
-            }
+/// Distribute radiant gains using InteriorSolarSurfaceInfo (StarMesh/solar path).
+///
+/// Uses solar_absorptance as a proxy for thermal absorptance (Kirchhoff's
+/// law: α_thermal ≈ ε for opaque surfaces in the LW band). Windows have
+/// `input_index: None` and are excluded from the TMULT weighting.
+fn distribute_radiant_solar_surfaces(
+    u: &mut DVector<f64>,
+    total_radiant_w: f64,
+    zone_air_idx: Option<usize>,
+    surfaces: &[super::config::InteriorSolarSurfaceInfo],
+    buf: &mut Vec<f64>,
+) {
+    buf.clear();
+    buf.resize(surfaces.len(), 0.0);
+
+    let mut total_weight = 0.0;
+    for (i, s) in surfaces.iter().enumerate() {
+        // Windows (input_index=None) can't absorb radiant gain into an
+        // RC node; skip them from the TMULT weighting.
+        let w = if s.input_index.is_some() {
+            s.area_m2 * s.solar_absorptance
         } else {
-            air_from_radiant = total_radiant_w;
-        }
+            0.0
+        };
+        buf[i] = w;
+        total_weight += w;
+    }
 
-        if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&indoor_zone) {
-            if idx < u.len() {
-                u[idx] += air_from_radiant;
+    let mut air_from_radiant = 0.0;
+    if total_weight > 0.0 {
+        for (s, &w) in surfaces.iter().zip(buf.iter()) {
+            if w > 0.0 && s.input_index.is_some() {
+                let q = total_radiant_w * w / total_weight;
+                if let Some(idx) = s.input_index {
+                    if idx < u.len() {
+                        u[idx] += q * s.radiation_frac;
+                    }
+                }
+                air_from_radiant += q * (1.0 - s.radiation_frac);
             }
+        }
+    } else {
+        air_from_radiant = total_radiant_w;
+    }
+
+    if let Some(idx) = zone_air_idx {
+        if idx < u.len() {
+            u[idx] += air_from_radiant;
         }
     }
 }

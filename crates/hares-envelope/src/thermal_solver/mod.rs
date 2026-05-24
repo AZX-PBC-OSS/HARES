@@ -87,6 +87,10 @@ pub struct ThermalSolver {
     window_exterior_lwr_w: f64,
     /// Pre-allocated buffer for interior LWR net flux results per surface.
     lwr_net_flux_buf: Vec<f64>,
+    /// Pre-allocated buffer for radiant distribution weight vectors.
+    /// Reused across `distribute_radiant_lwr_surfaces` and
+    /// `distribute_radiant_solar_surfaces` to avoid per-timestep allocation.
+    radiant_weights_buf: Vec<f64>,
     /// Pre-sorted zone temperature buffer for format_domain_update; indexed parallel to sorted zone_output_indices.
     zone_temps_buf: Vec<(ZoneId, f64)>,
     latent_pairs_buf: Vec<(ZoneId, f64)>,
@@ -289,6 +293,15 @@ impl ThermalSolver {
             .map(|z| z.surfaces.len())
             .max()
             .unwrap_or(0);
+        let max_radiant_surfaces = {
+            let solar_max = config
+                .interior_solar_zones
+                .iter()
+                .map(|z| z.surfaces.len())
+                .max()
+                .unwrap_or(0);
+            max_interior_surfaces.max(solar_max)
+        };
         let mut interior_surface_temps = Vec::with_capacity(n_lwr_zones);
         let mut interior_surface_prev_temps = Vec::with_capacity(n_lwr_zones);
         for zone_cfg in &config.interior_lwr_zones {
@@ -357,6 +370,7 @@ impl ThermalSolver {
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
             window_exterior_lwr_w: 0.0,
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
+            radiant_weights_buf: Vec::with_capacity(max_radiant_surfaces),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
@@ -4315,7 +4329,7 @@ mod tests {
         use hares_types::{THERMAL_CATEGORY_COUNT, ThermalAccumulator};
 
         let env = env_for_temp(20.0, 10.0);
-        let solver = interior_lwr_solver(&env);
+        let mut solver = interior_lwr_solver(&env);
 
         let zone = ZoneId(1);
         let radiant_w = 100.0;
@@ -4471,7 +4485,7 @@ mod tests {
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
-        let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
 
         let zone = ZoneId(1);
         let radiant_w = 100.0;
@@ -4854,7 +4868,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
         };
 
-        let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
 
         let zone = ZoneId(1);
         let radiant_w = 100.0;
