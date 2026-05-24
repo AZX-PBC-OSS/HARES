@@ -538,6 +538,14 @@ impl HeatPumpHeaterCore {
             vec![default_eir]
         };
 
+        if let Some(r) = cfg.common.charge_defect_ratio {
+            super::super::hvac_core::apply_charge_defect_correction(
+                &mut self.hvac.config.heating_capacities_w,
+                &mut self.hvac.config.eir_by_stage,
+                r,
+            );
+        }
+
         if let Some(fan_power_w) = cfg.common.fan_power_w {
             let rated_capacity_w = self
                 .hvac
@@ -2141,6 +2149,7 @@ mod tests {
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
                 er_stages: 1,
+                charge_defect_ratio: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2200,6 +2209,7 @@ mod tests {
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
                 er_stages: 1,
+                charge_defect_ratio: None,
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -5818,6 +5828,7 @@ mod ideal_capacity_tests {
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
                     er_stages: 1,
+                    charge_defect_ratio: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
@@ -6019,6 +6030,7 @@ mod ideal_capacity_tests {
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
                     er_stages: 1,
+                    charge_defect_ratio: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: Some(10.0),
@@ -6178,6 +6190,7 @@ mod ideal_capacity_tests {
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
                     er_stages: 1,
+                    charge_defect_ratio: None,
                 },
                 hp_lockout_temp_c: Some(10.0),
                 er_lockout_temp_c: Some(5.0),
@@ -6280,6 +6293,7 @@ mod ideal_capacity_tests {
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
                     er_stages: 1,
+                    charge_defect_ratio: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: Some(5.0),

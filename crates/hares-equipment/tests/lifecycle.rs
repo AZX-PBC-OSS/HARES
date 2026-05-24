@@ -681,6 +681,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             },
         ),
         "Room AC" => typed_alias_config(
@@ -765,6 +766,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
                     er_stages: 1,
+                    charge_defect_ratio: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
@@ -818,6 +820,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
                     er_stages: 1,
+                    charge_defect_ratio: None,
                 },
                 stage_shrs: None,
             },

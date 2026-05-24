@@ -175,6 +175,7 @@ fn sample_central_ac_config() -> CentralAirConditionerConfig {
         ff_max: Some(1.2),
         plf_min: Some(0.7),
         plf_max: Some(1.0),
+        charge_defect_ratio: None,
     }
 }
 
@@ -249,6 +250,7 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
             min_compressor_fraction: 0.25,
             eir_part_load_benefit: None,
             er_stages: 1,
+            charge_defect_ratio: None,
         },
         hp_lockout_temp_c: None,
         er_lockout_temp_c: None,

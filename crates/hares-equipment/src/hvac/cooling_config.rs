@@ -101,6 +101,11 @@ pub struct CentralAirConditionerConfig {
     /// Part-load fraction (PLF) upper clamp bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plf_max: Option<f64>,
+    /// Refrigerant charge defect ratio `(InstalledCharge - DesignCharge) / DesignCharge`.
+    /// Applied multiplicatively to all rated capacity and EIR values during equipment init.
+    /// Correction factors: ANSI/RESNET/ACCA 310-2020.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charge_defect_ratio: Option<f64>,
 }
 
 impl EquipmentTypedConfig for CentralAirConditionerConfig {
@@ -510,6 +515,7 @@ mod tests {
             ff_max: Some(1.2),
             plf_min: Some(0.7),
             plf_max: Some(1.0),
+            charge_defect_ratio: None,
         };
         let ec = typed_config(cfg.clone());
         assert!(ec.is_typed());
@@ -577,6 +583,7 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            charge_defect_ratio: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -616,6 +623,7 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            charge_defect_ratio: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -655,6 +663,7 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            charge_defect_ratio: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -694,6 +703,7 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            charge_defect_ratio: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -733,6 +743,7 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            charge_defect_ratio: None,
         };
 
         assert_eq!(
@@ -786,6 +797,7 @@ mod tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             }
         }
 

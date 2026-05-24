@@ -1258,109 +1258,150 @@ fn fuel_oil_2_boiler_resolves_to_gas_boiler_config_with_oil_fuel() {
 }
 
 // ---------------------------------------------------------------------------
-// Ticket 081 – ChargeDefectRatio parsed but never applied
+// ChargeDefectRatio propagation into typed configs
 // ---------------------------------------------------------------------------
-// Commented out: `charge_defect_ratio` field does not yet exist on
-// `CentralAirConditionerConfig`, `HeatPumpHeaterConfig`, or
-// `HeatPumpCoolerConfig` — fix pending on ticket 081.
-// Uncomment when ticket 081 is resolved.
 
-// /// A -10% charge defect on a CoolingSystem must propagate into the typed
-// /// `CentralAirConditionerConfig` field `charge_defect_ratio`.
-// #[test]
-// fn charge_defect_ratio_propagates_to_central_ac_typed_config() {
-//     let xml = minimal_xml(
-//         r#"<Systems><HVAC><CoolingSystem>
-//             <CoolingSystemType>central air conditioner</CoolingSystemType>
-//             <CoolingCapacity>36000</CoolingCapacity>
-//             <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
-//             <extension>
-//                 <ChargeDefectRatio>-0.10</ChargeDefectRatio>
-//             </extension>
-//         </CoolingSystem></HVAC></Systems>"#,
-//     );
-//     let specs = resolve(&xml);
-//     let ac = specs.iter().find(|s| s.name == "Air Conditioner").expect("should emit Air Conditioner");
-//     assert_eq!(ac.parameters.get("charge_defect_ratio").and_then(|v| v.as_f64()), Some(-0.10));
-//     let typed_cfg: CentralAirConditionerConfig = ac.typed_config.as_ref().expect("typed config").typed().expect("CentralAirConditionerConfig");
-//     assert!(typed_cfg.charge_defect_ratio.is_some());
-//     assert!((typed_cfg.charge_defect_ratio.unwrap() - (-0.10)).abs() < 1e-12);
-// }
+/// A -10% charge defect on a CoolingSystem must propagate into the typed
+/// `CentralAirConditionerConfig` field `charge_defect_ratio`.
+#[test]
+fn charge_defect_ratio_propagates_to_central_ac_typed_config() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><CoolingSystem>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+            <extension>
+                <ChargeDefectRatio>-0.10</ChargeDefectRatio>
+            </extension>
+        </CoolingSystem></HVAC></Systems>"#,
+    );
+    let specs = resolve(&xml);
+    let ac = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("should emit Air Conditioner");
+    assert_eq!(
+        ac.parameters
+            .get("charge_defect_ratio")
+            .and_then(|v| v.as_f64()),
+        Some(-0.10)
+    );
+    let typed_cfg: CentralAirConditionerConfig = ac
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("CentralAirConditionerConfig");
+    assert!(typed_cfg.charge_defect_ratio.is_some());
+    assert!((typed_cfg.charge_defect_ratio.unwrap() - (-0.10)).abs() < 1e-12);
+}
 
-// /// A -10% charge defect on a HeatPump must propagate into the typed
-// /// `HeatPumpHeaterConfig` field `charge_defect_ratio`.
-// #[test]
-// fn charge_defect_ratio_propagates_to_heat_pump_heater_typed_config() {
-//     let xml = minimal_xml(
-//         r#"<Systems><HVAC><HeatPump>
-//             <HeatPumpType>air-to-air</HeatPumpType>
-//             <CompressorType>single stage</CompressorType>
-//             <HeatingCapacity>36000</HeatingCapacity>
-//             <CoolingCapacity>36000</CoolingCapacity>
-//             <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.5</Value></AnnualHeatingEfficiency>
-//             <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
-//             <extension><ChargeDefectRatio>-0.10</ChargeDefectRatio></extension>
-//         </HeatPump></HVAC></Systems>"#,
-//     );
-//     let specs = resolve(&xml);
-//     let heater = specs.iter().find(|s| s.name == "ASHP Heater").expect("should emit ASHP Heater");
-//     let typed_cfg: HeatPumpHeaterConfig = heater.typed_config.as_ref().expect("typed config").typed().expect("HeatPumpHeaterConfig");
-//     assert!(typed_cfg.charge_defect_ratio.is_some());
-//     assert!((typed_cfg.charge_defect_ratio.unwrap() - (-0.10)).abs() < 1e-12);
-// }
+/// A -10% charge defect on a HeatPump must propagate into the typed
+/// `HeatPumpHeaterConfig` field `charge_defect_ratio`.
+#[test]
+fn charge_defect_ratio_propagates_to_heat_pump_heater_typed_config() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><HeatPump>
+            <HeatPumpType>air-to-air</HeatPumpType>
+            <CompressorType>single stage</CompressorType>
+            <HeatingCapacity>36000</HeatingCapacity>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.5</Value></AnnualHeatingEfficiency>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+            <extension><ChargeDefectRatio>-0.10</ChargeDefectRatio></extension>
+        </HeatPump></HVAC></Systems>"#,
+    );
+    let specs = resolve(&xml);
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "ASHP Heater")
+        .expect("should emit ASHP Heater");
+    let typed_cfg: HeatPumpHeaterConfig = heater
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("HeatPumpHeaterConfig");
+    assert!(typed_cfg.common.charge_defect_ratio.is_some());
+    assert!((typed_cfg.common.charge_defect_ratio.unwrap() - (-0.10)).abs() < 1e-12);
+}
 
-// /// A -10% charge defect on a HeatPump must propagate into the typed
-// /// `HeatPumpCoolerConfig` field `charge_defect_ratio`.
-// #[test]
-// fn charge_defect_ratio_propagates_to_heat_pump_cooler_typed_config() {
-//     let xml = minimal_xml(
-//         r#"<Systems><HVAC><HeatPump>
-//             <HeatPumpType>air-to-air</HeatPumpType>
-//             <CompressorType>single stage</CompressorType>
-//             <HeatingCapacity>36000</HeatingCapacity>
-//             <CoolingCapacity>36000</CoolingCapacity>
-//             <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.5</Value></AnnualHeatingEfficiency>
-//             <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
-//             <extension><ChargeDefectRatio>-0.10</ChargeDefectRatio></extension>
-//         </HeatPump></HVAC></Systems>"#,
-//     );
-//     let specs = resolve(&xml);
-//     let cooler = specs.iter().find(|s| s.name == "ASHP Cooler").expect("should emit ASHP Cooler");
-//     let typed_cfg: HeatPumpCoolerConfig = cooler.typed_config.as_ref().expect("typed config").typed().expect("HeatPumpCoolerConfig");
-//     assert!(typed_cfg.charge_defect_ratio.is_some());
-//     assert!((typed_cfg.charge_defect_ratio.unwrap() - (-0.10)).abs() < 1e-12);
-// }
+/// A -10% charge defect on a HeatPump must propagate into the typed
+/// `HeatPumpCoolerConfig` field `charge_defect_ratio`.
+#[test]
+fn charge_defect_ratio_propagates_to_heat_pump_cooler_typed_config() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><HeatPump>
+            <HeatPumpType>air-to-air</HeatPumpType>
+            <CompressorType>single stage</CompressorType>
+            <HeatingCapacity>36000</HeatingCapacity>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.5</Value></AnnualHeatingEfficiency>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+            <extension><ChargeDefectRatio>-0.10</ChargeDefectRatio></extension>
+        </HeatPump></HVAC></Systems>"#,
+    );
+    let specs = resolve(&xml);
+    let cooler = specs
+        .iter()
+        .find(|s| s.name == "ASHP Cooler")
+        .expect("should emit ASHP Cooler");
+    let typed_cfg: HeatPumpCoolerConfig = cooler
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("HeatPumpCoolerConfig");
+    assert!(typed_cfg.common.charge_defect_ratio.is_some());
+    assert!((typed_cfg.common.charge_defect_ratio.unwrap() - (-0.10)).abs() < 1e-12);
+}
 
-// /// A zero charge defect ratio must result in no correction.
-// #[test]
-// fn zero_charge_defect_ratio_stored_as_some_zero() {
-//     let xml = minimal_xml(
-//         r#"<Systems><HVAC><CoolingSystem>
-//             <CoolingSystemType>central air conditioner</CoolingSystemType>
-//             <CoolingCapacity>36000</CoolingCapacity>
-//             <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
-//             <extension><ChargeDefectRatio>0.0</ChargeDefectRatio></extension>
-//         </CoolingSystem></HVAC></Systems>"#,
-//     );
-//     let specs = resolve(&xml);
-//     let ac = specs.iter().find(|s| s.name == "Air Conditioner").expect("should emit Air Conditioner");
-//     let typed_cfg: CentralAirConditionerConfig = ac.typed_config.as_ref().expect("typed config").typed().expect("CentralAirConditionerConfig");
-//     assert!(typed_cfg.charge_defect_ratio.is_some());
-//     assert!(typed_cfg.charge_defect_ratio.unwrap().abs() < 1e-12);
-// }
+/// A zero charge defect ratio must result in no correction.
+#[test]
+fn zero_charge_defect_ratio_stored_as_some_zero() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><CoolingSystem>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+            <extension><ChargeDefectRatio>0.0</ChargeDefectRatio></extension>
+        </CoolingSystem></HVAC></Systems>"#,
+    );
+    let specs = resolve(&xml);
+    let ac = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("should emit Air Conditioner");
+    let typed_cfg: CentralAirConditionerConfig = ac
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("CentralAirConditionerConfig");
+    assert!(typed_cfg.charge_defect_ratio.is_some());
+    assert!(typed_cfg.charge_defect_ratio.unwrap().abs() < 1e-12);
+}
 
-// /// When ChargeDefectRatio is absent, the typed config field must be None.
-// #[test]
-// fn absent_charge_defect_ratio_gives_none() {
-//     let xml = minimal_xml(
-//         r#"<Systems><HVAC><CoolingSystem>
-//             <CoolingSystemType>central air conditioner</CoolingSystemType>
-//             <CoolingCapacity>36000</CoolingCapacity>
-//             <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
-//         </CoolingSystem></HVAC></Systems>"#,
-//     );
-//     let specs = resolve(&xml);
-//     let ac = specs.iter().find(|s| s.name == "Air Conditioner").expect("should emit Air Conditioner");
-//     let typed_cfg: CentralAirConditionerConfig = ac.typed_config.as_ref().expect("typed config").typed().expect("CentralAirConditionerConfig");
-//     assert!(typed_cfg.charge_defect_ratio.is_none());
-// }
+/// When ChargeDefectRatio is absent, the typed config field must be None.
+#[test]
+fn absent_charge_defect_ratio_gives_none() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><CoolingSystem>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+        </CoolingSystem></HVAC></Systems>"#,
+    );
+    let specs = resolve(&xml);
+    let ac = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("should emit Air Conditioner");
+    let typed_cfg: CentralAirConditionerConfig = ac
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("CentralAirConditionerConfig");
+    assert!(typed_cfg.charge_defect_ratio.is_none());
+}

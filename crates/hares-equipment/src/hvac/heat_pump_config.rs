@@ -111,6 +111,11 @@ pub struct HeatPumpCommonConfig {
     /// discrete staged operation rather than modulation.
     #[serde(default = "default_one")]
     pub er_stages: u8,
+    /// Refrigerant charge defect ratio `(InstalledCharge - DesignCharge) / DesignCharge`.
+    /// Applied multiplicatively to all rated capacity and EIR values during equipment init.
+    /// Correction factors: ANSI/RESNET/ACCA 310-2020.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charge_defect_ratio: Option<f64>,
 }
 
 impl Default for HeatPumpCommonConfig {
@@ -154,6 +159,7 @@ impl Default for HeatPumpCommonConfig {
             min_compressor_fraction: 0.25,
             eir_part_load_benefit: None,
             er_stages: 1,
+            charge_defect_ratio: None,
         }
     }
 }
@@ -576,6 +582,7 @@ mod tests {
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
                 er_stages: 1,
+                charge_defect_ratio: None,
             },
             hp_lockout_temp_c: Some(-17.8),
             er_lockout_temp_c: Some(4.4),
@@ -775,6 +782,7 @@ mod tests {
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
                 er_stages: 1,
+                charge_defect_ratio: None,
             },
             hp_lockout_temp_c: Some(-17.8),
             er_lockout_temp_c: Some(4.4),

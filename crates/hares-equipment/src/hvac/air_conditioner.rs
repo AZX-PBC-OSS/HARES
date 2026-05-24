@@ -549,6 +549,14 @@ impl CoolingCore {
                 ));
             }
 
+            if let Some(r) = cfg.charge_defect_ratio {
+                super::hvac_core::apply_charge_defect_correction(
+                    &mut self.hvac.config.cooling_capacities_w,
+                    &mut self.hvac.config.eir_by_stage,
+                    r,
+                );
+            }
+
             if let Some(airflow_m3_s_per_w) = cfg.airflow_m3_s_per_w {
                 self.hvac.config.airflow_m3_s_per_w = airflow_m3_s_per_w;
             }
@@ -1542,6 +1550,7 @@ fn typed_ac_test_config(eir: f64) -> EquipmentConfig {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            charge_defect_ratio: None,
         },
     )
 }
@@ -2366,6 +2375,7 @@ mod tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             },
         );
         let environment = env(26.0, 0.010, 18.0, 35.0);
@@ -2967,6 +2977,7 @@ mod dr_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             },
         );
         cfg.test_extras_mut().insert(
@@ -3359,6 +3370,7 @@ mod crankcase_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             },
         );
         cfg.test_extras_mut().insert(
@@ -3449,6 +3461,7 @@ mod crankcase_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             },
         );
         cfg.test_extras_mut().insert(
@@ -4028,6 +4041,7 @@ mod ideal_capacity_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             },
         );
 
@@ -4187,6 +4201,7 @@ mod defaults_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             },
         );
         cfg.test_extras_mut().insert(
@@ -4257,6 +4272,7 @@ mod defaults_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             },
         );
 
@@ -4440,6 +4456,7 @@ mod speed_selection_parity_tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            charge_defect_ratio: None,
         };
         let mut cfg =
             EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);

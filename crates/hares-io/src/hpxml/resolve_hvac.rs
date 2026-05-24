@@ -868,6 +868,7 @@ fn try_build_central_ac_config(
         ff_max: curve_bounds.ff_max,
         plf_min: curve_bounds.plf_min,
         plf_max: curve_bounds.plf_max,
+        charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -1061,6 +1062,7 @@ fn try_build_heat_pump_heater_config(
                 .and_then(Value::as_u64)
                 .map(|v| v as u8)
                 .unwrap_or(1),
+            charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
         },
         hp_lockout_temp_c: params.get("hp_lockout_temp_c").and_then(Value::as_f64),
         er_lockout_temp_c: params.get("er_lockout_temp_c").and_then(Value::as_f64),
@@ -1227,6 +1229,7 @@ fn try_build_heat_pump_cooler_config(
                 .and_then(Value::as_u64)
                 .map(|v| v as u8)
                 .unwrap_or(1),
+            charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
         },
         stage_shrs: extract_stage_values(params, "shr"),
     };

@@ -174,6 +174,7 @@ impl HpCooler {
             ff_max: hp_cfg.common.ff_max,
             plf_min: hp_cfg.common.plf_min,
             plf_max: hp_cfg.common.plf_max,
+            charge_defect_ratio: hp_cfg.common.charge_defect_ratio,
         };
 
         Ok(EquipmentConfig::from_typed(
@@ -367,6 +368,7 @@ mod tests {
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
                     er_stages: 1,
+                    charge_defect_ratio: None,
                 },
                 stage_shrs: None,
             },

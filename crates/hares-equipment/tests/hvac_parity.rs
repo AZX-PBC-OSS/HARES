@@ -135,6 +135,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                charge_defect_ratio: None,
             },
         ),
         "ASHP Heater" => EquipmentConfig::from_typed(
@@ -180,6 +181,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
                     er_stages: 1,
+                    charge_defect_ratio: None,
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
@@ -275,6 +277,7 @@ fn hp_cooler_cfg(
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
                 er_stages: 1,
+                charge_defect_ratio: None,
             },
             stage_shrs: None,
         },
@@ -1064,6 +1067,7 @@ fn two_speed_ac_config() -> EquipmentConfig {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            charge_defect_ratio: None,
         },
     )
 }
@@ -1873,6 +1877,7 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
                 min_compressor_fraction: 0.25,
                 eir_part_load_benefit: None,
                 er_stages: 1,
+                charge_defect_ratio: None,
             },
             hp_lockout_temp_c: Some(10.0),
             er_lockout_temp_c: Some(5.0),

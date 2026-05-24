@@ -92,6 +92,44 @@ pub const AIRFLOW_CENTRAL_AC_M3_S_PER_W: f64 = 5.367_838_475_978_508_5e-5;
 pub const AIRFLOW_MSHP_COOLING_M3_S_PER_W: f64 = 4.186_914_011_263_237e-5;
 pub const AIRFLOW_ROOM_AC_M3_S_PER_W: f64 = 4.294_270_780_782_807e-5;
 
+/// Refrigerant charge defect capacity correction coefficient (Cc).
+///
+/// Capacity multiplier = 1.0 + CC_CHARGE_DEFECT * r
+/// where r = (InstalledCharge - DesignCharge) / DesignCharge.
+///
+/// For cooling DX coils: ANSI/RESNET/ACCA 310-2020.
+/// Both Cc and Ce use the same magnitude; the verification audit was unable to
+/// confirm the exact coefficient values from publicly available sources; the
+/// coefficients should be confirmed against the standard when accessible.
+pub const CC_CHARGE_DEFECT: f64 = 0.9;
+
+/// Refrigerant charge defect EIR correction coefficient (Ce).
+///
+/// EIR multiplier = 1.0 + CE_CHARGE_DEFECT * r
+/// where r = (InstalledCharge - DesignCharge) / DesignCharge.
+///
+/// For cooling DX coils: ANSI/RESNET/ACCA 310-2020.
+pub const CE_CHARGE_DEFECT: f64 = 0.9;
+
+/// Apply refrigerant charge defect correction to rated capacity and EIR values.
+///
+/// Multiplies each capacity by `1.0 + CC_CHARGE_DEFECT * r` and each EIR by
+/// `1.0 + CE_CHARGE_DEFECT * r` where r is the charge defect ratio.
+pub fn apply_charge_defect_correction(
+    capacities: &mut [f64],
+    eirs: &mut [f64],
+    charge_defect_ratio: f64,
+) {
+    let cap_corr = 1.0 + CC_CHARGE_DEFECT * charge_defect_ratio;
+    let eir_corr = 1.0 + CE_CHARGE_DEFECT * charge_defect_ratio;
+    for cap in capacities.iter_mut() {
+        *cap *= cap_corr;
+    }
+    for eir in eirs.iter_mut() {
+        *eir *= eir_corr;
+    }
+}
+
 impl HvacEquipmentType {
     pub fn default_supply_air_temp_c(self, outdoor_temp_c: f64) -> f64 {
         match self {
@@ -419,6 +457,16 @@ impl HvacEquipment {
                 .transpose()?
                 .unwrap_or_default();
             if !cap_curves.is_empty() || !eir_curves.is_empty() {
+                if !cap_curves.is_empty()
+                    && !eir_curves.is_empty()
+                    && cap_curves.len() != eir_curves.len()
+                {
+                    return Err(HaresError::Equipment(format!(
+                        "capacity_biquadratic_coeffs has {} speed(s) but eir_biquadratic_coeffs has {} speed(s); per-speed cap/EIR curve counts must match",
+                        cap_curves.len(),
+                        eir_curves.len()
+                    )));
+                }
                 let n_stages = cap_curves.len().max(eir_curves.len());
                 let mut interleaved = Vec::with_capacity(n_stages * 2);
                 for i in 0..n_stages {
@@ -3049,23 +3097,13 @@ mod tests {
     // mismatched cap/EIR biquadratic curve counts should warn
     // ---------------------------------------------------------------------------
 
-    /// Regression test: when capacity_biquadratic_coeffs has
-    /// more speed stages than eir_biquadratic_coeffs, the loader silently fills
-    /// the missing EIR stages with DEFAULT_BIQUADRATIC_COEFFS (identity).
-    ///
-    /// This test confirms the current silent-fill behaviour is present (the bug
-    /// exists) by asserting the interleaved `biquadratic_coeffs` vector has the
-    /// expected length and that the padded EIR slot uses identity coefficients.
-    ///
-    /// FAILS the spirit of the issue: no warning is emitted. The fix (add
-    /// `tracing::warn!` before the fill loop) must make this observable via
-    /// a log subscriber; until then this test documents the silent behaviour.
+    /// Mismatched capacity/EIR biquadratic curve counts are rejected during
+    /// init rather than silently padded with identity coefficients. OCHRE raises
+    /// an exception for this, so HARES must fail loudly too.
     #[test]
-    fn mismatched_curve_counts_silently_filled_with_identity() {
+    fn mismatched_curve_counts_rejected() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
         let mut config = EquipmentConfig::default();
-        // 2 capacity curves, 1 EIR curve → loader must pad EIR with identity at
-        // speed index 1.  Interleaved result: [cap0, eir0, cap1, identity_eir].
         config.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[[0.9,0.01,0,0.02,0,0],[0.8,0.02,0,0.015,0,0]]".into(),
@@ -3074,40 +3112,36 @@ mod tests {
             "eir_biquadratic_coeffs".to_string(),
             "[[1.1,0,0,0.03,0,0]]".into(),
         );
-        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+        let result = hvac.init(&config, &env(20.0, 60, 0));
+        assert!(
+            result.is_err(),
+            "expected Err for mismatched curve counts, got Ok"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("capacity_biquadratic_coeffs has 2 speed(s) but eir_biquadratic_coeffs has 1 speed(s)")
+                || msg.contains("per-speed cap/EIR curve counts must match"),
+            "error message should mention mismatched curve counts, got: {msg}"
+        );
+    }
 
-        // n_stages = max(2, 1) = 2; interleaved vector has 4 entries.
-        assert_eq!(
-            hvac.config.biquadratic_coeffs.len(),
-            4,
-            "expected 4 interleaved coefficients (2 cap + 2 eir), \
-             got {}",
-            hvac.config.biquadratic_coeffs.len()
+    /// Converse direction: more EIR curves than capacity curves is also rejected.
+    #[test]
+    fn mismatched_curve_counts_eir_more_than_cap_rejected() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config.test_extras_mut().insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[[0.9,0.01,0,0.02,0,0]]".into(),
         );
-        // Slot 0 = cap for speed 0.
-        assert_eq!(
-            hvac.config.biquadratic_coeffs[0],
-            [0.9, 0.01, 0.0, 0.02, 0.0, 0.0],
-            "cap curve for speed 0 should be preserved"
+        config.test_extras_mut().insert(
+            "eir_biquadratic_coeffs".to_string(),
+            "[[1.1,0,0,0.03,0,0],[1.2,0,0,0.04,0,0]]".into(),
         );
-        // Slot 1 = eir for speed 0 (explicitly provided).
-        assert_eq!(
-            hvac.config.biquadratic_coeffs[1],
-            [1.1, 0.0, 0.0, 0.03, 0.0, 0.0],
-            "eir curve for speed 0 should be preserved"
-        );
-        // Slot 2 = cap for speed 1 (explicitly provided).
-        assert_eq!(
-            hvac.config.biquadratic_coeffs[2],
-            [0.8, 0.02, 0.0, 0.015, 0.0, 0.0],
-            "cap curve for speed 1 should be preserved"
-        );
-        // Slot 3 = eir for speed 1 — SILENTLY filled with identity (the bug).
-        // After the fix, a tracing::warn! should fire before this assignment.
-        assert_eq!(
-            hvac.config.biquadratic_coeffs[3], DEFAULT_BIQUADRATIC_COEFFS,
-            "missing eir curve at speed 1 is silently filled with \
-             identity coefficients [1,0,0,0,0,0] — no warning is emitted (bug)"
+        let result = hvac.init(&config, &env(20.0, 60, 0));
+        assert!(
+            result.is_err(),
+            "expected Err for mismatched curve counts (more EIR than cap), got Ok"
         );
     }
 
