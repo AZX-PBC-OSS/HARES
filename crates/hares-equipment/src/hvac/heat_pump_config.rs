@@ -194,6 +194,14 @@ pub struct HeatPumpHeaterConfig {
     /// reverse-cycle defrost from indoor-coil surface moisture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heating_shr: Option<f64>,
+    /// Ratio of heating capacity at 17°F (-8.33°C) to rated capacity at
+    /// 47°F (8.33°C), from HPXML HeatingCapacity17F / HeatingCapacity.
+    /// AHRI 210/240 H3 low-ambient rating point for ASHPs.
+    /// When present, the capacity biquadratic curve coefficients are scaled
+    /// linearly so the H3 evaluation matches this ratio. A pre-scaling
+    /// deviation >10% produces a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_ratio_at_17f: Option<f64>,
     /// Defrost configuration: control mode, strategy, timing, capacity.
     /// Flattened into the same JSON namespace as heater-only fields.
     /// All fields default to the OnDemand/ReverseCycle values matching
@@ -575,6 +583,7 @@ mod tests {
             er_setpoint_offset_c: Some(1.6),
             er_hard_lockout_time_s: Some(600.0),
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         };
         let ec = typed_config(cfg.clone());
@@ -773,6 +782,7 @@ mod tests {
             er_setpoint_offset_c: Some(1.6),
             er_hard_lockout_time_s: Some(600.0),
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         };
         let value = serde_json::to_value(&cfg).unwrap();

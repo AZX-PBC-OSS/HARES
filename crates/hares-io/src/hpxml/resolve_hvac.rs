@@ -1068,6 +1068,7 @@ fn try_build_heat_pump_heater_config(
         er_setpoint_offset_c: params.get("er_setpoint_offset_c").and_then(Value::as_f64),
         er_hard_lockout_time_s: params.get("er_hard_lockout_time_s").and_then(Value::as_f64),
         heating_shr: None,
+        capacity_ratio_at_17f: params.get("capacity_ratio_at_17f").and_then(Value::as_f64),
         defrost: {
             let mut d = DefrostConfig::default();
             if let Some(s) = params.get("defrost_control").and_then(Value::as_str) {
@@ -1586,6 +1587,21 @@ pub(super) fn resolve_hvac(
             "heat_pump_type".to_string(),
             Value::String(heat_pump_type.clone()),
         );
+
+        // HeatingCapacity17F: AHRI 210/240 H3 low-ambient rating point at 17°F (-8.33°C).
+        // Stores capacity_ratio_at_17f = HeatingCapacity17F / HeatingCapacity (both in W)
+        // so the biquadratic curve can be validated against the manufacturer spec.
+        if let Some(cap_17f_btu) = child_f64(heat_pump, "HeatingCapacity17F") {
+            if let Some(cap_w) = params.get("heating_capacity_w").and_then(Value::as_f64) {
+                if cap_w > 0.0 {
+                    let cap_17f_w = conv::power_btu_h_to_w(cap_17f_btu);
+                    params.insert(
+                        "capacity_ratio_at_17f".to_string(),
+                        json!(cap_17f_w / cap_w),
+                    );
+                }
+            }
+        }
 
         // Backup heating parameters
         if let Some(cap_btu) = child_f64(heat_pump, "BackupHeatingCapacity") {

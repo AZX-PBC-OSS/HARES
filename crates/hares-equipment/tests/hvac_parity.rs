@@ -187,6 +187,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                 er_setpoint_offset_c: None,
                 er_hard_lockout_time_s: None,
                 heating_shr: None,
+                capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
         ),
@@ -1879,6 +1880,7 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );

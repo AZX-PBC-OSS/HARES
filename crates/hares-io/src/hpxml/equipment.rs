@@ -1508,8 +1508,6 @@ mod tests {
     // HeatingCapacity17F (21600 BTU/h) with HeatingCapacity (36000 BTU/h) must
     // produce capacity_ratio_at_17f ≈ 0.600 in the ASHP Heater typed config.
     // This test FAILS until the resolver reads HeatingCapacity17F.
-    /// Will stop panicking when HeatingCapacity17F is parsed into typed config
-    #[should_panic(expected = "capacity_ratio_at_17f")]
     #[test]
     fn ashp_heating_capacity_17f_ratio_is_parsed_into_typed_config() {
         let xml = r#"
@@ -1546,8 +1544,6 @@ mod tests {
             .find(|s| s.name == "ASHP Heater")
             .expect("ASHP Heater spec must be present");
 
-        // The ratio must be present in the raw params map as
-        // "capacity_ratio_at_17f" until the typed config grows the field.
         let ratio = heater
             .parameters
             .get("capacity_ratio_at_17f")
@@ -1559,6 +1555,20 @@ mod tests {
         assert!(
             (ratio - 0.600).abs() < 0.01,
             "capacity_ratio_at_17f = {ratio:.4}, expected ~0.600 (21600/36000)"
+        );
+
+        let typed: hares_equipment::HeatPumpHeaterConfig = heater
+            .typed_config
+            .as_ref()
+            .expect("heater spec must carry typed config")
+            .typed()
+            .expect("heater typed config must deserialise");
+        let typed_ratio = typed
+            .capacity_ratio_at_17f
+            .expect("capacity_ratio_at_17f must be present in typed config");
+        assert!(
+            (typed_ratio - 0.600).abs() < 0.01,
+            "typed capacity_ratio_at_17f = {typed_ratio:.4}, expected ~0.600 (21600/36000)"
         );
     }
 
@@ -1598,15 +1608,16 @@ mod tests {
             .find(|s| s.name == "ASHP Heater")
             .expect("ASHP Heater spec must be present");
 
-        // When HeatingCapacity17F is absent the field must be None
-        // (cannot assert this yet -- typed config has no such field; the test
-        // verifies at least that parsing succeeds without panic)
-        let _typed: hares_equipment::HeatPumpHeaterConfig = heater
+        let typed: hares_equipment::HeatPumpHeaterConfig = heater
             .typed_config
             .as_ref()
             .expect("heater spec must carry typed config")
             .typed()
             .expect("heater typed config must deserialise");
+        assert!(
+            typed.capacity_ratio_at_17f.is_none(),
+            "capacity_ratio_at_17f must be None when HeatingCapacity17F is absent"
+        );
     }
 
     // Unsupported HeatPumpType should not silently skip HVAC.

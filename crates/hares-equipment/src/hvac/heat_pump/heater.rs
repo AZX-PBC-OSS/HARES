@@ -702,6 +702,68 @@ impl HeatPumpHeaterCore {
 
         self.defrost_config = cfg.defrost;
 
+        // Anchor capacity biquadratic to manufacturer-specified capacity at the
+        // AHRI 210/240 H3 low-ambient rating point (17°F / -8.33°C).
+        // When the HeatingCapacity17F / HeatingCapacity ratio was parsed from HPXML:
+        // 1. Evaluate the biquadratic at H3 conditions and compute the deviation.
+        // 2. Warn when the pre-scaling deviation exceeds 10% (curve was substantially off).
+        // 3. Scale all capacity-curve coefficients linearly so the H3 evaluation
+        //    matches the manufacturer ratio. EIR curves are not scaled — efficiency
+        //    vs temperature is independent of the raw capacity anchor point.
+        if let Some(expected_ratio) = cfg.capacity_ratio_at_17f {
+            let n_pairs = self.hvac.config.biquadratic_coeffs.len() / 2;
+            if n_pairs > 0 {
+                // AHRI 210/240 H3 test: indoor 70°F (21.11°C) dry-bulb,
+                // outdoor 17°F (-8.33°C) dry-bulb, rated airflow.
+                let t_indoor_c = 21.11;
+                let t_outdoor_c = -8.33;
+                let rated_curve_idx = (n_pairs - 1) * 2;
+                let (raw_ratio, _) = self.hvac.evaluate_biquadratic_with_flow(
+                    rated_curve_idx,
+                    t_indoor_c,
+                    t_outdoor_c,
+                    1.0,
+                );
+                let rel_error = (raw_ratio - expected_ratio).abs() / expected_ratio.max(1e-6);
+                if rel_error > 0.10 {
+                    tracing::warn!(
+                        expected_ratio,
+                        curve_ratio = raw_ratio,
+                        rel_error_pct = rel_error * 100.0,
+                        "HeatingCapacity17F ratio {:.3} deviates from biquadratic \
+                         curve ratio {:.3} by {:.1}% at 17°F; scaling curve to match",
+                        expected_ratio,
+                        raw_ratio,
+                        rel_error * 100.0,
+                    );
+                }
+                // Linear scaling of all capacity-curve coefficients so the curve
+                // matches the manufacturer ratio at H3. Multiplying every [c0..c5]
+                // by the same factor is equivalent to multiplying the output by
+                // that factor — the biquadratic polynomial is homogeneous in its
+                // coefficients. EIR curves (odd indices) are left unchanged.
+                if raw_ratio.abs() > 1e-9 {
+                    let scale = expected_ratio / raw_ratio;
+                    let n = self.hvac.config.biquadratic_coeffs.len();
+                    for i in (0..n).step_by(2) {
+                        self.hvac.config.biquadratic_coeffs[i]
+                            .iter_mut()
+                            .for_each(|c| *c *= scale);
+                    }
+                    if rel_error > 1e-6 {
+                        tracing::info!(
+                            expected_ratio,
+                            curve_ratio = raw_ratio,
+                            scale,
+                            "Scaled ASHP heating capacity biquadratic curve(s) by {:.4}x \
+                             to match HeatingCapacity17F ratio at AHRI H3 conditions",
+                            scale,
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2086,6 +2148,7 @@ mod tests {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         }
     }
@@ -2144,6 +2207,7 @@ mod tests {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         }
     }
@@ -5586,6 +5650,67 @@ mod tests {
              got {cap_ratio_identity:.6}"
         );
     }
+
+    // Regression: verify that capacity_ratio_at_17f scales the biquadratic
+    // curve coefficients so that H3 evaluation matches the manufacturer ratio.
+    // Without this scaling, cold-climate capacity extrapolation is unreliable.
+    #[test]
+    fn ashp_heating_capacity_ratio_at_17f_scales_biquadratic_to_match_h3() {
+        // Build a config with capacity_ratio_at_17f = 0.6 and a
+        // biquadratic that evaluates to 0.5 at any condition (including H3).
+        let mut cfg = heater_config_with(|typed| typed.capacity_ratio_at_17f = Some(0.6));
+        cfg.test_extras_mut().insert(
+            "biquadratic_coeffs".to_string(),
+            "[[0.5,0,0,0,0,0],[1.0,0,0,0,0,0]]".into(),
+        );
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let env = env(18.0, 0.0, 0.003);
+        eq.init(&cfg, &env).unwrap();
+
+        let coeffs = &eq.core.hvac.config.biquadratic_coeffs;
+        assert_eq!(coeffs.len(), 2, "single-speed => 2 coefficient entries");
+
+        // Capacity curve: [0.5,0,0,0,0,0] scaled by 0.6/0.5 = 1.2 → [0.6,0,0,0,0,0]
+        assert!(
+            (coeffs[0][0] - 0.6).abs() < 1e-9,
+            "capacity c0 must be scaled to 0.6; got {}",
+            coeffs[0][0]
+        );
+        for j in 1..6 {
+            assert!(
+                coeffs[0][j].abs() < 1e-12,
+                "capacity coeff[{j}] must remain zero; got {}",
+                coeffs[0][j]
+            );
+        }
+
+        // EIR curve: must be unchanged [1.0,0,0,0,0,0]
+        assert!(
+            (coeffs[1][0] - 1.0).abs() < 1e-12,
+            "EIR c0 must remain 1.0; got {}",
+            coeffs[1][0]
+        );
+        for j in 1..6 {
+            assert!(
+                coeffs[1][j].abs() < 1e-12,
+                "EIR coeff[{j}] must remain zero; got {}",
+                coeffs[1][j]
+            );
+        }
+
+        // Verify the scaled curve actually evaluates to ~0.6 at H3.
+        let (raw_h3, _) = eq.core.hvac.evaluate_biquadratic_with_flow(
+            0,     // capacity curve index
+            21.11, // AHRI H3 indoor dry-bulb
+            -8.33, // AHRI H3 outdoor dry-bulb
+            1.0,
+        );
+        assert!(
+            (raw_h3 - 0.6).abs() < 1e-9,
+            "H3 evaluation must match capacity_ratio_at_17f=0.6; got {raw_h3}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5700,6 +5825,7 @@ mod ideal_capacity_tests {
                 er_setpoint_offset_c: None,
                 er_hard_lockout_time_s: None,
                 heating_shr: None,
+                capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
         );
@@ -5900,6 +6026,7 @@ mod ideal_capacity_tests {
                 er_setpoint_offset_c: Some(3.0),
                 er_hard_lockout_time_s: None,
                 heating_shr: None,
+                capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
         );
@@ -6058,6 +6185,7 @@ mod ideal_capacity_tests {
                 er_setpoint_offset_c: Some(0.0),
                 er_hard_lockout_time_s: None,
                 heating_shr: None,
+                capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
         );
@@ -6159,6 +6287,7 @@ mod ideal_capacity_tests {
                 er_setpoint_offset_c: Some(3.0),
                 er_hard_lockout_time_s: None,
                 heating_shr: None,
+                capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
             },
         );

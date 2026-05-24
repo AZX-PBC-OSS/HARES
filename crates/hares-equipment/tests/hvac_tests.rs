@@ -272,6 +272,7 @@ fn discrete_defrost_no_phantom_draw_when_compressor_off() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -478,6 +479,7 @@ fn ashp_heating_cop_above_unity() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -1097,6 +1099,7 @@ fn ashp_sub_consumption_telemetry() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -1243,6 +1246,7 @@ fn ashp_defaults_match_reference() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -1332,6 +1336,7 @@ fn ashp_defaults_match_reference() {
             er_setpoint_offset_c: Some(0.5),
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -1426,6 +1431,7 @@ fn mshp_defaults_match_reference() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -1553,6 +1559,7 @@ fn bang_bang_single_speed_cycles_within_deadband() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -1979,6 +1986,7 @@ fn defrost_discrete_cycle_starts_in_accumulating() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2081,6 +2089,7 @@ fn defrost_discrete_cycle_transitions_to_defrosting() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2181,6 +2190,7 @@ fn defrost_discrete_cycle_returns_to_accumulating() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2277,6 +2287,7 @@ fn defrost_discrete_peak_power_exceeds_continuous_average() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2390,6 +2401,7 @@ fn heating_latent_always_zero_during_normal_heating() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2480,6 +2492,7 @@ fn heating_latent_nonzero_during_defrost_with_sub1_shr() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: Some(0.95),
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2572,6 +2585,7 @@ fn heating_latent_zero_with_default_shr_during_defrost() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2648,6 +2662,7 @@ fn heating_latent_telemetry_key_present() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2725,6 +2740,7 @@ fn heating_sensible_plus_latent_equals_total_thermal_output() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: Some(0.95),
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2831,6 +2847,7 @@ fn defrost_accumulating_applies_continuous_multiplier() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -2956,6 +2973,7 @@ fn mshp_load_above_stage1_runs_continuously() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
@@ -3136,6 +3154,7 @@ fn defrost_typed_config_propagates_to_heater_init() {
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig {
                 control: DefrostControl::Timed,
                 strategy: DefrostStrategy::ReverseCycle,
@@ -4384,6 +4403,7 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
             er_setpoint_offset_c: Some(0.0),
             er_hard_lockout_time_s: None,
             heating_shr: None,
+            capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
         },
     );
