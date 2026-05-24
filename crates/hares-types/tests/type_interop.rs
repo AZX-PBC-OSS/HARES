@@ -224,6 +224,7 @@ fn zero_resets_all_slots_while_preserving_structure() {
         ThermalCategory::InternalGain,
         ThermalCategory::JacketLoss,
         ThermalCategory::DuctLoss,
+        ThermalCategory::HvacDehumidification,
     ] {
         approx_eq(
             acc.sensible_for_category(cat),
@@ -335,6 +336,7 @@ fn thermal_accumulator_new_is_zero_and_bound_to_zone() {
         ThermalCategory::InternalGain,
         ThermalCategory::JacketLoss,
         ThermalCategory::DuctLoss,
+        ThermalCategory::HvacDehumidification,
     ] {
         approx_eq(
             acc.sensible_for_category(cat),
@@ -414,7 +416,8 @@ fn mixed_category_totals_are_consistent() {
         + acc.sensible_for_category(ThermalCategory::HvacCooling)
         + acc.sensible_for_category(ThermalCategory::InternalGain)
         + acc.sensible_for_category(ThermalCategory::JacketLoss)
-        + acc.sensible_for_category(ThermalCategory::DuctLoss);
+        + acc.sensible_for_category(ThermalCategory::DuctLoss)
+        + acc.sensible_for_category(ThermalCategory::HvacDehumidification);
     approx_eq(
         cat_sum,
         acc.sensible_gain_w,
@@ -484,6 +487,7 @@ fn latent_category_sum_matches_total() {
         ThermalCategory::InternalGain,
         ThermalCategory::JacketLoss,
         ThermalCategory::DuctLoss,
+        ThermalCategory::HvacDehumidification,
     ];
     let cat_sum: f64 = categories.iter().map(|&c| acc.latent_for_category(c)).sum();
     approx_eq(
@@ -515,6 +519,7 @@ fn zero_resets_latent_by_category() {
         ThermalCategory::InternalGain,
         ThermalCategory::JacketLoss,
         ThermalCategory::DuctLoss,
+        ThermalCategory::HvacDehumidification,
     ];
     for cat in categories {
         assert_eq!(

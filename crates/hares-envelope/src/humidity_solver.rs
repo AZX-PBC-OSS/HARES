@@ -328,7 +328,8 @@ mod tests {
     use hares_physics::psychrometrics::relative_humidity;
     use hares_types::{
         DomainSolver, DomainUpdate, EnvironmentState, GridState, HumidityAccumulator, PortSlots,
-        SurfaceIrradiance, THERMAL, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        SurfaceIrradiance, THERMAL, THERMAL_CATEGORY_COUNT, ThermalAccumulator, WeatherState,
+        ZoneId, ZoneState,
     };
 
     use crate::humidity_solver::{HumiditySolver, HumiditySolverConfig, humidity_ratio_increment};
@@ -1381,9 +1382,9 @@ mod tests {
                 sensible_gain_w: 0.0,
                 radiant_gain_w: 0.0,
                 latent_gain_w: -water_removal_kg_s * 2_501_000.0,
-                sensible_by_category: [0.0; 5],
-                radiant_by_category: [0.0; 5],
-                latent_by_category: [0.0; 5],
+                sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                radiant_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             }],
             humidity: vec![HumidityAccumulator {
                 zone: zone_id,
@@ -1452,9 +1453,9 @@ mod tests {
                 sensible_gain_w: 0.0,
                 radiant_gain_w: 0.0,
                 latent_gain_w: latent_gain_w_wrong,
-                sensible_by_category: [0.0; 5],
-                radiant_by_category: [0.0; 5],
-                latent_by_category: [0.0; 5],
+                sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                radiant_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             }],
             humidity: vec![HumidityAccumulator {
                 zone: zone_id,
@@ -1469,9 +1470,9 @@ mod tests {
                 sensible_gain_w: 0.0,
                 radiant_gain_w: 0.0,
                 latent_gain_w: moisture_mass_flow_kg_s * correct_h_fg,
-                sensible_by_category: [0.0; 5],
-                radiant_by_category: [0.0; 5],
-                latent_by_category: [0.0; 5],
+                sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                radiant_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             }],
             ..PortSlots::default()
         };

@@ -646,6 +646,10 @@ impl ThermalSolver {
             .map(|a| a.sensible_for_category(ThermalCategory::DuctLoss))
             .sum();
 
+        let hvac_dehumidification_w = indoor_acc
+            .map(|a| a.sensible_for_category(ThermalCategory::HvacDehumidification))
+            .unwrap_or(0.0);
+
         self.infiltration_by_zone_buf.clear();
         self.infiltration_by_zone_buf.extend(
             self.infiltration_buf
@@ -669,6 +673,7 @@ impl ThermalSolver {
             internal_gain_w: internal_gain_cat_w,
             jacket_loss_w,
             duct_loss_w,
+            hvac_dehumidification_w,
             infiltration_by_zone: Vec::new(),
             interior_lwr_by_zone: Vec::new(),
             wall_heat_gain_w: 0.0,
@@ -4531,7 +4536,7 @@ mod tests {
                 radiant_gain_w: radiant_w,
                 latent_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
-                radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0],
+                radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             }],
             ..Default::default()
@@ -4690,7 +4695,7 @@ mod tests {
                 radiant_gain_w: radiant_w,
                 latent_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
-                radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0],
+                radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             }],
             ..Default::default()
@@ -5078,7 +5083,7 @@ mod tests {
                 radiant_gain_w: radiant_w,
                 latent_gain_w: 0.0,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
-                radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0],
+                radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             }],
             ..Default::default()

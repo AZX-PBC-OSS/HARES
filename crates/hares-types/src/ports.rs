@@ -26,6 +26,10 @@ pub enum ThermalCategory {
     JacketLoss,
     /// Distribution system inefficiency (duct losses).
     DuctLoss,
+    /// Standalone dehumidifier: intentional mechanical moisture removal.
+    /// EnergyPlus classifies the ZoneDehumidifier as zone HVAC equipment, not
+    /// an internal gain source (Eng. Ref., Zone Equipment and Zone Forced Air Units).
+    HvacDehumidification,
 }
 
 impl ThermalCategory {
@@ -39,12 +43,13 @@ impl ThermalCategory {
             ThermalCategory::InternalGain => 2,
             ThermalCategory::JacketLoss => 3,
             ThermalCategory::DuctLoss => 4,
+            ThermalCategory::HvacDehumidification => 5,
         }
     }
 }
 
 /// Number of `ThermalCategory` variants -- size of the per-category array.
-pub const THERMAL_CATEGORY_COUNT: usize = 5;
+pub const THERMAL_CATEGORY_COUNT: usize = 6;
 
 /// Per-step equipment contribution into a typed simulation port.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -724,9 +729,9 @@ mod tests {
                 sensible_gain_w: 10.0,
                 radiant_gain_w: 3.0,
                 latent_gain_w: 5.0,
-                sensible_by_category: [1.0, 2.0, 3.0, 4.0, 0.0],
-                radiant_by_category: [0.0, 0.0, 3.0, 0.0, 0.0],
-                latent_by_category: [0.0, 0.0, 5.0, 0.0, 0.0],
+                sensible_by_category: [1.0, 2.0, 3.0, 4.0, 0.0, 0.0],
+                radiant_by_category: [0.0, 0.0, 3.0, 0.0, 0.0, 0.0],
+                latent_by_category: [0.0, 0.0, 5.0, 0.0, 0.0, 0.0],
             }],
             electrical: ElectricalAccumulator {
                 reactive_power_kvar: 1.0,

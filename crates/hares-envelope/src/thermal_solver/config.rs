@@ -563,6 +563,10 @@ pub struct EnvelopeComponentGains {
     pub jacket_loss_w: f64,
     /// Duct distribution losses [W] -- heat deposited into the duct zone, removed from delivered capacity.
     pub duct_loss_w: f64,
+    /// Dehumidifier sensible heat gain to the indoor zone [W].
+    /// Standalone dehumidifiers are zone HVAC equipment (EnergyPlus Eng. Ref.,
+    /// Zone Equipment and Zone Forced Air Units), not passive internal gains.
+    pub hvac_dehumidification_w: f64,
     /// Per-zone infiltration sensible heat gains [W].
     /// `infiltration_w` is the indoor-zone alias for backward compatibility.
     pub infiltration_by_zone: Vec<(ZoneId, f64)>,

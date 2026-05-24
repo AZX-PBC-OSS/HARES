@@ -245,7 +245,7 @@ fn radiant_gain_weight_distribution_zero_allocations() {
             radiant_gain_w: 100.0,
             latent_gain_w: 0.0,
             sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
-            radiant_by_category: [100.0, 0.0, 0.0, 0.0, 0.0],
+            radiant_by_category: [100.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
         }],
         ..Default::default()

@@ -346,7 +346,7 @@ impl Equipment for Dehumidifier {
                 sensible_gain_w: snapshot.sensible_gain_w,
                 radiant_gain_w: 0.0,
                 latent_gain_w: -snapshot.latent_removal_w,
-                category: ThermalCategory::InternalGain,
+                category: ThermalCategory::HvacDehumidification,
             })?;
         }
 
@@ -949,14 +949,15 @@ mod tests {
         );
     }
 
-    /// Regression test for ticket 071: the dehumidifier must write its thermal
-    /// contribution under `ThermalCategory::HvacDehumidification`, not
-    /// `ThermalCategory::InternalGain`.
+    /// Regression test: the dehumidifier writes its thermal contribution under
+    /// `ThermalCategory::HvacDehumidification`, not `ThermalCategory::InternalGain`.
     ///
-    /// Fix pending on ticket 071 — will stop panicking when the dehumidifier
-    /// writes thermal contributions under HvacDehumidification, not InternalGain.
+    /// A standalone dehumidifier is intentional mechanical conditioning equipment;
+    /// attributing its sensible heat to InternalGain conflates mechanical output
+    /// with passive gains (lighting, plug loads, occupants). EnergyPlus classifies
+    /// the ZoneDehumidifier as zone HVAC equipment (Eng. Ref., Zone Equipment and
+    /// Zone Forced Air Units).
     #[test]
-    #[should_panic(expected = "dehumidifier wrote")]
     fn dehumidifier_thermal_category_is_hvac_not_internal_gain() {
         use hares_types::ThermalCategory;
 
@@ -969,22 +970,25 @@ mod tests {
         eq.step(&env(0.60), Duration::from_secs(60), &mut slots)
             .unwrap();
 
-        // The dehumidifier must be running and contributing sensible heat.
         let sensible = eq.telemetry().get(tk::SENSIBLE_GAIN_W).unwrap();
         assert!(
             sensible > 0.0,
             "expected non-zero sensible gain but got {sensible}"
         );
 
-        // After the fix: InternalGain bucket must be zero; the dehumidifier's
-        // contribution must appear only under HvacDehumidification (index 5).
+        // InternalGain bucket must be zero — the dehumidifier is not a passive gain.
         let internal_gain_bucket =
             slots.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
         assert_eq!(
             internal_gain_bucket, 0.0,
             "dehumidifier wrote {internal_gain_bucket} W to InternalGain bucket; \
-             expected 0.0 — fix ticket 071 by changing category to HvacDehumidification"
+             dehumidifier contributions must be under HvacDehumidification"
         );
+
+        // The dehumidifier's sensible gain must appear under HvacDehumidification.
+        let dehumidification_bucket =
+            slots.thermal[0].sensible_for_category(ThermalCategory::HvacDehumidification);
+        approx_eq(dehumidification_bucket, sensible);
     }
 
     /// Regression test for ticket 086: identity curves (`[1,0,0,0,0,0]`) make
