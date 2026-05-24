@@ -23,7 +23,7 @@ pub enum SpeedControlMode {
     VariableSpeedIdeal,
 }
 
-/// Startup capacity ramp configuration (Winkler 2011 / OCHRE exponential model).
+/// Startup capacity ramp configuration (Winkler 2009 / OCHRE exponential model).
 ///
 /// The ramp multiplier follows:
 ///   t_full = 20.0 * c_d + 0.4  [minutes]
@@ -88,6 +88,26 @@ impl StartupConfig {
             self.time_since_start_min += dt_min;
         }
 
+        if self.time_since_start_min >= t_full {
+            1.0
+        } else {
+            let t = self.time_since_start_min;
+            (-1.025_f64 * (-3.799_36_f64 * t / t_full).exp() + 1.025).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Compute the startup capacity multiplier from the current timer state
+    /// without advancing the timer.
+    ///
+    /// Returns 1.0 when the timer is zero (compressor is off or c_d == 0).
+    /// Safe to call after `capacity_multiplier` has already been invoked for
+    /// the current step — the timer has the correct value and this merely
+    /// reports it without mutation.
+    pub fn current_multiplier(&self) -> f64 {
+        if self.c_d == 0.0 || self.time_since_start_min == 0.0 {
+            return 1.0;
+        }
+        let t_full = 20.0 * self.c_d + 0.4;
         if self.time_since_start_min >= t_full {
             1.0
         } else {

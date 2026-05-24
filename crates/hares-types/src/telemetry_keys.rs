@@ -55,6 +55,15 @@ pub const OPERATING_MODE: &str = "operating_mode";
 pub const STATE: &str = "state";
 pub const RUNTIME_FRACTION: &str = "runtime_fraction";
 pub const SPEED_INDEX: &str = "speed_index";
+
+// ── HVAC speed/staging ──────────────────────────────────────────────────────
+pub const SPEED_FRAC: &str = "speed_frac";
+pub const PART_LOAD_RATIO: &str = "part_load_ratio";
+pub const PART_LOAD_FACTOR: &str = "part_load_factor";
+pub const STARTUP_MULTIPLIER: &str = "startup_multiplier";
+pub const DUTY_CYCLE: &str = "duty_cycle";
+pub const TIME_AT_CURRENT_SPEED_S: &str = "time_at_current_speed_s";
+pub const MODE_DURATION_S: &str = "mode_duration_s";
 pub const DEFROST_ACTIVE: &str = "defrost_active";
 pub const DEFROST_TIME_FRACTION: &str = "defrost_time_fraction";
 pub const DEFROST_EXTRA_POWER_W: &str = "defrost_extra_power_w";

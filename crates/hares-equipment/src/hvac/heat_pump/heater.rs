@@ -973,6 +973,32 @@ impl HeatPumpHeaterCore {
         self.telemetry.set(tk::CAP_RATIO, step.cap_ratio);
         self.telemetry.set(tk::EIR_RATIO, step.eir_ratio);
         self.telemetry.set(tk::HEATING_LATENT_W, step.latent_gain_w);
+        self.telemetry
+            .set(tk::SPEED_FRAC, self.hvac.runtime.last_speed_frac);
+        self.telemetry
+            .set(tk::PART_LOAD_RATIO, self.hvac.runtime.duty_cycle);
+        self.telemetry
+            .set(tk::PART_LOAD_FACTOR, self.hvac.runtime.plf_state);
+        self.telemetry.set(
+            tk::STARTUP_MULTIPLIER,
+            self.hvac.runtime.startup.current_multiplier(),
+        );
+        self.telemetry
+            .set(tk::DUTY_CYCLE, self.hvac.runtime.duty_cycle);
+        self.telemetry.set(
+            tk::TIME_AT_CURRENT_SPEED_S,
+            self.hvac.runtime.time_at_current_speed_s,
+        );
+        let mode_duration_s = (env.current_time
+            - self
+                .hvac
+                .thermostat_fsm
+                .mode_start_at
+                .unwrap_or(env.current_time))
+        .num_milliseconds()
+        .max(0) as f64
+            / 1000.0;
+        self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
         if step.latent_gain_w > 0.0 {
             tracing::debug!(
                 heating_latent_w = step.latent_gain_w,

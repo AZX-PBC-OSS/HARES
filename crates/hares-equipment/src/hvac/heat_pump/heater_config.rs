@@ -49,6 +49,13 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::DEFROST_CYCLE_STATE, 0.0);
     telemetry.insert(tk::DEFROST_ACCUMULATED_FROST_S, 0.0);
     telemetry.insert(tk::DEFROST_ELAPSED_S, 0.0);
+    telemetry.insert(tk::SPEED_FRAC, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
+    telemetry.insert(tk::PART_LOAD_FACTOR, 0.0);
+    telemetry.insert(tk::STARTUP_MULTIPLIER, 0.0);
+    telemetry.insert(tk::DUTY_CYCLE, 0.0);
+    telemetry.insert(tk::TIME_AT_CURRENT_SPEED_S, 0.0);
+    telemetry.insert(tk::MODE_DURATION_S, 0.0);
     telemetry
 }
 
@@ -246,6 +253,41 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::HEATING_LATENT_W.to_string(),
             unit: "W".to_string(),
             description: "Heating-side latent gain to zone; non-zero only during reverse-cycle defrost with heating_shr < 1.0".to_string(),
+        },
+        TelemetryField {
+            name: tk::SPEED_FRAC.to_string(),
+            unit: "-".to_string(),
+            description: "Interpolation weight between speed stages [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Heating load fraction at lowest speed stage [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_FACTOR.to_string(),
+            unit: "-".to_string(),
+            description: "EIR degradation correction from cycling (PLF)".to_string(),
+        },
+        TelemetryField {
+            name: tk::STARTUP_MULTIPLIER.to_string(),
+            unit: "-".to_string(),
+            description: "Capacity ramp multiplier on compressor restart (Winkler 2009)".to_string(),
+        },
+        TelemetryField {
+            name: tk::DUTY_CYCLE.to_string(),
+            unit: "-".to_string(),
+            description: "Thermostat on/off fraction this timestep [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::TIME_AT_CURRENT_SPEED_S.to_string(),
+            unit: "s".to_string(),
+            description: "Seconds since the last speed-stage change".to_string(),
+        },
+        TelemetryField {
+            name: tk::MODE_DURATION_S.to_string(),
+            unit: "s".to_string(),
+            description: "Seconds since the last thermostat mode change".to_string(),
         },
     ]
 }

@@ -157,7 +157,7 @@ impl Equipment for ElectricFurnace {
 
     fn step(
         &mut self,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
@@ -218,6 +218,32 @@ impl Equipment for ElectricFurnace {
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry
             .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
+        self.telemetry
+            .set(tk::SPEED_FRAC, self.hvac.runtime.last_speed_frac);
+        self.telemetry
+            .set(tk::PART_LOAD_RATIO, self.hvac.runtime.duty_cycle);
+        self.telemetry
+            .set(tk::PART_LOAD_FACTOR, self.hvac.runtime.plf_state);
+        self.telemetry.set(
+            tk::STARTUP_MULTIPLIER,
+            self.hvac.runtime.startup.current_multiplier(),
+        );
+        self.telemetry
+            .set(tk::DUTY_CYCLE, self.hvac.runtime.duty_cycle);
+        self.telemetry.set(
+            tk::TIME_AT_CURRENT_SPEED_S,
+            self.hvac.runtime.time_at_current_speed_s,
+        );
+        let mode_duration_s = (env.current_time
+            - self
+                .hvac
+                .thermostat_fsm
+                .mode_start_at
+                .unwrap_or(env.current_time))
+        .num_milliseconds()
+        .max(0) as f64
+            / 1000.0;
+        self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
@@ -410,7 +436,7 @@ impl Equipment for GasFurnace {
 
     fn step(
         &mut self,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
@@ -486,6 +512,32 @@ impl Equipment for GasFurnace {
         self.telemetry.set(tk::RUNTIME_FRACTION, rtf);
         self.telemetry.set(tk::MAIN_POWER_KW, main_power_kw);
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
+        self.telemetry
+            .set(tk::SPEED_FRAC, self.hvac.runtime.last_speed_frac);
+        self.telemetry
+            .set(tk::PART_LOAD_RATIO, self.hvac.runtime.duty_cycle);
+        self.telemetry
+            .set(tk::PART_LOAD_FACTOR, self.hvac.runtime.plf_state);
+        self.telemetry.set(
+            tk::STARTUP_MULTIPLIER,
+            self.hvac.runtime.startup.current_multiplier(),
+        );
+        self.telemetry
+            .set(tk::DUTY_CYCLE, self.hvac.runtime.duty_cycle);
+        self.telemetry.set(
+            tk::TIME_AT_CURRENT_SPEED_S,
+            self.hvac.runtime.time_at_current_speed_s,
+        );
+        let mode_duration_s = (env.current_time
+            - self
+                .hvac
+                .thermostat_fsm
+                .mode_start_at
+                .unwrap_or(env.current_time))
+        .num_milliseconds()
+        .max(0) as f64
+            / 1000.0;
+        self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
         // Heating-only equipment: setpoint_c is always the heating setpoint (per
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
@@ -593,7 +645,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn electric_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(11);
+    let mut telemetry = Telemetry::with_capacity(18);
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
@@ -605,11 +657,18 @@ fn electric_furnace_default_telemetry() -> Telemetry {
     telemetry.insert(tk::MAIN_POWER_KW, 0.0);
     telemetry.insert(tk::DUCT_LOSS_W, 0.0);
     telemetry.insert(tk::SPEED_INDEX, 0.0);
+    telemetry.insert(tk::SPEED_FRAC, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
+    telemetry.insert(tk::PART_LOAD_FACTOR, 0.0);
+    telemetry.insert(tk::STARTUP_MULTIPLIER, 0.0);
+    telemetry.insert(tk::DUTY_CYCLE, 0.0);
+    telemetry.insert(tk::TIME_AT_CURRENT_SPEED_S, 0.0);
+    telemetry.insert(tk::MODE_DURATION_S, 0.0);
     telemetry
 }
 
 fn gas_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(13);
+    let mut telemetry = Telemetry::with_capacity(20);
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
@@ -622,6 +681,13 @@ fn gas_furnace_default_telemetry() -> Telemetry {
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::MAIN_POWER_KW, 0.0);
     telemetry.insert(tk::DUCT_LOSS_W, 0.0);
+    telemetry.insert(tk::SPEED_FRAC, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
+    telemetry.insert(tk::PART_LOAD_FACTOR, 0.0);
+    telemetry.insert(tk::STARTUP_MULTIPLIER, 0.0);
+    telemetry.insert(tk::DUTY_CYCLE, 0.0);
+    telemetry.insert(tk::TIME_AT_CURRENT_SPEED_S, 0.0);
+    telemetry.insert(tk::MODE_DURATION_S, 0.0);
     telemetry
 }
 
@@ -688,6 +754,41 @@ fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
             unit: "-".to_string(),
             description: "Active heating speed stage index (0-based)".to_string(),
         },
+        TelemetryField {
+            name: tk::SPEED_FRAC.to_string(),
+            unit: "-".to_string(),
+            description: "Interpolation weight between speed stages [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Heating load fraction this timestep [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_FACTOR.to_string(),
+            unit: "-".to_string(),
+            description: "Part-load factor for cycling degradation (PLF)".to_string(),
+        },
+        TelemetryField {
+            name: tk::STARTUP_MULTIPLIER.to_string(),
+            unit: "-".to_string(),
+            description: "Capacity ramp multiplier on startup (1.0 for furnace)".to_string(),
+        },
+        TelemetryField {
+            name: tk::DUTY_CYCLE.to_string(),
+            unit: "-".to_string(),
+            description: "Thermostat on/off fraction this timestep [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::TIME_AT_CURRENT_SPEED_S.to_string(),
+            unit: "s".to_string(),
+            description: "Seconds since the last speed-stage change".to_string(),
+        },
+        TelemetryField {
+            name: tk::MODE_DURATION_S.to_string(),
+            unit: "s".to_string(),
+            description: "Seconds since the last thermostat mode change".to_string(),
+        },
     ];
     fields.extend(setpoint_telemetry_fields());
     fields
@@ -746,6 +847,41 @@ fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
             unit: "W".to_string(),
             description: "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)"
                 .to_string(),
+        },
+        TelemetryField {
+            name: tk::SPEED_FRAC.to_string(),
+            unit: "-".to_string(),
+            description: "Interpolation weight between speed stages [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Heating load fraction this timestep [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_FACTOR.to_string(),
+            unit: "-".to_string(),
+            description: "Part-load factor for cycling degradation (PLF)".to_string(),
+        },
+        TelemetryField {
+            name: tk::STARTUP_MULTIPLIER.to_string(),
+            unit: "-".to_string(),
+            description: "Capacity ramp multiplier on startup (1.0 for furnace)".to_string(),
+        },
+        TelemetryField {
+            name: tk::DUTY_CYCLE.to_string(),
+            unit: "-".to_string(),
+            description: "Thermostat on/off fraction this timestep [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::TIME_AT_CURRENT_SPEED_S.to_string(),
+            unit: "s".to_string(),
+            description: "Seconds since the last speed-stage change".to_string(),
+        },
+        TelemetryField {
+            name: tk::MODE_DURATION_S.to_string(),
+            unit: "s".to_string(),
+            description: "Seconds since the last thermostat mode change".to_string(),
         },
     ];
     fields.extend(setpoint_telemetry_fields());

@@ -3574,14 +3574,11 @@ fn furnace_core_output_carries_setpoint() {
 // ---------------------------------------------------------------------------
 
 /// Single-speed AC running at partial load must expose all 7 telemetry keys
-/// that must appear in telemetry after a step.
-///
-/// Expected to FAIL until the missing telemetry keys are implemented:
+/// in telemetry after a step:
 ///   SPEED_FRAC, PART_LOAD_RATIO, PART_LOAD_FACTOR, STARTUP_MULTIPLIER,
 ///   DUTY_CYCLE, TIME_AT_CURRENT_SPEED_S, MODE_DURATION_S
 #[test]
-#[should_panic(expected = "speed_frac not in telemetry")]
-fn speed_staging_keys_absent_from_telemetry() {
+fn speed_staging_keys_present_in_telemetry() {
     let cfg = EquipmentConfig::from_typed(
         "ac019".to_string(),
         "Air Conditioner".to_string(),
@@ -3634,35 +3631,33 @@ fn speed_staging_keys_absent_from_telemetry() {
     let t = eq.telemetry();
 
     // All 7 keys must be present in telemetry after a step.
-    // Each assert uses the string key names from the proposed telemetry_keys.rs
-    // constants; update to use the constants once they are defined.
     assert!(
-        t.get("speed_frac").is_some(),
-        "speed_frac not in telemetry after step"
+        t.get(tk::SPEED_FRAC).is_some(),
+        "SPEED_FRAC not in telemetry after step"
     );
     assert!(
-        t.get("part_load_ratio").is_some(),
-        "'part_load_ratio' must be written to telemetry after step"
+        t.get(tk::PART_LOAD_RATIO).is_some(),
+        "PART_LOAD_RATIO not in telemetry after step"
     );
     assert!(
-        t.get("part_load_factor").is_some(),
-        "'part_load_factor' must be written to telemetry after step"
+        t.get(tk::PART_LOAD_FACTOR).is_some(),
+        "PART_LOAD_FACTOR not in telemetry after step"
     );
     assert!(
-        t.get("startup_multiplier").is_some(),
-        "'startup_multiplier' must be written to telemetry after step"
+        t.get(tk::STARTUP_MULTIPLIER).is_some(),
+        "STARTUP_MULTIPLIER not in telemetry after step"
     );
     assert!(
-        t.get("duty_cycle").is_some(),
-        "'duty_cycle' must be written to telemetry after step"
+        t.get(tk::DUTY_CYCLE).is_some(),
+        "DUTY_CYCLE not in telemetry after step"
     );
     assert!(
-        t.get("time_at_current_speed_s").is_some(),
-        "'time_at_current_speed_s' must be written to telemetry after step"
+        t.get(tk::TIME_AT_CURRENT_SPEED_S).is_some(),
+        "TIME_AT_CURRENT_SPEED_S not in telemetry after step"
     );
     assert!(
-        t.get("mode_duration_s").is_some(),
-        "'mode_duration_s' must be written to telemetry after step"
+        t.get(tk::MODE_DURATION_S).is_some(),
+        "MODE_DURATION_S not in telemetry after step"
     );
 }
 
@@ -3670,10 +3665,7 @@ fn speed_staging_keys_absent_from_telemetry() {
 /// at the end of every step (they are the same physical quantity computed
 /// from different paths).  This invariant is stated explicitly in the telemetry spec
 /// §Approach, Step 3 timing note.
-///
-/// Expected to FAIL until the missing telemetry keys are implemented (keys absent today).
 #[test]
-#[should_panic(expected = "part_load_ratio not in telemetry")]
 fn single_speed_duty_cycle_equals_part_load_ratio() {
     let cfg = EquipmentConfig::from_typed(
         "ac019b".to_string(),
@@ -3725,9 +3717,9 @@ fn single_speed_duty_cycle_equals_part_load_ratio() {
 
     let t = eq.telemetry();
     let plr = t
-        .get("part_load_ratio")
-        .expect("part_load_ratio not in telemetry");
-    let dc = t.get("duty_cycle").expect("duty_cycle not in telemetry");
+        .get(tk::PART_LOAD_RATIO)
+        .expect("PART_LOAD_RATIO not in telemetry");
+    let dc = t.get(tk::DUTY_CYCLE).expect("DUTY_CYCLE not in telemetry");
     assert!(
         (plr - dc).abs() < 1e-9,
         "single-speed duty_cycle ({dc:.6}) must equal part_load_ratio ({plr:.6})"

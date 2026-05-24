@@ -895,6 +895,32 @@ impl CoolingCore {
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
+        self.telemetry
+            .set(tk::SPEED_FRAC, self.hvac.runtime.last_speed_frac);
+        self.telemetry
+            .set(tk::PART_LOAD_RATIO, self.hvac.runtime.duty_cycle);
+        self.telemetry
+            .set(tk::PART_LOAD_FACTOR, self.hvac.runtime.plf_state);
+        self.telemetry.set(
+            tk::STARTUP_MULTIPLIER,
+            self.hvac.runtime.startup.current_multiplier(),
+        );
+        self.telemetry
+            .set(tk::DUTY_CYCLE, self.hvac.runtime.duty_cycle);
+        self.telemetry.set(
+            tk::TIME_AT_CURRENT_SPEED_S,
+            self.hvac.runtime.time_at_current_speed_s,
+        );
+        let mode_duration_s = (env.current_time
+            - self
+                .hvac
+                .thermostat_fsm
+                .mode_start_at
+                .unwrap_or(env.current_time))
+        .num_milliseconds()
+        .max(0) as f64
+            / 1000.0;
+        self.telemetry.set(tk::MODE_DURATION_S, mode_duration_s);
         let post_dse_sensible_w = sensible_cooling_w * dse;
         let post_dse_latent_w = latent_cooling_w * dse;
         let active_setpoint_c = match self.operating_mode {

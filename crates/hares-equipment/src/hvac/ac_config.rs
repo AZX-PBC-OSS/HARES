@@ -20,7 +20,7 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
     [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub(super) fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(22);
+    let mut telemetry = Telemetry::with_capacity(29);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::LATENT_COOLING_W, 0.0);
@@ -45,6 +45,13 @@ pub(super) fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::MAX_CAPACITY_FRACTION, 1.0);
     telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
     telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SPEED_FRAC, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
+    telemetry.insert(tk::PART_LOAD_FACTOR, 0.0);
+    telemetry.insert(tk::STARTUP_MULTIPLIER, 0.0);
+    telemetry.insert(tk::DUTY_CYCLE, 0.0);
+    telemetry.insert(tk::TIME_AT_CURRENT_SPEED_S, 0.0);
+    telemetry.insert(tk::MODE_DURATION_S, 0.0);
     telemetry
 }
 
@@ -159,6 +166,41 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::COOLING_SETPOINT_C.to_string(),
             unit: "C".to_string(),
             description: "Active cooling setpoint temperature".to_string(),
+        },
+        TelemetryField {
+            name: tk::SPEED_FRAC.to_string(),
+            unit: "-".to_string(),
+            description: "Interpolation weight between speed stages [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "-".to_string(),
+            description: "Cycling fraction at lowest speed stage [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_FACTOR.to_string(),
+            unit: "-".to_string(),
+            description: "EIR degradation correction from cycling (PLF)".to_string(),
+        },
+        TelemetryField {
+            name: tk::STARTUP_MULTIPLIER.to_string(),
+            unit: "-".to_string(),
+            description: "Capacity ramp multiplier on compressor restart (Winkler 2009)".to_string(),
+        },
+        TelemetryField {
+            name: tk::DUTY_CYCLE.to_string(),
+            unit: "-".to_string(),
+            description: "Thermostat on/off fraction this timestep [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::TIME_AT_CURRENT_SPEED_S.to_string(),
+            unit: "s".to_string(),
+            description: "Seconds since the last speed-stage change".to_string(),
+        },
+        TelemetryField {
+            name: tk::MODE_DURATION_S.to_string(),
+            unit: "s".to_string(),
+            description: "Seconds since the last thermostat mode change".to_string(),
         },
     ]
 }
