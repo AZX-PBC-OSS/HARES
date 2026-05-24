@@ -185,15 +185,22 @@ pub(super) fn resolve_water_heaters(
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
             "Heat Pump Water Heater" => {
+                // UEF→EF conversion coefficients for HPWH.
+                // Source: ResStock waterheater.rb; NREL ResStock calibration (Maguire & Roberts 2020).
+                const HPWH_UEF_TO_EF_SLOPE: f64 = 0.60522;
+                const HPWH_UEF_TO_EF_DENOM: f64 = 1.2101;
+                // Scale factor mapping UEF to rated COP for HPWH.
+                // Source: OCHRE WaterHeater.py; derived from GE GeoSpring calibration.
+                const HPWH_UEF_TO_COP: f64 = 1.174_536_058;
                 let uef = uniform_energy_factor
-                    .or_else(|| energy_factor.map(|ef| (0.60522 + ef) / 1.2101));
+                    .or_else(|| energy_factor.map(|ef| (HPWH_UEF_TO_EF_SLOPE + ef) / HPWH_UEF_TO_EF_DENOM));
                 let low_power = uef.is_some_and(|u| (u - 4.9).abs() < 1e-9);
                 let (cop, setpoint_c, tempering_valve_setpoint_c) = if low_power {
                     // Low-power OCHRE preset (UEF ≈ 4.9): fixed 60 °C storage,
                     // 51.67 °C (125 °F) tempering valve per manufacturer spec.
                     (Some(4.2), Some(60.0), Some(51.67))
                 } else {
-                    let cop = uef.map(|uef_val| 1.174_536_058 * uef_val);
+                    let cop = uef.map(|uef_val| HPWH_UEF_TO_COP * uef_val);
                     // Tempering valve setpoint mirrors the HPXML-declared
                     // storage setpoint. If HPXML omits HotWaterTemperature we
                     // cannot guess safely -- error loudly.
@@ -385,9 +392,11 @@ fn parse_distribution_system(details: &XmlNode, n_bedrooms: f64) -> Distribution
         return DistributionSystem::Unknown;
     };
 
+    // HPXML PipeRValue is in hr·ft²·°F/Btu (IP R-value). Convert to SI [m²·K/W] at parse time.
     let pipe_r_value = dist_node
         .path(&["PipeInsulation"])
         .and_then(|n| child_f64(n, "PipeRValue"))
+        .map(conv::r_value_ip_to_si)
         .unwrap_or(0.0);
 
     let system_type = dist_node.child("SystemType");

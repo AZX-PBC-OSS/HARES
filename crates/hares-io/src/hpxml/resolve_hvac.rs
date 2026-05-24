@@ -22,13 +22,20 @@ use super::HpxmlError;
 use super::building::{Boundary, BoundaryType, Building, DuctLocation, XmlNode, Zone, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec};
 use super::xml_helpers::{child_f64, child_text, descendants_named};
-use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+use hares_physics::constants::{BTU_PER_HR_PER_W, CFM_TO_M3_S, HOURS_PER_YEAR, W_PER_TON};
 use hares_physics::units as conv;
 
 use crate::defaults::DefaultsStore;
 
 const SEER2_TO_SEER_FACTOR: f64 = 1.0 / 0.95;
-const HSPF2_TO_HSPF_FACTOR: f64 = 1.0 / 0.95;
+/// HSPF2→HSPF factor. DOE 87 FR 74364 (Dec 2022) / AHRI 210/240-2023:
+/// ducted split-system heat pump HSPF2/HSPF ratio ≈ 0.85 (≈15% reduction).
+/// Distinct from SEER2→SEER (0.95). RESNET MINHERS Addendum 71f.
+const HSPF2_TO_HSPF_FACTOR: f64 = 1.0 / 0.85;
+/// EER2→EER factor. DOE 10 CFR Part 430 Appendix F revision / AHRI 340/360-2022:
+/// EER2 ratings ≈ 8% lower than EER under revised test procedure.
+/// Residential central estimate per DOE 2022 rulemaking.
+const EER2_TO_EER_FACTOR: f64 = 1.0 / 0.92;
 
 fn airflow_defect_multiplier(params: &Map<String, Value>) -> f64 {
     params
@@ -743,7 +750,7 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
         .get("heating_efficiency")
         .and_then(Value::as_f64)
         .map(|v| 1.0 / v.max(1e-6));
-    let cooling_eir = seer_from_params(params).map(|seer| 3.412_141_633_f64 / seer.max(1e-6));
+    let cooling_eir = seer_from_params(params).map(|seer| BTU_PER_HR_PER_W / seer.max(1e-6));
     let rated_eir = heating_eir.or(cooling_eir);
     let fraction = params.get("fraction_load_served").and_then(Value::as_f64);
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
@@ -788,7 +795,7 @@ fn try_build_central_ac_config(
         tracing::warn!("Skipping AC: AnnualCoolingEfficiency (SEER) not found in HPXML");
         return None;
     };
-    let eir = 3.412_141_633 / seer.max(1e-6);
+    let eir = BTU_PER_HR_PER_W / seer.max(1e-6);
     let capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64)?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
@@ -864,7 +871,7 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     // because the test conditions and cycling correction factors differ; treating
     // SEER as EER would overestimate efficiency by ~10–15%.
     let eer = eer_from_params(params)?;
-    let eir = 3.412_141_633 / eer.max(1e-6);
+    let eir = BTU_PER_HR_PER_W / eer.max(1e-6);
 
     let curve_bounds = extract_curve_bounds(params);
     let airflow_m3_s_per_w =
@@ -945,8 +952,8 @@ fn try_build_heat_pump_heater_config(
     } else {
         n_speeds_from_params(params)
     };
-    let heating_eir = hspf_from_params(params).map(|hspf| 3.412_141_633 / hspf.max(1e-6));
-    let cooling_eir = seer_from_params(params).map(|seer| 3.412_141_633 / seer.max(1e-6));
+    let heating_eir = hspf_from_params(params).map(|hspf| BTU_PER_HR_PER_W / hspf.max(1e-6));
+    let cooling_eir = seer_from_params(params).map(|seer| BTU_PER_HR_PER_W / seer.max(1e-6));
     let shr = params.get("shr").and_then(Value::as_f64);
     let fan_power_w = fan_power_from_params(params);
     let backup_capacity_w = params.get("backup_capacity_w").and_then(Value::as_f64);
@@ -1110,8 +1117,8 @@ fn try_build_heat_pump_cooler_config(
     } else {
         n_speeds_from_params(params)
     };
-    let heating_eir = hspf_from_params(params).map(|hspf| 3.412_141_633 / hspf.max(1e-6));
-    let cooling_eir = seer_from_params(params).map(|seer| 3.412_141_633 / seer.max(1e-6));
+    let heating_eir = hspf_from_params(params).map(|hspf| BTU_PER_HR_PER_W / hspf.max(1e-6));
+    let cooling_eir = seer_from_params(params).map(|seer| BTU_PER_HR_PER_W / seer.max(1e-6));
     let shr = params.get("shr").and_then(Value::as_f64);
     let fan_power_w = fan_power_from_params(params);
     let backup_capacity_w = params.get("backup_capacity_w").and_then(Value::as_f64);
@@ -1385,7 +1392,7 @@ pub(super) fn resolve_hvac(
         if let Some(aux_kwh) = child_f64(heating, "ElectricAuxiliaryEnergy") {
             params.insert(
                 "auxiliary_power_w".to_string(),
-                json!(aux_kwh / 8760.0 * 1000.0),
+                json!(aux_kwh / HOURS_PER_YEAR * 1000.0),
             );
         }
         if let Some(ext) = heating.child("extension") {
@@ -1864,7 +1871,8 @@ fn normalize_efficiency_units(units: &str, value: f64) -> (String, f64) {
     match units.trim().to_ascii_uppercase().as_str() {
         "SEER2" => ("SEER".to_string(), value * SEER2_TO_SEER_FACTOR),
         "HSPF2" => ("HSPF".to_string(), value * HSPF2_TO_HSPF_FACTOR),
-        "SEER" | "EER" | "EER2" | "HSPF" | "AFUE" | "PERCENT" | "COP" => {
+        "EER2" => ("EER".to_string(), value * EER2_TO_EER_FACTOR),
+        "SEER" | "EER" | "HSPF" | "AFUE" | "PERCENT" | "COP" => {
             (units.trim().to_ascii_uppercase(), value)
         }
         other => (other.to_string(), value),
@@ -4736,10 +4744,6 @@ mod tests {
     // Per MINHERS Addendum 71f (RESNET, adopted from AHRI), the HSPF2/HSPF ratio for
     // ducted split-system heat pumps is 0.85 (≈15% reduction), whereas the SEER2/SEER
     // ratio is 0.95 (≈5% reduction). Using 0.95 for HSPF2 overstates COP by ~10%.
-    //
-    // This test FAILS until HSPF2_TO_HSPF_FACTOR is corrected from 1.0/0.95 to 1.0/0.85.
-    /// Fix pending on ticket 078 — will stop panicking when HSPF2_TO_HSPF_FACTOR is corrected from 1/0.95 to 1/0.85
-    #[should_panic(expected = "bug 078: factor is 1/0.95 instead of 1/0.85")]
     #[test]
     fn hspf2_to_hspf_factor_is_one_over_0_85() {
         // normalize_efficiency_units("HSPF2", 9.0) must return ("HSPF", 9.0 / 0.85).
@@ -4749,14 +4753,12 @@ mod tests {
         let expected = 9.0_f64 / 0.85;
         assert!(
             (hspf - expected).abs() < expected * 0.001,
-            "HSPF2=9.0 must convert to HSPF≈{expected:.4}, got {hspf:.4} (bug 078: factor is 1/0.95 instead of 1/0.85)"
+            "HSPF2=9.0 must convert to HSPF≈{expected:.4}, got {hspf:.4}"
         );
     }
 
     // Regression (ticket 078): the EIR derived from the converted HSPF must match
     // 3.412 / (HSPF2 / 0.85), not 3.412 / (HSPF2 / 0.95).
-    /// Fix pending on ticket 078 — will stop panicking when HSPF2 conversion uses correct 1/0.85 factor
-    #[should_panic(expected = "bug 078")]
     #[test]
     fn hspf2_conversion_eir_matches_correct_factor() {
         let hspf2 = 9.0_f64;
@@ -4771,7 +4773,7 @@ mod tests {
 
         assert!(
             (eir - correct_eir).abs() < 1e-6,
-            "EIR must be {correct_eir:.6} (1/0.85 factor), got {eir:.6} (bug 078)"
+            "EIR must be {correct_eir:.6} (1/0.85 factor), got {eir:.6}"
         );
         assert!(
             (eir - wrong_eir).abs() > 0.01,
@@ -4791,21 +4793,20 @@ mod tests {
         );
     }
 
-    // Regression (ticket 088): EER2 must be converted to EER, not passed through unchanged.
-    // DOE/AHRI 2023 standards lower EER2 values relative to EER (tested at higher external
-    // static pressure). EER2 appearing in HPXML must be uprated before use as EER.
-    // This test FAILS until EER2 is split out of the pass-through arm and given its own
-    // conversion arm in normalize_efficiency_units.
-    /// Fix pending on ticket 088 — will stop panicking when EER2 is converted to EER instead of passed through
-    #[should_panic(expected = "EER2 must normalize to label 'EER'")]
+    // Regression (ticket 088): EER2 must be converted to EER using EER2_TO_EER_FACTOR (1/0.92).
+    // DOE 10 CFR Part 430 Appendix F revision / AHRI 340/360-2022: EER2 ratings are ≈8%
+    // lower than EER under the revised test procedure. EER = EER2 / 0.92.
     #[test]
-    fn eer2_is_not_treated_as_eer_passthrough() {
+    fn eer2_is_converted_to_eer_with_correct_factor() {
         let (units, eer) = normalize_efficiency_units("EER2", 10.0);
         assert_eq!(units, "EER", "EER2 must normalize to label 'EER'");
+
+        let expected = 10.0_f64 / 0.92;
         assert!(
-            eer > 10.0,
-            "EER2=10.0 must convert to EER > 10.0 (EER2 is lower than EER under stricter test conditions); got {eer:.4} (bug 088: EER2 passed through unchanged)"
+            (eer - expected).abs() < expected * 0.001,
+            "EER2=10.0 must convert to EER≈{expected:.4} (factor 1/0.92), got {eer:.4}"
         );
+        assert!(eer > 10.0, "EER2=10.0 must yield EER > 10.0 since EER2 < EER for same unit");
     }
 
     // Regression (ticket 088): plain EER must remain unchanged through normalize_efficiency_units.

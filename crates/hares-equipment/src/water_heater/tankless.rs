@@ -12,13 +12,14 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::WaterHeaterZip;
 use super::wh_config::TanklessWaterHeaterConfig;
 use crate::hvac::helpers::{equipment_id_from_config, zone_id_from_config};
 
-const WATER_SPECIFIC_HEAT_J_PER_KG_K: f64 = 4183.0;
 const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 const DEFAULT_EF: f64 = 0.9;
 /// Default rated thermal capacity (W). OCHRE uses 20 kW for tankless.
@@ -320,7 +321,7 @@ impl Equipment for TanklessWH {
         let (thermal_output_w, outlet_temp_c) =
             if mode == OperatingMode::Heating && total_draw_kg_s > 0.0 {
                 // Unclamped thermal demand to reach setpoint.
-                let demand_w = total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K * delta_t_c * duty;
+                let demand_w = total_draw_kg_s * CP_LIQUID_WATER_J_KG_K * delta_t_c * duty;
 
                 let capacity_w = effective_max_w * duty;
 
@@ -333,7 +334,7 @@ impl Equipment for TanklessWH {
                     // its on-fraction regardless of duty or power-limit accounting.
                     let outlet_c = inlet_temp_c
                         + self.rated_thermal_power_w
-                            / (total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+                            / (total_draw_kg_s * CP_LIQUID_WATER_J_KG_K);
                     (capacity_w, outlet_c)
                 }
             } else if mode == OperatingMode::Heating {
@@ -618,7 +619,9 @@ mod tests {
         ZoneState, telemetry_keys as tk,
     };
 
-    use super::{DEFAULT_GAS_PARASITIC_POWER_W, TanklessWH, WATER_SPECIFIC_HEAT_J_PER_KG_K};
+    use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+
+    use super::{DEFAULT_GAS_PARASITIC_POWER_W, TanklessWH};
     use crate::water_heater::DHW_DEMAND_LOOP;
     use crate::{Equipment, EquipmentConfig, TanklessWaterHeaterConfig};
 
@@ -760,7 +763,7 @@ mod tests {
         eq.step(&env(), Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let expected_thermal = 0.2 * 4183.0 * (50.0 - 20.0);
+        let expected_thermal = 0.2 * CP_LIQUID_WATER_J_KG_K * (50.0 - 20.0);
         let expected_input = expected_thermal / 0.8;
 
         assert!(
@@ -944,11 +947,11 @@ mod tests {
     // --- New capacity-limiting tests ---
 
     /// Normal operation: demand is within capacity, so setpoint is delivered.
-    /// Config: flow=0.2 kg/s, delta_T=30 K → demand = 0.2*4183*30 ≈ 25,098 W.
+    /// Config: flow=0.2 kg/s, delta_T=30 K → demand = 0.2*CP_LIQUID_WATER*30 ≈ 25,098 W.
     /// With max_thermal_power_w=30,000 W this is within capacity.
     #[test]
     fn normal_operation_within_capacity_delivers_setpoint() {
-        // demand_w = 0.2 * 4183 * 30 = 25,098 W < 30,000 W capacity
+        // demand_w = 0.2 * CP_LIQUID_WATER_J_KG_K * 30 ≈ 25,098 W < 30,000 W capacity
         let cap = config_with_capacity(30_000.0);
         let mut eq = TanklessWH::new(cap.clone());
         eq.init(&cap, &env()).unwrap();
@@ -958,7 +961,7 @@ mod tests {
         let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).unwrap();
         let thermal = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
         let fuel = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let expected_thermal = 0.2 * WATER_SPECIFIC_HEAT_J_PER_KG_K * 30.0;
+        let expected_thermal = 0.2 * CP_LIQUID_WATER_J_KG_K * 30.0;
 
         assert!(
             (outlet - 50.0).abs() < 1e-6,
@@ -975,11 +978,11 @@ mod tests {
     }
 
     /// Over-capacity: flow rate is high enough that demand exceeds rated capacity.
-    /// Config: flow=1.0 kg/s, delta_T=30 K → demand = 1.0*4183*30 = 125,490 W.
+    /// Config: flow=1.0 kg/s, delta_T=30 K → demand = 1.0*CP_LIQUID_WATER*30 ≈ 125,280 W.
     /// With max_thermal_power_w=20,000 W, output clamps at 20,000 W.
     #[test]
     fn over_capacity_clamps_output_and_reduces_outlet_temp() {
-        // 1.0 kg/s → demand = 1.0 * 4183 * 30 = 125,490 W >> 20,000 W capacity
+        // 1.0 kg/s → demand = 1.0 * CP_LIQUID_WATER_J_KG_K * 30 >> 20,000 W capacity
         let mut typed = typed_config();
         typed.draw_flow_rate_kg_s = Some(1.0);
         typed.heating_capacity_w = Some(20_000.0);
@@ -1011,7 +1014,7 @@ mod tests {
             "outlet temp must be below setpoint (50°C) when over-capacity, got {outlet}"
         );
         // Outlet temperature formula: T_out = T_in + Q_max / (m_dot * c_p)
-        let expected_outlet = 20.0 + 20_000.0 / (1.0 * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+        let expected_outlet = 20.0 + 20_000.0 / (1.0 * CP_LIQUID_WATER_J_KG_K);
         assert!(
             (outlet - expected_outlet).abs() < 1e-6,
             "outlet temp must be {expected_outlet:.4}°C, got {outlet:.4}"
@@ -1082,7 +1085,7 @@ mod tests {
     /// Very low flow rate: demand is well within capacity, setpoint delivered.
     #[test]
     fn very_low_flow_rate_within_capacity() {
-        // 0.001 kg/s → demand = 0.001 * 4183 * 30 ≈ 125.5 W, well below 20 kW capacity
+        // 0.001 kg/s → demand = 0.001 * CP_LIQUID_WATER_J_KG_K * 30 ≈ 125.4 W, well below 20 kW capacity
         let mut typed = typed_config();
         typed.draw_flow_rate_kg_s = Some(0.001_f64);
         typed.energy_factor = Some(0.9);
@@ -1108,7 +1111,7 @@ mod tests {
         // capacity = demand exactly when m_dot = capacity / (cp * delta_T)
         let delta_t = 30.0_f64;
         let capacity_w = 20_000.0_f64;
-        let m_dot = capacity_w / (WATER_SPECIFIC_HEAT_J_PER_KG_K * delta_t);
+        let m_dot = capacity_w / (CP_LIQUID_WATER_J_KG_K * delta_t);
 
         let mut typed = typed_config();
         typed.draw_flow_rate_kg_s = Some(m_dot);
@@ -1172,7 +1175,7 @@ mod tests {
             "outlet must be below setpoint when over effective capacity, got {outlet}"
         );
         // Outlet uses FULL rated power (20 kW), not duty-scaled -- heater fires at 100% during on-phase
-        let expected_outlet = 20.0 + 20_000.0 / (1.0 * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+        let expected_outlet = 20.0 + 20_000.0 / (1.0 * CP_LIQUID_WATER_J_KG_K);
         assert!(
             (outlet - expected_outlet).abs() < 1e-6,
             "outlet temp must use full rated power: {expected_outlet:.4}°C, got {outlet:.4}"
@@ -1182,7 +1185,7 @@ mod tests {
     /// Over-capacity outlet temperature uses instantaneous rated power, not duty-scaled power.
     /// OCHRE reference: outlet formula uses `capacity_rated`, not `capacity_rated * duty`.
     /// Setup: rated=20 kW, duty=0.5, flow=0.5 kg/s, inlet=20°C.
-    /// Expected outlet = 20 + 20000 / (0.5 * 4183) ≈ 29.56°C (not 24.78°C from 10 kW).
+    /// Expected outlet = 20 + 20000 / (0.5 * CP_LIQUID_WATER_J_KG_K) ≈ 29.56°C (not 24.78°C from 10 kW).
     #[test]
     fn over_capacity_outlet_temp_uses_instantaneous_power() {
         use hares_types::ControlSignal;
@@ -1215,8 +1218,8 @@ mod tests {
             "time-averaged thermal must be 10,000 W (rated * duty), got {thermal}"
         );
         // Outlet uses full 20 kW instantaneous, not duty-scaled 10 kW
-        let expected_outlet = 20.0 + 20_000.0 / (0.5 * WATER_SPECIFIC_HEAT_J_PER_KG_K);
-        let wrong_outlet = 20.0 + 10_000.0 / (0.5 * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+        let expected_outlet = 20.0 + 20_000.0 / (0.5 * CP_LIQUID_WATER_J_KG_K);
+        let wrong_outlet = 20.0 + 10_000.0 / (0.5 * CP_LIQUID_WATER_J_KG_K);
         assert!(
             (outlet - expected_outlet).abs() < 1e-4,
             "outlet must use instantaneous rated power: {expected_outlet:.4}°C, got {outlet:.4}°C (wrong duty-scaled would be {wrong_outlet:.4}°C)"
@@ -1528,7 +1531,7 @@ mod tests {
         );
 
         // Verify the values align with exact physics: Q = m_dot * Cp * (Tset - Tinlet)
-        let cp = WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let cp = CP_LIQUID_WATER_J_KG_K;
         let m_dot = 0.2_f64;
         let tset = 50.0_f64;
         let expected_cold = m_dot * cp * (tset - 5.0);

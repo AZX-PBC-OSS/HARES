@@ -19,6 +19,20 @@ use crate::defaults::DefaultsStore;
 
 /// OCHRE EV fuel economy: 1/325 * 1000 miles per kWh (for sedans).
 const EV_FUEL_ECONOMY: f64 = 1000.0 / 325.0;
+/// Fraction of dryer energy exhausted to outdoors when the dryer is vented.
+/// Source: OCHRE hpxml.py parse_clothes_dryer; ANSI/RESNET 301-2014 §4.2.2.5.2.7.
+const DRYER_EXHAUST_FRACTION_VENTED: f64 = 0.85;
+/// Sensible heat gain factor for gas clothes dryers.
+/// Approximates OCHRE's BTU-weighted blend of electric parasitic (0.90) and gas combustion (0.8894).
+/// Source: OCHRE hpxml.py parse_clothes_dryer.
+const DRYER_GAS_SENSIBLE_GAIN: f64 = 0.89;
+/// Sensible heat gain factor for electric clothes dryers.
+/// Source: OCHRE hpxml.py parse_clothes_dryer.
+const DRYER_ELECTRIC_SENSIBLE_GAIN: f64 = 0.90;
+/// BTU per kWh conversion factor (1 kWh = 3412.141... BTU; rounded to 3412).
+/// Used to convert kWh to BTU for gas dryer therm calculation.
+/// Source: OCHRE hpxml.py parse_clothes_dryer.
+const BTU_PER_KWH: f64 = 3412.0;
 
 pub(super) fn resolve_scheduled_loads(
     building: &Building,
@@ -180,8 +194,8 @@ pub(super) fn resolve_scheduled_loads(
                         // The 0.89 gas factor approximates OCHRE's BTU-weighted blend of
                         // 0.90 (electric parasitic) and 0.8894 (gas combustion), stable
                         // across CEF values (~7%/93% electric/gas split).
-                        let frac_lost = if vented { 0.85 } else { 0.0 };
-                        let gain_factor = if fuel == FuelType::Gas { 0.89 } else { 0.90 };
+                        let frac_lost = if vented { DRYER_EXHAUST_FRACTION_VENTED } else { 0.0 };
+                        let gain_factor = if fuel == FuelType::Gas { DRYER_GAS_SENSIBLE_GAIN } else { DRYER_ELECTRIC_SENSIBLE_GAIN };
                         let frac_sens = (1.0 - frac_lost) * gain_factor;
                         let frac_lat = 1.0 - frac_sens - frac_lost;
                         params.insert("sensible_gain_fraction".to_string(), json!(frac_sens));
@@ -225,7 +239,7 @@ pub(super) fn resolve_scheduled_loads(
                                 // Gas dryer: ~7% electric parasitic, ~93% gas combustion
                                 // OCHRE hpxml.py:1312-1313
                                 let annual_kwh = base_kwh * 0.07 * (3.73 / 3.30) * multiplier;
-                                let annual_therm = base_kwh * 3412.0 * (1.0 - 0.07) * (3.73 / 3.30)
+                                let annual_therm = base_kwh * BTU_PER_KWH * (1.0 - 0.07) * (3.73 / 3.30)
                                     / 100_000.0
                                     * multiplier;
                                 params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));

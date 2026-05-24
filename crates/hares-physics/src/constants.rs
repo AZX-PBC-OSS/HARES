@@ -72,9 +72,18 @@ pub const CP_WATER_VAPOUR_KJ_KG_K: f64 = 1.86;
 
 // --- Liquid Water ---
 
-/// Specific heat of liquid water at ~20°C [J/(kg·K)].
-/// NIST / ASHRAE 2017 HOF Ch. 1.
-pub const CP_LIQUID_WATER_J_KG_K: f64 = 4_186.0;
+/// Specific heat of liquid water [J/(kg·K)] at ~20–25°C.
+///
+/// EnergyPlus Engineering Reference uses 4180 J/(kg·K) as the fixed
+/// specific heat for all water heating calculations (Psychrometrics.hh,
+/// `CPHW` / `CPCW` functions, author Russell D. Taylor, April 1992).
+/// This matches the ASHRAE HoF 2021 round value and is adopted here
+/// for consistency with EnergyPlus.
+///
+/// Note: temperature-dependent cp ranges from 4182 J/(kg·K) at 20°C
+/// to 4186 J/(kg·K) at 15°C per NIST; the 4180 approximation is
+/// standard in building energy simulation.
+pub const CP_LIQUID_WATER_J_KG_K: f64 = 4_180.0;
 
 // --- Atmosphere ---
 
@@ -120,6 +129,20 @@ pub const KJ_TO_J: f64 = 1_000.0;
 
 /// kW to W conversion factor.
 pub const KW_TO_W: f64 = 1_000.0;
+
+// --- Time ---
+
+/// Seconds per hour [s/h]. Exact by definition.
+pub const SECONDS_PER_HOUR: f64 = 3_600.0;
+
+/// Seconds per day [s/day]. Exact by definition.
+pub const SECONDS_PER_DAY: f64 = 86_400.0;
+
+/// Minutes per day [min/day]. Exact by definition.
+pub const MINUTES_PER_DAY: f64 = 1_440.0;
+
+/// Hours per year [h/year]. ASHRAE 8760 h = 365 days × 24 h/day.
+pub const HOURS_PER_YEAR: f64 = 8_760.0;
 
 // --- Occupant Internal Gains ---
 

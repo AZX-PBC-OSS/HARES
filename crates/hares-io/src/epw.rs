@@ -13,7 +13,7 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 
-use hares_physics::constants::{CELSIUS_TO_KELVIN as KELVIN_OFFSET_C, STEFAN_BOLTZMANN};
+use hares_physics::constants::{CELSIUS_TO_KELVIN as KELVIN_OFFSET_C, HOURS_PER_YEAR, STEFAN_BOLTZMANN};
 use hares_types::parse_trimmed_f64;
 use tracing::{debug, warn};
 
@@ -409,8 +409,8 @@ fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
 }
 
 /// DOE-2/OCHRE model constants for monthly ground-temperature fallback.
-/// Hours in a standard (non-leap) year [h/year].
-const DOE2_GROUND_HOURS_PER_YEAR: f64 = 8760.0;
+/// Hours in a standard (non-leap) year [h/year]. Alias of [`hares_physics::constants::HOURS_PER_YEAR`].
+const DOE2_GROUND_HOURS_PER_YEAR: f64 = HOURS_PER_YEAR;
 /// Days in a standard year used in the phase-angle formula [days].
 const DOE2_GROUND_DAYS_PER_YEAR: f64 = 365.0;
 /// Soil thermal diffusivity [m²/hour] -- DOE-2 default for average soil.

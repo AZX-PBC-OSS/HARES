@@ -7,11 +7,12 @@ use serde::{Deserialize, Serialize};
 use crate::{Result, load_postcard, save_postcard};
 use hares_types::{HaresError, telemetry_keys as tk};
 
+use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+
 use super::WATER_DENSITY_KG_PER_M3;
 
 const MIN_NODES: usize = 1;
 const MAX_NODES: usize = 12;
-const WATER_SPECIFIC_HEAT_J_PER_KG_K: f64 = 4183.0;
 
 /// Configuration for a stratified tank.
 #[derive(Debug, Clone)]
@@ -277,7 +278,7 @@ impl StratifiedTank {
         }
         let t_now = self.node_temps_c[node_idx];
         let vol = self.node_volumes_m3[node_idx];
-        let mcp = WATER_DENSITY_KG_PER_M3 * vol * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let mcp = WATER_DENSITY_KG_PER_M3 * vol * CP_LIQUID_WATER_J_KG_K;
         let ua = self.ua_per_node.get(node_idx).copied().unwrap_or(0.0);
         let t_off = t_now - ua * (t_now - ambient_c) * dt_s / mcp;
         let deficit_k = (setpoint_c - t_off).max(0.0);
@@ -406,10 +407,9 @@ impl StratifiedTank {
         // Unmet load: watts of heat the fixture didn't receive because outlet_temp < setpoint.
         // OCHRE Water.py:363: h_unmet_load = max(draw_tempered/60 * water_c * (t_fix - t_out), 0)
         // Here tempered_flow_m3_s is already in m³/s, so kg/s = flow_m3_s * density.
-        const WATER_C_J_PER_KG_K: f64 = WATER_SPECIFIC_HEAT_J_PER_KG_K;
         let unmet_load_w = if tempered_flow_m3_s > 0.0 {
             let deficit = (tmv.tempered_draw_temp_c - draw.outlet_temp_c).max(0.0);
-            tempered_flow_m3_s * WATER_DENSITY_KG_PER_M3 * WATER_C_J_PER_KG_K * deficit
+            tempered_flow_m3_s * WATER_DENSITY_KG_PER_M3 * CP_LIQUID_WATER_J_KG_K * deficit
         } else {
             0.0
         };
@@ -434,7 +434,7 @@ impl StratifiedTank {
             validate_finite("heat_injection_power_w", power_w)?;
             let volume_m3 = self.node_volume(node)?;
             let delta_t_c = power_w * seconds
-                / (WATER_DENSITY_KG_PER_M3 * volume_m3 * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+                / (WATER_DENSITY_KG_PER_M3 * volume_m3 * CP_LIQUID_WATER_J_KG_K);
             self.node_temps_c[node] += delta_t_c;
         }
         Ok(())
@@ -451,7 +451,7 @@ impl StratifiedTank {
         validate_nonnegative("dt_seconds", seconds)?;
         let volume_m3 = self.node_volume(node)?;
         let delta_t_c = power_w * seconds
-            / (WATER_DENSITY_KG_PER_M3 * volume_m3 * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+            / (WATER_DENSITY_KG_PER_M3 * volume_m3 * CP_LIQUID_WATER_J_KG_K);
         self.node_temps_c[node] += delta_t_c;
         Ok(())
     }
@@ -574,7 +574,7 @@ impl StratifiedTank {
         for (idx, node_temp_c) in self.node_temps_c.iter_mut().enumerate() {
             let thermal_mass_j_per_k = WATER_DENSITY_KG_PER_M3
                 * self.node_volumes_m3[idx]
-                * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+                * CP_LIQUID_WATER_J_KG_K;
             *node_temp_c += self.scratch_delta_energy[idx] / thermal_mass_j_per_k;
         }
 
@@ -604,7 +604,7 @@ impl StratifiedTank {
         self.scratch_old_temps.copy_from_slice(&self.node_temps_c);
         let top_segment_edges_m3 = [0.0, draw_volume_m3];
         let energy_out_j = WATER_DENSITY_KG_PER_M3
-            * WATER_SPECIFIC_HEAT_J_PER_KG_K
+            * CP_LIQUID_WATER_J_KG_K
             * segment_average_temp(
                 &self.node_edges_m3,
                 &self.scratch_pre_injection_temps,
@@ -613,7 +613,7 @@ impl StratifiedTank {
             )
             * draw_volume_m3;
         let energy_in_j = WATER_DENSITY_KG_PER_M3
-            * WATER_SPECIFIC_HEAT_J_PER_KG_K
+            * CP_LIQUID_WATER_J_KG_K
             * mains_temp_c
             * draw_volume_m3;
 
@@ -753,10 +753,9 @@ fn segment_average_temp(edges_m3: &[f64], temps_c: &[f64], start_m3: f64, end_m3
 mod tests {
     use std::time::Duration;
 
-    use super::{
-        StratifiedTank, StratifiedTankConfig, WATER_DENSITY_KG_PER_M3,
-        WATER_SPECIFIC_HEAT_J_PER_KG_K,
-    };
+    use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+
+    use super::{StratifiedTank, StratifiedTankConfig, WATER_DENSITY_KG_PER_M3};
 
     const EPSILON: f64 = 1.0e-9;
 
@@ -795,7 +794,7 @@ mod tests {
             .iter()
             .zip(tank.node_volumes_m3().iter())
             .map(|(temp_c, volume_m3)| {
-                WATER_DENSITY_KG_PER_M3 * WATER_SPECIFIC_HEAT_J_PER_KG_K * volume_m3 * temp_c
+                WATER_DENSITY_KG_PER_M3 * CP_LIQUID_WATER_J_KG_K * volume_m3 * temp_c
             })
             .sum()
     }
@@ -806,7 +805,7 @@ mod tests {
         let power_w = 4_500.0;
         let dt = Duration::from_secs(60);
         let mcp =
-            WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+            WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
         let expected_delta_t = power_w * dt.as_secs_f64() / mcp;
 
         tank.heat_node(0, power_w, dt).expect("heat top node");
@@ -858,7 +857,7 @@ mod tests {
         let dt = Duration::from_secs(30);
         let ambient = 20.0;
         let mcp =
-            WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+            WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
         // Use the actual per-node UA (includes end-cap contribution) for the expected value.
         let effective_ua = tank.ua_per_node[0];
         let expected = 60.0 - (effective_ua * (60.0 - ambient) * dt.as_secs_f64()) / mcp;
@@ -930,7 +929,7 @@ mod tests {
         let dt = Duration::from_secs(120);
         let power_w = 3_000.0;
         let node_mass_cp =
-            WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+            WATER_DENSITY_KG_PER_M3 * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K;
         let expected_delta = power_w * dt.as_secs_f64() / node_mass_cp;
 
         tank.heat_node(0, power_w, dt).expect("heat top");
@@ -1211,7 +1210,7 @@ mod tests {
         // Rough sanity: unmet load ≈ flow_kg_s * Cp * deficit
         let deficit = (tmv.tempered_draw_temp_c - draw.outlet_temp_c).max(0.0);
         let expected =
-            flow_m3_s * WATER_DENSITY_KG_PER_M3 * WATER_SPECIFIC_HEAT_J_PER_KG_K * deficit;
+            flow_m3_s * WATER_DENSITY_KG_PER_M3 * CP_LIQUID_WATER_J_KG_K * deficit;
         assert!(
             (draw.unmet_load_w - expected).abs() < 1.0,
             "unmet_load_w {:.2} should be close to {expected:.2}",
@@ -1242,7 +1241,7 @@ mod tests {
 
         // energy removed should be less than if raw draw (65°C) was used
         let raw_draw_energy = WATER_DENSITY_KG_PER_M3
-            * WATER_SPECIFIC_HEAT_J_PER_KG_K
+            * CP_LIQUID_WATER_J_KG_K
             * (flow_m3_s * dt.as_secs_f64())
             * 65.0;
         assert!(
@@ -1280,7 +1279,7 @@ mod tests {
     fn outlet_temp_reflects_post_injection_segment_average() {
         let mut tank = test_tank(6, 50.0);
         let node_vol = tank.node_volumes_m3()[0];
-        let mcp = WATER_DENSITY_KG_PER_M3 * node_vol * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let mcp = WATER_DENSITY_KG_PER_M3 * node_vol * CP_LIQUID_WATER_J_KG_K;
         let draw_volume = node_vol * 0.5;
         let element_power_w = 10_000.0;
         let dt = Duration::from_secs(60);
@@ -1301,7 +1300,7 @@ mod tests {
         );
         // energy_out_j still uses the pre-injection snapshot for accounting.
         let expected_energy_out =
-            WATER_DENSITY_KG_PER_M3 * WATER_SPECIFIC_HEAT_J_PER_KG_K * 50.0 * draw_volume;
+            WATER_DENSITY_KG_PER_M3 * CP_LIQUID_WATER_J_KG_K * 50.0 * draw_volume;
         assert!(
             (draw.energy_out_j - expected_energy_out).abs() < 1.0,
             "energy_out_j ({:.2}) must use pre-injection snapshot ({expected_energy_out:.2})",
@@ -1367,7 +1366,7 @@ mod tests {
         let power_w = 4_500.0;
         let mains_temp_c = 15.0;
         let node_vol = tank.node_volumes_m3()[0];
-        let mcp = WATER_DENSITY_KG_PER_M3 * node_vol * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let mcp = WATER_DENSITY_KG_PER_M3 * node_vol * CP_LIQUID_WATER_J_KG_K;
         let delta_t = power_w * dt.as_secs_f64() / mcp;
 
         // Step 1: heat-only (no draw)
@@ -1452,7 +1451,7 @@ mod tests {
         let dt = Duration::from_secs(60);
         let ua_node0 = tank.ua_per_node[0];
         let vol_node0 = tank.node_volumes_m3()[0];
-        let mcp_node0 = WATER_DENSITY_KG_PER_M3 * vol_node0 * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let mcp_node0 = WATER_DENSITY_KG_PER_M3 * vol_node0 * CP_LIQUID_WATER_J_KG_K;
         let expected_loss_j = ua_node0 * (60.0 - ambient) * dt.as_secs_f64();
         let expected_temp0 = 60.0 - expected_loss_j / mcp_node0;
 
@@ -1512,7 +1511,7 @@ mod tests {
 
         // Energy removed equals ρ·V·Cp·T_outlet (pre-injection top-node segment).
         let expected_energy_out =
-            WATER_DENSITY_KG_PER_M3 * WATER_SPECIFIC_HEAT_J_PER_KG_K * node_vol * 65.0;
+            WATER_DENSITY_KG_PER_M3 * CP_LIQUID_WATER_J_KG_K * node_vol * 65.0;
         assert!(
             (draw.energy_out_j - expected_energy_out).abs() < 1e-6,
             "energy_out_j: expected {expected_energy_out:.6}, got {:.6}",
@@ -1634,7 +1633,7 @@ mod tests {
         // 100 steps: 50 heating steps × 4500 W × 60 s = 13_500_000 J max injection.
         // Adiabatic tank means no losses, so upper bound is initial energy + all injected heat.
         let max_possible_delta = 50.0 * element_power_w * dt.as_secs_f64()
-            / (WATER_DENSITY_KG_PER_M3 * tank.total_volume_m3() * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+            / (WATER_DENSITY_KG_PER_M3 * tank.total_volume_m3() * CP_LIQUID_WATER_J_KG_K);
         for (i, &t) in tank.node_temps().iter().enumerate() {
             assert!(
                 t >= mains_temp_c && t <= 55.0 + max_possible_delta,
@@ -1661,7 +1660,7 @@ mod tests {
         );
         // 50 draw steps each inject mains water: cumulative_energy_in is exactly ρ·V_draw·Cp·T_mains·50.
         let expected_energy_in = WATER_DENSITY_KG_PER_M3
-            * WATER_SPECIFIC_HEAT_J_PER_KG_K
+            * CP_LIQUID_WATER_J_KG_K
             * draw_vol
             * mains_temp_c
             * 50.0;
@@ -1758,8 +1757,8 @@ mod tests {
         let total_vol = std::f64::consts::PI * (0.5_f64 / 2.0).powi(2) * 1.2;
         let vol0 = total_vol / 3.0;
         let vol1 = 2.0 * total_vol / 3.0;
-        let mcp0 = WATER_DENSITY_KG_PER_M3 * vol0 * WATER_SPECIFIC_HEAT_J_PER_KG_K;
-        let mcp1 = WATER_DENSITY_KG_PER_M3 * vol1 * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let mcp0 = WATER_DENSITY_KG_PER_M3 * vol0 * CP_LIQUID_WATER_J_KG_K;
+        let mcp1 = WATER_DENSITY_KG_PER_M3 * vol1 * CP_LIQUID_WATER_J_KG_K;
 
         let expected_t0 = t_top + heat_flow_j / mcp0;
         let expected_t1 = t_bot - heat_flow_j / mcp1;

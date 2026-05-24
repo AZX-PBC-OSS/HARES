@@ -35,9 +35,14 @@ pub(super) const DEFAULT_CAPACITY_CURVE: [f64; 6] =
 pub(super) const DEFAULT_ZONE_TEMP_BOUNDS_C: (f64, f64) = (5.0, 45.0);
 pub(super) const DEFAULT_TANK_TEMP_BOUNDS_C: (f64, f64) = (20.0, 70.0);
 /// OCHRE-compatible ambient temperature lockout range (°C) -- standard HPWH.
-/// 45°F = (45-32)×5/9 = 7.2̄°C; 110°F = (110-32)×5/9 = 43.3̄°C.
-pub(super) const DEFAULT_MIN_AMBIENT_TEMP_C: f64 = 5.0 * (45.0 - 32.0) / 9.0; // 7.2222...
-pub(super) const DEFAULT_MAX_AMBIENT_TEMP_C: f64 = 5.0 * (110.0 - 32.0) / 9.0; // 43.3333...
+///
+/// Source values in Fahrenheit: lower = 45°F, upper = 110°F.
+/// Conversion formula: (°F − 32) × 5/9. These are const expressions, not
+/// function calls, so they evaluate at compile time.
+// 45°F → (45 - 32) × 5/9 = 7.222...°C
+pub(super) const DEFAULT_MIN_AMBIENT_TEMP_C: f64 = (45.0 - 32.0) * 5.0 / 9.0;
+// 110°F → (110 - 32) × 5/9 = 43.333...°C
+pub(super) const DEFAULT_MAX_AMBIENT_TEMP_C: f64 = (110.0 - 32.0) * 5.0 / 9.0;
 /// Sensible heat ratio of zone-air cooling from evaporator (OCHRE WH.py:671-674).
 pub(super) const DEFAULT_SHR: f64 = 0.88;
 /// Fraction of compressor waste heat that exits the building envelope.

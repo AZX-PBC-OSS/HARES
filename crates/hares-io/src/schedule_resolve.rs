@@ -11,6 +11,7 @@ use hares_equipment::{
     ConfigPayload, ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
 };
+use hares_physics::constants::HOURS_PER_YEAR;
 use hares_types::{BoundaryPolicy, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64};
 use serde_json::Value;
 use tracing::warn;
@@ -809,7 +810,7 @@ fn determine_max_kw(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
         return None;
     }
 
-    Some((annual_kwh / 8760.0) / mean_fraction)
+    Some((annual_kwh / HOURS_PER_YEAR) / mean_fraction)
 }
 
 fn determine_constant_kw(spec: &EquipmentSpec) -> Option<f64> {
@@ -822,7 +823,7 @@ fn determine_constant_kw(spec: &EquipmentSpec) -> Option<f64> {
                 .get("annual_electric_kwh")
                 .and_then(|v| v.as_f64())
                 .filter(|kwh| *kwh > 0.0)
-                .map(|kwh| kwh / 8760.0)
+                .map(|kwh| kwh / HOURS_PER_YEAR)
         })
 }
 

@@ -477,7 +477,8 @@ fn tankless_wh_uses_schedule_draw_and_mains_inputs() {
         "schedule draw must override config draw; got {draw_kg_s:.6} kg/s"
     );
     assert!(
-        (thermal_w - (0.05 * 4183.0 * 50.0)).abs() < 1e-6,
+        (thermal_w - (0.05 * hares_physics::constants::CP_LIQUID_WATER_J_KG_K * 50.0)).abs()
+            < 1e-6,
         "tankless thermal output must use schedule draw and mains temp; got {thermal_w:.3} W"
     );
     assert!(

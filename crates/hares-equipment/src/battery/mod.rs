@@ -22,6 +22,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_physics::constants::SECONDS_PER_HOUR;
+
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 pub use config::BatteryConfig;
@@ -834,7 +836,7 @@ impl Equipment for Battery {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let dt_s = dt.as_secs_f64();
-        let dt_hours = dt_s / 3600.0;
+        let dt_hours = dt_s / SECONDS_PER_HOUR;
 
         if dt_s <= 0.0 {
             return Err(HaresError::Equipment(
@@ -1701,7 +1703,7 @@ mod tests {
         for _ in 0..10 {
             let mut ports = default_ports();
             bat.step(&env, dt, &mut ports).unwrap();
-            total_charge_energy += ports.electrical.net_active_kw() * dt.as_secs_f64() / 3600.0;
+            total_charge_energy += ports.electrical.net_active_kw() * dt.as_secs_f64() / SECONDS_PER_HOUR;
         }
         let soc_after_charge = bat.soc;
 
@@ -1718,7 +1720,7 @@ mod tests {
             bat.step(&env, dt, &mut ports).unwrap();
             // Discharging produces negative power (generation)
             total_discharge_energy +=
-                (-ports.electrical.net_active_kw()) * dt.as_secs_f64() / 3600.0;
+                (-ports.electrical.net_active_kw()) * dt.as_secs_f64() / SECONDS_PER_HOUR;
         }
 
         assert!(

@@ -165,10 +165,9 @@ impl SoilingState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use hares_physics::constants::{SECONDS_PER_DAY, SECONDS_PER_HOUR};
 
-    const HOUR_S: f64 = 3600.0;
-    const DAY_S: f64 = 86_400.0;
+    use super::*;
 
     fn default_config() -> SoilingConfig {
         SoilingConfig::default()
@@ -177,8 +176,8 @@ mod tests {
     #[test]
     fn clean_panel_stays_clean_during_grace_period() {
         let cfg = default_config();
-        let mut state = SoilingState::new(&cfg, HOUR_S);
-        let ratio = state.step(&cfg, 0.0, HOUR_S, false);
+        let mut state = SoilingState::new(&cfg, SECONDS_PER_HOUR);
+        let ratio = state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
         assert_eq!(ratio, 1.0);
     }
 
@@ -189,18 +188,18 @@ mod tests {
             initial_soiling: 0.0,
             ..default_config()
         };
-        let mut state = SoilingState::new(&cfg, HOUR_S);
+        let mut state = SoilingState::new(&cfg, SECONDS_PER_HOUR);
         // Force past grace period.
         state.seconds_since_last_clean = cfg.grace_period_s + 1.0;
 
         let mut prev_ratio = 1.0;
         for _ in 0..48 {
-            let ratio = state.step(&cfg, 0.0, HOUR_S, false);
+            let ratio = state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
             assert!(ratio < prev_ratio, "soiling should increase each step");
             prev_ratio = ratio;
         }
 
-        let expected_loss = cfg.soiling_loss_rate_per_s * 48.0 * HOUR_S;
+        let expected_loss = cfg.soiling_loss_rate_per_s * 48.0 * SECONDS_PER_HOUR;
         let actual_loss = 1.0 - prev_ratio;
         assert!(
             (actual_loss - expected_loss).abs() < 1e-12,
@@ -215,11 +214,11 @@ mod tests {
             max_soiling: 0.10,
             ..default_config()
         };
-        let mut state = SoilingState::new(&cfg, HOUR_S);
+        let mut state = SoilingState::new(&cfg, SECONDS_PER_HOUR);
         state.seconds_since_last_clean = cfg.grace_period_s + 1.0;
 
         for _ in 0..10_000 {
-            state.step(&cfg, 0.0, HOUR_S, false);
+            state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
         }
 
         assert!(
@@ -235,15 +234,15 @@ mod tests {
             grace_period_s: 0.0,
             ..default_config()
         };
-        let mut state = SoilingState::new(&cfg, HOUR_S);
+        let mut state = SoilingState::new(&cfg, SECONDS_PER_HOUR);
         state.seconds_since_last_clean = cfg.grace_period_s + 1.0;
 
         for _ in 0..(30 * 24) {
-            state.step(&cfg, 0.0, HOUR_S, false);
+            state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
         }
         assert!(state.soiling_ratio() < 1.0, "panel should be soiled");
 
-        let ratio = state.step(&cfg, 0.006, HOUR_S, false);
+        let ratio = state.step(&cfg, 0.006, SECONDS_PER_HOUR, false);
         assert_eq!(ratio, 1.0, "rain event should clean the panel");
     }
 
@@ -253,15 +252,15 @@ mod tests {
             grace_period_s: 0.0,
             ..default_config()
         };
-        let mut state = SoilingState::new(&cfg, HOUR_S);
+        let mut state = SoilingState::new(&cfg, SECONDS_PER_HOUR);
         state.seconds_since_last_clean = cfg.grace_period_s + 1.0;
 
         for _ in 0..(7 * 24) {
-            state.step(&cfg, 0.0, HOUR_S, false);
+            state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
         }
 
         // Deliver 2mm rain (below 6mm threshold). Panel must remain soiled.
-        let ratio = state.step(&cfg, 0.002, HOUR_S, false);
+        let ratio = state.step(&cfg, 0.002, SECONDS_PER_HOUR, false);
         assert!(
             ratio < 1.0,
             "insufficient rain should not clean panel to 1.0: ratio={ratio}"
@@ -273,16 +272,16 @@ mod tests {
         // 1-hour accumulation window isolates grace-period logic from buffer
         // clearing delays. Rain is evicted after 1 step.
         let cfg = SoilingConfig {
-            grace_period_s: 3.0 * DAY_S,
-            rain_accum_period_s: HOUR_S,
+            grace_period_s: 3.0 * SECONDS_PER_DAY,
+            rain_accum_period_s: SECONDS_PER_HOUR,
             ..default_config()
         };
-        let mut state = SoilingState::new(&cfg, HOUR_S);
+        let mut state = SoilingState::new(&cfg, SECONDS_PER_HOUR);
         state.seconds_since_last_clean = cfg.grace_period_s + 1.0;
 
         // Soil the panel.
         for _ in 0..240 {
-            state.step(&cfg, 0.0, HOUR_S, false);
+            state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
         }
         assert!(
             state.soiling_ratio() < 1.0,
@@ -290,14 +289,14 @@ mod tests {
         );
 
         // Rain event.
-        state.step(&cfg, 0.010, HOUR_S, false);
+        state.step(&cfg, 0.010, SECONDS_PER_HOUR, false);
         assert_eq!(state.soiling_ratio(), 1.0, "rain must clean the panel");
 
         // Panel stays clean for grace period (72 hours at 1-hour steps).
-        // seconds_since_last_clean advances from 0 by HOUR_S each step.
+        // seconds_since_last_clean advances from 0 by SECONDS_PER_HOUR each step.
         // Grace condition holds while counter <= grace_period_s.
         for step_idx in 0..72 {
-            let ratio = state.step(&cfg, 0.0, HOUR_S, false);
+            let ratio = state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
             assert_eq!(
                 ratio, 1.0,
                 "should stay clean during grace period (step {step_idx})"
@@ -305,7 +304,7 @@ mod tests {
         }
 
         // After grace period, soiling resumes.
-        state.step(&cfg, 0.0, HOUR_S, false);
+        state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
         assert!(
             state.soiling_ratio() < 1.0,
             "soiling should resume after grace period expires"
@@ -315,24 +314,24 @@ mod tests {
     #[test]
     fn ring_buffer_rolls_over_correctly() {
         let cfg = SoilingConfig {
-            rain_accum_period_s: 6.0 * HOUR_S,
+            rain_accum_period_s: 6.0 * SECONDS_PER_HOUR,
             cleaning_threshold_m: 0.005,
             grace_period_s: 0.0,
             ..default_config()
         };
-        let mut state = SoilingState::new(&cfg, HOUR_S);
+        let mut state = SoilingState::new(&cfg, SECONDS_PER_HOUR);
         state.seconds_since_last_clean = 1.0;
 
         // Deliver 1mm each hour for 5 hours.
         for _ in 0..5 {
-            state.step(&cfg, 0.001, HOUR_S, false);
+            state.step(&cfg, 0.001, SECONDS_PER_HOUR, false);
         }
         // Buffer: [0.0, 0.001, 0.001, 0.001, 0.001, 0.001] = 5mm >= 5mm threshold.
         assert_eq!(state.soiling_ratio(), 1.0, "5mm should meet 5mm threshold");
 
         // Advance 6 dry hours to flush rain out of buffer.
         for _ in 0..6 {
-            state.step(&cfg, 0.0, HOUR_S, false);
+            state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
         }
         assert!(
             state.soiling_ratio() < 1.0,
@@ -346,30 +345,30 @@ mod tests {
             grace_period_s: 0.0,
             ..default_config()
         };
-        let mut state = SoilingState::new(&cfg, HOUR_S);
+        let mut state = SoilingState::new(&cfg, SECONDS_PER_HOUR);
         state.seconds_since_last_clean = cfg.grace_period_s + 1.0;
 
         for _ in 0..240 {
-            state.step(&cfg, 0.0, HOUR_S, false);
+            state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
         }
         assert!(state.soiling_ratio() < 1.0);
 
-        let ratio = state.step(&cfg, 0.0, HOUR_S, true);
+        let ratio = state.step(&cfg, 0.0, SECONDS_PER_HOUR, true);
         assert_eq!(ratio, 1.0, "manual wash should clean immediately");
     }
 
     #[test]
     fn default_config_produces_expected_annual_loss() {
         let cfg = default_config();
-        let mut state = SoilingState::new(&cfg, HOUR_S);
+        let mut state = SoilingState::new(&cfg, SECONDS_PER_HOUR);
         state.seconds_since_last_clean = cfg.grace_period_s + 1.0;
 
         for _ in 0..(30 * 24) {
-            state.step(&cfg, 0.0, HOUR_S, false);
+            state.step(&cfg, 0.0, SECONDS_PER_HOUR, false);
         }
 
         let loss = 1.0 - state.soiling_ratio();
-        let expected = cfg.soiling_loss_rate_per_s * 30.0 * DAY_S;
+        let expected = cfg.soiling_loss_rate_per_s * 30.0 * SECONDS_PER_DAY;
         assert!(
             (loss - expected).abs() < 1e-10,
             "30-day loss: got {loss:.6}, expected {expected:.6}"

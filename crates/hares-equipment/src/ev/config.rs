@@ -69,7 +69,7 @@ pub(super) const DEFAULT_V2L_SOC_RESERVE: f64 = 0.2;
 pub(super) const DEFAULT_V2L_MAX_DISCHARGE_KW: f64 = 3.0;
 pub(super) const DEFAULT_V2G_SOC_RESERVE: f64 = 0.3;
 pub(super) const DEFAULT_V2G_MAX_DISCHARGE_KW: f64 = 5.0;
-pub(super) const SECONDS_PER_HOUR: f64 = 3600.0;
+pub(super) use hares_physics::constants::SECONDS_PER_HOUR;
 pub(super) const MIN_TIMESTEP_HOURS: f64 = 1e-9;
 
 pub(super) fn resolve_capacity_kwh(config: &EquipmentConfig) -> Option<f64> {

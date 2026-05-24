@@ -11,8 +11,22 @@
 //! - The public API returns kg/s (mass flow).
 //! - Gallons appear only inside conversion constants; they are never exposed.
 
+use hares_physics::constants::MINUTES_PER_DAY;
+
 /// US gallons per litre (exact by definition of US gallon).
 const GAL_PER_L: f64 = 1.0 / 3.785_411_784;
+
+/// ANSI/RESNET/ICC 301-2014 Addendum A-2015 §4.2.2.5.2.11: reference waste water coefficient.
+/// Formula: ref_w_gpd = RESNET_WASTE_COEFF_GPD × bedrooms^RESNET_WASTE_EXPONENT  [gal/day]
+const RESNET_WASTE_COEFF_GPD: f64 = 9.8;
+/// ANSI/RESNET/ICC 301-2014 Addendum A-2015 §4.2.2.5.2.11: reference waste water exponent.
+const RESNET_WASTE_EXPONENT: f64 = 0.43;
+
+/// ANSI/RESNET 301-2014 Addendum A-2015 §4.2.2.5.2.11: R-3 IP insulation threshold in SI.
+/// R-3 IP × (1 / 5.678_263 W·m⁻²·K⁻¹ per BTU·h⁻¹·ft⁻²·°F⁻¹) = 0.528_328 m²·K/W.
+/// Matches `conv::r_value_ip_to_si(3.0)` to within 5.8×10⁻⁷ m²·K/W (uom rounding).
+/// `pipe_r_value` in [`DistributionSystem`] is stored in SI [m²·K/W].
+const PIPE_INSULATION_R_THRESHOLD_M2_K_W: f64 = 3.0 * 0.176_110;
 
 /// Convert US gallons to litres.
 #[inline]
@@ -63,7 +77,7 @@ pub fn normalize_draw_profile(raw_fractions: &[f64], avg_daily_consumption_l: f6
     // Convert daily target to L/min rate, then build a scale factor that maps
     // the fractional schedule mean to that rate.  Dividing by 60 converts L/min → L/s;
     // with density ≈ 1 kg/L this equals kg/s directly.
-    let annual_mean_l_per_min = avg_daily_consumption_l / 1440.0;
+    let annual_mean_l_per_min = avg_daily_consumption_l / MINUTES_PER_DAY;
     let scale = annual_mean_l_per_min / mean;
 
     raw_fractions.iter().map(|&f| f * scale / 60.0).collect()
@@ -92,7 +106,7 @@ impl FixtureEfficiency {
 /// Hot water distribution system type, used to compute distribution losses.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DistributionSystem {
-    /// Standard branched piping.  `pipe_r_value` is the insulation R-value [h·ft²·°F/Btu].
+    /// Standard branched piping.  `pipe_r_value` is the insulation R-value [m²·K/W].
     /// `piping_length_m` is the total pipe length; defaults to a floor-area-derived value if
     /// `None`.
     Standard {
@@ -100,7 +114,7 @@ pub enum DistributionSystem {
         piping_length_m: Option<f64>,
         default_piping_length_m: f64,
     },
-    /// Recirculation loop.  `pipe_r_value` is the insulation R-value [h·ft²·°F/Btu].
+    /// Recirculation loop.  `pipe_r_value` is the insulation R-value [m²·K/W].
     /// `branch_loop_length_m` defaults to ~3.05 m (10 ft) if `None`.
     Recirculation {
         pipe_r_value: f64,
@@ -153,7 +167,7 @@ pub fn distribution_daily_hot_water_l(
     distribution: &DistributionSystem,
 ) -> f64 {
     // Reference waste water rate [gal/day]; power law from ANSI/RESNET 301.
-    let ref_w_gpd = 9.8 * n_bedrooms.powf(0.43);
+    let ref_w_gpd = RESNET_WASTE_COEFF_GPD * n_bedrooms.powf(RESNET_WASTE_EXPONENT);
 
     // Fraction of reference that is "on-demand" (off-fixture cold drain).
     const O_FRAC: f64 = 0.25;
@@ -168,7 +182,7 @@ pub fn distribution_daily_hot_water_l(
             piping_length_m,
             default_piping_length_m,
         } => {
-            let dist_factor = if *pipe_r_value >= 3.0 { 0.9 } else { 1.0 };
+            let dist_factor = if *pipe_r_value >= PIPE_INSULATION_R_THRESHOLD_M2_K_W { 0.9 } else { 1.0 };
             // Default piping length expressed in metres; ratio is dimensionless.
             let actual_m = piping_length_m.unwrap_or(*default_piping_length_m);
             let ratio = if *default_piping_length_m > 0.0 {
@@ -182,7 +196,7 @@ pub fn distribution_daily_hot_water_l(
             pipe_r_value,
             branch_loop_length_m,
         } => {
-            let dist_factor = if *pipe_r_value >= 3.0 { 1.0 } else { 1.11 };
+            let dist_factor = if *pipe_r_value >= PIPE_INSULATION_R_THRESHOLD_M2_K_W { 1.0 } else { 1.11 };
             // Default branch loop length = 10 ft ≈ 3.048 m.
             const DEFAULT_BRANCH_M: f64 = 3.048;
             let actual_m = branch_loop_length_m.unwrap_or(DEFAULT_BRANCH_M);
@@ -249,7 +263,7 @@ pub fn ansi_resnet_daily_hot_water_l(
     let fixture_l = gal_to_l(fixture_ref_gpd) * fixture_efficiency;
 
     // Distribution waste: OCHRE formula, scaled by distribution_loss_factor.
-    let ref_w_gpd = 9.8 * n_bedrooms.powf(0.43);
+    let ref_w_gpd = RESNET_WASTE_COEFF_GPD * n_bedrooms.powf(RESNET_WASTE_EXPONENT);
     const O_FRAC: f64 = 0.25;
     const O_CD_EFF: f64 = 0.0;
     let o_w_gpd = ref_w_gpd * O_FRAC * (1.0 - O_CD_EFF);
@@ -477,7 +491,8 @@ mod tests {
         let eff = FixtureEfficiency::Standard;
         let mult = 1.0;
         let insulated = DistributionSystem::Standard {
-            pipe_r_value: 4.0,
+            // R-4 IP ≈ 0.704 m²·K/W (above the R-3 IP threshold of 0.5283 m²·K/W).
+            pipe_r_value: 4.0 * 0.176_110,
             piping_length_m: None,
             default_piping_length_m: 30.0,
         };
@@ -500,7 +515,8 @@ mod tests {
         let eff = FixtureEfficiency::Standard;
         let mult = 1.0;
         let insulated = DistributionSystem::Recirculation {
-            pipe_r_value: 4.0,
+            // R-4 IP ≈ 0.704 m²·K/W (above the R-3 IP threshold of 0.5283 m²·K/W).
+            pipe_r_value: 4.0 * 0.176_110,
             branch_loop_length_m: None,
         };
         let uninsulated = DistributionSystem::Recirculation {
