@@ -32,8 +32,6 @@ pub const DEFAULT_UA_W_PER_K: f64 = 120.0;
 pub const DEFAULT_R_M2_K_W: f64 = 2.5;
 /// Exterior air-film resistance [m²·K/W].
 pub const R_FILM_EXTERIOR_M2_K_W: f64 = 0.03;
-/// Interior air-film resistance [m²·K/W].
-pub const R_FILM_INTERIOR_M2_K_W: f64 = 0.12;
 /// NodeId for the outdoor temperature driving node.
 pub const OUTDOOR_NODE_ID: u32 = u32::MAX - 1;
 /// NodeId for the ground temperature driving node (legacy single-ground reference).
@@ -1597,7 +1595,7 @@ mod tests {
             material_layers: layers,
             precomputed_rc: Vec::new(),
             fallback_r_m2_k_w: fallback_r,
-            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_interior_m2_k_w: 0.12,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
@@ -2171,7 +2169,7 @@ mod tests {
             material_layers: Vec::new(),
             precomputed_rc: precomputed,
             fallback_r_m2_k_w: fallback_r,
-            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_interior_m2_k_w: 0.12,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
@@ -2444,7 +2442,7 @@ mod tests {
             material_layers: raw_layers,
             precomputed_rc: precomputed,
             fallback_r_m2_k_w: 2.5,
-            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_interior_m2_k_w: 0.12,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
@@ -2505,7 +2503,7 @@ mod tests {
             material_layers: vec![layer.clone()],
             precomputed_rc: Vec::new(),
             fallback_r_m2_k_w: 2.5,
-            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_interior_m2_k_w: 0.12,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
@@ -2522,7 +2520,7 @@ mod tests {
             material_layers: vec![layer],
             precomputed_rc: Vec::new(),
             fallback_r_m2_k_w: 2.5,
-            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_interior_m2_k_w: 0.12,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: Some(0.25),
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
@@ -2868,7 +2866,7 @@ mod tests {
             material_layers: Vec::new(),
             precomputed_rc: precomputed,
             fallback_r_m2_k_w: 0.0,
-            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_interior_m2_k_w: 0.12,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
@@ -2882,7 +2880,7 @@ mod tests {
             .expect("precomputed boundary should have r_zone_to_inner");
 
         // Last precomputed layer has R=0.5, so half-R = 0.25.
-        let expected_r = R_FILM_INTERIOR_M2_K_W + 0.5 / 2.0;
+        let expected_r = 0.12 + 0.5 / 2.0;
         assert!(
             (r_zone_to_inner - expected_r).abs() < 1e-4,
             "r_zone_to_inner={r_zone_to_inner:.4}, expected {expected_r:.4}"
@@ -2913,7 +2911,7 @@ mod tests {
             material_layers: vec![concrete],
             precomputed_rc: Vec::new(),
             fallback_r_m2_k_w: 0.0,
-            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_interior_m2_k_w: 0.12,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
@@ -2957,7 +2955,7 @@ mod tests {
             material_layers: vec![insulation, concrete_inner],
             precomputed_rc: Vec::new(),
             fallback_r_m2_k_w: 0.0,
-            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_interior_m2_k_w: 0.12,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
@@ -2998,7 +2996,7 @@ mod tests {
             material_layers: vec![concrete, insulation, plasterboard],
             precomputed_rc: Vec::new(),
             fallback_r_m2_k_w: 0.0,
-            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_interior_m2_k_w: 0.12,
             r_film_exterior_m2_k_w: r_film_ext,
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
@@ -3060,7 +3058,7 @@ mod tests {
                 material_layers: layers.clone(),
                 precomputed_rc: Vec::new(),
                 fallback_r_m2_k_w: 2.5,
-                r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+                r_film_interior_m2_k_w: 0.12,
                 r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
                 framing_factor: None,
                 interior_emissivity: emissivity,
@@ -3315,48 +3313,5 @@ mod tests {
                 "diagnostic inner_node must not collide with GROUND_NODE_ID"
             );
         }
-    }
-
-    // ── R_FILM_INTERIOR constant mismatch regression ───────────────────
-    //
-    // R_FILM_INTERIOR_M2_K_W = 0.12 is a combined (convection + radiation)
-    // surface resistance sourced from ASHRAE 90.1 / ISO 6946 conventions.
-    // Production film_resistances() returns ASHRAE Simple convection-only
-    // coefficients (~0.325 m²·K/W for vertical walls) — a ~2.7× mismatch.
-    //
-    // This test documents the mismatch and will fail if R_FILM_INTERIOR_M2_K_W
-    // is ever silently used in a production UA calculation where
-    // film_resistances() should be called instead.
-
-    #[test]
-    fn r_film_interior_constant_is_not_production_convection_only_value() {
-        // Production value for a vertical conditioned-to-outdoor wall comes
-        // from ASHRAE Simple interior convection: h = 3.076 W/(m²·K).
-        let h_ashrae_simple_vertical =
-            hares_physics::film_coefficients::ashrae_simple_interior_h_conv(
-                90.0, // vertical
-                0.0,  // t_ext_c (unused for vertical)
-                20.0, // t_int_c (unused for vertical)
-                true,
-            );
-        let r_production = 1.0 / h_ashrae_simple_vertical;
-
-        // The constant 0.12 is a COMBINED (conv+rad) reference value, not
-        // the convection-only value used in production.
-        assert!(
-            (R_FILM_INTERIOR_M2_K_W - 0.12).abs() < 1e-10,
-            "constant value changed from 0.12 — update regression test"
-        );
-
-        // Production r_film_int is ~2.7× larger than the constant.
-        // If this assertion fails it means either:
-        //   (a) production now uses the constant directly (regression of S1), or
-        //   (b) the ASHRAE Simple coefficient was changed without updating this test.
-        assert!(
-            r_production > R_FILM_INTERIOR_M2_K_W * 2.0,
-            "production convection-only r_film_int={r_production:.4} should be \
-             >2× the combined constant {R_FILM_INTERIOR_M2_K_W} — \
-             see R_FILM_INTERIOR mismatch context"
-        );
     }
 }
