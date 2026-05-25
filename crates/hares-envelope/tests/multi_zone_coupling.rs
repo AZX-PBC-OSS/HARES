@@ -297,16 +297,13 @@ fn initialize_steady_state_pins_only_configured_indoor_zone() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression test for ticket 091: apply_port_radiant_inputs must iterate
-// all zones, not only the configured indoor_zone_id.
+// Regression: apply_port_radiant_inputs must iterate all zones, not only the
+// configured indoor_zone_id.
 //
-// Bug: `apply_port_radiant_inputs` (ports.rs:35-76) hard-codes the indoor
-// zone when collecting total_radiant_w and when looking up the surface config.
-// Equipment placed in ZONE2 (a non-indoor zone) emits radiant_gain_w, but
-// that gain is silently dropped — it never reaches any surface input index,
-// and it never falls back to the zone air node.
-//
-// This test FAILS until the fix is applied.
+// Pre-fix bug: `apply_port_radiant_inputs` hard-coded the indoor zone when
+// summing radiant gains and when looking up surface config, so equipment in
+// non-indoor zones had its radiant fraction silently dropped — it never
+// reached any surface input index or the zone air fallback node.
 // ---------------------------------------------------------------------------
 
 /// A radiant-emitting load in a non-indoor zone must deliver its radiant
@@ -327,7 +324,6 @@ fn initialize_steady_state_pins_only_configured_indoor_zone() {
 /// Fix pending on ticket 091 — will stop panicking when apply_port_radiant_inputs
 /// routes radiant gains to non-indoor zones.
 #[test]
-#[should_panic(expected = "ticket 091 regression")]
 fn radiant_port_in_non_indoor_zone_reaches_zone_surface() {
     // -----------------------------------------------------------------------
     // Build a 2-zone model.

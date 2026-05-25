@@ -31,66 +31,80 @@ impl ThermalSolver {
     ///
     /// Uses `interior_lwr_zones` surfaces when available (ScriptF mode),
     /// falls back to `interior_solar_zones` surfaces (StarMesh mode).
+    /// Distributes radiant gains from all zones (not only the configured
+    /// indoor zone). Equipment in non-indoor zones (basement, garage, attic)
+    /// must have its radiant fraction delivered to the host zone's surfaces
+    /// and air node, matching the zone-scoped distribution semantics of
+    /// `apply_port_sensible_inputs`.
+    ///
+    /// Per-entry distribution is correct because TMULT weighting is linear:
+    /// distributing each entry's radiant gain independently and accumulating
+    /// via `+=` into the surface and air-node inputs produces the same result
+    /// as summing per-zone first.  This avoids a per-timestep `Vec` allocation
+    /// for zone aggregation.
+    ///
+    /// EnergyPlus Eng. Ref. "Inside Heat Balance": *"The radiative part is
+    /// then distributed over the surfaces within the zone in some prescribed
+    /// manner."*  ASHRAE HoF 2021 Ch. 18 §2 confirms that both convective and
+    /// radiant fractions of internal gains belong to the zone where the
+    /// equipment resides.
     pub(super) fn apply_port_radiant_inputs(&mut self, u: &mut DVector<f64>, ports: &PortSlots) {
-        let indoor_zone = self.config.indoor_zone_id;
-        let total_radiant_w: f64 = ports
-            .thermal
-            .iter()
-            .filter(|t| t.zone == indoor_zone)
-            .map(|t| t.radiant_gain_w)
-            .sum();
-
-        if total_radiant_w <= 0.0 {
-            return;
-        }
-
-        let zone_air_idx = self
-            .wiring
-            .zone_sensible_input_indices
-            .get(&indoor_zone)
-            .copied();
-
-        // Prefer interior_lwr_zones (ScriptF mode, has full surface info with
-        // emissivity and driving_temp), fall back to interior_solar_zones
-        // (StarMesh mode, has area/absorptance/radiation_frac).
-        let lwr_zone = self
-            .config
-            .interior_lwr_zones
-            .iter()
-            .find(|z| z.zone_id == indoor_zone);
-
-        if let Some(zone_cfg) = lwr_zone {
-            distribute_radiant_lwr_surfaces(
-                u,
-                total_radiant_w,
-                zone_air_idx,
-                &zone_cfg.surfaces,
-                &mut self.radiant_weights_buf,
-            );
-            return;
-        }
-
-        let solar_zone = self
-            .config
-            .interior_solar_zones
-            .iter()
-            .find(|z| z.zone_id == indoor_zone);
-
-        let Some(zone_cfg) = solar_zone else {
-            // No surface info at all: dump all radiant gain to zone air.
-            if let Some(idx) = zone_air_idx {
-                u[idx] += total_radiant_w;
+        for thermal in &ports.thermal {
+            let radiant_w = thermal.radiant_gain_w;
+            if radiant_w <= 0.0 {
+                continue;
             }
-            return;
-        };
 
-        distribute_radiant_solar_surfaces(
-            u,
-            total_radiant_w,
-            zone_air_idx,
-            &zone_cfg.surfaces,
-            &mut self.radiant_weights_buf,
-        );
+            let zone_id = thermal.zone;
+            let zone_air_idx = self
+                .wiring
+                .zone_sensible_input_indices
+                .get(&zone_id)
+                .copied();
+
+            // Prefer interior_lwr_zones (ScriptF mode, has full surface info
+            // with emissivity and driving_temp), fall back to
+            // interior_solar_zones (StarMesh mode, has area/absorptance/
+            // radiation_frac).
+            if let Some(zone_cfg) = self
+                .config
+                .interior_lwr_zones
+                .iter()
+                .find(|z| z.zone_id == zone_id)
+            {
+                distribute_radiant_lwr_surfaces(
+                    u,
+                    radiant_w,
+                    zone_air_idx,
+                    &zone_cfg.surfaces,
+                    &mut self.radiant_weights_buf,
+                );
+                continue;
+            }
+
+            if let Some(zone_cfg) = self
+                .config
+                .interior_solar_zones
+                .iter()
+                .find(|z| z.zone_id == zone_id)
+            {
+                distribute_radiant_solar_surfaces(
+                    u,
+                    radiant_w,
+                    zone_air_idx,
+                    &zone_cfg.surfaces,
+                    &mut self.radiant_weights_buf,
+                );
+                continue;
+            }
+
+            // No surface info for this zone: dump all radiant gain to zone air.
+            if let Some(idx) = zone_air_idx {
+                if idx < u.len() {
+                    u[idx] += radiant_w;
+                }
+            }
+        }
     }
 }
 
