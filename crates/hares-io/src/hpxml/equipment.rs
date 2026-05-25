@@ -1623,16 +1623,13 @@ mod tests {
         );
     }
 
-    // Unsupported HeatPumpType should not silently skip HVAC.
-    // Currently these tests document the BROKEN behaviour (silent skip → 0 specs).
-    // After the fix they must be updated to assert an Err containing "unsupported HeatPumpType".
+    // Unsupported HeatPumpType must produce a hard error, not a silent HVAC skip.
 
     #[test]
-    fn heat_pump_ground_to_air_currently_silently_skips_hvac() {
+    fn heat_pump_ground_to_air_rejected_with_error() {
         // ground-to-air is a valid HPXML 4.x HeatPumpType (hpxml.nlr.gov/datadictionary/4.0.0)
-        // but HARES has no handler for it.  The _ => None arm at resolve_hvac.rs:1454 causes the
-        // if let Some(...) guard at line 1573 to be skipped, so the building emits zero HVAC specs.
-        // This test FAILS after the fix (which should return Err).
+        // but HARES has no GSHP physics model.  Return a hard error rather than silently
+        // drop the equipment.
         let xml = minimal_hvac_xml(
             r#"<HeatPump>
           <HeatPumpType>ground-to-air</HeatPumpType>
@@ -1641,20 +1638,21 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-            .expect("currently succeeds (silent skip)");
-        // BUG: after the fix this call should return Err, not Ok([]).
-        // The absence of any HVAC spec is the observable symptom of the silent skip.
+        let err = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect_err("ground-to-air must be rejected");
+        let msg = err.to_string();
         assert!(
-            !specs
-                .iter()
-                .any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
-            "ground-to-air silently drops HVAC — zero heater/cooler specs emitted"
+            msg.contains("unsupported HeatPumpType"),
+            "error message must mention unsupported HeatPumpType, got: {msg}"
+        );
+        assert!(
+            msg.contains("ground-to-air"),
+            "error message must name the rejected type, got: {msg}"
         );
     }
 
     #[test]
-    fn heat_pump_water_loop_to_air_currently_silently_skips_hvac() {
+    fn heat_pump_water_loop_to_air_rejected_with_error() {
         // water-loop-to-air is another valid HPXML 4.x HeatPumpType that is unhandled.
         let xml = minimal_hvac_xml(
             r#"<HeatPump>
@@ -1664,13 +1662,40 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-            .expect("currently succeeds (silent skip)");
+        let err = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect_err("water-loop-to-air must be rejected");
+        let msg = err.to_string();
         assert!(
-            !specs
-                .iter()
-                .any(|s| s.name.contains("Heater") || s.name.contains("Cooler")),
-            "water-loop-to-air silently drops HVAC — zero heater/cooler specs emitted"
+            msg.contains("unsupported HeatPumpType"),
+            "error message must mention unsupported HeatPumpType, got: {msg}"
         );
+        assert!(
+            msg.contains("water-loop-to-air"),
+            "error message must name the rejected type, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn heat_pump_air_to_air_produces_ashp_specs() {
+        let xml = minimal_hvac_xml(
+            r#"<HeatPump>
+          <HeatPumpType>air-to-air</HeatPumpType>
+          <HeatingCapacity>36000</HeatingCapacity>
+          <CoolingCapacity>36000</CoolingCapacity>
+        </HeatPump>"#,
+        );
+        let building = parse_building(&xml).expect("xml parses");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("air-to-air must succeed");
+        let heater = specs
+            .iter()
+            .find(|s| s.name == "ASHP Heater")
+            .expect("ASHP Heater spec must be present");
+        let cooler = specs
+            .iter()
+            .find(|s| s.name == "ASHP Cooler")
+            .expect("ASHP Cooler spec must be present");
+        assert_eq!(heater.fuel_type, FuelType::Electric);
+        assert_eq!(cooler.fuel_type, FuelType::Electric);
     }
 }

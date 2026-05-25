@@ -1576,10 +1576,15 @@ pub(super) fn resolve_hvac(
             })?
             .to_ascii_lowercase();
 
-        let split = match heat_pump_type.as_str() {
-            "air-to-air" => Some(("ASHP Heater", "ASHP Cooler")),
-            "mini-split" => Some(("MSHP Heater", "MSHP Cooler")),
-            _ => None,
+        let (heater_name, cooler_name) = match heat_pump_type.as_str() {
+            "air-to-air" => ("ASHP Heater", "ASHP Cooler"),
+            "mini-split" => ("MSHP Heater", "MSHP Cooler"),
+            other => {
+                return Err(HpxmlError::Parse(format!(
+                    "HeatPump: unsupported HeatPumpType '{other}'; \
+                     supported types are: air-to-air, mini-split"
+                )));
+            }
         };
 
         let mut params = Map::new();
@@ -1775,49 +1780,47 @@ pub(super) fn resolve_hvac(
             duct_params.insert_into_map(&mut params);
         }
 
-        if let Some((heater_name, cooler_name)) = split {
-            let is_mini_split = heat_pump_type == "mini-split";
-            let mut heater_params = params.clone();
-            let mut cooler_params = params;
-            for (k, v) in &basement_params {
-                heater_params.insert(k.clone(), v.clone());
-            }
-            apply_multispeed_heating_parameters(&mut heater_params, defaults, heater_name);
-            apply_multispeed_cooling_parameters(&mut cooler_params, defaults, cooler_name);
-            insert_startup_degradation(&mut heater_params, heater_name, true);
-            insert_startup_degradation(&mut cooler_params, cooler_name, false);
-
-            let heater_typed = try_build_heat_pump_heater_config(
-                heater_name,
-                &heater_params,
-                &duct_params,
-                is_mini_split,
-            );
-            let cooler_typed = try_build_heat_pump_cooler_config(
-                cooler_name,
-                &cooler_params,
-                &duct_params,
-                is_mini_split,
-            );
-
-            let mut heater_spec = build_spec(
-                heater_name.to_string(),
-                FuelType::Electric,
-                heater_params,
-                defaults,
-            );
-            heater_spec.typed_config = heater_typed;
-            specs.push(heater_spec);
-
-            let mut cooler_spec = build_spec(
-                cooler_name.to_string(),
-                FuelType::Electric,
-                cooler_params,
-                defaults,
-            );
-            cooler_spec.typed_config = cooler_typed;
-            specs.push(cooler_spec);
+        let is_mini_split = heat_pump_type == "mini-split";
+        let mut heater_params = params.clone();
+        let mut cooler_params = params;
+        for (k, v) in &basement_params {
+            heater_params.insert(k.clone(), v.clone());
         }
+        apply_multispeed_heating_parameters(&mut heater_params, defaults, heater_name);
+        apply_multispeed_cooling_parameters(&mut cooler_params, defaults, cooler_name);
+        insert_startup_degradation(&mut heater_params, heater_name, true);
+        insert_startup_degradation(&mut cooler_params, cooler_name, false);
+
+        let heater_typed = try_build_heat_pump_heater_config(
+            heater_name,
+            &heater_params,
+            &duct_params,
+            is_mini_split,
+        );
+        let cooler_typed = try_build_heat_pump_cooler_config(
+            cooler_name,
+            &cooler_params,
+            &duct_params,
+            is_mini_split,
+        );
+
+        let mut heater_spec = build_spec(
+            heater_name.to_string(),
+            FuelType::Electric,
+            heater_params,
+            defaults,
+        );
+        heater_spec.typed_config = heater_typed;
+        specs.push(heater_spec);
+
+        let mut cooler_spec = build_spec(
+            cooler_name.to_string(),
+            FuelType::Electric,
+            cooler_params,
+            defaults,
+        );
+        cooler_spec.typed_config = cooler_typed;
+        specs.push(cooler_spec);
     }
 
     for dehumidifier in descendants_named(hvac, "Dehumidifier") {
