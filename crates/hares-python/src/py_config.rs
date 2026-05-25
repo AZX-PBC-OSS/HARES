@@ -5,12 +5,12 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_core::DwellingConfig;
-use hares_io::{OutputFormat, ResampleMethod, ResampleOverrides, SimulationConfig};
+use hares_io::{OutputFormat, ResampleOverrides, SimulationConfig};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList};
 
-use crate::utils::parse_datetime_str;
+use crate::utils::{parse_datetime_str, parse_resample_method};
 
 const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
 const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
@@ -420,20 +420,9 @@ impl PyDwellingConfig {
                     ))
                 })?;
                 let value_str = value.extract::<String>()?;
-                let valid_methods = [
-                    "pchip",
-                    "pchip_cyclic",
-                    "zoh",
-                    "linear",
-                    "circular_linear",
-                    "triangular",
-                ];
-                if !valid_methods.contains(&value_str.as_str()) {
-                    return Err(PyValueError::new_err(format!(
-                        "invalid resample method '{}'. Expected one of: pchip, pchip_cyclic, zoh, linear, circular_linear, triangular",
-                        value_str
-                    )));
-                }
+                // Validate through the shared helper; discard the typed return
+                // since the constructor stores raw strings for later conversion.
+                parse_resample_method(&key_str, &value_str)?;
                 map.insert(key_str, value_str);
             }
             if map.is_empty() { None } else { Some(map) }
@@ -576,16 +565,16 @@ impl PyDwellingConfig {
                 civil_timezone: None,
             });
 
-        let resample_overrides: Option<ResampleOverrides> =
-            self.resample_overrides.as_ref().map(|map| {
+        let resample_overrides: Option<ResampleOverrides> = self
+            .resample_overrides
+            .as_ref()
+            .map(|map| -> PyResult<ResampleOverrides> {
                 let mut overrides = ResampleOverrides::default();
                 macro_rules! set_resample {
                     ($($field:ident),*) => {
                         $(
                             if let Some(v) = map.get(stringify!($field)) {
-                                if let Ok(m) = parse_resample_method(v) {
-                                    overrides.$field = Some(m);
-                                }
+                                overrides.$field = Some(parse_resample_method(stringify!($field), v)?);
                             }
                         )*
                     };
@@ -604,8 +593,9 @@ impl PyDwellingConfig {
                     wind_speed,
                     wind_dir
                 );
-                overrides
-            });
+                Ok(overrides)
+            })
+            .transpose()?;
 
         let overrides_value = self.overrides.as_ref().map(|map| {
             let mut obj = serde_json::Map::new();
@@ -628,20 +618,5 @@ impl PyDwellingConfig {
                 .map(|d| StdDuration::from_secs(d as u64)),
             resample_overrides,
         })
-    }
-}
-
-fn parse_resample_method(s: &str) -> PyResult<ResampleMethod> {
-    match s {
-        "pchip" => Ok(ResampleMethod::Pchip),
-        "pchip_cyclic" => Ok(ResampleMethod::PchipCyclic),
-        "zoh" => Ok(ResampleMethod::Zoh),
-        "linear" => Ok(ResampleMethod::Linear),
-        "circular_linear" => Ok(ResampleMethod::CircularLinear),
-        "triangular" => Ok(ResampleMethod::Triangular),
-        _ => Err(PyValueError::new_err(format!(
-            "invalid resample method: '{}'. Expected pchip, pchip_cyclic, zoh, linear, circular_linear, or triangular",
-            s
-        ))),
     }
 }

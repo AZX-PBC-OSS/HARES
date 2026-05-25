@@ -146,11 +146,8 @@ class TestDwellingConfig:
         assert cfg.resample_overrides.get("dry_bulb") == "zoh"
 
     def test_resample_overrides_typo_raises_value_error(self):
-        """Regression test for ticket #100: typo in resample method must raise ValueError,
-        not silently fall back to a default (feedback_no_silent_defaults policy).
-
-        Currently FAILS if the silent-discard path in to_dwelling_config() is reached
-        before the constructor validates the method name."""
+        """Regression guard: typo in resample method must raise ValueError,
+        not silently fall back to a default."""
         with pytest.raises(ValueError, match="tringular"):
             DwellingConfig(
                 hpxml="path/to/building.xml",

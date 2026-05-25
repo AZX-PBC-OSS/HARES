@@ -48,6 +48,7 @@ use crate::py_equipment::{
 use crate::py_metrics::PySimulationMetrics;
 use crate::py_telemetry::PyTelemetry;
 use crate::utils::extract_datetime;
+use crate::utils::parse_resample_method;
 
 const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
 const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
@@ -1655,25 +1656,11 @@ fn build_config(
                 "wind_speed",
                 "wind_dir",
             ];
-            fn parse_method(field: &str, v: &str) -> PyResult<hares_io::ResampleMethod> {
-                match v {
-                    "zoh" => Ok(hares_io::ResampleMethod::Zoh),
-                    "pchip" => Ok(hares_io::ResampleMethod::Pchip),
-                    "pchip_cyclic" => Ok(hares_io::ResampleMethod::PchipCyclic),
-                    "linear" => Ok(hares_io::ResampleMethod::Linear),
-                    "circular_linear" => Ok(hares_io::ResampleMethod::CircularLinear),
-                    "triangular" => Ok(hares_io::ResampleMethod::Triangular),
-                    other => Err(PyValueError::new_err(format!(
-                        "unknown resample method '{other}' for field '{field}'; \
-                         valid methods: zoh, pchip, pchip_cyclic, linear, circular_linear, triangular"
-                    ))),
-                }
-            }
             macro_rules! set_field {
                 ($($field:ident),*) => {
                     $(
                         if let Some(v) = map.get(stringify!($field)) {
-                            overrides.$field = Some(parse_method(stringify!($field), v)?);
+                            overrides.$field = Some(parse_resample_method(stringify!($field), v)?);
                         }
                     )*
                 };
