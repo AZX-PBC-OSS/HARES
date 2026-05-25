@@ -322,7 +322,7 @@ mod tests {
             SurfaceRoughness::Rough,
         );
         let h_conv = 3.076_f64;
-        let h_rad = 4.0 * 0.9 * crate::constants::STEFAN_BOLTZMANN * 293.15_f64.powi(3);
+        let h_rad = crate::constants::linearised_h_rad(0.9, 293.15);
         assert_approx(r_int, 1.0 / h_conv, 1e-10);
         assert!(
             r_int > 1.0 / (h_conv + h_rad),
@@ -370,7 +370,7 @@ mod tests {
             SurfaceRoughness::Rough,
         );
         let h_conv = 3.076_f64;
-        let h_rad = 4.0 * 0.9 * crate::constants::STEFAN_BOLTZMANN * 293.15_f64.powi(3);
+        let h_rad = crate::constants::linearised_h_rad(0.9, 293.15);
         let r_conv_only = 1.0 / h_conv;
         let r_combined = 1.0 / (h_conv + h_rad);
 

@@ -237,7 +237,7 @@ pub struct InteriorSurface {
 /// * `t_avg_c`    -- representative average temperature [°C]
 #[must_use]
 pub fn linearised_h_r(emissivity: f64, t_avg_c: f64) -> f64 {
-    4.0 * emissivity * STEFAN_BOLTZMANN * (t_avg_c + CELSIUS_TO_KELVIN).powi(3)
+    hares_physics::constants::linearised_h_rad(emissivity, t_avg_c + CELSIUS_TO_KELVIN)
 }
 
 /// Net longwave radiation exchange for each interior surface in a zone [W].
@@ -812,14 +812,9 @@ mod tests {
             "h_r at T=295K, ε=0.9 should be ~5.241 W/(m²·K), got {h_at_295k:.4}"
         );
 
-        // Confirm the truncated sigma used in rc_network.rs tests (5.670374e-8) is within
-        // 1 ppm of NIST, so the existing inline computations are numerically equivalent.
-        let sigma_truncated: f64 = 5.670374e-8;
-        let rel_diff = (sigma_truncated - sigma_nist).abs() / sigma_nist;
-        assert!(
-            rel_diff < 1e-6,
-            "rc_network.rs inline σ={sigma_truncated:e} differs from NIST by {rel_diff:.2e} (>1 ppm)"
-        );
+        // The canonical σ constant is defined in hares-physics and used
+        // throughout the codebase. All inline formulations have been
+        // consolidated into linearised_h_rad / linearised_h_r.
     }
 
     // ─────────────────────────────────────────────────────────────────────────

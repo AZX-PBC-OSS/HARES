@@ -682,7 +682,6 @@ mod tests {
     /// EN ISO 52016-1:2017 Annex E "detailed" RC method.
     #[test]
     fn zone_with_star_and_window_cascading_elimination() {
-        const SIGMA: f64 = 5.670374e-8;
         const T_REF_K: f64 = 293.15;
         // ASHRAE 140-2017 §5.3.1.9, Table 24: ε_ir = 0.9 for ALL interior
         // surfaces including windows.
@@ -693,9 +692,12 @@ mod tests {
         let a_window = 12.0;
 
         // Linearized radiation conductances: G_i = 4·ε·σ·A·T_ref³
-        let g_rad_wall = 4.0 * EPS_INTERIOR * SIGMA * a_wall * T_REF_K.powi(3);
-        let g_rad_floor = 4.0 * EPS_INTERIOR * SIGMA * a_floor * T_REF_K.powi(3);
-        let g_rad_window = 4.0 * EPS_INTERIOR * SIGMA * a_window * T_REF_K.powi(3);
+        // Stefan-Boltzmann linearisation: h_rad = 4·ε·σ·T_ref³  [W/(m²·K)]
+        let g_rad_wall = hares_physics::constants::linearised_h_rad(EPS_INTERIOR, T_REF_K) * a_wall;
+        let g_rad_floor =
+            hares_physics::constants::linearised_h_rad(EPS_INTERIOR, T_REF_K) * a_floor;
+        let g_rad_window =
+            hares_physics::constants::linearised_h_rad(EPS_INTERIOR, T_REF_K) * a_window;
         let r_rad_wall = 1.0 / g_rad_wall;
         let r_rad_floor = 1.0 / g_rad_floor;
         let r_rad_window = 1.0 / g_rad_window;
@@ -872,17 +874,22 @@ mod tests {
     /// 1-3% error becomes material for the use case.
     #[test]
     fn linearized_h_rad_sensitivity_at_reference_temperature() {
-        const SIGMA: f64 = 5.670374e-8;
         const EPS: f64 = 0.9;
         const T_REF_K: f64 = 293.15;
 
-        let h_rad_ref = 4.0 * EPS * SIGMA * T_REF_K.powi(3);
+        let h_rad_ref = hares_physics::constants::linearised_h_rad(EPS, T_REF_K);
 
         let test_temps_k: [f64; 4] = [285.0, 295.0, 305.0, 315.0];
         let expected_pcts = [-4.2, 1.0, 6.3, 11.8]; // approximate
 
         for (i, &t_k) in test_temps_k.iter().enumerate() {
-            let h_rad_true = EPS * SIGMA * (t_k.powi(2) + T_REF_K.powi(2)) * (t_k + T_REF_K);
+            // Exact (non-linearised) radiation coefficient:
+            //   εσ(T₁² + T₂²)(T₁ + T₂)
+            // which reduces to 4εσT³ when T₁ = T₂.
+            let h_rad_true = EPS
+                * hares_physics::constants::STEFAN_BOLTZMANN
+                * (t_k.powi(2) + T_REF_K.powi(2))
+                * (t_k + T_REF_K);
             let pct_error = (h_rad_true - h_rad_ref) / h_rad_ref * 100.0;
             assert!(
                 (pct_error - expected_pcts[i]).abs() < 1.0,

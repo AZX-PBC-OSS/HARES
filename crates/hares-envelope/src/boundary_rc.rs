@@ -758,7 +758,6 @@ pub fn assemble_building_rc(
                 // is already convection-only (Step 1 change). h_si < h_rad → no
                 // decomposition needed.
                 const T_REF_K: f64 = 293.15; // 20°C (OCHRE, TRNSYS, ESP-r)
-                const SIGMA: f64 = crate::longwave_radiation::STEFAN_BOLTZMANN;
                 // Glass thermal emissivity ε = 0.84 (NFRC). The E+ Simple Window
                 // Step 1 polynomial (E+ Eng.Ref §Window Heat Transfer Calculations)
                 // was derived at this emissivity, so h_si implicitly contains
@@ -774,7 +773,8 @@ pub fn assemble_building_rc(
 
                 let a = bd.area_m2;
                 let h_si = 1.0 / bd.r_film_interior_m2_k_w;
-                let h_rad_glass = 4.0 * GLASS_THERMAL_EMISSIVITY * SIGMA * T_REF_K.powi(3);
+                let h_rad_glass =
+                    hares_physics::constants::linearised_h_rad(GLASS_THERMAL_EMISSIVITY, T_REF_K);
 
                 if h_si > h_rad_glass {
                     // Film includes h_rad (window case): decompose into conv + rad.
@@ -926,7 +926,6 @@ pub fn assemble_building_rc(
     // linearization error is <10% (see linearization_sensitivity_documentation test).
     if interior_lwr_method == InteriorLwrMethod::StarMesh {
         const T_REF_K: f64 = 293.15; // 20°C operating point (OCHRE, TRNSYS, ESP-r)
-        const SIGMA: f64 = crate::longwave_radiation::STEFAN_BOLTZMANN;
 
         // Build lookup from bd_idx to floating surface node (windows + fallback-R).
         let floating_node_map: HashMap<usize, NodeId> = window_for_starmesh
@@ -989,7 +988,7 @@ pub fn assemble_building_rc(
                     // Reference: E+ Eng.Ref §Inside Surface Heat Balance uses
                     //   h_c (convection-only) for surface-to-air coupling, with
                     //   LWR handled separately by ScriptF / star-mesh.
-                    let g = 4.0 * e * SIGMA * a * T_REF_K.powi(3);
+                    let g = hares_physics::constants::linearised_h_rad(e, T_REF_K) * a;
                     if g > 0.0 {
                         graph.add_resistance(s_node, star_node, 1.0 / g);
                     }
@@ -3027,8 +3026,6 @@ mod tests {
     // `assemble_building_rc`.
     #[test]
     fn star_mesh_isothermal_zone_zero_net_flow() {
-        use crate::longwave_radiation::STEFAN_BOLTZMANN;
-
         /// Linearization reference temperature [K]. 20°C operating point
         /// matching OCHRE, TRNSYS Type 56, ESP-r.
         const T_REF_K: f64 = 293.15_f64;
@@ -3116,7 +3113,7 @@ mod tests {
         // G_ij = G_iStar × G_jStar / Σ_k G_kStar
         let g_star: Vec<f64> = inner_nodes
             .iter()
-            .map(|&(_, a, e)| 4.0 * e * STEFAN_BOLTZMANN * a * T_REF_K.powi(3))
+            .map(|&(_, a, e)| hares_physics::constants::linearised_h_rad(e, T_REF_K) * a)
             .collect();
         let _sum_g_star: f64 = g_star.iter().sum();
 
@@ -3169,8 +3166,7 @@ mod tests {
     fn linearization_sensitivity_documentation() {
         const T_REF_K: f64 = 293.15_f64; // 20°C
         const EPSILON: f64 = 0.90;
-        let h_ref: f64 =
-            4.0 * EPSILON * crate::longwave_radiation::STEFAN_BOLTZMANN * T_REF_K.powi(3);
+        let h_ref: f64 = hares_physics::constants::linearised_h_rad(EPSILON, T_REF_K);
 
         // (temperature °C, max expected error %)
         let cases: [(f64, f64); 4] = [
@@ -3182,9 +3178,7 @@ mod tests {
 
         for (t_c, max_err) in cases {
             let t_k = t_c + 273.15;
-            let t_k_cubed = t_k * t_k * t_k;
-            let h_true: f64 =
-                4.0 * EPSILON * crate::longwave_radiation::STEFAN_BOLTZMANN * t_k_cubed;
+            let h_true: f64 = hares_physics::constants::linearised_h_rad(EPSILON, t_k);
             let error_pct = ((h_ref - h_true) / h_true).abs() * 100.0;
             assert!(
                 error_pct < max_err,

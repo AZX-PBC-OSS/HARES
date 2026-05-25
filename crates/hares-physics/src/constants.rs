@@ -187,6 +187,24 @@ pub const OCCUPANT_CONVECTIVE_FRACTION: f64 = 0.70;
 /// NIST CODATA 2018: σ = 5.670374419 × 10⁻⁸ W·m⁻²·K⁻⁴.
 pub const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
 
+/// Linearised radiative heat transfer coefficient [W/(m²·K)].
+///
+/// `h_rad = 4·ε·σ·T³` — the first-order Taylor expansion of the
+/// Stefan-Boltzmann radiation exchange about the pivot temperature `t_kelvin`.
+/// Valid when the temperature difference between the two participating
+/// surfaces is small compared to their absolute temperature (ΔT ≪ T).
+///
+/// ASHRAE HoF 2021 Ch.4 §4.3 "Radiation Heat Transfer"; Incropera et al.
+/// *Fundamentals of Heat and Mass Transfer* 7th ed. §1.2.3 Eq.1.9.
+///
+/// * `emissivity` — surface emissivity [-], typically 0.84 (glass) or 0.90 (opaque)
+/// * `t_kelvin`    — linearisation pivot temperature [K]; commonly 293.15 K (20°C)
+#[must_use]
+#[inline]
+pub fn linearised_h_rad(emissivity: f64, t_kelvin: f64) -> f64 {
+    4.0 * emissivity * STEFAN_BOLTZMANN * t_kelvin.powi(3)
+}
+
 /// Celsius to Kelvin offset [K].
 /// ISA 1976 / NIST: T(K) = T(°C) + 273.15.
 pub const CELSIUS_TO_KELVIN: f64 = 273.15;
@@ -217,4 +235,59 @@ pub fn water_density_kg_m3(t_celsius: f64) -> f64 {
         - 280.542_53e-12 * t * t * t * t * t;
     let denominator = 1.0 + 16.879_850e-3 * t;
     numerator / denominator
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linearised_h_rad_at_20c_is_physically_reasonable() {
+        // At 20°C (293.15 K) with ε=0.9: h_rad ≈ 5.14 W/(m²·K)
+        let h = linearised_h_rad(0.90, 293.15);
+        assert!(
+            (4.0..=7.0).contains(&h),
+            "h_rad at 20°C should be ~5 W/(m²·K), got {h:.3}"
+        );
+    }
+
+    #[test]
+    fn linearised_h_rad_increases_with_temperature() {
+        let h_cold = linearised_h_rad(0.90, 263.15);
+        let h_hot = linearised_h_rad(0.90, 333.15);
+        assert!(
+            h_hot > h_cold,
+            "h_rad should increase with temperature: h_cold={h_cold:.4}, h_hot={h_hot:.4}"
+        );
+    }
+
+    #[test]
+    fn linearised_h_rad_correctness() {
+        // NIST CODATA 2018: σ = 5.670374419 × 10⁻⁸ W·m⁻²·K⁻⁴
+        let sigma_nist: f64 = 5.670_374_419e-8;
+        assert!(
+            (STEFAN_BOLTZMANN - sigma_nist).abs() < 1e-18,
+            "STEFAN_BOLTZMANN constant ({STEFAN_BOLTZMANN:e}) diverges from NIST CODATA 2018 ({sigma_nist:e})"
+        );
+
+        // At ε=0.9, T=293.15 K (20°C): h_rad = 4·0.9·σ·293.15³ ≈ 5.143 W/(m²·K)
+        let h_at_20c = linearised_h_rad(0.90, 293.15);
+        let expected_at_20c = 4.0 * 0.90 * sigma_nist * 293.15_f64.powi(3);
+        assert!(
+            (h_at_20c - expected_at_20c).abs() < 1e-6,
+            "linearised_h_rad(0.9, 293.15 K) = {h_at_20c:.6}, expected {expected_at_20c:.6}"
+        );
+
+        // At ε=0.9, T=295 K: h_rad ≈ 5.241 W/(m²·K)
+        let h_at_295k = linearised_h_rad(0.90, 295.0);
+        let expected_at_295k = 4.0 * 0.90 * sigma_nist * 295.0_f64.powi(3);
+        assert!(
+            (h_at_295k - expected_at_295k).abs() < 1e-6,
+            "linearised_h_rad(0.9, 295 K) = {h_at_295k:.6}, expected {expected_at_295k:.6}"
+        );
+        assert!(
+            (h_at_295k - 5.241).abs() < 0.001,
+            "h_rad at T=295 K, ε=0.9 should be ~5.241 W/(m²·K), got {h_at_295k:.4}"
+        );
+    }
 }
