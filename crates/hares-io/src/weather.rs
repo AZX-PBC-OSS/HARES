@@ -400,6 +400,15 @@ impl ResampleOverrides {
     ///
     /// Note: sky_temp_c is not listed because it is always recomputed from
     /// the interpolated inputs, never directly interpolated.
+    ///
+    /// Even with this configuration, the resampled sky temperature stream is
+    /// not bit-identical to OCHRE's. OCHRE carries the source-file sky
+    /// temperature forward via ZOH, while HARES recomputes sky temperature at
+    /// each resampled timestep from the interpolated dry-bulb and dew-point
+    /// inputs (see `epw::compute_sky_temp_c`). HARES's behaviour is physically
+    /// more consistent — the sky temperature always agrees with the humidity
+    /// that produced it — but the resulting stream will differ from OCHRE
+    /// between hour boundaries.
     pub fn ochre_compat() -> Self {
         Self {
             dry_bulb: Some(ResampleMethod::Zoh),
