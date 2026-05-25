@@ -2,6 +2,7 @@
 // Invariant: HVAC typed configs are built from typed/defaults-derived fields
 // (including curve metadata), not from ad-hoc string-key translation logic.
 
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use hares_equipment::EquipmentConfig;
@@ -2709,8 +2710,18 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
     }
 
     if let (Some((h_wd, h_we)), Some((c_wd, c_we))) = (heating.as_mut(), cooling.as_mut()) {
-        reconcile_setpoint_pair(h_wd, c_wd, "weekday");
-        reconcile_setpoint_pair(h_we, c_we, "weekend");
+        let mut reconciliations = Vec::<SetpointReconciliation>::new();
+        if let Some(r) = reconcile_setpoint_pair(h_wd, c_wd, "weekday") {
+            reconciliations.push(r);
+        }
+        if let Some(r) = reconcile_setpoint_pair(h_we, c_we, "weekend") {
+            reconciliations.push(r);
+        }
+        if !reconciliations.is_empty() {
+            let v = serde_json::to_value(&reconciliations)
+                .expect("SetpointReconciliation must serialize");
+            out.push(("setpoints_reconciled".to_string(), v));
+        }
     }
 
     if let Some((wd, we)) = heating {
@@ -2729,6 +2740,20 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
     out
 }
 
+/// Machine-readable record of per-hour setpoint widening performed by
+/// `reconcile_setpoint_pair`.  Carried in the resolved params map under the
+/// key `"setpoints_reconciled"` so downstream consumers (dashboards, Python
+/// introspection, CSV diagnostics) can detect and report that the values they
+/// see are not the values the user supplied.
+#[derive(Serialize, Debug, Clone)]
+struct SetpointReconciliation {
+    day: &'static str,
+    original_heating_c: [f64; 24],
+    original_cooling_c: [f64; 24],
+    adjusted_heating_c: [f64; 24],
+    adjusted_cooling_c: [f64; 24],
+}
+
 /// Clip inverted or too-close heating/cooling setpoint pairs to the daily
 /// midpoint with a symmetric offset, matching OCHRE's reconciliation
 /// (see `vendors/OCHRE/ochre/utils/schedule.py:617-625`).
@@ -2745,7 +2770,10 @@ fn reconcile_setpoint_pair(
     heating: &mut [f64; 24],
     cooling: &mut [f64; 24],
     day_label: &'static str,
-) {
+) -> Option<SetpointReconciliation> {
+    let original_heating = *heating;
+    let original_cooling = *cooling;
+
     let half_gap = 0.5 * SETPOINT_RECONCILE_GAP_C;
     let mut violated_hours = 0_u32;
     let mut worst_inversion_c = 0.0_f64;
@@ -2767,6 +2795,15 @@ fn reconcile_setpoint_pair(
             gap_c = SETPOINT_RECONCILE_GAP_C,
             "HPXML heating/cooling setpoints too close or inverted; clipped to midpoint with 2 °C separation"
         );
+        Some(SetpointReconciliation {
+            day: day_label,
+            original_heating_c: original_heating,
+            original_cooling_c: original_cooling,
+            adjusted_heating_c: *heating,
+            adjusted_cooling_c: *cooling,
+        })
+    } else {
+        None
     }
 }
 
@@ -2806,8 +2843,18 @@ fn apply_building_setpoint_profiles(
     });
 
     if let (Some((h_wd, h_we)), Some((c_wd, c_we))) = (heating.as_mut(), cooling.as_mut()) {
-        reconcile_setpoint_pair(h_wd, c_wd, "weekday");
-        reconcile_setpoint_pair(h_we, c_we, "weekend");
+        let mut reconciliations = Vec::<SetpointReconciliation>::new();
+        if let Some(r) = reconcile_setpoint_pair(h_wd, c_wd, "weekday") {
+            reconciliations.push(r);
+        }
+        if let Some(r) = reconcile_setpoint_pair(h_we, c_we, "weekend") {
+            reconciliations.push(r);
+        }
+        if !reconciliations.is_empty() {
+            let v = serde_json::to_value(&reconciliations)
+                .expect("SetpointReconciliation must serialize");
+            params.insert("setpoints_reconciled".to_string(), v);
+        }
     }
 
     if include_heating {
@@ -4338,19 +4385,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // reconcile_setpoint_pair must surface mutation loudly
+    // Setpoint reconciliation machine-readable signal
     // -----------------------------------------------------------------------
 
     /// When heating/cooling setpoints are too close (gap < 2 °C), the
-    /// reconciler silently widens them but emits no machine-readable signal —
-    /// no `setpoints_reconciled` key is inserted into the params map.
-    ///
-    /// This test FAILS until the reconciler inserts a machine-readable signal
-    /// on widening (path A: key insertion, or path B: Err return).
-    /// Once the fix lands the assertion must be changed to match the chosen API.
+    /// reconciler widens them to satisfy the thermostat deadband invariant and
+    /// emits a machine-readable `SetpointReconciliation` record under the
+    /// `"setpoints_reconciled"` key in the params map so downstream consumers
+    /// can detect and report the mutation.
     #[test]
-    #[should_panic(expected = "setpoints_reconciled key must be present after reconciliation")]
-    fn reconcile_setpoint_pair_narrow_gap_produces_no_machine_readable_signal() {
+    fn reconcile_setpoint_pair_narrow_gap_emits_reconciliation_record() {
         // Heating 21 °C, cooling 22 °C — gap is 1 °C, below the 2 °C minimum.
         let building = building_with_setpoint_profiles(
             [21.0f64; 24],
@@ -4362,16 +4406,154 @@ mod tests {
         let mut params = Map::new();
         apply_building_setpoint_profiles(&building, &mut params, true, true);
 
-        // The reconciler widened the gap silently.  After the fix, either:
-        //   A) the call above returned an Err (hard error path), or
-        //   B) params contains a "setpoints_reconciled" key with original values.
-        //
-        // Currently neither is true, so this assertion deliberately panics to
-        // prove the bug is present.
-        assert!(
-            params.contains_key("setpoints_reconciled"),
-            "setpoints_reconciled key must be present after reconciliation"
+        let reconciliations = params
+            .get("setpoints_reconciled")
+            .expect("setpoints_reconciled key must be present after reconciliation");
+
+        let arr = reconciliations
+            .as_array()
+            .expect("setpoints_reconciled must be an array");
+
+        assert!(!arr.is_empty(), "reconciliations array must be non-empty");
+
+        // Both weekday and weekend had the same 1 °C gap, so both should be
+        // reconciled.
+        assert_eq!(
+            arr.len(),
+            2,
+            "expected weekday and weekend reconciliation records"
         );
+
+        let rec = &arr[0];
+        assert_eq!(rec["day"].as_str().expect("day must be string"), "weekday");
+        let original_h: Vec<f64> = rec["original_heating_c"]
+            .as_array()
+            .expect("original_heating_c must be array")
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let original_c: Vec<f64> = rec["original_cooling_c"]
+            .as_array()
+            .expect("original_cooling_c must be array")
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let adjusted_h: Vec<f64> = rec["adjusted_heating_c"]
+            .as_array()
+            .expect("adjusted_heating_c must be array")
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let adjusted_c: Vec<f64> = rec["adjusted_cooling_c"]
+            .as_array()
+            .expect("adjusted_cooling_c must be array")
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+
+        // Original values preserved in record.
+        assert!(original_h.iter().all(|&v| (v - 21.0).abs() < 1e-9));
+        assert!(original_c.iter().all(|&v| (v - 22.0).abs() < 1e-9));
+
+        // Adjusted values widened to midpoint ± 1 °C.
+        let expected_midpoint = 0.5 * (21.0 + 22.0); // 21.5 °C
+        let expected_heating = expected_midpoint - 1.0; // 20.5 °C
+        let expected_cooling = expected_midpoint + 1.0; // 22.5 °C
+        assert!(
+            adjusted_h
+                .iter()
+                .all(|&v| (v - expected_heating).abs() < 1e-9)
+        );
+        assert!(
+            adjusted_c
+                .iter()
+                .all(|&v| (v - expected_cooling).abs() < 1e-9)
+        );
+
+        // Post-reconciliation gap is ≥ 2 °C for every hour.
+        for h in 0..24 {
+            assert!(adjusted_c[h] - adjusted_h[h] >= 2.0 - 1e-9);
+        }
+    }
+
+    #[test]
+    fn reconcile_setpoint_pair_wide_gap_produces_no_reconciliation_key() {
+        // Heating 18 °C, cooling 26 °C — gap is 8 °C, well above 2 °C minimum.
+        let building = building_with_setpoint_profiles(
+            [18.0f64; 24],
+            [18.0f64; 24],
+            [26.0f64; 24],
+            [26.0f64; 24],
+        );
+
+        let mut params = Map::new();
+        apply_building_setpoint_profiles(&building, &mut params, true, true);
+
+        assert!(
+            !params.contains_key("setpoints_reconciled"),
+            "setpoints_reconciled key must NOT be present when no reconciliation occurred"
+        );
+    }
+
+    #[test]
+    fn parse_hvac_setpoint_params_narrow_gap_emits_reconciliation_record() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <HVACPlant>
+                    <HVACControl>
+                      <extension>
+                        <WeekdaySetpointTempsHeatingSeason>
+                          70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70
+                        </WeekdaySetpointTempsHeatingSeason>
+                        <WeekendSetpointTempsHeatingSeason>
+                          70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70,70
+                        </WeekendSetpointTempsHeatingSeason>
+                        <WeekdaySetpointTempsCoolingSeason>
+                          72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72
+                        </WeekdaySetpointTempsCoolingSeason>
+                        <WeekendSetpointTempsCoolingSeason>
+                          72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72
+                        </WeekendSetpointTempsCoolingSeason>
+                      </extension>
+                    </HVACControl>
+                  </HVACPlant>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details node must exist");
+
+        let params = parse_hvac_setpoint_params(details);
+
+        // Find the setpoints_reconciled entry.
+        let key_found = params.iter().any(|(k, _)| k == "setpoints_reconciled");
+        assert!(
+            key_found,
+            "setpoints_reconciled key must be present in output"
+        );
+
+        for (k, v) in &params {
+            if k == "setpoints_reconciled" {
+                let arr = v.as_array().expect("setpoints_reconciled must be an array");
+                assert!(!arr.is_empty(), "reconciliations array must be non-empty");
+                // 70 °F → 21.11 °C, 72 °F → 22.22 °C, gap ≈ 1.11 °C < 2 °C
+                // so both weekday and weekend should be reconciled.
+                assert_eq!(arr.len(), 2);
+                // Verify record fields exist.
+                for rec in arr {
+                    assert!(rec["original_heating_c"].is_array());
+                    assert!(rec["original_cooling_c"].is_array());
+                    assert!(rec["adjusted_heating_c"].is_array());
+                    assert!(rec["adjusted_cooling_c"].is_array());
+                }
+                break;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
