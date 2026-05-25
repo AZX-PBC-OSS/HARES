@@ -1046,10 +1046,10 @@ impl Dwelling {
 
         // Read number_of_occupants from the Occupancy spec to scale the raw
         // schedule fraction (0–1) into a person count for internal heat gains.
-        // If no Occupancy spec exists, 1.0 is fine (gains won't be applied).
-        // If an Occupancy spec exists, number_of_occupants is required.
+        let mut has_occupancy_spec = false;
         let occupancy_scale = match equipment_specs.iter().find(|s| s.name == "Occupancy") {
             Some(spec) => {
+                has_occupancy_spec = true;
                 let val = spec.parameters.get("number_of_occupants").ok_or_else(|| {
                     HaresError::Equipment(
                         "Occupancy spec is missing required key 'number_of_occupants'".into(),
@@ -1063,6 +1063,23 @@ impl Dwelling {
             }
             None => 1.0,
         };
+
+        // Construction-time validation: if an Occupancy spec was configured but
+        // the schedule has no occupancy column, the dwelling cannot compute
+        // occupant heat gains and must error loudly per `feedback_no_silent_defaults`.
+        // HPXML Schedule CSV files, ASHRAE HoF 2021 Ch.18 §18.4 — occupant heat gain is a
+        // primary driver of cooling load; silently zeroing it produces a systematic
+        // underestimate.
+        if has_occupancy_spec && occupancy_column_idx.is_none() {
+            return Err(HaresError::Dwelling(
+                "Occupancy spec configured but no occupancy column found in schedule. \
+                 An occupancy schedule column (e.g. 'Occupancy (Persons)') is required \
+                 when an Occupancy equipment spec with number_of_occupants is present. \
+                 If this dwelling intentionally has no occupants, remove the Occupancy \
+                 spec from the equipment configuration."
+                    .into(),
+            ));
+        }
 
         // Equipment names whose loads are handled outside the registry (e.g. directly in the
         // simulation loop) -- silently skip them rather than emitting a warning.
@@ -2052,12 +2069,18 @@ impl Dwelling {
     ///   - latent:              `n_occupants × OCCUPANT_LATENT_GAIN_W`
     ///
     /// If no occupancy column is present in the schedule the method returns without
-    /// side-effects, supporting synthetic TOML inputs that omit occupancy schedules.
+    /// side-effects.  Construction-time validation in `from_preparsed` guarantees that
+    /// when an Occupancy spec exists the schedule always includes an occupancy column,
+    /// so a `None` column index here indicates an intentionally unoccupied dwelling
+    /// (e.g. BESTEST base cases with `occupants_present: false`).
     fn apply_occupancy_gains(&mut self) {
         let Some(col_idx) = self.occupancy_column_idx else {
             return;
         };
 
+        // Construction-time validation guarantees the schedule domain exists
+        // and carries a payload when occupancy_column_idx is Some.  Absence at
+        // step time is a programming error (schedule update not pushed).
         let n_occupants = self
             .latest_env
             .custom_domains
@@ -2066,7 +2089,11 @@ impl Dwelling {
             .and_then(|u| u.custom_payload.as_ref())
             .and_then(|p| p.get(col_idx))
             .copied()
-            .unwrap_or(0.0)
+            .expect(
+                "SCHEDULE_DOMAIN_ID payload absent at step time: \
+                 construction validated occupancy column exists in schedule; \
+                 environment update must always push the schedule domain payload.",
+            )
             * self.occupancy_scale;
 
         if n_occupants <= 0.0 {
@@ -5729,59 +5756,138 @@ occupancy = 1.0
         }
     }
 
-    /// Ticket #109 regression: `apply_occupancy_gains` silently returns zero
-    /// when the schedule domain update is absent from `latest_env`.
+    /// Verify that calling `apply_occupancy_gains` without a valid schedule domain
+    /// payload in `latest_env` panics — the `.expect()` replaces the old silent
+    /// `.unwrap_or(0.0)` because construction-time validation guarantees the
+    /// schedule domain is always present when `occupancy_column_idx` is `Some`.
     ///
     /// With `occupancy_column_idx = Some(0)` and `occupancy_scale = 3.0`, but
     /// NO `SCHEDULE_DOMAIN_ID` update pushed into `latest_env`, the dwelling
-    /// computes `n_occupants = 0.0` and deposits no gains.  The zero is
-    /// indistinguishable from a legitimate "schedule said 0 occupants" reading.
-    ///
-    /// This test documents the CURRENT (broken) behaviour.  Once the fix
-    /// lands it must be updated: construction must either reject the dwelling
-    /// that has occupancy configured but no schedule domain, or the hot-step
-    /// path must emit a `tracing::warn!` / error.
+    /// must panic rather than silently computing zero occupants.
     #[test]
-    fn absent_schedule_domain_silently_produces_zero_gains() {
+    #[should_panic(
+        expected = "SCHEDULE_DOMAIN_ID payload absent at step time: construction validated occupancy column exists in schedule"
+    )]
+    fn absent_schedule_domain_panics_instead_of_silent_zero() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
             .expect("build dwelling");
 
-        // Set occupancy column and scale — simulating a dwelling that has an
-        // Occupancy spec with 3 occupants at fractional schedule 1.0.
+        // Manually override to simulate an Occupancy spec with 3 occupants
+        // and a valid schedule column index, but with NO schedule domain
+        // update pushed into latest_env.  The `.expect()` in the hot path
+        // must fire because construction validation guarantees this scenario
+        // should never occur.
         dwelling.occupancy_column_idx = Some(0);
         dwelling.occupancy_scale = 3.0;
-
-        // Deliberately do NOT push a SCHEDULE_DOMAIN_ID update into latest_env.
-        // This is the "absent schedule domain" scenario.
 
         for thermal in &mut dwelling.ports.thermal {
             thermal.zero();
         }
 
+        // This must panic — the schedule domain payload is absent and the
+        // `.expect()` replaces the old silent `.unwrap_or(0.0)`.
         dwelling.apply_occupancy_gains();
+    }
 
-        let indoor_zone = dwelling.thermal_solver.config().indoor_zone_id;
-        let indoor_port = dwelling
-            .ports
-            .thermal
-            .iter()
-            .find(|t| t.zone == indoor_zone)
-            .expect("indoor zone must have a thermal port");
+    /// Verify that construction-time validation rejects a dwelling with an
+    /// Occupancy equipment spec but no occupancy schedule column.
+    ///
+    /// The guard at `from_preparsed` lines 1073–1082 must return
+    /// `Err(HaresError::Dwelling(...))` because the dwelling cannot compute
+    /// occupant heat gains from a missing schedule domain. Without this test,
+    /// deleting the guard would pass the entire test suite — the primary new
+    /// behaviour introduced by T-0090 would be unverified.
+    #[test]
+    fn occupied_dwelling_missing_occupancy_schedule_errors_at_construction() {
+        use hares_io::hpxml::building::XmlNode;
+        use std::collections::HashMap;
 
-        // BUG: gains are silently zero because `.unwrap_or(0.0)`
-        // absorbs the missing domain.  Expected: a loud error or warning.
-        assert_eq!(
-            indoor_port.sensible_gain_w, 0.0,
-            "absent SCHEDULE_DOMAIN_ID silently yields 0 W sensible gain \
-             instead of a loud MissingScheduleDomain error"
+        // Load a fixture with occupants_present = false so the schedule
+        // has no occupancy column.
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let toml_str = fs::read_to_string(&base_path).expect("read 600.toml");
+        let config: SyntheticTomlConfig = toml::from_str(&toml_str).expect("parse 600.toml");
+        assert!(
+            !config.schedule.occupants_present,
+            "600.toml must have occupants_present = false"
         );
-        assert_eq!(
-            indoor_port.latent_gain_w, 0.0,
-            "absent SCHEDULE_DOMAIN_ID silently yields 0 W latent gain \
-             instead of a loud MissingScheduleDomain error"
-        );
+
+        let mut building = build_synthetic_building(&config);
+        let schedule = build_synthetic_schedule(&config).expect("build schedule");
+        let weather = build_synthetic_weather(&config, &base_path).expect("build weather");
+
+        // Inject BuildingOccupancy / NumberofResidents into the HPXML details
+        // so resolve_equipment creates an Occupancy spec.  Without this node
+        // the BESTEST 600 building has no Occupancy equipment at all, and the
+        // construction path would succeed — exactly the happy path that the
+        // other tests already cover.
+        {
+            let n_residents = XmlNode {
+                name: "NumberofResidents".to_string(),
+                attrs: HashMap::new(),
+                text: "3".to_string(),
+                children: Vec::new(),
+            };
+            let building_occupancy = XmlNode {
+                name: "BuildingOccupancy".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![n_residents],
+            };
+            let building_summary = XmlNode {
+                name: "BuildingSummary".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![building_occupancy],
+            };
+            building.details_xml.children.push(building_summary);
+        }
+
+        let sim_config = SimulationConfig {
+            start_time: config.simulation.start_time,
+            duration: chrono::Duration::seconds(config.simulation.duration_s),
+            time_res: chrono::Duration::seconds(config.simulation.time_res_s),
+            output_verbosity: config.output.output_verbosity,
+            output_path: config.output.output_path.as_ref().map(PathBuf::from),
+            write_output: config.output.write_output,
+            output_format: config.output.output_format,
+            output_chunk_size: config.output.output_chunk_size,
+            setpoint_deadband_c: None,
+            master_seed: config.output.master_seed,
+            civil_timezone: None,
+        };
+        validate_sim_config(&sim_config).expect("valid sim config");
+
+        let dwelling_config = DwellingConfig {
+            hpxml_path: base_path.clone(),
+            schedule_path: base_path.clone(),
+            weather_path: base_path.clone(),
+            defaults_path: None,
+            sim_config,
+            overrides: config.overrides.clone(),
+            bldg_id: config.building_id.unwrap_or(0),
+            initialization_duration: config
+                .simulation
+                .initialization_duration_s
+                .map(StdDuration::from_secs),
+            resample_overrides: None,
+        };
+
+        match Dwelling::from_preparsed(dwelling_config, building, weather, schedule) {
+            Err(HaresError::Dwelling(msg)) => {
+                assert!(
+                    msg.contains("Occupancy spec configured but no occupancy column"),
+                    "error must identify the missing occupancy schedule column; got: {msg}"
+                );
+            }
+            Ok(_) => panic!("expected Err(HaresError::Dwelling(...)) but construction succeeded"),
+            Err(e) => {
+                panic!("expected Err(HaresError::Dwelling(...)) but got different error: {e}")
+            }
+        }
     }
 
     #[test]

@@ -125,12 +125,23 @@ impl Default for SyntheticWeatherConfig {
 pub(crate) struct SyntheticScheduleConfig {
     #[serde(default = "default_schedule_value")]
     pub(crate) occupancy: f64,
+    /// Set to `false` when the dwelling legitimately has no occupants (e.g. BESTEST
+    /// base cases). When `false` the schedule is built without an occupancy column,
+    /// and `occupancy_column_idx` is `None`, causing `apply_occupancy_gains` to
+    /// return early with no side effects and no diagnostic.
+    #[serde(default = "default_occupants_present")]
+    pub(crate) occupants_present: bool,
+}
+
+fn default_occupants_present() -> bool {
+    true
 }
 
 impl Default for SyntheticScheduleConfig {
     fn default() -> Self {
         Self {
             occupancy: default_schedule_value(),
+            occupants_present: true,
         }
     }
 }
@@ -861,16 +872,24 @@ pub(crate) fn build_synthetic_schedule(config: &SyntheticTomlConfig) -> Result<S
         timestamps.push(start + TimeDelta::seconds((i as i64) * i64::from(step_secs)));
     }
 
-    let column_names = vec!["occupancy".to_string()];
-    let columns = vec![vec![config.schedule.occupancy; total_steps]];
-    let column_index = HashMap::from([("occupancy".to_string(), 0usize)]);
+    let (column_names, columns, column_index, column_aggregations) =
+        if config.schedule.occupants_present {
+            (
+                vec!["occupancy".to_string()],
+                vec![vec![config.schedule.occupancy; total_steps]],
+                HashMap::from([("occupancy".to_string(), 0usize)]),
+                vec![ColumnAggregation::Mean],
+            )
+        } else {
+            (vec![], vec![], HashMap::new(), vec![])
+        };
     Ok(ScheduleTimeSeries {
         timestamps,
         column_names,
         columns,
         column_index,
         source_step_secs: step_secs,
-        column_aggregations: vec![ColumnAggregation::Mean],
+        column_aggregations,
     })
 }
 

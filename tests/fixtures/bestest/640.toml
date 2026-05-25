@@ -219,6 +219,7 @@ attached_to_wall_id = "south-wall"
 
 [schedule]
 occupancy = 0.0
+occupants_present = false
 
 [output]
 output_verbosity = 0

@@ -27,6 +27,7 @@ pressure_kpa = 101.325
 
 [schedule]
 occupancy = 0.0
+occupants_present = false
 
 [output]
 output_verbosity = 0
