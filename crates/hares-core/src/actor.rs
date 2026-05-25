@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget};
-use hares_types::{EnvironmentState, ZoneId};
+use hares_types::{EnvironmentState, Telemetry, ZoneId};
 
 /// What state changes an actor subscribes to. Empty = polled every step.
 ///
@@ -63,6 +63,16 @@ pub trait Actor: Send + Sync + 'static {
     /// * `env` - Current environment state (weather, zone temps, grid state).
     /// * `out` - Pre-allocated output buffer to append dispatch requests to.
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>);
+
+    /// Returns a reference to the actor's telemetry, or `None` if the actor
+    /// has no observable internal state.
+    ///
+    /// The default returns `None`. Actors that hold observable decision
+    /// state (presence, setpoint, BMS action, DR compliance, EV SoC/phase)
+    /// override this to return `Some(&self.telemetry)`.
+    fn telemetry(&self) -> Option<&Telemetry> {
+        None
+    }
 }
 
 pub mod testing {

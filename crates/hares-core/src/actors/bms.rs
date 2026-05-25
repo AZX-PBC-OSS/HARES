@@ -9,7 +9,7 @@ use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     BmsAction, BmsMode, BmsScheduleWindow, ControlSignal, EnvironmentState, EquipmentId,
-    GridExportRule, StormWatchTrigger,
+    GridExportRule, StormWatchTrigger, Telemetry,
 };
 
 use crate::Actor;
@@ -29,6 +29,7 @@ pub struct BatteryManagementActor {
     price_schedule: Option<Arc<[f64]>>,
     steps_per_day: usize,
     last_action: String,
+    telemetry: Telemetry,
 }
 
 impl BatteryManagementActor {
@@ -64,6 +65,11 @@ impl BatteryManagementActor {
         price_schedule: Option<Arc<[f64]>>,
         steps_per_day: usize,
     ) -> Self {
+        let mut telemetry = Telemetry::with_capacity(4);
+        telemetry.insert("bms_action", -1.0);
+        telemetry.insert("soc", f64::NAN);
+        telemetry.insert("pv_kw", 0.0);
+        telemetry.insert("load_kw", 0.0);
         Self {
             name: name.to_string(),
             dispatch_target: DispatchTarget::ByName(Arc::from(battery_name)),
@@ -79,6 +85,7 @@ impl BatteryManagementActor {
             price_schedule,
             steps_per_day,
             last_action: String::new(),
+            telemetry,
         }
     }
 
@@ -482,10 +489,22 @@ impl Actor for BatteryManagementActor {
         &self.name
     }
 
+    fn telemetry(&self) -> Option<&Telemetry> {
+        Some(&self.telemetry)
+    }
+
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         let mode = std::mem::take(&mut self.bms_mode);
         self.evaluate_mode(&mode, env, out);
         self.bms_mode = mode;
+
+        // Populate telemetry: bms_action uses a numeric code from last_action.
+        self.telemetry
+            .set("bms_action", bms_action_code(&self.last_action));
+        self.telemetry
+            .set("soc", self.read_soc(env).unwrap_or(f64::NAN));
+        self.telemetry.set("pv_kw", env.electrical.pv_generation_kw);
+        self.telemetry.set("load_kw", env.electrical.base_load_kw);
     }
 }
 
@@ -507,6 +526,22 @@ fn compute_percentile(prices: &[f64], percentile: f64) -> f64 {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let idx = ((percentile * (sorted.len() - 1) as f64).round() as usize).min(sorted.len() - 1);
     sorted[idx]
+}
+
+/// Maps `last_action` string to a numeric code for telemetry.
+/// 0=idle, 1=charge, 2=discharge, 3=grid_disconnect, -1=unknown.
+fn bms_action_code(action: &str) -> f64 {
+    if action.contains("charge") {
+        1.0
+    } else if action.contains("discharge") {
+        2.0
+    } else if action.contains("grid_disconnect") {
+        3.0
+    } else if action.contains("idle") {
+        0.0
+    } else {
+        -1.0
+    }
 }
 
 #[cfg(test)]

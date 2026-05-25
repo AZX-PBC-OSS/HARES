@@ -23,6 +23,8 @@ pub struct DwellingTelemetry {
     pub reactive_power_kvar: f64,
     pub outdoor_temp_c: f64,
     pub outdoor_rh: f64,
+    /// Per-actor telemetry: actor_name → channel_name → value.
+    pub actor_telemetry: HashMap<String, HashMap<String, f64>>,
 }
 
 impl DwellingTelemetry {
@@ -138,6 +140,7 @@ fn single_instance_alias(
 mod tests {
     use super::DwellingTelemetry;
     use chrono::{FixedOffset, TimeZone};
+    use std::collections::HashMap;
 
     fn sample() -> DwellingTelemetry {
         DwellingTelemetry {
@@ -159,6 +162,7 @@ mod tests {
             reactive_power_kvar: 0.0,
             outdoor_temp_c: 10.0,
             outdoor_rh: 0.45,
+            actor_telemetry: HashMap::new(),
         }
     }
 

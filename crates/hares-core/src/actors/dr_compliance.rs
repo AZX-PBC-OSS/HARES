@@ -43,7 +43,7 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::{ControlSignal, DRLevel, EnvironmentState, OperatingMode};
+use hares_types::{ControlSignal, DRLevel, EnvironmentState, OperatingMode, Telemetry};
 
 use crate::Actor;
 
@@ -235,11 +235,18 @@ pub struct DrCompliance {
     load_targets: Vec<(DispatchTarget, DrAction)>,
     /// Current DR level. `Normal` means no DR event is active.
     current_dr_level: DRLevel,
+    /// Actor telemetry: observable decision state for diagnostics.
+    telemetry: Telemetry,
 }
 
 impl DrCompliance {
     /// Creates a new DR compliance actor with the default compliance model.
     pub fn new(name: &str) -> Self {
+        let mut telemetry = Telemetry::with_capacity(4);
+        telemetry.insert("dr_level", 0.0);
+        telemetry.insert("dr_active", 0.0);
+        telemetry.insert("dr_complied", 0.0);
+        telemetry.insert("signals_count", 0.0);
         Self {
             name: Arc::from(name),
             model: Box::new(AlwaysComply),
@@ -247,6 +254,7 @@ impl DrCompliance {
             hvac_action: DrAction::None,
             load_targets: Vec::new(),
             current_dr_level: DRLevel::Normal,
+            telemetry,
         }
     }
 
@@ -334,12 +342,27 @@ impl Actor for DrCompliance {
         &self.name
     }
 
+    fn telemetry(&self) -> Option<&Telemetry> {
+        Some(&self.telemetry)
+    }
+
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        // Populate telemetry regardless of DR activity.
+        self.telemetry
+            .set("dr_level", dr_level_as_f64(self.current_dr_level));
+        self.telemetry
+            .set("dr_active", if self.is_dr_active() { 1.0 } else { 0.0 });
+
         if self.current_dr_level == DRLevel::Normal {
+            self.telemetry.set("dr_complied", 0.0);
+            self.telemetry.set("signals_count", 0.0);
             return;
         }
 
         let should_comply = self.model.should_comply(self.current_dr_level, env);
+
+        self.telemetry
+            .set("dr_complied", if should_comply { 1.0 } else { 0.0 });
 
         tracing::debug!(
             actor = %self.name,
@@ -349,8 +372,11 @@ impl Actor for DrCompliance {
         );
 
         if !should_comply {
+            self.telemetry.set("signals_count", 0.0);
             return;
         }
+
+        let before = out.len();
 
         if let Some(target) = &self.hvac_target {
             Self::dispatch_for_action(target, &self.hvac_action, out);
@@ -359,6 +385,19 @@ impl Actor for DrCompliance {
         for (target, action) in &self.load_targets {
             Self::dispatch_for_action(target, action, out);
         }
+
+        self.telemetry
+            .set("signals_count", (out.len() - before) as f64);
+    }
+}
+
+fn dr_level_as_f64(level: DRLevel) -> f64 {
+    match level {
+        DRLevel::Normal => 0.0,
+        DRLevel::Moderate => 1.0,
+        DRLevel::High => 2.0,
+        DRLevel::Critical => 3.0,
+        DRLevel::GridEmergency => 4.0,
     }
 }
 

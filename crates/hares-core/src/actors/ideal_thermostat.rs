@@ -20,7 +20,7 @@
 //! 4. Override signals use `PriorityTier::UserOverride` (higher than Schedule)
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::{ControlSignal, EnvironmentState};
+use hares_types::{ControlSignal, EnvironmentState, Telemetry};
 
 use crate::Actor;
 
@@ -125,15 +125,22 @@ pub struct IdealThermostat {
     override_state: OverrideState,
     /// Pre-allocated dispatch target (avoids per-step Arc construction).
     dispatch_target: DispatchTarget,
+    /// Actor telemetry: observable decision state for diagnostics.
+    telemetry: Telemetry,
 }
 
 impl IdealThermostat {
     /// Creates a new IdealThermostat actor targeting the named equipment.
     pub fn new(target_name: &str) -> Self {
+        let mut telemetry = Telemetry::with_capacity(3);
+        telemetry.insert("heating_setpoint_c", 0.0);
+        telemetry.insert("cooling_setpoint_c", 0.0);
+        telemetry.insert("deadband_c", 0.0);
         Self {
             name: format!("IdealThermostat({})", target_name),
             dispatch_target: DispatchTarget::ByName(target_name.into()),
             override_state: OverrideState::default(),
+            telemetry,
         }
     }
 
@@ -215,7 +222,26 @@ impl Actor for IdealThermostat {
         &self.name
     }
 
+    fn telemetry(&self) -> Option<&Telemetry> {
+        Some(&self.telemetry)
+    }
+
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        // Populate telemetry regardless of whether override is active,
+        // so consumers can see cleared state after clear_override().
+        self.telemetry.set(
+            "heating_setpoint_c",
+            self.override_state.heating_setpoint_c.unwrap_or(f64::NAN),
+        );
+        self.telemetry.set(
+            "cooling_setpoint_c",
+            self.override_state.cooling_setpoint_c.unwrap_or(f64::NAN),
+        );
+        self.telemetry.set(
+            "deadband_c",
+            self.override_state.deadband_c.unwrap_or(f64::NAN),
+        );
+
         if !self.override_state.is_active() {
             return;
         }

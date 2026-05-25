@@ -1879,6 +1879,20 @@ impl Dwelling {
             }
         }
 
+        let mut actor_telemetry: HashMap<String, HashMap<String, f64>> =
+            HashMap::with_capacity(self.actors.len() + 1);
+
+        // Collect solver feedback actor telemetry (always None, but included for completeness).
+        if let Some(tel) = self.solver_feedback_actor.telemetry() {
+            actor_telemetry.insert(self.solver_feedback_actor.name().to_string(), tel.0.clone());
+        }
+
+        for actor in &self.actors {
+            if let Some(tel) = actor.telemetry() {
+                actor_telemetry.insert(actor.name().to_string(), tel.0.clone());
+            }
+        }
+
         DwellingTelemetry {
             timestep_index: self.clock.current_step(),
             current_time: self.latest_env.current_time,
@@ -1894,6 +1908,7 @@ impl Dwelling {
             reactive_power_kvar: self.electrical_solver.net_reactive_kvar(),
             outdoor_temp_c: self.latest_env.weather.outdoor_temp_c,
             outdoor_rh: self.latest_env.weather.outdoor_humidity_ratio,
+            actor_telemetry,
         }
     }
 

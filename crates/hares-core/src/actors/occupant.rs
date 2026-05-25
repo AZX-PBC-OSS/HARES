@@ -29,7 +29,9 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::{ControlSignal, EndUse, EnvironmentState, EvConnectionState, OperatingMode};
+use hares_types::{
+    ControlSignal, EndUse, EnvironmentState, EvConnectionState, OperatingMode, Telemetry,
+};
 
 use crate::Actor;
 
@@ -136,11 +138,17 @@ pub struct Occupant {
     ev: Option<(DispatchTarget, EquipmentBehavior)>,
     /// Pre-cached dispatch target + behavior for plug loads.
     plug_loads: Option<(DispatchTarget, EquipmentBehavior)>,
+    /// Actor telemetry: observable decision state for diagnostics.
+    telemetry: Telemetry,
 }
 
 impl Occupant {
     /// Creates a new Occupant actor with the given name.
     pub fn new(name: &str) -> Self {
+        let mut telemetry = Telemetry::with_capacity(3);
+        telemetry.insert("away", 0.0);
+        telemetry.insert("transition", 0.0);
+        telemetry.insert("signals_count", 0.0);
         Self {
             name: Arc::from(name),
             presence_schedule: vec![Presence::Home],
@@ -150,6 +158,7 @@ impl Occupant {
             appliance: None,
             ev: None,
             plug_loads: None,
+            telemetry,
         }
     }
 
@@ -339,9 +348,21 @@ fn push_load_fraction_if(
     }
 }
 
+fn presence_as_f64(p: Presence) -> f64 {
+    match p {
+        Presence::Home => 0.0,
+        Presence::Away => 1.0,
+        Presence::Sleeping => 2.0,
+    }
+}
+
 impl Actor for Occupant {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn telemetry(&self) -> Option<&Telemetry> {
+        Some(&self.telemetry)
     }
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
@@ -367,6 +388,14 @@ impl Actor for Occupant {
         }
 
         let dispatched = out.len() - before;
+
+        // Populate telemetry channels for structured observability.
+        self.telemetry
+            .set("away", presence_as_f64(current_presence));
+        self.telemetry
+            .set("transition", if is_transition { 1.0 } else { 0.0 });
+        self.telemetry.set("signals_count", dispatched as f64);
+
         if dispatched > 0 || is_transition {
             tracing::debug!(
                 actor = %self.name,

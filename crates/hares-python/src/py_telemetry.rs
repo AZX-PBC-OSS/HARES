@@ -56,6 +56,22 @@ impl PyTelemetry {
         Ok(out)
     }
 
+    /// Per-actor telemetry: actor_name → channel_name → value.
+    ///
+    /// Returns a dict mapping each actor name to its telemetry channels dict.
+    /// Actors with no observable state (telemetry() returns None) are omitted.
+    pub fn actors<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        for (name, channels) in &self.inner.actor_telemetry {
+            let channel_dict = PyDict::new(py);
+            for (key, value) in channels {
+                channel_dict.set_item(key, *value)?;
+            }
+            out.set_item(name, channel_dict)?;
+        }
+        Ok(out)
+    }
+
     #[getter]
     pub fn timestep_index(&self) -> u64 {
         self.inner.timestep_index

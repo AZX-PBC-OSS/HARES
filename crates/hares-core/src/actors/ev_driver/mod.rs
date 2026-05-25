@@ -27,7 +27,7 @@ use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     ChargingStrategy, ControlSignal, EnvironmentState, EquipmentId, EvConnectionState,
-    PlugInPolicy, ScheduleSource,
+    PlugInPolicy, ScheduleSource, Telemetry,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -241,6 +241,8 @@ pub struct EvDriverActor {
     expected_daily_miles: f64,
     /// Deferred away-charge signals to emit on the next step after driving ends.
     needs_away_charge: bool,
+    /// Actor telemetry: observable decision state for diagnostics.
+    telemetry: Telemetry,
 }
 
 use efficiency::{seed_bytes, temp_efficiency_multiplier};
@@ -278,6 +280,13 @@ impl EvDriverActor {
         );
         let composer = ChargingComposer::new(prefs, target);
         let expected_daily_miles = daily_drive_miles.mean();
+
+        let mut telemetry = Telemetry::with_capacity(4);
+        telemetry.insert("soc", 1.0);
+        telemetry.insert("phase", 0.0);
+        telemetry.insert("charge_kw", 0.0);
+        telemetry.insert("plugged_in", 1.0);
+
         Self {
             name: Arc::from(name),
             dispatch_target: DispatchTarget::ByName(target.into()),
@@ -304,6 +313,7 @@ impl EvDriverActor {
             time_res_minutes: 1.0,
             expected_daily_miles,
             needs_away_charge: false,
+            telemetry,
         }
     }
 
@@ -324,6 +334,33 @@ impl EvDriverActor {
     /// Returns the last charging action taken by the composer (for telemetry).
     pub fn last_action(&self) -> &str {
         self.composer.last_action()
+    }
+
+    fn populate_telemetry(&mut self, before_out: usize, out: &[DispatchRequest]) {
+        self.telemetry.set("soc", self.estimated_soc);
+        self.telemetry.set("phase", phase_as_f64(self.phase));
+        self.telemetry.set(
+            "plugged_in",
+            if matches!(self.phase, DriverPhase::HomePluggedIn) {
+                1.0
+            } else {
+                0.0
+            },
+        );
+
+        // Scan newly-emitted dispatch requests for charge/discharge power.
+        let mut charge_kw = 0.0;
+        for req in &out[before_out..] {
+            match &req.signal {
+                ControlSignal::PowerSetpoint {
+                    active_power_kw, ..
+                } => charge_kw = *active_power_kw,
+                ControlSignal::EvAwayCharge { power_kw } => charge_kw = *power_kw,
+                ControlSignal::EvDrive { .. } => {} // driving, not charging
+                _ => {}
+            }
+        }
+        self.telemetry.set("charge_kw", charge_kw);
     }
 
     /// Returns the target equipment name.
@@ -472,15 +509,24 @@ impl Actor for EvDriverActor {
         &self.name
     }
 
+    fn telemetry(&self) -> Option<&Telemetry> {
+        Some(&self.telemetry)
+    }
+
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         let res_seconds = env.time_res.num_seconds();
         debug_assert!(res_seconds >= 1, "time_res must be >= 1 second");
         self.time_res_minutes = (res_seconds.max(1) as f64) / 60.0;
         self.maybe_roll_daily_event(env);
 
+        let before_out = out.len();
+
         let event = match self.todays_event {
             Some(ev) => ev,
-            None => return,
+            None => {
+                self.populate_telemetry(before_out, out);
+                return;
+            }
         };
 
         let current_minute = (env.current_time.hour() * 60 + env.current_time.minute()) as u16;
@@ -626,6 +672,16 @@ impl Actor for EvDriverActor {
                 }
             }
         }
+
+        self.populate_telemetry(before_out, out);
+    }
+}
+
+fn phase_as_f64(phase: DriverPhase) -> f64 {
+    match phase {
+        DriverPhase::HomePluggedIn => 0.0,
+        DriverPhase::Driving { .. } => 1.0,
+        DriverPhase::Away => 2.0,
     }
 }
 
