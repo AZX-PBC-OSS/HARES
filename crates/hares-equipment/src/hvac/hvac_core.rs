@@ -55,6 +55,15 @@ const DEFAULT_BIQUADRATIC_X1_BOUNDS: (f64, f64) = (-10.0, 50.0);
 /// Fallback only; per-curve explicit bounds from equipment CSV/specs must be preferred.
 const DEFAULT_BIQUADRATIC_X2_BOUNDS: (f64, f64) = (-50.0, 60.0);
 
+/// Maximum safe zone temperature [°C] for conditioned zones with active heating.
+///
+/// Above this threshold, heating equipment must be forced Off to prevent
+/// simulation runaway where zone temperatures reach physically impossible levels
+/// (e.g. 49.5 °C indoors in January). Attics and garages can legitimately reach
+/// higher temperatures, but heating equipment's served zone (`config.zone_id`)
+/// is always a conditioned space.
+pub(crate) const MAX_CONDITIONED_ZONE_TEMP_C: f64 = 35.0;
+
 /// Maximum number of compressor speed stages supported by any HVAC equipment type.
 /// Covers 4-stage central AC/ASHP and 8-stage MSHP (the highest stage count in
 /// the OCHRE/HARES default performance curve set). Used for stack-allocated
@@ -682,6 +691,10 @@ impl HvacEquipment {
                 | HvacEquipmentType::AshpHeatPumpOnly
                 | HvacEquipmentType::AshpHeatPumpAux
                 | HvacEquipmentType::MiniSplitHeat
+                | HvacEquipmentType::GasFurnace
+                | HvacEquipmentType::ElectricFurnace
+                | HvacEquipmentType::Baseboard
+                | HvacEquipmentType::Other
         );
         let auto_ideal =
             (coarse_auto || variable_speed_mode || has_four_plus_stages) && supports_auto_ideal;

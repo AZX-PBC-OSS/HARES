@@ -14,6 +14,8 @@ use hares_types::{
 
 use crate::{ConfigPayload, EquipmentConfig};
 
+use super::hvac_core::MAX_CONDITIONED_ZONE_TEMP_C;
+
 // Re-exported from crate root; used by `apply_heating_control_unchecked`
 // and `update_heating_control`.
 use crate::HvacEquipment;
@@ -134,6 +136,25 @@ pub fn operating_mode_code(mode: OperatingMode) -> f64 {
 /// when `use_ideal_capacity` is configured. All other modes set duty to 0.0 and
 /// return `Off`.
 pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) -> OperatingMode {
+    // Safety cutoff: prevent simulation runaway where zone temperatures
+    // reach physically impossible levels (e.g. 49.5 °C indoors in January).
+    // Only the served (conditioned) zone is checked; duct zones in attics
+    // or garages are not subject to this limit because they can legitimately
+    // reach high temperatures without heating equipment running.
+    if let Ok(zone) = lookup_zone(env, hvac.config.zone_id) {
+        if zone.temperature_c > MAX_CONDITIONED_ZONE_TEMP_C {
+            tracing::warn!(
+                zone_temp_c = zone.temperature_c,
+                equipment_type = ?hvac.config.equipment_type,
+                zone_id = hvac.config.zone_id.0,
+                max_safe_temp = MAX_CONDITIONED_ZONE_TEMP_C,
+                "Safety cutoff: conditioned zone temperature exceeds max safe limit; forcing heating equipment Off"
+            );
+            hvac.runtime.duty_cycle = 0.0;
+            return OperatingMode::Off;
+        }
+    }
+
     match hvac.update_mode(env) {
         Ok(super::thermostat::ThermostatMode::Heating) => {
             if !hvac.use_ideal_capacity(env) {

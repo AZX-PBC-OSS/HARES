@@ -179,8 +179,11 @@ pub(super) fn is_cycle_change_allowed(
     let Some(last_switch) = last_mode_switch_at else {
         return true;
     };
-    let elapsed_ms = (now - last_switch).num_milliseconds().max(0) as f64;
-    elapsed_ms / 1000.0 >= thermostat.min_cycle_time_s
+    let elapsed_ms = (now - last_switch).num_milliseconds();
+    if elapsed_ms <= 0 {
+        return true;
+    }
+    elapsed_ms as f64 / 1000.0 >= thermostat.min_cycle_time_s
 }
 
 /// Thermostat finite-state machine owning the 11 fields and 5 methods that
@@ -473,5 +476,85 @@ impl ThermostatFsm {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{FixedOffset, TimeZone};
+
+    use super::*;
+
+    fn thermostat_with_cycle_time(min_cycle_time_s: f64) -> ThermostatConfig {
+        let mut cfg = ThermostatConfig::default();
+        cfg.min_cycle_time_s = min_cycle_time_s;
+        cfg
+    }
+
+    fn utc_time(day: u32, hour: u32) -> DateTime<FixedOffset> {
+        FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2018, 1, day, hour, 0, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn cycle_change_allowed_when_cycle_time_is_zero() {
+        let tstat = ThermostatConfig::default(); // min_cycle_time_s = 0.0
+        // Should always allow regardless of timing
+        assert!(is_cycle_change_allowed(&tstat, None, utc_time(15, 0)));
+        assert!(is_cycle_change_allowed(&tstat, Some(utc_time(15, 0)), utc_time(15, 1)));
+    }
+
+    #[test]
+    fn cycle_change_allowed_when_no_previous_switch() {
+        let tstat = thermostat_with_cycle_time(60.0);
+        assert!(is_cycle_change_allowed(&tstat, None, utc_time(15, 0)));
+    }
+
+    #[test]
+    fn cycle_change_blocked_within_min_cycle_time() {
+        let tstat = thermostat_with_cycle_time(300.0); // 5 minutes
+        // Last switch 1 minute ago
+        assert!(!is_cycle_change_allowed(
+            &tstat,
+            Some(utc_time(15, 0)),
+            utc_time(15, 0) + chrono::Duration::minutes(1),
+        ));
+    }
+
+    #[test]
+    fn cycle_change_allowed_after_min_cycle_time() {
+        let tstat = thermostat_with_cycle_time(300.0);
+        // Last switch 6 minutes ago
+        assert!(is_cycle_change_allowed(
+            &tstat,
+            Some(utc_time(15, 0)),
+            utc_time(15, 0) + chrono::Duration::minutes(6),
+        ));
+    }
+
+    #[test]
+    fn cycle_change_allowed_after_clock_reset() {
+        // Warmup resets clock.current_step = 0, taking current_time back
+        // to the start of the day while last_mode_switch_at is a later
+        // wall-clock time from the previous warmup iteration.
+        let tstat = thermostat_with_cycle_time(60.0);
+        // Last switch at 3pm on day 15, now is 12am on day 15 (clock reset)
+        assert!(is_cycle_change_allowed(
+            &tstat,
+            Some(utc_time(15, 15)),
+            utc_time(15, 0),
+        ));
+    }
+
+    #[test]
+    fn cycle_change_allowed_exactly_at_boundary() {
+        let tstat = thermostat_with_cycle_time(60.0);
+        assert!(is_cycle_change_allowed(
+            &tstat,
+            Some(utc_time(15, 0)),
+            utc_time(15, 0) + chrono::Duration::seconds(60),
+        ));
     }
 }

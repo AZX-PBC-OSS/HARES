@@ -77,6 +77,9 @@ pub struct ElectricBoiler {
     default_return_temp_c: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
+    /// Cached from last update_control; true when timestep >= 5 min
+    /// so ideal_target() can participate in the solver feedback loop.
+    use_ideal: bool,
 }
 
 pub struct GasBoiler {
@@ -99,6 +102,9 @@ pub struct GasBoiler {
     non_condensing_eir_coeffs: [f64; 10],
     operating_mode: OperatingMode,
     run_time_s: f64,
+    /// Cached from last update_control; true when timestep >= 5 min
+    /// so ideal_target() can participate in the solver feedback loop.
+    use_ideal: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -158,6 +164,7 @@ impl ElectricBoiler {
             default_return_temp_c: DEFAULT_RETURN_TEMP_C,
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
+            use_ideal: false,
         }
     }
 }
@@ -200,6 +207,7 @@ impl Equipment for ElectricBoiler {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        self.use_ideal = self.hvac.use_ideal_capacity(env);
         self.operating_mode = update_heating_control(&mut self.hvac, env);
         self.operating_mode
     }
@@ -326,6 +334,17 @@ impl Equipment for ElectricBoiler {
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        if !self.use_ideal {
+            return None;
+        }
+        if self.operating_mode != OperatingMode::Heating {
+            return None;
+        }
+        let setpoint = self.hvac.effective_setpoints().heating_c;
+        Some((self.hvac.config.zone_id, setpoint))
+    }
 }
 
 impl GasBoiler {
@@ -378,6 +397,7 @@ impl GasBoiler {
             non_condensing_eir_coeffs: DEFAULT_NON_CONDENSING_EIR_COEFFS,
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
+            use_ideal: false,
         }
     }
 
@@ -458,6 +478,7 @@ impl Equipment for GasBoiler {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        self.use_ideal = self.hvac.use_ideal_capacity(env);
         self.operating_mode = update_heating_control(&mut self.hvac, env);
         self.operating_mode
     }
@@ -632,6 +653,17 @@ impl Equipment for GasBoiler {
         apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Boiler")?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
+    }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        if !self.use_ideal {
+            return None;
+        }
+        if self.operating_mode != OperatingMode::Heating {
+            return None;
+        }
+        let setpoint = self.hvac.effective_setpoints().heating_c;
+        Some((self.hvac.config.zone_id, setpoint))
     }
 }
 

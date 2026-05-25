@@ -1834,8 +1834,8 @@ mod tests {
     #[test]
     fn attic_vented_defaults_to_resnet_sla() {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
-        let method =
-            attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect("vented attic with no rate must use default SLA");
+        let method = attic_infiltration_method(&zone, Some(100.0), 5.0, 3)
+            .expect("vented attic with no rate must use default SLA");
         assert!(
             matches!(method, InfiltrationMethod::Ela { .. }),
             "expected ELA method from default SLA, got {method:?}"

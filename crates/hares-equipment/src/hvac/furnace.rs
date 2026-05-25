@@ -39,6 +39,9 @@ pub struct ElectricFurnace {
     fan_power_w: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
+    /// Cached from last update_control; true when timestep >= 5 min
+    /// so ideal_target() can participate in the solver feedback loop.
+    use_ideal: bool,
 }
 
 pub struct GasFurnace {
@@ -53,6 +56,9 @@ pub struct GasFurnace {
     fuel_type: FuelType,
     operating_mode: OperatingMode,
     run_time_s: f64,
+    /// Cached from last update_control; true when timestep >= 5 min
+    /// so ideal_target() can participate in the solver feedback loop.
+    use_ideal: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,6 +114,7 @@ impl ElectricFurnace {
             fan_power_w: 0.0,
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
+            use_ideal: false,
         }
     }
 }
@@ -151,6 +158,7 @@ impl Equipment for ElectricFurnace {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        self.use_ideal = self.hvac.use_ideal_capacity(env);
         self.operating_mode = update_heating_control(&mut self.hvac, env);
         self.operating_mode
     }
@@ -344,6 +352,17 @@ impl Equipment for ElectricFurnace {
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
     }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        if !self.use_ideal {
+            return None;
+        }
+        if self.operating_mode != OperatingMode::Heating {
+            return None;
+        }
+        let setpoint = self.hvac.effective_setpoints().heating_c;
+        Some((self.hvac.config.zone_id, setpoint))
+    }
 }
 
 impl GasFurnace {
@@ -386,6 +405,7 @@ impl GasFurnace {
             fuel_type: FuelType::Gas,
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
+            use_ideal: false,
         }
     }
 }
@@ -445,6 +465,7 @@ impl Equipment for GasFurnace {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        self.use_ideal = self.hvac.use_ideal_capacity(env);
         self.operating_mode = update_heating_control(&mut self.hvac, env);
         self.operating_mode
     }
@@ -660,6 +681,17 @@ impl Equipment for GasFurnace {
         apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Furnace")?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
+    }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        if !self.use_ideal {
+            return None;
+        }
+        if self.operating_mode != OperatingMode::Heating {
+            return None;
+        }
+        let setpoint = self.hvac.effective_setpoints().heating_c;
+        Some((self.hvac.config.zone_id, setpoint))
     }
 }
 

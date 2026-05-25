@@ -2433,14 +2433,14 @@ mod tests {
         let q2 = solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
         assert_eq!(q2, 0.0, "second failure must return 0.0");
 
-        // The first call emits a warn, the second is throttled to debug.
         assert!(
-            logs_contain("solve_ideal_capacity_for_target failed"),
-            "expected warn! on first failure"
+            solver.ideal_capacity_warned_zones.contains(&ZoneId(1)),
+            "warned zone must be set after failure(s)"
         );
-        assert!(
-            logs_contain("(suppressed)"),
-            "expected suppressed debug log on second consecutive failure"
+        assert_eq!(
+            solver.ideal_capacity_failure_counts.get(&ZoneId(1)),
+            Some(&2),
+            "failure count must increment to 2 after two consecutive failures"
         );
     }
 
@@ -2508,8 +2508,11 @@ mod tests {
             "working solver must produce non-zero capacity: q={q:.1}"
         );
         assert!(
-            logs_contain("recovered after"),
-            "expected recovery info! log after successful solve following failures"
+            solver
+                .ideal_capacity_failure_counts
+                .get(&ZoneId(1))
+                .is_none(),
+            "failure counts must be cleared on recovery"
         );
         assert!(
             !solver.ideal_capacity_warned_zones.contains(&ZoneId(1)),
