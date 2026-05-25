@@ -1,0 +1,102 @@
+{
+  "category": "types-physics",
+  "description": "Cross-cutting types, physics, control, and tariff reviews: latent heat constants, solar models, window models, duct leakage, typed units, control compat mapping, dispatch conflicts, tariff evaluation, humidity coupling, and curve bounds.",
+  "reviews": [
+    {
+      "id": "types-physics-01",
+      "slug": "latent-heat-reference-state-inconsistency",
+      "title": "Latent heat of vaporization reference-state inconsistency (2450 vs 2501 kJ/kg)",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.cc",
+      "files": "crates/hares-physics/src/psychrometrics.rs crates/hares-physics/src/constants.rs",
+      "prompt": "The latent heat of vaporization for water appears in multiple locations with potentially inconsistent reference temperatures. The standard ASHRAE value is 2501 kJ/kg at 0°C reference, while the approximate value 2450 kJ/kg is sometimes used at ~20°C reference. Search the codebase for all hardcoded latent heat values (2.45e6, 2.501e6, and any other variants in J/kg or kJ/kg) across psychrometrics, moisture balance, and water heater condensate calculations. A 2% error in latent heat directly biases all latent load calculations. Verify that the specific heat of water vapor (cp_v) and liquid water (cp_l) used in the psychrometric enthalpy formula h = cp_da*T + w*(2501e3 + cp_v*T) are consistent with the 2501e3 reference—mixing a 2450 kJ/kg latent heat with cp_v*T terms assuming 2501 base would produce systematic enthalpy errors that grow with humidity ratio. Compare reference-state conventions against EnergyPlus Psychrometrics.cc."
+    },
+    {
+      "id": "types-physics-02",
+      "slug": "perez-epsilon-formula-duplication",
+      "title": "Perez epsilon formula code duplication",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/SolarShading.cc",
+      "files": "crates/hares-physics/src/solar.rs crates/hares-envelope/src/thermal_solver/solar.rs crates/hares-envelope/src/longwave_radiation.rs",
+      "prompt": "The Perez anisotropic sky model's epsilon parameter (clearness indicator) computation appears to be duplicated across multiple crates: hares-physics solar module, hares-envelope thermal solver solar, and the longwave radiation module. This is a non-trivial formula involving diffuse horizontal, direct normal, and zenith angle. Review each occurrence to check: (a) are all duplicates byte-for-byte identical or do they use slightly different formulations? (b) is the clearness binning threshold set (epsilon bins: 1.065, 1.230, 1.500, 1.950, 2.800, 4.500, 6.200) consistent across all copies? (c) does the longwave radiation module even need epsilon or is it erroneously recomputing it when it should receive it from the solar module? If the duplicates are identical, consider whether refactoring to a single source of truth in hares-physics is warranted. Compare the epsilon computation against EnergyPlus SolarShading.cc which implements the same Perez 1990 model."
+    },
+    {
+      "id": "types-physics-03",
+      "slug": "window-u-factor-three-resistance",
+      "title": "Window U-factor decomposition three-resistance vs OCHRE",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WindowModel.cc vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-envelope/src/rc_network.rs crates/hares-envelope/src/thermal_solver/config.rs crates/hares-io/src/hpxml/building.rs",
+      "prompt": "Windows in HARES appear to use a three-resistance model to decompose the overall U-factor into interior film, glazing conductance, and exterior film resistances. Review this decomposition: verify that the interior film coefficient matches the standard ASHRAE value for vertical surfaces with natural convection (~8.3 W/m²K for winter, ~5.5 W/m²K with low-e for summer) and that the exterior film coefficient accounts for wind speed using the standard McAdams correlation or similar. Check whether the glazing layer conductance is derived from the NFRC-rated U-factor minus the film coefficients, or whether it has an independent data source. Compare against the EnergyPlus window model in WindowModel.cc which supports both simple glazing systems (single U-factor, SHGC) and detailed layer-by-layer models (Window5/Window7). Also compare against OCHRE's hpxml.py to verify how window properties from HPXML (U-factor, SHGC) are translated to the RC network parameters. Look for potential double-counting of interior film resistance if the U-factor from HPXML already includes it."
+    },
+    {
+      "id": "types-physics-04",
+      "slug": "duct-leakage-infiltration-formula-duplicates-ashrae152",
+      "title": "Duct leakage infiltration formula duplicates ASHRAE 152 across crates",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/DuctSolver.cc",
+      "files": "crates/hares-physics/src/ashrae152.rs crates/hares-physics/src/infiltration.rs crates/hares-envelope/src/thermal_solver/infiltration.rs",
+      "prompt": "ASHRAE Standard 152 provides the methodology for converting duct leakage measurements (CFM25) to operating infiltration rates that depend on duct location (attic, crawlspace, basement, conditioned space). Review the codebase for implementations of this conversion: check hares-physics/src/ashrae152.rs for the canonical implementation, hares-physics/src/infiltration.rs for a possible duplicate, and hares-envelope/src/thermal_solver/infiltration.rs for the solver-side usage. Verify that the pressure exponent for duct leakage (typically 0.6 for supply and 0.65 for return in ASHRAE 152) is correct and used consistently. Check that the duct location weighting factors (multipliers for unconditioned attic vs basement vs crawlspace) match the ASHRAE 152-2014 tables. If the formula appears in multiple crates, assess whether they are identical copies or whether one is a simplified version used for quick estimates while the other is the full solver model—this split could cause inconsistencies if they are not kept in sync. Compare against EnergyPlus DuctSolver.cc for the reference implementation of duct leakage-to-infiltration conversion."
+    },
+    {
+      "id": "types-physics-05",
+      "slug": "incomplete-uom-typed-wrapper-coverage",
+      "title": "Incomplete uom typed wrapper coverage",
+      "vendor_refs": null,
+      "files": "crates/hares-physics/src/units.rs crates/hares-equipment/src/ports.rs",
+      "prompt": "The hares-physics units module provides strongly-typed wrappers for physical quantities (Temperature, Power, Energy, etc.) to prevent unit confusion at compile time. Audit the coverage: which physical quantities are still using bare f64 throughout the equipment and envelope crates? Pay particular attention to interface boundaries (ports.rs) where equipment connects to solvers—a mismatch here (e.g., passing Watts where kW is expected) would be a critical runtime bug. Check whether energy quantities (kWh, J, BTU) and temperature units (°C, K, °F) are consistently typed or whether conversions happen implicitly at boundaries. Also verify that the typed wrappers implement appropriate arithmetic traits (Add, Sub, Mul, Div) with correct unit propagation—multiplying a Temperature and a HeatCapacity should yield Energy, not a bare f64. Look for any transmute or unsafe casts that bypass the wrapper and could introduce silent unit errors."
+    },
+    {
+      "id": "types-physics-06",
+      "slug": "ochre-compat-mapping-coarse-ambiguous",
+      "title": "OCHRE compat mapping coarse and ambiguous",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-control/src/compat.rs crates/hares-control/src/types.rs",
+      "prompt": "The compat module in hares-control maps between HARES control type identifiers and external representations (likely OCHRE-style string tags). Review the mapping table for ambiguity: do any HARES end-use types map to the same OCHRE string, making round-trip conversion lossy? Check for enumeration gaps where OCHRE strings exist that have no HARES counterpart, which would cause silent deserialization failures or incorrect type assignment. Verify that the mapping covers all dispatch-capable equipment types and that any new equipment added to HARES also has a compat entry—missing entries could cause dispatch commands to be silently ignored for new equipment types. Also audit the reverse mapping from OCHRE to HARES for robustness against case sensitivity, whitespace, and deprecated OCHRE tags that might appear in legacy configuration files."
+    },
+    {
+      "id": "types-physics-07",
+      "slug": "dispatch-target-conflict-detection",
+      "title": "DispatchTarget conflict detection by-name vs by-end-use",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/Controller.py",
+      "files": "crates/hares-control/src/dispatch.rs crates/hares-control/src/signal.rs",
+      "prompt": "When multiple control signals target the same equipment, the dispatch module must detect conflicts. Review whether conflict detection operates by equipment name (string comparison) or by end-use/service category. By-name detection would miss conflicts where two controllers target the same battery under different names, while by-end-use could over-block legitimate simultaneous dispatch of different services on the same equipment. Check the conflict resolution strategy: first-writer-wins, last-writer-wins, priority-ordered, or rejected-duplicate. For time-of-use tariff and demand-response signals arriving simultaneously, the correct behavior depends on the tariff and DR program design—verify that the conflict resolution allows appropriate override or coexistence. Compare against OCHRE's Controller.py for expected dispatch conflict behavior."
+    },
+    {
+      "id": "types-physics-08",
+      "slug": "tariff-demand-averaging-window-collapse",
+      "title": "Tariff demand averaging window silently collapses",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-tariff/src/evaluator.rs crates/hares-tariff/src/types.rs",
+      "prompt": "Demand charges are computed over an averaging window (typically 15 minutes for residential, 15 or 30 for commercial). Review the demand averaging logic: when the simulation step size is larger than the demand window, does the window silently collapse to the step size or does it warn the user? If the step size is 60 minutes and the demand window is 15 minutes, the max over 4 sub-steps should be the reported demand—verify this sub-step aggregation is performed even when the step size exceeds the window. Check the sliding-window implementation for off-by-one errors at window boundaries, especially when equipment dispatch changes power mid-window. Also verify that the demand ratchet (the mechanism that sets a floor on demand charges based on historical peak) is correctly initialized on the first billing period and does not use a zero initial peak that would undercharge the first period."
+    },
+    {
+      "id": "types-physics-09",
+      "slug": "urdb-summer-month-heuristic-fragile",
+      "title": "URDB summer-month heuristic fragile",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-tariff/src/urdb.rs",
+      "prompt": "The URDB (Utility Rate Database) parser determines summer vs winter seasons to apply seasonal rate schedules. Review the heuristic used: if it relies on month-name string matching ('June' through 'September'), it will fail on non-English URDB exports, abbreviated month names, or numeric month designations. If it uses fixed calendar months, it will be wrong for Southern Hemisphere locations where summer is December-February. A robust implementation should use the tariff's own season definitions from the URDB JSON rather than inferring seasons from month names. Also verify that shoulder or intermediate seasons (e.g., May and October for some utilities) are handled and don't silently fall into either summer or winter using the wrong rate. Check whether the URDB parser gracefully handles missing season definitions vs silently defaulting to a single year-round rate."
+    },
+    {
+      "id": "types-physics-10",
+      "slug": "no-cross-validation-humidity-vs-latent-thermal",
+      "title": "No cross-validation humidity vs latent thermal ports",
+      "vendor_refs": null,
+      "files": "crates/hares-envelope/src/humidity_solver.rs crates/hares-envelope/src/thermal_solver/mod.rs crates/hares-equipment/src/ports.rs",
+      "prompt": "The humidity solver and thermal solver operate on separate but coupled domains: latent heat exchange affects the thermal balance and temperature affects saturation vapor pressure which drives moisture transfer. Review whether there is any cross-validation between the two solvers within each time step. If equipment reports latent gain to the humidity solver (via a humidity port) but also reports a thermal gain to the thermal solver (via a thermal port), are these two quantities thermodynamically consistent? A condensing surface removes both sensible heat and moisture simultaneously—does the model enforce the Lewis relation between convective heat and mass transfer coefficients? Check whether any equipment type reports latent gains without corresponding sensible cooling load (which would violate energy conservation) or vice versa. Compare against the EnergyPlus heat balance / moisture balance coupling approach which iterates until both balances converge."
+    },
+    {
+      "id": "types-physics-11",
+      "slug": "biquadratic-curve-default-bounds-too-wide",
+      "title": "Biquadratic curve default bounds too wide (documented bug)",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/CurveManager.cc",
+      "files": "crates/hares-physics/src/biquadratic.rs",
+      "prompt": "Biquadratic curves used for equipment performance maps (heat pump COP, HPWH capacity, etc.) have input variable bounds beyond which the curve evaluation should clamp or warn. Review the default bounds: if they are set to +/-infinity or absurdly wide values (e.g., -100°C to +100°C for refrigerant temperatures), equipment performance can silently extrapolate to non-physical values during extreme weather or startup transients. This is reportedly a known issue—verify the current default bounds and identify which equipment curves are affected. For each affected curve, determine whether the fix should be tighter default bounds from manufacturer data or runtime clamp-and-warn behavior. Check that the biquadratic evaluation code does not produce NaN or Inf for out-of-bound inputs (e.g., from a near-zero water flow causing a division by zero in the input variable calculation). Compare bound handling against EnergyPlus CurveManager.cc which uses curve-specific min/max limits."
+    },
+    {
+      "id": "types-physics-12",
+      "slug": "no-hrv-erv-balanced-mechanical-ventilation",
+      "title": "No HRV/ERV balanced mechanical ventilation physics",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/HeatRecovery.cc",
+      "files": "crates/hares-equipment/src/ventilation.rs crates/hares-envelope/src/thermal_solver/infiltration.rs",
+      "prompt": "The current ventilation model describes effectiveness-based heat/moisture recovery, but it is unclear whether this implements a true balanced HRV/ERV (Heat/Energy Recovery Ventilator) model with equal supply and exhaust airflows. A balanced system requires modeling two air streams: supply air brought in from outdoors through the heat exchanger and exhaust air removed from indoors and discharged outdoors. Review whether the implementation tracks the exhaust stream mass flow and its thermal effect on indoor air (exhaust removal represents a negative infiltration load). If only the supply stream is modeled with effectiveness but the exhaust stream is missing, the model is an unbalanced supply-only ventilator, not an HRV. Check whether the HRV/ERV core frost protection (recirculation defrost vs electric preheat defrost) is modeled and its impact on effectiveness and fan power. Compare against EnergyPlus HeatExchanger:AirToAir in HeatRecovery.cc for the full two-stream model with frost control."
+    }
+  ]
+}

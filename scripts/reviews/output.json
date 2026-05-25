@@ -1,0 +1,30 @@
+{
+  "category": "output",
+  "description": "Output pipeline — Arrow/Parquet writer, column definitions, and metrics computation",
+  "reviews": [
+    {
+      "id": "output-01",
+      "slug": "arrow-parquet-writer",
+      "title": "Arrow/Parquet output writer: schema stability, column types, file rotation",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/OutputProcessor.cc",
+      "files": "crates/hares-io/src/output/writer.rs crates/hares-io/src/output/columns.rs",
+      "prompt": "Schema stable across runs? Numeric types appropriate? File rotation for long simulations? Timestamps with correct timezone? Arrow RecordBatch does not silently drop columns? The output writer must produce Parquet files with a stable, well-defined schema where column names and types are deterministic across simulation runs of the same dwelling — running the same input twice must produce files with identical schemas. Numeric types must be chosen carefully: temperatures in float32 (sufficient precision for 0.01°C), energy in float64 (to handle large cumulative sums), integer ids in int32. For year-long or multi-year simulations, the writer must support file rotation (hourly output per file, daily output per file, or a configurable interval) to prevent single files from exceeding practical size limits. Timestamps must include the correct UTC offset or timezone designation so that downstream analysis tools can interpret them unambiguously. Verify that Arrow RecordBatch construction does not silently drop columns: if a column is defined in the schema but missing from a batch, the writer must produce a clear error rather than writing a file with a truncated schema."
+    },
+    {
+      "id": "output-02",
+      "slug": "output-column-definitions",
+      "title": "Output column definitions: completeness, naming conventions, unit labeling",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/OutputProcessor.cc",
+      "files": "crates/hares-io/src/output/columns.rs crates/hares-types/src/telemetry.rs crates/hares-types/src/telemetry_keys.rs",
+      "prompt": "All equipment telemetry keys have output columns? Column names include unit suffixes consistently? Columns defined but never populated? Telemetry keys with no column? Column ordering deterministic. Perform an exhaustive cross-reference: for every telemetry key defined in telemetry_keys.rs, there must exist a corresponding output column definition that maps the telemetry data to a named, typed column in the Parquet output. Conversely, verify that no output column is defined that no equipment or subsystem ever publishes data onto — these would produce all-null columns that waste storage and confuse consumers. Column naming must follow a consistent convention with unit suffixes appended to the column name: 'zone_air_temperature_c', 'total_electric_power_w', 'heating_delivered_j', 'cooling_capacity_w', 'solar_irradiance_on_tilted_w_m2'. Verify that column ordering is deterministic (e.g., alphabetical by name, or grouped by subsystem in a fixed order) so that downstream consumers can rely on column position stability across simulation runs. The output column registry must produce a compile-time error or clear runtime panic if a telemetry key references a column that is not defined."
+    },
+    {
+      "id": "output-03",
+      "slug": "output-metrics-computation",
+      "title": "Output metrics computation: aggregation, resampling, correctness",
+      "vendor_refs": "vendors/OCHRE/ochre/Analysis.py",
+      "files": "crates/hares-io/src/output/metrics.rs",
+      "prompt": "Aggregation correct (sum for energy, mean for temp, max for demand)? Sub-hourly to hourly resampling correct? Annual totals correct for leap years? Metrics don't silently drop NaN or use stale accumulator. Verify that aggregation operators are correctly chosen per metric type: energy quantities (heating delivered, cooling delivered, electrical consumption) must use sum; temperature and other state variables must use mean (or area-weighted mean for spatial averages); demand/power peaks must use max over the aggregation window; counts (occupants, equipment cycles) must use either sum or last value depending on semantics. Sub-hourly to hourly resampling must use time-weighted averages (not simple arithmetic means) when upscaling energy from, e.g., 10-minute to hourly resolution. Annual and monthly totals must account for the correct number of days including leap year handling — verify February has 28 days in non-leap and 29 in leap years. Metrics accumulators must detect and handle NaN values explicitly: a single NaN in a timestep must either be propagated as a clear error or the affected aggregation period must be flagged, never silently ignored. Stale accumulators from a previous simulation run or a previous aggregation period must not carry over into a new calculation."
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "category": "equipment-loads",
+  "description": "Scheduled and event-based load model reviews: ventilation, ZIP model loads, wet appliances, lighting gains, and appliance defaults.",
+  "reviews": [
+    {
+      "id": "equip-loads-01",
+      "slug": "ventilation-bypass-defrost-derating",
+      "title": "Ventilation bypass and defrost derating propagation to solver",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/HeatRecovery.cc",
+      "files": "crates/hares-equipment/src/ventilation.rs crates/hares-envelope/src/thermal_solver/infiltration.rs",
+      "prompt": "The ventilation model computes effective_ventilation_effectiveness() which returns a tuple of (sensible_effectiveness, latent_effectiveness) after accounting for frost-control bypass and defrost cycle derating. Review the propagation of these effectiveness values to ThermalSolverConfig.ventilation before each thermal solver step—an outdated or cached effectiveness value would cause the solver to use incorrect supply air conditions for an entire step. Verify that supply air temperature and humidity ratio are computed from the effectiveness values as T_supply = T_outdoor + eff_sensible*(T_indoor - T_outdoor) and w_supply = w_outdoor + eff_latent*(w_indoor - w_outdoor). Check the defrost derating logic: does the model reduce effectiveness during defrost and increase bypass air fraction, and are these two effects additive or do they interact (bypass during defrost may be redundant)? Compare the frost-control and defrost derating approach against EnergyPlus HeatExchanger:AirToAir (HeatRecovery.cc), especially the defrost fraction calculation as a function of outdoor temperature."
+    },
+    {
+      "id": "equip-loads-02",
+      "slug": "scheduled-load-zip-zone-routing",
+      "title": "Scheduled load ZIP model and auto-zone routing by name convention",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ScheduledLoad.py vendors/OCHRE/ochre/Equipment/EventBasedLoad.py",
+      "files": "crates/hares-equipment/src/scheduled_load.rs crates/hares-equipment/src/event_load.rs",
+      "prompt": "Scheduled loads use a ZIP model (constant impedance Z, constant current I, constant power P coefficients) to compute real power as a function of terminal voltage, with reactive power coefficients defaulting to zero. Review whether the default zero reactive coefficients are appropriate—this essentially assumes unity power factor for all default loads, which may overstate the combined load power factor. Audit the automatic zone-routing logic that assigns thermal gains from loads to building thermal zones by location name convention: a load assigned to a room named 'Garage' should route its thermal gains to the garage zone, while basement and exterior-convention loads route accordingly. Verify that when zone is explicitly set to None (outdoor load), the thermal gain fraction is set to zero for the indoor thermal balance—no heat should be added to the indoor air. Check that all 14+ scheduled load types are enumerated and each has correct default ZIP coefficients and gain fractions. Compare against OCHRE's ScheduledLoad.py and EventBasedLoad.py for the full set of load types and their default parameters."
+    },
+    {
+      "id": "equip-loads-03",
+      "slug": "event-load-wet-appliance",
+      "title": "Event-based load wet appliance model completeness",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/EventBasedLoad.py vendors/OCHRE/ochre/Equipment/WetAppliance.py",
+      "files": "crates/hares-equipment/src/event_load.rs",
+      "prompt": "Wet appliances (clothes washer, dishwasher, clothes dryer, cooking range) use event-based load models with multi-phase power and water draw profiles. Review whether the multi-phase flow rate model from OCHRE's WetAppliance.py is correctly implemented: each appliance event has distinct phases (fill, wash, rinse, spin for clothes washer; wash, rinse, dry for dishwasher) with per-phase electric power, hot water draw, and duration. Verify that the clothes dryer model distinguishes between vented electric, vented gas, and unvented (condenser) types. For vented gas dryers, the combustion latent heat and moisture release into the indoor space must be modeled—check whether these latent gains are routed to the humidity solver. For unvented condenser dryers, the latent heat is rejected to the condenser and should not appear as indoor moisture gain. Also check whether the dishwasher's hot water draw is communicated to the water heater model as a draw event that triggers water heater operation. Compare parameter completeness against OCHRE's WetAppliance.py, noting any CEF vs EF efficiency metric conversion for dryers."
+    },
+    {
+      "id": "equip-loads-04",
+      "slug": "lighting-gain-fraction-defaults",
+      "title": "Lighting thermal gain fraction defaults and location routing",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-io/src/hpxml/resolve_loads.rs crates/hares-equipment/src/scheduled_load.rs",
+      "prompt": "Lighting loads have thermal gain fractions that vary by lighting technology type: LED has a much higher fraction of energy converted to light (which then becomes heat at illuminated surfaces) compared to incandescent where a large portion goes directly to convective/radiative heat at the fixture. Review the default gain fractions for LED, CFL, and incandescent types to verify physically correct allocation: incandescent typically ~90% heat at fixture with ~10% visible light, LED ~70% light with ~30% fixture heat. Audit the zone-routing of lighting gains: garage lights should route gains to the garage zone when one exists, otherwise default to the main conditioned space. Exterior lighting should route 100% of its energy as outdoor loss (zero indoor thermal gain). Verify that the lighting schedule shape factors and diversity multipliers are consistent with typical residential usage patterns. Compare lighting gain fraction defaults and zone routing against OCHRE's hpxml.py lighting load resolution."
+    },
+    {
+      "id": "equip-loads-05",
+      "slug": "appliance-defaults-citation",
+      "title": "Appliance default energy values: source citation and coverage",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-io/src/hpxml/resolve_loads.rs",
+      "prompt": "Default RatedAnnualkWh values for major appliances (refrigerator, freezer, dishwasher, cooking range, clothes washer, clothes dryer) are hardcoded as fallback values when HPXML inputs omit energy consumption data. Review the source for each default value: are they from ANSI/RESNET 301-2022 Appendix B, the DOE Appliance Standards Rulemaking, RECS survey data, or another source? Bedroom-count-based formulas for refrigerators and freezers should follow the correct ANSI/RESNET 301 version—verify the specific formula coefficients and the RESNET standard year referenced. Check whether any defaults have become stale relative to HPXML 4.2, which may have updated reference appliance efficiencies (e.g., current federal minimum standards are more stringent than when some RESNET defaults were published). Compare the full set of appliance defaults against OCHRE's hpxml.py to identify any appliances missing from HARES's default table or values that differ. For cooking range default energy, verify whether the value accounts for both electric and gas ranges or is electric-only."
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "category": "architecture",
+  "description": "Overall architecture assessment: crate dependency graph, data flow, coupling, and structural concerns",
+  "reviews": [
+    {
+      "id": "arch-01",
+      "slug": "overall-architecture",
+      "title": "Overall architecture assessment: crate dependency graph, data flow, coupling",
+      "vendor_refs": "vendors/OCHRE/ochre/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/*/src/lib.rs crates/*/Cargo.toml",
+      "prompt": "Assess the crate dependency graph for circular dependencies — verify that no cycle exists and that dependencies follow a strict layering (types < io < equipment < core < fleet/py). Check that data flows are well-defined with clear ownership boundaries: configuration enters at io layer, flows through core dwelling into equipment models, and outputs via telemetry. Evaluate coupling: are there god objects or excessively large modules that concentrate too much state? Compare against OCHRE's Simulator/Dwelling/Equipment hierarchy where a clean compositional model separates concerns, and against EnergyPlus's EnergyPlusData monolith pattern which centralizes all simulation state. Identify any crates that import from higher layers. Flag modules exceeding 500+ lines that should be split."
+    },
+    {
+      "id": "arch-02",
+      "slug": "core-state-structs",
+      "title": "Core state types: EnvironmentState, WeatherState, ZoneState completeness",
+      "vendor_refs": "vendors/OCHRE/ochre/Models/Envelope.py vendors/EnergyPlus/src/EnergyPlus/Data/",
+      "files": "crates/hares-types/src/environment.rs crates/hares-core/src/environment.rs",
+      "prompt": "Verify that EnvironmentState, WeatherState, and ZoneState contain all required state fields needed by equipment models, solvers, and actors. Check unit consistency across all fields — temperatures must be in Celsius, pressures in Pa, mass flows in kg/s throughout. Identify any fields that can become stale due to caching across timesteps without refresh. Assess whether the current state representation is sufficient to support checkpoint/restore operations: can the entire simulation state be serialized and resumed at any timestep without information loss? Verify that WeatherState is correctly refreshed at timestep boundaries, including proper extraction of dry-bulb temperature, humidity, pressure, wind speed, and solar irradiance components (beam, diffuse, ground-reflected) from the weather file. Compare field coverage against OCHRE's Envelope model state and EnergyPlus's ZoneData to ensure no critical thermal or moisture state fields are missing."
+    },
+    {
+      "id": "arch-03",
+      "slug": "control-capability-matching",
+      "title": "Control capability matching: equipment declares capabilities, dispatcher matches signals",
+      "vendor_refs": "vendors/OCHRE/ochre/Dwelling.py",
+      "files": "crates/hares-control/src/capabilities.rs crates/hares-control/src/dispatch.rs crates/hares-control/src/signal.rs",
+      "prompt": "Equipment models declare CoreCapabilities and ControlCapabilities bitflags specifying which control signals they accept. The ControlDispatcher matches incoming control signals (setpoint, power limit, mode override, price signal, DR event, etc.) against equipment capability declarations. Audit every ControlSignal variant against every equipment type's declared capabilities: verify that each signal type has at least one equipment type that declares the corresponding bitflag. Check for signals that could be silently dropped because no equipment declares the relevant capability — this is a silent failure mode. Verify that HAS_SETPOINT is correctly declared by HVAC equipment (heat pumps, AC, furnaces), HAS_POWER_LIMIT by curtailable loads (EV, battery, water heater), HAS_MODE_OVERRIDE by all equipment with operating modes, HAS_PRICE_SIGNAL by price-responsive equipment (EV, battery), and HAS_DR_EVENT by DR-participating equipment. Check that bitflag definitions are complete and that OR-combination semantics are used correctly when equipment accepts multiple signal types. Single-bit flags must not alias across different signal semantics."
+    },
+    {
+      "id": "arch-04",
+      "slug": "port-slot-accumulation",
+      "title": "Port slot accumulation: declaration vs runtime, zone indexing, category tagging",
+      "vendor_refs": "vendors/OCHRE/ochre/Dwelling.py",
+      "files": "crates/hares-types/src/ports.rs crates/hares-core/src/dwelling/mod.rs",
+      "prompt": "PortSlots are declared at initialization time (static wiring) and accumulated at runtime as equipment produces port contributions. Verify that the declarative wiring model prevents accumulation to undeclared slots — any PortContribution emitted to a port name not registered in the slot map must be caught as an error rather than silently discarded. Audit every ThermalCategory tag (HvacHeating, HvacCooling, DuctLoss, JacketLoss, InternalGain) to verify it is correctly set by the equipment producing it: HVAC equipment contributes HvacHeating/HvacCooling, duct models contribute DuctLoss, water heater jacket losses contribute JacketLoss, occupant/lighting/appliance models contribute InternalGain. Verify that the Accumulator correctly sums contributions from multiple equipment targeting the same zone — e.g., a heat pump, water heater jacket loss, and occupant gains must all accumulate correctly to the same zone accumulator. Check that zone_id indexing is consistent between the port wiring declarations and the environment's Zone array: no off-by-one errors, no dangling zone references to zones that don't exist in the dwelling definition."
+    }
+  ]
+}

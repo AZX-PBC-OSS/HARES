@@ -2313,13 +2313,12 @@ mod tests {
     /// (e.g. HVAC column of B_c is zero → `ZeroEffectiveGain`), the solver fails
     /// and returns 0.0 W. This test verifies that the failure path:
     ///   1. Returns 0.0 (no spurious non-zero capacity)
-    ///   2. Emits a `warn!` log with the expected diagnostic string
+    ///   2. Records the zone in `ideal_capacity_warned_zones` (the behavioral contract)
     ///
     /// To trigger `ZeroEffectiveGain`: use a B matrix where the HVAC sensible-input column
     /// (column 1) has zero contribution to the zone output (C row × B_eff[:, 1] ≈ 0).
     /// We achieve this by setting the HVAC column of B_c to zero.
     #[test]
-    #[traced_test]
     fn solve_ideal_capacity_failure_returns_zero_and_warns() {
         let zone_temp = 20.0;
         let outdoor_temp = 10.0;
@@ -2367,12 +2366,12 @@ mod tests {
         solver.x[0] = zone_temp;
 
         // The HVAC input has zero gain → solve_for_scalar_input returns ZeroEffectiveGain.
-        // After fix: returns 0.0 and logs at warn!.
+        // After fix: returns 0.0 and records the zone in warned_zones.
         let q = solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
         assert_eq!(q, 0.0, "failure path must return 0.0");
         assert!(
-            logs_contain("solve_ideal_capacity_for_target failed"),
-            "expected warn! log for ideal capacity solve failure"
+            solver.ideal_capacity_warned_zones.contains(&ZoneId(1)),
+            "failure path must record zone in warned_zones"
         );
     }
 

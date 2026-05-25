@@ -1,0 +1,102 @@
+{
+  "category": "hpxml",
+  "description": "HPXML input parsing, validation, defaults, unit conversions",
+  "reviews": [
+    {
+      "id": "hpxml-01",
+      "slug": "duct-leakage-cfm25-silent-skip",
+      "title": "HPXML duct leakage CFM25 units silently skipped",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-io/src/hpxml/building.rs crates/hares-io/src/hpxml/equipment.rs",
+      "prompt": "When HPXML <DuctLeakageMeasurements/Units> is CFM25 (volumetric flow, not fraction), the parser logs tracing::warn and skips the value, producing zero duct leakage for DSE. OCHRE handles this by using fan flow to convert CFM25 to a fraction. Review the code at building.rs:4993-5045. Check: does HARES have fan flow available at parse time? Should this be a hard error instead of silent skip? Compare against OCHRE handle at hpxml.py DSE computation."
+    },
+    {
+      "id": "hpxml-02",
+      "slug": "wh-jacket-ua-reduction-mismatch",
+      "title": "Water heater jacket R-value UA reduction timing mismatch vs OCHRE",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py vendors/OCHRE/ochre/Equipment/WaterHeater.py",
+      "files": "crates/hares-io/src/hpxml/resolve_water_heater.rs crates/hares-io/src/hpxml/water_heater_ua.rs",
+      "prompt": "OCHRE reduces tank UA by jacket insulation at parse time in hpxml.py. HARES parses jacket_r_value_m2_k_w but stores the un-reduced ua_w_per_k. Verify that the water heater equipment model (crates/hares-equipment/src/water_heater/tank.rs) applies jacket UA reduction at initialization. If the reduction is not applied before the energy balance, the tank model will silently overestimate standby losses."
+    },
+    {
+      "id": "hpxml-03",
+      "slug": "ceiling-height-fallback",
+      "title": "Ceiling height defaults to 2.5m with only a warning",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-io/src/hpxml/building.rs",
+      "prompt": "When conditioned volume and floor area are absent from the HPXML, the parser defaults ceiling height to 2.5m (building.rs:766-774) with only a tracing::warn. This default propagates into zone volumes, attic geometry, and infiltration calculations. Should this be a hard error requiring explicit user input? What does OCHRE do — does it enforce that either volume or floor-area+ceiling-height are present?"
+    },
+    {
+      "id": "hpxml-04",
+      "slug": "foundation-wall-area-zero",
+      "title": "Foundation wall area defaults to 0.0 for missing Area element",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-io/src/hpxml/building.rs",
+      "prompt": "Unlike above-grade walls, roofs, and floors (which produce a hard error on missing area), FoundationWall and Slab areas silently default to 0.0 (building.rs ~1281 area near FoundationWall parsing). A malformed foundation wall element with a missing Area child produces zero heat loss through that surface with no diagnostic warning. Compare OCHRE behavior for missing FoundationWall Area. Should a missing area produce at minimum a warning, or should it be treated as a hard parse error?"
+    },
+    {
+      "id": "hpxml-05",
+      "slug": "refrigerator-location-string-match",
+      "title": "Refrigerator gain fraction zeroing uses fragile string matching",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-io/src/hpxml/resolve_loads.rs",
+      "prompt": "The is_conditioned_location() function matches location strings against only 'conditioned space', 'living space', and 'indoor'. A refrigerator located in 'basement - conditioned', 'conditioned basement', or any semantically conditioned-but-differently-named zone is treated as non-conditioned, zeroing its internal gains. Should use zone type enum comparison rather than string matching. Compare against OCHRE's location-to-zone-type mapping approach."
+    },
+    {
+      "id": "hpxml-06",
+      "slug": "infiltration-unit-conversion-exponent",
+      "title": "Infiltration ACHnatural/CFMnatural conversion uses hardcoded exponent",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py crates/hares-physics/src/infiltration.rs",
+      "files": "crates/hares-io/src/hpxml/building.rs",
+      "prompt": "The ach_nat_to_ach50() function applies the same exponent (0.65) to both ACH and CFM rate conversions (building.rs:5153-5240). However, CFM depends on house volume — the conversion should normalize the volumetric flow rate by volume to compute an air-change rate before applying the pressure exponent. Check ASHRAE 119 reference for correct CFMnatural-to-CFM50 conversion sequence. What does OCHRE do with CFMnatural infiltration inputs?"
+    },
+    {
+      "id": "hpxml-07",
+      "slug": "adjacent-zone-boundaries-filtered",
+      "title": "Adjacent (adiabatic) zone boundaries silently filtered out",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py vendors/OCHRE/ochre/Models/Envelope.py",
+      "files": "crates/hares-io/src/hpxml/building.rs",
+      "prompt": "ZoneType::Adjacent zones are filtered out at building.rs ~758-760 during zone assembly. This means heat transfer to adjacent dwelling units (e.g., apartment party walls) is silently ignored rather than modeled as adiabatic or with a specified temperature schedule. Is a configurable adiabatic boundary model needed for multi-family accuracy? What does OCHRE do with Attached/Adjacent zone types?"
+    },
+    {
+      "id": "hpxml-08",
+      "slug": "wh-uef-ef-regression-constants",
+      "title": "Water heater UEF->EF regression constants are hardcoded OCHRE-specific values",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py vendors/OCHRE/ochre/Equipment/WaterHeater.py",
+      "files": "crates/hares-io/src/hpxml/water_heater_ua.rs crates/hares-io/src/hpxml/resolve_water_heater.rs",
+      "prompt": "Constants GAS_UEF_TO_EF_SLOPE (0.9066), electric regression params (2.4029/1.2844), and HPWH UEF->COP conversion (1.174536058) are derived from ResStock/Maguire 2020 and hardcoded. Should these be configurable from the defaults CSV to allow updating when better regressions become available? Are these constants valid for HPXML 4.x UEF values which have different test procedures? Check original citations."
+    },
+    {
+      "id": "hpxml-09",
+      "slug": "hvac-efficiency-normalization",
+      "title": "HVAC efficiency metric normalization uses uniform conversion factors",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py vendors/OCHRE/ochre/Equipment/HVAC.py",
+      "files": "crates/hares-io/src/hpxml/resolve_hvac.rs",
+      "prompt": "SEER2->SEER (1/0.95), HSPF2->HSPF (1/0.85 or 1/0.90), and EER2->EER (1/0.96) conversion factors are uniform regardless of equipment type and capacity. The CEC database shows EER = EER2 × factor varies from 1.038 to 1.043 depending on equipment specifics. Check AHRI 210/240-2023 conversion rules. Does using a uniform factor create systematic bias in capacity/efficiency estimates across different equipment classes?"
+    },
+    {
+      "id": "hpxml-10",
+      "slug": "hpxml-validation-coverage-gaps",
+      "title": "HPXML validation test coverage gaps",
+      "vendor_refs": "vendors/OCHRE/test/",
+      "files": "crates/hares-io/src/hpxml/validation.rs crates/hares-io/tests/hpxml_parsing_tests.rs crates/hares-io/tests/hpxml_parity.rs crates/hares-io/tests/hpxml_fixture_inventory.rs crates/hares-io/tests/hpxml_defaults_regressions.rs",
+      "prompt": "Audit the HPXML test fixture inventory: no tests use HPXML 3.x fixtures; no test covers multiple heating systems or multiple water heaters; no test exercises the HPWH low-power path; no test covers pool/spa loads via MiscLoads; no test validates HPXML 4.0 BuildingSync features. Compare against OCHRE's test fixture set under vendors/OCHRE/test/. Identify the highest-priority missing fixture classes."
+    },
+    {
+      "id": "hpxml-11",
+      "slug": "hpxml-xml-helpers",
+      "title": "HPXML XML helper utilities: correctness and edge cases",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/base.py vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-io/src/hpxml/xml_helpers.rs crates/hares-io/src/hpxml/mod.rs",
+      "prompt": "Review normalize_name(), parse_value_with_units(), temperature/Fahrenheit conversion, and area/volume/length unit parsing in xml_helpers.rs. Are unit conversion constants mathematically exact (e.g., 5/9 for F->C offset)? Check ASHRAE 152 duct leakage value parsing for edge cases. Verify that quick_xml errors are propagated with sufficient context (element name, line number) for debugging malformed HPXML files."
+    },
+    {
+      "id": "hpxml-12",
+      "slug": "hpxml-building-geometry-garage-attic",
+      "title": "HPXML garage and attic geometry computation correctness",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-io/src/hpxml/building.rs",
+      "prompt": "Review compute_garage_geometry() and compute_attic_volume() in building.rs. Check garage protrusion area calculation, attic compound volume (prism+pyramid decomposition), gable wall count vs garage presence logic, and roof pitch-to-tilt conversion. Compare against OCHRE geometry computations at hpxml.py L560-L650. Verify known FIXME about Attic<->Garage wall deletion when garage is attached and attic abuts."
+    }
+  ]
+}

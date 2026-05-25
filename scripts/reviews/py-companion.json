@@ -1,0 +1,38 @@
+{
+  "category": "py-companion",
+  "description": "Python companion code: adapter models (PyBaMM, SAM), HELICS co-simulation federates, data pipelines, and RL environments",
+  "reviews": [
+    {
+      "id": "py-companion-01",
+      "slug": "python-adapters",
+      "title": "Python adapter models: PyBaMM battery, SAM battery, SAM PV correctness",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/Battery.py vendors/OCHRE/ochre/Equipment/PV.py",
+      "files": "python/ochre_next/adapters/pybamm_battery.py python/ochre_next/adapters/sam_battery.py python/ochre_next/adapters/sam_pv.py",
+      "prompt": "Verify that PyBaMM and SAM model integrations are correct: parameter conversions between Python (SI units from model libraries) and Rust (HARES internal units) must be accurate with no unit errors. Check that adapter classes respect the Equipment trait contract — they must implement the same interface (init, step, port contributions, telemetry) that native Rust equipment models provide, otherwise the dwelling engine will fail to integrate them. Assess correctness of LUT generation: adapters produce pre-computed look-up tables from detailed physics models for injection into Rust LUT-based equipment. Verify that generated LUT tables have correct dimensionality (matching what the Rust model expects), axis breakpoints that cover the full operating range without gaps, interpolated values that match the underlying detailed model within an acceptable tolerance (<1% relative error), and correct handling of edge cases including minimum/maximum operating conditions. Check that SAM PV model correctly computes DC power from irradiance, temperature, and module parameters, and that the AC derate (inverter efficiency, wiring losses) is applied correctly. Verify that SAM battery model correctly computes round-trip efficiency, degradation as a function of cycle count and calendar age, and thermal effects on capacity."
+    },
+    {
+      "id": "py-companion-02",
+      "slug": "helics-federate",
+      "title": "HELICS federate: dwelling and fleet federates, time sync, signal mapping",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "python/ochre_next/helics/dwelling.py python/ochre_next/helics/fleet.py python/ochre_next/helics/broker.py python/ochre_next/helics/runner.py python/ochre_next/helics/_types.py",
+      "prompt": "Verify that time synchronization across HELICS co-simulation federates is correct: no timesteps are skipped, no double-execution of a timestep, and time advances monotonically. Each federate must request the same time grant and the HELICS broker must advance time only when all federates have completed their current timestep computation. Check that HELICS signal types are correctly mapped to HARES control signals: HELICS publications (subscriptions from other federates) must map to the correct ControlSignal variant (power setpoint, mode override, DR event, price signal), and HELICS subscriptions (publications to other federates) must correctly extract the relevant telemetry fields (total load, PV generation, battery SOC, zone temperature). Verify that the federate handles HELICS errors gracefully: broker disconnection mid-simulation, message delivery failures, time synchronization mismatches, and federate timeouts must produce descriptive error messages rather than hanging. Assess whether the broker lifecycle is correct: start initializes the HELICS core, run executes the simulation loop, and shutdown finalizes the federate and cleans up HELICS resources. Test that multi-federate scenarios (dwelling federate + grid federate + weather federate) exchange data correctly at each timestep."
+    },
+    {
+      "id": "py-companion-03",
+      "slug": "resstock-data-pipeline",
+      "title": "ResStock data pipeline: OEDI S3 download, building sampling, weather pairing",
+      "vendor_refs": "vendors/OCHRE/",
+      "files": "python/ochre_next/data/resstock.py python/ochre_next/data/weather.py",
+      "prompt": "Verify that the ResStock data pipeline correctly downloads building stock data from the OEDI S3 bucket: download must support retries with exponential backoff for transient network errors, validate file integrity via checksums (SHA256 or MD5), and handle partial downloads gracefully (resume or restart). Check that building-to-weather pairings are correct: each ResStock building has a climate zone assignment (IECC or ASHRAE 169-2013), and the weather file paired must match that climate zone. Verify that sampling respects housing stock weights: when sampling N buildings from a census tract or state, the probability of selecting each building archetype must be proportional to its housing stock weight (not uniform across all available HPXML files). Assess whether downloaded data is correctly cached: repeated pipeline runs must not re-download identical files, cache invalidation must work correctly when upstream data changes, and cache corruption must be detected and self-healed. Check that the pipeline can handle the full ResStock dataset (hundreds of thousands of buildings) without memory exhaustion by streaming rather than loading all HPXML into memory at once."
+    },
+    {
+      "id": "py-companion-04",
+      "slug": "rl-gym-and-vec",
+      "title": "RL Gymnasium environment: obs/action spaces, reward, vec env correctness",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_gym.rs python/ochre_next/rl/gym_env.py python/ochre_next/rl/vec_env.py",
+      "prompt": "Verify that the Gymnasium environment's observation space includes all telemetry keys needed for RL agents: zone temperatures, outdoor temperature, humidity, occupancy, time-of-day encoding, electricity price, equipment status (on/off/mode), battery SOC, EV SOC, PV generation, net load. Check that observation bounds are correct — Box space low/high values must reflect physically possible ranges (e.g., zone temperature 10-50 C, not -inf to +inf) to guide RL exploration. Action space must have correct dimension per equipment type (e.g., 1 continuous action for HVAC setpoint offset, 1 for battery charge/discharge rate, 1 for EV charging rate) and correct range (e.g., -1.0 to 1.0 for normalized actions). Reward function: verify sign convention (positive = good, negative = bad), correct scaling (reward magnitude should not overwhelm agent learning), and component weights (comfort vs. energy cost vs. demand charge trade-off). Done and truncation conditions: episode must terminate on simulation completion, not prematurely due to missing weather data. Vec environment (SubprocVecEnv): verify that each subprocess runs an independent dwelling instance with separate RNG state, observations from all environments are correctly stacked into batched arrays, and subprocess cleanup on close() releases all resources. Check that step_async() and step_wait() pattern correctly parallelizes environment stepping."
+    }
+  ]
+}

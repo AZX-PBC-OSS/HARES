@@ -1,0 +1,38 @@
+{
+  "category": "tests",
+  "description": "Test oracles, integration tests, parity tolerance assessment, and output contract validation",
+  "reviews": [
+    {
+      "id": "test-01",
+      "slug": "test-oracle-infrastructure",
+      "title": "Test oracle infrastructure: BESTEST, conditioned/freefloat oracles, parity corpus",
+      "vendor_refs": "vendors/OCHRE/test/ vendors/EnergyPlus/testfiles/",
+      "files": "crates/hares-core/tests/ tests/bestest/ tests/parity/",
+      "prompt": "Verify that all oracle types are correctly validated against reference implementations. BESTEST oracle cases (conditioned and free-float) must be validated against the ANSI/ASHRAE Standard 140 reference results with correct test procedure: identical building description, identical weather file (TMY or design-day as specified), correct output metrics (annual heating/cooling load, peak load, zone temperature range). Free-float oracle (no HVAC) must validate that indoor temperature evolution matches reference within defined tolerance bands. Assess whether the parity corpus is representative: the 10 climate zones (IECC 1A through 8) must cover hot-humid, hot-dry, marine, mixed-humid, cold, very cold, and subarctic climates with appropriate building archetypes for each. Tolerance bands must be physically justified — e.g., 0.5C for zone temperature, 5% for annual energy — not arbitrarily chosen numbers that mask real discrepancies. Verify that oracle generation scripts (Python) produce reproducible reference data: same inputs must generate identical reference outputs on any machine, and the scripts must be version-controlled with explicit dependency versions."
+    },
+    {
+      "id": "test-02",
+      "slug": "integration-test-coverage",
+      "title": "Integration test coverage: full simulation scenarios, ResStock smoke, determinism",
+      "vendor_refs": "vendors/OCHRE/test/test_dwelling/",
+      "files": "tests/regression/ tests/resstock_smoke.rs crates/hares-core/tests/",
+      "prompt": "Audit integration test coverage across the full simulation pipeline. Verify that tests cover the complete HPXML-to-telemetry-output pipeline including config parsing, building model construction, equipment initialization, multi-day simulation with weather seasonal variation, equipment interactions (HVAC + water heater + PV + battery), multi-dwelling fleet execution, checkpoint/restart (save state, restore, continue, verify identical output), and deterministic reproducibility (same seed = same output). Check that every equipment type — heat pump, AC, furnace, electric resistance, gas water heater, heat pump water heater, PV, battery, EV — appears in at least one integration test that exercises its full state machine (off -> on -> cycling -> off). Assess whether integration tests exercise seasonal weather variation (summer vs winter performance differences should cause measurable output changes). Verify that multi-dwelling fleet tests exercise heterogeneous dwellings (different climate zones and building types) in the same fleet run. Check that checkpoint/restart tests verify every state field is serialized and restored, not just a subset."
+    },
+    {
+      "id": "test-03",
+      "slug": "parity-test-tolerance",
+      "title": "Parity test tolerance definitions: physically justified or hiding defects?",
+      "vendor_refs": "vendors/OCHRE/ vendors/EnergyPlus/",
+      "files": "tests/parity/tolerance.rs",
+      "prompt": "Examine every numeric tolerance value defined in parity testing and assess whether each is physically justified or potentially masking real discrepancies. A tolerance of 1C on zone temperature might be acceptable for annual energy predictions but would mask comfort-relevant temperature errors. A tolerance of 10% on annual energy might hide systematic equipment modeling errors. For each tolerance, identify the physical justification: sensor accuracy limit? round-off error bound? acceptable engineering margin? Document any tolerances wide enough to mask known discrepancies between HARES and the reference implementation (OCHRE or EnergyPlus). Assess the process for tightening tolerances: as defects are fixed, tolerances should narrow — but is there a mechanism to detect that parity improved and tighten the tolerance accordingly? Verify that parity tests use identical inputs (same weather file, same building description, same schedule parameters) as the reference — if inputs differ, tolerances are meaningless. Check that reference data generation uses the same parameterization (e.g., same thermal capacitance model, same infiltration model) rather than comparing across fundamentally different model formulations."
+    },
+    {
+      "id": "test-04",
+      "slug": "core-output-contract",
+      "title": "CoreOutput contract validation: invariants, bitflag checks, test coverage",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/OutputProcessor.cc",
+      "files": "crates/hares-types/tests/core_output_invariants.rs crates/hares-types/src/telemetry.rs",
+      "prompt": "Verify that the CoreOutput contract validation is complete and catches realistic data corruption scenarios. The CoreOutput struct carries the simulation output for one timestep across all zones and equipment. Contract validation must check all required fields: non-NaN for numeric values, valid time index (monotonic, within simulation bounds), valid zone indices (within dwelling zone count), non-negative power/energy values where physically required (e.g., load energy cannot be negative, PV generation cannot be negative), SOC values within [0, 1], temperatures within physically possible range (-50C to 80C). Check that bitflag checks are correct: status bitflags (equipment on/off, heating/cooling mode, DR active, fault condition) must be validated for consistency (e.g., equipment cannot simultaneously be in heating AND cooling mode, cannot report non-zero power while off). Verify that contract validation catches realistic data corruption: NaN injection from numerical instability, out-of-range values from uninitialized memory, negative values where only non-negative is valid. Assess test coverage for core_output_invariants.rs: are all invariant checks exercised by at least one test case? Are edge cases (empty output, single-zone, maximum zone count, boundary timesteps) covered?"
+    }
+  ]
+}

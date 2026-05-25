@@ -13,7 +13,7 @@
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
@@ -23,11 +23,10 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    fn weather_for(bldg_dir: &PathBuf) -> PathBuf {
+    fn weather_for(bldg_dir: &Path) -> PathBuf {
         let xml = fs::read_to_string(bldg_dir.join("home.xml")).unwrap();
         let fips = parse_fips(&xml);
-        let wdir = project_root()
-            .join("tests/fixtures/resstock/2025.1/weather");
+        let wdir = project_root().join("tests/fixtures/resstock/2025.1/weather");
         [format!("{fips}_2018.csv"), format!("{fips}.csv")]
             .iter()
             .map(|n| wdir.join(n))
@@ -70,8 +69,7 @@ mod tests {
 
     #[test]
     fn ct_boiler_diagnostic() {
-        let bldg_dir = project_root()
-            .join("tests/fixtures/resstock/2025.1/bldg0000002");
+        let bldg_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
 
         let output = std::env::temp_dir().join(utn("ct_boiler_diag.csv"));
         let _cleanup = TmpGuard(output.clone());
@@ -128,7 +126,7 @@ mod tests {
         // ── 5. First 10 and last 5 steps: print summary ──────────────────
         print_step_table(&snapshots, "FIRST 10 STEPS", 0..10.min(snapshots.len()));
         let n = snapshots.len();
-        let last_start = if n >= 5 { n - 5 } else { 0 };
+        let last_start = n.saturating_sub(5);
         print_step_table(&snapshots, "LAST 5 STEPS", last_start..n);
 
         // ── 6. Find cold steps (indoor < 10°C) ───────────────────────────
@@ -180,14 +178,11 @@ mod tests {
         eprintln!("\n=== ANALYSIS ===");
 
         // Temperature summary
-        let min_zone = zone_temps_all
-            .iter()
-            .fold(f64::INFINITY, |a, &b| a.min(b));
+        let min_zone = zone_temps_all.iter().fold(f64::INFINITY, |a, &b| a.min(b));
         let max_zone = zone_temps_all
             .iter()
             .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let avg_zone =
-            zone_temps_all.iter().sum::<f64>() / zone_temps_all.len().max(1) as f64;
+        let avg_zone = zone_temps_all.iter().sum::<f64>() / zone_temps_all.len().max(1) as f64;
 
         let min_oat = outdoor_temps_all
             .iter()
@@ -214,25 +209,33 @@ mod tests {
             eprintln!("\n  Boiler analysis ({total_steps} steps observed):");
             eprintln!("    ON steps:  {steps_on}");
             eprintln!("    OFF steps: {steps_off}");
-            eprintln!("    Max thermal_output_w: {max_thermal_w:.0} W ({:.2} kW)", max_thermal_w / 1000.0);
-            eprintln!("    Max fuel_input_w:     {max_fuel_w:.0} W ({:.2} kW)", max_fuel_w / 1000.0);
+            eprintln!(
+                "    Max thermal_output_w: {max_thermal_w:.0} W ({:.2} kW)",
+                max_thermal_w / 1000.0
+            );
+            eprintln!(
+                "    Max fuel_input_w:     {max_fuel_w:.0} W ({:.2} kW)",
+                max_fuel_w / 1000.0
+            );
 
             // Expected: HPXML HeatingCapacity = 37881 BTU/hr, AFUE = 0.78
             // Net capacity = 37881 * 0.78 / 3.41214 = ~8658 W (8.66 kW)
             let expected_net_w = 8658.0;
-            eprintln!("    Expected net capacity: {expected_net_w:.0} W (8.66 kW from HPXML 37881 BTU/hr * 0.78 AFUE)");
+            eprintln!(
+                "    Expected net capacity: {expected_net_w:.0} W (8.66 kW from HPXML 37881 BTU/hr * 0.78 AFUE)"
+            );
 
             if max_thermal_w > 0.0 {
                 let apparent_sf = max_thermal_w / expected_net_w;
                 let sf_verdict = if (apparent_sf - 1.0).abs() < 0.05 {
-                "≈ 1.0 (full capacity)".to_string()
-            } else if apparent_sf < 0.9 {
-                format!("≈ {apparent_sf:.2} (REDUCED — check fraction_heating_load_served)")
-            } else {
-                format!("≈ {apparent_sf:.2} (close to 1.0)")
-            };
-            eprintln!("    Apparent space_fraction (max_thermal/expected): {apparent_sf:.3}");
-            eprintln!("    => space_fraction {sf_verdict}");
+                    "≈ 1.0 (full capacity)".to_string()
+                } else if apparent_sf < 0.9 {
+                    format!("≈ {apparent_sf:.2} (REDUCED — check fraction_heating_load_served)")
+                } else {
+                    format!("≈ {apparent_sf:.2} (close to 1.0)")
+                };
+                eprintln!("    Apparent space_fraction (max_thermal/expected): {apparent_sf:.3}");
+                eprintln!("    => space_fraction {sf_verdict}");
             }
 
             if steps_on == 0 {
@@ -240,7 +243,9 @@ mod tests {
                 eprintln!("        Likely thermostat issue — heating setpoint may be set too low");
                 eprintln!("        or the thermostat is not recognizing the heating need.");
             } else if (min_zone - min_oat).abs() < 1.0 {
-                eprintln!("\n    *** INDOOR TEMP TRACKS OUTDOOR — possible no thermal coupling ***");
+                eprintln!(
+                    "\n    *** INDOOR TEMP TRACKS OUTDOOR — possible no thermal coupling ***"
+                );
             } else if min_zone < 12.0 && steps_on > 0 {
                 eprintln!("\n    *** BOILER RUNNING BUT HOUSE STILL COLD ***");
                 if max_thermal_w < expected_net_w * 0.8 {
@@ -248,7 +253,9 @@ mod tests {
                 } else {
                     eprintln!("        Boiler at full capacity but cannot meet load (undersized)");
                 }
-                eprintln!("        Possible causes: poor insulation, high infiltration, duct losses.");
+                eprintln!(
+                    "        Possible causes: poor insulation, high infiltration, duct losses."
+                );
             }
         }
 
@@ -257,13 +264,33 @@ mod tests {
         for eq in dwelling.equipment() {
             let name: &str = &eq.descriptor().name;
             let co = eq.core_output();
-            let mode = co.state.operating_mode.map(|m| format!("{m:?}")).unwrap_or_default();
-            let setpoint = co.state.setpoint_c.map(|s| format!("{s:.1}°C")).unwrap_or_default();
-            let elec = co.flows.electric_kw.as_ref()
-                .map(|e| format!("{:.3} kW", e.net_consumption_kw())).unwrap_or_default();
-            let thermal = co.flows.thermal_output_w.map(|w| format!("{w:.0} W")).unwrap_or_default();
-            let fuel = co.flows.fuel_w.as_ref()
-                .map(|f| format!("{:.0} W", f.consumption_w)).unwrap_or_default();
+            let mode = co
+                .state
+                .operating_mode
+                .map(|m| format!("{m:?}"))
+                .unwrap_or_default();
+            let setpoint = co
+                .state
+                .setpoint_c
+                .map(|s| format!("{s:.1}°C"))
+                .unwrap_or_default();
+            let elec = co
+                .flows
+                .electric_kw
+                .as_ref()
+                .map(|e| format!("{:.3} kW", e.net_consumption_kw()))
+                .unwrap_or_default();
+            let thermal = co
+                .flows
+                .thermal_output_w
+                .map(|w| format!("{w:.0} W"))
+                .unwrap_or_default();
+            let fuel = co
+                .flows
+                .fuel_w
+                .as_ref()
+                .map(|f| format!("{:.0} W", f.consumption_w))
+                .unwrap_or_default();
             eprintln!(
                 "    {:30} mode={mode:12} setpoint={setpoint:8} elec={elec:12} thermal={thermal:10} fuel={fuel:10}",
                 name
@@ -273,9 +300,15 @@ mod tests {
             if name.to_lowercase().contains("boiler") {
                 let telemetry = eq.telemetry();
                 if let Some(eir) = telemetry.get("eir") {
-                    eprintln!("      telemetry: eir={eir:.4}, rated_capacity (approx via fuel/eir when on)");
+                    eprintln!(
+                        "      telemetry: eir={eir:.4}, rated_capacity (approx via fuel/eir when on)"
+                    );
                 }
-                if telemetry.get("heating_setpoint_c").unwrap_or(f64::NAN).is_finite() {
+                if telemetry
+                    .get("heating_setpoint_c")
+                    .unwrap_or(f64::NAN)
+                    .is_finite()
+                {
                     eprintln!(
                         "      telemetry heating_setpoint_c={:.1}",
                         telemetry.get("heating_setpoint_c").unwrap()
@@ -340,14 +373,8 @@ mod tests {
                         let elec_kw = eq.telemetry.get("electric_kw").unwrap_or(f64::NAN);
                         let fuel_w = eq.telemetry.get("fuel_input_w").unwrap_or(f64::NAN);
                         let eir = eq.telemetry.get("eir").unwrap_or(f64::NAN);
-                        let heat_sp = eq
-                            .telemetry
-                            .get("heating_setpoint_c")
-                            .unwrap_or(f64::NAN);
-                        let cool_sp = eq
-                            .telemetry
-                            .get("cooling_setpoint_c")
-                            .unwrap_or(f64::NAN);
+                        let heat_sp = eq.telemetry.get("heating_setpoint_c").unwrap_or(f64::NAN);
+                        let cool_sp = eq.telemetry.get("cooling_setpoint_c").unwrap_or(f64::NAN);
 
                         eprintln!(
                             "{:>4} {:>10} {:>7.1} {:>7.1}  {:>8} {:>12.0} {:>8.1}  {:>16.1} {:>16.1}",
@@ -405,8 +432,10 @@ mod tests {
         // Environment phase
         if let Some(env) = snap.phases.post_environment.as_ref() {
             eprintln!("    All zone temps (env):      {:?}", env.zone_temps_c);
-            eprintln!("    GHI: {:.0} W/m²  Wind: {:.1} m/s  Mains: {:.1}°C",
-                env.ghi_w_m2, env.wind_speed_m_s, env.mains_temp_c);
+            eprintln!(
+                "    GHI: {:.0} W/m²  Wind: {:.1} m/s  Mains: {:.1}°C",
+                env.ghi_w_m2, env.wind_speed_m_s, env.mains_temp_c
+            );
         }
 
         // Thermal equipment phase
@@ -414,7 +443,10 @@ mod tests {
             eprintln!("    ── Thermal equipment ──");
             for eq in &phase.equipment {
                 eprintln!("      Name:         {}", eq.name);
-                eprintln!("      Type:         {} (end_use={:?})", eq.equipment_type, eq.end_use);
+                eprintln!(
+                    "      Type:         {} (end_use={:?})",
+                    eq.equipment_type, eq.end_use
+                );
 
                 // All telemetry keys
                 eprintln!("      Telemetry:");
@@ -425,10 +457,19 @@ mod tests {
                 // Contribution
                 eprintln!("      Contribution:");
                 eprintln!("        thermal:          {:?}", eq.contribution.thermal);
-                eprintln!("        electrical_load:  {:.6} kW", eq.contribution.electrical_load_kw);
-                eprintln!("        electrical_gen:   {:.6} kW", eq.contribution.electrical_gen_kw);
+                eprintln!(
+                    "        electrical_load:  {:.6} kW",
+                    eq.contribution.electrical_load_kw
+                );
+                eprintln!(
+                    "        electrical_gen:   {:.6} kW",
+                    eq.contribution.electrical_gen_kw
+                );
                 if !eq.contribution.fuel_consumption_w.is_empty() {
-                    eprintln!("        fuel_consumption: {:?}", eq.contribution.fuel_consumption_w);
+                    eprintln!(
+                        "        fuel_consumption: {:?}",
+                        eq.contribution.fuel_consumption_w
+                    );
                 }
                 if !eq.contribution.fluid.is_empty() {
                     for f in &eq.contribution.fluid {
