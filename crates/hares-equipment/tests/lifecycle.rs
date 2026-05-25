@@ -517,6 +517,7 @@ fn scheduled_load_grid_outage_keeps_reactive_core_output_present_when_configured
         "Plug Loads",
         &[
             ("zone_id", 1.0),
+            ("sensible_gain_fraction", 0.0),
             ("power_constant_kw", 1.5),
             ("zip_zq", 0.2),
             ("zip_iq", 0.3),

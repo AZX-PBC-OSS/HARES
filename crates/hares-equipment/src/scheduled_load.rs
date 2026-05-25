@@ -259,13 +259,12 @@ impl ScheduledLoad {
                     None
                 }
             })
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    "sensible_gain_fraction missing for '{}'; using 0.5",
+            .ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "sensible_gain_fraction missing for '{}'; must be specified explicitly",
                     self.descriptor.name
-                );
-                0.5
-            });
+                ))
+            })?;
         self.radiant_gain_fraction = radiative_frac;
         // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
         self.latent_gain_fraction = config
@@ -275,6 +274,12 @@ impl ScheduledLoad {
         if self.sensible_gain_fraction < 0.0 {
             return Err(HaresError::Equipment(format!(
                 "sensible_gain_fraction ({}) must not be negative",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.sensible_gain_fraction > 1.0 + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not exceed 1.0",
                 self.sensible_gain_fraction
             )));
         }
@@ -1220,6 +1225,7 @@ mod tests {
             KEY_POWER_CONSTANT_KW.to_string(),
             schedule.first().copied().unwrap_or(0.0).into(),
         );
+        raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
         EquipmentConfig::raw(name.to_string(), ochre_class.to_string(), raw)
     }
 
@@ -1259,6 +1265,7 @@ mod tests {
             "Lighting",
             &[1.0],
             &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_ZIP_Z, 0.2.into()),
                 (KEY_ZIP_I, 0.2.into()),
                 (KEY_ZIP_P, 0.2.into()),
@@ -1276,6 +1283,7 @@ mod tests {
             "Lighting",
             &[2.0],
             &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_ZIP_Z, 0.2.into()),
                 (KEY_ZIP_I, 0.3.into()),
                 (KEY_ZIP_P, 0.5.into()),
@@ -1321,47 +1329,23 @@ mod tests {
     }
 
     #[test]
-    fn missing_sensible_gain_fraction_uses_conservative_half() {
-        let config = config_with_schedule("s", "Lighting", &[1.0]);
+    fn missing_sensible_gain_fraction_returns_err_on_init() {
+        // Construct a config without any sensible_gain_fraction key.
+        let mut raw: std::collections::HashMap<String, crate::config::ConfigValue> =
+            std::collections::HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
+        // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
+        let config = crate::EquipmentConfig::raw("s".to_string(), "Lighting".to_string(), raw);
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
-        let env = base_env();
-        eq.init(&config, &env).unwrap();
-
-        let mut ports = PortSlots {
-            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        };
-        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert!((ports.thermal[0].sensible_gain_w - 500.0).abs() < 1e-12);
-    }
-
-    // Regression test for ticket #114: init() must return Err when
-    // sensible_gain_fraction is absent (no explicit key, no HPXML alias,
-    // no convective/radiative sum available). The silent 0.5 fallback biases
-    // HVAC sizing; callers must provide an explicit value.
-    //
-    // Fix pending — will stop panicking when init() returns Err for missing
-    // sensible_gain_fraction instead of defaulting to 0.5.
-    #[test]
-    #[should_panic(expected = "init() must return Err when sensible_gain_fraction is absent")]
-    fn missing_sensible_gain_fraction_returns_err() {
-        let config = config_with_schedule("s", "Lighting", &[1.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
-        let env = base_env();
-        let result = eq.init(&config, &env);
+        let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
-            result.is_err(),
-            "init() must return Err when sensible_gain_fraction is absent; \
-             got Ok (ticket #114 regression: silent 0.5 default is still present)"
+            err.to_string().contains("sensible_gain_fraction missing"),
+            "expected 'sensible_gain_fraction missing' error, got: {err}"
         );
     }
 
-    // Regression test for ticket #114: init() must return Err when
-    // sensible_gain_fraction is outside [0.0, 1.0].
-    //
-    // Currently FAILS for values > 1.0 (the existing > 0 check catches < 0 only
-    // in combination; upper bound validation is not enforced for sensible alone).
-    // Will pass once explicit range validation is added.
     #[test]
     fn out_of_range_sensible_gain_fraction_returns_err() {
         use crate::config::ConfigValue;
@@ -1378,8 +1362,8 @@ mod tests {
         let result = eq.init(&config, &env);
         assert!(
             result.is_err(),
-            "init() must return Err for sensible_gain_fraction=1.5 (> 1.0); \
-             got Ok (ticket #114: upper-bound validation missing)"
+            "init() must return Err for sensible_gain_fraction=1.5 outside [0.0, 1.0]; \
+             got Ok (upper-bound validation missing)"
         );
     }
 
@@ -1562,6 +1546,7 @@ mod tests {
             "Lighting",
             &[1.0],
             &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_GAS_SCHEDULE_SOURCE, "constant".into()),
                 (KEY_GAS_CONSTANT, 0.1.into()),
             ],
@@ -1589,6 +1574,7 @@ mod tests {
             "Lighting",
             &[1.0],
             &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_GAS_SCHEDULE_SOURCE, "constant".into()),
                 (KEY_GAS_CONSTANT, 1000.0.into()),
                 (KEY_GAS_SCHEDULE_IS_W, 1.0.into()),
@@ -1821,6 +1807,7 @@ mod tests {
             "Gas Grill",
             &[1.0],
             &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_GAS_SCHEDULE_SOURCE, "constant".into()),
                 (KEY_GAS_CONSTANT, 0.2.into()),
             ],
@@ -1850,7 +1837,10 @@ mod tests {
             "Ceiling Fan",
             "Ceiling Fan",
             &[2.0],
-            &[(&format!("{KEY_MONTH_MULTIPLIER_PREFIX}0"), 0.0.into())],
+            &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
+                (&format!("{KEY_MONTH_MULTIPLIER_PREFIX}0"), 0.0.into()),
+            ],
         );
         let mut eq = ScheduledLoad::new(
             config.clone(),
@@ -1948,6 +1938,7 @@ mod tests {
             "Lighting",
             &[2.0],
             &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_ZIP_Z, 0.2.into()),
                 (KEY_ZIP_I, 0.3.into()),
                 (KEY_ZIP_P, 0.5.into()),
@@ -2014,6 +2005,7 @@ mod tests {
             "Lighting",
             &[2.0],
             &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (super::KEY_ZIP_ZQ, 0.0.into()),
                 (super::KEY_ZIP_IQ, 0.0.into()),
                 (super::KEY_ZIP_PQ, 1.0.into()),
@@ -2090,6 +2082,7 @@ mod tests {
             "Lighting",
             &[1.0],
             &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (super::KEY_ZIP_ZQ, 0.3.into()),
                 (super::KEY_ZIP_IQ, 0.3.into()),
                 (super::KEY_ZIP_PQ, 0.3.into()),

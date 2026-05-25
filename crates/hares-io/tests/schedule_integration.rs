@@ -48,6 +48,7 @@ fn make_schedule(columns: &[(&str, &[f64])]) -> ScheduleTimeSeries {
 fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
     let mut parameters = Map::new();
     parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+    parameters.insert("sensible_gain_fraction".to_string(), Value::from(0.0));
     EquipmentSpec {
         name: name.to_string(),
         fuel_type: FuelType::Electric,
