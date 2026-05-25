@@ -47,10 +47,16 @@ const HSPF2_TO_HSPF_FACTOR: f64 = 1.0 / 0.85;
 /// The test-procedure change for ductless units is milder than for ducted
 /// units because ductless units have no external static pressure duct penalty.
 const HSPF2_TO_HSPF_FACTOR_DUCTLESS: f64 = 1.0 / 0.90;
-/// EER2→EER factor. DOE 10 CFR Part 430 Appendix F revision / AHRI 340/360-2022:
-/// EER2 ratings ≈ 8% lower than EER under revised test procedure.
-/// Residential central estimate per DOE 2022 rulemaking.
-const EER2_TO_EER_FACTOR: f64 = 1.0 / 0.92;
+/// EER2→EER factor for central air conditioners and heat pumps.
+/// DOE 10 CFR Part 430 Appendix M1 (2023 revision) / AHRI 210/240-2023:
+/// EER2/EER ratio ≈ 0.96 (≈4% reduction). Per CEC conversion table:
+/// split-system AC: EER = EER2 × 1.043 (≈ 1/0.9588); packaged AC: EER = EER2 × 1.038.
+/// Using 1/0.96 as the central residential estimate — the exact factor varies by
+/// equipment type (split vs. packaged) and capacity bin, which HPXML cannot distinguish.
+/// Note: room ACs rated under 10 CFR Part 430 Appendix F use CEER, not EER2. An EER2
+/// value for a room AC in HPXML is likely a central-AC metric misapplied; the conversion
+/// is still applied rather than silently discarding the value.
+const EER2_TO_EER_FACTOR: f64 = 1.0 / 0.96;
 
 fn airflow_defect_multiplier(params: &Map<String, Value>) -> f64 {
     params
@@ -458,7 +464,7 @@ fn eer_from_params(params: &Map<String, Value>) -> Option<f64> {
             let units = params
                 .get("cooling_efficiency_units")
                 .and_then(Value::as_str)?;
-            if units.eq_ignore_ascii_case("EER") || units.eq_ignore_ascii_case("EER2") {
+            if units.eq_ignore_ascii_case("EER") {
                 params.get("cooling_efficiency").and_then(Value::as_f64)
             } else {
                 None
@@ -5158,18 +5164,19 @@ mod tests {
         );
     }
 
-    // EER2 must be converted to EER using EER2_TO_EER_FACTOR (1/0.92).
-    // DOE 10 CFR Part 430 Appendix F revision / AHRI 340/360-2022: EER2 ratings are ≈8%
-    // lower than EER under the revised test procedure. EER = EER2 / 0.92.
+    // EER2 must be converted to EER using EER2_TO_EER_FACTOR (1/0.96).
+    // DOE 10 CFR Part 430 Appendix M1 (2023) / AHRI 210/240-2023: EER2/EER ratio ≈ 0.96
+    // (≈4% reduction). CEC conversion table: split-system EER = EER2 × 1.043, packaged
+    // EER = EER2 × 1.038. 1/0.96 is the central residential estimate.
     #[test]
     fn eer2_is_converted_to_eer_with_correct_factor() {
         let (units, eer) = normalize_efficiency_units("EER2", 10.0, false);
         assert_eq!(units, "EER", "EER2 must normalize to label 'EER'");
 
-        let expected = 10.0_f64 / 0.92;
+        let expected = 10.0_f64 / 0.96;
         assert!(
             (eer - expected).abs() < expected * 0.001,
-            "EER2=10.0 must convert to EER≈{expected:.4} (factor 1/0.92), got {eer:.4}"
+            "EER2=10.0 must convert to EER≈{expected:.4} (factor 1/0.96), got {eer:.4}"
         );
         assert!(
             eer > 10.0,
