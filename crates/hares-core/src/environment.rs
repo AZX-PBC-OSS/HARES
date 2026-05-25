@@ -67,10 +67,6 @@ pub enum EnvironmentManagerError {
     #[error("civil_timezone requires the 'dst' cargo feature")]
     DstNotEnabled,
     #[error(
-        "attic zone {zone_idx} is missing volume_m3; provide attic geometry or explicit ventilation data"
-    )]
-    MissingAtticVolume { zone_idx: usize },
-    #[error(
         "surface {surface_type} at boundary index {boundary_idx} is missing azimuth; orientation is required for solar-receiving surfaces"
     )]
     MissingAzimuth {
@@ -923,19 +919,26 @@ fn initial_zones(
                     ZoneType::Foundation => ground_temp_c,
                     _ => outdoor_temp_c,
                 };
-                let volume_m3 = match (&zone.zone_type, zone.volume_m3) {
-                    (ZoneType::Attic, None) => {
-                        return Err(EnvironmentManagerError::MissingAtticVolume { zone_idx: idx });
-                    }
-                    (_, Some(volume_m3)) => volume_m3,
-                    (zone_type, None) => {
+                let volume_m3 = match zone.volume_m3 {
+                    Some(v) => v,
+                    None => {
+                        let estimated = zone
+                            .floor_area_m2
+                            .map(|area| match zone.zone_type {
+                                ZoneType::Attic => 0.5 * area * 1.5,
+                                ZoneType::Garage | ZoneType::Foundation | ZoneType::Conditioned => {
+                                    area * 2.44
+                                }
+                                _ => DEFAULT_ZONE_VOLUME_M3,
+                            })
+                            .unwrap_or(DEFAULT_ZONE_VOLUME_M3);
                         tracing::warn!(
                             zone_idx = idx,
-                            zone_type = ?zone_type,
-                            default_m3 = DEFAULT_ZONE_VOLUME_M3,
-                            "zone is missing volume_m3; using {DEFAULT_ZONE_VOLUME_M3} m³ default"
+                            zone_type = ?zone.zone_type,
+                            estimated_m3 = estimated,
+                            "zone is missing volume_m3; using geometry-based estimate"
                         );
-                        DEFAULT_ZONE_VOLUME_M3
+                        estimated
                     }
                 };
                 Ok(ZoneState {
@@ -1317,20 +1320,19 @@ mod tests {
     }
 
     #[test]
-    fn manager_errors_when_attic_volume_is_missing() {
-        let err = EnvironmentManager::new(
+    fn manager_defaults_attic_volume_when_missing() {
+        let result = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
             &building_with_missing_attic_volume(),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
             None,
-        )
-        .expect_err("expected attic volume validation error");
-        assert!(matches!(
-            err,
-            EnvironmentManagerError::MissingAtticVolume { zone_idx: 1 }
-        ));
+        );
+        assert!(
+            result.is_ok(),
+            "attic missing volume should fall back to DEFAULT_ZONE_VOLUME_M3, got: {result:?}"
+        );
     }
 
     #[test]

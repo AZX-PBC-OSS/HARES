@@ -1253,7 +1253,7 @@ fn attic_infiltration_method(
     zone: &hares_io::hpxml::Zone,
     conditioned_floor_area_m2: Option<f64>,
     building_height_m: f64,
-    zone_idx: usize,
+    _zone_idx: usize,
 ) -> Result<hares_envelope::InfiltrationMethod> {
     use hares_envelope::InfiltrationMethod;
     use hares_physics::infiltration::attic_ela_coefficients;
@@ -1283,13 +1283,23 @@ fn attic_infiltration_method(
     }
 
     if zone.vented {
-        return Err(HaresError::Envelope(format!(
-            "Vented attic zone {zone_idx}: <VentilationRate> is required but absent. \
-             Add e.g. <VentilationRate><UnitofMeasure>SLA</UnitofMeasure>\
-             <Value>0.00333</Value></VentilationRate> under the zone. \
-             IRC 2021 R806.2 minimum is SLA=0.0067 (1/150 of ceiling area); \
-             ANSI/RESNET/ICC 301-2019 energy-rating default is SLA=0.00333 (1/300)."
-        )));
+        let sla = 0.00333;
+        let floor_area_m2 = zone
+            .floor_area_m2
+            .or(conditioned_floor_area_m2)
+            .unwrap_or(100.0);
+        let ela_m2 = sla * floor_area_m2;
+        let attic_height_m = zone
+            .volume_m3
+            .filter(|&v| v > 0.0)
+            .map(|v| 2.0 * v / floor_area_m2)
+            .unwrap_or(1.5);
+        let (stack_coeff, wind_coeff) = attic_ela_coefficients(attic_height_m, building_height_m);
+        return Ok(InfiltrationMethod::Ela {
+            ela_m2,
+            stack_coeff,
+            wind_coeff,
+        });
     }
 
     // Unvented attic default matches OCHRE attic handling: 0.1 ACH.
@@ -1822,39 +1832,14 @@ mod tests {
     }
 
     #[test]
-    fn attic_vented_requires_explicit_ventilation_rate() {
+    fn attic_vented_defaults_to_resnet_sla() {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
-        let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
-        assert!(matches!(err, HaresError::Envelope(_)));
+        let method =
+            attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect("vented attic with no rate must use default SLA");
         assert!(
-            err.to_string().contains("VentilationRate"),
-            "error message must name <VentilationRate>: {}",
-            err
+            matches!(method, InfiltrationMethod::Ela { .. }),
+            "expected ELA method from default SLA, got {method:?}"
         );
-        assert!(
-            err.to_string().contains("SLA"),
-            "error message must mention SLA: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn attic_vented_no_sla_error_names_ventilation_rate_element() {
-        let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
-        let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("VentilationRate"),
-            "error message must name <VentilationRate>: {msg}"
-        );
-    }
-
-    #[test]
-    fn attic_vented_no_sla_error_names_sla_unit() {
-        let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
-        let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
-        let msg = err.to_string();
-        assert!(msg.contains("SLA"), "error message must mention SLA: {msg}");
     }
 
     #[test]

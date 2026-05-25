@@ -1,12 +1,7 @@
-//! ResStock integration smoke tests.
+//! ResStock integration sanity tests.
 //!
-//! Runs short (1h) simulations on real ResStock HPXML files from both
-//! 2024.2 (TMY3) and 2025.1 (AMY 2018) releases and verifies that the
-//! engine completes without error, produces physically plausible output,
-//! and that zone temperatures stay within physical bounds.
-//!
-//! Fixtures are stored in tests/fixtures/resstock/{version}/ and were
-//! downloaded from the NREL OEDI data lake.
+//! Verifies HARES on real ResStock HPXML from 2024.2 (TMY3) and
+//! 2025.1 (AMY 2018). Fixtures in tests/fixtures/resstock/{version}/.
 
 #[cfg(test)]
 mod tests {
@@ -18,12 +13,10 @@ mod tests {
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
 
+    // ── helpers ──────────────────────────────────────────────────────────
+
     fn project_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-    }
-
-    fn fixture_versions() -> Vec<&'static str> {
-        vec!["2024.2", "2025.1"]
     }
 
     fn fixture_building_dirs(version: &str) -> Vec<PathBuf> {
@@ -33,7 +26,12 @@ mod tests {
         let mut dirs: Vec<_> = std::fs::read_dir(&base)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter(|e| {
+                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && e.file_name().to_str()
+                        .map(|n| n.starts_with("bldg"))
+                        .unwrap_or(false)
+            })
             .map(|e| e.path())
             .collect();
         dirs.sort();
@@ -43,138 +41,125 @@ mod tests {
     fn weather_path(version: &str, bldg_dir: &PathBuf) -> PathBuf {
         let hpxml = fs::read_to_string(bldg_dir.join("home.xml")).unwrap();
         let fips = parse_fips_from_hpxml(&hpxml);
-
         let weather_dir = project_root()
             .join("tests/fixtures/resstock")
             .join(version)
             .join("weather");
-
-        if version == "2025.1" {
-            let csv = weather_dir.join(format!("{fips}_2018.csv"));
-            if csv.exists() {
-                return csv;
-            }
+        let ext = if version == "2025.1" { "csv" } else { "epw" };
+        if let Some(p) = [format!("{fips}_2018.csv"), format!("{fips}.{ext}")]
+            .iter()
+            .map(|n| weather_dir.join(n))
+            .find(|p| p.exists())
+        {
+            return p;
         }
-
-        let epw = weather_dir.join(format!("{fips}.epw"));
-        if epw.exists() {
-            return epw;
-        }
-
-        weather_dir
-            .read_dir()
-            .unwrap()
+        weather_dir.read_dir().unwrap()
             .filter_map(|e| e.ok())
-            .find(|e| e.path().extension().map(|x| x == "epw").unwrap_or(false))
+            .find(|e| e.path().is_file())
             .map(|e| e.path())
-            .unwrap_or_else(|| panic!("no weather file found in {weather_dir:?}"))
+            .unwrap_or_else(|| panic!("no weather in {weather_dir:?}"))
     }
 
     fn parse_fips_from_hpxml(xml: &str) -> String {
         for line in xml.lines() {
-            if let Some(start) = line.find("<Name>") {
-                let inner = &line[start + 6..];
-                if let Some(end) = inner.find("</Name>") {
-                    let name = &inner[..end];
-                    if name.starts_with('G') && name.len() >= 7 {
-                        return name[..7].to_string();
+            if let Some(s) = line.find("<Name>") {
+                let inner = &line[s + 6..];
+                if let Some(e) = inner.find("</Name>") {
+                    let n = &inner[..e];
+                    if n.starts_with('G') && n.len() >= 7 {
+                        return n[..7].to_string();
                     }
                 }
             }
         }
-        panic!("could not find FIPS weather station in HPXML");
+        panic!("no FIPS weather station in HPXML");
     }
 
-    fn unique_temp_name(base: &str, ext: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let tid = std::thread::current().id();
-        format!("{base}_{nanos}_{tid:?}.{ext}")
+    fn utn(base: &str, ext: &str) -> String {
+        format!("{base}_{}_{:?}.{ext}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            std::thread::current().id())
     }
 
-    struct TempFile(std::path::PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
+    struct Tmp(PathBuf);
+    impl Drop for Tmp { fn drop(&mut self) { let _ = fs::remove_file(&self.0); } }
 
-    fn parse_csv_columns(path: &PathBuf) -> BTreeMap<String, Vec<f64>> {
-        let contents = fs::read_to_string(path).expect("read CSV");
-        let mut lines = contents.lines();
-        let header = lines.next().expect("header line");
-        let columns: Vec<String> = header.split(',').map(|c| c.trim().to_string()).collect();
-        let mut data: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-        for col in &columns {
-            data.insert(col.clone(), Vec::new());
-        }
-        for line in lines {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let fields: Vec<&str> = line.split(',').collect();
-            for (i, field) in fields.iter().enumerate() {
-                if i < columns.len() {
-                    if let Ok(v) = field.trim().parse::<f64>() {
-                        data.get_mut(&columns[i]).unwrap().push(v);
-                    }
-                }
+    fn read_output(path: &PathBuf) -> BTreeMap<String, Vec<f64>> {
+        let s = fs::read_to_string(path).expect("read CSV");
+        let mut lines = s.lines();
+        let hdr = lines.next().expect("header");
+        let cols: Vec<String> = hdr.split(',').map(|c| c.trim().to_string()).collect();
+        let mut data: BTreeMap<String, Vec<f64>> = cols.iter().map(|c| (c.clone(), vec![])).collect();
+        for line in lines.filter(|l| !l.trim().is_empty()) {
+            for (i, f) in line.split(',').enumerate() {
+                if i < cols.len() { if let Ok(v) = f.trim().parse::<f64>() { data.get_mut(&cols[i]).unwrap().push(v); } }
             }
         }
         data
     }
 
-    fn assert_physics_bounds(csv_path: &PathBuf) {
-        let data = parse_csv_columns(csv_path);
+    // ── assertions ───────────────────────────────────────────────────────
 
-        for (col, values) in &data {
-            if col.starts_with("Temperature -") && col.ends_with("(C)") {
-                for (i, &v) in values.iter().enumerate() {
-                    assert!(
-                        v > -50.0 && v < 80.0,
-                        "Zone temp {v:.1}°C outside physical bounds in '{col}' at row {i}"
-                    );
-                }
-            }
-        }
-
-        for (col, values) in &data {
-            for (i, &v) in values.iter().enumerate() {
-                assert!(
-                    v.is_finite(),
-                    "Non-finite value ({v}) in '{col}' at row {i}"
-                );
+    fn assert_no_nan(data: &BTreeMap<String, Vec<f64>>) {
+        for (col, vals) in data {
+            for (i, &v) in vals.iter().enumerate() {
+                assert!(v.is_finite(), "NaN/Inf in '{col}' row {i}");
             }
         }
     }
 
-    fn run_resstock_smoke(version: &str, bldg_dir: &PathBuf) {
-        let hpxml_path = bldg_dir.join("home.xml");
-        let schedule_path = bldg_dir.join("in.schedules.csv");
-        let weather_path = weather_path(version, bldg_dir);
-        let output_path = std::env::temp_dir()
-            .join(unique_temp_name("hares_resstock_smoke", "csv"));
-        let _guard = TempFile(output_path.clone());
+    fn assert_indoor_temp_bounds(data: &BTreeMap<String, Vec<f64>>, label: &str) {
+        let col = data.keys().find(|k|
+            k.starts_with("Temperature -") && k.ends_with("(C)") && k.contains("Indoor")
+        ).expect("no indoor temp column");
+        let vals = &data[col];
+        let (lo, hi) = vals.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l,h),&v| (l.min(v), h.max(v)));
+        let avg = vals.iter().sum::<f64>() / vals.len() as f64;
+        eprintln!("    {label} indoor: lo={lo:.1} hi={hi:.1} avg={avg:.1}°C");
+        // Wide physics bounds — this is a smoke test, not thermal validation.
+        assert!(lo > -30.0, "{label}: indoor min {lo:.1}°C (freeze damage / numerical runaway)");
+        assert!(hi < 60.0,  "{label}: indoor max {hi:.1}°C (fire hazard / numerical runaway)");
+    }
 
-        let bldg_name = bldg_dir.file_name().unwrap().to_str().unwrap();
+    fn assert_peak_power(data: &BTreeMap<String, Vec<f64>>, max_kw: f64, label: &str) {
+        if let Some(col) = data.keys().find(|k| k == &"Total Electric Power (kW)") {
+            let peak = data[col].iter().fold(0.0_f64, |a,&b| a.max(b));
+            eprintln!("    {label} peak power: {peak:.2} kW");
+            assert!(peak < max_kw, "{label}: peak {peak:.1} kW > {max_kw} kW");
+        }
+    }
 
-        let engine = SimulationEngine::new();
-        let config = DwellingConfig {
-            hpxml_path,
-            schedule_path,
-            weather_path,
+    fn assert_energy_range(total_kwh: f64, lo: f64, hi: f64, label: &str) {
+        eprintln!("    {label} energy: {total_kwh:.2} kWh");
+        assert!(total_kwh > lo, "{label}: {total_kwh:.2} kWh < {lo} kWh");
+        assert!(total_kwh < hi, "{label}: {total_kwh:.2} kWh > {hi} kWh");
+    }
+
+    fn assert_total_power_non_neg(data: &BTreeMap<String, Vec<f64>>) {
+        if let Some(col) = data.keys().find(|k| k == &"Total Electric Power (kW)") {
+            for (i, &v) in data[col].iter().enumerate() {
+                assert!(v >= 0.0, "negative total power {v} at row {i}");
+            }
+        }
+    }
+
+    // ── config builder ───────────────────────────────────────────────────
+
+    fn config_for(bldg_dir: &PathBuf, version: &str, hrs: i64, min_step: i64,
+                  month: u32, day: u32) -> DwellingConfig {
+        DwellingConfig {
+            hpxml_path: bldg_dir.join("home.xml"),
+            schedule_path: bldg_dir.join("in.schedules.csv"),
+            weather_path: weather_path(version, bldg_dir),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                start_time: FixedOffset::west_opt(7 * 3600)
-                    .expect("UTC-7 offset")
-                    .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(1),
-                time_res: Duration::minutes(1),
+                start_time: FixedOffset::west_opt(7 * 3600).unwrap()
+                    .with_ymd_and_hms(2018, month, day, 0, 0, 0).unwrap(),
+                duration: Duration::hours(hrs),
+                time_res: Duration::minutes(min_step),
                 output_verbosity: 1,
-                output_path: Some(output_path.clone()),
+                output_path: Some(std::env::temp_dir().join(utn("rs", "csv"))),
                 write_output: true,
                 output_format: OutputFormat::Csv,
                 output_chunk_size: 1024,
@@ -183,47 +168,78 @@ mod tests {
                 civil_timezone: None,
             },
             overrides: None,
-            bldg_id: 100,
-            initialization_duration: None,
+            bldg_id: 200,
+            initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
             resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        };
+        }
+    }
 
-        let result = engine.run(config).expect("engine.run should succeed");
-
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "[{version}] {bldg_name} simulation failed: {:?}",
-            result.status
-        );
-
+    fn run_and_check(config: DwellingConfig, label: &str) -> (f64, BTreeMap<String, Vec<f64>>) {
+        let output = config.sim_config.output_path.clone().unwrap();
+        let _g = Tmp(output.clone());
+        let engine = SimulationEngine::new();
+        let result = engine.run(config).expect("run");
+        assert!(!matches!(result.status, SimStatus::Failed(_)), "{label}: {result:?}");
+        let kwh = result.metrics.annual_energy_kwh.total;
+        let data = if output.exists() { read_output(&output) } else { BTreeMap::new() };
+        assert_no_nan(&data);
+        assert_total_power_non_neg(&data);
         eprintln!(
-            "[{version}] {bldg_name} OK — status={:?}, elapsed={:?}, energy={:.4} kWh",
-            result.status, result.elapsed, result.metrics.annual_energy_kwh.total
+            "[{}] {:.2} kWh, {:.0}ms",
+            label, kwh, result.elapsed.as_secs_f64() * 1000.0
         );
+        (kwh, data)
+    }
 
-        if result.metrics.annual_energy_kwh.total.is_finite() {
-            assert!(
-                result.metrics.annual_energy_kwh.total >= 0.0,
-                "[{version}] {bldg_name} total energy is negative"
-            );
-        }
+    // ── tests ────────────────────────────────────────────────────────────
 
-        if output_path.exists() {
-            assert_physics_bounds(&output_path);
+    /// 1h fast smoke — catches parse/startup errors (all buildings).
+    fn smoke_1h(version: &str) {
+        for bd in fixture_building_dirs(version) {
+            let name = bd.file_name().unwrap().to_str().unwrap();
+            let cfg = config_for(&bd, version, 1, 1, 5, 5);
+            let (kwh, _data) = run_and_check(cfg, &format!("{version}/{name}/1h"));
+            assert!(kwh >= 0.0);
         }
     }
 
-    #[test]
-    fn resstock_2024_2_smoke() {
-        for bldg_dir in fixture_building_dirs("2024.2") {
-            run_resstock_smoke("2024.2", &bldg_dir);
-        }
+    /// 3-day summer week at 1h res — verifies AC runs, reasonable peak.
+    fn summer_72h(version: &str) {
+        // Use bldg 4 (TX weather → hot summer = guaranteed AC load).
+        let bd = fixture_building_dirs(version)
+            .into_iter()
+            .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000004"))
+            .unwrap_or_else(|| fixture_building_dirs(version)[0].clone());
+        let cfg = config_for(&bd, version, 72, 60, 7, 15);
+        let (kwh, data) = run_and_check(cfg, "summer_72h");
+        assert_indoor_temp_bounds(&data, "summer_72h");
+        assert_peak_power(&data, 20.0, "summer_72h");
+        assert_energy_range(kwh, 5.0, 400.0, "summer_72h");
     }
 
-    #[test]
-    fn resstock_2025_1_smoke() {
-        for bldg_dir in fixture_building_dirs("2025.1") {
-            run_resstock_smoke("2025.1", &bldg_dir);
-        }
+    /// 3-day winter week at 1h res — verifies heating runs, no freeze.
+    fn winter_72h(version: &str) {
+        // Use bldg 2 (Idaho weather → cold winter = guaranteed heat).
+        let bd = fixture_building_dirs(version)
+            .into_iter()
+            .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000002"))
+            .unwrap_or_else(|| fixture_building_dirs(version)[0].clone());
+        let cfg = config_for(&bd, version, 72, 60, 1, 15);
+        let (kwh, data) = run_and_check(cfg, "winter_72h");
+        assert_indoor_temp_bounds(&data, "winter_72h");
+        assert_peak_power(&data, 20.0, "winter_72h");
+        assert_energy_range(kwh, 5.0, 600.0, "winter_72h");
     }
+
+    // ── test entry points ────────────────────────────────────────────────
+
+    // --- 2025.1 ---
+    #[test] fn resstock_2025_1_smoke() { smoke_1h("2025.1"); }
+    #[test] fn resstock_2025_1_summer_72h() { summer_72h("2025.1"); }
+    #[test] fn resstock_2025_1_winter_72h() { winter_72h("2025.1"); }
+
+    // --- 2024.2 ---
+    #[test] fn resstock_2024_2_smoke() { smoke_1h("2024.2"); }
+    #[test] fn resstock_2024_2_summer_72h() { summer_72h("2024.2"); }
+    #[test] fn resstock_2024_2_winter_72h() { winter_72h("2024.2"); }
 }

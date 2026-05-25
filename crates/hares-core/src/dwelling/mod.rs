@@ -895,7 +895,7 @@ impl Dwelling {
 
     fn from_preparsed(
         config: DwellingConfig,
-        building: Building,
+        mut building: Building,
         weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
     ) -> Result<Self> {
@@ -967,6 +967,14 @@ impl Dwelling {
         };
 
         let empty_overrides = Value::Object(Map::new());
+
+        if building.site.latitude_deg.is_none() {
+            building.site.latitude_deg = Some(weather_lat);
+        }
+        if building.site.longitude_deg.is_none() {
+            building.site.longitude_deg = Some(weather_lon);
+        }
+
         let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
             .map_err(|e| HaresError::Io(e.to_string()))?;
 

@@ -126,10 +126,17 @@ fn collect_descendants<'a>(node: &'a XmlNode, name: &str, out: &mut Vec<&'a XmlN
 ///
 /// Search order: under `HVACPlant`, then `HVAC`, then any descendant.
 pub(crate) fn find_hvac_control(details: &XmlNode) -> Option<&XmlNode> {
-    descendants_named(details, "HVACPlant")
-        .into_iter()
-        .find_map(|p| p.child("HVACControl"))
+    // ResStock-style: Systems > HVAC > HVACControl
+    details
+        .path(&["Systems", "HVAC", "HVACControl"])
         .or_else(|| {
+            // NRELCAMP-style: HVACPlant > HVACControl
+            descendants_named(details, "HVACPlant")
+                .into_iter()
+                .find_map(|p| p.child("HVACControl"))
+        })
+        .or_else(|| {
+            // Any HVAC > HVACControl pairing
             descendants_named(details, "HVAC")
                 .into_iter()
                 .find_map(|p| p.child("HVACControl"))
