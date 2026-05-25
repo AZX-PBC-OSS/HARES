@@ -579,15 +579,10 @@ fn standby_loss_ua_magnitude() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. HPWH documentation: COP curves may not be fully implemented
+// HPWH COP at multiple ambient temperatures.
 //
-// HPWH COP curves may be incomplete. This test documents
-// current behavior: initialize a HPWH and verify it either (a) computes
-// a reasonable COP or (b) fails clearly with a diagnostic message.
-//
-// If the HPWH is not yet implemented, this test reports the gap but does
-// not fail -- it is marked #[ignore] to prevent CI noise until the model
-// is complete.
+// Initialize a HPWH and verify it computes a reasonable COP across a range
+// of ambient temperatures.
 // ---------------------------------------------------------------------------
 #[test]
 fn hpwh_cop_at_multiple_ambient_temps() {

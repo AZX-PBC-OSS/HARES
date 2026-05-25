@@ -2,8 +2,8 @@
 //!
 //! Tests physics correctness against hand-calculated OCHRE reference values.
 //! Where HARES intentionally uses better physics than OCHRE, divergences are
-//! documented inline. Tests that require OCHRE output data files are marked
-//! `#[ignore]`.
+//! documented inline. Tests that require OCHRE output data files describe
+//! the gap in the test comment.
 //!
 //! Reference: vendors/OCHRE/ochre/Equipment/HVAC.py
 

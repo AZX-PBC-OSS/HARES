@@ -2,17 +2,8 @@
 //!
 //! - Sky temperature formula: Stefan-Boltzmann inversion of horizontal infrared
 //! - Clark-Allen fallback formula for low-IR conditions
-//! - EPW column parsing with SI units (requires real EPW file -- marked #[ignore])
+//! - EPW column parsing with SI units (uses fixture at tests/fixtures/weather/test_location.epw)
 //! - Ground temperature model properties
-//!
-//! The EPW file tests are #[ignore] because:
-//! 1. The EPW parser requires exactly 8760 or 8784 records (8760 lines minimum).
-//! 2. No real EPW file exists in tests/fixtures/weather/ at this time.
-//! 3. Creating a synthetic 8760-row EPW in a test file would be unmaintainable.
-//!
-//! To enable EPW tests: place a real EPW file at
-//!   tests/fixtures/weather/test_location.epw
-//! and remove the #[ignore] attribute.
 //!
 //! Sky temp formulas are tested by reproducing the math from epw.rs constants.
 //! These are the same formulas OCHRE uses (EnergyPlus method + Clark-Allen).
@@ -191,8 +182,7 @@ fn clark_allen_sky_temp_dew_point_at_dry_bulb_gives_maximum() {
 // - Sky temperature computed from horizontal infrared
 // - Ground temperature series has the same length as dry-bulb
 //
-// Marked #[ignore] because no EPW fixture exists at tests/fixtures/weather/.
-// To enable: place a real EPW file at tests/fixtures/weather/test_location.epw.
+// EPW fixture lives at tests/fixtures/weather/test_location.epw.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -283,7 +273,6 @@ fn epw_all_columns_parsed_with_correct_si_units() {
 //
 // This test verifies the stored sky_temp_c is consistent with that formula
 // for rows where IR is above the fallback threshold.
-// Marked #[ignore] -- requires real EPW file.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -319,8 +308,12 @@ fn sky_temp_matches_stefan_boltzmann_for_high_ir_rows() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Clark-Allen fallback consistency for low-IR rows
-// Marked #[ignore] -- requires real EPW file.
+// Test: Clark-Allen fallback consistency for low-IR rows.
+//
+// For rows where horizontal_infrared < 50 W/m², the EPW parser uses the
+// Clark-Allen sky temperature model (T_db, T_dp) instead of Stefan-Boltzmann.
+// This test verifies that the stored sky_temp_c matches the Clark-Allen formula
+// for those low-IR rows.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1047,7 +1040,7 @@ fn pchip_two_consecutive_nans_do_not_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// Real EPW fixture test (ignored)
+// Real EPW fixture test
 // ---------------------------------------------------------------------------
 
 #[test]

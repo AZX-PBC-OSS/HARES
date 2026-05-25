@@ -4,9 +4,6 @@
 //! - Annual energy round-trip (sum of kW × dt = annual_kwh)
 //! - duty_cycle_fraction scales resolved kW series proportionally
 //! - OCHRE parity with hardcoded reference values (requires OCHRE Python to regenerate)
-//!
-//! The OCHRE parity test is #[ignore] because it requires running OCHRE's
-//! schedule.py::resolve_schedule() externally to produce reference values.
 
 use std::collections::HashMap;
 
@@ -284,9 +281,6 @@ fn missing_required_column_returns_typed_error_not_silent_fallback() {
 //
 // The expected values below were computed analytically from the formula above
 // (not from running OCHRE Python) and verify HARES matches within 0.1%.
-//
-// Marked #[ignore] because a future maintainer should regenerate these by
-// running OCHRE's schedule.py and comparing with actual OCHRE output.
 // ---------------------------------------------------------------------------
 
 #[test]

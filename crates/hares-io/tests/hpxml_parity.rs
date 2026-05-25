@@ -10,8 +10,8 @@
 //! For each test, the OCHRE derivation logic is cited as a comment showing
 //! the Python expression that produces the expected value.
 //!
-//! Tests for gaps that are NOT yet implemented are marked #[ignore] with a
-//! description of what is missing.
+//! Tests for gaps that are NOT yet implemented describe what is missing in
+//! the test comment.
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
@@ -695,9 +695,7 @@ fn heat_pump_typed_config_for_mini_split_sets_four_speeds() {
 // Test: startup_capacity_degradation field presence
 //
 // OCHRE AC/HP equipment has startup_capacity_degradation (default 0.0 for AC).
-// This test documents whether HARES currently extracts this field.
-// Marked #[ignore] because startup_capacity_degradation is not yet extracted
-// by resolve_hvac.rs.
+// HARES extracts this field and assigns a default derived from SEER.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -735,9 +733,8 @@ fn ac_has_startup_capacity_degradation_default() {
 // ---------------------------------------------------------------------------
 // Test: heat pump backup lockout temperature
 //
-// OCHRE HP backup lockout: hp_min_temp or backup_heating_lockout_temp
-// Marked #[ignore] because heat pump backup lockout temperature is not yet
-// extracted from HPXML.
+// OCHRE HP backup lockout: hp_min_temp or backup_heating_lockout_temp.
+// HARES now extracts the backup heating lockout temperature from HPXML.
 // ---------------------------------------------------------------------------
 
 #[test]
