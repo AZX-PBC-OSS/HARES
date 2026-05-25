@@ -581,7 +581,18 @@ pub fn assemble_building_rc(
                 "boundary {bd_idx}: capacitance must be >= 0"
             );
             let inner_node = if n_cap_nodes > 0 {
-                Some(NodeId(nodes_before + n_cap_nodes as u32 - 1))
+                let inner = NodeId(nodes_before + n_cap_nodes as u32 - 1);
+                // Guard: inner_node must not alias any reserved external driving node.
+                // Reserved range: [GROUND_NODE_BASE (u32::MAX - 100), u32::MAX] (101 IDs).
+                // NodeId scheme allocates from LAYER_NODE_BASE (1000) upward; a collision
+                // would require ~4.3B nodes — physically impossible — but the invariant
+                // is enforced by assertion so that a future broken scheme panics immediately.
+                assert!(
+                    inner.0 < GROUND_NODE_BASE,
+                    "precomputed-path inner_node {:?} falls in reserved driving-node range [GROUND_NODE_BASE, u32::MAX]",
+                    inner
+                );
+                Some(inner)
             } else {
                 None
             };
@@ -675,7 +686,18 @@ pub fn assemble_building_rc(
                 "boundary {bd_idx}: capacitance must be >= 0"
             );
             let inner_node = if n_cap_nodes > 0 {
-                Some(NodeId(nodes_before + n_cap_nodes as u32 - 1))
+                let inner = NodeId(nodes_before + n_cap_nodes as u32 - 1);
+                // Guard: inner_node must not alias any reserved external driving node.
+                // Reserved range: [GROUND_NODE_BASE (u32::MAX - 100), u32::MAX] (101 IDs).
+                // NodeId scheme allocates from LAYER_NODE_BASE (1000) upward; a collision
+                // would require ~4.3B nodes — physically impossible — but the invariant
+                // is enforced by assertion so that a future broken scheme panics immediately.
+                assert!(
+                    inner.0 < GROUND_NODE_BASE,
+                    "material-layer-path inner_node {:?} falls in reserved driving-node range [GROUND_NODE_BASE, u32::MAX]",
+                    inner
+                );
+                Some(inner)
             } else {
                 None
             };
@@ -1991,10 +2013,14 @@ mod tests {
             assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
         // 1 zone + 80 layer nodes = 81 internal nodes.
         assert_eq!(rc.a_c.nrows(), 81);
-        // All node IDs should be distinct from OUTDOOR_NODE_ID and GROUND_NODE_ID.
+        // All node IDs must be outside the reserved driving-node range.
+        // Reserved range: [GROUND_NODE_BASE (u32::MAX - 100), u32::MAX].
         for &nid in rc.node_index.keys() {
-            assert_ne!(nid, NodeId(OUTDOOR_NODE_ID));
-            assert_ne!(nid, NodeId(GROUND_NODE_ID));
+            assert!(
+                nid.0 < GROUND_NODE_BASE,
+                "node {:?} falls in reserved driving-node range [GROUND_NODE_BASE, u32::MAX]",
+                nid
+            );
         }
     }
 
@@ -3190,19 +3216,21 @@ mod tests {
     // ── Layer inner_node vs reserved IDs regression ───────────────────
     //
     // Verify that layer_info.inner_node (SurfaceLayerInfo) does not collide
-    // with OUTDOOR_NODE_ID or GROUND_NODE_ID.  Also verifies the diagnostic
+    // with any reserved external driving node.  Also verifies the diagnostic
     // inner_node (BoundaryDiagnostic) for both material-layer and precomputed
     // paths.
     //
     // Node IDs are laid out as:
     //   Zone air nodes:  1 ..= n_zones
     //   Layer nodes:     LAYER_NODE_BASE (1000) .. next_layer_id
-    //   OUTDOOR_NODE_ID: u32::MAX - 1
-    //   GROUND_NODE_ID:  u32::MAX
+    //   Reserved range:  GROUND_NODE_BASE (u32::MAX - 100) .. u32::MAX
+    //     ├─ Per-depth ground nodes: GROUND_NODE_BASE + 0..=98
+    //     ├─ OUTDOOR_NODE_ID:        u32::MAX - 1
+    //     └─ GROUND_NODE_ID:         u32::MAX
     //
     // Any call to alloc_node / alloc_node_no_cap increments next_layer_id from
-    // LAYER_NODE_BASE upward.  Reaching u32::MAX - 1 would require allocating
-    // u32::MAX - 1 - 1000 ≈ 4 294 966 295 nodes — physically impossible.
+    // LAYER_NODE_BASE upward.  Reaching GROUND_NODE_BASE would require allocating
+    // >4 billion nodes — physically impossible.
     // This test documents and enforces the invariant, analogous to the existing
     // many_boundaries_no_node_id_collision test but scoped to inner_node
     // specifically.
@@ -3225,30 +3253,20 @@ mod tests {
         let (rc, diag) =
             assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
-        // SurfaceLayerInfo.inner_node must not alias a reserved driving node.
+        // SurfaceLayerInfo.inner_node must not alias any reserved driving node.
         let info = &rc.layer_info[&0];
-        assert_ne!(
-            info.inner_node,
-            NodeId(OUTDOOR_NODE_ID),
-            "material-path inner_node must not collide with OUTDOOR_NODE_ID"
-        );
-        assert_ne!(
-            info.inner_node,
-            NodeId(GROUND_NODE_ID),
-            "material-path inner_node must not collide with GROUND_NODE_ID"
+        assert!(
+            info.inner_node.0 < GROUND_NODE_BASE,
+            "material-path inner_node {:?} falls in reserved driving-node range [GROUND_NODE_BASE, u32::MAX]",
+            info.inner_node
         );
 
         // BoundaryDiagnostic.inner_node (Option) must also be free of collisions.
         if let Some(diag_inner) = diag.boundaries[0].inner_node {
-            assert_ne!(
-                diag_inner,
-                NodeId(OUTDOOR_NODE_ID),
-                "diagnostic inner_node must not collide with OUTDOOR_NODE_ID"
-            );
-            assert_ne!(
-                diag_inner,
-                NodeId(GROUND_NODE_ID),
-                "diagnostic inner_node must not collide with GROUND_NODE_ID"
+            assert!(
+                diag_inner.0 < GROUND_NODE_BASE,
+                "diagnostic inner_node {:?} falls in reserved driving-node range [GROUND_NODE_BASE, u32::MAX]",
+                diag_inner
             );
         }
     }
@@ -3284,27 +3302,17 @@ mod tests {
             assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         let info = &rc.layer_info[&0];
-        assert_ne!(
-            info.inner_node,
-            NodeId(OUTDOOR_NODE_ID),
-            "precomputed-path inner_node must not collide with OUTDOOR_NODE_ID"
-        );
-        assert_ne!(
-            info.inner_node,
-            NodeId(GROUND_NODE_ID),
-            "precomputed-path inner_node must not collide with GROUND_NODE_ID"
+        assert!(
+            info.inner_node.0 < GROUND_NODE_BASE,
+            "precomputed-path inner_node {:?} falls in reserved driving-node range [GROUND_NODE_BASE, u32::MAX]",
+            info.inner_node
         );
 
         if let Some(diag_inner) = diag.boundaries[0].inner_node {
-            assert_ne!(
-                diag_inner,
-                NodeId(OUTDOOR_NODE_ID),
-                "diagnostic inner_node must not collide with OUTDOOR_NODE_ID"
-            );
-            assert_ne!(
-                diag_inner,
-                NodeId(GROUND_NODE_ID),
-                "diagnostic inner_node must not collide with GROUND_NODE_ID"
+            assert!(
+                diag_inner.0 < GROUND_NODE_BASE,
+                "diagnostic inner_node {:?} falls in reserved driving-node range [GROUND_NODE_BASE, u32::MAX]",
+                diag_inner
             );
         }
     }
