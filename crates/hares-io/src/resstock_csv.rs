@@ -337,7 +337,13 @@ pub fn parse_resstock_csv_str(
         timezone_offset_h,
         elevation_m,
         source_step_secs,
-        midpoint_offset_secs: 0,
+        // ResStock AMY simplified CSV uses end-of-interval timestamps (first row =
+        // 01:00:00, representing 00:00–01:00), matching the TMY3/EPW hour-ending
+        // convention. The midpoint of each hourly record lies 1800 s (30 min)
+        // before the timestamp. Parallel to the B4 fix at tmy3.rs:244.
+        // See Wilcox & Marion 2008, NREL/TP-581-43156 §3; confirmed by real NREL
+        // ResStock AMY 2018 CSV files (G0100630_2018.csv, G5107750_2018.csv).
+        midpoint_offset_secs: 1800,
     };
 
     Ok(WeatherTimeSeries {
@@ -834,11 +840,6 @@ Diffuse Horizontal Radiation [W/m2]
     /// (e.g. G0100630_2018.csv) start at `2018-01-01 01:00:00`, confirming the
     /// end-of-interval convention. The TMY3 path was corrected to 1800 (B4 fix at
     /// `tmy3.rs`); this test guards the equivalent fix for the ResStock CSV path.
-    ///
-    /// This test FAILS until `midpoint_offset_secs: 0` is changed to
-    /// `midpoint_offset_secs: 1800` in `parse_resstock_csv_str`.
-    /// Fix pending on ticket 099 — will stop panicking when ResStock CSV midpoint_offset_secs is 1800
-    #[should_panic(expected = "midpoint_offset_secs must be 1800 s")]
     #[test]
     fn resstock_midpoint_offset_is_1800_seconds() {
         let csv = build_test_csv(8760);
@@ -849,6 +850,28 @@ Diffuse Horizontal Radiation [W/m2]
             "ResStock CSV uses end-of-interval timestamps: midpoint_offset_secs \
              must be 1800 s (30 min), not {}",
             result.meta.midpoint_offset_secs
+        );
+    }
+
+    /// Verify that the midpoint of the first ResStock CSV record
+    /// (timestamp = 01:00, i.e. 3600 s into the year) lies at 00:30
+    /// (1800 s into the year), consistent with the end-of-interval convention
+    /// and the TMY3/EPW offset.
+    #[test]
+    fn resstock_first_record_midpoint_is_half_past_midnight() {
+        let csv = build_test_csv(8760);
+        let ts = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0)
+            .expect("should parse 8760-row CSV");
+
+        // First record timestamp sits at 3600 s (01:00) into the year.
+        // Midpoint = timestamp_secs - midpoint_offset_secs = 3600 - 1800 = 1800 s = 00:30.
+        let offset = ts.meta.midpoint_offset_secs as u64;
+        let first_timestamp_secs: u64 = ts.meta.source_step_secs as u64; // one step = 3600 s
+        let midpoint_secs = first_timestamp_secs - offset;
+        assert_eq!(
+            midpoint_secs, 1800,
+            "midpoint of first ResStock CSV record should be 1800 s (00:30) into year, \
+             not {midpoint_secs}"
         );
     }
 }
