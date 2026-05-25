@@ -14,9 +14,10 @@ use hares_io::{
     hpxml::resolve_hvac::{DuctDseParams, rebuild_hvac_typed_config},
 };
 use hares_physics::ashrae152::design_temperatures_f;
+use hares_physics::units::{temperature_c_to_f, temperature_f_to_c};
 use hares_types::ZoneId;
 use serde_json::json;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// ASHRAE 90.1 default indoor design setpoints [°C].
 /// ASHRAE 90.1-2019 §6.4.3.1.1.
@@ -126,7 +127,7 @@ pub fn autosize_equipment_capacities(
                     "autosized heating capacity"
                 );
             } else {
-                warn!(
+                error!(
                     equipment = %spec.name,
                     design_outdoor_c = heating_design_c,
                     "autosize heating capacity: solve returned zero — \
@@ -154,7 +155,7 @@ pub fn autosize_equipment_capacities(
                     "autosized cooling capacity"
                 );
             } else {
-                warn!(
+                error!(
                     equipment = %spec.name,
                     design_outdoor_c = cooling_design_c,
                     "autosize cooling capacity: solve returned zero — \
@@ -198,18 +199,13 @@ fn resolve_design_temperatures(
             "no ASHRAE 152 station found — using conservative defaults: \
              heating -10 °C, cooling 35 °C"
         );
-        (celsius_to_fahrenheit(-10.0), celsius_to_fahrenheit(35.0))
+        (temperature_c_to_f(-10.0), temperature_c_to_f(35.0))
     });
 
     // ASHRAE 152 returns °F; convert to °C.
-    let htg_c = (htg_f - 32.0) / 1.8;
-    let clg_c = (clg_f - 32.0) / 1.8;
+    let htg_c = temperature_f_to_c(htg_f);
+    let clg_c = temperature_f_to_c(clg_f);
     (htg_c, clg_c)
-}
-
-/// Celsius → Fahrenheit conversion.
-fn celsius_to_fahrenheit(c: f64) -> f64 {
-    c * 1.8 + 32.0
 }
 
 /// Extract the heating setpoint from an equipment spec, falling back to
@@ -272,13 +268,6 @@ mod tests {
     fn oversize_factors_match_manual_s() {
         assert!((HEATING_OVERSIZE_FACTOR - 1.4).abs() < f64::EPSILON);
         assert!((COOLING_OVERSIZE_FACTOR - 1.15).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn celsius_to_fahrenheit_conversion() {
-        assert!((celsius_to_fahrenheit(0.0) - 32.0).abs() < f64::EPSILON);
-        assert!((celsius_to_fahrenheit(100.0) - 212.0).abs() < f64::EPSILON);
-        assert!((celsius_to_fahrenheit(-10.0) - 14.0).abs() < f64::EPSILON);
     }
 
     #[test]

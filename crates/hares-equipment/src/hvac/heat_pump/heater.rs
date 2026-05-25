@@ -368,7 +368,15 @@ impl HeatPumpHeaterCore {
             .typed::<HeatPumpHeaterConfig>()
             .ok()
             .and_then(|cfg| cfg.common.backup_capacity_w)
-            .unwrap_or(default_backup)
+            .unwrap_or_else(|| {
+                if default_backup > 0.0 {
+                    tracing::warn!(
+                        "HeatPumpHeater backup_capacity_w not specified; \
+                         falling back to default {default_backup} W"
+                    );
+                }
+                default_backup
+            })
             .max(0.0);
         let hvac_type = match variant {
             HeaterVariant::Ashp => {
@@ -520,7 +528,11 @@ impl HeatPumpHeaterCore {
             } else if let Some(cap) = cfg.common.heating_capacity_w {
                 vec![cap]
             } else {
-                vec![DEFAULT_HEATING_CAPACITY_W]
+                return Err(HaresError::Equipment(
+                    "heating_capacity_w required for HeatPumpHeater; \
+                     capacity must be provided in HPXML or computed by autosizing"
+                        .into(),
+                ));
             };
 
         let is_mini_split =
@@ -567,7 +579,13 @@ impl HeatPumpHeaterCore {
                 .heating_capacities_w
                 .last()
                 .copied()
-                .unwrap_or(DEFAULT_HEATING_CAPACITY_W);
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "HeatPumpHeater fan-power sizing: heating_capacities_w is empty; \
+                         falling back to DEFAULT_HEATING_CAPACITY_W = {DEFAULT_HEATING_CAPACITY_W} W"
+                    );
+                    DEFAULT_HEATING_CAPACITY_W
+                });
             let rated_airflow_m3_s = self.hvac.config.airflow_m3_s_per_w * rated_capacity_w;
             self.hvac.config.fan_power_w_per_m3_s = if rated_airflow_m3_s > 0.0 {
                 fan_power_w.max(0.0) / rated_airflow_m3_s
@@ -662,7 +680,15 @@ impl HeatPumpHeaterCore {
         self.backup_capacity_w = cfg
             .common
             .backup_capacity_w
-            .unwrap_or(default_backup)
+            .unwrap_or_else(|| {
+                if default_backup > 0.0 {
+                    tracing::warn!(
+                        "HeatPumpHeater backup_capacity_w not specified; \
+                         falling back to default {default_backup} W"
+                    );
+                }
+                default_backup
+            })
             .max(0.0);
         self.backup_eir = cfg
             .common

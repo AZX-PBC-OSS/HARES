@@ -578,17 +578,23 @@ fn extract_curve_bounds(params: &Map<String, Value>) -> CurveBounds {
 
 /// Build a `GasFurnaceConfig` typed config from the resolved params map.
 ///
-/// Returns `Ok(None)` when `heating_capacity_w` is absent (no real furnace to
-/// model). Returns `Err(HpxmlError::MissingField)` when the furnace has a
-/// capacity but no AFUE -- efficiency must be specified explicitly and never
-/// silently defaulted.
+/// Returns `Err(HpxmlError::MissingField)` when `heating_capacity_w` is absent
+/// (caller catches this when `autosize_heating` is set and assigns `None`
+/// typed_config until autosizing computes the real capacity).
+/// Returns `Err(HpxmlError::MissingField)` when AFUE is absent — efficiency
+/// must be specified explicitly and never silently defaulted.
 fn try_build_gas_furnace_config(
     name: &str,
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
 ) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
     let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
-        return Ok(None);
+        return Err(HpxmlError::MissingField {
+            path: "HeatingSystem/HeatingCapacity",
+            system_kind: "Gas Furnace",
+            system_id: name.to_string(),
+            reason: "HeatingCapacity is required; provide it in HPXML or let the dwelling builder autosize it",
+        });
     };
     let afue = afue_from_params(params).ok_or_else(|| HpxmlError::MissingField {
         path: "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
@@ -680,14 +686,19 @@ fn try_build_electric_furnace_config(
 
 /// Build a `GasBoilerConfig` typed config.
 ///
-/// Returns `Ok(None)` when `heating_capacity_w` is absent. Returns
-/// `Err(HpxmlError::MissingField)` when the boiler has a capacity but no AFUE.
+/// Returns `Err(HpxmlError::MissingField)` when `heating_capacity_w` is absent
+/// or when the boiler has a capacity but no AFUE.
 fn try_build_gas_boiler_config(
     name: &str,
     params: &Map<String, Value>,
 ) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
     let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
-        return Ok(None);
+        return Err(HpxmlError::MissingField {
+            path: "HeatingSystem/HeatingCapacity",
+            system_kind: "Gas Boiler",
+            system_id: name.to_string(),
+            reason: "HeatingCapacity is required; provide it in HPXML or let the dwelling builder autosize it",
+        });
     };
     let afue = afue_from_params(params).ok_or_else(|| HpxmlError::MissingField {
         path: "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
@@ -1516,9 +1527,31 @@ pub(super) fn resolve_hvac(
             apply_multispeed_furnace_parameters(&mut params, defaults, &name);
         }
         let typed_config = match name.as_str() {
-            "Gas Furnace" => try_build_gas_furnace_config(&name, &params, &duct_params)?,
+            "Gas Furnace" => match try_build_gas_furnace_config(&name, &params, &duct_params) {
+                Ok(config) => config,
+                Err(HpxmlError::MissingField { .. })
+                    if params
+                        .get("autosize_heating")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    None
+                }
+                Err(e) => return Err(e),
+            },
             "Electric Furnace" => try_build_electric_furnace_config(&name, &params, &duct_params),
-            "Gas Boiler" => try_build_gas_boiler_config(&name, &params)?,
+            "Gas Boiler" => match try_build_gas_boiler_config(&name, &params) {
+                Ok(config) => config,
+                Err(HpxmlError::MissingField { .. })
+                    if params
+                        .get("autosize_heating")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    None
+                }
+                Err(e) => return Err(e),
+            },
             "Electric Boiler" => try_build_electric_boiler_config(&name, &params),
             "Electric Baseboard" => try_build_electric_baseboard_config(&name, &params),
             "Ideal HVAC" => try_build_ideal_hvac_config(&name, &params),
@@ -1994,14 +2027,16 @@ fn insert_capacity_w(params: &mut Map<String, Value>, node: &XmlNode, tag: &str,
         // Mark for autosizing: capacity was omitted from HPXML.
         // The dwelling builder will back-calculate the required capacity
         // from the building envelope model and design weather conditions.
+        // No placeholder is inserted — the absent capacity triggers a loud
+        // error in the typed-config builder, which the resolver catches when
+        // autosizing is flagged and assigns None typed_config until autosizing
+        // computes the real capacity.
         let autosize_key = if key.contains("heating") {
             "autosize_heating"
         } else {
             "autosize_cooling"
         };
         params.insert(autosize_key.to_string(), json!(true));
-        // Insert a placeholder capacity of 0.0 so config builders can proceed.
-        params.insert(key.to_string(), json!(0.0));
     }
 }
 
@@ -2723,6 +2758,10 @@ mod tests {
             infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
             infiltration_constant_ach: None,
+            // Reserved for Phase 2 autosizing: will hold the building-level design
+            // heating/cooling load once Manual J/S autosizing is implemented.
+            // Currently always None — autosizing computes per-equipment capacity
+            // in hares-core::dwelling::autosize rather than at the HPXML parse layer.
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,

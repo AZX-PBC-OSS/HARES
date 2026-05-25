@@ -563,13 +563,19 @@ fn ducts_outside_conditioned_space_resolve_when_site_data_present() {
     }
 }
 
-// --- Ticket 085: missing HeatingCapacity must error, not silently drop or default -----
+// --- Ticket 085: missing HeatingCapacity triggers autosizing flag, not silent drop -----
+//
+// When HPXML omits <HeatingCapacity>, Phase 2 autosizing kicks in: the resolver
+// sets autosize_heating = true and the dwelling builder computes capacity from
+// the building envelope model at design conditions. The equipment spec is still
+// emitted (typed_config = None) because capacity will be populated after
+// autosizing. Phase 1 errors fire in the equipment init layer when capacity is
+// still absent after autosizing completes.
 
-// Gas furnace without <HeatingCapacity> must produce MissingField, not Ok(None)
-// (the silent-skip path at resolve_hvac.rs:521-522).
+/// Furnace without <HeatingCapacity> resolves with autosize_heating flag set,
+/// signalling that capacity will be computed by the dwelling builder later.
 #[test]
-#[should_panic(expected = "expected HpxmlError::MissingField, but parse succeeded")]
-fn gas_furnace_missing_heating_capacity_errors() {
+fn gas_furnace_missing_heating_capacity_flags_autosize() {
     let xml = wrap_systems(
         r#"<Systems>
           <HVAC>
@@ -582,10 +588,25 @@ fn gas_furnace_missing_heating_capacity_errors() {
           </HVAC>
         </Systems>"#,
     );
-    expect_missing(
-        resolve(&xml),
-        "HeatingSystem/HeatingCapacity",
-        "Gas Furnace",
+    let specs =
+        resolve(&xml).expect("furnace without HeatingCapacity must resolve with autosize flag");
+    let furnace = specs
+        .iter()
+        .find(|s| s.name == "Gas Furnace")
+        .expect("Gas Furnace spec must be emitted even without HeatingCapacity");
+    let autosize = furnace
+        .parameters
+        .get("autosize_heating")
+        .and_then(|v| v.as_bool())
+        .expect("autosize_heating must be set when HeatingCapacity is absent");
+    assert!(
+        autosize,
+        "autosize_heating must be true when HeatingCapacity is absent"
+    );
+    assert!(
+        !furnace.parameters.contains_key("heating_capacity_w"),
+        "heating_capacity_w must not be set when HeatingCapacity is absent \
+         (autosizing will compute it later)"
     );
 }
 
@@ -613,11 +634,10 @@ fn gas_furnace_with_heating_capacity_and_afue_resolves() {
     );
 }
 
-// ASHP heat pump without <HeatingCapacity> must produce MissingField, not
-// silently substitute DEFAULT_HEATING_CAPACITY_W = 10_000 W.
+/// ASHP heat pump without <HeatingCapacity> resolves with autosize_heating flag set,
+/// signalling that capacity will be computed by the dwelling builder later.
 #[test]
-#[should_panic(expected = "expected HpxmlError::MissingField, but parse succeeded")]
-fn ashp_missing_heating_capacity_errors() {
+fn ashp_missing_heating_capacity_flags_autosize() {
     let xml = wrap_systems(
         r#"<Systems>
           <HVAC>
@@ -634,7 +654,26 @@ fn ashp_missing_heating_capacity_errors() {
           </HVAC>
         </Systems>"#,
     );
-    expect_missing(resolve(&xml), "HeatPump/HeatingCapacity", "ASHP Heater");
+    let specs =
+        resolve(&xml).expect("ASHP without HeatingCapacity must resolve with autosize flag");
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "ASHP Heater")
+        .expect("ASHP Heater spec must be emitted even without HeatingCapacity");
+    let autosize = heater
+        .parameters
+        .get("autosize_heating")
+        .and_then(|v| v.as_bool())
+        .expect("autosize_heating must be set when HeatingCapacity is absent");
+    assert!(
+        autosize,
+        "autosize_heating must be true when HeatingCapacity is absent"
+    );
+    assert!(
+        !heater.parameters.contains_key("heating_capacity_w"),
+        "heating_capacity_w must not be set when HeatingCapacity is absent \
+         (autosizing will compute it later)"
+    );
 }
 
 // ASHP with explicit HeatingCapacity must resolve cleanly.
@@ -676,7 +715,7 @@ fn ashp_with_heating_capacity_resolves() {
 /// Electric Furnace without AnnualHeatingEfficiency must produce
 /// MissingField, not silently assume EIR = 1.0.
 #[test]
-#[ignore = "ticket 111: resistance_efficiency_from_params must return Err when efficiency absent"]
+#[should_panic(expected = "expected HpxmlError::MissingField, but parse succeeded")]
 fn electric_furnace_missing_efficiency_errors() {
     let xml = wrap_systems(
         r#"<Systems>
@@ -724,7 +763,7 @@ fn electric_furnace_with_explicit_efficiency_resolves() {
 /// ElectricResistance baseboard without AnnualHeatingEfficiency must produce
 /// MissingField, not silently assume EIR = 1.0.
 #[test]
-#[ignore = "ticket 111: resistance_efficiency_from_params must return Err when efficiency absent"]
+#[should_panic(expected = "expected HpxmlError::MissingField, but parse succeeded")]
 fn electric_resistance_baseboard_missing_efficiency_errors() {
     let xml = wrap_systems(
         r#"<Systems>
@@ -783,7 +822,7 @@ fn electric_resistance_baseboard_with_explicit_efficiency_resolves() {
 // closed rather than produce a silently-wrong single_speed inference.
 
 #[test]
-#[ignore = "ticket 120: unknown CompressorType must return Err, not silently map to single_speed"]
+#[should_panic(expected = "ticket 120: unknown CompressorType 'DualStage' silently resolved")]
 fn unknown_compressor_type_errors_not_silently_defaults() {
     let xml = wrap_systems(
         r#"<Systems>
