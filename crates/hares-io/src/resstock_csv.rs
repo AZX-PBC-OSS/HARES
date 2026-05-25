@@ -30,6 +30,8 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
 
+use hares_physics::constants::{ISA_LAPSE_COEFFICIENT, ISA_PRESSURE_EXPONENT};
+
 use crate::epw::{
     compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, interpolate_ground_temp_c,
     monthly_average_dry_bulb,
@@ -38,16 +40,18 @@ use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 
 /// ISA standard atmosphere: pressure [kPa] at a given elevation [m].
 ///
-/// Formula: `P = 101.325 * (1 - 2.25577e-5 * h)^5.25588`
+/// Formula: `P = 101.325 * (1 - L * h)^E`
+/// where L = [`ISA_LAPSE_COEFFICIENT`] and E = [`ISA_PRESSURE_EXPONENT`]
+/// from `hares-physics`.
 ///
 /// Valid for elevations 0–11 000 m (troposphere). Returns NaN-safe minimum
 /// of 1.0 kPa for elevations beyond the formula's validity range.
 fn isa_pressure_kpa(elevation_m: f64) -> f64 {
-    let base = 1.0 - 2.25577e-5 * elevation_m;
+    let base = 1.0 - ISA_LAPSE_COEFFICIENT * elevation_m;
     if base <= 0.0 {
         return 1.0; // Above ~44 km -- return a safe floor
     }
-    101.325 * base.powf(5.25588)
+    101.325 * base.powf(ISA_PRESSURE_EXPONENT)
 }
 
 /// Magnus formula dew point [°C] from dry-bulb [°C] and relative humidity [%].

@@ -94,9 +94,23 @@ pub const SEA_LEVEL_PRESSURE_PA: f64 = 101_325.0;
 /// ISA 1976: p = p0 * (1 - L*h)^E where L = 2.25577e-5.
 pub const ISA_LAPSE_COEFFICIENT: f64 = 2.255_77e-5;
 
-/// ISA pressure exponent. Derived from g/(R_da * L) = 9.80665 / (287.058 * 0.0065).
-/// ISA 1976 / ICAO Doc 7488.
-pub const ISA_PRESSURE_EXPONENT: f64 = 5.2559;
+/// ISA pressure exponent: E = g₀·M₀ / (R*·L).
+///
+/// U.S. Standard Atmosphere 1976 (NOAA-S/T 76-1562) Part 1 §1.2.5,
+/// tropospheric layer (0–11 000 m):
+///   g₀  = 9.80665 m/s²     — standard gravity (exact by definition)
+///   M₀  = 0.0289644 kg/mol — mean molar mass of dry air at sea level
+///   R*  = 8.31432 J/(mol·K)— USSA 1976 universal gas constant (intentionally
+///          ～99.998% of the true value; see USSA 1976 §1.2.3 note)
+///   L   = 0.0065 K/m       — tropospheric temperature lapse rate
+///
+/// → E = 9.80665 × 0.0289644 / (8.31432 × 0.0065) ≈ 5.2558761
+///
+/// Rounded to 8 significant figures from the full derivation value 5.2558761133….
+/// EnergyPlus and ASHRAE HoF use the over-rounded 5.2559 (5 sig figs); HARES
+/// stores the higher-precision USSA 1976 value. The practical difference at
+/// 1 000 m is ～0.04 Pa — well within numerical noise.
+pub const ISA_PRESSURE_EXPONENT: f64 = 5.255_876_1;
 
 /// Minimum humidity ratio used as a floor guard in density calculations.
 /// Prevents division by near-zero in moist air density formula.

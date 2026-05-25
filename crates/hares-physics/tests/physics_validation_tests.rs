@@ -1154,8 +1154,8 @@ fn doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
 // ISA pressure exponent constant precision mismatch
 // ===========================================================================
 
-/// `ISA_PRESSURE_EXPONENT` in `hares-physics` and the inline
-/// literal in `hares-io/resstock_csv.rs` must agree.
+/// `ISA_PRESSURE_EXPONENT` in `hares-physics` must agree with the
+/// USSA 1976 tropospheric pressure exponent derivation.
 ///
 /// The USSA 1976 tropospheric pressure exponent is derived as:
 ///   E = g₀ · M₀ / (R* · L)
@@ -1168,19 +1168,12 @@ fn doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
 ///   L   = 0.0065 K/m  (troposphere lapse rate)
 /// → E = 9.80665 × 0.0289644 / (8.31432 × 0.0065) ≈ 5.2558761133
 ///
-/// Correctly-rounded:
-///   5 sig figs → 5.2559   (what constants.rs currently stores)
-///   6 sig figs → 5.25588  (what resstock_csv.rs uses — closer to the exact value)
-///
-/// This test FAILS with the current constants.rs value of 5.2559 because it
-/// asserts the stored constant equals the 6-significant-figure-rounded value
-/// that resstock_csv.rs independently uses.  Once fixed (constant updated to
-/// ≥ 6 sig figs and resstock_csv.rs imports it), the test will pass.
+/// The stored constant must agree with the USSA 1976 derivation to within 1e-5
+/// (i.e., correct to at least 5 significant figures).
 ///
 /// Reference: U.S. Standard Atmosphere 1976 (NOAA-S/T 76-1562) §1.2.5;
 ///            Wikipedia "Barometric formula" model equations table, layer 0.
 #[test]
-#[should_panic(expected = "ISA_PRESSURE_EXPONENT")]
 fn isa_pressure_exponent_matches_ussa76_derivation() {
     use hares_physics::constants::ISA_PRESSURE_EXPONENT;
 
@@ -1192,18 +1185,11 @@ fn isa_pressure_exponent_matches_ussa76_derivation() {
 
     let derived = g0 * m0 / (r_star * lapse); // ≈ 5.2558761133
 
-    // The constant must agree with the USSA 1976 derivation to within 1e-5
-    // (i.e., correct to at least 5 significant figures, matching 6-sig-fig
-    // rounding of 5.255876… to give 5.25588, not the current over-rounded 5.2559).
-    //
-    // BUG: `ISA_PRESSURE_EXPONENT = 5.2559` diverges from the
-    // derived value by 0.00002, which is larger than the 1e-5 tolerance.
-    // This assertion therefore FAILS until the constant is updated.
+    // The stored constant must agree with the USSA 1976 derivation to within 1e-5.
     assert!(
         (ISA_PRESSURE_EXPONENT - derived).abs() < 1e-5,
         "ISA_PRESSURE_EXPONENT ({ISA_PRESSURE_EXPONENT}) deviates from \
-         USSA 1976 derivation ({derived:.10}) by {:.2e}, which exceeds 1e-5. \
-         The constant must be updated to at least 5.25588 (6 sig figs).",
+         USSA 1976 derivation ({derived:.10}) by {:.2e}, which exceeds 1e-5.",
         (ISA_PRESSURE_EXPONENT - derived).abs()
     );
 }
