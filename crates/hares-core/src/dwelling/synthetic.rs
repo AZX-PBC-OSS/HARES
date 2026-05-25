@@ -401,6 +401,30 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
                     },
                 ],
             });
+        } else {
+            // Electric resistance heating is by definition 100% efficient
+            // at the appliance per ASHRAE HVAC Systems & Equipment 2020 Ch. 33.
+            // The HPXML resolver now requires explicit efficiency — a silent
+            // default is no longer permitted.
+            heating_children.push(hares_io::hpxml::building::XmlNode {
+                name: "AnnualHeatingEfficiency".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![
+                    hares_io::hpxml::building::XmlNode {
+                        name: "Units".to_string(),
+                        attrs: HashMap::new(),
+                        text: "Percent".to_string(),
+                        children: Vec::new(),
+                    },
+                    hares_io::hpxml::building::XmlNode {
+                        name: "Value".to_string(),
+                        attrs: HashMap::new(),
+                        text: "1.0".to_string(),
+                        children: Vec::new(),
+                    },
+                ],
+            });
         }
 
         hvac_children.push(hares_io::hpxml::building::XmlNode {

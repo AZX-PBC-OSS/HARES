@@ -59,6 +59,23 @@ pub enum HpxmlError {
         /// must be specified explicitly instead of defaulted.
         reason: &'static str,
     },
+    /// A supplied HPXML field value is outside the acceptable range.
+    #[error(
+        "HPXML field `{path}` on {system_kind} `{system_id}` has invalid value \
+         `{value_received}` -- {reason}"
+    )]
+    InvalidField {
+        /// HPXML element path (e.g. `HeatingSystem/AnnualHeatingEfficiency`).
+        path: &'static str,
+        /// Short type label for the enclosing system.
+        system_kind: &'static str,
+        /// Identifier from `SystemIdentifier/@id` or `unknown` when absent.
+        system_id: String,
+        /// String representation of the invalid value received.
+        value_received: String,
+        /// Human-readable explanation of the valid range or constraint.
+        reason: &'static str,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, HpxmlError>;

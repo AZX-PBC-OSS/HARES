@@ -69,6 +69,41 @@ fn expect_missing(
     }
 }
 
+fn expect_invalid_field(
+    result: Result<Vec<hares_io::hpxml::EquipmentSpec>, HpxmlError>,
+    expected_path: &str,
+    expected_kind: &str,
+    expected_value_received: &str,
+) {
+    match result {
+        Err(HpxmlError::InvalidField {
+            path,
+            system_kind,
+            system_id,
+            value_received,
+            reason,
+        }) => {
+            assert_eq!(
+                path, expected_path,
+                "InvalidField.path mismatch (system_id={system_id}, \
+                 value_received={value_received}, reason={reason})"
+            );
+            assert_eq!(
+                system_kind, expected_kind,
+                "InvalidField.system_kind mismatch (path={path}, \
+                 system_id={system_id}, value_received={value_received})"
+            );
+            assert_eq!(
+                value_received, expected_value_received,
+                "InvalidField.value_received mismatch (path={path}, \
+                 system_kind={system_kind}, system_id={system_id})"
+            );
+        }
+        Err(other) => panic!("expected HpxmlError::InvalidField, got {other:?}"),
+        Ok(_) => panic!("expected HpxmlError::InvalidField, but parse succeeded"),
+    }
+}
+
 // --- PV ---------------------------------------------------------------------
 
 #[test]
@@ -715,7 +750,6 @@ fn ashp_with_heating_capacity_resolves() {
 /// Electric Furnace without AnnualHeatingEfficiency must produce
 /// MissingField, not silently assume EIR = 1.0.
 #[test]
-#[should_panic(expected = "expected HpxmlError::MissingField, but parse succeeded")]
 fn electric_furnace_missing_efficiency_errors() {
     let xml = wrap_systems(
         r#"<Systems>
@@ -763,7 +797,6 @@ fn electric_furnace_with_explicit_efficiency_resolves() {
 /// ElectricResistance baseboard without AnnualHeatingEfficiency must produce
 /// MissingField, not silently assume EIR = 1.0.
 #[test]
-#[should_panic(expected = "expected HpxmlError::MissingField, but parse succeeded")]
 fn electric_resistance_baseboard_missing_efficiency_errors() {
     let xml = wrap_systems(
         r#"<Systems>
@@ -805,6 +838,151 @@ fn electric_resistance_baseboard_with_explicit_efficiency_resolves() {
         specs.iter().any(|s| s.name == "Electric Baseboard"),
         "expected Electric Baseboard spec in {:?}",
         specs.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
+/// Electric Furnace with out-of-range efficiency value 2.0 must produce
+/// InvalidField, not silently accept an invalid value.
+#[test]
+fn electric_furnace_efficiency_greater_than_one_errors() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="ef1"/>
+              <HeatingSystemFuel>electricity</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <HeatingCapacity>18000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>Percent</Units><Value>2.0</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    expect_invalid_field(
+        resolve(&xml),
+        "HeatingSystem/AnnualHeatingEfficiency",
+        "Electric Furnace",
+        "2",
+    );
+}
+
+/// Electric Furnace with efficiency value 0.0 must produce InvalidField.
+#[test]
+fn electric_furnace_efficiency_zero_errors() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="ef1"/>
+              <HeatingSystemFuel>electricity</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <HeatingCapacity>18000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>Percent</Units><Value>0.0</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    expect_invalid_field(
+        resolve(&xml),
+        "HeatingSystem/AnnualHeatingEfficiency",
+        "Electric Furnace",
+        "0",
+    );
+}
+
+/// Electric Boiler with out-of-range efficiency value 2.0 must produce InvalidField.
+#[test]
+fn electric_boiler_efficiency_greater_than_one_errors() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="eboi1"/>
+              <HeatingSystemFuel>electricity</HeatingSystemFuel>
+              <HeatingSystemType><Boiler/></HeatingSystemType>
+              <HeatingCapacity>12000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>Percent</Units><Value>2.0</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    expect_invalid_field(
+        resolve(&xml),
+        "HeatingSystem/AnnualHeatingEfficiency",
+        "Electric Boiler",
+        "2",
+    );
+}
+
+/// Electric Boiler with efficiency value 0.0 must produce InvalidField.
+#[test]
+fn electric_boiler_efficiency_zero_errors() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="eboi1"/>
+              <HeatingSystemFuel>electricity</HeatingSystemFuel>
+              <HeatingSystemType><Boiler/></HeatingSystemType>
+              <HeatingCapacity>12000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>Percent</Units><Value>0.0</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    expect_invalid_field(
+        resolve(&xml),
+        "HeatingSystem/AnnualHeatingEfficiency",
+        "Electric Boiler",
+        "0",
+    );
+}
+
+/// Electric Baseboard with out-of-range efficiency value 2.0 must produce InvalidField.
+#[test]
+fn electric_baseboard_efficiency_greater_than_one_errors() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="er1"/>
+              <HeatingSystemFuel>electricity</HeatingSystemFuel>
+              <HeatingSystemType><ElectricResistance/></HeatingSystemType>
+              <HeatingCapacity>5000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>Percent</Units><Value>2.0</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    expect_invalid_field(
+        resolve(&xml),
+        "HeatingSystem/AnnualHeatingEfficiency",
+        "Electric Baseboard",
+        "2",
+    );
+}
+
+/// Electric Baseboard with efficiency value 0.0 must produce InvalidField.
+#[test]
+fn electric_baseboard_efficiency_zero_errors() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="er1"/>
+              <HeatingSystemFuel>electricity</HeatingSystemFuel>
+              <HeatingSystemType><ElectricResistance/></HeatingSystemType>
+              <HeatingCapacity>5000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>Percent</Units><Value>0.0</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    expect_invalid_field(
+        resolve(&xml),
+        "HeatingSystem/AnnualHeatingEfficiency",
+        "Electric Baseboard",
+        "0",
     );
 }
 

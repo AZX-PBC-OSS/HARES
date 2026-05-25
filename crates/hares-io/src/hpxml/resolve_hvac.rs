@@ -292,10 +292,16 @@ pub fn rebuild_hvac_typed_config(
         "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params)
             .ok()
             .flatten(),
-        "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params),
+        "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params)
+            .ok()
+            .flatten(),
         "Gas Boiler" => try_build_gas_boiler_config(name, params).ok().flatten(),
-        "Electric Boiler" => try_build_electric_boiler_config(name, params),
-        "Electric Baseboard" => try_build_electric_baseboard_config(name, params),
+        "Electric Boiler" => try_build_electric_boiler_config(name, params)
+            .ok()
+            .flatten(),
+        "Electric Baseboard" => try_build_electric_baseboard_config(name, params)
+            .ok()
+            .flatten(),
         "Ideal HVAC" => try_build_ideal_hvac_config(name, params),
         "Air Conditioner" => try_build_central_ac_config(name, params, duct_params),
         "Room AC" => try_build_room_ac_config(name, params),
@@ -430,12 +436,40 @@ fn afue_from_params(params: &Map<String, Value>) -> Option<f64> {
 }
 
 /// Extract COP/efficiency for resistance heaters from the params map.
-fn resistance_efficiency_from_params(params: &Map<String, Value>) -> f64 {
-    params
+///
+/// Electric resistance heating is by definition 100% efficient at the appliance
+/// (all electrical input becomes heat). This conventional value is documented in
+/// ASHRAE Handbook — HVAC Systems and Equipment 2020, Ch. 33 "Furnaces".
+/// HARES requires the input file to state the efficiency explicitly rather than
+/// silently defaulting — a misspelled key or absent field must fail loudly.
+fn resistance_efficiency_from_params(
+    params: &Map<String, Value>,
+    name: &str,
+    system_kind: &'static str,
+) -> std::result::Result<f64, HpxmlError> {
+    let value = params
         .get("heating_efficiency")
         .and_then(Value::as_f64)
         .or_else(|| params.get("efficiency_cop").and_then(Value::as_f64))
-        .unwrap_or(1.0)
+        .ok_or_else(|| HpxmlError::MissingField {
+            path: "HeatingSystem/AnnualHeatingEfficiency",
+            system_kind,
+            system_id: name.to_string(),
+            reason: "Electric resistance efficiency must be specified explicitly; \
+                     value 1.0 (100% appliance efficiency) per ASHRAE HVAC Systems \
+                     & Equipment 2020 Ch. 33 is the conventional choice",
+        })?;
+    if value <= 0.0 || value > 1.0 {
+        return Err(HpxmlError::InvalidField {
+            path: "HeatingSystem/AnnualHeatingEfficiency",
+            system_kind,
+            system_id: name.to_string(),
+            value_received: format!("{value}"),
+            reason: "Electric resistance efficiency must be in range (0.0, 1.0]; \
+                     value 1.0 (100%) is the conventional choice",
+        });
+    }
+    Ok(value)
 }
 
 /// Extract SEER from the params map.
@@ -651,9 +685,11 @@ fn try_build_electric_furnace_config(
     name: &str,
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
-) -> Option<EquipmentConfig> {
-    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
-    let heating_efficiency = resistance_efficiency_from_params(params);
+) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
+    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
+        return Ok(None);
+    };
+    let heating_efficiency = resistance_efficiency_from_params(params, name, "Electric Furnace")?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
     let airflow_m3_s_per_w =
@@ -683,11 +719,11 @@ fn try_build_electric_furnace_config(
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
     };
-    Some(EquipmentConfig::from_typed(
+    Ok(Some(EquipmentConfig::from_typed(
         name.to_string(),
         "Electric Furnace".to_string(),
         cfg,
-    ))
+    )))
 }
 
 /// Build a `GasBoilerConfig` typed config.
@@ -754,9 +790,11 @@ fn try_build_gas_boiler_config(
 fn try_build_electric_boiler_config(
     name: &str,
     params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
-    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
-    let heating_efficiency = resistance_efficiency_from_params(params);
+) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
+    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
+        return Ok(None);
+    };
+    let heating_efficiency = resistance_efficiency_from_params(params, name, "Electric Boiler")?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
 
@@ -784,38 +822,45 @@ fn try_build_electric_boiler_config(
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
     };
-    Some(EquipmentConfig::from_typed(
+    Ok(Some(EquipmentConfig::from_typed(
         name.to_string(),
         "Electric Boiler".to_string(),
         cfg,
-    ))
+    )))
 }
 
 /// Build an `ElectricBaseboardConfig` typed config.
+///
+/// Electric resistance heating is by definition 100% efficient at the appliance
+/// (all electrical input becomes heat). This conventional value is documented in
+/// ASHRAE Handbook — HVAC Systems and Equipment 2020, Ch. 33 "Furnaces".
 fn try_build_electric_baseboard_config(
     name: &str,
     params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
-    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
+) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
+    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
+        return Ok(None);
+    };
     let zone_id = params
         .get("zone_id")
         .and_then(Value::as_u64)
         .map(|v| v as u16);
+    let heating_efficiency = resistance_efficiency_from_params(params, name, "Electric Baseboard")?;
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cfg = ElectricBaseboardConfig {
         equipment_id: None,
         zone_id,
         capacity_w,
-        eir: 1.0,
+        eir: heating_efficiency,
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
     };
-    Some(EquipmentConfig::from_typed(
+    Ok(Some(EquipmentConfig::from_typed(
         name.to_string(),
         "Electric Baseboard".to_string(),
         cfg,
-    ))
+    )))
 }
 
 /// Build an `IdealHvacConfig` typed config.
@@ -1545,7 +1590,7 @@ pub(super) fn resolve_hvac(
                 }
                 Err(e) => return Err(e),
             },
-            "Electric Furnace" => try_build_electric_furnace_config(&name, &params, &duct_params),
+            "Electric Furnace" => try_build_electric_furnace_config(&name, &params, &duct_params)?,
             "Gas Boiler" => match try_build_gas_boiler_config(&name, &params) {
                 Ok(config) => config,
                 Err(HpxmlError::MissingField { .. })
@@ -1558,8 +1603,8 @@ pub(super) fn resolve_hvac(
                 }
                 Err(e) => return Err(e),
             },
-            "Electric Boiler" => try_build_electric_boiler_config(&name, &params),
-            "Electric Baseboard" => try_build_electric_baseboard_config(&name, &params),
+            "Electric Boiler" => try_build_electric_boiler_config(&name, &params)?,
+            "Electric Baseboard" => try_build_electric_baseboard_config(&name, &params)?,
             "Ideal HVAC" => try_build_ideal_hvac_config(&name, &params),
             _ => None,
         };
@@ -4188,10 +4233,12 @@ mod tests {
     fn electric_baseboard_builder_populates_zone_id_from_params() {
         let mut params = Map::new();
         params.insert("heating_capacity_w".to_string(), json!(3_000.0));
+        params.insert("heating_efficiency".to_string(), json!(1.0));
         params.insert("zone_id".to_string(), json!(1u16));
 
         let ec = try_build_electric_baseboard_config("Electric Baseboard", &params)
-            .expect("builder must succeed with capacity and zone_id");
+            .expect("builder must succeed with capacity and zone_id")
+            .expect("typed config must be present");
         use hares_equipment::hvac::heating_config::ElectricBaseboardConfig;
         let cfg: ElectricBaseboardConfig = ec
             .typed()
@@ -4202,15 +4249,18 @@ mod tests {
             "zone_id must be populated from params"
         );
         assert!((cfg.capacity_w - 3_000.0).abs() < 1e-9);
+        assert!((cfg.eir - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn electric_baseboard_builder_zone_id_none_when_param_absent() {
         let mut params = Map::new();
         params.insert("heating_capacity_w".to_string(), json!(3_000.0));
+        params.insert("heating_efficiency".to_string(), json!(1.0));
 
         let ec = try_build_electric_baseboard_config("Electric Baseboard", &params)
-            .expect("builder must succeed with capacity only");
+            .expect("builder must succeed with capacity only")
+            .expect("typed config must be present");
         use hares_equipment::hvac::heating_config::ElectricBaseboardConfig;
         let cfg: ElectricBaseboardConfig = ec
             .typed()
