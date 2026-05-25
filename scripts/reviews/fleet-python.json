@@ -1,0 +1,70 @@
+{
+  "category": "fleet-python",
+  "description": "Fleet aggregation, Python binding safety, HELICS integration, RL environment, and progress reporting",
+  "reviews": [
+    {
+      "id": "fleet-python-01",
+      "slug": "aggregation-empty-batch-silent",
+      "title": "Fleet aggregation: silent empty-batch on column mismatch",
+      "vendor_refs": "",
+      "files": "crates/hares-fleet/src/aggregation.rs",
+      "prompt": "The build_aggregate_batch() function silently returns an empty RecordBatch when the column sets from different dwellings differ. This means if one dwelling has an extra telemetry column (perhaps from an additional equipment type) that others lack, the entire aggregation silently produces zero rows with no warning to the user. Similarly, the bucket-intersection logic silently drops timesteps where different dwellings have non-overlapping time ranges. Trace the callers and consumers of build_aggregate_batch(): what downstream code expects non-empty output? If the function is used to produce fleet-level statistics for analysis or visualization, an empty batch silently returning will produce empty plots or zero statistics, masking the underlying data mismatch issue. The function should emit a warning (via log::warn! or tracing::warn!) when it detects column set mismatch, stating which dwellings contributed which columns and why the batch is empty. If empty output is semantically invalid for the callers, the function should return a Result::Err with a descriptive error rather than silently producing empty data. Investigate whether column mismatch is a realistic scenario (equipment added via Python custom equipment, heterogeneous dwelling fleets with different equipment types) or only a theoretical concern."
+    },
+    {
+      "id": "fleet-python-02",
+      "slug": "aggregation-column-suffix-matching",
+      "title": "Fleet aggregation: column classification by suffix string matching only",
+      "vendor_refs": "",
+      "files": "crates/hares-fleet/src/aggregation.rs",
+      "prompt": "The aggregation system classifies telemetry columns for statistical aggregation using string suffix matching: ends_with('(kWh)'), ends_with('(kW)'), ends_with('(degC)'), etc. Any column whose name does not end with a recognized suffix string silently defaults to Mean aggregation. This is fragile: a column named 'total_consumption_kWh' (without parentheses) would not match 'ends_with((kWh))' and would be aggregated as Mean instead of Sum, producing incorrect fleet-level totals. Similarly, if a new telemetry column with a different unit suffix is added in the future, it would silently get Mean aggregation with no warning. The correct approach is to drive aggregation strategy from column metadata (unit, aggregation type, allowed operations) rather than fragile string parsing. Verify whether the telemetry system provides column metadata that could be used instead. If string suffix matching is retained, document every recognized suffix and its corresponding aggregation type, test that no existing telemetry column name deviates from the expected suffix pattern, and add a warning for unrecognized suffixes rather than silently defaulting to Mean."
+    },
+    {
+      "id": "fleet-python-03",
+      "slug": "aggregation-energy-column-weighting",
+      "title": "Fleet aggregation: energy column weighting with non-unit sample weights",
+      "vendor_refs": "",
+      "files": "crates/hares-fleet/src/aggregation.rs",
+      "prompt": "FleetAggregation maps energy columns to WeightedSum aggregation, which is only correct when all sample weights equal 1.0 (i.e., each dwelling represents one unit in the population). ColumnAggregation classifies columns with kWh suffix as Sum aggregation (not WeightedSum). This creates a potential double-weighting issue: if dwellings have unequal sample weights (representing different numbers of buildings in the housing stock), and energy columns are aggregated as Sum (which implicitly assumes weight=1.0) rather than WeightedSum (which multiplies each dwelling's energy by its sample weight before summing), the fleet-level energy totals will be incorrect — they will undercount dwellings with weight > 1.0 and overcount those with weight < 1.0. Verify whether the fleet runner applies sample weights before aggregation or whether aggregation must handle weights. Check the interaction between the dwelling weight (population scaling factor for ResStock sampling) and the aggregation math. If FleetAggregation is designed for unweighted samples only, document this constraint and add a runtime check that all weights are 1.0 or warn if not. If weighted aggregation is intended, fix the column classification to use WeightedSum for energy columns when weights are not all 1.0."
+    },
+    {
+      "id": "fleet-python-04",
+      "slug": "send-dwelling-ptr-safety",
+      "title": "Python binding: unsafe SendDwellingPtr safety audit",
+      "vendor_refs": "",
+      "files": "crates/hares-python/src/py_gym.rs crates/hares-python/src/conversions.rs",
+      "prompt": "SendDwellingPtr wraps a raw pointer to PyDwelling (`*const PyDwelling`) with `unsafe impl Send` and `unsafe impl Sync`. The safety justification is that a PyDwelling behind a Python GIL-managed reference can be shared across threads when the GIL is released. Assess whether this unsafe impl is actually sound: (1) PyO3's Py<PyDwelling> is already Send (if PyDwelling: Send) — why is the raw pointer wrapper needed? (2) When Rayon releases the GIL and executes parallel section, the PyRef borrows obtained before GIL release must stay alive for the duration — is there a check that the Py<PyDwelling> handles outlive the parallel section? (3) If Python garbage collection runs on a different thread and collects the PyDwelling while the Rust parallel section holds a SendDwellingPtr, this is use-after-free. (4) Action mapping (converting RL actions to control signals) is documented as not implemented (TODO) — if partially implemented code produces invalid control signals, this could corrupt simulation state. Verify that the unsafe Send+Sync impl follows PyO3's documented patterns for sharing Python objects across threads, has adequate documentation of the safety invariants, and has no path where a dropped PyDwelling can be accessed from a parallel section."
+    },
+    {
+      "id": "fleet-python-05",
+      "slug": "python-dead-code-cleanup",
+      "title": "Python binding: dead code with #[allow(dead_code)]",
+      "vendor_refs": "",
+      "files": "crates/hares-python/src/conversions.rs",
+      "prompt": "The functions obs_to_numpy() and record_batch_arc_to_polars_df() are annotated with #[allow(dead_code)], indicating they are implemented but never called. obs_to_numpy() converts an RL observation dictionary to a NumPy array — this is exactly what the batch_step_py method would use to return observations to an RL agent, suggesting the RL environment implementation is incomplete or uses a different code path. record_batch_arc_to_polars_df() converts an Arrow RecordBatch to a Polars DataFrame — this is what the fleet aggregation Python binding would use to return results to Python users. For each dead function: either (1) wire it into the API where it belongs (obs_to_numpy in py_gym.rs batch_step_py, record_batch_arc_to_polars_df in py_fleet.rs aggregation), (2) document it as a forward-declaration for planned future use with a tracking issue reference, or (3) remove it to eliminate dead code that creates false expectations of functionality. Dead code with #[allow(dead_code)] that implements critical functionality is a sign of incomplete feature wiring, not just cosmetic cleanup."
+    },
+    {
+      "id": "fleet-python-06",
+      "slug": "helics-integration-test-gaps",
+      "title": "HELICS co-simulation integration test coverage gaps",
+      "vendor_refs": "",
+      "files": "crates/hares-python/src/ python/ochre_next/helics/ tests/python/test_helics_*.py",
+      "prompt": "Audit HELICS co-simulation integration test coverage against the full co-simulation lifecycle. Required test scenarios: (1) Federate setup and teardown — single federate registers, initializes, and finalizes correctly with no HELICS core leaks. (2) Time synchronization — two or more federates advance time in lockstep; verify no timestep is skipped, no federate runs ahead. (3) Signal subscription — a dwelling federate subscribes to a grid power limit signal and applies it to equipment; verify the correct control signal is dispatched. (4) Signal publication — a dwelling federate publishes telemetry (net load, zone temperature) and a consumer federate receives correct values at the correct timestep. (5) Error handling — a federate fails mid-simulation (simulated by exception injection); verify the HELICS broker detects the failure, other federates receive error notifications, and the simulation terminates cleanly rather than hanging. (6) Multi-year co-simulation — simulate a full year with hourly timesteps across multiple federates to detect time accumulation errors. Compare against EnergyPlus's BCVTB (Building Controls Virtual Test Bed) patterns for co-simulation robustness testing. Identify which scenarios are covered, which are missing, and which missing scenarios represent the highest risk for production HELICS deployments."
+    },
+    {
+      "id": "fleet-python-07",
+      "slug": "rl-gym-env-completeness",
+      "title": "RL Gymnasium environment completeness and observation space correctness",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/api/",
+      "files": "crates/hares-python/src/py_gym.rs python/ochre_next/rl/gym_env.py python/ochre_next/rl/vec_env.py",
+      "prompt": "Comprehensive review of the RL Gymnasium environment. Observation space: verify that all telemetry keys relevant for control decisions are included — zone temperatures (all zones), outdoor temperature, humidity (indoor and outdoor), occupancy status, time-of-day (sin/cos encoding for cyclical continuity), day-of-week, electricity price signal ($/kWh), equipment status flags (HVAC mode, water heater mode, battery charging/discharging/idle), battery SOC, EV SOC and connected status, PV generation, and net electrical load. Check that observation bounds are physically correct (not -inf to +inf) and that normalization/scaling is applied before the observation reaches the agent. Action space: verify per-equipment action dimensions and ranges — HVAC setpoint offset (e.g., -2C to +2C), battery charge/discharge rate (e.g., -1.0 to 1.0 normalized, or -max_power to +max_power in Watts), EV charging rate (0.0 to 1.0), water heater setpoint offset. Check that action clipping is applied (actions outside valid range clipped, not silently accepted producing invalid simulation state). Reward function: verify sign convention (positive = desirable), weighting between comfort (temperature penalty for deviation from setpoint), energy cost ($), demand charge ($/kW peak), and equipment cycling penalty. Done condition: episode must terminate on simulation end (not prematurely due to weather file exhaustion or equipment fault). Truncation: episode truncated if maximum timesteps reached. Vec env: verify SubprocVecEnv correctly creates N independent dwelling instances, step_async/step_wait correctly parallelizes, and observations are correctly stacked."
+    },
+    {
+      "id": "fleet-python-08",
+      "slug": "fleet-progress-empty-stub",
+      "title": "Fleet progress.rs is an empty stub",
+      "vendor_refs": "",
+      "files": "crates/hares-fleet/src/progress.rs crates/hares-fleet/src/fleet.rs",
+      "prompt": "The file crates/hares-fleet/src/progress.rs contains only a module doc comment and no implementation code. Progress reporting functionality is instead implemented inline in fleet.rs via a ProgressCallback type (likely a closure or function pointer). Assess whether an empty progress.rs module should be: (1) populated with the progress reporting logic extracted from fleet.rs (a Progress struct with start/finish/increment methods, ProgressReporter trait for different output formats like console bar, log, callback), (2) removed entirely including its mod declaration in lib.rs and fleet.rs, or (3) kept as a placeholder with a doc comment explaining what will be implemented. The current state — an empty file declared as a module — compiles but creates confusion: developers looking for progress reporting logic will find an empty file and may not discover the inline implementation in fleet.rs. If the inline implementation is the intended final form, the module declaration in fleet.rs (`mod progress;`) should be removed. If progress logic will be extracted, the stub should have at least a type definition and trait sketch. Document any plan for this module."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "category": "air-properties",
+  "description": "Air property calculations",
+  "reviews": [
+    {
+      "id": "air-01",
+      "slug": "isa-standard-pressure-function",
+      "title": "ISA standard pressure function: verify p0*(1-L·h)^E against USSA 1976 at 0/500/1000/1609/3000m",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/air_properties.rs:12-14",
+      "prompt": "Verify the ISA standard pressure function p = p0 * (1 - L*h/T0)^E against USSA 1976 standard atmosphere tables. Compute pressure at 0, 500, 1000, 1609 (1 mile), and 3000m elevations. Compare against published USSA 1976 values and report the deviation at each altitude."
+    },
+    {
+      "id": "air-02",
+      "slug": "moist-air-density-formula",
+      "title": "Moist air density formula: verify p/(R_da·T·(1+1.6077687·W)) against ASHRAE HOF 2021 Ch.1 Eq.28; check humidity floor guard (1e-5)",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/air_properties.rs:21-26",
+      "prompt": "Verify the moist air density formula ρ = p / (R_da · T · (1 + 1.6077687 · W)) against ASHRAE HOF 2021 Ch.1 Eq.28. Check that the humidity ratio enhancement factor 1.6077687 is correct (derived from R_da/R_wv = 0.62198...). Verify the humidity floor guard of 1e-5 prevents division-by-zero without distorting valid low-humidity values."
+    },
+    {
+      "id": "air-03",
+      "slug": "dry-air-density-formula",
+      "title": "Dry air density formula: verify p/(R_da·T) and ISA sea-level 15°C reference density 1.2250 kg/m³",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/, vendors/OCHRE/ochre/",
+      "files": "crates/hares-physics/src/air_properties.rs:29-31",
+      "prompt": "Verify the dry air density formula ρ_dry = p / (R_da · T). At ISA sea-level conditions (p=101325 Pa, T=288.15 K, R_da=287.058 J/kg·K), confirm the computed density is 1.2250 kg/m³. Check that R_da = 287.058 J/kg·K is correctly used."
+    }
+  ]
+}

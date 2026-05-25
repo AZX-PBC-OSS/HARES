@@ -357,9 +357,6 @@ impl Equipment for ElectricFurnace {
         if !self.use_ideal {
             return None;
         }
-        if self.operating_mode != OperatingMode::Heating {
-            return None;
-        }
         let setpoint = self.hvac.effective_setpoints().heating_c;
         Some((self.hvac.config.zone_id, setpoint))
     }
@@ -685,9 +682,6 @@ impl Equipment for GasFurnace {
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         if !self.use_ideal {
-            return None;
-        }
-        if self.operating_mode != OperatingMode::Heating {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;

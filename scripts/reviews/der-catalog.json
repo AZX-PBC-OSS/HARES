@@ -1,0 +1,86 @@
+{
+  "category": "der-catalog",
+  "description": "DER product catalogs and config data verification: battery specs, EV specs, PV configs, generator paths, and SAM LUT interpolation.",
+  "reviews": [
+    {
+      "id": "dercat-01",
+      "slug": "battery-spec-catalog",
+      "title": "BatterySpec catalog: verify all 11 products against manufacturer datasheets",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/battery/catalog.rs",
+      "prompt": "BatterySpec entries for all 11 products: Tesla Powerwall 3 (13.5 kWh, 11.5 kW), Powerwall 2, Enphase IQ5P/10C, Franklin aPower, Solaredge Home, LG Resu10H, and remaining models. For each product verify: (a) total capacity (kWh) matches manufacturer datasheet, (b) max continuous charge/discharge power (kW) matches datasheet, (c) round-trip efficiency matches datasheet (typically 90-97% for lithium), (d) chemistry (NMC, LFP, NCA) identified correctly for degradation model selection, (e) nominal voltage matches product specification, (f) internal resistance values are physically plausible for the given chemistry and capacity (should be in mΩ range for residential packs). Cross-reference each product against its latest manufacturer specification sheet. Any discrepancy between the catalog entry and the datasheet causes incorrect capacity-based dispatch limits, potentially violating NEM 3.0 export caps or over-discharging batteries. Pay particular attention to Powerwall 3 which has different specs from Powerwall 2 (higher power, LFP chemistry vs NMC in PW2)."
+    },
+    {
+      "id": "dercat-02",
+      "slug": "battery-pack-voltage-topology",
+      "title": "Battery pack voltage and topology derivation from cell parameters",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/battery/config.rs",
+      "prompt": "Battery pack electrical topology is derived from cell-level parameters: pack_voltage = n_series * v_cell and capacity = n_parallel * ah_cell * pack_voltage. Verify: (a) default 350V target is used when pack voltage is not specified directly and the computation n_series = round(target_voltage / v_cell) produces integer cell counts—fractional cells are physically impossible and indicate a bug, (b) series cell count is recomputed from actual pack voltage: n_series = pack_voltage / v_cell must be integer, (c) parallel cell count is computed from capacity: n_parallel = capacity_wh / (ah_cell * v_cell * n_series) and must also be integer, (d) total cell count n_series * n_parallel does not exceed physical cabinet limits, (e) adjusted actual pack voltage (n_series * v_cell) matches the declared pack voltage within rounding tolerance. Integer rounding in cell count computation can shift actual pack voltage by several volts, affecting SOC-OCV curve lookup accuracy. Verify that the config uses the actual topology-adjusted voltage for all electrical calculations, not the nominal voltage."
+    },
+    {
+      "id": "dercat-03",
+      "slug": "battery-thermal-config",
+      "title": "Battery thermal config defaults: heater, thermal mass, heat loss coefficient",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/battery/config.rs",
+      "prompt": "Review battery thermal parameters in the config struct around lines 50-90: heater_power_w, thermal_mass_j_per_k, ua_w_per_k. Verify physical plausibility for residential battery cabinets. (a) heater_power_w: typical values are 50-200W for residential batteries; verify default is within this range (Tesla Powerwall has ~80W thermal management, LG Chem RESU uses ~60W). (b) thermal_mass_j_per_k: compute expected = mass * cp where mass is cabinet weight (typically 100-150 kg) and cp of battery materials ~900 J/(kg·K); this gives 90-135 kJ/K. Verify the default is in this range. (c) ua_w_per_k: the heat loss coefficient to ambient; for a metal cabinet ~2 m² surface area with ~R2 insulation, UA ≈ A/R ≈ 1 W/K. Verify default is not orders of magnitude off. Incorrect thermal mass affects battery temperature dynamics and therefore capacity derating—a cold battery at -5°C can have 30-50% less usable capacity than at 25°C. The heater power and UA determine whether the battery can self-heat at low ambient temperatures to maintain minimum operating temperature (typically 0°C for LFP, 5°C for NMC)."
+    },
+    {
+      "id": "dercat-04",
+      "slug": "ev-vehicle-spec-catalog",
+      "title": "VehicleSpec for all 13 vehicles: capacity, charging power, efficiency, PHEV vs BEV",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/ev/catalog.rs",
+      "prompt": "VehicleSpec catalog for all 13 vehicles. For each vehicle verify: (a) battery capacity (kWh) matches manufacturer specification for the model year listed, (b) max AC charging power (kW) matches onboard charger rating (common values: 3.3 kW, 6.6 kW, 7.2 kW, 11.5 kW, 19.2 kW)—DC fast charging limits should be separate, (c) efficiency (Wh/mi or mi/kWh) matches EPA combined rating, (d) PHEV vs BEV classification is correct—PHEVs have smaller batteries (typically 8-18 kWh) and must be flagged correctly because their charging behavior differs (shallower cycles, more frequent charging), (e) all-electric range for PHEVs matches EPA rating, (f) battery chemistry (NMC, LFP, NCA) if recorded matches vehicle model. Vehicles with incorrectly high charging power can over-draw from the building electrical panel. Incorrect efficiency values compound over year-long simulations, misestimating total EV load by 10-20%. PHEVs misclassified as BEVs would incorrectly simulate multi-day charging patterns. Cross-reference each vehicle against fueleconomy.gov or manufacturer specs."
+    },
+    {
+      "id": "dercat-05",
+      "slug": "ev-driver-archetypes",
+      "title": "EV driver archetype presets: log-normal distributions vs NHTS data",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/ev/catalog.rs",
+      "prompt": "Seven EV driver archetype presets define log-normal distributions (mean, std) for daily_miles, arrival_time, departure_time. Verify against NHTS (National Household Travel Survey) data: (a) daily_miles: NHTS reports mean ~30 miles/day with strong right skew; the log-normal mean and std must reproduce this distribution—a normal distribution for daily miles would produce negative values. (b) arrival_time: NHTS shows peak arrivals at 17:00-18:00 for commuters; verify means and standard deviations for each archetype align. (c) departure_time: NHTS shows peak departures at 7:00-8:00; similarly verify. (d) Each archetype must have a coherent story (e.g., 'commuter' archetype: high daily miles, late arrival, early departure; 'stay-at-home' archetype: low daily miles, random arrival/departure; 'night-shift' archetype: inverted schedule). (e) Verify the log-normal CDF truncation—the distribution is bounded to [0, 24] hours and [0, 500] miles, and the truncated PDF should integrate to 1.0. (f) Check that no two archetypes are near-duplicates that would waste simulation diversity. These archetype parameters drive the entire EV charging load profile for fleet simulations."
+    },
+    {
+      "id": "dercat-06",
+      "slug": "ev-config-key-constants",
+      "title": "EV config KEY_* string constants: verify match against HPXML parser",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/ev/config.rs",
+      "prompt": "Review all KEY_* string constants in the EV config module (around lines 10-40). These string constants are used to look up EV configuration values from HPXML or from a ConfigPayload::Raw map. Every KEY_* must exactly match: (a) the HPXML element name if parsing from HPXML, (b) the ConfigPayload::Raw field name if parsing from raw config, (c) any intermediate normalization or transformation (e.g., snake_case vs camelCase, string prefix/suffix). A single-character typo in a key constant causes the corresponding config value to silently fall through to the default without warning—this is an extremely high-impact but hard-to-detect bug class. Verify that every KEY_* constant appears in at least one parser path and that every parser path's string literal matches the corresponding KEY_* constant (i.e., no hardcoded string duplication that could drift). Also verify that new config fields added to EV have corresponding KEY_* entries and parser entries, and that deprecated keys are handled with a migration path or explicit error rather than silent ignore."
+    },
+    {
+      "id": "dercat-07",
+      "slug": "pv-config-plausibility",
+      "title": "PvConfig physical plausibility constraints: capacity, tilt, azimuth, inverter",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/pv/config.rs",
+      "prompt": "PvConfig physical plausibility validation. Verify all field constraints: (a) capacity > 0 (kW DC)—zero or negative capacity should be rejected at config validation time, not silently producing zero generation. (b) tilt ∈ [0, 90] degrees—0° is flat (roof), 90° is vertical (facade); values outside this range are physically impossible. (c) azimuth ∈ [0, 360) degrees—North=0°/360°, East=90°, South=180°, West=270° in northern hemisphere convention; verify convention matches the solar position calculation. (d) inverter efficiency ∈ (0, 1]—DC-to-AC conversion efficiency; typical values 0.94-0.98. A value of 0 would silently zero all PV output. (e) power factor ∈ [0, 1]—reactive power capability; typically 1.0 for residential. (f) system losses ∈ [0, 1)—soiling, wiring, mismatch losses; typical 0.10-0.15 (10-15%). A value of 1.0 would claim 100% losses. (g) DC-to-AC ratio (inverter loading ratio) should be in reasonable range [1.0, 1.5]; a ratio of 0 would imply infinite inverter capacity. These constraints prevent configuration errors that would produce silently wrong generation profiles in year-long simulations."
+    },
+    {
+      "id": "dercat-08",
+      "slug": "pv-array-config",
+      "title": "PvArrayConfig: multi-array geometry, module count, inverter, irradiance",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/pv/array_config.rs",
+      "prompt": "PvArrayConfig supports multiple arrays per installation, each with independent tilt, azimuth, module count, and inverter association. Verify: (a) array count is correctly enumerated—each array index must produce distinct geometric parameters. (b) per-array tilt and azimuth are validated with the same constraints as PvConfig. (c) module count is a positive integer and total system capacity = Σ(array.module_count * module.rated_power) matches the declared PvConfig capacity. (d) inverter association: each array is mapped to an inverter, and total inverter capacity must be >= total array DC capacity (or the DC-to-AC ratio is correctly computed). (e) Multi-array irradiance calculation: for each array, the beam, diffuse, and ground-reflected components must be computed separately using the array's tilt and azimuth. The Perez transposition model (or equivalent) must be applied per-array, not once for all arrays. A common error is computing POA irradiance once with an average orientation and applying it to all arrays—this is incorrect because beam radiation on a tilted surface is strongly directional. (f) Verify that array-level shading factors (if supported) are independent per array."
+    },
+    {
+      "id": "dercat-09",
+      "slug": "generator-fuel-cell-combustion",
+      "title": "Generator fuel cell vs combustion path completeness and CHP routing",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/generator.rs",
+      "prompt": "Generator model supports two technology paths: fuel cell and internal combustion. Both paths must be complete with a step() method and combined heat and power (CHP) thermal routing. Verify: (a) Fuel cell path: electrochemical conversion with DC output, inverter to AC, waste heat captured from stack at ~60-80°C and routed to a thermal load (domestic hot water preheat or space heating hydronic loop). (b) Combustion path: fuel-to-shaft-power with generator efficiency curve, shaft-to-electric with alternator efficiency, waste heat captured from engine coolant (~90°C) and exhaust (~400-500°C) with heat exchanger effectiveness. (c) ElectricalPowerOutput parsing: the generator's AC power output must be correctly computed from the fuel input and efficiency curve, respecting the generator's operating range (typically 30-100% of rated). Below minimum part-load, the generator should shut down (not operate at zero efficiency). (d) CHP thermal routing: the recovered thermal power must be routed to the correct thermal zone or water heater node, and the fraction of recoverable heat (typically 60-80% of waste heat) must be correctly parameterized. (e) Verify that the generator does not produce electricity and heat independently—energy conservation requires that fuel_in * LHV = electricity + useful_heat + losses."
+    },
+    {
+      "id": "dercat-10",
+      "slug": "pv-lut-sam-interpolation",
+      "title": "PV LUT SAM path: 6-D interpolation grid parameters and LUT generation",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/ vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-equipment/src/pv/lut.rs",
+      "prompt": "PV performance using look-up tables with 6-D interpolation grid: DNI, DHI, GHI, dry-bulb temperature, wind speed, albedo. Verify: (a) The 6-D interpolation grid dimensions and resolution match NREL SAM defaults—typical grid has 5-10 points per dimension, with finer resolution in the operating region. (b) LUT generation parameters (module model, inverter model, cell temperature model, spectral correction) match SAM defaults for the selected module type. If the LUT was generated with different SAM parameters than assumed by the model, the interpolation will produce consistently biased results. (c) Interpolation method: verify trilinear or multi-linear interpolation across the 6 dimensions, with correct handling of extrapolation at grid boundaries (should clamp to grid edge values, not extrapolate linearly which can produce negative power or power > rated). (d) Cell temperature computation: T_cell = T_ambient + (NOCT - 20) * G / 800, where NOCT is module-specific (typically 42-47°C). Verify the NOCT value matches the module spec. (e) Spectral correction: if using single-diode model with spectral correction (air mass modifier), verify the air mass formula and correction polynomial coefficients match SAM. (f) Albedo default (typically 0.2 for ground, 0.5-0.8 for snow) must be physically reasonable. The LUT approach trades interpolation error for speed—verify the maximum interpolation error is documented and under 1% for typical operating conditions."
+    }
+  ]
+}

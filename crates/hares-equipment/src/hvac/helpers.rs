@@ -165,7 +165,9 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
             OperatingMode::Heating
         }
         _ => {
-            hvac.runtime.duty_cycle = 0.0;
+            if !hvac.use_ideal_capacity(env) {
+                hvac.runtime.duty_cycle = 0.0;
+            }
             OperatingMode::Off
         }
     }

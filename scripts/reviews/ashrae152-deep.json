@@ -1,0 +1,30 @@
+{
+  "category": "ashrae152-deep",
+  "description": "ASHRAE 152 DSE model deep-dive: climate station lookup, zone type parameters, and SI-to-IP unit conversions",
+  "reviews": [
+    {
+      "id": "dse-deep-01",
+      "slug": "climate-station-lookup",
+      "title": "ASHRAE 152 climate station design temperature lookup — CSV parsing, interpolation, and fallback logic",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-physics/src/ashrae152.rs",
+      "prompt": "ASHRAE 152 distribution system efficiency (DSE) calculations require lookup of design temperatures from a climate station database. Review the CSV parsing, geographic interpolation, and fallback logic covering approximately 230 lines. Verify: (1) CSV column mapping — does HARES correctly parse station ID, latitude, longitude, heating design temperature, cooling design temperature, and elevation from the climate station data file? A column shift error would silently produce wrong design temperatures. (2) Nearest-station selection — when multiple stations are within range, does HARES select the geographically closest, or does it use inverse-distance-weighted interpolation across multiple stations? ASHRAE 152 does not specify an interpolation method; document the chosen approach and its accuracy relative to single-nearest-neighbor. (3) Fallback logic when no station exists within a reasonable distance — does HARES use a latitude-based default, a nearest-city approximation, or does it emit an error? (4) The 2080 auxiliary hours convention — ASHRAE 152 uses 2080 annual auxiliary (fan/pump) operating hours as the default. Verify that HARES correctly applies this convention and allows override for variable-speed equipment with non-continuous fan operation. Incorrect auxiliary hour assumptions propagate into the delivery effectiveness calculation and can bias annual HVAC energy by 5-10%. Cross-reference against EnergyPlus ZoneHVAC:DistributionSystem object parameter defaults."
+    },
+    {
+      "id": "dse-deep-02",
+      "slug": "zone-type-enum",
+      "title": "All 16 Ashrae152ZoneType variants — default insulation, leakage, and seasonal parameters",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-physics/src/ashrae152.rs",
+      "prompt": "The Ashrae152ZoneType enum defines 16 zone variants, each with specific default parameters for insulation level, duct leakage class, and seasonal delivery effectiveness multipliers. Verify every variant's parameters against ASHRAE 152 Tables 5-A through 5-D. Check: (1) Insulation R-value defaults for each zone type — conditioned space, unconditioned basement, unconditioned attic, unconditioned crawlspace, and their vented/unvented sub-variants — match the ASHRAE 152-prescribed values for the appropriate climate zone. (2) Duct leakage class assignments — verify that duct leakage area per unit duct surface area matches ASHRAE 152 default leakage classes (sealed, unsealed, etc.) and that the leakage-to-outside vs. leakage-to-zone fraction is correctly split. (3) Seasonal multipliers — ASHRAE 152 applies heating-season and cooling-season delivery effectiveness multipliers that depend on zone type and equipment type. Verify the correct multiplier table is used for each zone type variant. (4) Buried-duct correction factors — if any zone type uses a ground-coupling correction for buried ducts, verify the burial depth and soil conductivity assumptions against ASHRAE 152. (5) Enum exhaustiveness — verify that the 16 variants cover all zone types described in ASHRAE 152 and that no variant is missing parameters that would cause a silent default-to-zero. Any parameter error in this enum affects every building that uses the corresponding zone type in its duct system layout."
+    },
+    {
+      "id": "dse-deep-03",
+      "slug": "si-ip-conversions",
+      "title": "SI-to-IP conversion constants — 6 significant figure accuracy required",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/",
+      "files": "crates/hares-physics/src/ashrae152.rs",
+      "prompt": "ASHRAE 152 operates internally in IP (inch-pound) units, while HARES maintains state in SI units. The conversion constants at lines 13-18 are therefore multiply-used across every DSE calculation. Verify each constant to at least 6 significant figures: (1) M3_TO_FT3 = 35.3147 — the exact conversion is 1 m³ = 35.3146667... ft³; the stored value is accurate to 6 figures but truncates at 7. For volumetric flow calculations repeated thousands of times, does this truncation accumulate meaningful error? (2) M2_TO_FT2 = 10.7639 — exact is 1 m² = 10.7639104... ft²; verify 6-figure accuracy and check if used in duct surface area calculations where errors would be proportional. (3) W_TO_BTU_H = 3.41214 — exact is 1 W = 3.412141633... BTU/h; verify for thermal power conversions in delivery effectiveness calculations. (4) M3S_TO_CFM = 2118.88 — exact is 1 m³/s = 2118.880003... CFM; this constant converts volumetric airflow and directly affects duct leakage rate calculations. (5) SI_R_TO_IP_R = 5.67826 — this is the thermal resistance conversion 1 m²·K/W = 5.678263337... ft²·°F·h/BTU; verify for duct insulation R-value conversions. Since ASHRAE 152 calculates delivery effectiveness as a product of several factors, constant errors compound multiplicatively. A 0.01% error in each of five constants could produce a 0.05% systematic bias in final DSE results, which is likely acceptable, but any single constant truncated at fewer than 6 figures could produce a 0.1%+ bias. Verify the f64 representation maintains the stated precision at runtime and is not subject to rounding during const evaluation. Cross-reference against EnergyPlus unit conversion constants in DataGlobalConstants.cc for consistency."
+    }
+  ]
+}

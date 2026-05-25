@@ -1,0 +1,150 @@
+{
+  "category": "core",
+  "description": "Core simulation engine reviews: thermal and moisture invariants, solver feedback, control dispatch, equipment staging, DST scheduling, checkpointing, scheduler, synthetic weather, occupancy, autosizing, BMS, engine main loop, observer diagnostics, RNG, dwelling assembly, synthetic generation, and environment state.",
+  "reviews": [
+    {
+      "id": "core-01",
+      "slug": "thermal-invariant-unwired",
+      "title": "Thermal balance invariant registration unwired in engine",
+      "vendor_refs": null,
+      "files": "crates/hares-core/src/invariants.rs crates/hares-core/src/engine.rs",
+      "prompt": "The invariant framework in invariants.rs provides thermal and electrical balance checks that should fire after each solver step to catch energy non-conservation bugs. Review whether the thermal invariant is registered and called in the engine main loop. If it is defined but never wired into engine.rs step execution, it provides no runtime protection. Verify that the invariant check actually performs a meaningful energy balance (sum of all heat flows into and out of each thermal node should approximately equal the change in stored energy) rather than a trivial comparison. When an invariant violation is detected, does the engine halt, warn, or silently log? The failure mode should be configurable for development (panic) vs production (warn-and-continue). Check that the tolerance for floating-point accumulation over many solver steps is set appropriately—a tolerance that is too tight will false-positive due to numerical roundoff."
+    },
+    {
+      "id": "core-02",
+      "slug": "moisture-balance-invariant",
+      "title": "Moisture balance invariant registration and solver coupling gap",
+      "vendor_refs": null,
+      "files": "crates/hares-core/src/invariants.rs crates/hares-envelope/src/humidity_solver.rs",
+      "prompt": "If a moisture balance invariant exists in invariants.rs, verify it is registered in the engine loop with the same rigor as the thermal invariant. The moisture balance should track: (a) water vapor mass change in indoor air, (b) moisture sources (occupants, wet appliances, cooking, plants), (c) moisture sinks (dehumidification, condensation on cold surfaces, ventilation exhaust), and (d) moisture exchange through envelope infiltration. A common gap is that moisture adsorption/desorption by building materials (furniture, drywall, wood) is not modeled but can buffer 10-30% of daily moisture swings—verify whether the invariant tolerance accounts for this unmodeled buffer or whether the moisture balance is expected to close without material buffering. Also check whether the humidity solver and thermal solver use the same time step and are called in the correct order (thermal first, then moisture, or coupled iteration)."
+    },
+    {
+      "id": "core-03",
+      "slug": "solver-feedback-loop-ordering",
+      "title": "Solver feedback loop ordering and convergence within time step",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc",
+      "files": "crates/hares-core/src/actors/solver_feedback.rs crates/hares-envelope/src/thermal_solver/mod.rs crates/hares-envelope/src/electrical_solver.rs",
+      "prompt": "The thermal, electrical, and fluid solvers form a coupled system where equipment responds to solver states and solver states depend on equipment outputs. Review the feedback loop ordering within a single simulation time step: does the engine iterate the equipment-solver feedback until convergence, or does it use a single-pass approach? In a single-pass design, equipment sees the previous step's thermal state (one-step lag), which can cause oscillations when equipment has fast response relative to the thermal time constant—verify whether this lag is acceptable for the residential simulation time scales. Check the ordering: thermal solver → electrical solver → fluid solver → equipment step → back to thermal solver for next step. If electrical solver runs before equipment step, PV generation cannot be used for same-step battery charging. Compare the coupling approach against EnergyPlus's zone heat balance manager in HeatBalanceManager.cc which uses predictor-corrector or full iteration for the air heat balance."
+    },
+    {
+      "id": "core-04",
+      "slug": "control-dispatch-cross-pass-ledger",
+      "title": "Control dispatch cross-pass ledger state consistency",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/Controller.py",
+      "files": "crates/hares-control/src/dispatch.rs crates/hares-control/src/types.rs crates/hares-core/src/engine.rs",
+      "prompt": "When multiple control passes execute within a single time step (e.g., a battery dispatch pass followed by an HVAC setpoint pass), the dispatch ledger must track which equipment has already received commands to prevent double-dispatch. Review the cross-pass state: does the dispatch ledger clear between passes within the same step, or does it accumulate? If a pass-1 command adjusts the battery and pass-2 does not reference the battery, the battery should maintain pass-1's command—but if the ledger clears between passes, the battery would revert to its default behavior. Conversely, if the ledger accumulates, a pass-2 command could stack on top of pass-1, causing double-counting of power. Also verify that the dispatch state is persisted across process boundaries if the engine uses an actor model—a stale dispatch from a previous step should not leak into the current step. Compare against OCHRE's Controller.py for expected multi-pass dispatch semantics."
+    },
+    {
+      "id": "core-05",
+      "slug": "equipment-execution-stage-ordering",
+      "title": "Equipment execution stage ordering within time step",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/HVACManager.cc",
+      "files": "crates/hares-core/src/engine.rs crates/hares-equipment/src/registry.rs",
+      "prompt": "Equipment models execute in a defined stage order within each time step (e.g., generation before storage before loads). Review the stage ordering: PV and generation should run first to establish available power, followed by battery/EV storage dispatch, then non-deferrable loads, and finally HVAC which has the largest thermal inertia and can tolerate some lag. An incorrect ordering—such as running HVAC before PV—would prevent the thermal solver from seeing the current step's internal gains when setting the HVAC load, requiring an extra iteration or causing one-step lag. Check whether the stage ordering is hardcoded or configurable, and whether any equipment types can be registered in a custom stage that breaks the intended dependency chain. Compare the execution order against EnergyPlus HVACManager.cc which has a strict calling-tree order: zone equipment → air loop → plant loop."
+    },
+    {
+      "id": "core-06",
+      "slug": "dst-schedule-indexing",
+      "title": "DST schedule indexing and hour-skip/duplicate handling",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc",
+      "files": "crates/hares-core/src/clock.rs crates/hares-io/src/schedule.rs crates/hares-io/src/schedule_resolve.rs",
+      "prompt": "Daylight Saving Time transitions create a 23-hour day (spring forward) and a 25-hour day (fall back) where schedules must be indexed correctly. Review the schedule indexing logic in schedule.rs and schedule_resolve.rs: during the spring-forward transition, the skipped hour (typically 2:00-3:00 AM) should not appear in schedule lookups—verify that the schedule does not return a default or zero value for the missing hour. During the fall-back transition, the duplicated hour (1:00-2:00 AM repeated) requires the schedule to produce values for both instances—verify that the second instance is not silently dropped. Check whether DST handling in clock.rs and schedule indexing is consistent with the weather file's timestamp convention (many TMY3 files use local standard time without DST, while EPW files may use local clock time with DST shifts). Compare against EnergyPlus WeatherManager.cc DST handling."
+    },
+    {
+      "id": "core-07",
+      "slug": "checkpoint-round-trip",
+      "title": "Checkpoint round-trip serialization fidelity",
+      "vendor_refs": null,
+      "files": "crates/hares-core/src/checkpoint.rs crates/hares-equipment/src/ev/checkpoint.rs crates/hares-core/src/engine.rs",
+      "prompt": "The checkpoint system must capture complete simulation state so that a restore produces bitwise-identical results from the checkpoint step onward. Review the checkpoint round-trip: serialize all equipment states, solver states (thermal node temperatures, moisture content), actor states (thermostat setpoints, EV driver SOC estimates, occupancy state), RNG state, and schedule pointers. Then deserialize, advance one step, and compare against the same step from the original run—any divergence indicates incomplete state capture. Pay particular attention to: (a) derived/cached quantities that are recomputed on deserialization (if the recomputation formula differs from the serialized value), (b) hash-based collections (HashMap, HashSet) whose iteration order is non-deterministic across runs, and (c) floating-point state that might serialize with different precision than the in-memory representation. The EV has its own checkpoint module—verify it is integrated into the main checkpoint path and not maintained separately."
+    },
+    {
+      "id": "core-08",
+      "slug": "scheduler-placeholder",
+      "title": "Scheduler placeholder resolution and fallback behavior",
+      "vendor_refs": null,
+      "files": "crates/hares-core/src/scheduler.rs crates/hares-core/src/actor_registry.rs",
+      "prompt": "The scheduler manages when actors (equipment controllers, occupant models, price signals) execute within a time step. Review the placeholder resolution: when a schedule refers to an actor that does not exist in the registry (e.g., a schedule for a PV inverter controller when no PV is installed), does the scheduler skip gracefully, log a warning, or panic? Check whether schedule entries have a concept of optional vs required—a missing optional actor should be silently skipped while a missing required actor should be an error. Also verify that the scheduler handles overlapping time intervals correctly when two schedules for the same actor type overlap, and that the last-write-wins resolving order is deterministic. Review the scheduler's actor execution order guarantee: if actor A must run before actor B (e.g., price signal before dispatch), is this ordering explicit or implicit in the schedule?"
+    },
+    {
+      "id": "core-09",
+      "slug": "synthetic-weather",
+      "title": "Synthetic weather generation statistical fidelity",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc",
+      "files": "crates/hares-io/src/weather.rs crates/hares-io/src/tmy3.rs crates/hares-io/src/psm3.rs crates/hares-io/src/epw.rs",
+      "prompt": "Synthetic weather generation produces statistically representative weather when actual TMY3/EPW/PSM3 data is unavailable. Review the statistical model: are temperature, humidity, solar radiation, and wind speed generated independently or with correct cross-correlations? Temperature and solar radiation have strong diurnal correlation (high radiation → high temperature) and humidity is anti-correlated with temperature in most climates—independent generation would produce physically unrealistic combinations (e.g., high solar with freezing temperatures). Verify that the clear-sky solar model used for synthetic generation accounts for latitude, day-of-year, and atmospheric turbidity. Check whether synthetic weather includes stochastic cloud cover (a key driver of PV variability) and whether inter-day persistence is modeled (cloudy days tend to cluster). Compare the synthetic weather approach against EnergyPlus's built-in weather generator or against the TMY3 methodology for statistical representativeness."
+    },
+    {
+      "id": "core-10",
+      "slug": "occupancy-gains",
+      "title": "Occupancy sensible and latent gain schedules and diversity",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-core/src/actors/occupant.rs crates/hares-io/src/hpxml/resolve_loads.rs",
+      "prompt": "Occupant internal gains (sensible and latent heat) are a major driver of residential thermal loads. Review the gain model: are occupant gains per-person values sourced from ASHRAE Standard 55 (typically ~70 W sensible, ~45 W latent for seated activity) and scaled by a metabolic rate factor for active occupants? Check whether occupancy schedules account for weekday/weekend differences and whether fractional occupancy (e.g., 0.5 persons during partial-occupancy hours) is supported or only binary present/absent. Verify that the occupant count from HPXML (via number of bedrooms or explicit occupancy) correctly drives the gain magnitude and that the schedule shape from either HPXML or default schedules has appropriate morning and evening peaks. Compare occupancy gain modeling against OCHRE's hpxml.py and standard ASHRAE 90.2/HERS reference home assumptions."
+    },
+    {
+      "id": "core-11",
+      "slug": "autosizing",
+      "title": "HVAC and water heater autosizing methodology and iteration",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/SizingManager.cc",
+      "files": "crates/hares-core/src/dwelling/autosize.rs crates/hares-core/src/dwelling/solver_builder.rs",
+      "prompt": "The autosizing module determines HVAC and water heater capacities from building characteristics and design-day conditions. Review the sizing methodology: does it run a simplified design-day simulation (e.g., ASHRAE design day with no internal gains and fixed thermostat setpoints) or does it use a simplified UA*deltaT formula? A simplified formula will miss solar gains through windows and internal gains from occupancy/appliances, leading to oversized equipment. If design-day simulation is used, verify that it iterates correctly to find the equipment capacity that just meets the load at the design condition—oversizing factors should be explicitly configurable (typically 1.0-1.4 per Manual J/S). For water heater sizing, check whether the first-hour rating (FHR) methodology is implemented or whether a simpler storage-volume-based approach is used. Compare the autosizing approach against EnergyPlus SizingManager.cc and Manual J/M manual S residential sizing standards."
+    },
+    {
+      "id": "core-12",
+      "slug": "bms-modes",
+      "title": "BMS operating mode transitions and hysteresis",
+      "vendor_refs": "vendors/OCHRE/ochre/Equipment/Controller.py",
+      "files": "crates/hares-core/src/actors/bms.rs",
+      "prompt": "The Building Management System (BMS) actor implements operating modes (occupied, unoccupied, setback, vacation, demand-response) with transitions triggered by schedule, occupancy, or external signals. Review the mode transition logic: does each transition have hysteresis or minimum dwell time to prevent rapid mode cycling? A common problem is a thermostat switching between heating and cooling modes within a single time step when the deadband is too narrow. Verify that mode priorities are explicitly defined (e.g., demand-response overrides setback but not vacation) and that mode conflicts are resolved deterministically. Check that the BMS setpoint outputs (heating setpoint, cooling setpoint, ventilation mode) are always within safe and comfortable ranges—a bug in mode transition could send a 100°C heating setpoint or a -10°C cooling setpoint to the thermal solver. Compare mode definitions and transition rules against OCHRE's Controller.py."
+    },
+    {
+      "id": "core-13",
+      "slug": "engine-main-loop",
+      "title": "Engine main loop step sequencing and error recovery",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/SimulationManager.cc",
+      "files": "crates/hares-core/src/engine.rs crates/hares-core/src/lib.rs",
+      "prompt": "The engine main loop drives the entire simulation: for each time step, advance clock → read weather → run solver feedback → execute equipment → compute outputs → checkpoint. Review the step sequencing for correctness and for error recovery paths. If any sub-step fails (e.g., solver non-convergence, equipment NaN output, weather file read error), does the engine halt, retry with a smaller time step, or skip and continue with last-good values? A non-convergent thermal solver step can cascade into equipment faults; verify that failure isolation prevents a single bad step from corrupting the entire simulation state. Check that the warm-up period (typically first day repeated until temperatures stabilize) is correctly implemented with convergence detection and a maximum iteration cap. Also review the engine's handling of simulation time boundaries: does the final step execute correctly or does an off-by-one truncate the last hour? Compare the main loop structure against EnergyPlus SimulationManager.cc."
+    },
+    {
+      "id": "core-14",
+      "slug": "observer-diagnostics",
+      "title": "Observer/diagnostics framework completeness and performance impact",
+      "vendor_refs": null,
+      "files": "crates/hares-core/src/observer.rs crates/hares-core/src/observer_capture.rs crates/hares-core/src/diagnostics.rs",
+      "prompt": "The observer framework captures per-step state snapshots for diagnostics and output. Review the observer registration: are all equipment types, all solver states, and all actor states observable? A diagnostic tool that cannot observe a particular equipment type creates a blind spot. Check the performance impact of observer capture—if every state snapshot allocates heap memory on every sub-hourly step for a year-long simulation, the allocation overhead could dominate runtime. Verify that observers can be enabled/disabled at runtime and that disabled observers incur zero overhead (not just an empty callback). Review the diagnostics module: what diagnostics are built on top of the observer data? Are there automatic checks for common issues (excessive unmet hours, equipment short-cycling, temperature excursions below freezing, simultaneous heating and cooling)?"
+    },
+    {
+      "id": "core-15",
+      "slug": "rng-state",
+      "title": "RNG state management across actors and checkpointing",
+      "vendor_refs": null,
+      "files": "crates/hares-core/src/rng.rs crates/hares-core/src/checkpoint.rs",
+      "prompt": "Multiple actors (occupant behavior, EV driver archetypes, synthetic weather, appliance event timing) consume random numbers. Review the RNG architecture: does each actor have an independent RNG stream with a deterministic seed derived from a master seed? Independent streams (via ChaCha/SplitMix jump-ahead) are essential for reproducibility—if actors share a single RNG, changing the execution order or adding/removing an actor changes all downstream random draws. Verify that the RNG state is included in checkpoints so that a restore-and-continue produces the same random sequence. Check the seed derivation: a master seed of N should produce actor-specific seeds via a deterministic hash (not sequential assignment), so that adding actors to the simulation doesn't shift seeds for existing actors. Also verify that the RNG algorithm (likely ChaCha8 or similar) is cryptographically appropriate for the stochastic models used."
+    },
+    {
+      "id": "core-16",
+      "slug": "dwelling-assembly",
+      "title": "Dwelling assembly from HPXML: missing defaults and validation",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-core/src/dwelling/mod.rs crates/hares-core/src/dwelling/conversions.rs crates/hares-io/src/hpxml/mod.rs crates/hares-io/src/hpxml/building.rs",
+      "prompt": "The dwelling assembly process converts HPXML building description into the RC network thermal model, fluid distribution model, and electrical network. Review the assembly pipeline for missing defaults: if HPXML omits foundation type, attic type, or wall construction details, what defaults are applied? A missing foundation type defaulting to slab-on-grade vs unconditioned basement creates radically different thermal behavior. Verify that the assembly validates the resulting dwelling model for physical consistency: wall R-values should be positive, window areas should not exceed wall areas, attic ventilation area should be non-zero for vented attics. Check the conversion from HPXML geometry (footprint, number of floors, wall height) to the RC network node count and connectivity—a common error is miscomputing the inter-zone adjacency areas for multi-zone dwellings. Compare the assembly logic against OCHRE's hpxml.py dwelling construction."
+    },
+    {
+      "id": "core-17",
+      "slug": "synthetic-dwelling-generation",
+      "title": "Synthetic dwelling generation statistical distributions and correlations",
+      "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
+      "files": "crates/hares-core/src/dwelling/synthetic.rs crates/hares-io/src/resstock.rs",
+      "prompt": "Synthetic dwelling generation creates representative building stock without requiring HPXML files. Review the statistical distributions: house size (conditioned floor area) distributions should be parameterized by vintage and location. Verify that building characteristics are correlated correctly—larger houses tend to have more bedrooms, newer houses have better insulation, and climate zones determine foundation types and glazing ratios. Independent draws for correlated variables produce unrealistic dwellings (e.g., a 400 m² house with single-pane windows in a cold climate). Check whether the synthetic generator uses ResStock-style sampling from conditional probability tables (CPTs) or simpler independent distributions. Also verify that the generated dwelling count can be specified (single dwelling for detailed analysis, many for stock analysis) and that identical input seeds produce identical dwelling sets. Compare the generation approach against OCHRE's HPXML-based generation and NREL ResStock methodology in resstock.rs."
+    },
+    {
+      "id": "core-18",
+      "slug": "environment-state-management",
+      "title": "Environment state management: weather, ground, water mains",
+      "vendor_refs": "vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc",
+      "files": "crates/hares-core/src/environment.rs crates/hares-physics/src/ground.rs crates/hares-physics/src/water_mains.rs",
+      "prompt": "The environment module manages external boundary conditions during simulation: weather data (temperature, humidity, solar, wind), ground temperature, and water mains temperature. Review the environment state update: are weather values interpolated between hourly data points for sub-hourly time steps, and is the interpolation method (linear, cubic, or hold-last) appropriate for each variable? Solar radiation should not be linearly interpolated—the sun position changes nonlinearly and the Perez model expects actual radiation at the simulation time, not interpolated values. Check the ground temperature model: is it a simple sinusoidal annual model (Kasuda) or a full finite-difference soil model? If sinusoidal, verify the phase lag (deep soil temperature lags air temperature by 4-6 weeks) and amplitude damping with depth are correct. The water mains temperature model should account for soil temperature at pipe depth (typically 1-2 m) and seasonal lag—verify it is not simply tracking outdoor air temperature which would produce physically impossible winter water temperatures below freezing. Compare against EnergyPlus WeatherManager.cc and Site:GroundTemperature:Undisturbed."
+    }
+  ]
+}
