@@ -971,7 +971,7 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
         ff_max: curve_bounds.ff_max,
         plf_min: curve_bounds.plf_min,
         plf_max: curve_bounds.plf_max,
-        shr: None,
+        shr: params.get("shr").and_then(Value::as_f64),
         startup_cd: None,
         crankcase_heater_kw: None,
         crankcase_heater_threshold_c: None,
@@ -3877,10 +3877,6 @@ mod tests {
         assert!((cfg.eir - expected_eir).abs() < 1e-12);
     }
 
-    // try_build_room_ac_config always hard-codes `shr: None`, ignoring any SHR
-    // that was already loaded into `params["shr"]` by the CoolingSystem loop.
-    // This test will FAIL until the room_ac_builder propagates SHR from params.
-    #[should_panic(expected = "shr should be Some(0.82)")]
     #[test]
     fn room_ac_builder_propagates_shr_from_params() {
         let mut params = Map::new();
