@@ -94,8 +94,8 @@ fn derive_zone_capacitances_uses_altitude_corrected_density() {
     let p_sea_level = hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
     let p_denver = standard_pressure_pa(1609.0);
 
-    let caps_sea = derive_zone_capacitances(&zones, p_sea_level);
-    let caps_denver = derive_zone_capacitances(&zones, p_denver);
+    let caps_sea = derive_zone_capacitances(&zones, p_sea_level).unwrap();
+    let caps_denver = derive_zone_capacitances(&zones, p_denver).unwrap();
 
     let expected_sea_level = dry_air_density_kg_m3(p_sea_level, 20.0) * AIR_CP_J_KG_K * 129.6 * 1.0;
     let expected_denver = dry_air_density_kg_m3(p_denver, 20.0) * AIR_CP_J_KG_K * 129.6 * 1.0;
@@ -143,7 +143,7 @@ fn heavyweight_concrete_wall_produces_two_rc_sub_layers() {
         volume_m3: Some(129.6),
         mass_multiplier: 1.0,
     }];
-    let zone_caps = derive_zone_capacitances(&zones, standard_pressure_pa(1609.0));
+    let zone_caps = derive_zone_capacitances(&zones, standard_pressure_pa(1609.0)).unwrap();
 
     let boundaries = vec![BoundaryInput {
         area_m2: wall_area,

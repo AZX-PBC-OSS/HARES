@@ -361,7 +361,7 @@ fn rc_network_exposes_ground_column() {
         mass_multiplier: INTERIOR_MASS_MULTIPLIER,
     }];
     let zone_caps =
-        derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA);
+        derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA).unwrap();
 
     let boundaries = vec![BoundaryInput {
         area_m2: 48.0,

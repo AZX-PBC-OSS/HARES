@@ -377,7 +377,7 @@ mod tests {
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0)
                 .expect("building_to_boundary_inputs");
         let zone_caps =
-            derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
+            derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building)).unwrap();
 
         assert_eq!(zone_caps.len(), n_zones, "zone capacitances length");
 
@@ -520,7 +520,7 @@ mod tests {
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0)
                 .expect("building_to_boundary_inputs");
         let zone_caps =
-            derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
+            derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building)).unwrap();
 
         let (_rc, diag) = assemble_building_rc(
             &boundary_inputs,
@@ -677,7 +677,7 @@ mod tests {
             building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0)
                 .expect("building_to_boundary_inputs");
         let zone_caps =
-            derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building));
+            derive_zone_capacitances(&zone_inputs, site_pressure_for_building(&building)).unwrap();
 
         let (_rc, diag) = assemble_building_rc(
             &boundary_inputs,

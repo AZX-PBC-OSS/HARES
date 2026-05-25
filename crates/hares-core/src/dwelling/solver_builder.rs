@@ -508,7 +508,8 @@ pub(crate) fn build_default_solvers(
     let site_pressure_pa = hares_physics::air_properties::standard_pressure_pa(
         building.site.elevation_m.unwrap_or(0.0),
     );
-    let zone_capacitances = derive_zone_capacitances(&zone_inputs, site_pressure_pa);
+    let zone_capacitances = derive_zone_capacitances(&zone_inputs, site_pressure_pa)
+        .map_err(|e| HaresError::Envelope(e.to_string()))?;
 
     // Build the RC network from material layers where available.
     // StarMesh mode bakes linearized inter-surface radiation conductances
