@@ -12,9 +12,14 @@ use crate::longwave_radiation::{
     exterior_longwave_w, interior_longwave_linearised_w_into, sky_view_factor,
 };
 
-/// NFRC standard exterior combined film coefficient [W/(m²·K)].
-/// The window U-factor is rated at h_out = 34 W/(m²·K) with T_sky ≈ T_air.
-/// Ref: NFRC 100-2020; E+ Eng.Ref "Window U-factor".
+/// NFRC exterior combined film coefficient [W/(m²·K)] for window U-factor rating.
+///
+/// The value 34 W/(m²·K) is used here as an approximation of the NFRC 100 winter
+/// design condition. Authoritative sources (LBNL Windows-CalcEngine issue #77,
+/// ASHRAE HoF) indicate the NFRC combined outside film coefficient is approximately
+/// 20.6 W/(m²·K) (convective 15 + radiative ~5.6) — this constant should be
+/// corrected to ~20.6 once the correction has been validated against the full
+/// window U-factor calculation chain.
 const H_OUT_NFRC: f64 = 34.0;
 
 use super::ThermalSolver;
@@ -83,9 +88,23 @@ impl ThermalSolver {
                 // radiative exchange at T_sky = T_air; we correct for T_sky ≠ T_air only.
                 // Use actual h_out from boundary film resistance when available;
                 // fall back to NFRC 34 W/(m²·K) rating condition.
-                let h_out = if info.h_out_w_m2_k > 1.0 {
+                let h_out = if info.h_out_w_m2_k > 0.0 {
                     info.h_out_w_m2_k
                 } else {
+                    // The NFRC combined outside film coefficient is here approximated
+                    // as 34 W/(m²·K); authoritative sources (LBNL Windows-CalcEngine
+                    // issue #77, ASHRAE HoF) indicate ~20.6 W/(m²·K) — the constant
+                    // should be corrected once validated against the full window
+                    // U-factor chain. A non-positive computed h_out indicates an
+                    // upstream computation failure and should be unreachable in
+                    // production.
+                    tracing::warn!(
+                        surface_id = info.surface_id,
+                        h_out_w_m2_k = info.h_out_w_m2_k,
+                        "window exterior film coefficient is non-positive; \
+                         using NFRC fallback ({H_OUT_NFRC} W/(m²·K)). \
+                         This should be rare — check upstream boundary film computation."
+                    );
                     H_OUT_NFRC
                 };
                 let delta_q_w = (u_factor / h_out) * delta_q_w_m2 * info.area_m2;
@@ -486,6 +505,8 @@ mod tests {
     use crate::longwave_radiation::{
         CELSIUS_TO_KELVIN, STEFAN_BOLTZMANN, beta_factor, sky_view_factor,
     };
+    use hares_types::EnvironmentState;
+    use nalgebra::DVector;
 
     /// Verify: when T_sky < T_air (clear winter night), the window LWR delta is
     /// negative (additional cooling) and scaled by U/h_out per the T_eff approach.
@@ -737,69 +758,254 @@ mod tests {
         );
     }
 
-    // ── Regression tests for ticket #106 ──────────────────────────────────────
+    // ── Regression: window exterior LWR uses computed h_out, not NFRC fallback ──
     //
-    // The guard at longwave.rs:86 uses `> 1.0` instead of `> 0.0`.
-    // Any h_out_w_m2_k in (0, 1] silently falls back to H_OUT_NFRC (34 W/(m²·K)).
+    // The guard at longwave.rs:86 previously used `> 1.0` instead of `> 0.0`,
+    // causing any h_out_w_m2_k in (0, 1] to silently fall back to H_OUT_NFRC
+    // (34 W/(m²·K)) — a 34× to 68× mismatch for valid low-wind conditions.
+    // Fixed: guard is now `> 0.0` so any positive computed coefficient is used.
     //
-    // `h_out_nfrc_fallback_threshold_is_zero` encodes the *correct* behaviour.
-    // It will FAIL against the current `> 1.0` threshold and PASS once it is
-    // changed to `> 0.0` as required by the ticket.
+    // `window_lwr_uses_computed_h_out_not_nfrc_fallback` exercises the production
+    // code path through `apply_exterior_longwave_inputs_iterative` to verify that
+    // the guard at line 86 selects the correct h_out. If the guard reverts to
+    // `> 1.0`, h_out=0.5 triggers the NFRC fallback and the injected δq is 68×
+    // too small, causing the ratio-based assertion to fail.
     //
-    // `h_out_guard_uses_nfrc_fallback_for_zero` guards the boundary case that
-    // must keep working after the fix.
+    // `window_lwr_falls_back_to_nfrc_for_zero` guards the boundary case that
+    // non-positive values still fall back to H_OUT_NFRC.
 
-    /// Regression (FAILING): a computed h_out of 0.5 W/(m²·K) is a valid
-    /// low-wind exterior film coefficient and must be used directly.
-    ///
-    /// The correct discriminant is `> 0.0`, not `> 1.0`.
-    /// With the current `> 1.0` guard, h_out=0.5 falls through to H_OUT_NFRC
-    /// (34 W/(m²·K)), biasing the window LWR delta by 34/0.5 = 68×.
-    ///
-    /// Fix pending — will stop panicking when `> 1.0` guard at line 86 is
-    /// changed to `> 0.0`.
-    #[test]
-    #[should_panic(expected = "h_out_w_m2_k = 0.5")]
-    fn h_out_nfrc_fallback_threshold_is_zero() {
-        let h_out_w_m2_k = 0.5_f64;
+    /// Build a minimal one-zone `ThermalSolver` with a single vertical window
+    /// exterior surface having the specified film coefficient [W/(m²·K)].
+    /// Uses clear-winter-night conditions: T_air = −15°C, T_sky = −30°C.
+    fn window_lwr_solver(
+        h_out_w_m2_k: f64,
+        env: &EnvironmentState,
+    ) -> crate::thermal_solver::ThermalSolver {
+        use std::collections::HashMap;
 
-        // Mirror the production guard from longwave.rs:86 exactly.
-        // Change this to `> 0.0` when fixing the bug — the test will then pass.
-        let h_out = if h_out_w_m2_k > 1.0 {
-            h_out_w_m2_k
-        } else {
-            H_OUT_NFRC
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{
+            BoundaryCategory, ExteriorSurfaceInfo, StateSpaceWiring, ThermalSolverConfig,
+        };
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
         };
 
-        // Assert the desired behaviour: any positive h_out must be used, not the fallback.
+        let window_config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_zone_ids: HashMap::from([(100, ZoneId(1))]),
+            exterior_surfaces: vec![ExteriorSurfaceInfo {
+                surface_id: 100,
+                state_index: 0,
+                input_index: 1,
+                area_m2: 12.0,
+                emissivity: 0.84,
+                tilt_deg: 90.0,
+                rad_frac: 0.0,
+                rad_res_k_w: 0.0,
+                n_iter: 1,
+                absorptance: 0.0,
+                boundary_category: Some(BoundaryCategory::Window),
+                u_factor_w_m2_k: 3.0,
+                h_out_w_m2_k,
+            }],
+            ..Default::default()
+        };
+
+        crate::thermal_solver::ThermalSolver::new(model, wiring, window_config, 60.0, env, 22.0)
+            .unwrap()
+    }
+
+    /// Build an `EnvironmentState` for clear-winter-night window LWR testing.
+    fn window_lwr_env() -> EnvironmentState {
+        use std::collections::HashMap;
+
+        use chrono::{FixedOffset, TimeZone};
+        use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
+
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 22.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 17.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: -15.0,
+                outdoor_humidity_ratio: 0.004,
+                wind_speed_m_s: 0.0,
+                wind_dir_deg: 180.0,
+                ground_temp_c: -15.0,
+                sky_temp_c: -30.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                outdoor_wet_bulb_c: 0.0,
+                outdoor_enthalpy_j_kg: 0.0,
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 0.0,
+                mains_temp_c: 15.0,
+                rainfall_m: 0.0,
+                ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: Default::default(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid time"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// Regression: a computed h_out of 0.5 W/(m²·K) is a valid low-wind exterior
+    /// film coefficient and must be used directly rather than falling back to the
+    /// NFRC default of 34 W/(m²·K).
+    ///
+    /// Natural convection coefficients for vertical surfaces can approach
+    /// 1 W/(m²·K) in still air (ASHRAE HoF 2021 Ch. 4 §4.2); for non-vertical
+    /// surfaces they fall well below it. The correct discriminant is `> 0.0`:
+    /// any positive computed coefficient is more accurate than the rating-condition
+    /// tabulated value.
+    ///
+    /// Exercises `apply_exterior_longwave_inputs_iterative` — if line 86's guard
+    /// reverts to `> 1.0`, h_out=0.5 triggers the NFRC fallback and the injected
+    /// δq is 68× too small.
+    #[test]
+    fn window_lwr_uses_computed_h_out_not_nfrc_fallback() {
+        let env = window_lwr_env();
+
+        let mut solver_0_5 = window_lwr_solver(0.5, &env);
+        let mut solver_0 = window_lwr_solver(0.0, &env);
+        let mut u_0_5 = DVector::zeros(solver_0_5.model.input_dim());
+        let mut u_0 = DVector::zeros(solver_0.model.input_dim());
+
+        solver_0_5.apply_exterior_longwave_inputs_iterative(&mut u_0_5, &env);
+        solver_0.apply_exterior_longwave_inputs_iterative(&mut u_0, &env);
+
+        // Analytic δq_w_m2 (identical for both; only h_out differs):
+        //   δq = ε·σ·β·F_sky·(T_sky⁴ − T_air⁴)
+        //   with β = √F_sky = √0.5 ≈ 0.7071
+        let f_sky = sky_view_factor(90.0);
+        let beta = beta_factor(90.0);
+        let t_sky_k = -30.0 + CELSIUS_TO_KELVIN; // 243.15 K
+        let t_air_k = -15.0 + CELSIUS_TO_KELVIN; // 258.15 K
+        let delta_q_w_m2 =
+            0.84 * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
+
+        let expected_0_5 = (3.0 / 0.5) * delta_q_w_m2 * 12.0;
+        let expected_nfrc = (3.0 / H_OUT_NFRC) * delta_q_w_m2 * 12.0;
+
+        // The solver with h_out=0.5 must use 0.5, not the NFRC fallback.
+        let actual_0_5 = u_0_5[1];
         assert!(
-            (h_out - h_out_w_m2_k).abs() < 1e-9,
-            "h_out_w_m2_k = 0.5 is a valid positive exterior film coefficient; \
-             the guard should use 0.5 W/(m²·K), not the NFRC fallback ({H_OUT_NFRC}). \
-             Got {h_out}. Fix: change `> 1.0` to `> 0.0` at longwave.rs:86."
+            (actual_0_5 - expected_0_5).abs() < 1e-6,
+            "h_out=0.5: window LWR correction expected {expected_0_5:.6} W, got {actual_0_5:.6} W. \
+             The guard at line 86 may have fallen back to H_OUT_NFRC instead of using the \
+             computed coefficient."
+        );
+
+        // The solver with h_out=0.0 must fall back to H_OUT_NFRC.
+        let actual_0 = u_0[1];
+        assert!(
+            (actual_0 - expected_nfrc).abs() < 1e-6,
+            "h_out=0.0: window LWR correction expected NFRC fallback {expected_nfrc:.6} W, \
+             got {actual_0:.6} W"
+        );
+
+        // Final sanity: ratio must be 34/0.5 = 68.
+        let ratio = actual_0_5 / actual_0;
+        assert!(
+            (ratio - H_OUT_NFRC / 0.5).abs() < 1e-3,
+            "ratio u(0.5)/u(0.0) should be {:.0}, got {ratio}",
+            H_OUT_NFRC / 0.5
         );
     }
 
-    // ── Regression tests for ticket #130 ──────────────────────────────────────
+    /// Guard-condition regression: h_out_w_m2_k = 0.0 must still use the
+    /// NFRC fallback after the threshold is corrected to `> 0.0`.
+    ///
+    /// Exercises `apply_exterior_longwave_inputs_iterative` — if the guard
+    /// were changed to accept zero (e.g. `>= 0.0` instead of `> 0.0`), a
+    /// computed coefficient of zero would be used in the denominator,
+    /// producing a NaN or infinite δq.
+    #[test]
+    fn window_lwr_falls_back_to_nfrc_for_zero() {
+        let env = window_lwr_env();
+        let mut solver = window_lwr_solver(0.0, &env);
+        let mut u = DVector::zeros(solver.model.input_dim());
+        solver.apply_exterior_longwave_inputs_iterative(&mut u, &env);
+
+        let f_sky = sky_view_factor(90.0);
+        let beta = beta_factor(90.0);
+        let t_sky_k = -30.0 + CELSIUS_TO_KELVIN;
+        let t_air_k = -15.0 + CELSIUS_TO_KELVIN;
+        let delta_q_w_m2 =
+            0.84 * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
+        let expected = (3.0 / H_OUT_NFRC) * delta_q_w_m2 * 12.0;
+
+        let actual = u[1];
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "h_out=0.0: window LWR correction should use NFRC fallback ({H_OUT_NFRC} W/(m²·K)), \
+             expected {expected:.6} W, got {actual:.6} W"
+        );
+    }
+
+    // ── Guard against H_OUT_NFRC silent drift ─────────────────────────────────
     //
     // H_OUT_NFRC is declared private in this module. A second consumer at
-    // solver_builder.rs already hardcodes `34.0` as a fallback for the same
-    // purpose, creating a silent drift risk. Both must agree; the constant must
-    // be exported from hares-physics so that the duplicate can be removed.
+    // solver_builder.rs hardcodes `34.0` as a fallback for the same purpose,
+    // creating a silent drift risk. Both must agree; the constant must be
+    // exported from hares-physics so that the duplicate can be removed.
     //
     // `h_out_nfrc_private_matches_solver_builder_fallback` documents the current
-    // duplicate and will pass as long as both copies remain 34.0. Once
-    // H_OUT_NFRC is exported from hares-physics and solver_builder.rs is updated
-    // to import it, this test and the companion comment become the guard.
+    // duplicate and will pass as long as both copies remain 34.0. Once H_OUT_NFRC
+    // is exported from hares-physics and solver_builder.rs is updated to import
+    // it, this test becomes the guard.
 
-    /// Regression (ticket #130): the NFRC fallback value used in this module
-    /// must equal the hardcoded `34.0` literal in
-    /// `crates/hares-core/src/dwelling/solver_builder.rs:658`. Until
-    /// `H_OUT_NFRC` is exported from `hares-physics` and both sites
-    /// consume the same constant, this test guards against silent drift.
+    /// Regression: the NFRC fallback value used in this module must equal the
+    /// hardcoded `34.0` literal in
+    /// `crates/hares-core/src/dwelling/solver_builder.rs:708`. Until
+    /// `H_OUT_NFRC` is exported from `hares-physics` and both sites consume
+    /// the same constant, this test guards against silent drift.
     #[test]
     fn h_out_nfrc_private_matches_solver_builder_fallback() {
-        // The `solver_builder.rs` fallback at line 658:
+        // The `solver_builder.rs` fallback at line 708:
         //   h_out_w_m2_k: if sb.r_film_exterior_m2_k_w > 1e-9 {
         //       1.0 / sb.r_film_exterior_m2_k_w
         //   } else {
@@ -811,27 +1017,6 @@ mod tests {
             "H_OUT_NFRC ({H_OUT_NFRC}) has drifted from the duplicate \
              literal in solver_builder.rs ({solver_builder_fallback}). \
              Fix: export H_OUT_NFRC from hares-physics and use it in both sites."
-        );
-    }
-
-    /// Guard-condition regression: h_out_w_m2_k = 0.0 must still use the
-    /// NFRC fallback after the threshold is corrected to `> 0.0`.
-    #[test]
-    fn h_out_guard_uses_nfrc_fallback_for_zero() {
-        let h_out_w_m2_k = 0.0_f64;
-
-        // This uses the *fixed* guard expression (`> 0.0`) intentionally —
-        // it documents what the code should do once the fix is applied.
-        let h_out = if h_out_w_m2_k > 0.0 {
-            h_out_w_m2_k
-        } else {
-            H_OUT_NFRC
-        };
-
-        assert!(
-            (h_out - H_OUT_NFRC).abs() < 1e-9,
-            "h_out_w_m2_k = 0.0 should use the NFRC fallback ({H_OUT_NFRC} W/(m²·K)), \
-             got {h_out}"
         );
     }
 }
