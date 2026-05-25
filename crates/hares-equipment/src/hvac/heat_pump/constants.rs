@@ -31,6 +31,29 @@ pub const TIMED_DEFROST_PWR_MULT_SLOPE: f64 = 36.45;
 /// Minimum wet-bulb / outdoor DB for defrost EIR curve evaluation [°C].
 pub const DEFROST_EIR_CURVE_TEMP_MIN_C: f64 = 15.555;
 
+/// Default compressor lockout temperature for air-source heat pumps: -17.78°C (0°F).
+///
+/// This is the outdoor air temperature below which the heat pump compressor is disabled,
+/// falling through to backup electric resistance heat when the HPXML file omits
+/// `CompressorLockoutTemperature`.
+///
+/// Source chain:
+/// - **Direct source**: OCHRE `vendors/OCHRE/ochre/Equipment/HVAC.py:1208` defaults to
+///   `-17.78` with the annotation `# 0F default`. OCHRE's HPXML parser
+///   (`hpxml.py:947-951`) also uses 0°F (-17.78°C) when both `CompressorLockoutTemperature`
+///   and `BackupHeatingSwitchoverTemperature` are absent.
+/// - **Corroborating evidence**: OpenStudio-HPXML defaults `CompressorLockoutTemperature` to
+///   0°F for standard single-speed air-to-air heat pumps (per HPXML Working Group PR #309
+///   and openstudio-hpxml.readthedocs.io).
+/// - **Intentional divergence from EnergyPlus**: the EnergyPlus `Coil:Heating:DX:SingleSpeed`
+///   object's "Minimum Outdoor Dry-Bulb Temperature for Compressor Operation" defaults to
+///   -8°C (≈ 17.6°F). HARES intentionally follows the OCHRE / OpenStudio-HPXML 0°F value,
+///   which reflects the practical minimum operating temperature for typical residential
+///   non-cold-climate ASHPs as manufactured and installed.
+///
+/// Consumed by `HeatPumpHeater` in `heater.rs` as the default for `hp_lockout_temp_c` when
+/// the HPXML `CompressorLockoutTemperature` or `BackupHeatingSwitchoverTemperature` field is
+/// absent.
 pub const DEFAULT_HP_LOCKOUT_TEMP_C: f64 = -17.78;
 /// Compressor lockout hysteresis band width [°C].
 /// Prevents rapid HP enable/disable chatter near the lockout threshold.
