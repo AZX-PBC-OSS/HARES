@@ -131,12 +131,14 @@ impl ThermalSolver {
             .wiring
             .zone_state_indices
             .get(&zone)
-            .map(|&idx| self.x[idx]);
+            .map(|&idx| self.x[idx])
+            .unwrap_or(f64::NAN);
         let t_out = self
             .wiring
             .outdoor_temp_input_indices
             .first()
-            .map(|&idx| self.last_u[idx]);
+            .map(|&idx| self.last_u[idx])
+            .unwrap_or(f64::NAN);
         let capacity_value = self.last_u[input_idx];
 
         match total.map(|raw| raw - capacity_value) {

@@ -1639,9 +1639,7 @@ fn build_zone_map(
         if let Some(group) = enclosure.child("Attics") {
             for node in group.children_named("Attic") {
                 // <FlatRoof/> means no attic cavity; skip zone creation (OCHRE hpxml.py:575-576).
-                let attic_type_child = node
-                    .child("AtticType")
-                    .and_then(|at| at.children.first());
+                let attic_type_child = node.child("AtticType").and_then(|at| at.children.first());
                 if let Some(child) = attic_type_child {
                     if child.name == "FlatRoof" {
                         continue;
@@ -5479,7 +5477,10 @@ mod tests {
 "#;
         let building = parse_building(xml).expect("flat roof HPXML should parse");
         assert!(
-            !building.zones.iter().any(|z| matches!(z.zone_type, ZoneType::Attic)),
+            !building
+                .zones
+                .iter()
+                .any(|z| matches!(z.zone_type, ZoneType::Attic)),
             "FlatRoof should not create an attic zone"
         );
     }

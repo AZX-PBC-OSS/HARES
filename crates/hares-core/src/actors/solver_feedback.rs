@@ -60,7 +60,8 @@ impl SolverFeedbackActor {
     }
 
     /// Test-friendly variant: collect ideal targets and resolve capacities via closure.
-    pub fn collect_and_solve_test(
+    #[cfg(test)]
+    pub(crate) fn collect_and_solve_test(
         &mut self,
         equipment: &[Box<dyn Equipment>],
         solve: impl FnMut(ZoneId, f64) -> f64,

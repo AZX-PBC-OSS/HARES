@@ -2376,6 +2376,147 @@ mod tests {
         );
     }
 
+    /// Two consecutive ideal-capacity solve failures must emit only one `warn!`;
+    /// the second failure is suppressed to `debug!` by the per-zone throttle.
+    /// This test verifies the throttle guard (`ideal_capacity_warned_zones`)
+    /// prevents per-timestep warn flood in pathological runs.
+    #[test]
+    #[traced_test]
+    fn solve_ideal_capacity_throttles_repeat_failures() {
+        let zone_temp = 20.0;
+        let outdoor_temp = 10.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (2.0 * 50_000.0)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (2.0 * 50_000.0), 0.0]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+        };
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+
+        let q1 = solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
+        assert_eq!(q1, 0.0, "first failure must return 0.0");
+
+        let q2 = solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
+        assert_eq!(q2, 0.0, "second failure must return 0.0");
+
+        // The first call emits a warn, the second is throttled to debug.
+        assert!(
+            logs_contain("solve_ideal_capacity_for_target failed"),
+            "expected warn! on first failure"
+        );
+        assert!(
+            logs_contain("(suppressed)"),
+            "expected suppressed debug log on second consecutive failure"
+        );
+    }
+
+    /// After one or more ideal-capacity solve failures, the first successful
+    /// solve must emit an `info!` recovery log. This test verifies the recovery
+    /// path clears `ideal_capacity_warned_zones` and logs the consecutive-failure
+    /// count.
+    #[test]
+    #[traced_test]
+    fn solve_ideal_capacity_emits_recovery_log_after_success() {
+        let zone_temp = 20.0;
+        let outdoor_temp = 10.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+
+        // Working model: HVAC column (index 1) has non-zero gain.
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+        };
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+
+        // Simulate a prior failure run by injecting the zone into the warned set.
+        solver.ideal_capacity_warned_zones.insert(ZoneId(1));
+        solver.ideal_capacity_failure_counts.insert(ZoneId(1), 3);
+
+        let q = solver.solve_ideal_capacity_for_target(ZoneId(1), 22.0);
+        assert!(
+            q != 0.0,
+            "working solver must produce non-zero capacity: q={q:.1}"
+        );
+        assert!(
+            logs_contain("recovered after"),
+            "expected recovery info! log after successful solve following failures"
+        );
+        assert!(
+            !solver.ideal_capacity_warned_zones.contains(&ZoneId(1)),
+            "warned zone must be cleared on recovery"
+        );
+    }
+
     /// Non-zero solar irradiance routed through solar_input_indices must raise
     /// zone temperature compared to an identical solver with zero irradiance.
     #[test]
