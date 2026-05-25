@@ -144,6 +144,15 @@ pub const MINUTES_PER_DAY: f64 = 1_440.0;
 /// Hours per year [h/year]. ASHRAE 8760 h = 365 days × 24 h/day.
 pub const HOURS_PER_YEAR: f64 = 8_760.0;
 
+/// Boiler auxiliary operating hours per year [h/year].
+///
+/// ANSI/RESNET/ICC 301-2019 Equation 4.4-5 and the ResStock convention
+/// use 2080 h/yr for boiler auxiliary loads (pumps, controls), reflecting
+/// heating-season operation rather than year-round continuous duty.
+/// OCHRE hvac.rb:1754 `get_default_boiler_eae` applies this same divisor
+/// when converting `ElectricAuxiliaryEnergy` (kWh/yr) to watts for boilers.
+pub const BOILER_AUXILIARY_HOURS_PER_YEAR: f64 = 2_080.0;
+
 // --- Occupant Internal Gains ---
 
 /// Total sensible heat gain per occupant [W/person].

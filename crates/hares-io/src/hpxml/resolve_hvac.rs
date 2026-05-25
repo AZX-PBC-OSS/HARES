@@ -22,7 +22,10 @@ use super::HpxmlError;
 use super::building::{Boundary, BoundaryType, Building, DuctLocation, XmlNode, Zone, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec};
 use super::xml_helpers::{child_f64, child_text, descendants_named};
-use hares_physics::constants::{BTU_PER_HR_PER_W, CFM_TO_M3_S, HOURS_PER_YEAR, W_PER_TON};
+use hares_physics::constants::{
+    BOILER_AUXILIARY_HOURS_PER_YEAR, BTU_PER_HR_PER_W, CFM_TO_M3_S, HOURS_PER_YEAR, KW_TO_W,
+    W_PER_TON,
+};
 use hares_physics::units as conv;
 
 use crate::defaults::DefaultsStore;
@@ -532,7 +535,15 @@ fn extract_stage_values(params: &Map<String, Value>, prefix: &str) -> Option<Vec
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// Extract fan_power_w from params, falling back to auxiliary_power_w (ElectricAuxiliaryEnergy).
+/// Extract fan power from params. Preference order within this function:
+/// 1. `fan_power_w` (from HPXML `<extension>/<FanPowerWatts>`)
+/// 2. `auxiliary_power_w` (from `ElectricAuxiliaryEnergy` divided by an
+///    equipment-specific hours divisor — an average-watts approximation;
+///    see conversion site for details)
+///
+/// Note: `FanPowerWattsPerCFM` (highest priority overall) is handled separately
+/// as a `fan_power_w_per_cfm` struct field in each equipment builder, because it
+/// requires airflow data to convert to watts and cannot be resolved here.
 fn fan_power_from_params(params: &Map<String, Value>) -> Option<f64> {
     params
         .get("fan_power_w")
@@ -1442,9 +1453,27 @@ pub(super) fn resolve_hvac(
             params.insert("fraction_load_served".to_string(), json!(frac));
         }
         if let Some(aux_kwh) = child_f64(heating, "ElectricAuxiliaryEnergy") {
+            // ElectricAuxiliaryEnergy is an annual total (kWh/year per HPXML Data
+            // Dictionary v4.2).
+            //
+            // For furnaces: dividing by HOURS_PER_YEAR (8760 h) yields an
+            // average-watts value — this is an approximation: real fan power is
+            // load-dependent and the per-timestep distribution is distorted, though
+            // the annual energy total is preserved. Prefer FanPowerWattsPerCFM or
+            // FanPowerWatts extension fields when available.
+            //
+            // For boilers: dividing by BOILER_AUXILIARY_HOURS_PER_YEAR (2080 h)
+            // per ANSI/RESNET/ICC 301-2019 Eq. 4.4-5 and the ResStock convention
+            // (OCHRE hvac.rb:1754), reflecting heating-season pump/control operating
+            // hours rather than year-round continuous duty.
+            let hours = if name.contains("Boiler") {
+                BOILER_AUXILIARY_HOURS_PER_YEAR
+            } else {
+                HOURS_PER_YEAR
+            };
             params.insert(
                 "auxiliary_power_w".to_string(),
-                json!(aux_kwh / HOURS_PER_YEAR * 1000.0),
+                json!(aux_kwh / hours * KW_TO_W),
             );
         }
         if let Some(ext) = heating.child("extension") {
@@ -4515,6 +4544,59 @@ mod tests {
         assert!(
             (aux_w - 100.0).abs() < 1e-6,
             "ElectricAuxiliaryEnergy=876 kWh/year must yield 100.0 W, got {aux_w}"
+        );
+    }
+
+    #[test]
+    fn boiler_electric_auxiliary_energy_uses_2080_hour_divisor() {
+        // ANSI/RESNET/ICC 301-2019 Eq. 4.4-5: boiler auxiliaries (pumps, controls)
+        // operate for 2080 h/yr during heating season, not 8760 h/yr year-round.
+        // ElectricAuxiliaryEnergy = 2080 kWh/yr → 2080 / 2080 * 1000 = 1000.0 W.
+        let xml = r#"
+            <HPXML>
+              <Building>
+                <BuildingDetails>
+                  <Systems>
+                    <HVAC>
+                      <HVACPlant>
+                        <HeatingSystem>
+                          <SystemIdentifier id="htg1"/>
+                          <HeatingSystemType><Boiler><BoilerType>hot water</BoilerType></Boiler></HeatingSystemType>
+                          <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+                          <HeatingCapacity>40000</HeatingCapacity>
+                          <AnnualHeatingEfficiency>
+                            <Units>AFUE</Units>
+                            <Value>0.85</Value>
+                          </AnnualHeatingEfficiency>
+                          <ElectricAuxiliaryEnergy>2080</ElectricAuxiliaryEnergy>
+                          <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+                        </HeatingSystem>
+                      </HVACPlant>
+                    </HVAC>
+                  </Systems>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details must exist");
+        let mut building = empty_building(vec![conditioned_zone()]);
+        building.details_xml = details.clone();
+        let defaults = DefaultsStore::empty();
+        let mut specs = Vec::new();
+        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+        assert_eq!(specs.len(), 1, "expected one heating spec");
+        let aux_w = specs[0]
+            .parameters
+            .get("auxiliary_power_w")
+            .and_then(|v| v.as_f64())
+            .expect("auxiliary_power_w must be present");
+        assert!(
+            (aux_w - 1000.0).abs() < 1e-6,
+            "Boiler ElectricAuxiliaryEnergy=2080 kWh/yr must yield 1000.0 W \
+             (2080 h/yr divisor per RESNET Eq. 4.4-5), got {aux_w}"
         );
     }
 
