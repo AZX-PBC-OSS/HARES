@@ -334,22 +334,29 @@ pub struct BuildingRC {
 
 // ── Interior LWR method ─────────────────────────────────────────────────────
 
-/// Method for handling interior longwave radiation exchange.
+/// Interior longwave radiation method — a physics-significant choice that
+/// materially changes the A-matrix structure and solver behaviour.
 ///
-/// `StarMesh` is the default and recommended mode. It bakes linearized
-/// inter-surface radiation conductances into the RC A-matrix at construction
-/// time, eliminating the need for iterative LWR injection each timestep.
+/// `StarMesh` bakes linearized inter-surface radiation conductances into the
+/// RC A-matrix at construction time, eliminating the need for iterative LWR
+/// injection each timestep.
 ///
 /// `ScriptF` preserves the previous behavior: iterative T⁴ radiosity
 /// injection via the `apply_interior_longwave_inputs()` solver method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// **Explicit-variant rule**: callers must name the variant explicitly at every
+/// construction site (`InteriorLwrMethod::StarMesh` or
+/// `InteriorLwrMethod::ScriptF`), never `::default()`. The `Default` impl is
+/// deliberately omitted so the compiler enforces this. A future change to add
+/// a third variant (e.g. an exact `ExactMatrix` method) cannot silently switch
+/// behaviour at any callsite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InteriorLwrMethod {
     /// Star-mesh linearized radiation: floating "radiation star" node per zone,
     /// connected to each interior surface via `R = 1/(4·ε·σ·A·T_ref³)`.
     /// `reduce_floating_nodes()` eliminates the star node into pairwise
     /// conductances automatically. Matches OCHRE `linearize_int_radiation`,
     /// TRNSYS Type 56, ESP-r.
-    #[default]
     StarMesh,
     /// ScriptF iterative T⁴ radiosity injection (OCHRE legacy mode).
     /// The A-matrix contains convection-only film resistances; LWR flux

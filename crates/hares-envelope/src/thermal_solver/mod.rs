@@ -1091,7 +1091,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -1177,7 +1177,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -1311,7 +1311,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -1406,7 +1406,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -1865,7 +1865,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -1916,7 +1916,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -2090,7 +2090,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -2159,7 +2159,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -2212,7 +2212,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -2269,7 +2269,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -2347,7 +2347,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -2487,7 +2487,7 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
-                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -2644,7 +2644,7 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
-                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, &env, zone_temp)
@@ -2812,7 +2812,7 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
-                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let env = make_env();
             let mut s =
@@ -3165,7 +3165,7 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
-                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -3280,7 +3280,7 @@ mod tests {
             )),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -3365,7 +3365,7 @@ mod tests {
             )),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -3465,7 +3465,7 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
-                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -3620,7 +3620,7 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
-                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -3735,7 +3735,7 @@ mod tests {
                     natural_ventilation: None,
                     supply_duct_leakage_m3_s: 0.0,
                     return_duct_leakage_m3_s: 0.0,
-                    interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+                    interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
                     interior_solar_zones: Vec::new(),
                     boundary_diagnostics: Vec::new(),
                 };
@@ -4077,7 +4077,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -4144,7 +4144,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -4332,7 +4332,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -4499,7 +4499,7 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
-                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+                interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -4813,7 +4813,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -4949,7 +4949,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
         };
@@ -5204,7 +5204,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: vec![solar_zone],
             boundary_diagnostics: Vec::new(),
         };
@@ -5332,7 +5332,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: vec![BoundaryDiagnosticInfo::RCNode {
                 inner_state_index: 1, // wall node

@@ -531,7 +531,7 @@ impl Default for ThermalSolverConfig {
             ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             boundary_diagnostics: Vec::new(),
-            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
         }
     }
 }

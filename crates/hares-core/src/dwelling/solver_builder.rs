@@ -528,7 +528,7 @@ pub(crate) fn build_default_solvers(
     // StarMesh mode bakes linearized inter-surface radiation conductances
     // into the A-matrix at construction time. ScriptF mode preserves the
     // iterative T⁴ radiosity injection path.
-    let interior_lwr_method = hares_envelope::InteriorLwrMethod::default(); // StarMesh
+    let interior_lwr_method = hares_envelope::InteriorLwrMethod::StarMesh;
     let (rc, envelope_diagnostics) = assemble_building_rc(
         &boundary_inputs,
         n_zones,

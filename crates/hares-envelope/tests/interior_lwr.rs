@@ -405,31 +405,6 @@ fn lwr_zone_without_scriptf_must_error_at_construction() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: InteriorLwrMethod::default() must equal StarMesh
-// ---------------------------------------------------------------------------
-
-/// Implicit default must be StarMesh, not any future variant.
-///
-/// `InteriorLwrMethod::default()` is used at ~28 callsites across
-/// `hares_envelope` and `hares_core`. The ticket requests those callsites be
-/// made explicit. This regression test pins the invariant that `default()`
-/// resolves to `StarMesh` so that any accidental change to the `#[default]`
-/// attribute on `InteriorLwrMethod` will be caught immediately.
-///
-/// NOTE: This test does NOT fix the underlying issue (callsites still use `default()`);
-/// it only guards the behavioural promise relied on.
-#[test]
-fn interior_lwr_default_is_starmesh() {
-    assert_eq!(
-        hares_envelope::InteriorLwrMethod::default(),
-        hares_envelope::InteriorLwrMethod::StarMesh,
-        "InteriorLwrMethod::default() must be StarMesh; if you changed the \
-         #[default] attribute, update all callsites in hares-envelope and \
-         hares-core to name the variant explicitly"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Verification: radiation_frac = r_film_conv / (r_film_conv + r_inner_half)
 // ---------------------------------------------------------------------------
 
