@@ -1719,7 +1719,9 @@ pub(super) fn resolve_hvac(
         insert_mode_and_speed_metadata(
             &mut params,
             child_text(cooling, "CompressorType").as_deref(),
-        );
+            "CoolingSystem",
+            &name,
+        )?;
         apply_default_hvac_speed_fallback(
             &mut params,
             "CoolingSystem/AnnualCoolingEfficiency",
@@ -1931,7 +1933,9 @@ pub(super) fn resolve_hvac(
         insert_mode_and_speed_metadata(
             &mut params,
             child_text(heat_pump, "CompressorType").as_deref(),
-        );
+            "HeatPump",
+            cooler_name,
+        )?;
         apply_default_hvac_speed_fallback(
             &mut params,
             "HeatPump/AnnualCoolingEfficiency",
@@ -2253,12 +2257,49 @@ fn normalize_efficiency_units(units: &str, value: f64, is_ductless: bool) -> (St
     }
 }
 
-fn compressor_type_to_mode(compressor_type: &str) -> &'static str {
-    match compressor_type.trim().to_ascii_lowercase().as_str() {
-        "single stage" => "single_speed",
-        "two stage" => "two_speed",
-        "variable speed" => "variable_speed",
-        _ => "single_speed",
+/// HPXML v4.x §8.4 CompressorType enumeration values.
+/// Three valid values per the HPXML Data Dictionary; any other value is rejected
+/// at parse time rather than silently defaulted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HpxmlCompressorType {
+    SingleStage,
+    TwoStage,
+    VariableSpeed,
+}
+
+fn parse_compressor_type(
+    raw: &str,
+    system_kind: &'static str,
+    system_id: &str,
+) -> Result<HpxmlCompressorType, HpxmlError> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "single stage" => Ok(HpxmlCompressorType::SingleStage),
+        "two stage" => Ok(HpxmlCompressorType::TwoStage),
+        "variable speed" => Ok(HpxmlCompressorType::VariableSpeed),
+        _ => {
+            tracing::warn!(
+                compressor_type = raw,
+                system_kind,
+                system_id,
+                "Unknown HPXML CompressorType; rejecting rather than silently defaulting",
+            );
+            Err(HpxmlError::InvalidField {
+                path: "CompressorType",
+                system_kind,
+                system_id: system_id.to_string(),
+                value_received: raw.to_string(),
+                reason: "CompressorType must be one of: single stage, two stage, variable speed",
+            })
+        }
+    }
+}
+
+fn compressor_type_to_mode(ct: HpxmlCompressorType) -> &'static str {
+    match ct {
+        HpxmlCompressorType::SingleStage => "single_speed",
+        HpxmlCompressorType::TwoStage => "two_speed",
+        HpxmlCompressorType::VariableSpeed => "variable_speed",
     }
 }
 
@@ -2278,9 +2319,15 @@ fn mode_from_number_of_speeds(n: usize) -> &'static str {
     }
 }
 
-fn insert_mode_and_speed_metadata(params: &mut Map<String, Value>, compressor_type: Option<&str>) {
+fn insert_mode_and_speed_metadata(
+    params: &mut Map<String, Value>,
+    compressor_type: Option<&str>,
+    system_kind: &'static str,
+    system_id: &str,
+) -> Result<(), HpxmlError> {
     if let Some(raw) = compressor_type {
-        let mode = compressor_type_to_mode(raw);
+        let ct = parse_compressor_type(raw, system_kind, system_id)?;
+        let mode = compressor_type_to_mode(ct);
         let n_speeds = number_of_speeds_from_mode(mode);
         params.insert(
             "speed_control_mode".to_string(),
@@ -2288,6 +2335,7 @@ fn insert_mode_and_speed_metadata(params: &mut Map<String, Value>, compressor_ty
         );
         params.insert("number_of_speeds".to_string(), json!(n_speeds));
     }
+    Ok(())
 }
 
 fn apply_default_hvac_speed_fallback(

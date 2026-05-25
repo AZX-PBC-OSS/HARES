@@ -1120,21 +1120,13 @@ fn electric_boiler_logs_debug_when_flow_rate_and_return_temp_are_defaulted() {
     );
 }
 
-// --- Ticket 120: unknown CompressorType must error, not silently default to single_speed -----
+// --- Unknown CompressorType must error, not silently default to single_speed ---------------
 //
 // HPXML v4.x §8.4 defines exactly three CompressorType values: "single stage",
 // "two stage", and "variable speed" (confirmed at hpxml.nlr.gov/datadictionary).
-// Any other string is outside the spec.  Currently `compressor_type_to_mode`
-// (resolve_hvac.rs:1779) silently maps unknown values to "single_speed" via
-// `_ => "single_speed"`.  The ticket requires the wildcard be replaced by a
-// loud error (tracing::warn! + Err(HpxmlError::...)).
-//
-// This test is marked #[ignore] because the fix has not yet been applied.
-// It documents the *desired* behaviour: an unknown CompressorType must fail
-// closed rather than produce a silently-wrong single_speed inference.
+// Any other string is outside the spec and must produce an HpxmlError::InvalidField.
 
 #[test]
-#[should_panic(expected = "ticket 120: unknown CompressorType 'DualStage' silently resolved")]
 fn unknown_compressor_type_errors_not_silently_defaults() {
     let xml = wrap_systems(
         r#"<Systems>
@@ -1152,21 +1144,12 @@ fn unknown_compressor_type_errors_not_silently_defaults() {
         </Systems>"#,
     );
 
-    // After the fix, this must return Err rather than silently produce a spec
-    // with speed_control_mode="single_speed".
-    match resolve(&xml) {
-        Err(_) => {} // any error variant satisfies the contract
-        Ok(specs) => {
-            // Pre-fix: resolve succeeds and silently maps to single_speed.
-            // If this branch is hit, the bug is still present.
-            let ac = specs.iter().find(|s| s.name == "Air Conditioner");
-            panic!(
-                "ticket 120: unknown CompressorType 'DualStage' silently resolved to \
-                 speed_control_mode={:?} instead of returning an error",
-                ac.and_then(|s| s.parameters.get("speed_control_mode"))
-            );
-        }
-    }
+    expect_invalid_field(
+        resolve(&xml),
+        "CompressorType",
+        "CoolingSystem",
+        "DualStage",
+    );
 }
 
 /// Companion happy-path test: all three HPXML-spec CompressorType values must
