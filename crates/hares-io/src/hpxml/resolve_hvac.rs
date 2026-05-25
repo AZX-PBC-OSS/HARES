@@ -753,16 +753,41 @@ fn try_build_gas_boiler_config(
 
     // Hydronic loop flow rate and return-temperature are configuration defaults
     // applied by the boiler equipment model when not explicitly specified.
-    // These are water-loop sizing parameters (typical residential: 0.5 kg/s,
-    // 40 °C return); not HPXML-sourced physics.
+    // These are water-loop sizing parameters derived from ASHRAE HVAC Systems
+    // and Equipment, Chapter 13 "Hydronic Heating and Cooling" for residential
+    // flow-rate sizing conventions, and Chapter 32 "Boilers" for return-water
+    // temperature in condensing-mode operation. Neither the HPXML data model
+    // nor a single primary source prescribes canonical defaults for these fields;
+    // 0.5 kg/s (~8 gpm for a typical 60 000 Btu/h residential boiler, from the
+    // historical US standard of 1 gpm per 10 000 Btu/h) and 40.0 °C (typical
+    // condensing-boiler return temperature, well below the ~55 °C flue-gas
+    // dewpoint) are engineering estimates pending calibration data.
     let flow_rate_kg_s = params
         .get("flow_rate_kg_s")
         .and_then(Value::as_f64)
-        .unwrap_or(0.5);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                equipment_id = name,
+                field = "flow_rate_kg_s",
+                value = 0.5_f64,
+                "boiler hydronic flow rate not specified; using engineering default \
+                 (ASHRAE SE Ch.13 residential sizing convention)"
+            );
+            0.5
+        });
     let return_temp_c = params
         .get("return_temp_c")
         .and_then(Value::as_f64)
-        .unwrap_or(40.0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                equipment_id = name,
+                field = "return_temp_c",
+                value = 40.0_f64,
+                "boiler return water temperature not specified; using engineering default \
+                 (40 °C, typical condensing-boiler return per ASHRAE SE Ch.32)"
+            );
+            40.0
+        });
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cfg = GasBoilerConfig {
@@ -798,14 +823,39 @@ fn try_build_electric_boiler_config(
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
 
+    // Hydronic loop flow rate and return-temperature are configuration defaults
+    // applied by the boiler equipment model when not explicitly specified.
+    // These are water-loop sizing parameters derived from ASHRAE HVAC Systems
+    // and Equipment, Chapter 13 "Hydronic Heating and Cooling" for residential
+    // flow-rate sizing conventions, and Chapter 32 "Boilers" for return-water
+    // temperature in condensing-mode operation. See Gas Boiler path above for
+    // the full citation rationale.
     let flow_rate_kg_s = params
         .get("flow_rate_kg_s")
         .and_then(Value::as_f64)
-        .unwrap_or(0.5);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                equipment_id = name,
+                field = "flow_rate_kg_s",
+                value = 0.5_f64,
+                "electric boiler hydronic flow rate not specified; using engineering default \
+                 (ASHRAE SE Ch.13 residential sizing convention)"
+            );
+            0.5
+        });
     let return_temp_c = params
         .get("return_temp_c")
         .and_then(Value::as_f64)
-        .unwrap_or(40.0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                equipment_id = name,
+                field = "return_temp_c",
+                value = 40.0_f64,
+                "electric boiler return water temperature not specified; using engineering default \
+                 (40 °C, typical condensing-boiler return per ASHRAE SE Ch.32)"
+            );
+            40.0
+        });
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cfg = ElectricBoilerConfig {

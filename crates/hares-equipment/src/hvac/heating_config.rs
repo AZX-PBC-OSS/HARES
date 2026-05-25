@@ -120,8 +120,18 @@ pub struct GasBoilerConfig {
     pub capacity_w: f64,
     /// Required; resolver errors if absent.
     pub afue: f64,
+    /// Hydronic loop design flow rate [kg/s]. Default 0.5 kg/s (~8 gpm),
+    /// an engineering estimate from ASHRAE HVAC Systems and Equipment Ch.13
+    /// residential hydronic sizing conventions (historical US standard:
+    /// 1 gpm per 10 000 Btu/h). Not sourced from HPXML; applied as a
+    /// configuration default when the HPXML file omits this field.
     #[serde(default = "default_flow_rate_kg_s")]
     pub flow_rate_kg_s: f64,
+    /// Hydronic loop design return temperature [°C]. Default 40.0 °C, a
+    /// typical condensing-boiler return temperature well below the ~55 °C
+    /// flue-gas dewpoint (ASHRAE HVAC Systems and Equipment Ch.32 "Boilers").
+    /// Not sourced from HPXML; applied as a configuration default when the
+    /// HPXML file omits this field.
     #[serde(default = "default_return_temp_c")]
     pub return_temp_c: f64,
     #[serde(default = "default_fluid_type")]
@@ -175,8 +185,18 @@ pub struct ElectricBoilerConfig {
     /// Electric input ratio [W/W] = electric input power divided by delivered
     /// thermal output. Unity is ideal resistive conversion.
     pub eir: f64,
+    /// Hydronic loop design flow rate [kg/s]. Default 0.5 kg/s (~8 gpm),
+    /// an engineering estimate from ASHRAE HVAC Systems and Equipment Ch.13
+    /// residential hydronic sizing conventions (historical US standard:
+    /// 1 gpm per 10 000 Btu/h). Not sourced from HPXML; applied as a
+    /// configuration default when the HPXML file omits this field.
     #[serde(default = "default_flow_rate_kg_s")]
     pub flow_rate_kg_s: f64,
+    /// Hydronic loop design return temperature [°C]. Default 40.0 °C, a
+    /// typical condensing-boiler return temperature well below the ~55 °C
+    /// flue-gas dewpoint (ASHRAE HVAC Systems and Equipment Ch.32 "Boilers").
+    /// Not sourced from HPXML; applied as a configuration default when the
+    /// HPXML file omits this field.
     #[serde(default = "default_return_temp_c")]
     pub return_temp_c: f64,
     #[serde(default = "default_fluid_type")]
@@ -326,10 +346,19 @@ impl EquipmentTypedConfig for IdealHvacConfig {
 }
 
 fn default_flow_rate_kg_s() -> f64 {
+    // ASHRAE HVAC Systems and Equipment Ch.13 "Hydronic Heating and Cooling":
+    // historical US residential standard of 1 gpm per 10 000 Btu/h,
+    // approximately 0.5 kg/s for a typical 60 000 Btu/h boiler.
+    // Engineering estimate; not a canonical standard default.
     0.5
 }
 
 fn default_return_temp_c() -> f64 {
+    // ASHRAE HVAC Systems and Equipment Ch.32 "Boilers": condensing-boiler
+    // efficiency peaks when return water temperature is below the flue-gas
+    // dewpoint (~55 °C / 130 °F for natural gas). 40.0 °C is a typical
+    // condensing-mode operating point. Engineering estimate; not a canonical
+    // standard default.
     40.0
 }
 
