@@ -1127,17 +1127,16 @@ fn steel_frame_default_returns_none_not_softwood() {
 }
 
 // ===========================================================================
-// Regression: ticket 093 — SEER silent-zero fallback misclassifies EER-only
+// Regression suite: SEER silent-zero fallback misclassifies EER-only
 // cooling systems.
 //
-// Defect: apply_default_hvac_speed_fallback uses `.unwrap_or(0.0)` on the
-// SEER Option<f64>.  When SEER is absent but EER is present (valid for room
-// ACs and some legacy central units), the 0.0 sentinel drives n_speeds=1
-// regardless of what the EER value implies, and the non-physical 0.0 may
-// propagate downstream.  When both SEER and EER are absent the function
-// should return an error rather than silently inserting single-speed.
-//
-// These tests FAIL until the fix described in ticket 093 is applied.
+// Root cause (now fixed): apply_default_hvac_speed_fallback used
+// `.unwrap_or(0.0)` on the SEER Option<f64>.  When SEER is absent but EER
+// is present (valid for room ACs and some legacy central units), the 0.0
+// sentinel drove n_speeds=1 regardless of what the EER value implied, and
+// the non-physical 0.0 could propagate downstream.  When both SEER and EER
+// are absent the function now returns HpxmlError::MissingField instead of
+// silently inserting single-speed.
 // ===========================================================================
 
 #[test]
@@ -1174,10 +1173,8 @@ fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
         .find(|s| s.name.contains("Room AC") || s.name.contains("Air Conditioner"))
         .expect("should emit a cooling system spec");
 
-    // The efficiency stored in params must NOT be the 0.0 sentinel.
-    // BUG (ticket 093): before the fix, efficiency_eer or cooling_efficiency
-    // is set to 10.0 but the speed-inference path reads seer=0.0 and never
-    // consults EER.  The test below will pass once the EER path is used.
+    // The efficiency stored in params must NOT be the 0.0 sentinel — the
+    // resolver must have taken the EER path, not fallen back to SEER=0.0.
     let has_nonzero_seer = ac
         .parameters
         .get("efficiency_seer")
@@ -1194,9 +1191,7 @@ fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
 
     assert!(
         has_eer,
-        "BUG (ticket 093): EER-only cooling system must carry a non-zero EER \
-         value in its resolved params; currently the 0.0 SEER sentinel may \
-         shadow or discard the EER"
+        "EER-only cooling system must carry a non-zero EER value in its resolved params"
     );
     assert!(
         !has_nonzero_seer,
@@ -1204,10 +1199,9 @@ fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
     );
 
     // EER=10 is below the 15-SEER threshold, so n_speeds=1 is correct.
-    // Note: the current (buggy) code *also* returns 1 here because 0.0 < 15,
-    // so the speed count alone cannot distinguish the correct path from the
-    // buggy path.  The assertions above on EER presence / no SEER sentinel
-    // are the primary mechanism checks.  The speed count is a sanity guard.
+    // For EER=10 the correct EER path and the old zero-sentinel path both
+    // produce n_speeds=1, so the assertions above on EER presence / no SEER
+    // are the primary guards; the speed count is a sanity check.
     let n_speeds = ac.parameters["number_of_speeds"]
         .as_u64()
         .expect("number_of_speeds must be set");
@@ -1218,18 +1212,15 @@ fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
 }
 
 #[test]
-#[should_panic(expected = "BUG (ticket 093): EER=17 (> 15 threshold) should infer 2-speed")]
 fn high_eer_central_ac_without_seer_resolves_via_eer_not_zero_sentinel() {
     // Central AC with EER=17 and no SEER.  The 0.0-sentinel bug causes
     // n_speeds=1 (because 0.0 < 15). If the code correctly falls through to
     // EER and uses EER as the speed-inference input, the system should resolve
     // to 2-speed (15 < 17 ≤ 21).
     //
-    // This is the "observable" bug case: both the mechanism AND the result
-    // differ between buggy (n_speeds=1 via seer=0.0) and correct (n_speeds=2
-    // via eer=17).
-    //
-    // This test FAILS until ticket 093 is fixed.
+    // This is the "observable" case: both the mechanism AND the result differ
+    // between the prior bug (n_speeds=1 via seer=0.0) and correct behaviour
+    // (n_speeds=2 via eer=17).
     let xml = minimal_xml_with_systems(
         r#"<Systems><HVAC>
             <CoolingSystem>
@@ -1256,25 +1247,19 @@ fn high_eer_central_ac_without_seer_resolves_via_eer_not_zero_sentinel() {
         .as_u64()
         .expect("number_of_speeds must be set");
 
-    // BUG (ticket 093): currently n_speeds=1 (via seer=0.0 sentinel).
-    // After the fix, EER=17 should drive n_speeds=2.
+    // EER=17 is in the range (15, 21] → 2-speed (same thresholds as SEER;
+    // EER and SEER differ by ≤10-15% for typical residential equipment).
     assert_eq!(
         n_speeds, 2,
-        "BUG (ticket 093): EER=17 (> 15 threshold) should infer 2-speed, \
-         but currently resolves to {n_speeds} because seer=0.0 sentinel is used \
-         instead of EER"
+        "EER=17 (> 15 threshold) should infer 2-speed, got {n_speeds}"
     );
 }
 
 #[test]
-#[should_panic(expected = "BUG (ticket 093): resolve_equipment should return Err")]
 fn cooling_system_missing_both_seer_and_eer_produces_error() {
-    // A CoolingSystem with no efficiency data at all.
-    // Before the fix: apply_default_hvac_speed_fallback silently substitutes
-    // seer=0.0 and resolve_equipment succeeds, producing a single-speed AC
-    // with a non-physical 0.0 efficiency.
-    // After the fix: the resolver must return an error (HpxmlError::MissingField
-    // or HpxmlError::Parse) rather than succeeding with junk data.
+    // A CoolingSystem with no efficiency data at all must be rejected with
+    // HpxmlError::MissingField — silently substituting 0.0 (the old bug)
+    // would produce a non-physical efficiency and wrong speed inference.
     let xml = minimal_xml_with_systems(
         r#"<Systems><HVAC>
             <CoolingSystem>
@@ -1288,21 +1273,15 @@ fn cooling_system_missing_both_seer_and_eer_produces_error() {
     let building = parse_building(&xml).expect("should parse XML structure");
     let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
 
-    // BUG (ticket 093): currently resolve_equipment succeeds (returns Ok)
-    // because apply_default_hvac_speed_fallback silently substitutes 0.0.
-    // After the fix this must be an Err.
     assert!(
         result.is_err(),
-        "BUG (ticket 093): resolve_equipment should return Err when \
-         CoolingSystem has no SEER or EER data, but currently succeeds \
-         (silently using seer=0.0 sentinel)"
+        "resolve_equipment must return Err when CoolingSystem has no SEER or EER data"
     );
 }
 
 #[test]
 fn seer_present_cooling_system_resolves_normally_regression() {
-    // Regression guard: a CoolingSystem with SEER must continue to work after
-    // the ticket 093 fix.
+    // Regression guard: a CoolingSystem with SEER must resolve correctly.
     let xml = minimal_xml_with_systems(
         r#"<Systems><HVAC>
             <CoolingSystem>

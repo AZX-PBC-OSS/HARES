@@ -1592,7 +1592,12 @@ pub(super) fn resolve_hvac(
             &mut params,
             child_text(cooling, "CompressorType").as_deref(),
         );
-        apply_default_hvac_speed_fallback(&mut params);
+        apply_default_hvac_speed_fallback(
+            &mut params,
+            "CoolingSystem/AnnualCoolingEfficiency",
+            "CoolingSystem",
+            &name,
+        )?;
         apply_multispeed_cooling_parameters(&mut params, defaults, &name);
         insert_startup_degradation(&mut params, &name, false);
 
@@ -1799,7 +1804,12 @@ pub(super) fn resolve_hvac(
             &mut params,
             child_text(heat_pump, "CompressorType").as_deref(),
         );
-        apply_default_hvac_speed_fallback(&mut params);
+        apply_default_hvac_speed_fallback(
+            &mut params,
+            "HeatPump/AnnualCoolingEfficiency",
+            "HeatPump",
+            cooler_name,
+        )?;
         if heat_pump_type == "mini-split" {
             params.insert("number_of_speeds".to_string(), json!(4));
             params.insert(
@@ -2152,34 +2162,66 @@ fn insert_mode_and_speed_metadata(params: &mut Map<String, Value>, compressor_ty
     }
 }
 
-fn apply_default_hvac_speed_fallback(params: &mut Map<String, Value>) {
+fn apply_default_hvac_speed_fallback(
+    params: &mut Map<String, Value>,
+    path: &'static str,
+    system_kind: &'static str,
+    system_id: &str,
+) -> std::result::Result<(), HpxmlError> {
     if params.contains_key("number_of_speeds") {
-        return;
+        return Ok(());
     }
-    // Prefer the bare <SEER> tag path ("efficiency_seer").
-    // Fall back to HPXML 4.x AnnualCoolingEfficiency when units are SEER
-    // ("cooling_efficiency" with "cooling_efficiency_units" == "SEER").
-    let seer = params
-        .get("efficiency_seer")
-        .and_then(Value::as_f64)
-        .or_else(|| {
-            let units = params
-                .get("cooling_efficiency_units")
-                .and_then(Value::as_str)?;
-            if units == "SEER" {
-                params.get("cooling_efficiency").and_then(Value::as_f64)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0.0);
-    let n_speeds = if seer > 21.0 {
+
+    // Try SEER first, then EER as a fallback for EER-only systems (room ACs
+    // and some legacy central units).  EER is a valid primary efficiency metric
+    // per HPXML v4.x for room air conditioners; SEER requires multi-condition
+    // test data (AHRI 210/240) and may legitimately be absent.
+    let efficiency = seer_from_params(params).or_else(|| eer_from_params(params));
+    let Some(efficiency) = efficiency else {
+        // HeatPumps may legitimately lack cooling efficiency when modelling
+        // heating-only features (e.g. lockout temperatures, defrost, heating
+        // capacity ratios at 17°F).  For standalone CoolingSystems a missing
+        // efficiency is a data-quality error.
+        if system_kind == "HeatPump" {
+            // No CompressorType and no cooling efficiency — the speed cannot
+            // be inferred from data.  Default to single-speed and warn so the
+            // downstream model still functions.
+            tracing::warn!(
+                system_kind,
+                system_id,
+                "HeatPump has no CompressorType and no SEER/EER cooling efficiency; \
+                 defaulting to single-speed (1)"
+            );
+            set_speed_fallback(params, 1);
+            return Ok(());
+        }
+        return Err(HpxmlError::MissingField {
+            path,
+            system_kind,
+            system_id: system_id.to_string(),
+            reason: "SEER or EER cooling efficiency is required to infer equipment speed; \
+                 provide AnnualCoolingEfficiency with Units='SEER' or 'EER'",
+        });
+    };
+
+    // Speed thresholds are calibrated to SEER per the reference OCHRE
+    // resolver (ochre/utils/hpxml.py:861-876).  Using the same thresholds
+    // for EER is a defensible approximation: EER and SEER differ by ≤10-15%
+    // for typical single-speed residential equipment.
+    let n_speeds = if efficiency > 21.0 {
         4
-    } else if seer > 15.0 {
+    } else if efficiency > 15.0 {
         2
     } else {
         1
     };
+    set_speed_fallback(params, n_speeds);
+    Ok(())
+}
+
+/// Write number_of_speeds and speed_control_mode into params (the shared
+/// body when a fallback speed is determined or defaulted).
+fn set_speed_fallback(params: &mut Map<String, Value>, n_speeds: usize) {
     params.insert("number_of_speeds".to_string(), json!(n_speeds));
     params.insert(
         "speed_control_mode".to_string(),
