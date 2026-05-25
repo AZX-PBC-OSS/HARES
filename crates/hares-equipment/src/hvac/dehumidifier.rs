@@ -18,6 +18,9 @@ use hares_types::telemetry_keys as tk;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::ac_config::DehumidifierConfig;
+use super::dehumidifier_defaults::{
+    DEFAULT_ENERGY_FACTOR_CURVE, DEFAULT_WATER_REMOVAL_CURVE, RATED_DB_C, RATED_RH,
+};
 use super::helpers::{equipment_id_from_config, zone_id_from_config};
 
 const KG_PER_LITER_WATER: f64 = 1.0;
@@ -250,21 +253,31 @@ impl Dehumidifier {
         self.max_rh = (self.target_rh + DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION)
             .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION);
 
-        // Use default curves for typed config.
+        // Use default dehumidifier biquadratic curves sourced from EnergyPlus
+        // ZoneHVAC:Dehumidifier:DX (WindACRHControl.idf), adapted from RH-% to
+        // RH-fraction domain.  Identity [1,0,0,0,0,0] is available as a
+        // last-resort fallback in new() for the pre-init state.
         self.water_removal_curve = BiquadraticCurve {
-            coeffs: DEFAULT_NORMALIZED_CURVE,
+            coeffs: DEFAULT_WATER_REMOVAL_CURVE,
             x1_bounds: DEFAULT_DB_BOUNDS_C,
             x2_bounds: DEFAULT_RH_BOUNDS,
             warn_on_clamp: false,
         };
         self.energy_factor_curve = BiquadraticCurve {
-            coeffs: DEFAULT_NORMALIZED_CURVE,
+            coeffs: DEFAULT_ENERGY_FACTOR_CURVE,
             x1_bounds: DEFAULT_DB_BOUNDS_C,
             x2_bounds: DEFAULT_RH_BOUNDS,
             warn_on_clamp: false,
         };
-        self.water_removal_curve_rated_value = 1.0;
-        self.energy_factor_curve_rated_value = 1.0;
+        // Compute normalisation divisors at the EnergyPlus rated condition
+        // (26.7°C / 60 %RH) so that rated_capacity_liters_per_day passes
+        // through unchanged at the design point.  Both curves are normalised
+        // to ≈1.0 at the rating point; the evaluated value self-corrects for
+        // any minor deviation.
+        self.water_removal_curve_rated_value =
+            self.water_removal_curve.evaluate(RATED_DB_C, RATED_RH);
+        self.energy_factor_curve_rated_value =
+            self.energy_factor_curve.evaluate(RATED_DB_C, RATED_RH);
 
         Ok(())
     }
@@ -996,15 +1009,9 @@ mod tests {
         approx_eq(dehumidification_bucket, sensible);
     }
 
-    /// Regression test for ticket 086: identity curves (`[1,0,0,0,0,0]`) make
-    /// water removal identical at all temperatures.  A physically correct
-    /// biquadratic curve must produce strictly less water removal at 10°C than
-    /// at 26.7°C (the EnergyPlus rated condition of 26.7°C / 60% RH).
-    ///
-    /// Fix pending on ticket 086 — will stop panicking when the dehumidifier
-    /// biquadratic curve decreases water removal below rated temperature.
+    /// A physically correct biquadratic curve must produce strictly less water
+    /// removal at 10°C than at the EnergyPlus rated condition (26.7°C / 60% RH).
     #[test]
-    #[should_panic(expected = "ticket 086")]
     fn water_removal_decreases_below_rated_temperature() {
         // Rated condition: 26.7°C / 60% RH — should give full capacity.
         let cfg = config();
@@ -1043,20 +1050,14 @@ mod tests {
 
         assert!(
             wr_cold < wr_rated,
-            "ticket 086: at 10°C water removal ({wr_cold:.4} L/day) must be less than at \
-             26.7°C ({wr_rated:.4} L/day); identity curves mask all temperature dependence — \
-             replace DEFAULT_NORMALIZED_CURVE with EnergyPlus default dehumidifier biquadratic coefficients"
+            "at 10°C water removal ({wr_cold:.4} L/day) must be less than at \
+             26.7°C ({wr_rated:.4} L/day); identity curves mask all temperature dependence"
         );
     }
 
-    /// Regression test for ticket 086: at the EnergyPlus rated condition
-    /// (26.7°C / 60% RH), the curve output normalised by `rated_value` must
-    /// equal exactly 1.0 so that `rated_capacity_liters_per_day` passes through
-    /// unchanged.
-    ///
-    /// This test PASSES with identity curves (trivially), but the companion test
-    /// `water_removal_decreases_below_rated_temperature` will FAIL until the fix
-    /// is applied.  Both tests must pass together after the fix.
+    /// At the EnergyPlus rated condition (26.7°C / 60% RH), the curve output
+    /// normalised by `rated_value` must equal exactly 1.0 so that
+    /// `rated_capacity_liters_per_day` passes through unchanged.
     #[test]
     fn water_removal_at_rated_condition_equals_rated_capacity() {
         let cfg = config();
@@ -1076,7 +1077,7 @@ mod tests {
         let rel_err = (wr - rated).abs() / rated;
         assert!(
             rel_err < 1e-9,
-            "ticket 086: water removal at rated condition must equal rated capacity \
+            "water removal at rated condition must equal rated capacity \
              ({rated:.4} L/day) but got {wr:.4} L/day (rel_err={rel_err:.2e})"
         );
     }

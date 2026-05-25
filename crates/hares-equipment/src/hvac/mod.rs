@@ -9,6 +9,7 @@ pub mod cooling_config;
 pub(super) mod core_config;
 pub(super) mod default_curves;
 pub mod dehumidifier;
+pub(super) mod dehumidifier_defaults;
 pub(super) mod duct_distribution;
 pub(super) mod equivalent_battery;
 pub mod furnace;
