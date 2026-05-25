@@ -185,7 +185,7 @@ pub fn compute_duct_dse_params(
 
             if duct_zone_idx.is_none() {
                 duct_zone_idx = Some(zone_idx);
-                duct_zone_type_str = Some(zone_type_to_ashrae152_str(zone, building));
+                duct_zone_type_str = Some(zone_type_to_ashrae152_str(zone, building)?);
             }
 
             let leak = duct.leakage_fraction.unwrap_or(0.0);
@@ -1441,47 +1441,79 @@ fn foundation_wall_is_insulated(boundaries: &[Boundary]) -> bool {
 /// Mirrors OCHRE `get_duct_info()` (ochre/utils/equipment.py:48-78).
 /// For Foundation zones, uses `building.foundation_name` and boundary insulation
 /// data to distinguish all ASHRAE 152 crawlspace/basement subtypes.
-fn zone_type_to_ashrae152_str(zone: &Zone, building: &Building) -> String {
+fn zone_type_to_ashrae152_str(zone: &Zone, building: &Building) -> super::Result<String> {
     match zone.zone_type {
         ZoneType::Attic => {
             if zone.vented {
-                "attic_vented".into()
+                Ok("attic_vented".into())
             } else {
-                "attic_unvented".into()
+                Ok("attic_unvented".into())
             }
         }
-        ZoneType::Garage => "garage".into(),
+        ZoneType::Garage => Ok("garage".into()),
         ZoneType::Foundation => {
             let fnd_name = building.foundation_name.as_deref().unwrap_or("");
             let wall_ins = foundation_wall_is_insulated(&building.boundaries);
             let floor_ins = foundation_floor_is_insulated(&building.boundaries);
+            if fnd_name.is_empty() {
+                tracing::warn!(
+                    "Foundation zone has no foundation name; falling back to crawlspace \
+                     ASHRAE 152 zone type default"
+                );
+            }
             if fnd_name == "Crawlspace" {
                 let v = if zone.vented { "vent" } else { "unvent" };
                 if wall_ins && floor_ins {
-                    format!("{v}_crawlspace_ins_floor_wall")
+                    Ok(format!("{v}_crawlspace_ins_floor_wall"))
                 } else if floor_ins {
-                    format!("{v}_crawlspace_ins_floor")
+                    Ok(format!("{v}_crawlspace_ins_floor"))
                 } else {
-                    format!("{v}_unins_crawlspace")
+                    Ok(format!("{v}_unins_crawlspace"))
                 }
             } else if fnd_name.contains("Basement") {
                 if wall_ins {
-                    "basement_ins_walls".into()
+                    Ok("basement_ins_walls".into())
                 } else if floor_ins {
-                    "basement_ins_ceiling".into()
+                    Ok("basement_ins_ceiling".into())
                 } else {
-                    "unins_basement".into()
+                    Ok("unins_basement".into())
                 }
             } else {
                 // Unknown foundation sub-type: fall back to uninsulated crawlspace.
+                if !fnd_name.is_empty() {
+                    tracing::warn!(
+                        foundation_name = %fnd_name,
+                        "Unknown foundation sub-type; falling back to crawlspace \
+                         ASHRAE 152 zone type"
+                    );
+                }
                 if zone.vented {
-                    "vent_unins_crawlspace".into()
+                    Ok("vent_unins_crawlspace".into())
                 } else {
-                    "unvent_unins_crawlspace".into()
+                    Ok("unvent_unins_crawlspace".into())
                 }
             }
         }
-        _ => "attic_vented".into(),
+        ZoneType::Conditioned => {
+            // Invariant: the sole call site in compute_duct_dse_params skips
+            // Conditioned zones before invoking this function.
+            unreachable!(
+                "Conditioned zones are filtered by call site before invoking \
+                 zone_type_to_ashrae152_str"
+            )
+        }
+        ZoneType::Outdoor => Err(super::HpxmlError::Parse(
+            "zone type 'Outdoor' is not supported for ASHRAE 152 duct derating".into(),
+        )),
+        ZoneType::Ground => Err(super::HpxmlError::Parse(
+            "zone type 'Ground' is not supported for ASHRAE 152 duct derating".into(),
+        )),
+        ZoneType::Adjacent => Err(super::HpxmlError::Parse(
+            "zone type 'Adjacent' is not supported for ASHRAE 152 duct derating".into(),
+        )),
+        ZoneType::Other(ref s) => Err(super::HpxmlError::Parse(format!(
+            "unrecognised zone type '{s}' is not supported for ASHRAE 152 duct derating"
+        ))),
     }
 }
 
@@ -3313,7 +3345,10 @@ mod tests {
     fn attic_vented_maps_correctly() {
         let zone = attic_zone(true);
         let building = building_with(None, vec![]);
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "attic_vented");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+            "attic_vented"
+        );
     }
 
     #[test]
@@ -3321,7 +3356,7 @@ mod tests {
         let zone = attic_zone(false);
         let building = building_with(None, vec![]);
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "attic_unvented"
         );
     }
@@ -3334,7 +3369,7 @@ mod tests {
             vec![foundation_wall_boundary(Some("Uninsulated"))],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "vent_unins_crawlspace"
         );
     }
@@ -3350,7 +3385,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "vent_crawlspace_ins_floor"
         );
     }
@@ -3366,7 +3401,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "vent_crawlspace_ins_floor_wall"
         );
     }
@@ -3379,7 +3414,7 @@ mod tests {
             vec![foundation_wall_boundary(Some("Uninsulated"))],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "unvent_unins_crawlspace"
         );
     }
@@ -3395,7 +3430,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "unvent_crawlspace_ins_floor"
         );
     }
@@ -3411,7 +3446,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "unvent_crawlspace_ins_floor_wall"
         );
     }
@@ -3424,7 +3459,7 @@ mod tests {
             vec![foundation_wall_boundary(Some("Uninsulated"))],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "unins_basement"
         );
     }
@@ -3437,7 +3472,7 @@ mod tests {
             vec![foundation_wall_boundary(Some("R-15"))],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "basement_ins_walls"
         );
     }
@@ -3453,7 +3488,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "basement_ins_ceiling"
         );
     }
@@ -3470,7 +3505,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "basement_ins_walls"
         );
     }
@@ -3486,7 +3521,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "vent_unins_crawlspace"
         );
     }
@@ -3496,7 +3531,7 @@ mod tests {
         let zone = foundation_zone(true);
         let building = building_with(None, vec![]);
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "vent_unins_crawlspace"
         );
     }
@@ -3506,18 +3541,16 @@ mod tests {
         let zone = foundation_zone(false);
         let building = building_with(None, vec![]);
         assert_eq!(
-            zone_type_to_ashrae152_str(&zone, &building),
+            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
             "unvent_unins_crawlspace"
         );
     }
 
-    // Regression test: the `_ =>` arm at line 1232 silently
-    // returns "attic_vented" for any ZoneType not explicitly matched (Outdoor,
-    // Ground, Adjacent, Other). This must be replaced with a panic/error or
-    // an exhaustive match so mis-classified zones are caught at construction
-    // time rather than silently producing wrong ASHRAE 152 zone strings.
-    /// Will stop panicking when non-attic zone types no longer silently return attic_vented
-    #[should_panic(expected = "must not silently map to \"attic_vented\"")]
+    // Regression test: zone_type_to_ashrae152_str must reject zone types
+    // that have no ASHRAE 152 duct-derating key (Outdoor, Ground, Adjacent,
+    // and unrecognised Other variants).  Previously these fell through a
+    // `_ => "attic_vented".into()` catch-all, silently routing non-attic
+    // zones through attic-specific efficiency parameters.
     #[test]
     fn non_attic_zone_types_must_not_return_attic_vented() {
         let building = building_with(None, vec![]);
@@ -3539,9 +3572,9 @@ mod tests {
                 ventilation_sla: None,
             };
             let result = zone_type_to_ashrae152_str(&zone, &building);
-            assert_ne!(
-                result, "attic_vented",
-                "zone_type {:?} must not silently map to \"attic_vented\" via the catch-all arm",
+            assert!(
+                result.is_err(),
+                "zone_type {:?} must not succeed; it has no ASHRAE 152 zone-type key",
                 zone.zone_type
             );
         }
