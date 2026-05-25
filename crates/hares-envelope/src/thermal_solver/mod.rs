@@ -132,6 +132,15 @@ pub struct ThermalSolver {
     /// Per-zone energy balance residuals [W] from the current timestep's closure check.
     /// Populated by `integrate_inner`, consumed by `format_domain_update` for telemetry.
     energy_balance_residuals: HashMap<ZoneId, f64>,
+    /// Per-zone consecutive failure counts for `solve_ideal_capacity_for_target`.
+    /// Incremented on each solve failure, reset to 0 on success. Used to throttle
+    /// warn-level diagnostic logs — only the first failure in a run emits `warn!`;
+    /// subsequent consecutive failures emit `debug!` to avoid log flood.
+    ideal_capacity_failure_counts: HashMap<ZoneId, usize>,
+    /// Zones for which an ideal-capacity solve-failure warn has already been emitted
+    /// during the current failure run. Guards against per-timestep log spam in
+    /// pathological runs where the target is unreachable every step.
+    ideal_capacity_warned_zones: HashSet<ZoneId>,
     /// Pre-allocated fallback buffer for InteriorSurface structs in non-ScriptF path.
     lwr_surfaces_buf: Vec<crate::longwave_radiation::InteriorSurface>,
     /// Zones for which the linearised interior LWR fallback has already emitted
@@ -521,6 +530,8 @@ impl ThermalSolver {
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_linearised_warned_zones: HashSet::new(),
             energy_balance_residuals: HashMap::with_capacity(n_zones_for_latent),
+            ideal_capacity_failure_counts: HashMap::with_capacity(n_zones_for_latent),
+            ideal_capacity_warned_zones: HashSet::new(),
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
             custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 5),
@@ -984,6 +995,7 @@ mod tests {
         ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
     use nalgebra::{DMatrix, DVector};
+    use tracing_test::traced_test;
 
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
@@ -2297,18 +2309,18 @@ mod tests {
         );
     }
 
-    /// Regression test: when `solve_ideal_capacity_for_target` encounters a
-    /// singular/zero-gain condition (failure path), it silently returns 0.0 and currently
-    /// logs at `debug!`. This test documents the failure path returns 0 and verifies the
-    /// bug is present (no `warn!` is emitted). When the ticket fix is applied, the log
-    /// level should be promoted to `warn!` and this test should be accompanied by a
-    /// `tracing-test` assertion.
+    /// When `solve_ideal_capacity_for_target` encounters a zero-gain condition
+    /// (e.g. HVAC column of B_c is zero → `ZeroEffectiveGain`), the solver fails
+    /// and returns 0.0 W. This test verifies that the failure path:
+    ///   1. Returns 0.0 (no spurious non-zero capacity)
+    ///   2. Emits a `warn!` log with the expected diagnostic string
     ///
     /// To trigger `ZeroEffectiveGain`: use a B matrix where the HVAC sensible-input column
     /// (column 1) has zero contribution to the zone output (C row × B_eff[:, 1] ≈ 0).
     /// We achieve this by setting the HVAC column of B_c to zero.
     #[test]
-    fn solve_ideal_capacity_failure_returns_zero_without_warn() {
+    #[traced_test]
+    fn solve_ideal_capacity_failure_returns_zero_and_warns() {
         let zone_temp = 20.0;
         let outdoor_temp = 10.0;
         let env = env_for_temp(zone_temp, outdoor_temp);
@@ -2355,17 +2367,13 @@ mod tests {
         solver.x[0] = zone_temp;
 
         // The HVAC input has zero gain → solve_for_scalar_input returns ZeroEffectiveGain.
-        // Current behaviour: silently returns 0.0 and logs at debug! (bug).
-        // Expected behaviour after fix: returns 0.0 AND logs at warn!.
+        // After fix: returns 0.0 and logs at warn!.
         let q = solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
-        assert_eq!(
-            q, 0.0,
-            "failure path must return 0.0 (silent fallback — log level should be warn)"
+        assert_eq!(q, 0.0, "failure path must return 0.0");
+        assert!(
+            logs_contain("solve_ideal_capacity_for_target failed"),
+            "expected warn! log for ideal capacity solve failure"
         );
-        // NOTE: this test intentionally does NOT assert a warn! is captured, because
-        // `tracing-test` is not yet a dev-dependency. Once the log level fix is applied, add
-        // `tracing-test` to [dev-dependencies] and add:
-        //   #[traced_test] and assert!(logs_contain("solve_ideal_capacity_for_target failed"))
     }
 
     /// Non-zero solar irradiance routed through solar_input_indices must raise

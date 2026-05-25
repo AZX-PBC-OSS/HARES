@@ -1638,13 +1638,21 @@ fn build_zone_map(
         // Attics
         if let Some(group) = enclosure.child("Attics") {
             for node in group.children_named("Attic") {
+                // <FlatRoof/> means no attic cavity; skip zone creation (OCHRE hpxml.py:575-576).
+                let attic_type_child = node
+                    .child("AtticType")
+                    .and_then(|at| at.children.first());
+                if let Some(child) = attic_type_child {
+                    if child.name == "FlatRoof" {
+                        continue;
+                    }
+                }
+
                 let floor_area_m2 =
                     parse_value_with_units(node.child("FloorArea"), ValueKind::Area);
 
                 // Parse vented status from <AtticType><Attic><Vented>
-                let vented = node
-                    .child("AtticType")
-                    .and_then(|at| at.children.first())
+                let vented = attic_type_child
                     .and_then(|child| child.child("Vented"))
                     .map(|v| v.text.trim().eq_ignore_ascii_case("true"))
                     .unwrap_or(true); // default vented for attics
@@ -5423,6 +5431,56 @@ mod tests {
         assert!(
             ff < 0.30,
             "WallHeight=0 should not produce clamped-infinity value 0.35, got {ff:.4}"
+        );
+    }
+
+    /// <AtticType><FlatRoof/> means no attic cavity (roof sits directly on
+    /// conditioned space). HARES must not create an attic thermal zone.
+    /// Ref: ResStock 2025.1 uses FlatRoof for slab-on-grade homes.
+    #[test]
+    fn flat_roof_skips_attic_zone() {
+        let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id='W1'/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+          </Wall>
+        </Walls>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id='R1'/>
+            <InteriorAdjacentTo>living space</InteriorAdjacentTo>
+            <Area units="m2">200</Area>
+            <Pitch>0</Pitch>
+          </Roof>
+        </Roofs>
+        <Attics>
+          <Attic>
+            <AtticType><FlatRoof/></AtticType>
+            <AttachedToRoof idref='R1'/>
+          </Attic>
+        </Attics>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(xml).expect("flat roof HPXML should parse");
+        assert!(
+            !building.zones.iter().any(|z| matches!(z.zone_type, ZoneType::Attic)),
+            "FlatRoof should not create an attic zone"
         );
     }
 }

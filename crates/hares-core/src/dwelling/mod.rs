@@ -2326,7 +2326,7 @@ impl Dwelling {
 
         // Step 1e: solver feedback actor collects ideal targets and solves for capacities.
         self.solver_feedback_actor
-            .collect_and_solve(&self.equipment, &self.thermal_solver);
+            .collect_and_solve(&self.equipment, &mut self.thermal_solver);
 
         // Step 1f: actors decide and queue control signals (registration order, last write wins).
         self.actor_dispatch_buf.clear();

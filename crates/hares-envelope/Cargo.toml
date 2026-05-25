@@ -20,6 +20,7 @@ observe_detailed = []
 [dev-dependencies]
 approx = "0.5"
 criterion = { workspace = true }
+tracing-test = "0.2"
 
 [[bench]]
 name = "rc_solver"

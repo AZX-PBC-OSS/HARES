@@ -89,7 +89,13 @@ impl ThermalSolver {
     ///
     /// Returns the required capacity in watts (positive = heating, negative = cooling),
     /// or 0.0 if the zone is unknown or solving fails.
-    pub fn solve_ideal_capacity_for_target(&self, zone: ZoneId, target_c: f64) -> f64 {
+    ///
+    /// Logging behaviour: failure emits `tracing::warn!` with structured context
+    /// (zone, target, zone temp, outdoor temp, error) on the first failure in a
+    /// consecutive run; subsequent consecutive failures are suppressed to `debug!`
+    /// to avoid log flood in pathological runs. When the solver next succeeds after
+    /// one or more failures, a single `info!` recovery log is emitted.
+    pub fn solve_ideal_capacity_for_target(&mut self, zone: ZoneId, target_c: f64) -> f64 {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
         };
@@ -121,16 +127,64 @@ impl ThermalSolver {
             ),
         };
 
-        total
-            .map(|raw| raw - self.last_u[input_idx])
-            .unwrap_or_else(|e| {
-                tracing::debug!(
-                    ?zone,
-                    ?e,
-                    "solve_ideal_capacity_for_target failed, returning 0"
-                );
+        let t_zone = self
+            .wiring
+            .zone_state_indices
+            .get(&zone)
+            .map(|&idx| self.x[idx]);
+        let t_out = self
+            .wiring
+            .outdoor_temp_input_indices
+            .first()
+            .map(|&idx| self.last_u[idx]);
+        let capacity_value = self.last_u[input_idx];
+
+        match total.map(|raw| raw - capacity_value) {
+            Ok(capacity) => {
+                if self.ideal_capacity_warned_zones.remove(&zone) {
+                    let count = self
+                        .ideal_capacity_failure_counts
+                        .remove(&zone)
+                        .unwrap_or(0);
+                    tracing::info!(
+                        zone_id = zone.0,
+                        consecutive_failures = count,
+                        "solve_ideal_capacity_for_target: recovered after {count} \
+                         consecutive failures"
+                    );
+                } else {
+                    self.ideal_capacity_failure_counts.remove(&zone);
+                }
+                capacity
+            }
+            Err(e) => {
+                let count = self
+                    .ideal_capacity_failure_counts
+                    .entry(zone)
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
+                if self.ideal_capacity_warned_zones.insert(zone) {
+                    tracing::warn!(
+                        zone_id = zone.0,
+                        target_c,
+                        t_zone_c = t_zone,
+                        oat_c = t_out,
+                        capacity_w = capacity_value,
+                        error = %e,
+                        "solve_ideal_capacity_for_target failed, returning 0"
+                    );
+                } else {
+                    tracing::debug!(
+                        zone_id = zone.0,
+                        target_c,
+                        consecutive_failures = count,
+                        error = %e,
+                        "solve_ideal_capacity_for_target failed (suppressed), returning 0"
+                    );
+                }
                 0.0
-            })
+            }
+        }
     }
 
     fn build_coupling(&mut self) {

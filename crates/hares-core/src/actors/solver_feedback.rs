@@ -49,7 +49,11 @@ impl SolverFeedbackActor {
     /// For each equipment with `ideal_target() -> Some((zone, target_c))`,
     /// calls the solver to compute the required capacity and queues it
     /// for dispatch. Uses equipment indices (zero allocation).
-    pub fn collect_and_solve(&mut self, equipment: &[Box<dyn Equipment>], solver: &ThermalSolver) {
+    pub fn collect_and_solve(
+        &mut self,
+        equipment: &[Box<dyn Equipment>],
+        solver: &mut ThermalSolver,
+    ) {
         self.collect_with(equipment, |zone, target_c| {
             solver.solve_ideal_capacity_for_target(zone, target_c)
         });
@@ -59,7 +63,7 @@ impl SolverFeedbackActor {
     pub fn collect_and_solve_test(
         &mut self,
         equipment: &[Box<dyn Equipment>],
-        solve: impl Fn(ZoneId, f64) -> f64,
+        solve: impl FnMut(ZoneId, f64) -> f64,
     ) {
         self.collect_with(equipment, solve);
     }
@@ -67,7 +71,7 @@ impl SolverFeedbackActor {
     fn collect_with(
         &mut self,
         equipment: &[Box<dyn Equipment>],
-        solve: impl Fn(ZoneId, f64) -> f64,
+        mut solve: impl FnMut(ZoneId, f64) -> f64,
     ) {
         self.pending.clear();
         for (idx, eq) in equipment.iter().enumerate() {
