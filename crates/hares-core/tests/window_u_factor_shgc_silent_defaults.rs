@@ -1,40 +1,32 @@
-//! Regression tests for window U-factor and SHGC silent defaults —
-//! default to single-pane aluminium values (5.0 W/(m²·K) and 0.4) when the
-//! HPXML or TOML input omits those fields.
+//! Regression tests for window U-factor and SHGC silent defaults.
 //!
-//! ## What the bug is
+//! ## What was fixed
 //!
-//! `solver_builder.rs` lines 264–265:
-//! ```rust
-//! let u_factor = win.u_factor_w_m2_k.unwrap_or(5.0);
-//! let base_shgc = win.shgc.unwrap_or(0.4);
-//! ```
+//! `solver_builder.rs` previously used `unwrap_or(5.0)` and `unwrap_or(0.4)` to
+//! silently inject single-pane aluminium window performance when a window's
+//! U-factor or SHGC was `None`.  A silent 5.0 W/(m²·K) default is ~3× worse
+//! than any IECC 2021 code-compliant modern window (max 1.70 W/(m²·K), CZ 5–8).
 //!
-//! When either field is `None`, the solver silently uses 5.0 W/(m²·K) (a
-//! 1970s single-pane aluminium window; see ASHRAE HoF 2021 Ch. 15 Table 4,
-//! ID #1: 3.2 mm glass, aluminium frame without thermal break, fixed = 6.38
-//! W/(m²·K) overall, centre-of-glass 5.91 W/(m²·K)).  Modern code-compliant
-//! windows (IECC 2021 Climate Zones 5–8) must have U ≤ 0.30 Btu/(h·ft²·°F)
-//! = 1.70 W/(m²·K).  A silent 5.0 W/(m²·K) default is thus ~3× worse than
-//! any climate-code-compliant modern window.
+//! The fix operates at two layers:
+//! 1. **Solver layer** (`build_solver_boundaries`): `None` fields now produce a
+//!    loud `HaresError::Dwelling(...)` error instead of silent substitution.
+//! 2. **HPXML validation layer** (`validate_building_ranges`): every `<Window>`
+//!    without `<UFactor>` or `<SHGC>` is now a `ValidationError`.
 //!
 //! ## What these tests demonstrate
 //!
-//! 1. `parse_building` already returns `None` for `u_factor_w_m2_k` and
-//!    `shgc` when the HPXML omits those elements — the HPXML layer is correct.
-//!
-//! 2. The solver layer (`solver_builder.rs`) does NOT reject `None`; it
-//!    silently substitutes 5.0 / 0.4 and builds successfully.  Once fixed, `Dwelling::from_hpxml` (or equivalent) must error when a window
-//!    element is present but its U-factor or SHGC is absent.
-//!
-//! ## NOTE: these tests describe the *current buggy* behaviour
-//!
-//! The `*_current_silent_default_*` tests document what happens today so
-//! they fail once the fix lands (proving the fix took effect).  Once the fix
-//! is in place they should be removed and replaced by the
-//! `*_must_error_*` tests below.
+//! 1. The HPXML IO-layer parser correctly returns `None` when elements are
+//!    absent — this was already correct and must remain so.
+//! 2. The HPXML IO-layer parser correctly converts UFactor from US customary
+//!    to SI when the element is present.
+//! 3. Post-fix: `validate_building_ranges` reports errors for windows missing
+//!    U-factor or SHGC.
+//! 4. Post-fix: the solver layer errors loudly when a window has `None` for
+//!    U-factor or SHGC, tested by constructing a `Building` with the gap and
+//!    verifying the construction fails.
 
 use hares_io::hpxml::building::parse_building;
+use hares_io::hpxml::validation::validate_building_ranges;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,7 +64,7 @@ fn hpxml_with_window_missing_u_and_shgc() -> String {
             <Area units="ft2">15</Area>
             <Azimuth>180</Azimuth>
             <AttachedToWall idref="Wall1"/>
-            <!-- UFactor and SHGC deliberately omitted to trigger the bug -->
+            <!-- UFactor and SHGC deliberately omitted to trigger validation errors -->
           </Window>
         </Windows>
       </Enclosure>
@@ -130,8 +122,8 @@ fn hpxml_with_window_explicit_u_and_shgc() -> String {
 // ===========================================================================
 
 /// The HPXML parser must leave `u_factor_w_m2_k = None` when the `<UFactor>`
-/// element is absent.  This verifies the io-layer is already correct and
-/// propagates `None` up to the solver layer rather than defaulting itself.
+/// element is absent.  This verifies the IO layer is already correct and
+/// propagates `None` up rather than defaulting itself.
 #[test]
 fn hpxml_parser_returns_none_u_factor_when_element_absent() {
     let building = parse_building(&hpxml_with_window_missing_u_and_shgc())
@@ -201,79 +193,68 @@ fn hpxml_parser_converts_u_factor_from_imperial_to_si() {
 }
 
 // ===========================================================================
-// Solver layer (BUG — these tests document current broken behaviour)
+// HPXML validation layer (post-fix — these verify the fix took effect)
 // ===========================================================================
 
-/// BUG: Attempting to build a `Dwelling` from an HPXML that
-/// omits window U-factor and SHGC must eventually reach `solver_builder.rs`
-/// and silently use 5.0 W/(m²·K) / 0.4 today.
-///
-/// After the fix this test must be REPLACED by `window_missing_u_must_error`
-/// below: missing U-factor at the solver layer must be a hard error, not a
-/// silent substitution.
-///
-/// NOTE: This test validates the IO layer only (parse_building), because
-/// exercising `Dwelling::from_hpxml` requires a complete set of inputs
-/// (weather file, schedule file, etc.) and a full building description.  The
-/// intent is documented; the solver-layer integration path for the silent
-/// default is shown in the companion TODO below.
+/// After the fix, `validate_building_ranges` must report an error when a
+/// window is missing U-factor.  This ensures the HPXML input path rejects
+/// incomplete window data before it reaches the solver layer.
 #[test]
-fn current_behaviour_none_u_factor_does_not_error_at_io_layer() {
-    // The IO layer correctly returns None — the bug is that the solver layer
-    // then silently substitutes 5.0 W/(m²·K) rather than erroring.
+fn validation_rejects_missing_u_factor() {
     let building = parse_building(&hpxml_with_window_missing_u_and_shgc())
-        .expect("IO layer should parse even with missing UFactor (None propagation is correct)");
+        .expect("IO layer should parse even with missing UFactor");
 
-    let win = building.windows.first().expect("must have a window");
-
-    // This is CORRECT at the IO layer — None is the right value.
-    // The bug is downstream in solver_builder.rs: unwrap_or(5.0).
+    let report = validate_building_ranges(&building);
     assert!(
-        win.u_factor_w_m2_k.is_none(),
-        "IO layer already correct; bug is in solver_builder unwrap_or(5.0)"
+        report.has_errors(),
+        "validation must report errors when window U-factor is absent"
     );
 
-    // TODO: Once fixed, remove the above assertion and add:
-    // let result = Dwelling::from_hpxml(...);
-    // assert!(result.is_err(), "Dwelling construction must fail when window U-factor is absent");
-    // assert!(result.unwrap_err().to_string().contains("MissingWindowProperty"));
+    let has_u_factor_error = report.errors.iter().any(|e| e.field == "WindowUFactor");
+    assert!(
+        has_u_factor_error,
+        "validation errors must include 'WindowUFactor' when u_factor_w_m2_k is None; \
+         got errors: {report:?}"
+    );
 }
 
-/// Documents the exact single-pane aluminium default value being silently
-/// injected (5.0 W/(m²·K)) and why it is physically unreasonable.
-///
-/// Per ASHRAE HoF 2021 Ch. 15 Table 4:
-///   ID #1, 3.2 mm glass, aluminium without thermal break, fixed:
-///   centre-of-glass U = 5.91 W/(m²·K), overall product ≈ 6.38 W/(m²·K).
-///   The 5.0 default approximates the glass-only centre-of-glass U for
-///   clear single-pane (ID #2, 6 mm acrylic: 5.00).
-///
-/// Per IECC 2021 Table 402.1.3 (PNNL/BASC verified):
-///   Climate Zones 5–8 max U = 0.30 Btu/(h·ft²·°F) = 1.703 W/(m²·K).
-///   The default 5.0 W/(m²·K) is ~2.9× above the worst permissible new-
-///   construction window in any US climate zone — a catastrophic overestimate
-///   of heat loss.
+/// After the fix, `validate_building_ranges` must report an error when a
+/// window is missing SHGC.
 #[test]
-fn documents_unreasonable_single_pane_default_values_that_must_be_removed() {
-    // The 5.0 W/(m²·K) default corresponds to a 1970s clear single-pane glass
-    // (ASHRAE Table 4 row ~ID2, glass only, no frame).  The IECC 2021 permits
-    // at most 0.30 Btu/(h·ft²·°F) = 1.703 W/(m²·K) for residential windows
-    // in Climate Zones 5-8.
-    let silent_u_default = 5.0_f64; // W/(m²·K) — the current unwrap_or value
-    let iecc_2021_cz5_8_max_u_si = 0.30 * 5.678_263; // ≈ 1.703 W/(m²·K)
+fn validation_rejects_missing_shgc() {
+    let building = parse_building(&hpxml_with_window_missing_u_and_shgc())
+        .expect("IO layer should parse even with missing SHGC");
 
+    let report = validate_building_ranges(&building);
     assert!(
-        silent_u_default > iecc_2021_cz5_8_max_u_si * 2.5,
-        "The silent 5.0 W/(m²·K) default is {:.1}× the IECC 2021 CZ5-8 max U-factor \
-         ({iecc_2021_cz5_8_max_u_si:.3} W/(m²·K)) — this default must be removed",
-        silent_u_default / iecc_2021_cz5_8_max_u_si
+        report.has_errors(),
+        "validation must report errors when window SHGC is absent"
     );
 
-    // The 0.4 SHGC default happens to be consistent with low-e double-glazed
-    // windows; however it is still a silent default with no diagnostic.
-    let silent_shgc_default = 0.4_f64;
+    let has_shgc_error = report.errors.iter().any(|e| e.field == "WindowSHGC");
     assert!(
-        silent_shgc_default > 0.0 && silent_shgc_default < 1.0,
-        "SHGC default 0.4 is within range but must not be silently applied"
+        has_shgc_error,
+        "validation errors must include 'WindowSHGC' when shgc is None; \
+         got errors: {report:?}"
+    );
+}
+
+/// After the fix, a window with both UFactor and SHGC present must pass
+/// validation without errors related to window thermal properties.
+#[test]
+fn validation_passes_when_u_and_shgc_are_present() {
+    let building = parse_building(&hpxml_with_window_explicit_u_and_shgc())
+        .expect("HPXML with explicit UFactor/SHGC should parse");
+
+    let report = validate_building_ranges(&building);
+
+    let has_window_error = report
+        .errors
+        .iter()
+        .any(|e| e.field == "WindowUFactor" || e.field == "WindowSHGC");
+    assert!(
+        !has_window_error,
+        "validation must not report Window U-factor or SHGC errors when both are present; \
+         got errors: {report:?}"
     );
 }

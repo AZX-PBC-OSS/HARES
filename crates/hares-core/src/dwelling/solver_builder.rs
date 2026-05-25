@@ -86,7 +86,7 @@ fn build_solver_boundaries(
     boundary_inputs: &[BoundaryInput],
     rc: &RCContext<'_>,
     env: &EnvironmentState,
-) -> (Vec<SolverBoundary>, usize, usize) {
+) -> Result<(Vec<SolverBoundary>, usize, usize)> {
     // Group windows by wall they're attached to (for wall→window aggregation).
     let mut windows_by_wall: HashMap<&str, Vec<&hares_io::hpxml::building::Window>> =
         HashMap::new();
@@ -283,10 +283,21 @@ fn build_solver_boundaries(
         let window_solar = if is_exterior
             && boundary.boundary_type == hares_io::hpxml::BoundaryType::Window
         {
-            let win_match = building.windows.iter().find(|w| w.id == boundary.id);
-            win_match.map(|win| {
-                let u_factor = win.u_factor_w_m2_k.unwrap_or(5.0);
-                let base_shgc = win.shgc.unwrap_or(0.4);
+            if let Some(win) = building.windows.iter().find(|w| w.id == boundary.id) {
+                let u_factor = win.u_factor_w_m2_k.ok_or_else(|| {
+                    HaresError::Dwelling(format!(
+                        "window '{}' is missing required u_factor_w_m2_k (U-factor); \
+                         <UFactor> must be present for every <Window> element per HPXML §6.5",
+                        win.id
+                    ))
+                })?;
+                let base_shgc = win.shgc.ok_or_else(|| {
+                    HaresError::Dwelling(format!(
+                        "window '{}' is missing required shgc (SHGC); \
+                         <SHGC> must be present for every <Window> element per HPXML §6.5",
+                        win.id
+                    ))
+                })?;
                 let shgc_summer =
                     base_shgc * win.interior_shading_fraction * win.exterior_shading_summer;
                 let shgc_winter =
@@ -318,7 +329,7 @@ fn build_solver_boundaries(
                         .map(|w| w.area_m2)
                         .sum()
                 };
-                WindowSolarData {
+                Some(WindowSolarData {
                     base_shgc,
                     shgc_summer,
                     shgc_winter,
@@ -327,8 +338,10 @@ fn build_solver_boundaries(
                     transmittance_summer,
                     transmittance_winter,
                     radiation_frac,
-                }
-            })
+                })
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -365,7 +378,7 @@ fn build_solver_boundaries(
         });
     }
 
-    (solver_boundaries, n_ext_surface_inputs, int_col_counter)
+    Ok((solver_boundaries, n_ext_surface_inputs, int_col_counter))
 }
 
 fn exterior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
@@ -547,7 +560,7 @@ pub(crate) fn build_default_solvers(
         n_ext,
     };
     let (solver_boundaries, n_ext_surface_inputs, n_int_surface_inputs) =
-        build_solver_boundaries(building, &boundary_inputs, &rc_ctx, env);
+        build_solver_boundaries(building, &boundary_inputs, &rc_ctx, env)?;
 
     // Augment B_c: [B_ext | ext-surface columns | int-surface columns | zone sensible heat].
     let n_total_inputs = n_ext + n_ext_surface_inputs + n_int_surface_inputs + n_zones;

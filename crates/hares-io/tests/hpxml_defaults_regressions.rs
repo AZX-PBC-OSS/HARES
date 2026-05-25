@@ -91,7 +91,7 @@ fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
 
 #[test]
 fn windows_physical_properties_fixture_preserves_explicit_fields_without_synthetic_defaults() {
-    let building = parse_hpxml_str(&read_fixture(
+    let building = parse_building(&read_fixture(
         "base-enclosure-windows-physical-properties.xml",
     ))
     .expect("window fixture should parse");

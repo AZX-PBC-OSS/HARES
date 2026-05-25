@@ -310,6 +310,34 @@ pub fn validate_building_ranges(building: &Building) -> ValidationReport {
         }
     }
 
+    // Window U-factor and SHGC presence — every <Window> must carry both
+    // <UFactor> and <SHGC> per HPXML §6.5 "Windows".  A silent solver-layer
+    // default (5.0 W/(m²·K) / 0.4, single-pane aluminium-equivalent) produces
+    // catastrophic bias (~3× code-compliant heat loss) with no diagnostic.
+    for win in &building.windows {
+        if win.u_factor_w_m2_k.is_none() {
+            report.errors.push(ValidationError::new(
+                "WindowUFactor",
+                format!(
+                    "window '{}': <UFactor> element is required per HPXML §6.5; \
+                     supply the NFRC-rated whole-product U-factor in Btu/(h·ft²·°F) \
+                     or SI units",
+                    win.id
+                ),
+            ));
+        }
+        if win.shgc.is_none() {
+            report.errors.push(ValidationError::new(
+                "WindowSHGC",
+                format!(
+                    "window '{}': <SHGC> element is required per HPXML §6.5; \
+                     supply the NFRC-rated whole-product solar heat gain coefficient",
+                    win.id
+                ),
+            ));
+        }
+    }
+
     report
 }
 
