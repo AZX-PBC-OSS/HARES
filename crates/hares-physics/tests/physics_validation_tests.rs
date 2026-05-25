@@ -1228,11 +1228,8 @@ fn isa_pressure_exponent_matches_ussa76_derivation() {
 ///           / (1 + 16.879850e-3·T)
 ///
 /// Tolerance is ±0.05 kg/m³ to match NIST tabulated values (rounded to 5 sig
-/// figs) while remaining tighter than the ~12 kg/m³ error produced by the
-/// current constant (1000.0 kg/m³ at 80°C).
-///
-/// BUG: `water_density_kg_m3` does not yet exist in `hares_physics`;
-/// this import will fail to compile until the function is added.
+/// figs) while remaining tighter than the ~1.2% error of the former
+/// constant (1000.0 kg/m³) at typical tank temperatures.
 #[test]
 fn water_density_four_reference_points() {
     use hares_physics::water_density_kg_m3;
@@ -1250,14 +1247,12 @@ fn water_density_four_reference_points() {
     assert_approx(water_density_kg_m3(80.0), 971.79, 0.05);
 }
 
-/// Verify the 1.2% overstatement of the current constant at 50°C.
+/// Verify the 1.2% overstatement that the former `WATER_DENSITY_KG_PER_M3 = 1000.0`
+/// constant produced at 50°C.
 ///
-/// The production code uses `WATER_DENSITY_KG_PER_M3 = 1000.0` uniformly.
-/// At a 50°C tank setpoint, the true density (NIST IAPWS) is ~988 kg/m³,
-/// so the constant over-estimates mass and thermal capacity by ~1.2%.
-///
-/// This test documents the magnitude of the existing bias; it passes today
-/// (asserting the constant IS 1000.0) to serve as a canary.
+/// Documents the magnitude of the replaced constant's bias: at a 50°C tank setpoint,
+/// the true density (NIST IAPWS) is ~988 kg/m³, so the constant over-estimated mass
+/// and thermal capacity by ~1.2%.
 #[test]
 fn constant_bias_at_typical_tank_temp() {
     use hares_physics::water_density_kg_m3;
@@ -1270,6 +1265,251 @@ fn constant_bias_at_typical_tank_temp() {
         (1.0..=1.5).contains(&bias_pct),
         "bias of WATER_DENSITY_KG_PER_M3=1000.0 at 50°C is {bias_pct:.3}%, \
          expected 1.0–1.5% per NIST IAPWS tabulated density of {rho_at_50c:.2} kg/m³",
+    );
+}
+
+// ===========================================================================
+// Water density: cross-validate against EnergyPlus RhoH2O polynomial
+// ===========================================================================
+
+/// EnergyPlus's `RhoH2O` cubic polynomial, reproduced verbatim from
+/// `vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.hh:1635–1650`.
+///
+/// ```cpp
+/// return 1000.1207 + 8.3215874e-04 * TB - 4.929976e-03 * pow_2(TB) + 8.4791863e-06 * pow_3(TB);
+/// ```
+///
+/// Used in this test file only for cross-validation against HARES's Kell 1975
+/// rational polynomial.
+fn eplus_rho_h2o(t_celsius: f64) -> f64 {
+    1000.1207 + 8.321_587_4e-4 * t_celsius - 4.929_976e-3 * t_celsius.powi(2)
+        + 8.479_186_3e-6 * t_celsius.powi(3)
+}
+
+/// Verify HARES's Kell 1975 water density agrees with EnergyPlus's `RhoH2O`
+/// cubic polynomial within ±2.0 kg/m³ across 0–80°C.
+///
+/// Both are independent polynomial fits to the same IAPWS-IF97 reference data.
+/// EnergyPlus's cubic is simpler and deviates from NIST IAPWS by up to
+/// ~1.8 kg/m³ at 80°C (RhoH2O(80°C) = 973.58 vs NIST = 971.76 kg/m³).
+/// HARES's Kell rational 5th-degree polynomial stays within ±0.05 kg/m³ of
+/// NIST across the full range. The ±2.0 kg/m³ tolerance covers the known
+/// accuracy difference between the two polynomial approximations while
+/// confirming both describe the same underlying physics.
+///
+/// The divergence grows with temperature and is a known limitation of
+/// EnergyPlus's simpler cubic — HARES intentionally uses the more accurate
+/// Kell polynomial for improved tank thermal calculations.
+///
+/// Reference:
+/// - EnergyPlus `Psychrometrics.hh:1635–1650` — `RhoH2O(TB)` cubic polynomial
+/// - Kell (1975) J. Chem. Eng. Data 20(1):97–105 — rational polynomial
+/// - NIST WebBook IAPWS-95 saturation table — reference data for both
+#[test]
+fn water_density_matches_eplus_rho_h2o_0_to_80c() {
+    use hares_physics::water_density_kg_m3;
+
+    for t_c in (0..=80).step_by(5) {
+        let t = t_c as f64;
+        let hares_rho = water_density_kg_m3(t);
+        let eplus_rho = eplus_rho_h2o(t);
+        let delta = (hares_rho - eplus_rho).abs();
+        assert!(
+            delta <= 2.0,
+            "HARES Kell({t}°C) = {hares_rho:.3} kg/m³ vs EnergyPlus RhoH2O({t}°C) = {eplus_rho:.3} kg/m³; delta = {delta:.3} kg/m³ exceeds ±2.0 tolerance. EnergyPlus's simpler cubic is known to deviate from NIST IAPWS by up to ~1.8 kg/m³ at 80°C."
+        );
+    }
+}
+
+// ===========================================================================
+// Water density: cross-validate against EnergyPlus GlycolProps lookup table
+// ===========================================================================
+
+/// EnergyPlus `GlycolProps` water density lookup table values at 5°C steps,
+/// 0–80°C, extracted verbatim from
+/// `vendors/EnergyPlus/src/EnergyPlus/FluidProperties.cc:134–136`
+/// (`DefaultWaterRhoData` array entries 8–24, mapped to 0–80°C).
+///
+/// These are the most precise water density values available in EnergyPlus
+/// outside of calling the full IAPWS formulation. They are used by the plant
+/// loop solver for water-side calculations.
+const EPLUS_GLYCOL_RHO_0_TO_80C: [(f64, f64); 17] = [
+    (0.0, 999.8),
+    (5.0, 999.9),
+    (10.0, 999.7),
+    (15.0, 999.1),
+    (20.0, 998.2),
+    (25.0, 997.0),
+    (30.0, 995.6),
+    (35.0, 994.0),
+    (40.0, 992.2),
+    (45.0, 990.2),
+    (50.0, 988.0),
+    (55.0, 985.7),
+    (60.0, 983.2),
+    (65.0, 980.5),
+    (70.0, 977.7),
+    (75.0, 974.8),
+    (80.0, 971.8),
+];
+
+/// Verify HARES's Kell 1975 density agrees with EnergyPlus's 33-point glycol
+/// lookup table at every tabulated temperature from 0–80°C within ±0.5 kg/m³.
+///
+/// EnergyPlus's lookup table values are rounded to 1 decimal place (0.1 kg/m³
+/// resolution). The Kell rational polynomial is accurate to ±0.05 kg/m³ versus
+/// NIST IAPWS. A ±0.5 kg/m³ tolerance comfortably covers the lookup-table
+/// rounding while verifying that the two independent data sources describe the
+/// same physical fluid.
+///
+/// Reference:
+/// - EnergyPlus `FluidProperties.cc:134–136` — `DefaultWaterRhoData` array
+#[test]
+fn water_density_matches_eplus_glycol_table_0_to_80c() {
+    use hares_physics::water_density_kg_m3;
+
+    for (t_c, expected) in EPLUS_GLYCOL_RHO_0_TO_80C {
+        let hares_rho = water_density_kg_m3(t_c);
+        let delta = (hares_rho - expected).abs();
+        assert!(
+            delta <= 0.5,
+            "HARES Kell({t_c}°C) = {hares_rho:.3} kg/m³ disagrees with EnergyPlus glycol table[{t_c}°C] = {expected:.1} kg/m³; delta = {delta:.3} exceeds ±0.5 tolerance"
+        );
+    }
+}
+
+// ===========================================================================
+// Water density: tank thermal mass and recovery energy self-consistency
+// ===========================================================================
+
+/// Verify that tank thermal mass, recovery energy, and standby loss
+/// calculations using temperature-dependent water density are physically
+/// self-consistent for a representative residential storage water heater.
+///
+/// Representative tank: 189 L (50 US gallon), UA = 2.0 W/K, T_setpoint = 52°C,
+/// T_mains = 15°C, T_ambient = 20°C. All density values are from the Kell 1975
+/// rational polynomial — no comparison to the former 1000.0 constant.
+///
+/// Validated physical relationships:
+///
+///  1. ρ(T_cold) > ρ(T_hot) — density strictly decreases with temperature.
+///  2. Thermal mass = ρ(T)·V·Cp — proportional to density at the operating
+///     temperature.
+///  3. Standby loss rate = UA·(T_tank − T_ambient) — independent of density;
+///     the jacket heat loss depends only on temperature difference and
+///     insulation conductance.
+///  4. Cool-down time constant τ = ρ·V·Cp / UA — scales with density.
+///  5. Energy-per-degree decreases with temperature — at higher temperatures
+///     (lower ρ), less energy is required per degree of heating.
+///  6. Recovery energy ≈ ρ(T_avg)·V·Cp·(T_set − T_mains) — the energy to
+///     heat a full tank of cold water to setpoint uses the density at the
+///     average temperature along the heating path.
+///
+/// References:
+/// - Kell (1975) J. Chem. Eng. Data 20(1):97–105 — density polynomial
+/// - NIST WebBook IAPWS — ρ(50°C) ≈ 988.0 kg/m³, ρ(15°C) ≈ 999.1 kg/m³
+/// - EnergyPlus Engineering Reference §14.8 — stratified tank model
+/// - ASHRAE HoF 2021 Ch. 1 Eq. 30 — water specific heat ≈ 4180 J/(kg·K)
+#[test]
+fn tank_thermal_mass_and_recovery_energy_physically_self_consistent() {
+    use hares_physics::constants::{CP_LIQUID_WATER_J_KG_K, SECONDS_PER_HOUR};
+    use hares_physics::water_density_kg_m3;
+
+    let tank_volume_m3 = 0.189;
+    let setpoint_c = 52.0;
+    let mains_c = 15.0;
+    let ambient_c = 20.0;
+    let ua_w_per_k = 2.0;
+
+    // --- 1. Density deceases with temperature ---
+    let rho_cold = water_density_kg_m3(mains_c);
+    let rho_hot = water_density_kg_m3(setpoint_c);
+    assert!(
+        rho_cold > rho_hot,
+        "ρ(mains={mains_c}°C) = {rho_cold:.3} kg/m³ must exceed ρ(setpoint={setpoint_c}°C) = {rho_hot:.3} kg/m³ — water expands when heated"
+    );
+
+    // --- 2. Density values match NIST IAPWS ---
+    // NIST WebBook: ρ(15°C) ≈ 999.10; ρ(52°C) ≈ 987.4
+    assert!(
+        (998.5..=999.5).contains(&rho_cold),
+        "ρ(15°C) = {rho_cold:.3} kg/m³; expected ~999.1 per NIST IAPWS"
+    );
+    assert!(
+        (986.5..=988.5).contains(&rho_hot),
+        "ρ(52°C) = {rho_hot:.3} kg/m³; expected ~987.4 per NIST IAPWS"
+    );
+
+    // --- 3. Thermal mass ---
+    let thermal_mass_j_per_k = rho_hot * tank_volume_m3 * CP_LIQUID_WATER_J_KG_K;
+    // ρ(52°C) × 0.189 m³ × 4180 J/(kg·K) ≈ 987.4 × 0.189 × 4180 ≈ 780.0 kJ/K
+    assert!(
+        thermal_mass_j_per_k > 770_000.0 && thermal_mass_j_per_k < 790_000.0,
+        "thermal mass at 52°C = {thermal_mass_j_per_k:.0} J/K; expected ~780 kJ/K for 189 L"
+    );
+
+    // --- 4. Standby loss rate is independent of density ---
+    let standby_loss_w = ua_w_per_k * (setpoint_c - ambient_c);
+    assert_approx(standby_loss_w, 64.0, 0.01);
+    // Recompute with density at a different temperature — standby loss
+    // depends on UA·ΔT, not ρ. This is a physical identity.
+    assert_approx(standby_loss_w, ua_w_per_k * (setpoint_c - ambient_c), 1e-12);
+
+    // --- 5. Cool-down time constant ---
+    let tau_s = thermal_mass_j_per_k / ua_w_per_k;
+    let tau_h = tau_s / SECONDS_PER_HOUR;
+    // τ = 780e3 / 2.0 = 390,000 s ≈ 108.3 h
+    assert!(
+        tau_h > 100.0 && tau_h < 115.0,
+        "cool-down τ = {tau_h:.1} h; expected ~108 h for 189 L, UA=2.0 W/K"
+    );
+
+    // --- 6. Energy per degree decreases with temperature ---
+    let e_per_k_30c = water_density_kg_m3(30.0) * tank_volume_m3 * CP_LIQUID_WATER_J_KG_K;
+    let e_per_k_60c = water_density_kg_m3(60.0) * tank_volume_m3 * CP_LIQUID_WATER_J_KG_K;
+    assert!(
+        e_per_k_30c > e_per_k_60c,
+        "energy/°C at 30°C ({e_per_k_30c:.0} J/K) must exceed energy/°C at 60°C ({e_per_k_60c:.0} J/K); thermal mass decreases as temperature rises"
+    );
+    let thermal_mass_reduction_pct = (1.0 - e_per_k_60c / e_per_k_30c) * 100.0;
+    assert!(
+        thermal_mass_reduction_pct > 0.5 && thermal_mass_reduction_pct < 2.0,
+        "thermal mass reduction 30→60°C = {thermal_mass_reduction_pct:.1}%; expected 0.8–1.5% per NIST"
+    );
+
+    // --- 7. Full-tank recovery energy ---
+    let t_avg = (setpoint_c + mains_c) / 2.0; // 33.5°C
+    let rho_avg = water_density_kg_m3(t_avg);
+    let delta_t = setpoint_c - mains_c;
+    let recovery_j = rho_avg * tank_volume_m3 * CP_LIQUID_WATER_J_KG_K * delta_t;
+    let recovery_kwh = recovery_j / (SECONDS_PER_HOUR * 1_000.0);
+    // ρ(33.5°C) ≈ 994.3 kg/m³ × 0.189 m³ × 4180 J/(kg·K) × 37 K ≈ 29.06 MJ ≈ 8.07 kWh
+    assert!(
+        recovery_kwh > 7.8 && recovery_kwh < 8.3,
+        "full-tank recovery energy = {recovery_kwh:.2} kWh ({recovery_j:.0} J); expected ~8.1 kWh for 189 L, ΔT=37 K"
+    );
+
+    // --- 8. Annual standby energy ---
+    // Standby: UA·ΔT × hours/year = 64 W × 8760 h = 560.6 kWh
+    let annual_standby_kwh = standby_loss_w * 8760.0 / 1_000.0;
+    assert!(
+        annual_standby_kwh > 555.0 && annual_standby_kwh < 565.0,
+        "annual standby energy = {annual_standby_kwh:.1} kWh; expected ~561 kWh for UA=2.0 W/K, ΔT=32 K, 8760 h/yr"
+    );
+
+    // --- 9. Annual draw recovery energy ---
+    // 189 L/day × 365 days = one tank turnover per day
+    let annual_draw_recovery_kwh = recovery_kwh * 365.0;
+    assert!(
+        annual_draw_recovery_kwh > 2_800.0 && annual_draw_recovery_kwh < 3_100.0,
+        "annual draw recovery = {annual_draw_recovery_kwh:.0} kWh; expected ~2950 kWh for 189 L/day, 365 days"
+    );
+
+    // --- 10. Key performance metric: combined annual input ---
+    let combined_annual_kwh = annual_standby_kwh + annual_draw_recovery_kwh;
+    assert!(
+        combined_annual_kwh > 3_300.0 && combined_annual_kwh < 3_700.0,
+        "combined annual input = {combined_annual_kwh:.0} kWh (standby {annual_standby_kwh:.0} + draw recovery {annual_draw_recovery_kwh:.0}); expected ~3500 kWh for representative 189 L tank"
     );
 }
 

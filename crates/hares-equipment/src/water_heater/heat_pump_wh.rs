@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_physics::biquadratic::BiquadraticCurve;
+use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, DutyCycleComponent, ElectricPower, EndUse, EnvironmentState,
@@ -32,7 +33,6 @@ use crate::hvac::helpers::{equipment_id_from_config, loop_id_from_config, zone_i
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
-    WATER_DENSITY_KG_PER_M3,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -685,8 +685,9 @@ impl Equipment for HeatPumpWH {
             hot_draw_temp_c,
             setpoint_temp_c: self.setpoint_c,
         };
-        let tempered_flow_m3_s = self.draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3;
-        let hot_flow_m3_s = appliance_demand_kg_s / WATER_DENSITY_KG_PER_M3;
+        let tempered_flow_m3_s =
+            self.draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
+        let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
             self.ambient_temp_c(env),
             tempered_flow_m3_s,

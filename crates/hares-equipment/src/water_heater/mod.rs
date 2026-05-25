@@ -11,7 +11,6 @@ pub mod wh_config;
 pub use tank::{DrawResult, StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 
 // Shared physical constants and defaults used by multiple water heater types.
-pub(crate) const WATER_DENSITY_KG_PER_M3: f64 = 1000.0;
 pub(crate) const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 pub(crate) const DEFAULT_UA_W_PER_K: f64 = 2.0;
 pub(crate) const DEFAULT_TANK_HEIGHT_M: f64 = 1.2;

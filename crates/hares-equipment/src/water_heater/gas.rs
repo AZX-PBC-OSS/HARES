@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -25,7 +26,6 @@ use super::wh_config::GasWaterHeaterConfig;
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
-    WATER_DENSITY_KG_PER_M3,
 };
 
 const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE storage WH default)
@@ -472,8 +472,9 @@ impl Equipment for GasWH {
             hot_draw_temp_c,
             setpoint_temp_c: self.setpoint_c,
         };
-        let tempered_flow_m3_s = draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3;
-        let hot_flow_m3_s = appliance_demand_kg_s / WATER_DENSITY_KG_PER_M3;
+        let tempered_flow_m3_s =
+            draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
+        let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
             ambient_c,
             tempered_flow_m3_s,
