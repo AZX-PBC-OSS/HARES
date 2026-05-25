@@ -92,7 +92,14 @@ pub(super) fn resolve_scheduled_loads(
             ("CookingRange", "Cooking Range"),
             ("Dehumidifier", "Dehumidifier"),
         ] {
+            let mut counter = 0u32;
             for node in appliances.children_named(tag) {
+                counter += 1;
+                let mut eq_name = if counter > 1 {
+                    format!("{name} {counter}")
+                } else {
+                    name.to_string()
+                };
                 let mut params = Map::new();
                 let mut fuel = FuelType::Electric;
                 // Default RatedAnnualkWh: washer=400, dishwasher=467, fridge=637+18*beds, freezer=319.8.
@@ -377,7 +384,7 @@ pub(super) fn resolve_scheduled_loads(
                     }
                 }
 
-                let mut spec = build_spec(name.to_string(), fuel, params, defaults);
+                let mut spec = build_spec(eq_name, fuel, params, defaults);
                 if tag == "Dehumidifier" {
                     let cfg = DehumidifierConfig {
                         equipment_id: None,
