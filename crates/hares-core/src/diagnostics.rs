@@ -36,8 +36,8 @@ pub struct EnvelopeDiag {
     pub infiltration_by_zone: Vec<(ZoneId, f64)>,
     /// Non-HVAC internal gains [W].
     pub internal_gain_w: f64,
-    /// Total port sensible [W] (HVAC + appliances).
-    pub port_sensible_w: f64,
+    /// Total port convective [W] (HVAC + appliances).
+    pub port_convective_w: f64,
     /// Total port radiant [W] (HVAC + appliances distributed to surfaces).
     ///
     /// ASHRAE HoF Ch. 18: internal gains have separate convective and radiant

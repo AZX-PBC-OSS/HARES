@@ -315,14 +315,14 @@ fn debug_bestest_600ff_observe_peak_terms() {
         env.dhi_w_m2
     );
     eprintln!(
-        "[observe] gains@peak window_solar_w={:.1} opaque_solar_lwr_w={:.1} infiltration_w={:.1} internal_gain_w={:.1} hvac_heating_w={:.1} hvac_cooling_w={:.1} port_sensible_w={:.1}",
+        "[observe] gains@peak window_solar_w={:.1} opaque_solar_lwr_w={:.1} infiltration_w={:.1} internal_gain_w={:.1} hvac_heating_w={:.1} hvac_cooling_w={:.1} port_convective_w={:.1}",
         gains.window_solar_w,
         gains.opaque_solar_lwr_w,
         gains.infiltration_w,
         gains.internal_gain_w,
         gains.hvac_heating_w,
         gains.hvac_cooling_w,
-        gains.port_sensible_w
+        gains.port_convective_w
     );
     eprintln!(
         "[observe] max_window_solar step={} value_w={:.1}",

@@ -11,7 +11,7 @@ use super::ThermalSolver;
 impl ThermalSolver {
     /// Accumulates per-zone convective sensible heat gains from equipment ports
     /// into the input vector at the corresponding zone sensible input indices.
-    pub(super) fn apply_port_sensible_inputs(&self, u: &mut DVector<f64>, ports: &PortSlots) {
+    pub(super) fn apply_port_convective_inputs(&self, u: &mut DVector<f64>, ports: &PortSlots) {
         for thermal in &ports.thermal {
             if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
                 && idx < u.len()
@@ -36,7 +36,7 @@ impl ThermalSolver {
     /// indoor zone). Equipment in non-indoor zones (basement, garage, attic)
     /// must have its radiant fraction delivered to the host zone's surfaces
     /// and air node, matching the zone-scoped distribution semantics of
-    /// `apply_port_sensible_inputs`.
+    /// `apply_port_convective_inputs`.
     ///
     /// Per-entry distribution is correct because TMULT weighting is linear:
     /// distributing each entry's radiant gain independently and accumulating

@@ -64,7 +64,7 @@ node override) and are not ticketed here.
 - **124** `isa-pressure-exponent-precision` — `ISA_PRESSURE_EXPONENT = 5.2559` constant vs inline `5.25588` in resstock_csv; unify and improve precision
 - **125** `berdahl-martin-coefficient-citation` — coefficients 0.758/0.521/0.625 cited to Martin & Berdahl (1984) but are actually Li et al. (2017) recalibrated values
 - **126** `ochre-compat-doc-sky-temp-divergence-note` — `ochre_compat()` doc should note sky-temperature recomputation diverges from OCHRE
-- **127** `port-sensible-w-rename-port-convective-w` — naming asymmetry footgun; rename `port_sensible_w` → `port_convective_w`
+- **127** `port-sensible-w-rename-port-convective-w` — naming asymmetry footgun; renamed `port_sensible_w` → `port_convective_w` (completed T-0108)
 - **128** `interior-lwr-method-explicit-starmesh-callsites` — use `InteriorLwrMethod::StarMesh` explicitly rather than `::default()`
 - **129** `solve-ideal-capacity-failure-warn-not-debug` — promote ideal-capacity convergence-failure log from `debug!` to `warn!`
 - **130** `h-out-nfrc-constant-export` — `H_OUT_NFRC` constant private; export to prevent future duplication

@@ -360,7 +360,7 @@ impl ThermalSolver {
         // Port inputs in production sequence: sensible first, then radiant.
         // Track the delta at the zone air index to split convective direct
         // from the radiant-to-air convective residual.
-        self.apply_port_sensible_inputs(&mut u, ports);
+        self.apply_port_convective_inputs(&mut u, ports);
         let after_convective = u[z_idx];
         let convective_direct_w = after_convective - after_int_lwr;
 
@@ -657,11 +657,11 @@ impl ThermalSolver {
             .map(|(_, w)| *w)
             .unwrap_or(0.0);
 
-        self.apply_port_sensible_inputs(&mut u, ports);
+        self.apply_port_convective_inputs(&mut u, ports);
         self.apply_port_radiant_inputs(&mut u, ports);
 
         let indoor_zone = self.config.indoor_zone_id;
-        let port_sensible_indoor_w = ports
+        let port_convective_indoor_w = ports
             .thermal
             .iter()
             .find(|t| t.zone == indoor_zone)
@@ -748,7 +748,7 @@ impl ThermalSolver {
             ventilation_w,
             natural_ventilation_w,
             combined_airflow_sensible_w,
-            port_sensible_w: port_sensible_indoor_w,
+            port_convective_w: port_convective_indoor_w,
             port_radiant_w: port_radiant_indoor_w,
             hvac_heating_w,
             hvac_cooling_w,
@@ -5390,6 +5390,52 @@ mod tests {
             rel_err < 0.20,
             "wall_gain={wall_gain:.2} W deviates from TARP prediction {q_tarp:.2} W by {:.1}%",
             rel_err * 100.0
+        );
+    }
+
+    /// `port_convective_w` in `EnvelopeComponentGains` is populated from the
+    /// convective accumulator slot (`sensible_gain_w`), not from the radiant
+    /// slot (`radiant_gain_w`) or their sum. This round-trip exercises the full
+    /// `prepare_inputs` path and would catch a regression where a struct literal
+    /// wires the wrong accumulator to the wrong field.
+    #[test]
+    fn port_convective_w_comes_from_sensible_gain_w_not_radiant_or_sum() {
+        let env = env_for_temp(22.0, 10.0);
+        let mut solver = one_zone_solver(&env);
+
+        let convect = 500.0_f64;
+        let radiant = 200.0_f64;
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: ZoneId(1),
+                sensible_gain_w: convect,
+                radiant_gain_w: radiant,
+                latent_gain_w: 0.0,
+                sensible_by_category: [0.0; hares_types::THERMAL_CATEGORY_COUNT],
+                radiant_by_category: [0.0; hares_types::THERMAL_CATEGORY_COUNT],
+                latent_by_category: [0.0; hares_types::THERMAL_CATEGORY_COUNT],
+            }],
+            electrical: Default::default(),
+            fuel: Default::default(),
+            fluid: vec![],
+            custom: vec![],
+            humidity: vec![],
+        };
+
+        solver.prepare_inputs(&ports, &env);
+        let gains = solver.component_gains();
+
+        assert!(
+            (gains.port_convective_w - convect).abs() < 1e-9,
+            "port_convective_w should come from sensible_gain_w ({} W), got {} W",
+            convect,
+            gains.port_convective_w
+        );
+        assert!(
+            (gains.port_radiant_w - radiant).abs() < 1e-9,
+            "port_radiant_w should come from radiant_gain_w ({} W), got {} W",
+            radiant,
+            gains.port_radiant_w
         );
     }
 }

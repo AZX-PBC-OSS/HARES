@@ -230,7 +230,7 @@ def test_observer_envelope_gains():
     gains_keys = [
         "window_solar_w", "opaque_solar_lwr_w", "interior_lwr_w",
         "infiltration_w", "ventilation_w", "natural_ventilation_w",
-        "port_sensible_w", "port_radiant_w", "internal_gain_w",
+        "port_convective_w", "port_radiant_w", "internal_gain_w",
     ]
     print(f"\n{'Step':>4} | " + " | ".join(f"{k:>14}" for k in gains_keys))
     print("-" * (6 + 17 * len(gains_keys)))

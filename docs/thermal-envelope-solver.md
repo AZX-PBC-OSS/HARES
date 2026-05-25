@@ -370,7 +370,7 @@ Populated by tracking u-vector sums before/after each application phase:
 | `infiltration_w`       | Indoor-zone value from infiltration return map |
 | `ventilation_w`        | Forced ventilation sensible                   |
 | `natural_ventilation_w`| Natural ventilation sensible                  |
-| `port_sensible_w`      | Sum of equipment port contributions           |
+| `port_convective_w`     | Sum of equipment port convective contributions |
 | `hvac_heating_w`       | HvacHeating category from thermal accumulator |
 | `hvac_cooling_w`       | HvacCooling category from thermal accumulator |
 | `internal_gain_w`      | InternalGain category from thermal accumulator|

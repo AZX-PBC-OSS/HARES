@@ -174,7 +174,7 @@ envelope solver:
 | `infiltration_w`         | W    | Infiltration sensible (indoor zone)          |
 | `ventilation_w`          | W    | Forced mechanical ventilation sensible       |
 | `natural_ventilation_w`  | W    | Natural ventilation sensible                 |
-| `port_sensible_w`        | W    | Total equipment port sensible (HVAC + loads) |
+| `port_convective_w`      | W    | Total equipment port convective (HVAC + loads) |
 | `hvac_heating_w`         | W    | HVAC heating contribution                    |
 | `hvac_cooling_w`         | W    | HVAC cooling contribution                    |
 | `internal_gain_w`        | W    | Appliances, lighting, occupancy              |
@@ -217,7 +217,7 @@ Per-zone (repeated for each zone): `zoneN_temp_c`, `zoneN_thermal_gain_w`,
 Extended fields (populated when available):
 - Per-equipment: name, mode, electric_kw, sensible_gain_w
 - Envelope breakdown: window_solar, opaque_solar_lwr, interior_lwr,
-  infiltration_by_zone, internal_gain, port_sensible
+  infiltration_by_zone, internal_gain, port_convective
 
 ---
 

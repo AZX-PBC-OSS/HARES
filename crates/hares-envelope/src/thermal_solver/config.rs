@@ -587,7 +587,7 @@ pub struct EnvelopeComponentGains {
     pub combined_airflow_sensible_w: f64,
     /// Total convective sensible gains from all equipment ports (HVAC + appliances) [W].
     /// Only the convective portion that goes directly to zone air.
-    pub port_sensible_w: f64,
+    pub port_convective_w: f64,
     /// Total radiant sensible gains from equipment ports distributed to surfaces [W].
     /// Distributed via E+ TMULT method; some reaches zone air via radiation_frac split.
     pub port_radiant_w: f64,

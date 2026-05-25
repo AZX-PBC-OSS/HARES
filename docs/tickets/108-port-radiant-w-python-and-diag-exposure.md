@@ -9,7 +9,7 @@
 
 `port_radiant_w` is missing from two observable surfaces:
 
-1. Python `post_solvers` dict at `crates/hares-python/src/py_dwelling.rs:1939` — only `port_sensible_w` is exposed.
+1. Python `post_solvers` dict at `crates/hares-python/src/py_dwelling.rs:1939` — only `port_convective_w` is exposed.
 2. `EnvelopeDiag.port_radiant_w` field at `crates/hares-core/src/diagnostics.rs:40` — the diagnostic struct has no such field, and the diagnostic CSV omits the column.
 
 Without these, downstream analysis cannot distinguish convective port contributions from radiant ones. The radiant-vs-convective split is precisely what determines surface MRT, surface-air heat exchange, and the BESTEST 900FF diagnostic comparison. Exposing only the convective component is a half-measure.
@@ -18,14 +18,14 @@ Without these, downstream analysis cannot distinguish convective port contributi
 
 `crates/hares-python/src/py_dwelling.rs:1939`:
 ```rust
-post_solvers.set_item("port_sensible_w", ...)?;
+post_solvers.set_item("port_convective_w", ...)?;
 // no "port_radiant_w" entry
 ```
 
 `crates/hares-core/src/diagnostics.rs:40`:
 ```rust
 pub struct EnvelopeDiag {
-    pub port_sensible_w: f64,
+    pub port_convective_w: f64,
     // no port_radiant_w
     ...
 }
@@ -86,10 +86,10 @@ uv run pytest python/tests/test_diagnostics.py
 
 ### Code Confirmation
 
-- [x] **py_dwelling.rs line 1939** — confirmed. Line 1939 is `d.set_item("port_sensible_w", gains.port_sensible_w)?;` with no subsequent `port_radiant_w` entry before the `dict.set_item("post_solvers", d)?;` call at line 1941. The `gains` binding is `&solvers.envelope_gains` which is `EnvelopeComponentGains` — that struct *does* have `port_radiant_w` (config.rs:510) but it is never forwarded to the Python dict.
-- [x] **diagnostics.rs line 40** — confirmed. `EnvelopeDiag` ends at line 41 with `port_sensible_w: f64` as its final field. No `port_radiant_w` field is present. The full field list is: `window_solar_w`, `opaque_solar_lwr_w`, `interior_lwr_w`, `infiltration_by_zone`, `internal_gain_w`, `port_sensible_w`.
+- [x] **py_dwelling.rs line 1939** — confirmed. Line 1939 is `d.set_item("port_convective_w", gains.port_convective_w)?;` with no subsequent `port_radiant_w` entry before the `dict.set_item("post_solvers", d)?;` call at line 1941. The `gains` binding is `&solvers.envelope_gains` which is `EnvelopeComponentGains` — that struct *does* have `port_radiant_w` (config.rs:510) but it is never forwarded to the Python dict.
+- [x] **diagnostics.rs line 40** — confirmed. `EnvelopeDiag` ends at line 41 with `port_convective_w: f64` as its final field. No `port_radiant_w` field is present. The full field list is: `window_solar_w`, `opaque_solar_lwr_w`, `interior_lwr_w`, `infiltration_by_zone`, `internal_gain_w`, `port_convective_w`.
 - [x] **`port_radiant_w` already tracked upstream** — `EnvelopeComponentGains` (hares-envelope/src/thermal_solver/config.rs:510) carries `pub port_radiant_w: f64` and it is populated at mod.rs:585 from `port_radiant_indoor_w`. The data exists at the solver level; it simply is not forwarded to `EnvelopeDiag`.
-- [x] **CSV writer** — `write_header` and `write_row` in diagnostics.rs do not write any `EnvelopeDiag` fields to the CSV at all (neither `port_sensible_w` nor `port_radiant_w`). The ticket's claim about the CSV omitting the column is technically correct but slightly understates the situation: the entire `EnvelopeDiag` struct is currently absent from the CSV, not just `port_radiant_w`.
+- [x] **CSV writer** — `write_header` and `write_row` in diagnostics.rs do not write any `EnvelopeDiag` fields to the CSV at all (neither `port_convective_w` nor `port_radiant_w`). The ticket's claim about the CSV omitting the column is technically correct but slightly understates the situation: the entire `EnvelopeDiag` struct is currently absent from the CSV, not just `port_radiant_w`.
 - [x] **OCHRE cross-check** — OCHRE (`vendors/OCHRE/ochre/Equipment/Equipment.py:80`) has an explicit `# FUTURE: separate convection and radiation, move radiation gains to the surfaces around the zone` comment. OCHRE currently combines radiant and convective into a single `sensible_gain` field and does NOT separately track or report `port_radiant_w`. HARES has gone further than OCHRE by implementing the separation at the solver level (`apply_port_radiant_inputs` in ports.rs) and recording `port_radiant_w` in `EnvelopeComponentGains`. The missing piece is forwarding that value into the diagnostic/Python surface.
 - [x] **EnergyPlus cross-check** — EnergyPlus Engineering Reference (Zone Internal Gains, v25.2) confirms: "Convective gains are instantaneous additions of heat to the zone air" while "Radiant gains are distributed on the surfaces of the zone, where they are first absorbed and then released back into the room according to the surface heat balances." EnergyPlus exposes separate output variables `OtherEquipment Radiant Heating Rate [W]` and `OtherEquipment Convective Heating Rate [W]` (Input/Output Reference v8.4). HARES's `apply_port_radiant_inputs` function mirrors the EnergyPlus TMULT surface-distribution method (as noted in the inline doc at ports.rs:28). The ticket's claim about BESTEST 900FF diagnostic comparison requiring the radiant/convective split is consistent with EnergyPlus practice.
 
@@ -118,7 +118,7 @@ uv run pytest python/tests/test_diagnostics.py
 1. Add `pub port_radiant_w: f64` to `EnvelopeDiag` in `crates/hares-core/src/diagnostics.rs` after line 40.
 2. Populate the new field wherever `EnvelopeDiag` is constructed — the value to use is `EnvelopeComponentGains::port_radiant_w`, which is already computed by the thermal solver.
 3. Add `"port_radiant_w"` to `write_header` and `write_row` in diagnostics.rs (noting that neither function currently emits any `EnvelopeDiag` fields; this is a broader gap to address).
-4. Add `d.set_item("port_radiant_w", gains.port_radiant_w)?;` in `py_dwelling.rs` at line 1940 (after `port_sensible_w`).
+4. Add `d.set_item("port_radiant_w", gains.port_radiant_w)?;` in `py_dwelling.rs` at line 1940 (after `port_convective_w`).
 5. Update any Python tests that assert the full key set of `post_solvers`.
 
 Note: The CSV gap is broader than the ticket states — currently `write_header`/`write_row` do not write *any* `EnvelopeDiag` fields. The ticket's scoping of the issue to `port_radiant_w` is still valid, but the implementer should be aware that wiring `port_radiant_w` into the CSV requires also wiring the other `EnvelopeDiag` fields, or at minimum ensuring those are handled consistently.

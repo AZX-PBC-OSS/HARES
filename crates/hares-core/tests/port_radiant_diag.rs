@@ -20,11 +20,11 @@ fn envelope_diag_exposes_port_radiant_w() {
 #[test]
 fn envelope_component_gains_has_port_radiant_w() {
     let gains = EnvelopeComponentGains {
-        port_sensible_w: 700.0,
+        port_convective_w: 700.0,
         port_radiant_w: 300.0,
         ..EnvelopeComponentGains::default()
     };
-    assert_eq!(gains.port_sensible_w + gains.port_radiant_w, 1000.0);
+    assert_eq!(gains.port_convective_w + gains.port_radiant_w, 1000.0);
 }
 
 // ---------------------------------------------------------------------------

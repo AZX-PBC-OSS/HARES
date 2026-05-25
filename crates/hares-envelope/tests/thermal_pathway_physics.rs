@@ -422,7 +422,7 @@ fn rc_network_exposes_ground_column() {
 // ---------------------------------------------------------------------------
 
 /// `zone_sensible_breakdown_debug` must apply `apply_port_radiant_inputs` in
-/// addition to `apply_port_sensible_inputs`, matching the production call
+/// addition to `apply_port_convective_inputs`, matching the production call
 /// sequence in `prepare_inputs_inner`.
 ///
 /// Setup: single-zone model (3 inputs: outdoor, surface, zone-air), one opaque
@@ -430,9 +430,9 @@ fn rc_network_exposes_ground_column() {
 /// surface RC node).  A port carries 700 W convective + 300 W radiant (30/70
 /// split matching the BESTEST ASHRAE 140-2017 §5.2.4.3 specification).
 ///
-/// The production path calls both `apply_port_sensible_inputs` and
+/// The production path calls both `apply_port_convective_inputs` and
 /// `apply_port_radiant_inputs`.  `zone_sensible_breakdown_debug` currently
-/// calls ONLY `apply_port_sensible_inputs`, so `breakdown[5]` (after_port)
+/// calls ONLY `apply_port_convective_inputs`, so `breakdown[5]` (after_port)
 /// reflects only the 700 W convective contribution.
 ///
 /// Expected (correct):   breakdown[5] = 700.0 W  (convective only goes to air;
