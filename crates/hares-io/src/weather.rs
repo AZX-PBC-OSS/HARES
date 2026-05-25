@@ -2590,14 +2590,15 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
     }
 
     #[test]
-    fn triangular_hourly_mean_preservation() {
-        // The midpoint-interpolation triangular resampling approximately
-        // preserves the hourly mean. For slowly varying signals, the mean
-        // of sub-hourly values within each hour is close to the original
-        // hourly value. The mean over hour i is:
-        //   0.125 × values[prev] + 0.75 × values[i] + 0.125 × values[next]
-        // which equals values[i] when the signal is constant or linear,
-        // and deviates proportionally to the second difference for curved signals.
+    fn triangular_mean_close_to_original_for_smooth_signals() {
+        // For slowly varying signals, the triangular mean blend
+        //   0.125·values[prev] + 0.75·values[i] + 0.125·values[next]
+        // is numerically close to values[i] because prev ≈ cur ≈ next.
+        // This is NOT mean preservation — see the WARNING in
+        // ResampleMethod::Triangular. The deviation is proportional to the
+        // second difference; for a sinusoidal profile the relative error is < 2%.
+        // At sharp transitions (sunrise/sunset) the error reaches 12.5–18.8% —
+        // see triangular_mean_is_not_preserved_at_sharp_transitions.
         //
         // Test with a sinusoidal solar profile (typical clear-sky day).
         let n = 24;
