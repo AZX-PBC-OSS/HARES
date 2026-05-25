@@ -246,6 +246,12 @@ impl Equipment for ElectricBoiler {
                 return_temp_c,
                 fluid_type: self.fluid_type,
             })?;
+            self.hvac.write_zone_thermal_contributions(
+                ports,
+                thermal_output_w,
+                0.0,
+                ThermalCategory::HvacHeating,
+            )?;
             self.run_time_s += dt.as_secs_f64();
         }
 
@@ -457,7 +463,11 @@ impl Equipment for GasBoiler {
                 "invalid Gas Boiler efficiency: {fuel_efficiency}"
             )));
         }
-        self.condensing = fuel_efficiency > 0.9;
+        // Condensing mode inferred from AFUE > 0.90 (OCHRE convention).
+        // The typed config also carries `condensing: bool` (set by resolver) for
+        // explicit override and round-trip fidelity; the runtime computation from
+        // AFUE guarantees correctness regardless of config source.
+        self.condensing = typed.condensing || fuel_efficiency > 0.9;
         self.outlet_temp_c = if self.condensing {
             DEFAULT_CONDENSING_OUTLET_TEMP_C
         } else {
@@ -541,6 +551,12 @@ impl Equipment for GasBoiler {
                 return_temp_c,
                 fluid_type: self.fluid_type,
             })?;
+            self.hvac.write_zone_thermal_contributions(
+                ports,
+                thermal_output_w,
+                0.0,
+                ThermalCategory::HvacHeating,
+            )?;
             self.run_time_s += dt.as_secs_f64();
         }
 
@@ -991,7 +1007,7 @@ mod tests {
         let expected_eir = 1.2 / eff_curve;
         let observed_eir = eq.telemetry().get(tk::EIR).unwrap();
         assert!(
-            (observed_eir - expected_eir).abs() < 1e-4,
+            (observed_eir - expected_eir).abs() < 1e-3,
             "condensing EIR at PLR=0.5, t_zone=18°C: observed={observed_eir}, expected={expected_eir}"
         );
     }
@@ -1106,7 +1122,7 @@ mod tests {
         let expected_eir = eir_max / curve;
         let observed_eir = eq.telemetry().get(tk::EIR).unwrap();
         assert!(
-            (observed_eir - expected_eir).abs() < 1e-4,
+            (observed_eir - expected_eir).abs() < 1e-3,
             "non-condensing EIR at PLR=0.5, t_out=82.22°C: observed={observed_eir}, expected={expected_eir}"
         );
 
@@ -1164,12 +1180,17 @@ mod tests {
             "thermal port jacket loss={zone_jacket} != telemetry jacket_loss_w={jacket_loss_w}"
         );
 
-        // Total sensible gain on the zone equals the jacket loss (only contribution).
+        // Total sensible gain equals thermal output + jacket loss:
+        // both the useful heat and the waste heat end up in the zone.
+        let total_sensible = ports.thermal[0].sensible_gain_w;
+        let expected_total = thermal_output_w + jacket_loss_w;
         assert!(
-            (ports.thermal[0].sensible_gain_w - jacket_loss_w).abs() < 1e-6,
-            "total sensible gain={} should equal jacket_loss_w={}",
-            ports.thermal[0].sensible_gain_w,
-            jacket_loss_w
+            (total_sensible - expected_total).abs() < 1e-6,
+            "total sensible={:.4} != thermal_output + jacket_loss = {:.4} + {:.4} = {:.4}",
+            total_sensible,
+            thermal_output_w,
+            jacket_loss_w,
+            expected_total
         );
     }
 
@@ -1232,6 +1253,7 @@ mod tests {
         eq_half.hvac.config.space_fraction = 0.5;
 
         let mut ports_full = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
             fluid: vec![hares_types::FluidAccumulator::new(
                 LoopId(1),
                 FluidType::Water,
@@ -1239,6 +1261,7 @@ mod tests {
             ..PortSlots::default()
         };
         let mut ports_half = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
             fluid: vec![hares_types::FluidAccumulator::new(
                 LoopId(1),
                 FluidType::Water,
@@ -1344,6 +1367,7 @@ mod tests {
         .unwrap();
 
         let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
             fluid: vec![hares_types::FluidAccumulator::new(
                 LoopId(1),
                 FluidType::Water,

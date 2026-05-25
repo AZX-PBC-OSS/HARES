@@ -387,6 +387,16 @@ pub struct HeatPumpCoolerConfig {
     /// Per-stage sensible heat ratios.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_shrs: Option<Vec<f64>>,
+    /// Crankcase heater rated power [kW]. Applied as parasitic load when the
+    /// compressor is off and outdoor air temperature is below the threshold.
+    /// ASHP default 0.050 kW (50 W) at 12.78°C (55°F); MSHP default 0.015 kW
+    /// (15 W) at 0°C (32°F). OCHRE HVAC.py AirConditioner class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crankcase_heater_kw: Option<f64>,
+    /// Crankcase heater activation threshold [°C]. The heater draws power when
+    /// OAT < this threshold and the compressor is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crankcase_heater_threshold_c: Option<f64>,
 }
 
 impl EquipmentTypedConfig for HeatPumpCoolerConfig {
@@ -616,6 +626,7 @@ mod tests {
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: None,
+            ..HeatPumpCoolerConfig::default()
         };
 
         assert_eq!(
@@ -670,6 +681,8 @@ mod tests {
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: Some(vec![0.78, 0.72]),
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
         };
         let ec =
             EquipmentConfig::from_typed("test".to_string(), "ASHP Cooler".to_string(), cfg.clone());
@@ -834,6 +847,8 @@ mod tests {
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: Some(vec![0.78, 0.72]),
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
         };
         let value = serde_json::to_value(&cfg).unwrap();
         let recovered: HeatPumpCoolerConfig = serde_json::from_value(value.clone()).unwrap();
@@ -914,6 +929,8 @@ mod tests {
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
         };
         let err = cfg_below.validate().unwrap_err();
         assert!(

@@ -147,6 +147,13 @@ pub struct GasBoilerConfig {
     /// Time-varying heating setpoint schedule (daily profile or external column).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heating_setpoint_source: Option<ScheduleSourceConfig>,
+    /// Condensing boiler mode. Inferred from AFUE > 0.90 (OCHRE convention).
+    /// Condensing boilers use a 6-coefficient efficiency curve and lower return
+    /// water temperature (~65 °C / 150 °F); non-condensing boilers use 10
+    /// coefficients and a higher outlet temperature (~82 °C / 180 °F).
+    /// OCHRE HVAC.py GasBoiler class: `condensing = eir_max < 1 / 0.9`.
+    #[serde(default)]
+    pub condensing: bool,
 }
 
 impl EquipmentTypedConfig for GasBoilerConfig {
@@ -170,6 +177,7 @@ impl Default for GasBoilerConfig {
             number_of_speeds: 1,
             heating_setpoint_c: None,
             heating_setpoint_source: None,
+            condensing: false,
         }
     }
 }

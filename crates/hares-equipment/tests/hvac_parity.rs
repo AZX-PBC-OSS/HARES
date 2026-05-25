@@ -280,11 +280,11 @@ fn hp_cooler_cfg(
                 charge_defect_ratio: None,
             },
             stage_shrs: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
         },
     )
 }
-
-// ---------------------------------------------------------------------------
 // 1. Gas furnace: energy balance verification
 //
 // OCHRE reference (HVAC.py GasFurnace.calculate_power_and_heat):

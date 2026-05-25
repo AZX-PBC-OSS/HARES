@@ -628,6 +628,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 fluid_type: hares_types::FluidType::Water,
                 heating_setpoint_c: None,
                 heating_setpoint_source: None,
+                condensing: false,
             },
         ),
         "Electric Boiler" => typed_alias_config(
@@ -824,6 +825,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                     charge_defect_ratio: None,
                 },
                 stage_shrs: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
             },
         ),
         "Ideal HVAC" => typed_alias_config(

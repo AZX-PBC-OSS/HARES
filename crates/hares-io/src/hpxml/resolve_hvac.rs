@@ -804,6 +804,11 @@ fn try_build_gas_boiler_config(
         fluid_type: hares_types::FluidType::Water,
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
+        // Condensing mode inferred from AFUE > 0.90 (OCHRE convention).
+        // OCHRE HVAC.py GasBoiler class: `condensing = eir_max < 1 / 0.9`.
+        // Condensing boilers operate at lower return water temperatures (~150 °F)
+        // with a 6-coefficient efficiency curve vs 10 coefficients for non-condensing.
+        condensing: afue > 0.90,
     };
     Ok(Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -1014,8 +1019,17 @@ fn try_build_central_ac_config(
         cooling_setpoint_source,
         airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
         fraction_load_served,
-        crankcase_heater_kw: None,
-        crankcase_heater_threshold_c: None,
+        // Crankcase heater: read from HPXML extension (CrankcaseHeaterPowerWatts in W).
+        // Central AC/ASHP defaults: 50 W (0.050 kW) at 12.78°C (55°F) per OCHRE.
+        // Room ACs typically have no crankcase heater (0.0 kW).
+        crankcase_heater_kw: Some(
+            params
+                .get("crankcase_heater_w")
+                .and_then(Value::as_f64)
+                .map(|w| w / 1000.0)
+                .unwrap_or(0.050),
+        ),
+        crankcase_heater_threshold_c: Some(12.78),
         crankcase_capacity_curve_coeffs: None,
         duct,
         system_type,
@@ -1075,7 +1089,11 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
         plf_max: curve_bounds.plf_max,
         shr: params.get("shr").and_then(Value::as_f64),
         startup_cd: None,
-        crankcase_heater_kw: None,
+        crankcase_heater_kw: params
+            .get("crankcase_heater_w")
+            .and_then(Value::as_f64)
+            .map(|w| Some(w / 1000.0))
+            .unwrap_or(Some(0.0)),
         crankcase_heater_threshold_c: None,
         crankcase_capacity_curve_coeffs: None,
     };
@@ -1392,6 +1410,25 @@ fn try_build_heat_pump_cooler_config(
             charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
         },
         stage_shrs: extract_stage_values(params, "shr"),
+        // Crankcase heater: power (W) from HPXML extension → kW.
+        // ASHP defaults: 50 W (0.050 kW) at 12.78°C (55°F); MSHP defaults: 15 W (0.015 kW) at 0°C (32°F).
+        // OCHRE HVAC.py AirConditioner / MinisplitAHSPCooler classes.
+        crankcase_heater_kw: params
+            .get("crankcase_heater_w")
+            .and_then(Value::as_f64)
+            .map(|w| Some(w / 1000.0))
+            .unwrap_or_else(|| {
+                if is_mini_split {
+                    Some(0.015)
+                } else {
+                    Some(0.050)
+                }
+            }),
+        crankcase_heater_threshold_c: if is_mini_split {
+            Some(0.0)
+        } else {
+            Some(12.78)
+        },
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -1739,6 +1776,10 @@ pub(super) fn resolve_hvac(
         {
             params.insert("fraction_load_served".to_string(), json!(frac));
         }
+        // Crankcase heater power: HPXML does not define a standard element.
+        // OpenStudio-HPXML uses extension/CrankcaseHeaterPowerWatts (W).
+        // Non-standard HPXML files may carry a direct CrankcaseHeaterWatts (W) child.
+        let crankcase_w = child_f64(cooling, "CrankcaseHeaterWatts");
         if let Some(ext) = cooling.child("extension") {
             if let Some(w_per_cfm) = child_f64(ext, "FanPowerWattsPerCFM") {
                 params.insert("fan_power_w_per_cfm".to_string(), json!(w_per_cfm));
@@ -1754,6 +1795,14 @@ pub(super) fn resolve_hvac(
             if let Some(v) = child_f64(ext, "CoolingAirflowCFM") {
                 params.insert("cooling_airflow_cfm".to_string(), json!(v));
             }
+            if let Some(v) = child_f64(ext, "CrankcaseHeaterPowerWatts") {
+                params.insert("crankcase_heater_w".to_string(), json!(v));
+            }
+        }
+        // Non-standard direct CrankcaseHeaterWatts element (used by some HPXML
+        // files that pre-date the OpenStudio-HPXML extension convention).
+        if let Some(w) = crankcase_w {
+            params.insert("crankcase_heater_w".to_string(), json!(w));
         }
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
@@ -1929,6 +1978,17 @@ pub(super) fn resolve_hvac(
                 }
             }
         }
+        // SupplementalHeatingLockoutTemperature (°F → °C).
+        // HPXML 4.x schema does not define this as a standard element; it
+        // appears in some non-standard HPXML files. The resolver reads it as
+        // a direct child of <HeatPump> for compatibility and stores it as
+        // max_oat_supplemental_c.
+        if let Some(f_val) = child_f64(heat_pump, "SupplementalHeatingLockoutTemperature") {
+            params.insert(
+                "max_oat_supplemental_c".to_string(),
+                json!(conv::temperature_f_to_c(f_val)),
+            );
+        }
 
         insert_mode_and_speed_metadata(
             &mut params,
@@ -1980,6 +2040,10 @@ pub(super) fn resolve_hvac(
             }
             if let Some(v) = child_f64(ext, "CoolingAirflowCFM") {
                 params.insert("cooling_airflow_cfm".to_string(), json!(v));
+            }
+            // Crankcase heater power (W): OpenStudio-HPXML extension convention.
+            if let Some(v) = child_f64(ext, "CrankcaseHeaterPowerWatts") {
+                params.insert("crankcase_heater_w".to_string(), json!(v));
             }
         }
         for (k, v) in &setpoint_params {

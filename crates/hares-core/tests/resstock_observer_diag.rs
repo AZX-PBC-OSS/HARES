@@ -37,7 +37,8 @@ mod tests {
             .map(|n| wdir.join(n))
             .find(|p| p.exists())
             .unwrap_or_else(|| {
-                wdir.read_dir().unwrap()
+                wdir.read_dir()
+                    .unwrap()
                     .filter_map(|e| e.ok())
                     .find(|e| e.path().is_file())
                     .map(|e| e.path())
@@ -61,10 +62,14 @@ mod tests {
     }
 
     fn utn(base: &str) -> String {
-        format!("{base}_{}_{:?}",
+        format!(
+            "{base}_{}_{:?}",
             std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
-            std::thread::current().id())
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::thread::current().id()
+        )
     }
 
     #[test]
@@ -78,8 +83,10 @@ mod tests {
             weather_path: weather_for(&bldg_dir, "2024.2"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                start_time: FixedOffset::west_opt(7 * 3600).unwrap()
-                    .with_ymd_and_hms(2018, 1, 15, 0, 0, 0).unwrap(),
+                start_time: FixedOffset::west_opt(7 * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
+                    .unwrap(),
                 duration: Duration::hours(24),
                 time_res: Duration::minutes(15),
                 output_verbosity: 4,
@@ -111,7 +118,11 @@ mod tests {
             // Find temperature columns
             eprintln!("=== Diagnostic columns ===");
             for (i, c) in cols.iter().enumerate() {
-                if c.contains("temp") || c.contains("Temp") || c.contains("mode") || c.contains("Mode") {
+                if c.contains("temp")
+                    || c.contains("Temp")
+                    || c.contains("mode")
+                    || c.contains("Mode")
+                {
                     eprintln!("  col {i}: {c}");
                 }
             }
@@ -141,8 +152,10 @@ mod tests {
                     let lo = vals.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                     let hi = vals.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                     let avg = vals.iter().sum::<f64>() / vals.len() as f64;
-                    eprintln!("  col {col_idx} ({}) lo={lo:.1} hi={hi:.1} avg={avg:.1}",
-                        cols[*col_idx]);
+                    eprintln!(
+                        "  col {col_idx} ({}) lo={lo:.1} hi={hi:.1} avg={avg:.1}",
+                        cols[*col_idx]
+                    );
                 }
             }
 
@@ -153,27 +166,40 @@ mod tests {
             let c2: Vec<&str> = hdr2.split(',').map(|c| c.trim()).collect();
             for (row_i, line) in l2.enumerate().take(10) {
                 let vals: Vec<&str> = line.split(',').collect();
-                let out_col = c2.iter().position(|c| c.contains("outdoor") && c.contains("temp"));
-                let in_col = c2.iter().position(|c| c.contains("Indoor") && c.contains("(C)"));
-                let mode_cols: Vec<_> = c2.iter().enumerate()
+                let out_col = c2
+                    .iter()
+                    .position(|c| c.contains("outdoor") && c.contains("temp"));
+                let in_col = c2
+                    .iter()
+                    .position(|c| c.contains("Indoor") && c.contains("(C)"));
+                let mode_cols: Vec<_> = c2
+                    .iter()
+                    .enumerate()
                     .filter(|(_, c)| c.contains("Mode"))
                     .collect();
-                let power_cols: Vec<_> = c2.iter().enumerate()
+                let power_cols: Vec<_> = c2
+                    .iter()
+                    .enumerate()
                     .filter(|(_, c)| c.contains("Power") && c.contains("(kW)"))
                     .take(4)
                     .collect();
 
                 eprint!("  row {row_i}: ");
                 if let (Some(oi), Some(ii)) = (out_col, in_col) {
-                    eprint!("out={:.1} in={:.1} ", 
+                    eprint!(
+                        "out={:.1} in={:.1} ",
                         vals[oi].trim().parse::<f64>().unwrap_or(f64::NAN),
-                        vals[ii].trim().parse::<f64>().unwrap_or(f64::NAN));
+                        vals[ii].trim().parse::<f64>().unwrap_or(f64::NAN)
+                    );
                 }
                 for (mi, mc) in &mode_cols {
                     eprint!("{mc}={} ", vals[*mi].trim());
                 }
                 for (pi, pc) in &power_cols {
-                    eprint!("{pc}={:.2} ", vals[*pi].trim().parse::<f64>().unwrap_or(f64::NAN));
+                    eprint!(
+                        "{pc}={:.2} ",
+                        vals[*pi].trim().parse::<f64>().unwrap_or(f64::NAN)
+                    );
                 }
                 eprintln!();
             }

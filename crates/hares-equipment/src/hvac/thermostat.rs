@@ -503,7 +503,11 @@ mod tests {
         let tstat = ThermostatConfig::default(); // min_cycle_time_s = 0.0
         // Should always allow regardless of timing
         assert!(is_cycle_change_allowed(&tstat, None, utc_time(15, 0)));
-        assert!(is_cycle_change_allowed(&tstat, Some(utc_time(15, 0)), utc_time(15, 1)));
+        assert!(is_cycle_change_allowed(
+            &tstat,
+            Some(utc_time(15, 0)),
+            utc_time(15, 1)
+        ));
     }
 
     #[test]

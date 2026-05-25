@@ -83,6 +83,7 @@ fn sample_gas_boiler_config() -> GasBoilerConfig {
         number_of_speeds: 1,
         heating_setpoint_c: None,
         heating_setpoint_source: None,
+        condensing: false,
     }
 }
 

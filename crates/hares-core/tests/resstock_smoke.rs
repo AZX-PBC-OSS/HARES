@@ -314,24 +314,44 @@ mod tests {
         if let Some(buf) = dwelling.observer_buffer() {
             if let Some(snap) = buf.last() {
                 // Zone temps at each phase boundary.
-                let env_zone = snap.phases.post_environment.as_ref()
+                let env_zone = snap
+                    .phases
+                    .post_environment
+                    .as_ref()
                     .and_then(|e| e.zone_temps_c.first().map(|(_, t)| *t))
                     .unwrap_or(f64::NAN);
-                let final_zone = snap.phases.post_zone_update.as_ref()
+                let final_zone = snap
+                    .phases
+                    .post_zone_update
+                    .as_ref()
                     .and_then(|z| z.zone_temps_c.first().map(|(_, t)| *t))
                     .unwrap_or(f64::NAN);
-                eprintln!("\nStep 0 zone temps: env_phase={:.2}°C  post_update={:.2}°C", env_zone, final_zone);
+                eprintln!(
+                    "\nStep 0 zone temps: env_phase={:.2}°C  post_update={:.2}°C",
+                    env_zone, final_zone
+                );
 
                 eprintln!("\nEquipment at step 0:");
                 if let Some(phase) = snap.phases.post_thermal_equipment.as_ref() {
                     for eq in &phase.equipment {
-                        let mode      = eq.telemetry.get("operating_mode").unwrap_or(f64::NAN);
-                        let heat_sp   = eq.telemetry.get("heating_setpoint_c").unwrap_or(f64::NAN);
-                        let cool_sp   = eq.telemetry.get("cooling_setpoint_c").unwrap_or(f64::NAN);
-                        let sched_h   = eq.telemetry.get("schedule_heating_setpoint_c").unwrap_or(f64::NAN);
-                        let sched_c   = eq.telemetry.get("schedule_cooling_setpoint_c").unwrap_or(f64::NAN);
-                        let output_w  = eq.telemetry.get("thermal_output_w").unwrap_or(f64::NAN);
-                        let hvac_w    = eq.contribution.thermal.first().map(|(_, s, _)| *s).unwrap_or(0.0);
+                        let mode = eq.telemetry.get("operating_mode").unwrap_or(f64::NAN);
+                        let heat_sp = eq.telemetry.get("heating_setpoint_c").unwrap_or(f64::NAN);
+                        let cool_sp = eq.telemetry.get("cooling_setpoint_c").unwrap_or(f64::NAN);
+                        let sched_h = eq
+                            .telemetry
+                            .get("schedule_heating_setpoint_c")
+                            .unwrap_or(f64::NAN);
+                        let sched_c = eq
+                            .telemetry
+                            .get("schedule_cooling_setpoint_c")
+                            .unwrap_or(f64::NAN);
+                        let output_w = eq.telemetry.get("thermal_output_w").unwrap_or(f64::NAN);
+                        let hvac_w = eq
+                            .contribution
+                            .thermal
+                            .first()
+                            .map(|(_, s, _)| *s)
+                            .unwrap_or(0.0);
                         eprintln!(
                             "  {:30} mode={:4.1} heat_sp={:6.2} cool_sp={:6.2} sched_h={:6.2} sched_c={:6.2} out_W={:8.1} contrib_W={:8.1}",
                             eq.name, mode, heat_sp, cool_sp, sched_h, sched_c, output_w, hvac_w
@@ -353,10 +373,16 @@ mod tests {
             if i % 30 == 0 {
                 if let Some(buf) = dwelling.observer_buffer() {
                     if let Some(snap) = buf.last() {
-                        let zone_c = snap.phases.post_zone_update.as_ref()
+                        let zone_c = snap
+                            .phases
+                            .post_zone_update
+                            .as_ref()
                             .and_then(|z| z.zone_temps_c.first().map(|(_, t)| *t))
                             .unwrap_or(f64::NAN);
-                        let oat_c = snap.phases.post_environment.as_ref()
+                        let oat_c = snap
+                            .phases
+                            .post_environment
+                            .as_ref()
                             .map(|e| e.outdoor_temp_c)
                             .unwrap_or(f64::NAN);
 
@@ -364,21 +390,41 @@ mod tests {
                             .phases
                             .post_thermal_equipment
                             .as_ref()
-                            .map(|p| p.equipment.iter().map(|eq| {
-                                let mode    = eq.telemetry.get("operating_mode").unwrap_or(f64::NAN);
-                                let heat_sp = eq.telemetry.get("heating_setpoint_c").unwrap_or(f64::NAN);
-                                let cool_sp = eq.telemetry.get("cooling_setpoint_c").unwrap_or(f64::NAN);
-                                let hvac_w  = eq.contribution.thermal.first().map(|(_, s, _)| *s).unwrap_or(0.0);
-                                format!("[{} m={:.0} h={:.1} c={:.1} W={:.0}]",
-                                    eq.name, mode, heat_sp, cool_sp, hvac_w)
-                            }).collect())
+                            .map(|p| {
+                                p.equipment
+                                    .iter()
+                                    .map(|eq| {
+                                        let mode =
+                                            eq.telemetry.get("operating_mode").unwrap_or(f64::NAN);
+                                        let heat_sp = eq
+                                            .telemetry
+                                            .get("heating_setpoint_c")
+                                            .unwrap_or(f64::NAN);
+                                        let cool_sp = eq
+                                            .telemetry
+                                            .get("cooling_setpoint_c")
+                                            .unwrap_or(f64::NAN);
+                                        let hvac_w = eq
+                                            .contribution
+                                            .thermal
+                                            .first()
+                                            .map(|(_, s, _)| *s)
+                                            .unwrap_or(0.0);
+                                        format!(
+                                            "[{} m={:.0} h={:.1} c={:.1} W={:.0}]",
+                                            eq.name, mode, heat_sp, cool_sp, hvac_w
+                                        )
+                                    })
+                                    .collect()
+                            })
                             .unwrap_or_default();
 
                         eprintln!(
                             "{:>6} {:>10} {:>8.2} {:>8.2}  {}",
                             i,
                             snap.timestamp.format("%H:%M"),
-                            zone_c, oat_c,
+                            zone_c,
+                            oat_c,
                             eq_summary.join("  ")
                         );
                     }

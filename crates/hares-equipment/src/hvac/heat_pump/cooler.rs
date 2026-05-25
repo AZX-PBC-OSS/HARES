@@ -157,8 +157,8 @@ impl HpCooler {
             cooling_setpoint_source: hp_cfg.common.cooling_setpoint_source.clone(),
             airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
-            crankcase_heater_kw: None,
-            crankcase_heater_threshold_c: None,
+            crankcase_heater_kw: hp_cfg.crankcase_heater_kw,
+            crankcase_heater_threshold_c: hp_cfg.crankcase_heater_threshold_c,
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.common.duct.clone(),
             system_type: hp_cfg
@@ -371,6 +371,8 @@ mod tests {
                     charge_defect_ratio: None,
                 },
                 stage_shrs: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
             },
         )
     }

@@ -75,11 +75,12 @@ fn find_spec<'a>(
 // threshold default is 10 °C.
 
 #[test]
-#[should_panic(expected = "BUG (G1): CrankcaseHeaterWatts=75 must wire to")]
 fn g1_crankcase_heater_watts_wired_from_hpxml() {
-    // BUG (G1): the resolver sets crankcase_heater_kw = None
-    // regardless of the <CrankcaseHeaterWatts> HPXML value.
-    // This test must FAIL until the wiring is added.
+    // G1: CrankcaseHeaterWatts→crankcase_heater_kw wiring is now fixed.
+    // HPXML does not define a standard CrankcaseHeaterWatts element; the
+    // resolver reads the direct child element for compatibility with
+    // non-standard HPXML files and extension/CrankcaseHeaterPowerWatts
+    // for OpenStudio-HPXML extension convention.
     let xml = wrap_systems(
         r#"<Systems><HVAC>
           <CoolingSystem>
@@ -107,19 +108,15 @@ fn g1_crankcase_heater_watts_wired_from_hpxml() {
     assert_eq!(
         cfg.crankcase_heater_kw,
         Some(0.075),
-        "BUG (G1): CrankcaseHeaterWatts=75 must wire to \
-         crankcase_heater_kw=Some(0.075 kW); got {:?}",
-        cfg.crankcase_heater_kw
+        "CrankcaseHeaterWatts=75 must wire to crankcase_heater_kw=Some(0.075 kW)"
     );
 }
 
 #[test]
-#[should_panic(expected = "BUG (G1): absent CrankcaseHeaterWatts must apply OCHRE")]
 fn g1_crankcase_heater_absent_uses_ochre_default() {
-    // BUG (G1): when CrankcaseHeaterWatts is absent, the resolver
-    // must apply OCHRE-compatible defaults (50 W, 12.78 °C for central AC).
-    // Currently it leaves both fields as None.
-    // This test must FAIL until the default application is added.
+    // G1: when no crankcase data is provided, the resolver applies
+    // OCHRE-compatible defaults: 0.050 kW (50 W) at 12.78 °C (55 °F) for
+    // central AC. OCHRE HVAC.py AirConditioner class.
     let xml = wrap_systems(
         r#"<Systems><HVAC>
           <CoolingSystem>
@@ -146,56 +143,12 @@ fn g1_crankcase_heater_absent_uses_ochre_default() {
     assert_eq!(
         cfg.crankcase_heater_kw,
         Some(0.050),
-        "BUG (G1): absent CrankcaseHeaterWatts must apply OCHRE \
-         default of 0.050 kW (50 W) for central AC; got {:?}",
-        cfg.crankcase_heater_kw
+        "absent crankcase must apply OCHRE default of 0.050 kW (50 W) for central AC"
     );
     let threshold = cfg.crankcase_heater_threshold_c.unwrap_or(f64::NAN);
     assert!(
         (threshold - 12.78).abs() < 0.01,
-        "BUG (G1): absent threshold must default to 12.78 °C (55 °F); \
-         got {threshold:.2}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// G1 presence check — documents the current None state (passes today)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn g1_crankcase_heater_kw_is_currently_none_documents_gap() {
-    // Documents the current (broken) state: the resolver always emits None.
-    // This test PASSES today. When the fix is applied it will correctly fail,
-    // signaling that g1_crankcase_heater_watts_wired_from_hpxml should pass.
-    let xml = wrap_systems(
-        r#"<Systems><HVAC>
-          <CoolingSystem>
-            <SystemIdentifier id="AC3"/>
-            <CoolingSystemType>central air conditioner</CoolingSystemType>
-            <CoolingCapacity>36000</CoolingCapacity>
-            <AnnualCoolingEfficiency>
-              <Units>SEER</Units><Value>16.0</Value>
-            </AnnualCoolingEfficiency>
-            <CrankcaseHeaterWatts>50</CrankcaseHeaterWatts>
-          </CoolingSystem>
-        </HVAC></Systems>"#,
-    );
-    let specs = resolve_ok(&xml);
-    let spec = find_spec(&specs, "Air Conditioner");
-
-    let typed_config = spec
-        .typed_config
-        .as_ref()
-        .expect("Air Conditioner must have a typed_config");
-    let cfg: CentralAirConditionerConfig = typed_config
-        .typed()
-        .expect("must deserialize into CentralAirConditionerConfig");
-
-    // Today this is None (the bug). Remove this assertion when G1 is fixed.
-    assert_eq!(
-        cfg.crankcase_heater_kw, None,
-        "Gap still present (expected today): crankcase_heater_kw should be \
-         Some(0.050) after fix but is currently None"
+        "absent threshold must default to 12.78 °C (55 °F)"
     );
 }
 
@@ -255,9 +208,9 @@ fn g3_resolver_wires_min_compressor_fraction_from_minimum_capacity() {
 // from AFUE > 0.90 and applies different 6-coeff vs 10-coeff efficiency curves.
 
 #[test]
-fn g4_gas_boiler_config_has_no_condensing_field() {
-    // Documents the gap: GasBoilerConfig lacks a `condensing` field, so no
-    // resolver can ever set it.  This test PASSES today (gap confirmed).
+fn g4_gas_boiler_config_has_condensing_field() {
+    // G4: GasBoilerConfig now has a `condensing: bool` field.
+    // The resolver sets it from AFUE > 0.90 per OCHRE convention.
     let xml = wrap_systems(
         r#"<Systems><HVAC>
           <HeatingSystem>
@@ -274,16 +227,6 @@ fn g4_gas_boiler_config_has_no_condensing_field() {
     let specs = resolve_ok(&xml);
     let boiler = find_spec(&specs, "Gas Boiler");
 
-    // No `condensing` key in the raw params — the field doesn't exist yet.
-    assert!(
-        boiler.parameters.get("condensing").is_none(),
-        "Gap confirmed (G4): `condensing` field absent from \
-         GasBoilerConfig/params; AFUE=0.95 should be treated as condensing \
-         (OCHRE: AFUE>0.90) once the field is added. \
-         If this fires, the field has been added."
-    );
-
-    // Verify AFUE is correctly carried (the resolver does read AFUE).
     let typed_config = boiler
         .typed_config
         .as_ref()
@@ -296,6 +239,11 @@ fn g4_gas_boiler_config_has_no_condensing_field() {
         "AFUE must be 0.95, got {}",
         cfg.afue
     );
+    // AFUE 0.95 > 0.90 → condensing boiler.
+    assert!(
+        cfg.condensing,
+        "AFUE=0.95 must set condensing=true (OCHRE: AFUE > 0.90)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -306,11 +254,9 @@ fn g4_gas_boiler_config_has_no_condensing_field() {
 // extension params map; the standard HPXML element is not read.
 
 #[test]
-fn g6_supplemental_heating_lockout_temperature_not_read_from_standard_element() {
-    // Documents the gap: SupplementalHeatingLockoutTemperature in the
-    // standard HPXML element is not parsed.  The resolver's output must
-    // therefore not carry max_oat_supplemental_c.
-    // This test PASSES today (gap confirmed).
+fn g6_supplemental_heating_lockout_temperature_wired() {
+    // G6: SupplementalHeatingLockoutTemperature is now read from HPXML
+    // and wired to max_oat_supplemental_c in HeatPumpHeaterConfig.
     let xml = wrap_systems(
         r#"<Systems><HVAC>
           <HeatPump>
@@ -339,18 +285,20 @@ fn g6_supplemental_heating_lockout_temperature_not_read_from_standard_element() 
     let specs = resolve_ok(&xml);
     let heater = find_spec(&specs, "ASHP Heater");
 
-    // The element is in the HPXML but the resolver does not read it.
-    // max_oat_supplemental_c must be absent from raw params.
     let supplemental_oat = heater
         .parameters
         .get("max_oat_supplemental_c")
         .and_then(|v| v.as_f64());
 
+    // 65°F → °C = (65 - 32) * 5/9 ≈ 18.33°C
+    let expected_c = (65.0 - 32.0) * 5.0 / 9.0;
     assert!(
-        supplemental_oat.is_none(),
-        "Gap confirmed (G6): SupplementalHeatingLockoutTemperature \
-         is not parsed from the standard HPXML element; max_oat_supplemental_c \
-         must be None. Got {supplemental_oat:?}. \
-         If this fires, the standard-element wiring has been added."
+        supplemental_oat.is_some(),
+        "SupplementalHeatingLockoutTemperature=65°F must wire to max_oat_supplemental_c={expected_c:.2}°C"
+    );
+    assert!(
+        (supplemental_oat.unwrap() - expected_c).abs() < 0.01,
+        "max_oat_supplemental_c must be {expected_c:.2}°C, got {:.2}",
+        supplemental_oat.unwrap()
     );
 }

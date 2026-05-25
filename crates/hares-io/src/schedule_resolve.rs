@@ -1522,6 +1522,8 @@ mod tests {
                         charge_defect_ratio: None,
                     },
                     stage_shrs: None,
+                    crankcase_heater_kw: None,
+                    crankcase_heater_threshold_c: None,
                 },
             ),
         ];
