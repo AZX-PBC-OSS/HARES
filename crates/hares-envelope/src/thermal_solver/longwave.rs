@@ -12,15 +12,7 @@ use crate::longwave_radiation::{
     exterior_longwave_w, interior_longwave_linearised_w_into, sky_view_factor,
 };
 
-/// NFRC exterior combined film coefficient [W/(m²·K)] for window U-factor rating.
-///
-/// The value 34 W/(m²·K) is used here as an approximation of the NFRC 100 winter
-/// design condition. Authoritative sources (LBNL Windows-CalcEngine issue #77,
-/// ASHRAE HoF) indicate the NFRC combined outside film coefficient is approximately
-/// 20.6 W/(m²·K) (convective 15 + radiative ~5.6) — this constant should be
-/// corrected to ~20.6 once the correction has been validated against the full
-/// window U-factor calculation chain.
-const H_OUT_NFRC: f64 = 34.0;
+use hares_physics::film_coefficients::H_OUT_NFRC;
 
 use super::ThermalSolver;
 
@@ -87,22 +79,26 @@ impl ThermalSolver {
                 // This avoids double-counting: the U-factor's h_out already includes
                 // radiative exchange at T_sky = T_air; we correct for T_sky ≠ T_air only.
                 // Use actual h_out from boundary film resistance when available;
-                // fall back to NFRC 34 W/(m²·K) rating condition.
+                // fall back to the ASHRAE conventional combined exterior coefficient
+                // (34 W/(m²·K)) — the standard peak-load fallback for fenestration
+                // when explicit film resistance is unavailable.
+                // ASHRAE HoF 2021 Ch. 15, Table 1; Engineers Edge (citing ASHRAE).
                 let h_out = if info.h_out_w_m2_k > 0.0 {
                     info.h_out_w_m2_k
                 } else {
-                    // The NFRC combined outside film coefficient is here approximated
-                    // as 34 W/(m²·K); authoritative sources (LBNL Windows-CalcEngine
-                    // issue #77, ASHRAE HoF) indicate ~20.6 W/(m²·K) — the constant
-                    // should be corrected once validated against the full window
-                    // U-factor chain. A non-positive computed h_out indicates an
-                    // upstream computation failure and should be unreachable in
-                    // production.
+                    // The fallback value 34 W/(m²·K) is the ASHRAE conventional
+                    // combined (convective + radiative) exterior coefficient for
+                    // peak heating load calculations at ~15 mph wind. It is NOT the
+                    // NFRC 100 / ISO 15099 convective boundary condition (26 W/(m²·K)
+                    // at 5.5 m/s), but is the correct fallback for simplified
+                    // fenestration load-calculation contexts (ASHRAE HoF 2021 Ch. 15).
+                    // A non-positive computed h_out indicates an upstream computation
+                    // failure and should be unreachable in production.
                     tracing::warn!(
                         surface_id = info.surface_id,
                         h_out_w_m2_k = info.h_out_w_m2_k,
                         "window exterior film coefficient is non-positive; \
-                         using NFRC fallback ({H_OUT_NFRC} W/(m²·K)). \
+                         using ASHRAE conventional fallback ({H_OUT_NFRC} W/(m²·K)). \
                          This should be rare — check upstream boundary film computation."
                     );
                     H_OUT_NFRC
@@ -679,12 +675,14 @@ mod tests {
         );
     }
 
-    /// Verify: H_OUT_NFRC matches the NFRC 100-2020 winter rating condition.
+    /// Verify: H_OUT_NFRC matches the ASHRAE conventional combined exterior
+    /// film coefficient for peak heating load calculations.
+    /// ASHRAE HoF 2021 Ch. 15, Table 1; Engineers Edge (citing ASHRAE).
     #[test]
     fn h_out_nfrc_matches_standard() {
         assert!(
             (H_OUT_NFRC - 34.0).abs() < 1e-9,
-            "H_OUT_NFRC should be 34.0 W/(m²·K) per NFRC 100-2020"
+            "H_OUT_NFRC should be 34.0 W/(m²·K) per ASHRAE conventional peak-load value"
         );
     }
 
@@ -986,37 +984,10 @@ mod tests {
         );
     }
 
-    // ── Guard against H_OUT_NFRC silent drift ─────────────────────────────────
+    // ── H_OUT_NFRC is now exported from hares-physics::film_coefficients ──────
     //
-    // H_OUT_NFRC is declared private in this module. A second consumer at
-    // solver_builder.rs hardcodes `34.0` as a fallback for the same purpose,
-    // creating a silent drift risk. Both must agree; the constant must be
-    // exported from hares-physics so that the duplicate can be removed.
-    //
-    // `h_out_nfrc_private_matches_solver_builder_fallback` documents the current
-    // duplicate and will pass as long as both copies remain 34.0. Once H_OUT_NFRC
-    // is exported from hares-physics and solver_builder.rs is updated to import
-    // it, this test becomes the guard.
+    // Both this module and solver_builder.rs import the same constant, eliminating
+    // the duplicate-literal drift risk. The `h_out_nfrc_matches_standard` test
+    // above guards the numeric value (34.0 W/(m²·K) per ASHRAE Ch. 15).
 
-    /// Regression: the NFRC fallback value used in this module must equal the
-    /// hardcoded `34.0` literal in
-    /// `crates/hares-core/src/dwelling/solver_builder.rs:708`. Until
-    /// `H_OUT_NFRC` is exported from `hares-physics` and both sites consume
-    /// the same constant, this test guards against silent drift.
-    #[test]
-    fn h_out_nfrc_private_matches_solver_builder_fallback() {
-        // The `solver_builder.rs` fallback at line 708:
-        //   h_out_w_m2_k: if sb.r_film_exterior_m2_k_w > 1e-9 {
-        //       1.0 / sb.r_film_exterior_m2_k_w
-        //   } else {
-        //       34.0          ← this literal duplicates H_OUT_NFRC
-        //   }
-        let solver_builder_fallback: f64 = 34.0;
-        assert!(
-            (H_OUT_NFRC - solver_builder_fallback).abs() < 1e-9,
-            "H_OUT_NFRC ({H_OUT_NFRC}) has drifted from the duplicate \
-             literal in solver_builder.rs ({solver_builder_fallback}). \
-             Fix: export H_OUT_NFRC from hares-physics and use it in both sites."
-        );
-    }
 }

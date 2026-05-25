@@ -361,6 +361,7 @@ where
         EquipmentConfig::from_typed(name.clone(), T::equipment_type_name().to_string(), cfg);
     EquipmentSpec {
         name: name.clone(),
+        instance_name: None,
         fuel_type,
         parameters,
         zip_params: defaults.zip_params(&name).cloned(),

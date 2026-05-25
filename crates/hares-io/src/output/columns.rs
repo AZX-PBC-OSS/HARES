@@ -471,6 +471,7 @@ mod tests {
 
     fn make_spec(name: &str, fuel: FuelType) -> EquipmentSpec {
         EquipmentSpec {
+            instance_name: None,
             name: name.to_string(),
             fuel_type: fuel,
             parameters: Map::new(),

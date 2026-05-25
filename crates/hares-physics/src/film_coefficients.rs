@@ -14,6 +14,26 @@
 //! - OCHRE reference implementation `calculate_film_resistances`.
 //! - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, pp 79.
 //! - ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1.
+//! - ASHRAE HoF 2021 Ch. 15, Table 1 (fenestration film coefficients).
+//! - Engineers Edge surface heat transfer coefficients (citing ASHRAE
+//!   peak-load convention): 34.0 W/(m²·°C) winter, 22.7 W/(m²·°C) summer.
+
+/// Combined exterior film coefficient [W/(m²·K)] — ASHRAE conventional
+/// (convective + radiative) peak-load value at ~15 mph (6.7 m/s) wind for
+/// opaque outer surfaces. Commonly applied to fenestration in simplified
+/// load-calculation contexts as a fallback when explicit film resistance is
+/// unavailable.
+///
+/// This is **not** the NFRC 100 / ISO 15099 convective boundary condition
+/// (26 W/(m²·K) at 5.5 m/s wind, formula h_cv = 4 + 4·V). The 34 W/(m²·K)
+/// value is the ASHRAE conventional combined coefficient used for peak
+/// heating load calculations. See ASHRAE HoF 2021 Ch. 15, Table 1.
+///
+/// Used in `hares-envelope::thermal_solver::longwave` as the NFRC-fallback
+/// exterior film coefficient for window longwave radiation correction, and
+/// in `hares-core::dwelling::solver_builder` as the fallback when a
+/// computed exterior film resistance is unavailable.
+pub const H_OUT_NFRC: f64 = 34.0;
 
 /// Zone height ordering for TARP above/below determination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1698,6 +1698,7 @@ impl Dwelling {
                 .map(|eq| {
                     let d = eq.descriptor();
                     hares_io::EquipmentSpec {
+                        instance_name: None,
                         name: d.name.clone(),
                         fuel_type: d.fuel,
                         parameters: Map::new(),
@@ -5894,6 +5895,7 @@ occupancy = 1.0
     fn dwelling_equipment_creation_errors_on_unknown_class() {
         let registry = EquipmentRegistry::new();
         let spec = hares_io::EquipmentSpec {
+            instance_name: None,
             name: "Imaginary Widget".to_string(),
             fuel_type: hares_types::FuelType::Electric,
             parameters: Map::new(),

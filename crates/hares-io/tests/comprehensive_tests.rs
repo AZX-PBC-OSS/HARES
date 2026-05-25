@@ -52,6 +52,7 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
 
 fn make_spec(name: &str, fuel: FuelType) -> hares_io::EquipmentSpec {
     hares_io::EquipmentSpec {
+        instance_name: None,
         name: name.to_string(),
         fuel_type: fuel,
         parameters: serde_json::Map::new(),

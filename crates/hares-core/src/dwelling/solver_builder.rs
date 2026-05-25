@@ -718,7 +718,7 @@ pub(crate) fn build_default_solvers(
                 h_out_w_m2_k: if sb.r_film_exterior_m2_k_w > 1e-9 {
                     1.0 / sb.r_film_exterior_m2_k_w
                 } else {
-                    34.0
+                    hares_physics::film_coefficients::H_OUT_NFRC
                 },
             });
             wiring

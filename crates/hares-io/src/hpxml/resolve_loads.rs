@@ -95,11 +95,6 @@ pub(super) fn resolve_scheduled_loads(
             let mut counter = 0u32;
             for node in appliances.children_named(tag) {
                 counter += 1;
-                let mut eq_name = if counter > 1 {
-                    format!("{name} {counter}")
-                } else {
-                    name.to_string()
-                };
                 let mut params = Map::new();
                 let mut fuel = FuelType::Electric;
                 // Default RatedAnnualkWh: washer=400, dishwasher=467, fridge=637+18*beds, freezer=319.8.
@@ -371,13 +366,10 @@ pub(super) fn resolve_scheduled_loads(
                 // (garage, basement, etc.) contribute zero zone gain. Primary
                 // refrigerators default to "Indoor" (conditioned); non-primary
                 // default to non-conditioned.
-                if tag == "Refrigerator" {
+                let is_non_primary_fridge = if tag == "Refrigerator" {
                     let is_primary = child_text(node, "PrimaryIndicator")
                         .map(|v| v.eq_ignore_ascii_case("true"))
                         .unwrap_or(true);
-                    if !is_primary {
-                        eq_name = format!("{name} (Secondary)");
-                    }
                     let default_loc = if is_primary { "conditioned space" } else { "" };
                     let location =
                         child_text(node, "Location").unwrap_or_else(|| default_loc.to_string());
@@ -385,9 +377,18 @@ pub(super) fn resolve_scheduled_loads(
                         params.insert("sensible_gain_fraction".to_string(), json!(0.0));
                         params.insert("latent_gain_fraction".to_string(), json!(0.0));
                     }
-                }
+                    !is_primary
+                } else {
+                    false
+                };
 
-                let mut spec = build_spec(eq_name, fuel, params, defaults);
+                let mut spec = build_spec(name.to_string(), fuel, params, defaults);
+                if counter > 1 {
+                    spec.instance_name = Some(format!("{name} {counter}"));
+                }
+                if is_non_primary_fridge {
+                    spec.instance_name = Some(format!("{name} (Secondary)"));
+                }
                 if tag == "Dehumidifier" {
                     let cfg = DehumidifierConfig {
                         equipment_id: None,

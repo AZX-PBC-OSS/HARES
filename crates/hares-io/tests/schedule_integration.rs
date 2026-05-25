@@ -50,6 +50,7 @@ fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
     parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
     parameters.insert("sensible_gain_fraction".to_string(), Value::from(0.0));
     EquipmentSpec {
+        instance_name: None,
         name: name.to_string(),
         fuel_type: FuelType::Electric,
         parameters,

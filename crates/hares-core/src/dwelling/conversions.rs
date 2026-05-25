@@ -533,7 +533,8 @@ pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> Equi
         raw_config.insert("zip_pf".to_string(), ConfigValue::Float(zip.pf));
     }
 
-    EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config)
+    let display_name = spec.instance_name.as_ref().unwrap_or(&spec.name).clone();
+    EquipmentConfig::raw(display_name, spec.name.clone(), raw_config)
 }
 
 pub(crate) fn merged_equipment_config(
@@ -564,6 +565,7 @@ pub(crate) fn merged_equipment_config(
     let mut merged = spec.parameters.clone();
     apply_equipment_overrides(&mut merged, overrides, &spec.name);
     let merged_spec = hares_io::EquipmentSpec {
+        instance_name: spec.instance_name.clone(),
         name: spec.name.clone(),
         fuel_type: spec.fuel_type,
         parameters: merged,
@@ -1013,6 +1015,7 @@ mod tests {
             .cloned()
             .expect("furnace config object");
         hares_io::EquipmentSpec {
+            instance_name: None,
             name: "Gas Furnace".to_string(),
             fuel_type: FuelType::Gas,
             parameters,

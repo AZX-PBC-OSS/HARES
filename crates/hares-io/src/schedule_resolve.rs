@@ -1155,6 +1155,7 @@ mod tests {
         let mut parameters = Map::new();
         parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
         EquipmentSpec {
+            instance_name: None,
             name: name.to_string(),
             fuel_type: FuelType::Electric,
             parameters,
@@ -1176,6 +1177,7 @@ mod tests {
             parameters.insert("max_electric_power_w".to_string(), Value::from(max_w));
         }
         EquipmentSpec {
+            instance_name: None,
             name: name.to_string(),
             fuel_type: FuelType::Electric,
             parameters,
@@ -1442,6 +1444,7 @@ mod tests {
         config: T,
     ) -> EquipmentSpec {
         EquipmentSpec {
+            instance_name: None,
             name: name.to_string(),
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
@@ -1689,6 +1692,7 @@ mod tests {
             other => panic!("unsupported water heater type for schedule test: {other}"),
         };
         EquipmentSpec {
+            instance_name: None,
             name: name.to_string(),
             fuel_type: if name == "Gas Water Heater" {
                 FuelType::Gas
@@ -1725,6 +1729,7 @@ mod tests {
             },
         );
         EquipmentSpec {
+            instance_name: None,
             name: "Tankless Water Heater".to_string(),
             fuel_type: FuelType::Electric,
             parameters: Map::new(),
@@ -1897,6 +1902,7 @@ mod tests {
             Value::from(annual_gas_therms),
         );
         let spec = EquipmentSpec {
+            instance_name: None,
             name: "Gas Dryer".to_string(),
             fuel_type: FuelType::Gas,
             parameters,

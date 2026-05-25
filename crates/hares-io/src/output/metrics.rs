@@ -1179,6 +1179,7 @@ mod tests {
     fn schema_from_build_schema_works_with_metrics_calculator() {
         // Integration test: build_schema output must be accepted by MetricsCalculator.
         let specs = vec![crate::hpxml::EquipmentSpec {
+            instance_name: None,
             name: "ASHP Heater".to_string(),
             fuel_type: hares_types::FuelType::Electric,
             parameters: serde_json::Map::new(),

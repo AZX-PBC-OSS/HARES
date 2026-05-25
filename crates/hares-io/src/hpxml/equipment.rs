@@ -17,11 +17,15 @@ use super::resolve_water_heater::resolve_water_heaters;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EquipmentSpec {
+    /// Equipment class name — identifies the equipment type for defaults lookup
+    /// and registry instantiation.
     pub name: String,
+    /// Per-instance display name. When `None`, `name` is used for display.
+    pub instance_name: Option<String>,
     pub fuel_type: FuelType,
     pub parameters: Map<String, Value>,
     pub zip_params: Option<ZipParameters>,
-    /// Typed config, populated for HVAC equipment types that have been migrated.
+    /// Typed config, populated for equipment types that have been migrated.
     /// When present, consumers should prefer this over raw `parameters`.
     pub typed_config: Option<hares_equipment::EquipmentConfig>,
 }
@@ -110,6 +114,7 @@ pub(super) fn build_spec(
 
     EquipmentSpec {
         name,
+        instance_name: None,
         fuel_type,
         parameters,
         zip_params,
@@ -133,6 +138,7 @@ where
     let typed_config = EquipmentConfig::from_typed(name.clone(), name.clone(), config);
     EquipmentSpec {
         name: name.clone(),
+        instance_name: None,
         fuel_type,
         parameters,
         zip_params: defaults.zip_params(&name).cloned(),

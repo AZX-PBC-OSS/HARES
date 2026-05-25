@@ -51,6 +51,7 @@ fn make_spec_annual_kwh(name: &str, annual_kwh: f64) -> EquipmentSpec {
     let mut parameters = Map::new();
     parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
     EquipmentSpec {
+        instance_name: None,
         name: name.to_string(),
         fuel_type: FuelType::Electric,
         parameters,
@@ -64,6 +65,7 @@ fn make_spec_with_duty_cycle(name: &str, annual_kwh: f64, duty_cycle: f64) -> Eq
     parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
     parameters.insert("duty_cycle_fraction".to_string(), Value::from(duty_cycle));
     EquipmentSpec {
+        instance_name: None,
         name: name.to_string(),
         fuel_type: FuelType::Electric,
         parameters,
