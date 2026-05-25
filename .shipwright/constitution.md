@@ -275,6 +275,12 @@ Specifically forbidden:
 
 Reviewers must fix rather than request. If the only remaining issues after an implementation pass are trivial — wording, comment phrasing, a variable name that could be clearer — the reviewer fixes them inline rather than bouncing the ticket back for another round-trip. Reserve review rejections for substantive problems: wrong physics, missing tests, architectural violations, broken correctness. A round-trip has a real cost; spend it only when the problem cannot be *trivially* fixed in place.
 
+Reviewers must also check for and reject untracked deferrals. Any `### Known Limitations` entry, code comment, or implementation note that describes doable work deferred to "future work," "a later ticket," "a follow-up pass," or any similar phrase without a concrete ticket ID is a substantively incomplete implementation. The reviewer must either:
+- Reject the ticket and require the deferred work to be completed before `done`, or
+- Require a tracking ticket to be created in `.shipwright/initiatives/` and referenced from the Known Limitations entry before accepting.
+
+A half-fix with a `// TODO` is not ready for review. A placeholder default with "should be configurable later" is not ready for merge. Reject these on sight.
+
 ---
 
 ## Artifact alignment
