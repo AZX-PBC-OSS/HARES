@@ -14,6 +14,7 @@ use hares_equipment::hvac::heating_config::GasBoilerConfig;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
+use hares_physics::units::temperature_f_to_c;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -290,8 +291,7 @@ fn g6_supplemental_heating_lockout_temperature_wired() {
         .get("max_oat_supplemental_c")
         .and_then(|v| v.as_f64());
 
-    // 65°F → °C = (65 - 32) * 5/9 ≈ 18.33°C
-    let expected_c = (65.0 - 32.0) * 5.0 / 9.0;
+    let expected_c = temperature_f_to_c(65.0); // 65 °F → 18.33 °C
     assert!(
         supplemental_oat.is_some(),
         "SupplementalHeatingLockoutTemperature=65°F must wire to max_oat_supplemental_c={expected_c:.2}°C"

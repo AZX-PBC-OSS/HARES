@@ -622,7 +622,10 @@ impl CoolingCore {
             if self.is_room_ac {
                 let cfg = config.require_typed::<RoomAcConfig>("Room AC")?;
                 (
-                    cfg.crankcase_heater_kw.unwrap_or(CRANKCASE_HEATER_KW),
+                    // Room ACs have no crankcase heater per OCHRE convention
+                    // (MinisplitAHSPCooler class uses 15 W; window/room ACs use 0 W).
+                    // Default to 0.0 kW, not the central-AC default of 0.05 kW.
+                    cfg.crankcase_heater_kw.unwrap_or(0.0),
                     cfg.crankcase_heater_threshold_c
                         .unwrap_or(CRANKCASE_HEATER_THRESHOLD_C),
                     cfg.crankcase_capacity_curve_coeffs,
@@ -2988,6 +2991,69 @@ mod tests {
         assert!(
             (eir - 0.25).abs() < 1e-9,
             "absent charge_defect_ratio must leave EIR unchanged; got {eir}"
+        );
+    }
+
+    // Regression: RoomAcConfig { crankcase_heater_kw: None } must default to 0 kW,
+    // not the central-AC default of 0.05 kW. Room ACs have no crankcase heater
+    // per OCHRE convention (OCHRE HVAC.py: room/window ACs use 0 W crankcase).
+    // OAT at 5 °C — below central-AC threshold (12.8 °C) — distinguishes the two:
+    //   Room AC correct:    crankcase = 0.0 kW (no heater)
+    //   Central AC default: crankcase = 0.05 kW (wrong for Room AC)
+    #[test]
+    fn room_ac_crankcase_none_defaults_to_zero_not_central_ac_default() {
+        let cfg = EquipmentConfig::from_typed(
+            "RAC".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 0.33,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                cooling_setpoint_source: None,
+                heating_setpoint_source: None,
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
+                shr: None,
+                startup_cd: None,
+                // Intentionally None: the equipment init must default to 0.0 kW (Room AC),
+                // not 0.05 kW (central-AC default used if the code path is wrong).
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+
+        let mut rac = RoomAC::new(cfg.clone());
+        // Zone in deadband (21 °C, between heating=18 °C and cooling=24 °C).
+        // OAT = 5 °C — below central-AC crankcase threshold (12.8 °C).
+        // Compressor is off; crankcase heater power must be 0 kW for Room AC.
+        let e = env(21.0, 0.010, 15.0, 5.0);
+        rac.init(&cfg, &e).unwrap();
+        rac.update_control(&e);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        rac.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert_eq!(
+            ports.electrical.net_active_kw(),
+            0.0,
+            "Room AC crankcase_heater_kw=None must default to 0 kW (no crankcase heater); \
+             central-AC default would draw 0.05 kW at 5 °C. Got {}",
+            ports.electrical.net_active_kw()
         );
     }
 }
