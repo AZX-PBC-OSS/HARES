@@ -25,9 +25,10 @@ impl ThermalSolver {
     /// thermal-absorptance-weighted area fractions (E+ Eng.Ref "Zone Internal
     /// Gains" TMULT method). Opaque surfaces: radiant × radiation_frac →
     /// surface node, radiant × (1-radiation_frac) → zone air. Window surfaces
-    /// (no input_index / no RC node): all radiant → zone air (no thermal mass
-    /// to absorb radiant gain). Kirchhoff's law: thermal absorptance ≈
-    /// emissivity for opaque surfaces in the LW band.
+    /// have `solar_absorptance = 0.0` set at construction (solver_builder.rs),
+    /// so their weight is zero and all their portion flows to zone air.
+    /// Kirchhoff's law: thermal absorptance ≈ emissivity for opaque surfaces
+    /// in the LW band.
     ///
     /// Uses `interior_lwr_zones` surfaces when available (ScriptF mode),
     /// falls back to `interior_solar_zones` surfaces (StarMesh mode).
@@ -156,7 +157,10 @@ fn distribute_radiant_lwr_surfaces(
 ///
 /// Uses solar_absorptance as a proxy for thermal absorptance (Kirchhoff's
 /// law: α_thermal ≈ ε for opaque surfaces in the LW band). Windows have
-/// `input_index: None` and are excluded from the TMULT weighting.
+/// solar_absorptance = 0.0 set at construction (see solver_builder.rs),
+/// so they receive zero weight in the radiant distribution. The input_index
+/// field is always Some(zone_air_idx); zero absorptance is the exclusion
+/// mechanism, not a None index.
 fn distribute_radiant_solar_surfaces(
     u: &mut DVector<f64>,
     total_radiant_w: f64,
@@ -169,8 +173,11 @@ fn distribute_radiant_solar_surfaces(
 
     let mut total_weight = 0.0;
     for (i, s) in surfaces.iter().enumerate() {
-        // Windows (input_index=None) can't absorb radiant gain into an
-        // RC node; skip them from the TMULT weighting.
+        // Windows have solar_absorptance = 0.0 set at construction
+        // (solver_builder.rs), producing zero weight. The input_index guard
+        // is defensive — in production input_index is always Some(zone_air_idx)
+        // — but is retained to avoid injecting into an out-of-range index if
+        // the struct is ever constructed outside solver_builder.rs.
         let w = if s.input_index.is_some() {
             s.area_m2 * s.solar_absorptance
         } else {
