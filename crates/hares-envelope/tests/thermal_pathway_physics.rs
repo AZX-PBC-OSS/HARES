@@ -447,12 +447,11 @@ fn rc_network_exposes_ground_column() {
 ///
 ///   Expected with fix:   air residual from radiant = 300 × (1−0.5) = 150 W
 ///                        breakdown[5] = 700 + 150 = 850 W
-///   With the bug:        breakdown[5] = 700 W  (missing 150 W)
-///
-/// Fix pending — will stop panicking when `zone_sensible_breakdown_debug`
-/// includes the radiant-air-residual in its breakdown output.
+/// `zone_sensible_breakdown_debug` applies both sensible and radiant port
+/// inputs, matching the production path in `build_input_vector`. The breakdown
+/// attributes convective direct, radiant-to-air residual, and radiant-to-surfaces
+/// components separately.
 #[test]
-#[should_panic(expected = "zone_sensible_breakdown_debug is missing apply_port_radiant_inputs")]
 fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
     // 1-state model: [zone_air]
     // 3 inputs: [T_outdoor(0), Q_surface(1), Q_zone_air(2)]
@@ -537,19 +536,48 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
     // With radiation_frac = 0.5:
     //   300 W radiant × (1 - 0.5) = 150 W returned to zone air
     //   300 W radiant × 0.5       = 150 W absorbed by surface RC node
-    // zone_sensible_breakdown_debug should include both sensible (700 W) and
-    // the air-node radiant residual (150 W) → total 850 W at after_port.
     let air_radiant_residual_w = radiant_w * (1.0 - surface.radiation_frac);
-    let expected_after_port = convective_w + air_radiant_residual_w;
+    let surface_radiant_w = radiant_w * surface.radiation_frac;
 
     assert!(
-        (breakdown[5] - expected_after_port).abs() < 1e-6,
-        "breakdown[5] (after_port) = {:.3} W, expected {:.3} W (convective {:.0} + radiant residual {:.0}); \
-         zone_sensible_breakdown_debug is missing apply_port_radiant_inputs",
-        breakdown[5],
-        expected_after_port,
+        (breakdown.convective_direct_w - convective_w).abs() < 1e-6,
+        "convective_direct_w = {:.3} W, expected {:.0} W",
+        breakdown.convective_direct_w,
         convective_w,
+    );
+    assert!(
+        (breakdown.radiant_to_air_residual_w - air_radiant_residual_w).abs() < 1e-6,
+        "radiant_to_air_residual_w = {:.3} W, expected {:.0} W",
+        breakdown.radiant_to_air_residual_w,
         air_radiant_residual_w,
+    );
+    assert!(
+        (breakdown.radiant_to_surfaces_w - surface_radiant_w).abs() < 1e-6,
+        "radiant_to_surfaces_w = {:.3} W, expected {:.0} W",
+        breakdown.radiant_to_surfaces_w,
+        surface_radiant_w,
+    );
+
+    // Energy balance: total port contribution to zone air equals
+    // convective + radiant-to-air residual.
+    let zone_air_port_total = breakdown.convective_direct_w + breakdown.radiant_to_air_residual_w;
+    let expected_zone_air = convective_w + air_radiant_residual_w;
+    assert!(
+        (zone_air_port_total - expected_zone_air).abs() < 1e-6,
+        "zone air port total = {:.3} W, expected {:.3} W",
+        zone_air_port_total,
+        expected_zone_air,
+    );
+
+    // Energy conservation: radiant_to_air + radiant_to_surfaces == total radiant
+    let radiant_total = breakdown.radiant_to_air_residual_w + breakdown.radiant_to_surfaces_w;
+    assert!(
+        (radiant_total - radiant_w).abs() < 1e-6,
+        "radiant total {:.3} = air {:.3} + surfaces {:.3}, expected {:.0}",
+        radiant_total,
+        breakdown.radiant_to_air_residual_w,
+        breakdown.radiant_to_surfaces_w,
+        radiant_w,
     );
 }
 

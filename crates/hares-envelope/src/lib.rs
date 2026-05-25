@@ -37,5 +37,5 @@ pub use thermal_solver::{
     ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
     InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
     NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
-    ThermalSolverError, WindowSolarProperties,
+    ThermalSolverError, WindowSolarProperties, ZoneSensibleBreakdown,
 };

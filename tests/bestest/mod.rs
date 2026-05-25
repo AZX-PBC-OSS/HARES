@@ -477,31 +477,40 @@ fn debug_600ff_heat_balance_at_peak() {
             .thermal_solver
             .zone_sensible_breakdown_debug(&ports_clone, &env_clone)
     };
-    eprintln!("[breakdown] after_outdoor={:.2}", breakdown[0]);
+    eprintln!("[breakdown] after_outdoor={:.2}", breakdown.after_outdoor_w);
     eprintln!(
         "[breakdown] after_window_solar={:.2} (delta={:.2})",
-        breakdown[1],
-        breakdown[1] - breakdown[0]
+        breakdown.after_window_solar_w,
+        breakdown.after_window_solar_w - breakdown.after_outdoor_w
     );
     eprintln!(
         "[breakdown] after_ext_solar={:.2} (delta={:.2})",
-        breakdown[2],
-        breakdown[2] - breakdown[1]
+        breakdown.after_ext_solar_w,
+        breakdown.after_ext_solar_w - breakdown.after_window_solar_w
     );
     eprintln!(
         "[breakdown] after_ext_lwr={:.2} (delta={:.2})",
-        breakdown[3],
-        breakdown[3] - breakdown[2]
+        breakdown.after_ext_lwr_w,
+        breakdown.after_ext_lwr_w - breakdown.after_ext_solar_w
     );
     eprintln!(
         "[breakdown] after_int_lwr={:.2} (delta={:.2})",
-        breakdown[4],
-        breakdown[4] - breakdown[3]
+        breakdown.after_int_lwr_w,
+        breakdown.after_int_lwr_w - breakdown.after_ext_lwr_w
     );
+    let after_port = breakdown.after_int_lwr_w
+        + breakdown.convective_direct_w
+        + breakdown.radiant_to_air_residual_w;
     eprintln!(
         "[breakdown] after_port={:.2} (delta={:.2})",
-        breakdown[5],
-        breakdown[5] - breakdown[4]
+        after_port,
+        after_port - breakdown.after_int_lwr_w
+    );
+    eprintln!(
+        "[breakdown] convective_direct={:.2} radiant_to_air={:.2} radiant_to_surfaces={:.2}",
+        breakdown.convective_direct_w,
+        breakdown.radiant_to_air_residual_w,
+        breakdown.radiant_to_surfaces_w,
     );
 
     // The zone temp at step (max_step-1)

@@ -157,6 +157,58 @@ pub struct ThermalSolver {
     window_solar_diag_buf: Vec<config::WindowSolarDiag>,
 }
 
+/// Per-component breakdown of zone air sensible contributions.
+///
+/// Captures both the production path stages (outdoor, solar, LWR) and the
+/// port contributions split by routing path so the convective/radiant
+/// attribution is explicit. The zone-air port total equals
+/// `convective_direct_w + radiant_to_air_residual_w`.
+///
+/// Energy balance invariant (within floating-point rounding):
+/// `after_int_lwr_w + convective_direct_w + radiant_to_air_residual_w`
+/// equals the total zone air input at the end of the port application
+/// sequence.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoneSensibleBreakdown {
+    /// u[zone_air] after outdoor temperature inputs [W].
+    pub after_outdoor_w: f64,
+    /// u[zone_air] after window solar inputs [W].
+    pub after_window_solar_w: f64,
+    /// u[zone_air] after exterior solar inputs [W].
+    pub after_ext_solar_w: f64,
+    /// u[zone_air] after exterior LWR inputs [W].
+    pub after_ext_lwr_w: f64,
+    /// u[zone_air] after interior LWR inputs (ScriptF) [W].
+    pub after_int_lwr_w: f64,
+    /// Direct convective gain from equipment sensible ports [W].
+    pub convective_direct_w: f64,
+    /// Radiant-to-air convective residual after TMULT surface distribution [W].
+    ///
+    /// Radiant gain × (1 − radiation_frac) for each surface, weighted
+    /// by area×emissivity per the EnergyPlus TMULT method.
+    pub radiant_to_air_residual_w: f64,
+    /// Radiant gain delivered to interior surface RC nodes [W].
+    ///
+    /// Radiant gain × radiation_frac for each surface.
+    pub radiant_to_surfaces_w: f64,
+}
+
+impl ZoneSensibleBreakdown {
+    /// All-zero breakdown (zone index not found).
+    fn zeros() -> Self {
+        Self {
+            after_outdoor_w: 0.0,
+            after_window_solar_w: 0.0,
+            after_ext_solar_w: 0.0,
+            after_ext_lwr_w: 0.0,
+            after_int_lwr_w: 0.0,
+            convective_direct_w: 0.0,
+            radiant_to_air_residual_w: 0.0,
+            radiant_to_surfaces_w: 0.0,
+        }
+    }
+}
+
 impl ThermalSolver {
     pub fn state_vector(&self) -> &[f64] {
         self.x.as_slice()
@@ -269,17 +321,25 @@ impl ThermalSolver {
     }
 
     /// Returns the per-component breakdown of u[zone_sensible] for debugging.
-    /// Returns (after_outdoor, after_window_solar, after_ext_solar, after_ext_lwr, after_int_lwr, after_port) [W].
+    ///
+    /// Applies both sensible and radiant port inputs in the same sequence as
+    /// the production path (`build_input_vector`), so the reported zone-air
+    /// contribution includes the convective residual from radiant distribution.
+    ///
+    /// Radiant gains are distributed to interior surfaces using TMULT
+    /// area×emissivity weighting; the fraction not absorbed by surfaces
+    /// (`1 − radiation_frac`) returns to the zone air as a convective
+    /// residual.
     pub fn zone_sensible_breakdown_debug(
         &mut self,
         ports: &hares_types::PortSlots,
         env: &hares_types::EnvironmentState,
-    ) -> [f64; 6] {
+    ) -> ZoneSensibleBreakdown {
         let n = self.model.input_dim();
         let mut u = DVector::zeros(n);
         let zone_id = self.config.indoor_zone_id;
         let Some(&z_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) else {
-            return [0.0; 6];
+            return ZoneSensibleBreakdown::zeros();
         };
         self.apply_outdoor_inputs(&mut u, env);
         let after_outdoor = u[z_idx];
@@ -296,16 +356,31 @@ impl ThermalSolver {
             self.apply_interior_longwave_inputs(&mut u, env);
         }
         let after_int_lwr = u[z_idx];
+
+        // Port inputs in production sequence: sensible first, then radiant.
+        // Track the delta at the zone air index to split convective direct
+        // from the radiant-to-air convective residual.
         self.apply_port_sensible_inputs(&mut u, ports);
-        let after_port = u[z_idx];
-        [
-            after_outdoor,
-            after_window_solar,
-            after_ext_solar,
-            after_ext_lwr,
-            after_int_lwr,
-            after_port,
-        ]
+        let after_convective = u[z_idx];
+        let convective_direct_w = after_convective - after_int_lwr;
+
+        self.apply_port_radiant_inputs(&mut u, ports);
+        let after_radiant = u[z_idx];
+        let radiant_to_air_residual_w = after_radiant - after_convective;
+
+        let total_radiant_w: f64 = ports.thermal.iter().map(|t| t.radiant_gain_w).sum();
+        let radiant_to_surfaces_w = (total_radiant_w - radiant_to_air_residual_w).max(0.0);
+
+        ZoneSensibleBreakdown {
+            after_outdoor_w: after_outdoor,
+            after_window_solar_w: after_window_solar,
+            after_ext_solar_w: after_ext_solar,
+            after_ext_lwr_w: after_ext_lwr,
+            after_int_lwr_w: after_int_lwr,
+            convective_direct_w,
+            radiant_to_air_residual_w,
+            radiant_to_surfaces_w,
+        }
     }
 
     pub fn new(
