@@ -989,5 +989,4 @@ mod tests {
     // Both this module and solver_builder.rs import the same constant, eliminating
     // the duplicate-literal drift risk. The `h_out_nfrc_matches_standard` test
     // above guards the numeric value (34.0 W/(m²·K) per ASHRAE Ch. 15).
-
 }
