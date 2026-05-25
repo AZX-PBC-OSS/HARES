@@ -592,17 +592,22 @@ pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
     sky_k - KELVIN_OFFSET_C
 }
 
-/// Martin & Berdahl (1984) clear-sky emissivity from dew point temperature.
+/// Berdahl-Martin clear-sky emissivity from dew point temperature.
 ///
 /// ε_clear = 0.758 + 0.521 × (T_dp_C / 100) + 0.625 × (T_dp_C / 100)²
 ///
-/// This is the quadratic form from Martin & Berdahl (1984) Solar Energy 33(3/4)
-/// pp. 321-336, which supersedes the linear approximation in the original
-/// Berdahl & Martin (1984) Solar Energy 32(5) pp. 663-664. The quadratic form
-/// is used verbatim in EnergyPlus 9.6.
+/// The quadratic functional form was introduced by Martin & Berdahl (1984),
+/// "Characteristics of Infrared Sky Radiation in the United States," Solar Energy
+/// 33(3/4):321-336. The original companion paper Berdahl & Martin (1984) Solar
+/// Energy 32(5):663-664 used a linear approximation with coefficients
+/// 0.711 / 0.56 / 0.73.
 ///
-/// Cite: Martin, M. and Berdahl, P. (1984), "Characteristics of Infrared Sky
-/// Radiation in the United States", Solar Energy, 33(3/4), 321-336.
+/// The coefficient values 0.758 / 0.521 / 0.625 are the recalibrated set from
+/// Li, M., Jiang, Y. & Coimbra, C.F.M. (2017), "On the determination of
+/// atmospheric longwave irradiance under all-sky conditions," Solar Energy
+/// 144:40-48. This recalibrated form is used by EnergyPlus under the
+/// "Martin & Berdahl" model label (EnergyPlus Engineering Reference,
+/// Sky Radiation Modeling section).
 #[must_use]
 pub fn berdahl_martin_sky_emissivity(t_dp_c: f64) -> f64 {
     let x = t_dp_c / 100.0;

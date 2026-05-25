@@ -814,7 +814,7 @@ pub(crate) fn build_synthetic_weather(
     let outdoor_temp_c = config.weather.outdoor_temp_c;
     let dew_point_c = config.weather.dew_point_c;
 
-    // Compute clear-sky horizontal IR from Berdahl-Martin (1984) emissivity.
+    // Compute clear-sky horizontal IR from Berdahl-Martin emissivity.
     //
     // ε_clear = 0.758 + 0.521·(T_dp/100) + 0.625·(T_dp/100)²
     // IR_horizontal = ε_clear · σ · T_air_K⁴
@@ -823,8 +823,10 @@ pub(crate) fn build_synthetic_weather(
     // The previous value of 300 W/m² was inconsistent with clear sky at
     // typical BESTEST winter conditions (Denver, ~0 °C) where IR ≈ 180–200 W/m².
     //
-    // Cite: Martin, M. and Berdahl, P. (1984), "Characteristics of Infrared
-    // Sky Radiation in the United States", Solar Energy, 33(3/4), 321-336.
+    // Quadratic functional form: Martin & Berdahl (1984), Solar Energy
+    // 33(3/4):321-336. Coefficient values 0.758 / 0.521 / 0.625 are the
+    // recalibrated set from Li, Jiang & Coimbra (2017), Solar Energy 144:40-48,
+    // as used by EnergyPlus (Engineering Reference, Sky Radiation Modeling).
     let eps_clear = hares_io::berdahl_martin_sky_emissivity(dew_point_c);
     let t_air_k = outdoor_temp_c + hares_io::KELVIN_OFFSET_C;
     let horizontal_ir_w_m2 = eps_clear * hares_io::STEFAN_BOLTZMANN * t_air_k.powi(4);
