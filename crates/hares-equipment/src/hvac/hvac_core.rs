@@ -471,8 +471,16 @@ impl HvacEquipment {
         // Also honour the split capacity/EIR keys that the HPXML resolver writes
         // (capacity_biquadratic_coeffs / eir_biquadratic_coeffs). These are the
         // same keys that ac_config::load_curve_pair handles for the AC path; the
-        // HP heater goes through this generic init, so we replicate the fallback
+        // HP heater goes through this generic init, so we replicate the handling
         // here. Per-stage curves are interleaved: [cap_0, eir_0, cap_1, eir_1, ...].
+        //
+        // When split keys are present they override any `biquadratic_coeffs` loaded
+        // above. Both keys must be provided with the same number of per-speed curves;
+        // a count mismatch or providing only one side is a configuration error. This
+        // is consistent with OCHRE (raises an exception) and EnergyPlus
+        // (required-field per speed stage). There is no silent fill — missing or
+        // mismatched entries produce an Err rather than substituting identity
+        // coefficients.
         {
             let cap_curves = extract_text(config, "capacity_biquadratic_coeffs")
                 .map(parse_biquadratic_list)
@@ -493,19 +501,23 @@ impl HvacEquipment {
                         eir_curves.len()
                     )));
                 }
-                let n_stages = cap_curves.len().max(eir_curves.len());
+                if cap_curves.is_empty() {
+                    return Err(HaresError::Equipment(format!(
+                        "eir_biquadratic_coeffs has {} speed(s) but no capacity_biquadratic_coeffs provided; per-speed cap/EIR curves must both be present or both absent",
+                        eir_curves.len()
+                    )));
+                }
+                if eir_curves.is_empty() {
+                    return Err(HaresError::Equipment(format!(
+                        "capacity_biquadratic_coeffs has {} speed(s) but no eir_biquadratic_coeffs provided; per-speed cap/EIR curves must both be present or both absent",
+                        cap_curves.len()
+                    )));
+                }
+                let n_stages = cap_curves.len();
                 let mut interleaved = Vec::with_capacity(n_stages * 2);
                 for i in 0..n_stages {
-                    let cap = cap_curves
-                        .get(i)
-                        .copied()
-                        .unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
-                    let eir = eir_curves
-                        .get(i)
-                        .copied()
-                        .unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
-                    interleaved.push(cap);
-                    interleaved.push(eir);
+                    interleaved.push(cap_curves[i]);
+                    interleaved.push(eir_curves[i]);
                 }
                 self.config.biquadratic_coeffs = interleaved;
             }
@@ -3168,6 +3180,51 @@ mod tests {
         assert!(
             result.is_err(),
             "expected Err for mismatched curve counts (more EIR than cap), got Ok"
+        );
+    }
+
+    /// Providing `capacity_biquadratic_coeffs` without `eir_biquadratic_coeffs` is
+    /// rejected. A per-speed capacity curve without a corresponding EIR curve produces
+    /// physically impossible constant-EIR behaviour.
+    #[test]
+    fn cap_curves_without_eir_curves_rejected() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config.test_extras_mut().insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[[0.9,0.01,0,0.02,0,0],[0.8,0.02,0,0.015,0,0]]".into(),
+        );
+        let result = hvac.init(&config, &env(20.0, 60, 0));
+        assert!(
+            result.is_err(),
+            "expected Err when capacity_biquadratic_coeffs is provided without eir_biquadratic_coeffs"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("no eir_biquadratic_coeffs provided"),
+            "error should mention missing eir, got: {msg}"
+        );
+    }
+
+    /// Providing `eir_biquadratic_coeffs` without `capacity_biquadratic_coeffs` is
+    /// rejected (converse direction of the test above).
+    #[test]
+    fn eir_curves_without_cap_curves_rejected() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config.test_extras_mut().insert(
+            "eir_biquadratic_coeffs".to_string(),
+            "[[1.1,0,0,0.03,0,0],[1.2,0,0,0.04,0,0]]".into(),
+        );
+        let result = hvac.init(&config, &env(20.0, 60, 0));
+        assert!(
+            result.is_err(),
+            "expected Err when eir_biquadratic_coeffs is provided without capacity_biquadratic_coeffs"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("no capacity_biquadratic_coeffs provided"),
+            "error should mention missing cap, got: {msg}"
         );
     }
 

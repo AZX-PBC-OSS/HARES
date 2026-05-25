@@ -1,6 +1,6 @@
 //! Air conditioner curve helpers and telemetry -- typed config structs live in cooling_config.
 
-use hares_types::{Telemetry, TelemetryField, telemetry_keys as tk};
+use hares_types::{HaresError, Telemetry, TelemetryField, telemetry_keys as tk};
 
 use super::core_config::parse_biquadratic_list;
 use crate::EquipmentConfig;
@@ -253,23 +253,31 @@ pub(super) fn load_curve_pair(
         .unwrap_or_default();
 
     if !cap_curves.is_empty() || !eir_curves.is_empty() {
-        let n_stages = cap_curves.len().max(eir_curves.len());
-        let default_cap = if is_room_ac {
-            DEFAULT_ROOM_AC_CAPACITY_CURVE
-        } else {
-            DEFAULT_AC_CAPACITY_CURVE
-        };
-        let default_eir = if is_room_ac {
-            DEFAULT_ROOM_AC_EIR_CURVE
-        } else {
-            DEFAULT_AC_EIR_CURVE
-        };
+        if !cap_curves.is_empty() && !eir_curves.is_empty() && cap_curves.len() != eir_curves.len()
+        {
+            return Err(HaresError::Equipment(format!(
+                "capacity_biquadratic_coeffs has {} speed(s) but eir_biquadratic_coeffs has {} speed(s); per-speed cap/EIR curve counts must match",
+                cap_curves.len(),
+                eir_curves.len()
+            )));
+        }
+        if cap_curves.is_empty() {
+            return Err(HaresError::Equipment(format!(
+                "eir_biquadratic_coeffs has {} speed(s) but no capacity_biquadratic_coeffs provided; per-speed cap/EIR curves must both be present or both absent",
+                eir_curves.len()
+            )));
+        }
+        if eir_curves.is_empty() {
+            return Err(HaresError::Equipment(format!(
+                "capacity_biquadratic_coeffs has {} speed(s) but no eir_biquadratic_coeffs provided; per-speed cap/EIR curves must both be present or both absent",
+                cap_curves.len()
+            )));
+        }
+        let n_stages = cap_curves.len();
         let mut interleaved = Vec::with_capacity(n_stages * 2);
         for i in 0..n_stages {
-            let cap = cap_curves.get(i).copied().unwrap_or(default_cap);
-            let eir = eir_curves.get(i).copied().unwrap_or(default_eir);
-            interleaved.push(cap);
-            interleaved.push(eir);
+            interleaved.push(cap_curves[i]);
+            interleaved.push(eir_curves[i]);
         }
         curves = interleaved;
     }
@@ -294,4 +302,95 @@ pub(super) fn load_curve_pair(
     }
 
     Ok(curves)
+}
+
+// ---------------------------------------------------------------------------
+// tests for load_curve_pair split-key validation
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with(key: &str, value: &str) -> EquipmentConfig {
+        let mut cfg = EquipmentConfig::default();
+        cfg.test_extras_mut().insert(key.to_string(), value.into());
+        cfg
+    }
+
+    /// Both split keys provided with matching counts: interleaves correctly.
+    #[test]
+    fn matching_split_keys_interleaved() {
+        let mut cfg = EquipmentConfig::default();
+        cfg.test_extras_mut().insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[[2.0,0,0,0,0,0],[3.0,0,0,0,0,0]]".into(),
+        );
+        cfg.test_extras_mut().insert(
+            "eir_biquadratic_coeffs".to_string(),
+            "[[0.5,0,0,0,0,0],[0.6,0,0,0,0,0]]".into(),
+        );
+        let result = load_curve_pair(&cfg, false).unwrap();
+        assert_eq!(result.len(), 4, "interleaved: 2 cap + 2 eir = 4 entries");
+        assert_eq!(result[0][0], 2.0); // cap[0] a-coeff
+        assert_eq!(result[1][0], 0.5); // eir[0] a-coeff
+        assert_eq!(result[2][0], 3.0); // cap[1] a-coeff
+        assert_eq!(result[3][0], 0.6); // eir[1] a-coeff
+    }
+
+    /// Both split keys non-empty but counts differ → rejected.
+    #[test]
+    fn mismatched_split_key_counts_error() {
+        let mut cfg = EquipmentConfig::default();
+        cfg.test_extras_mut().insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[[2.0,0,0,0,0,0],[3.0,0,0,0,0,0]]".into(),
+        );
+        cfg.test_extras_mut().insert(
+            "eir_biquadratic_coeffs".to_string(),
+            "[[0.5,0,0,0,0,0]]".into(),
+        );
+        let result = load_curve_pair(&cfg, false);
+        assert!(result.is_err(), "mismatched counts must be an error");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("per-speed cap/EIR curve counts must match"),
+            "got: {msg}"
+        );
+    }
+
+    /// Capacity split key without EIR split key → rejected.
+    #[test]
+    fn cap_split_key_without_eir_error() {
+        let cfg = config_with("capacity_biquadratic_coeffs", "[[2.0,0,0,0,0,0]]");
+        let result = load_curve_pair(&cfg, false);
+        assert!(result.is_err(), "cap without eir must be an error");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("no eir_biquadratic_coeffs provided"),
+            "got: {msg}"
+        );
+    }
+
+    /// EIR split key without capacity split key → rejected.
+    #[test]
+    fn eir_split_key_without_cap_error() {
+        let cfg = config_with("eir_biquadratic_coeffs", "[[0.5,0,0,0,0,0]]");
+        let result = load_curve_pair(&cfg, false);
+        assert!(result.is_err(), "eir without cap must be an error");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("no capacity_biquadratic_coeffs provided"),
+            "got: {msg}"
+        );
+    }
+
+    /// No split keys, no biquadratic_coeffs → falls back to equipment-type defaults.
+    #[test]
+    fn empty_config_produces_defaults() {
+        let cfg = EquipmentConfig::default();
+        let result = load_curve_pair(&cfg, false).unwrap();
+        assert_eq!(result.len(), 2, "one default cap + one default eir");
+        assert_eq!(result[0], DEFAULT_AC_CAPACITY_CURVE);
+        assert_eq!(result[1], DEFAULT_AC_EIR_CURVE);
+    }
 }
