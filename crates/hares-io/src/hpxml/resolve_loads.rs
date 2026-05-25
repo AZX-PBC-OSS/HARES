@@ -375,6 +375,9 @@ pub(super) fn resolve_scheduled_loads(
                     let is_primary = child_text(node, "PrimaryIndicator")
                         .map(|v| v.eq_ignore_ascii_case("true"))
                         .unwrap_or(true);
+                    if !is_primary {
+                        eq_name = format!("{name} (Secondary)");
+                    }
                     let default_loc = if is_primary { "conditioned space" } else { "" };
                     let location =
                         child_text(node, "Location").unwrap_or_else(|| default_loc.to_string());
