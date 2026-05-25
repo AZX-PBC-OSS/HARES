@@ -1823,6 +1823,8 @@ pub(super) fn resolve_hvac(
     for dehumidifier in descendants_named(hvac, "Dehumidifier") {
         let mut params = Map::new();
         if let Some(cap_pints_day) = child_f64(dehumidifier, "Capacity") {
+            // HPXML §Dehumidifier/Capacity is in US liquid pints/day per the HPXML 4.x schema
+            // annotation. 1 US liquid pint = 0.473176473 L (exact, NIST Handbook 44).
             params.insert(
                 "capacity_liters_per_day".to_string(),
                 json!(cap_pints_day * 0.473_176_473),

@@ -31,6 +31,11 @@ const DEFAULT_TARGET_RH_FRACTION: f64 = 0.50;
 const DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION: f64 = 0.025;
 const RH_MIN_FRACTION: f64 = 0.0;
 const RH_MAX_FRACTION: f64 = 1.0;
+// Default dry-bulb operating bounds. HPXML does not tag the AHAM DH-1 edition;
+// the rated conditions are:
+//   DH-1-2008 (legacy, pre-2019): 26.7°C DB (80°F) / 60% RH
+//   DH-1-2017 / DH-1-2022 (current, per 10 CFR Part 430 Appendix X1):
+//     18.3°C DB (65°F) / 60% RH for portable; 22.8°C DB (73°F) / 60% RH for whole-home
 const DEFAULT_DB_BOUNDS_C: (f64, f64) = (10.0, 40.0);
 const DEFAULT_RH_BOUNDS: (f64, f64) = (RH_MIN_FRACTION, RH_MAX_FRACTION);
 
