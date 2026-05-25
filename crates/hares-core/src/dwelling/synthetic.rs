@@ -727,6 +727,8 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         windows,
         infiltration_ach50: None,
         infiltration_cfm50: None,
+        infiltration_ach_natural: None,
+        infiltration_cfm_natural: None,
         infiltration_ela_cm2: None,
         infiltration_constant_ach,
         hvac_capacity_w: Some(conv::power_btu_h_to_w(heating_capacity_btu_h)),

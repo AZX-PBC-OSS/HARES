@@ -146,7 +146,9 @@ impl DuctDseParams {
 /// conditioned space. Returns `Err(HpxmlError::MissingField)` when ducts do
 /// exist but the building lacks any of the three inputs that drive ASHRAE
 /// 152 DSE: conditioned volume, site latitude, site longitude.
-pub fn compute_duct_dse_params(building: &Building) -> std::result::Result<DuctDseParams, HpxmlError> {
+pub fn compute_duct_dse_params(
+    building: &Building,
+) -> std::result::Result<DuctDseParams, HpxmlError> {
     use super::building::DuctType;
 
     // Aggregate supply vs return duct data from unconditioned zones.
@@ -278,7 +280,9 @@ pub fn rebuild_hvac_typed_config(
     duct_params: &DuctDseParams,
 ) -> Option<EquipmentConfig> {
     match name {
-        "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params).ok().flatten(),
+        "Gas Furnace" => try_build_gas_furnace_config(name, params, duct_params)
+            .ok()
+            .flatten(),
         "Electric Furnace" => try_build_electric_furnace_config(name, params, duct_params),
         "Gas Boiler" => try_build_gas_boiler_config(name, params).ok().flatten(),
         "Electric Boiler" => try_build_electric_boiler_config(name, params),
@@ -2681,6 +2685,8 @@ mod tests {
             windows: vec![],
             infiltration_ach50: None,
             infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
             infiltration_constant_ach: None,
             hvac_capacity_w: None,

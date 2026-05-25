@@ -149,6 +149,8 @@ fn build_two_zone_solver(
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
+        node_capacitances: HashMap::new(),
+        node_index: HashMap::new(),
     };
 
     ThermalSolver::new(model, wiring, config, dt, env, indoor_temp_c)
@@ -390,6 +392,8 @@ fn radiant_port_in_non_indoor_zone_reaches_zone_surface() {
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
+        node_capacitances: HashMap::new(),
+        node_index: HashMap::new(),
     };
 
     // ZONE2 has one opaque surface: state_index=1 (zone2 surf), input_index=2.
@@ -519,6 +523,8 @@ fn oob_input_index_in_radiant_lwr_distribution_does_not_panic() {
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
+        node_capacitances: HashMap::new(),
+        node_index: HashMap::new(),
     };
 
     // Surface with input_index = 99, but u.len() == 2 at runtime.

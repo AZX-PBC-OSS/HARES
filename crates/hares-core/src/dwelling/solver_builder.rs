@@ -626,6 +626,14 @@ pub(crate) fn build_default_solvers(
         );
     }
 
+    // Forward the full per-node capacitance and index maps to the solver.
+    // node_capacitances and node_index are consumed from BuildingRC above;
+    // they are no longer borrowed after the B-matrix column normalisation
+    // and RCContext usage complete. The solver uses these for full-system
+    // energy balance checks (Σ C_i × ΔT_i/dt over all thermal nodes).
+    wiring.node_capacitances = node_capacitances;
+    wiring.node_index = node_index;
+
     // Match OCHRE: iterations = floor(dt / 300 s) + 1.
     let n_iter = (dt_s / 300.0).floor() as u32 + 1;
 
@@ -799,7 +807,7 @@ pub(crate) fn build_default_solvers(
                     .push(BoundaryDiagnosticInfo::RCNode {
                         inner_state_index: iw.state_row,
                         area_m2: sb.area_m2,
-                        r_film_int_m2_k_w: r_film,
+                        tilt_deg: sb.tilt_deg,
                         radiation_frac,
                         category: cat,
                     });

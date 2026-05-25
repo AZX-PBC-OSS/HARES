@@ -969,7 +969,12 @@ impl HeatPumpHeaterCore {
         let dse = self.hvac.config.duct_dse.clamp(0.0, 1.0);
         let delivered_thermal_w = step.thermal_output_w * dse;
         // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
-        let duct_loss_w = step.thermal_output_w * (1.0 - dse);
+        // Use hp_capacity_w + er_capacity_w (pure gross thermal capacity) without
+        // fan heat. step.thermal_output_w includes fan_heat_w which is dissipated
+        // at the indoor unit / zone side, not upstream in the duct; fan heat is not
+        // subject to duct distribution losses.
+        let gross_capacity_w = step.hp_capacity_w + step.er_capacity_w;
+        let duct_loss_w = gross_capacity_w * (1.0 - dse);
         // OCHRE HVAC.py:1464-1467: ASHP heater Main Power = compressor-only (excludes ER).
         // For ASHP/MSHP: main_power = total_input - fan - er_backup - pan_heater.
         // OCHRE HVAC.py:575 defines main_power = total_input_kw - fan_kw.

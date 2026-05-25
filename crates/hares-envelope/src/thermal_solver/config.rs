@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::NodeId;
 use hares_physics::solar::GlazingCurve;
 use hares_types::ZoneId;
 use thiserror::Error;
@@ -15,20 +16,34 @@ pub enum BoundaryCategory {
 
 /// Per-boundary info needed for conduction heat flow diagnostics.
 ///
-/// Computes convective heat transfer from the interior surface to zone air:
+/// Computes convective heat transfer from the interior surface to zone air
+/// using the TARP natural convection model evaluated per timestep:
 ///   `T_surface = radiation_frac × T_node + (1 - radiation_frac) × T_zone`
-///   `Q_conv = (T_surface - T_zone) × area_m2 / r_film_int_m2_k_w`
+///   `h_conv = tarp_h_natural(tilt_deg, |T_surface - T_zone|, above_hotter)`
+///   `Q_conv = h_conv × area_m2 × (T_surface - T_zone)`
+///
+/// The TARP model (Walton 1983) is the EnergyPlus default for interior
+/// convection and scales with the cube root of surface-to-air ΔT.
+/// Per-step recomputation fixes the frozen-film-coefficient defect documented
+/// in T-0082 (interior film coefficients must recompute per timestep).
+///
+/// Note: the A-matrix conductance still uses the frozen init-time film
+/// resistance; this diagnostic-only fix reports the physically correct
+/// convective flux without changing the state-space discretization.
 ///
 /// This matches OCHRE's `H_{surface}_{zone}` energy flow variable.
 #[derive(Debug, Clone)]
 pub enum BoundaryDiagnosticInfo {
     /// Boundary with RC interior node -- uses surface temperature from state vector.
     /// `T_surface = radiation_frac × T_node + (1 - radiation_frac) × T_zone`
-    /// `Q = (T_surface - T_zone) × area / R_film_int`
+    /// `Q = h_tarp(ΔT) × area × (T_surface - T_zone)`  [per-step TARP, not frozen R_film]
     RCNode {
         inner_state_index: usize,
         area_m2: f64,
-        r_film_int_m2_k_w: f64,
+        /// Surface tilt from horizontal [°]; 0° = horizontal roof, 90° = vertical wall.
+        /// Used to select the correct TARP natural convection formula branch.
+        /// Ref: Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655.
+        tilt_deg: f64,
         radiation_frac: f64,
         category: BoundaryCategory,
     },
@@ -420,6 +435,26 @@ pub struct StateSpaceWiring {
     /// during model assembly. Used by `integrate_inner` to compute per-step energy
     /// balance residuals without re-deriving from the A/C matrices each timestep.
     pub c_zone_j_k: HashMap<ZoneId, f64>,
+    /// Per-node thermal capacitance [J/K] for all internal RC nodes.
+    ///
+    /// Includes zone air nodes, wall-layer nodes, and interior mass nodes.
+    /// Populated during `assemble_building_rc` and forwarded through
+    /// `solver_builder.rs` to the solver. Used by `integrate_inner` to compute
+    /// the full-system energy balance: `Σ C_i × ΔT_i / dt` over all thermal nodes
+    /// rather than just zone air nodes. This enables a mathematically exact
+    /// closure check that accounts for wall-mass energy redistribution,
+    /// conduction through the A-matrix, and all B_d column contributions.
+    ///
+    /// Reference: EnergyPlus Engineering Reference "Basis for the Zone and Air
+    /// System Integration" — the heat balance method requires that the sum of
+    /// all thermal energy flows across the system boundary equals the rate of
+    /// change of stored energy in all thermal capacitances.
+    pub node_capacitances: HashMap<NodeId, f64>,
+    /// NodeId → state-vector row index.
+    ///
+    /// Maps each internal RC node to its row in the state vector `x`. Precomputed
+    /// during `assemble_building_rc` from `internal_node_order`.
+    pub node_index: HashMap<NodeId, usize>,
 }
 
 #[derive(Debug, Clone)]

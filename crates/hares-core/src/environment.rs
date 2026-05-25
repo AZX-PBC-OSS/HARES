@@ -10,7 +10,9 @@ use hares_io::{Building, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries, mon
 use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
     psychrometrics::{humidity_ratio_from_tdp, moist_air_enthalpy, wet_bulb_from_humidity_ratio},
-    solar::{perez_tilted_irradiance, solar_position},
+    solar::{
+        OMNI_AZIMUTH_SAMPLES, omni_directional_irradiance, perez_tilted_irradiance, solar_position,
+    },
     water_mains::{Hemisphere, water_mains_temperature_c},
 };
 use hares_types::{
@@ -29,12 +31,22 @@ const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 const MAINS_WATER_DOMAIN_ID: DomainId = DomainId(u16::MAX - 1);
 
 /// Geometry required for solar irradiance projection.
+///
+/// When `omni_directional` is true, the surface has no known azimuth and
+/// solar irradiance is computed as the azimuth-averaged Perez result rather
+/// than a single-azimuth projection. `azimuth_deg` is retained at 180° for
+/// non-solar consumers (LWR view factors, exterior film coefficients, etc.)
+/// as documented in the Known Limitations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SurfaceGeometry {
     pub surface_id: u32,
     pub azimuth_deg: f64,
     pub tilt_deg: f64,
     pub area_m2: f64,
+    /// True when azimuth is unknown for walls/roofs (HPXML permits omission).
+    /// Solar irradiance is computed via azimuth-sampled Perez averaging
+    /// rather than a single-azimuth projection.
+    pub omni_directional: bool,
 }
 
 /// Errors returned by [`EnvironmentManager`].
@@ -516,18 +528,40 @@ impl EnvironmentManager {
         } else {
             self.solar_irradiance_buf
                 .extend(self.surfaces.iter().map(|surface| {
-                    perez_tilted_irradiance(
-                        surface.surface_id,
-                        ghi,
-                        dni,
-                        dhi,
-                        solar_zenith_deg,
-                        pos.azimuth_deg,
-                        surface.tilt_deg,
-                        surface.azimuth_deg,
-                        day_of_year,
-                        ground_albedo,
-                    )
+                    if surface.omni_directional {
+                        // Omnidirectional (azimuth-averaged) Perez model for
+                        // walls/roofs with unknown orientation.  N=12 uniformly-
+                        // spaced azimuth samples avoid south-facing bias that a
+                        // single 180° default would introduce.
+                        // Perez et al. (1990) anisotropic diffuse model;
+                        // Duffie & Beckman (2020) Eq. 1.6.2 — azimuth appears in
+                        // three AOI terms.
+                        omni_directional_irradiance(
+                            surface.surface_id,
+                            ghi,
+                            dni,
+                            dhi,
+                            solar_zenith_deg,
+                            pos.azimuth_deg,
+                            surface.tilt_deg,
+                            day_of_year,
+                            ground_albedo,
+                            OMNI_AZIMUTH_SAMPLES,
+                        )
+                    } else {
+                        perez_tilted_irradiance(
+                            surface.surface_id,
+                            ghi,
+                            dni,
+                            dhi,
+                            solar_zenith_deg,
+                            pos.azimuth_deg,
+                            surface.tilt_deg,
+                            surface.azimuth_deg,
+                            day_of_year,
+                            ground_albedo,
+                        )
+                    }
                 }));
         }
 
@@ -783,8 +817,8 @@ fn build_surface_geometry(
         .enumerate()
         .map(|(idx, boundary)| {
             let tilt_deg = boundary.tilt_deg.unwrap_or(90.0);
-            let azimuth_deg = match boundary.azimuth_deg {
-                Some(az) => az,
+            let (azimuth_deg, omni_directional) = match boundary.azimuth_deg {
+                Some(az) => (az, false),
                 None => {
                     let is_exterior = matches!(boundary.exterior_zone, Some(ZoneType::Outdoor));
                     match (&boundary.boundary_type, is_exterior) {
@@ -798,30 +832,32 @@ fn build_surface_geometry(
                             tracing::warn!(
                                 boundary_idx = idx,
                                 surface_type = "Wall",
-                                "wall surface has no azimuth; treating as 180° (south-facing) \
-                                 — HPXML does not require azimuth on walls, so this is a \
-                                 valid if physically ambiguous input; the surface will receive \
-                                 south-facing solar gain which may over- or under-estimate \
-                                 actual solar load"
+                                "wall surface has no azimuth; using omnidirectional \
+                                 (azimuth-averaged) Perez model to avoid south-facing bias \
+                                 — HPXML does not require azimuth on walls; this is a valid \
+                                 input.  Non-solar consumers (LWR view factors, film \
+                                 coefficients) default to 180° as documented in Known \
+                                 Limitations"
                             );
-                            180.0
+                            (180.0, true)
                         }
                         (BoundaryType::Roof, true) => {
                             tracing::warn!(
                                 boundary_idx = idx,
                                 surface_type = "Roof",
-                                "roof surface has no azimuth; treating as 180° (south-facing) \
-                                 — hip and flat roofs receive solar from all azimuth angles; \
-                                 this approximation is not physically correct and will be \
-                                 replaced by a hemispherical model"
+                                "roof surface has no azimuth; using omnidirectional \
+                                 (azimuth-averaged) Perez model — hip and flat roofs \
+                                 receive solar from all azimuth angles.  Non-solar \
+                                 consumers (LWR view factors, film coefficients) default \
+                                 to 180° as documented in Known Limitations"
                             );
-                            180.0
+                            (180.0, true)
                         }
                         _ => {
                             // Interior surfaces (inside walls, furniture) or
                             // non-sky-facing boundaries (foundation, slab, floor,
                             // rim joist): azimuth is irrelevant for solar.
-                            180.0
+                            (180.0, false)
                         }
                     }
                 }
@@ -831,6 +867,7 @@ fn build_surface_geometry(
                 azimuth_deg,
                 tilt_deg,
                 area_m2: boundary.area_m2,
+                omni_directional,
             })
         })
         .collect()
@@ -1060,6 +1097,7 @@ mod tests {
                 source_step_secs: 3600,
                 midpoint_offset_secs: 0,
             },
+            design_conditions: None,
             dry_bulb_c: vec![10.0, 20.0],
             dew_point_c: vec![2.0, 3.0],
             rel_humidity_pct: vec![50.0, 55.0],
@@ -1176,6 +1214,8 @@ mod tests {
             windows: Vec::<Window>::new(),
             infiltration_ach50: None,
             infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
             infiltration_ela_cm2: None,
             infiltration_constant_ach: None,
             hvac_capacity_w: None,
@@ -1956,6 +1996,7 @@ mod tests {
             azimuth_deg: 180.0,
             tilt_deg: 30.0,
             area_m2: 1.0,
+            omni_directional: false,
         });
         assert_eq!(env.surface_count(), initial_count + 1);
         // Duplicate should be ignored.
@@ -1964,6 +2005,7 @@ mod tests {
             azimuth_deg: 180.0,
             tilt_deg: 30.0,
             area_m2: 1.0,
+            omni_directional: false,
         });
         assert_eq!(env.surface_count(), initial_count + 1);
     }
@@ -2053,6 +2095,7 @@ mod tests {
                 source_step_secs: step_secs,
                 midpoint_offset_secs: 0,
             },
+            design_conditions: None,
             dry_bulb_c: dry_bulb,
             dew_point_c: vec![0.0; n],
             rel_humidity_pct: vec![50.0; n],
@@ -2113,6 +2156,7 @@ mod tests {
                 source_step_secs: step_secs,
                 midpoint_offset_secs: 0,
             },
+            design_conditions: None,
             dry_bulb_c,
             dew_point_c: vec![0.0; n],
             rel_humidity_pct: vec![50.0; n],
@@ -2185,6 +2229,7 @@ mod tests {
                 source_step_secs: step_secs,
                 midpoint_offset_secs: 0,
             },
+            design_conditions: None,
             dry_bulb_c: dry_bulb,
             dew_point_c: vec![0.0; n],
             rel_humidity_pct: vec![50.0; n],
@@ -2495,5 +2540,253 @@ mod tests {
                 "expected InvalidTimezone error, got {result:?}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Omnidirectional surface geometry tests
+    // ---------------------------------------------------------------
+
+    /// Exterior wall with `azimuth_deg: None` must produce a `SurfaceGeometry`
+    /// with `omni_directional: true` so the solar loop uses azimuth-averaged
+    /// Perez rather than a 180° default.
+    #[test]
+    fn wall_missing_azimuth_sets_omni_directional_flag() {
+        let building = {
+            let mut b = building(Some(21.0));
+            // Add an exterior wall with no azimuth.
+            b.boundaries.push(Boundary {
+                id: "wall-no-az".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 15.0,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+            });
+            b
+        };
+        let manager = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &building,
+            StdDuration::from_secs(3600),
+            utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
+            None,
+        )
+        .expect("manager");
+        let surfaces = manager.surface_geometry();
+        let no_az_wall = surfaces
+            .iter()
+            .find(|s| s.surface_id == 2)
+            .expect("wall-no-az surface");
+        assert!(
+            no_az_wall.omni_directional,
+            "exterior wall with missing azimuth must have omni_directional=true, got false"
+        );
+        // azimuth_deg retained at 180° for non-solar consumers.
+        assert!((no_az_wall.azimuth_deg - 180.0).abs() < 1e-9);
+    }
+
+    /// Exterior wall with explicit azimuth must have `omni_directional: false`.
+    #[test]
+    fn wall_with_explicit_azimuth_has_omni_directional_false() {
+        let building = building(Some(21.0));
+        let manager = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &building,
+            StdDuration::from_secs(3600),
+            utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
+            None,
+        )
+        .expect("manager");
+        let surfaces = manager.surface_geometry();
+        for s in surfaces {
+            assert!(
+                !s.omni_directional,
+                "surface {} with explicit azimuth must have omni_directional=false, got true",
+                s.surface_id
+            );
+        }
+    }
+
+    /// Exterior roof with missing azimuth must set `omni_directional: true`.
+    #[test]
+    fn roof_missing_azimuth_sets_omni_directional_flag() {
+        let building = {
+            let mut b = building(Some(21.0));
+            b.boundaries.push(Boundary {
+                id: "roof-no-az".to_string(),
+                boundary_type: BoundaryType::Roof,
+                area_m2: 80.0,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(30.0),
+                framing_factor: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+            });
+            b
+        };
+        let manager = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &building,
+            StdDuration::from_secs(3600),
+            utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
+            None,
+        )
+        .expect("manager");
+        let surfaces = manager.surface_geometry();
+        let no_az_roof = surfaces
+            .iter()
+            .find(|s| s.surface_id == 2)
+            .expect("roof-no-az surface");
+        assert!(
+            no_az_roof.omni_directional,
+            "exterior roof with missing azimuth must have omni_directional=true, got false"
+        );
+    }
+
+    /// Interior wall with missing azimuth must NOT be omnidirectional
+    /// (azimuth is irrelevant for interior surfaces — no solar gain).
+    #[test]
+    fn interior_wall_missing_azimuth_is_not_omni_directional() {
+        let building = {
+            let mut b = building(Some(21.0));
+            b.boundaries.push(Boundary {
+                id: "interior-wall".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 10.0,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Conditioned), // interior surface
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+            });
+            b
+        };
+        let manager = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &building,
+            StdDuration::from_secs(3600),
+            utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
+            None,
+        )
+        .expect("manager");
+        let surfaces = manager.surface_geometry();
+        let interior_wall = surfaces
+            .iter()
+            .find(|s| s.surface_id == 2)
+            .expect("interior-wall surface");
+        assert!(
+            !interior_wall.omni_directional,
+            "interior wall with missing azimuth must have omni_directional=false, got true"
+        );
+    }
+
+    /// Omnidirectional wall must produce lower direct irradiance at solar noon
+    /// than the south-facing wall, confirming the azimuth averaging avoids
+    /// the south-facing over-estimation bias.
+    #[test]
+    fn omni_wall_direct_lower_than_south_facing_at_noon() {
+        let building = {
+            // Keep the existing south and north walls, add an omni wall.
+            let mut b = building(Some(21.0));
+            b.boundaries.push(Boundary {
+                id: "omni-wall".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 20.0,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+            });
+            b
+        };
+        let mut manager = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &building,
+            StdDuration::from_secs(3600),
+            utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            None,
+        )
+        .expect("manager");
+
+        // Solar noon on June 21 at 40°N — south surface 0, north surface 1, omni surface 2.
+        let env = manager.update(&clock(), &[]);
+        let south = &env.weather.solar_irradiance[0];
+        let north = &env.weather.solar_irradiance[1];
+        let omni = &env.weather.solar_irradiance[2];
+
+        // South must get the most direct beam; north the least.
+        assert!(
+            south.direct_w_m2 > omni.direct_w_m2,
+            "south direct ({:.1}) must exceed omni direct ({:.1}) at solar noon",
+            south.direct_w_m2,
+            omni.direct_w_m2
+        );
+        assert!(
+            omni.direct_w_m2 > north.direct_w_m2,
+            "omni direct ({:.1}) must exceed north direct ({:.1}) — \
+             omnidirectional averaging should place it between south and north",
+            omni.direct_w_m2,
+            north.direct_w_m2
+        );
     }
 }

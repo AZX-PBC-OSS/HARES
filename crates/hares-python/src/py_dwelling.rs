@@ -804,6 +804,7 @@ impl PyDwelling {
             azimuth_deg: pv.azimuth,
             tilt_deg: pv.tilt,
             area_m2: 1.0,
+            omni_directional: false,
         });
 
         // PV init() validates that a SurfaceIrradiance entry exists for each

@@ -238,6 +238,13 @@ pub fn build_schema(
                     DataType::Float64,
                     true,
                 ));
+                // OCHRE HVAC.py:1464-1467: ER Power column for ASHP heaters at v7.
+                // Reports backup electric resistance power during ER-only or HP+ER modes.
+                fields.push(Field::new(
+                    format!("{name} ER Power (kW)"),
+                    DataType::Float64,
+                    true,
+                ));
             }
             // OCHRE HVAC.py:590-599: per-equipment HVAC performance columns at v7.
             if is_hvac_or_wh(name) {

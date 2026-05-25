@@ -51,6 +51,35 @@ pub const N_I_MAX: f64 = 0.7;
 /// Default pressure exponent -- matches OCHRE / ResStock typical residential (0.65).
 pub const N_I_DEFAULT: f64 = 0.65;
 
+/// Default flow exponent for natural-to-50 Pa pressure conversion.
+///
+/// ASHRAE Standard 119 / ASTM E779: `n = 0.65` for residential buildings.
+/// This is the same value as [`N_I_DEFAULT`].
+pub const NATURAL_TO_50PA_EXPONENT: f64 = N_I_DEFAULT;
+
+/// Convert leakage at natural pressure (≈ 4 Pa) to 50 Pa equivalent using
+/// the power-law relationship from ASHRAE 119 / ASTM E779:
+///
+/// ```text
+/// Q_50 = Q_nat × (50 / 4)^n
+/// ```
+///
+/// # Parameters
+/// - `q_nat`: leakage rate at natural pressure (≈ 4 Pa).
+/// - `n`: flow exponent; use [`NATURAL_TO_50PA_EXPONENT`] (0.65) for typical
+///   residential buildings.
+///
+/// # Examples
+/// ```
+/// use hares_physics::infiltration::{ach_nat_to_ach50, NATURAL_TO_50PA_EXPONENT};
+/// let ach50 = ach_nat_to_ach50(1.0, NATURAL_TO_50PA_EXPONENT);
+/// // 1.0 × (12.5)^0.65 ≈ 1.0 × 5.164 ≈ 5.164
+/// assert!((ach50 - 5.164).abs() < 0.01);
+/// ```
+pub fn ach_nat_to_ach50(q_nat: f64, n: f64) -> f64 {
+    q_nat * (50.0 / 4.0_f64).powf(n)
+}
+
 /// Canonical terrain classes from the architecture appendix.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TerrainClass {
@@ -687,6 +716,47 @@ mod tests {
     #[test]
     fn ashrae_default_n_i_is_065() {
         approx_eq(N_I_DEFAULT, 0.65, 1e-15);
+    }
+
+    #[test]
+    fn natural_to_50pa_exponent_matches_default() {
+        approx_eq(NATURAL_TO_50PA_EXPONENT, N_I_DEFAULT, 1e-15);
+    }
+
+    #[test]
+    fn ach_nat_to_ach50_conversion_matches_ashrae_119() {
+        // Q_50 = Q_nat × (50/4)^n  with n=0.65
+        // (50/4)^0.65 = 12.5^0.65 ≈ 5.164
+        let ach50 = ach_nat_to_ach50(1.0, 0.65);
+        approx_eq(ach50, 5.164, 0.01);
+    }
+
+    #[test]
+    fn ach_nat_to_ach50_scales_linearly() {
+        // Linearity: doubling natural leakage doubles the 50 Pa equivalent.
+        let a = ach_nat_to_ach50(2.0, 0.65);
+        let b = ach_nat_to_ach50(1.0, 0.65);
+        approx_eq(a, 2.0 * b, 1e-12);
+    }
+
+    #[test]
+    fn ach_nat_to_ach50_zero_input_gives_zero() {
+        let ach50 = ach_nat_to_ach50(0.0, 0.65);
+        approx_eq(ach50, 0.0, 1e-15);
+    }
+
+    #[test]
+    fn ach_nat_to_ach50_with_n_0_5_gives_sqrt_ratio() {
+        // (50/4)^0.5 = √12.5 ≈ 3.536
+        let ach50 = ach_nat_to_ach50(1.0, 0.5);
+        approx_eq(ach50, 3.535_533_905_932_737, 1e-12);
+    }
+
+    #[test]
+    fn ach_nat_to_ach50_with_n_0_7_gives_higher_multiplier() {
+        // (50/4)^0.7 = 12.5^0.7 ≈ 5.857
+        let ach50 = ach_nat_to_ach50(1.0, 0.7);
+        approx_eq(ach50, 5.857, 0.01);
     }
 
     #[test]

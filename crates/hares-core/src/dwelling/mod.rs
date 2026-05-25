@@ -151,6 +151,7 @@ struct EquipmentColumns {
     energy_kwh: Option<usize>,
     schedule: Option<usize>,
     defrost_state: Option<usize>,
+    er_power: Option<usize>,
     shr: Option<usize>,
     speed: Option<usize>,
     fan_power: Option<usize>,
@@ -205,6 +206,7 @@ fn build_equipment_column_map(
                 defrost_state: column_index
                     .get(&format!("{name} Defrost State (-)"))
                     .copied(),
+                er_power: column_index.get(&format!("{name} ER Power (kW)")).copied(),
                 shr: column_index.get(&format!("{name} SHR (-)")).copied(),
                 speed: column_index.get(&format!("{name} Speed (-)")).copied(),
                 fan_power: column_index.get(&format!("{name} Fan Power (kW)")).copied(),
@@ -527,6 +529,7 @@ fn register_pv_surfaces(specs: &[hares_io::EquipmentSpec], env: &mut Environment
                 azimuth_deg: az,
                 tilt_deg: tilt,
                 area_m2: 1.0, // area irrelevant for Perez -- only orientation matters
+                omni_directional: false,
             });
         }
     }
@@ -986,6 +989,47 @@ impl Dwelling {
             &weather_avgs,
             &equipment_specs,
         )?;
+
+        // ── Autosize HVAC capacities at design conditions ──────────────────────
+        //
+        // When HPXML omits HeatingCapacity/CoolingCapacity, compute the required
+        // capacity from the building's thermal envelope model at ASHRAE design
+        // outdoor conditions. Uses EPW "Extremes" header (preferred) or ASHRAE 152
+        // climate station lookup (fallback).
+        //
+        // Must run after the thermal solver is built (it needs the RC model) and
+        // before equipment creation (it sets capacities on equipment specs).
+        // ACCA Manual S-2017 oversizing factors applied: 1.4x heating, 1.15x cooling.
+        {
+            let duct_params =
+                match hares_io::hpxml::resolve_hvac::compute_duct_dse_params(&building) {
+                    Ok(dp) => dp,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "autosizing: duct DSE params unavailable; using defaults"
+                        );
+                        hares_io::hpxml::resolve_hvac::DuctDseParams::default()
+                    }
+                };
+
+            let indoor_zone = solvers.thermal.config().indoor_zone_id;
+
+            let ctx = crate::dwelling::autosize::AutosizeContext {
+                design_conditions: weather_design_conditions,
+                weather_lat,
+                weather_lon,
+                duct_params,
+            };
+
+            crate::dwelling::autosize::autosize_equipment_capacities(
+                &mut equipment_specs,
+                &solvers.thermal,
+                &ctx,
+                &building,
+                indoor_zone,
+            );
+        }
 
         // Enable ideal HVAC on the indoor zone when both heating AND cooling
         // setpoints are configured -- the thermal solver back-calculates the exact
@@ -2794,6 +2838,11 @@ impl Dwelling {
             }
             if let Some(idx) = cols.defrost_state {
                 row[idx] = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
+            }
+            if let Some(idx) = cols.er_power {
+                // OCHRE HVAC.py:1464-1467: ER Power = er_capacity * er_eir_rated * space_fraction / 1000.
+                // Maps to BACKUP_ER_KW (already space-fraction-adjusted in heater step).
+                row[idx] = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0); // allowed: ER power remains telemetry-only until CoreOutput gains an er_power field.
             }
             // Per-equipment HVAC performance columns at v7.
             // Some read from CoreOutput (setpoint, capacity, COP, speed, main_power),

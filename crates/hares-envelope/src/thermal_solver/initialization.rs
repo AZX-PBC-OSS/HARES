@@ -254,6 +254,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
 
         (model, wiring)
@@ -309,6 +311,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
 
         let outdoor = -10.0;
@@ -372,6 +376,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
 
         let indoor = 21.0;
@@ -409,6 +415,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
 
         let indoor = 21.0;

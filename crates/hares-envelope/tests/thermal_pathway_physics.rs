@@ -131,6 +131,8 @@ fn ground_temperature_drives_zone() {
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
+        node_capacitances: HashMap::new(),
+        node_index: HashMap::new(),
     };
 
     let config = ThermalSolverConfig {
@@ -282,6 +284,8 @@ fn interior_solar_distribution_damps_peak_temp() {
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
+        node_capacitances: HashMap::new(),
+        node_index: HashMap::new(),
     };
 
     let outdoor = 20.0;
@@ -479,6 +483,8 @@ fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
+        node_capacitances: HashMap::new(),
+        node_index: HashMap::new(),
     };
 
     // One interior surface: area=10 m², emissivity=0.9, radiation_frac=0.5,
@@ -590,6 +596,8 @@ fn kusuda_depth_corrected_ground_temp_used_at_2_4m_minneapolis_january() {
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
+        node_capacitances: HashMap::new(),
+        node_index: HashMap::new(),
     };
 
     let config = ThermalSolverConfig {

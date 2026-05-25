@@ -342,6 +342,8 @@ fn lwr_zone_without_scriptf_must_error_at_construction() {
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
+        node_capacitances: HashMap::new(),
+        node_index: HashMap::new(),
     };
 
     // Zone config has two surfaces but scriptf is deliberately left as None —
@@ -580,6 +582,8 @@ fn interior_lwr_converges_by_flux_residual_within_iter_budget() {
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
         c_zone_j_k: HashMap::new(),
+        node_capacitances: HashMap::new(),
+        node_index: HashMap::new(),
     };
 
     // Two surfaces at different temperatures: 25°C wall and 15°C floor.

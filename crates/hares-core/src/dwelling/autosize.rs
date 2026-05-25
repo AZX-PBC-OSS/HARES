@@ -10,21 +10,40 @@
 
 use hares_envelope::ThermalSolver;
 use hares_io::{
-    Building, EquipmentSpec, WeatherTimeSeries,
+    Building, DesignConditions, EquipmentSpec,
     hpxml::resolve_hvac::{DuctDseParams, rebuild_hvac_typed_config},
 };
 use hares_physics::ashrae152::design_temperatures_f;
 use hares_types::ZoneId;
-use serde_json::{Map, Value, json};
+use serde_json::json;
 use tracing::warn;
 
 /// ASHRAE 90.1 default indoor design setpoints [°C].
+/// ASHRAE 90.1-2019 §6.4.3.1.1.
 const DEFAULT_HEATING_SETPOINT_C: f64 = 21.1; // 70 °F
 const DEFAULT_COOLING_SETPOINT_C: f64 = 23.9; // 75 °F
 
 /// Manual S oversizing factors.
+/// ACCA Manual S-2017 §4: equipment sizing based on design loads.
 const HEATING_OVERSIZE_FACTOR: f64 = 1.4;
 const COOLING_OVERSIZE_FACTOR: f64 = 1.15;
+
+/// Context bundle for autosizing: weather-derived design conditions and
+/// duct parameters needed to rebuild typed equipment configs.
+///
+/// Groups together the EPW/ASHRAE 152 design temperature inputs and
+/// ASHRAE 152 duct DSE parameters that `autosize_equipment_capacities`
+/// requires, keeping the function signature under clippy's argument limit.
+pub struct AutosizeContext {
+    /// EPW design conditions from the weather file header, or `None`.
+    pub design_conditions: Option<DesignConditions>,
+    /// Weather file latitude [°N] for ASHRAE 152 fallback lookup.
+    pub weather_lat: f64,
+    /// Weather file longitude [°E] for ASHRAE 152 fallback lookup.
+    pub weather_lon: f64,
+    /// Duct DSE parameters for rebuilding typed equipment configs.
+    pub duct_params: DuctDseParams,
+}
 
 /// Autosize HVAC equipment capacities for all specs that are missing
 /// explicit capacity values from HPXML.
@@ -46,22 +65,22 @@ const COOLING_OVERSIZE_FACTOR: f64 = 1.15;
 ///
 /// * `specs` - Equipment specs from HPXML resolution (mutated in place).
 /// * `thermal` - The assembled building thermal solver.
-/// * `weather` - The parsed weather time series (for lat/lon and EPW design temps).
-/// * `building` - HPXML building data (for setpoint defaults).
-/// * `duct_params` - Duct DSE parameters (needed to rebuild typed configs).
+/// * `ctx` - Autosizing context (design conditions, weather location, duct params).
+/// * `building` - HPXML building data (for setpoint defaults and site lat/lon).
 /// * `indoor_zone_id` - The primary conditioned zone for HVAC delivery.
 pub fn autosize_equipment_capacities(
     specs: &mut [EquipmentSpec],
     thermal: &ThermalSolver,
-    weather: &WeatherTimeSeries,
+    ctx: &AutosizeContext,
     building: &Building,
-    duct_params: &DuctDseParams,
     indoor_zone_id: ZoneId,
 ) {
     // Resolve outdoor design temperatures.
     // Prefer EPW design conditions; fall back to ASHRAE 152 station lookup.
     let (heating_design_c, cooling_design_c) = resolve_design_temperatures(
-        weather,
+        ctx.design_conditions,
+        ctx.weather_lat,
+        ctx.weather_lon,
         building.site.latitude_deg,
         building.site.longitude_deg,
     );
@@ -145,7 +164,8 @@ pub fn autosize_equipment_capacities(
         }
 
         // Rebuild typed config with updated capacities.
-        spec.typed_config = rebuild_hvac_typed_config(&spec.name, &spec.parameters, duct_params);
+        spec.typed_config =
+            rebuild_hvac_typed_config(&spec.name, &spec.parameters, &ctx.duct_params);
     }
 }
 
@@ -155,20 +175,22 @@ pub fn autosize_equipment_capacities(
 /// EPW header). Falls back to the nearest ASHRAE 152 climate station when
 /// EPW design conditions are unavailable (e.g., PSM3, TMY3, ResStock CSV).
 fn resolve_design_temperatures(
-    weather: &WeatherTimeSeries,
+    design_conditions: Option<DesignConditions>,
+    weather_lat: f64,
+    weather_lon: f64,
     site_lat: Option<f64>,
     site_lon: Option<f64>,
 ) -> (f64, f64) {
     // Try EPW design conditions first.
-    if let Some(dc) = weather.design_conditions {
+    if let Some(dc) = design_conditions {
         if dc.heating_design_db_c.is_finite() && dc.cooling_design_db_c.is_finite() {
             return (dc.heating_design_db_c, dc.cooling_design_db_c);
         }
     }
 
     // Fall back to ASHRAE 152 climate station lookup.
-    let lat = site_lat.unwrap_or(weather.meta.latitude);
-    let lon = site_lon.unwrap_or(weather.meta.longitude);
+    let lat = site_lat.unwrap_or(weather_lat);
+    let lon = site_lon.unwrap_or(weather_lon);
     let (htg_f, clg_f) = design_temperatures_f(lat, lon).unwrap_or_else(|| {
         warn!(
             lat,
@@ -176,7 +198,7 @@ fn resolve_design_temperatures(
             "no ASHRAE 152 station found — using conservative defaults: \
              heating -10 °C, cooling 35 °C"
         );
-        (-10.0_f64.to_fahrenheit(), 35.0_f64.to_fahrenheit())
+        (celsius_to_fahrenheit(-10.0), celsius_to_fahrenheit(35.0))
     });
 
     // ASHRAE 152 returns °F; convert to °C.
@@ -185,15 +207,9 @@ fn resolve_design_temperatures(
     (htg_c, clg_c)
 }
 
-/// Fahrenheit → Celsius conversion.
-trait ToCelsius {
-    fn to_fahrenheit(self) -> f64;
-}
-
-impl ToCelsius for f64 {
-    fn to_fahrenheit(self) -> f64 {
-        self * 1.8 + 32.0
-    }
+/// Celsius → Fahrenheit conversion.
+fn celsius_to_fahrenheit(c: f64) -> f64 {
+    c * 1.8 + 32.0
 }
 
 /// Extract the heating setpoint from an equipment spec, falling back to
@@ -256,5 +272,41 @@ mod tests {
     fn oversize_factors_match_manual_s() {
         assert!((HEATING_OVERSIZE_FACTOR - 1.4).abs() < f64::EPSILON);
         assert!((COOLING_OVERSIZE_FACTOR - 1.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn celsius_to_fahrenheit_conversion() {
+        assert!((celsius_to_fahrenheit(0.0) - 32.0).abs() < f64::EPSILON);
+        assert!((celsius_to_fahrenheit(100.0) - 212.0).abs() < f64::EPSILON);
+        assert!((celsius_to_fahrenheit(-10.0) - 14.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn resolve_design_temps_uses_epw_when_available() {
+        let dc = DesignConditions {
+            heating_design_db_c: -15.0,
+            cooling_design_db_c: 38.0,
+        };
+        let (htg, clg) = resolve_design_temperatures(Some(dc), 0.0, 0.0, None, None);
+        assert!((htg - (-15.0)).abs() < f64::EPSILON, "got {htg}");
+        assert!((clg - 38.0).abs() < f64::EPSILON, "got {clg}");
+    }
+
+    #[test]
+    fn resolve_design_temps_falls_back_to_ashrae_152() {
+        // Denver coordinates (39.74, -104.87). ASHRAE 152 station should be nearby
+        // and return plausible design temperatures in °F.
+        let (htg, clg) =
+            resolve_design_temperatures(None, 39.74, -104.87, Some(39.74), Some(-104.87));
+        // Heating design temp for Denver should be well below freezing in °C.
+        assert!(
+            htg < -5.0,
+            "Denver heating design {htg}°C should be below -5°C"
+        );
+        // Cooling design temp should be ≥ 30°C.
+        assert!(
+            clg > 30.0,
+            "Denver cooling design {clg}°C should be above 30°C"
+        );
     }
 }

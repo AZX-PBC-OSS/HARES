@@ -7,6 +7,7 @@ use quick_xml::events::Event;
 
 use hares_types::{normalize_ascii, parse_trimmed_f64};
 
+use hares_physics::infiltration::{NATURAL_TO_50PA_EXPONENT, ach_nat_to_ach50};
 use hares_physics::units as conv;
 
 use super::HpxmlError;
@@ -214,6 +215,14 @@ pub struct Building {
     pub infiltration_ach50: Option<f64>,
     /// Blower-door result at 50 Pa in CFM (cubic feet per minute).
     pub infiltration_cfm50: Option<f64>,
+    /// Raw leakage at natural pressure (≈ 4 Pa) in ACH, before conversion to 50 Pa
+    /// equivalent. Preserved for diagnostics; the converted value is stored in
+    /// [`infiltration_ach50`](Self::infiltration_ach50).
+    pub infiltration_ach_natural: Option<f64>,
+    /// Raw leakage at natural pressure (≈ 4 Pa) in CFM, before conversion to 50 Pa
+    /// equivalent. Preserved for diagnostics; the converted value is stored in
+    /// [`infiltration_cfm50`](Self::infiltration_cfm50).
+    pub infiltration_cfm_natural: Option<f64>,
     /// Effective Leakage Area converted to cm² from sq-in input.
     pub infiltration_ela_cm2: Option<f64>,
     /// Constant infiltration rate in ACH (bypasses AIM-2 wind/stack model).
@@ -476,7 +485,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     // <AirLeakage units="CFM50"> under AirInfiltrationMeasurement, or
     // <BuildingAirLeakage><UnitofMeasure>CFM</UnitofMeasure>... (HPXML 3.x wrapper form).
-    let infiltration_cfm50 = parse_air_leakage_cfm50(details)?;
+    let (infiltration_cfm50, infiltration_cfm_natural) = parse_air_leakage_cfm50(details)?;
 
     // <extension><HasFlueOrChimneyInConditionedSpace> -- boolean text
     let has_flue_or_chimney = details
@@ -846,6 +855,9 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         };
     }
 
+    // <AirLeakage> ACH50 / ACHnatural (HPXML 4.x inline or HPXML 3.x wrapper).
+    let (infiltration_ach50, infiltration_ach_natural) = parse_air_leakage_ach50(details)?;
+
     Ok(Building {
         site: Site {
             elevation_m,
@@ -858,9 +870,11 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         boundaries,
         windows,
         infiltration_cfm50,
+        infiltration_cfm_natural,
         infiltration_ela_cm2,
         infiltration_constant_ach: None,
-        infiltration_ach50: parse_air_leakage_ach50(details)?,
+        infiltration_ach_natural,
+        infiltration_ach50,
         hvac_capacity_w: find_descendant_f64(details, "HeatingCapacity", ValueKind::Raw)
             .or_else(|| find_descendant_f64(details, "CoolingCapacity", ValueKind::Raw))
             .map(conv::power_btu_h_to_w),
@@ -2119,16 +2133,22 @@ fn convert_temperature_to_c(value: f64, units: Option<&str>) -> f64 {
 /// Extract CFM50 from `<BuildingAirLeakage>` when `UnitofMeasure` is "CFM" or
 /// when `<AirLeakage units="CFM50">` appears directly under `AirInfiltrationMeasurement`.
 ///
-/// Returns `Ok(None)` if the leakage value is specified in a known non-CFM unit
-/// (ACH, ACHnatural, CFMnatural) or is absent.
+/// When the unit is `"CFMnatural"`, the value is converted to a 50 Pa equivalent
+/// using [`ach_nat_to_ach50`] (the same power-law conversion applies to CFM rates;
+/// it depends only on the pressure ratio and flow exponent).
+///
+/// Returns `(cfm50, cfm_natural_raw)` where:
+/// - `cfm50` is the (possibly converted) value at 50 Pa reference pressure.
+/// - `cfm_natural_raw` is the original natural-pressure value when the unit was
+///   `"CFMnatural"`, or `None` otherwise.
 ///
 /// Returns `Err(HpxmlError::Parse(...))` when the unit string is unrecognised —
 /// the HPXML input is malformed and the user must correct it.
-fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<Option<f64>, HpxmlError> {
+fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<(Option<f64>, Option<f64>), HpxmlError> {
     // HPXML 3.x: BuildingAirLeakage wrapper with UnitofMeasure child element.
     let measurement = match details.first_descendant("AirInfiltrationMeasurement") {
         Some(m) => m,
-        None => return Ok(None),
+        None => return Ok((None, None)),
     };
     if let Some(bal) = measurement.child("BuildingAirLeakage") {
         let unit = bal
@@ -2136,11 +2156,17 @@ fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<Option<f64>, HpxmlError>
             .map(|n| normalize_ascii(n.text.trim()));
         if let Some(unit_str) = unit.as_deref() {
             if unit_str == "cfm" {
-                return Ok(bal.child("AirLeakage").and_then(XmlNode::text_as_f64));
+                let value = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+                return Ok((value, None));
             }
-            // Known HPXML UnitofMeasure values that are not CFM.
-            if matches!(unit_str, "ach" | "achnatural" | "cfmnatural") {
-                return Ok(None);
+            if unit_str == "cfmnatural" {
+                let raw = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+                let converted = raw.map(|v| ach_nat_to_ach50(v, NATURAL_TO_50PA_EXPONENT));
+                return Ok((converted, raw));
+            }
+            // Known HPXML UnitofMeasure values that are not CFM/CFMnatural.
+            if unit_str == "ach" || unit_str == "achnatural" {
+                return Ok((None, None));
             }
             return Err(HpxmlError::Parse(format!(
                 "unrecognised UnitofMeasure '{unit_str}' on BuildingAirLeakage -- \
@@ -2148,7 +2174,7 @@ fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<Option<f64>, HpxmlError>
             )));
         }
         // Absent UnitofMeasure — not a CFM measurement.
-        return Ok(None);
+        return Ok((None, None));
     }
     // HPXML 4.x: <AirLeakage units="CFM50"> directly under AirInfiltrationMeasurement.
     if let Some(al) = measurement.child("AirLeakage") {
@@ -2159,11 +2185,17 @@ fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<Option<f64>, HpxmlError>
             .map(|s| normalize_ascii(s));
         if let Some(unit_str) = unit_attr.as_deref() {
             if matches!(unit_str, "cfm50" | "cfm") {
-                return Ok(al.text_as_f64());
+                let value = al.text_as_f64();
+                return Ok((value, None));
             }
-            // Known HPXML units="" values that are not CFM50/CFM.
-            if matches!(unit_str, "ach50" | "ach" | "achnatural" | "cfmnatural") {
-                return Ok(None);
+            if unit_str == "cfmnatural" {
+                let raw = al.text_as_f64();
+                let converted = raw.map(|v| ach_nat_to_ach50(v, NATURAL_TO_50PA_EXPONENT));
+                return Ok((converted, raw));
+            }
+            // Known HPXML units="" values that are not CFM50/CFM/CFMnatural.
+            if matches!(unit_str, "ach50" | "ach" | "achnatural") {
+                return Ok((None, None));
             }
             return Err(HpxmlError::Parse(format!(
                 "unrecognised units attribute '{unit_str}' on AirLeakage -- \
@@ -2171,27 +2203,31 @@ fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<Option<f64>, HpxmlError>
             )));
         }
         // No units attribute — not a CFM50 measurement.
-        return Ok(None);
+        return Ok((None, None));
     }
-    Ok(None)
+    Ok((None, None))
 }
 
 /// Extract ACH50 from `<BuildingAirLeakage>` when `UnitofMeasure` is "ACH" or
 /// absent, or from `<AirLeakage units="ACH50">` / `<AirLeakage units="ACH">`
 /// under `AirInfiltrationMeasurement`, or from a bare `<AirLeakage>` value.
 ///
-/// Returns `Ok(None)` when the unit is a known non-ACH HPXML value (CFM, CFMnatural,
-/// ACHnatural) — the CFM50 parser (`parse_air_leakage_cfm50`) handles CFM, and natural
-/// pressure values are rejected per Known Limitations.
+/// When the unit is `"ACHnatural"`, the value is converted to a 50 Pa equivalent
+/// using [`ach_nat_to_ach50`] (ASHRAE 119 / ASTM E779 power law: `ACH50 = ACHnat × (50/4)^n`).
+///
+/// Returns `(ach50, ach_natural_raw)` where:
+/// - `ach50` is the (possibly converted) value at 50 Pa reference pressure.
+/// - `ach_natural_raw` is the original natural-pressure value when the unit was
+///   `"ACHnatural"`, or `None` otherwise.
 ///
 /// Returns `Err(HpxmlError::Parse(...))` when the unit string is unrecognised — this is
 /// a genuine input error that the user must fix; silently dropping the value would cause
 /// the home to be modelled with effectively zero infiltration.
-fn parse_air_leakage_ach50(details: &XmlNode) -> Result<Option<f64>, HpxmlError> {
+fn parse_air_leakage_ach50(details: &XmlNode) -> Result<(Option<f64>, Option<f64>), HpxmlError> {
     // HPXML 3.x: BuildingAirLeakage wrapper with UnitofMeasure child element.
     let measurement = match details.first_descendant("AirInfiltrationMeasurement") {
         Some(m) => m,
-        None => return Ok(None),
+        None => return Ok((None, None)),
     };
     if let Some(bal) = measurement.child("BuildingAirLeakage") {
         let unit = bal
@@ -2199,11 +2235,17 @@ fn parse_air_leakage_ach50(details: &XmlNode) -> Result<Option<f64>, HpxmlError>
             .map(|n| normalize_ascii(n.text.trim()));
         if let Some(unit_str) = unit.as_deref() {
             if unit_str == "ach" {
-                return Ok(bal.child("AirLeakage").and_then(XmlNode::text_as_f64));
+                let value = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+                return Ok((value, None));
             }
-            // Known HPXML UnitofMeasure values that are not ACH.
-            if matches!(unit_str, "cfm" | "achnatural" | "cfmnatural") {
-                return Ok(None);
+            if unit_str == "achnatural" {
+                let raw = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+                let converted = raw.map(|v| ach_nat_to_ach50(v, NATURAL_TO_50PA_EXPONENT));
+                return Ok((converted, raw));
+            }
+            // Known HPXML UnitofMeasure values that are not ACH/ACHnatural.
+            if unit_str == "cfm" || unit_str == "cfmnatural" {
+                return Ok((None, None));
             }
             return Err(HpxmlError::Parse(format!(
                 "unrecognised UnitofMeasure '{unit_str}' on BuildingAirLeakage -- \
@@ -2211,7 +2253,8 @@ fn parse_air_leakage_ach50(details: &XmlNode) -> Result<Option<f64>, HpxmlError>
             )));
         }
         // Absent UnitofMeasure — HPXML convention: bare BuildingAirLeakage value is ACH.
-        return Ok(bal.child("AirLeakage").and_then(XmlNode::text_as_f64));
+        let value = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+        return Ok((value, None));
     }
     // HPXML 4.x: <AirLeakage units="ACH50"> directly under AirInfiltrationMeasurement,
     // or bare <AirLeakage> with no units attribute (HPXML convention: ACH50 when HousePressure=50).
@@ -2223,11 +2266,17 @@ fn parse_air_leakage_ach50(details: &XmlNode) -> Result<Option<f64>, HpxmlError>
             .map(|s| normalize_ascii(s));
         if let Some(unit_str) = unit_attr.as_deref() {
             if matches!(unit_str, "ach50" | "ach") {
-                return Ok(al.text_as_f64());
+                let value = al.text_as_f64();
+                return Ok((value, None));
             }
-            // Known HPXML units="" values that are not ACH50/ACH.
-            if matches!(unit_str, "cfm50" | "cfm" | "achnatural" | "cfmnatural") {
-                return Ok(None);
+            if unit_str == "achnatural" {
+                let raw = al.text_as_f64();
+                let converted = raw.map(|v| ach_nat_to_ach50(v, NATURAL_TO_50PA_EXPONENT));
+                return Ok((converted, raw));
+            }
+            // Known HPXML units="" values that are not ACH50/ACH/ACHnatural.
+            if matches!(unit_str, "cfm50" | "cfm" | "cfmnatural") {
+                return Ok((None, None));
             }
             return Err(HpxmlError::Parse(format!(
                 "unrecognised units attribute '{unit_str}' on AirLeakage -- \
@@ -2235,9 +2284,9 @@ fn parse_air_leakage_ach50(details: &XmlNode) -> Result<Option<f64>, HpxmlError>
             )));
         }
         // No units attribute — bare value (HPXML convention: ACH50 when HousePressure=50).
-        return Ok(al.text_as_f64());
+        return Ok((al.text_as_f64(), None));
     }
-    Ok(None)
+    Ok((None, None))
 }
 
 fn parse_site_type(text: &str) -> SiteType {
@@ -5094,9 +5143,8 @@ mod tests {
     }
 
     #[test]
-    fn known_non_ach_unit_is_ok_none_not_error() {
-        // CFMnatural is a valid HPXML unit but not useful at 50 Pa — must be
-        // Ok(None), not an error, consistent with the natural-pressure Known Limitation.
+    fn cfmnatural_wrapper_converts_to_cfm50() {
+        // CFMnatural = 1200.0 → CFM50 = 1200.0 × 12.5^0.65 ≈ 6197.22
         let xml = SAMPLE_XML.replace(
             "<AirLeakage>5.0</AirLeakage>",
             "<BuildingAirLeakage>\
@@ -5104,9 +5152,88 @@ mod tests {
                <AirLeakage>1200.0</AirLeakage>\
              </BuildingAirLeakage>",
         );
-        let building = parse_building(&xml).expect("CFMnatural should be Ok(None), not an error");
+        let building = parse_building(&xml).expect("CFMnatural should parse successfully");
+        assert!(
+            building.infiltration_ach50.is_none(),
+            "CFMnatural must not populate infiltration_ach50"
+        );
+        let cfm50 = building
+            .infiltration_cfm50
+            .expect("CFMnatural should be converted to CFM50");
+        // 1200 × (50/4)^0.65 = 1200 × 12.5^0.65 ≈ 6197.22
+        assert!(
+            (cfm50 - 6197.22).abs() < 0.5,
+            "converted CFM50={cfm50}, expected ~6197.22"
+        );
+        // Raw natural value should be preserved for diagnostics.
+        assert_eq!(
+            building.infiltration_cfm_natural,
+            Some(1200.0),
+            "raw CFMnatural value must be preserved"
+        );
+    }
+
+    #[test]
+    fn cfmnatural_inline_attr_converts_to_cfm50() {
+        // HPXML 4.x: <AirLeakage units="CFMnatural">800.0</AirLeakage>
+        let xml = SAMPLE_XML.replace(
+            "<AirLeakage>5.0</AirLeakage>",
+            "<AirLeakage units=\"CFMnatural\">800.0</AirLeakage>",
+        );
+        let building = parse_building(&xml).expect("CFMnatural inline attr should parse");
         assert!(building.infiltration_ach50.is_none());
+        let cfm50 = building
+            .infiltration_cfm50
+            .expect("CFMnatural should be converted to CFM50");
+        // 800 × 12.5^0.65 ≈ 4131.48
+        assert!((cfm50 - 4131.48).abs() < 0.5);
+        assert_eq!(building.infiltration_cfm_natural, Some(800.0));
+    }
+
+    #[test]
+    fn achnatural_wrapper_converts_to_ach50() {
+        // ACHnatural = 1.0 → ACH50 = 1.0 × 12.5^0.65 ≈ 5.164
+        let xml = SAMPLE_XML.replace(
+            "<AirLeakage>5.0</AirLeakage>",
+            "<BuildingAirLeakage>\
+               <UnitofMeasure>ACHnatural</UnitofMeasure>\
+               <AirLeakage>1.0</AirLeakage>\
+             </BuildingAirLeakage>",
+        );
+        let building = parse_building(&xml).expect("ACHnatural should parse successfully");
+        assert!(
+            building.infiltration_cfm50.is_none(),
+            "ACHnatural must not populate infiltration_cfm50"
+        );
+        let ach50 = building
+            .infiltration_ach50
+            .expect("ACHnatural should be converted to ACH50");
+        assert!(
+            (ach50 - 5.164).abs() < 0.01,
+            "converted ACH50={ach50}, expected ~5.164"
+        );
+        assert_eq!(
+            building.infiltration_ach_natural,
+            Some(1.0),
+            "raw ACHnatural value must be preserved"
+        );
+    }
+
+    #[test]
+    fn achnatural_inline_attr_converts_to_ach50() {
+        // HPXML 4.x: <AirLeakage units="ACHnatural">2.0</AirLeakage>
+        let xml = SAMPLE_XML.replace(
+            "<AirLeakage>5.0</AirLeakage>",
+            "<AirLeakage units=\"ACHnatural\">2.0</AirLeakage>",
+        );
+        let building = parse_building(&xml).expect("ACHnatural inline attr should parse");
         assert!(building.infiltration_cfm50.is_none());
+        let ach50 = building
+            .infiltration_ach50
+            .expect("ACHnatural should be converted to ACH50");
+        // 2.0 × 12.5^0.65 ≈ 10.329
+        assert!((ach50 - 10.329).abs() < 0.02);
+        assert_eq!(building.infiltration_ach_natural, Some(2.0));
     }
 
     // -----------------------------------------------------------------

@@ -7,10 +7,11 @@
 //! All methods operate on pre-allocated buffers owned by `ThermalSolver` -- zero per-step heap
 //! allocation.
 
+use hares_physics::film_coefficients::tarp_h_natural;
 use hares_types::{DomainUpdate, EnvironmentState, PortSlots, ZoneId};
 
-use super::config::StateSpaceWiring;
 use super::ThermalSolver;
+use super::config::StateSpaceWiring;
 
 impl ThermalSolver {
     /// Compute the HVAC capacity (W) required to maintain `target_c` at
@@ -27,12 +28,7 @@ impl ThermalSolver {
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
     /// or `last_coupled_lu`). It constructs temporary vectors for the autosizing
     /// solve and restores the original input afterward.
-    pub fn autosize_capacity(
-        &self,
-        zone: ZoneId,
-        target_c: f64,
-        design_outdoor_c: f64,
-    ) -> f64 {
+    pub fn autosize_capacity(&self, zone: ZoneId, target_c: f64, design_outdoor_c: f64) -> f64 {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
         };
@@ -61,13 +57,9 @@ impl ThermalSolver {
         }
 
         // Solve without coupling (no infiltration at design conditions).
-        let total = self.model.solve_for_output_input(
-            &self.x,
-            &u_design,
-            target_c,
-            output_idx,
-            input_idx,
-        );
+        let total = self
+            .model
+            .solve_for_output_input(&self.x, &u_design, target_c, output_idx, input_idx);
 
         total
             .map(|raw| raw - u_design[input_idx])
@@ -234,16 +226,34 @@ impl ThermalSolver {
                     BoundaryDiagnosticInfo::RCNode {
                         inner_state_index,
                         area_m2,
-                        r_film_int_m2_k_w,
+                        tilt_deg,
                         radiation_frac,
                         category,
                     } => {
                         let t_node = self.x[*inner_state_index];
                         let t_surface = radiation_frac * t_node + (1.0 - radiation_frac) * t_zone;
-                        (
-                            (t_surface - t_zone) * area_m2 / r_film_int_m2_k_w,
-                            *category,
-                        )
+                        let delta_t_k = (t_surface - t_zone).abs();
+                        // 0.1 K floor for numerical stability at exactly-equal
+                        // temperatures (matches the floor in film_coefficients.rs
+                        // exterior TARP path). At ΔT = 0 K, h_conv = 0 (cbrt(0) = 0),
+                        // which is physically correct — no buoyancy-driven convection
+                        // without a temperature difference.
+                        let delta_t_clamped = delta_t_k.max(0.1);
+                        // above_hotter: true when the surface is warmer than the
+                        // zone air (heat flows from surface to air — enhanced
+                        // convection for upward heat flow, reduced for downward).
+                        let above_hotter = t_surface > t_zone;
+                        // Per-step TARP natural convection coefficient [W/(m²·K)].
+                        // Replaces the frozen init-time film resistance with the
+                        // ΔT-dependent EnergyPlus default interior convection model.
+                        // Eq. 90–92, Walton 1983 NBSSIR 83-2655.
+                        // Note: the A-matrix conductance is still frozen (per
+                        // T-0082 Known Limitations); this diagnostic-only fix
+                        // reports the physically correct convective flux without
+                        // changing the state-space discretization.
+                        let h_nat = tarp_h_natural(*tilt_deg, delta_t_clamped, above_hotter);
+                        let q_conv_w = h_nat * area_m2 * (t_surface - t_zone);
+                        (q_conv_w, *category)
                     }
                     BoundaryDiagnosticInfo::SteadyState {
                         ua_w_k,
@@ -346,6 +356,37 @@ impl ThermalSolver {
                      possible port wiring or sign error"
                 );
             }
+        }
+
+        // ── Full-system energy balance diagnostic ───────────────────────────────
+        //
+        // Compute Σ C_i × ΔT_i / dt over ALL thermal nodes (not just zone air).
+        // This accounts for wall-mass energy redistribution, conduction through
+        // the A-matrix, and all B_d column contributions. The ZOH discretization
+        // conserves energy by construction, so at steady state this approaches
+        // zero. Non-zero values during transients reflect energy being stored
+        // in or released from thermal capacitances.
+        //
+        // This is a diagnostic — not an assertion or correction. The per-zone
+        // check above catches gross port-wiring errors; this full-system check
+        // provides visibility into total stored energy for multi-node RC models.
+        //
+        // Reference: EnergyPlus Engineering Reference
+        // "Basis for the Zone and Air System Integration" — the heat balance
+        // method requires that the sum of all thermal energy flows across the
+        // system boundary equals the rate of change of stored energy in all
+        // thermal capacitances.
+        if !self.wiring.node_capacitances.is_empty() {
+            let mut stored_energy_w: f64 = 0.0;
+            for (node_id, c_j_k) in &self.wiring.node_capacitances {
+                if let Some(&idx) = self.wiring.node_index.get(node_id) {
+                    if idx < self.x.len() && idx < self.rhs_buf.len() {
+                        // After the swap, self.x is T_next and self.rhs_buf is T_prev.
+                        stored_energy_w += c_j_k * (self.x[idx] - self.rhs_buf[idx]) / self.dt_s;
+                    }
+                }
+            }
+            tracing::debug!(stored_energy_w, "full-system stored energy change rate [W]");
         }
 
         self.last_u.clone_from(&u);

@@ -913,10 +913,11 @@ mod tests {
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
-        DrivingTemp, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
-        InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
-        MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSolver,
-        ThermalSolverConfig, WindowSolarProperties,
+        BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, ExteriorSurfaceInfo,
+        InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
+        InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
+        NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
+        WindowSolarProperties,
     };
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
@@ -999,6 +1000,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1054,6 +1057,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
 
         let mut interior_lwr_zone = InteriorLwrZoneConfig {
@@ -1216,6 +1221,8 @@ mod tests {
             indoor_temp_input_indices: vec![1],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1308,6 +1315,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1765,6 +1774,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1815,6 +1826,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -1987,6 +2000,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -2054,6 +2069,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -2105,6 +2122,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -2160,6 +2179,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -2236,6 +2257,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -2358,6 +2381,8 @@ mod tests {
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
+                node_capacitances: HashMap::new(),
+                node_index: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -2513,6 +2538,8 @@ mod tests {
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
+                node_capacitances: HashMap::new(),
+                node_index: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -2678,6 +2705,8 @@ mod tests {
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
+                node_capacitances: HashMap::new(),
+                node_index: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -3030,6 +3059,8 @@ mod tests {
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
+                node_capacitances: HashMap::new(),
+                node_index: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -3154,6 +3185,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -3239,6 +3272,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -3337,6 +3372,8 @@ mod tests {
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 c_zone_j_k: HashMap::new(),
+                node_capacitances: HashMap::new(),
+                node_index: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -3491,6 +3528,8 @@ mod tests {
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
                 c_zone_j_k: HashMap::new(),
+                node_capacitances: HashMap::new(),
+                node_index: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -3605,6 +3644,8 @@ mod tests {
                     indoor_temp_input_indices: vec![],
                     solar_input_indices: HashMap::new(),
                     c_zone_j_k: HashMap::new(),
+                    node_capacitances: HashMap::new(),
+                    node_index: HashMap::new(),
                 };
                 let cfg = ThermalSolverConfig {
                     indoor_zone_id: ZoneId(1),
@@ -3946,6 +3987,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -4011,6 +4054,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -4194,6 +4239,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
@@ -4360,6 +4407,8 @@ mod tests {
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
                 c_zone_j_k: HashMap::new(),
+                node_capacitances: HashMap::new(),
+                node_index: HashMap::new(),
             };
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
@@ -4634,6 +4683,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let mut interior_lwr_zone = InteriorLwrZoneConfig {
             zone_id: ZoneId(1),
@@ -4775,6 +4826,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
         let rad_frac_opaque = 0.7;
         // Window radiation_frac from EnergyPlus interior film decomposition
@@ -5036,6 +5089,8 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
         };
 
         // Use the solar-surface (StarMesh) path: no interior_lwr_zones, only interior_solar_zones.
@@ -5127,6 +5182,139 @@ mod tests {
         assert!(
             (total - radiant_w).abs() < 1e-9,
             "energy conservation: total={total:.6}, expected={radiant_w:.6}"
+        );
+    }
+
+    /// Verify that the `RCNode` boundary diagnostic uses per-step TARP natural
+    /// convection (h_conv ∝ ΔT^(1/3)), not the frozen init-time ASHRAE Simple
+    /// value (h_conv = 3.076 constant).
+    ///
+    /// Constructs a 2-state model with a hot interior wall surface (30°C) and
+    /// zone air at 20°C. After one step, the diagnostic convective flux must be
+    /// consistent with TARP h_conv ≈ 1.31 × ΔT^(1/3) ≈ 2.82 W/(m²·K), not the
+    /// frozen ASHRAE Simple 3.076.
+    ///
+    /// References:
+    /// - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, Eq. 90.
+    /// - EnergyPlus Engineering Reference "Interior Convection / TARP Algorithm".
+    #[test]
+    fn rc_node_boundary_diagnostic_uses_tarp_natural_convection() {
+        let indoor = 20.0;
+        let outdoor = 20.0; // same as zone air — outdoor does not drive a gradient
+        let env = env_for_temp(indoor, outdoor);
+
+        // 2-state model: state 0 = zone air, state 1 = wall interior surface.
+        // Very weak coupling so temperatures barely move in one 60 s step.
+        let r_zw = 0.5; // K/W zone↔wall
+        let c_z = 50_000.0; // J/K zone air
+        let c_w = 500_000.0; // J/K wall (10× zone → wall moves 10× slower)
+
+        let a_c = DMatrix::from_row_slice(
+            2,
+            2,
+            &[
+                -1.0 / (r_zw * c_z),
+                1.0 / (r_zw * c_z),
+                1.0 / (r_zw * c_w),
+                -1.0 / (r_zw * c_w),
+            ],
+        );
+        let b_c = DMatrix::zeros(2, 2); // no external inputs needed for this test
+
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)], // y[0] = x[0] (zone air)
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+
+        let area_m2 = 10.0;
+        let tilt_deg = 90.0; // vertical wall
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::default(),
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: vec![BoundaryDiagnosticInfo::RCNode {
+                inner_state_index: 1, // wall node
+                area_m2,
+                tilt_deg,
+                radiation_frac: 1.0, // t_surface = t_node (no zone-air mixing)
+                category: BoundaryCategory::Wall,
+            }],
+        };
+
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();
+
+        // Override initial state: wall at 30°C, zone air at 20°C.
+        // After one 60 s step with weak coupling, ΔT ≈ 10 K.
+        solver.x[0] = 20.0;
+        solver.x[1] = 30.0;
+
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let mut update = DomainUpdate::empty(hares_types::THERMAL);
+        solver.resolve(&ports, &env, Duration::from_secs(60), &mut update);
+
+        let wall_gain = solver.component_gains().wall_heat_gain_w;
+
+        // Hot wall → heat flows into the zone (positive).
+        assert!(
+            wall_gain > 0.0,
+            "hot wall (30°C) should transfer heat into zone (20°C), got {wall_gain:.2} W"
+        );
+
+        // TARP h_conv at ΔT ≈ 10 K, vertical: h = 1.31 × ∛10 ≈ 2.822 W/(m²·K).
+        // Frozen ASHRAE Simple: h = 3.076 W/(m²·K) for vertical.
+        // The actual flux should be closer to TARP than to frozen.
+        let delta_t_approx = 10.0_f64;
+        let h_tarp = 1.31 * delta_t_approx.cbrt();
+        let q_tarp = h_tarp * area_m2 * delta_t_approx;
+        let q_frozen = 3.076 * area_m2 * delta_t_approx;
+
+        let dist_to_tarp = (wall_gain - q_tarp).abs();
+        let dist_to_frozen = (wall_gain - q_frozen).abs();
+        assert!(
+            dist_to_tarp < dist_to_frozen,
+            "wall_gain={wall_gain:.2} W should be closer to TARP ({q_tarp:.2} W) \
+             than frozen ASHRAE Simple ({q_frozen:.2} W); \
+             dist_to_tarp={dist_to_tarp:.2}, dist_to_frozen={dist_to_frozen:.2}"
+        );
+
+        // Sanity: the flux should be within 20% of the TARP prediction
+        // (ΔT drifts slightly from 10 K during the step).
+        let rel_err = (wall_gain - q_tarp).abs() / q_tarp;
+        assert!(
+            rel_err < 0.20,
+            "wall_gain={wall_gain:.2} W deviates from TARP prediction {q_tarp:.2} W by {:.1}%",
+            rel_err * 100.0
         );
     }
 }

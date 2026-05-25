@@ -412,12 +412,12 @@ mod tests {
                 hares_envelope::BoundaryDiagnosticInfo::RCNode {
                     inner_state_index,
                     area_m2,
-                    r_film_int_m2_k_w,
+                    tilt_deg,
                     radiation_frac,
                     category,
                 } => {
                     eprintln!(
-                        "  bd_diag[{i}]: RC state={inner_state_index} area={area_m2:.1}m² r_film={r_film_int_m2_k_w:.4} rad_frac={radiation_frac:.4} cat={category:?}",
+                        "  bd_diag[{i}]: RC state={inner_state_index} area={area_m2:.1}m² tilt={tilt_deg:.1}° rad_frac={radiation_frac:.4} cat={category:?}",
                     );
                 }
                 hares_envelope::BoundaryDiagnosticInfo::SteadyState {
