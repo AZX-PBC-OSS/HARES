@@ -4,7 +4,7 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::state_space::StateSpaceModel;
 
-use super::{Result, StateSpaceWiring};
+use super::{Result, StateSpaceWiring, ThermalSolverError};
 use hares_types::{EnvironmentState, ZoneId};
 
 /// Compute steady-state temperatures by solving `x = A_d x + B_d u` for `x`,
@@ -63,6 +63,23 @@ pub(crate) fn initialize_steady_state(
         }
     }
 
+    // Verify all pinned zones are registered in zone_state_indices.
+    // A missing indoor zone ID is a configuration error that must be surfaced
+    // loudly — silently falling back to a flat temperature vector hides the
+    // misconfiguration and produces physically wrong initial conditions.
+    // OCHRE raises ValueError for missing zone state names; EnergyPlus issues
+    // Severe/Fatal errors for missing zone references. HARES must not silently
+    // substitute a fallback where those implementations error.
+    for zone_id in pinned_zones {
+        if !wiring.zone_state_indices.contains_key(zone_id) {
+            let registered: Vec<ZoneId> = wiring.zone_state_indices.keys().copied().collect();
+            return Err(ThermalSolverError::IndoorZoneIdNotRegistered {
+                id: *zone_id,
+                registered,
+            });
+        }
+    }
+
     // Collect zone state indices to fix as boundary conditions.
     // Only conditioned zones listed in `pinned_zones` are pinned; unconditioned
     // zones (attic, garage, foundation) are left free so their steady-state
@@ -71,7 +88,12 @@ pub(crate) fn initialize_steady_state(
     let mut zone_fixes: Vec<(usize, f64)> = pinned_zones
         .iter()
         .filter_map(|zone_id| {
-            let idx = *wiring.zone_state_indices.get(zone_id)?;
+            // SAFETY: the pre-check above guarantees every pinned_zone is
+            // present in zone_state_indices.
+            let idx = *wiring
+                .zone_state_indices
+                .get(zone_id)
+                .expect("verified above");
             if idx >= n {
                 return None;
             }
@@ -341,17 +363,11 @@ mod tests {
         );
     }
 
-    /// Regression for ticket #102: when `indoor_zone_id` is absent from
-    /// `zone_state_indices`, `initialize_steady_state` should NOT silently
-    /// return a flat-temperature vector — it should return an error.
-    ///
-    /// Currently this test FAILS because the code at lines 79-83 silently
-    /// falls through via `filter_map` when the pinned zone is absent, returning
-    /// `Ok(steady_state)` instead of `Err`. Fix pending — will stop panicking
-    /// when the missing-zone-ID path returns an error instead of silently
-    /// falling through.
+    /// `initialize_steady_state` returns `Err(IndoorZoneIdNotRegistered)` when
+    /// a pinned zone is absent from `zone_state_indices`, surfacing the
+    /// configuration error rather than silently substituting a fallback initial
+    /// state.
     #[test]
-    #[should_panic(expected = "expected Err when indoor_zone_id is absent")]
     fn missing_indoor_zone_id_in_zone_state_indices_errors() {
         // 2-state model; the conditioned zone is ZoneId(2), but the wiring
         // only contains ZoneId(1) — so indoor_zone_id is not registered.
@@ -384,15 +400,22 @@ mod tests {
         let env = minimal_env(indoor, -5.0);
 
         // Pass ZoneId(2) as the pinned zone — it is not in zone_state_indices.
-        // This should return an error, not silently proceed with a flat vector.
         let result = initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(2)]);
 
-        assert!(
-            result.is_err(),
-            "expected Err when indoor_zone_id is absent from zone_state_indices, \
-             but got Ok({:?})",
-            result.ok()
-        );
+        match result {
+            Err(ThermalSolverError::IndoorZoneIdNotRegistered { id, registered }) => {
+                assert_eq!(id, ZoneId(2));
+                assert_eq!(registered, vec![ZoneId(1)]);
+            }
+            Ok(x) => panic!(
+                "expected Err(IndoorZoneIdNotRegistered) when indoor_zone_id is absent \
+                 from zone_state_indices, but got Ok({:?})",
+                x
+            ),
+            Err(other) => {
+                panic!("expected Err(IndoorZoneIdNotRegistered) but got different error: {other:?}")
+            }
+        }
     }
 
     #[test]

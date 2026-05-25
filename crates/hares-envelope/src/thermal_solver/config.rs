@@ -538,6 +538,10 @@ impl Default for ThermalSolverConfig {
 pub enum ThermalSolverError {
     #[error("invalid zone mapping: zone {zone:?} is missing from {field}")]
     MissingZoneMapping { zone: ZoneId, field: &'static str },
+    #[error(
+        "indoor zone {id:?} is not registered in zone_state_indices; registered zones: {registered:?}"
+    )]
+    IndoorZoneIdNotRegistered { id: ZoneId, registered: Vec<ZoneId> },
     #[error("failed to initialize steady-state vector: {0}")]
     Initialization(String),
     #[error("{0}")]
