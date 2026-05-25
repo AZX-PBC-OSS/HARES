@@ -101,7 +101,7 @@ pub const AIRFLOW_ROOM_AC_M3_S_PER_W: f64 = 4.294_270_780_782_807e-5;
 ///   r = −0.10 → 1.0 + 0.9 × (−0.10) = 0.91 ✓ (capacity falls 9%)
 ///
 /// Source: ANSI/RESNET/ACCA 310-2020 (paywalled; magnitude unverified from
-/// public sources — see Known Limitations in T-0062 implementation notes).
+/// public sources — the standard is not publicly accessible for direct citation).
 /// Sign and approximate magnitude are consistent with OpenStudio-HPXML (NREL)
 /// hvac_sizing.rb: `cool_qgr_values[0] = −9.46e-1` drives a ~0.9× capacity
 /// multiplier at rated conditions for a 10% charge defect.
