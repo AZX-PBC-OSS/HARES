@@ -1925,6 +1925,7 @@ fn snapshot_to_py(
         d.set_item("ventilation_w", gains.ventilation_w)?;
         d.set_item("natural_ventilation_w", gains.natural_ventilation_w)?;
         d.set_item("port_sensible_w", gains.port_sensible_w)?;
+        d.set_item("port_radiant_w", gains.port_radiant_w)?;
         d.set_item("internal_gain_w", gains.internal_gain_w)?;
         dict.set_item("post_solvers", d)?;
     }

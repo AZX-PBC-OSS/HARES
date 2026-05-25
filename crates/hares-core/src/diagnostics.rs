@@ -38,6 +38,13 @@ pub struct EnvelopeDiag {
     pub internal_gain_w: f64,
     /// Total port sensible [W] (HVAC + appliances).
     pub port_sensible_w: f64,
+    /// Total port radiant [W] (HVAC + appliances distributed to surfaces).
+    ///
+    /// ASHRAE HoF Ch. 18: internal gains have separate convective and radiant
+    /// components; reporting both enables MRT diagnosis and BESTEST comparisons.
+    /// EnergyPlus exposes `OtherEquipment Radiant Heating Rate [W]` as a
+    /// separate output variable (I/O Ref v8.4, Internal Gains group).
+    pub port_radiant_w: f64,
 }
 
 #[derive(Debug)]
@@ -61,6 +68,7 @@ pub fn write_header(w: &mut impl Write, n_zones: usize) {
         cols.push(format!("zone{}_latent_gain_w", i + 1));
     }
     cols.push("electrical_net_kw".to_string());
+    cols.push("port_radiant_w".to_string());
     let _ = writeln!(w, "{}", cols.join(","));
 }
 
@@ -96,11 +104,22 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
         vals.push(format!("{:.1}", latent));
     }
     vals.push(format!("{:.4}", d.electrical_net_kw));
+    vals.push(
+        d.envelope
+            .as_ref()
+            .map(|e| format!("{:.1}", e.port_radiant_w))
+            .unwrap_or_default(),
+    );
     let _ = writeln!(w, "{}", vals.join(","));
 }
 
 /// Capture diagnostics from the current environment and port state.
-pub fn capture(step: u64, env: &EnvironmentState, ports: &PortSlots) -> StepDiagnostics {
+pub fn capture(
+    step: u64,
+    env: &EnvironmentState,
+    ports: &PortSlots,
+    envelope: Option<EnvelopeDiag>,
+) -> StepDiagnostics {
     let timestamp_s = env.current_time.timestamp() as f64;
     let zone_temps_c: Vec<(ZoneId, f64)> =
         env.zones.iter().map(|z| (z.id, z.temperature_c)).collect();
@@ -126,6 +145,6 @@ pub fn capture(step: u64, env: &EnvironmentState, ports: &PortSlots) -> StepDiag
         electrical_net_kw,
         equipment: Vec::new(),
         equipment_sensible_w: Vec::new(),
-        envelope: None,
+        envelope,
     }
 }
