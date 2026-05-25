@@ -4,7 +4,8 @@ use std::fmt;
 ///
 /// BESTEST envelope conformance uses ±1 °C for annual means; 0.6 °C covers the
 /// observed 0.14–0.55 °C band across all fixtures while still flagging an
-/// order-of-magnitude regression in the thermal solver.
+/// order-of-magnitude regression in the thermal solver. Pending upstream
+/// physics fixes tracked in T-0075 (BESTEST conformance) and its dependencies.
 pub const ZONE_TEMP_CONDITIONED_C_MAE_MAX: f64 = 0.6;
 pub const ZONE_TEMP_UNCONDITIONED_C_MAE_MAX: f64 = 0.5;
 /// Relative HVAC energy tolerance over short (≤1 h) dynamic-cycling windows.
@@ -23,10 +24,10 @@ pub const SHORT_WINDOW_TOTAL_SITE_ENERGY_REL_PCT_MAX: f64 = 25.0;
 /// larger initial demand than OCHRE for some envelopes. With only 60 samples
 /// in a 1-hour window the instantaneous peak is dominated by that single
 /// transient, so a loose band is the only way to gate against blow-ups while
-/// the step-0 physics issue is outstanding. Pending follow-up: once the
+/// the step-0 physics issue is outstanding. Pending T-0123: once the
 /// back-solve at `crates/hares-envelope/src/thermal_solver/stepping.rs:24-66`
-/// is aligned with OCHRE this constant should drop to ~20 % for short-window
-/// cycling (the observed non-step-0 residual across the current corpus).
+/// is aligned with the reference this constant should drop to ~20 % for
+/// short-window cycling (the observed non-step-0 residual across the corpus).
 pub const PEAK_HVAC_POWER_REL_PCT_MAX: f64 = 80.0;
 pub const BATTERY_SOC_MAE_ABS_MAX: f64 = 0.01;
 pub const EQUIPMENT_MODE_CYCLE_COUNT_REL_PCT_MAX: f64 = 5.0;

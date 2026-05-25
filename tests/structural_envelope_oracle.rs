@@ -698,8 +698,8 @@ mod tests {
                 .unwrap_or_else(|e| panic!("read {}: {e}", ref_json_path.display())),
         )
         .expect("parse ashrae_rc_reference.json");
-        let ochre_boundaries = ref_json["boundaries"].as_array().expect("boundaries array");
-        let ochre_total_ua = ref_json["total_ua_w_k"].as_f64().unwrap_or(0.0);
+        let ref_boundaries = ref_json["boundaries"].as_array().expect("boundaries array");
+        let ref_total_ua = ref_json["total_ua_w_k"].as_f64().unwrap_or(0.0);
 
         // Aggregate HARES boundary diagnostics by LUT name
         // (OCHRE consolidates walls by type; HARES keeps per-orientation).
@@ -756,38 +756,41 @@ mod tests {
             }
         };
 
-        eprintln!("\n{:=^120}", " RC PARITY: HARES vs OCHRE (per-boundary) ");
+        eprintln!(
+            "\n{:=^120}",
+            " RC PARITY: HARES vs Reference (per-boundary) "
+        );
         eprintln!(
             "{:<20} {:>8} {:>8} {:>6}  {:>8} {:>8} {:>6}  {:>8} {:>8} {:>6}  {:>7} {:>7} {:>6}  {:>3} {:>3}",
             "Boundary",
             "H_UA",
-            "O_UA",
+            "R_UA",
             "Δ%",
             "H_Ri",
-            "O_Ri",
+            "R_Ri",
             "Δ%",
             "H_Re",
-            "O_Re",
+            "R_Re",
             "Δ%",
             "H_Cap",
-            "O_Cap",
+            "R_Cap",
             "Δ%",
             "H_n",
-            "O_n"
+            "R_n"
         );
         eprintln!("{}", "-".repeat(120));
 
         let mut failures: Vec<String> = Vec::new();
         let mut matched_count = 0usize;
 
-        for ochre_bd in ochre_boundaries {
-            let name = ochre_bd["name"].as_str().unwrap_or("?");
-            let o_ua = ochre_bd["ua_w_k"].as_f64().unwrap_or(0.0);
-            let o_area = ochre_bd["area_m2"].as_f64().unwrap_or(0.0);
-            let o_ri = ochre_bd["r_film_int_m2_k_w"].as_f64().unwrap_or(0.0);
-            let o_re = ochre_bd["r_film_ext_m2_k_w"].as_f64().unwrap_or(0.0);
-            let o_cap_kj = ochre_bd["capacitance_kj_k"].as_f64().unwrap_or(0.0);
-            let o_nodes = ochre_bd["n_nodes"].as_u64().unwrap_or(0) as usize;
+        for ref_bd in ref_boundaries {
+            let name = ref_bd["name"].as_str().unwrap_or("?");
+            let o_ua = ref_bd["ua_w_k"].as_f64().unwrap_or(0.0);
+            let o_area = ref_bd["area_m2"].as_f64().unwrap_or(0.0);
+            let o_ri = ref_bd["r_film_int_m2_k_w"].as_f64().unwrap_or(0.0);
+            let o_re = ref_bd["r_film_ext_m2_k_w"].as_f64().unwrap_or(0.0);
+            let o_cap_kj = ref_bd["capacitance_kj_k"].as_f64().unwrap_or(0.0);
+            let o_nodes = ref_bd["n_nodes"].as_u64().unwrap_or(0) as usize;
 
             // Windows are stored per-window in HARES (Window1 … WindowN) but
             // aggregated under the single "Window" name in the reference.
@@ -898,11 +901,11 @@ mod tests {
 
         // Total UA
         let hares_total = diag.total_ua_w_per_k;
-        let total_pct = pct(hares_total, ochre_total_ua);
+        let total_pct = pct(hares_total, ref_total_ua);
         eprintln!("{}", "-".repeat(120));
         eprintln!(
             "{:<20} {:>8.2} {:>8.2} {:>+5.1}%",
-            "TOTAL UA", hares_total, ochre_total_ua, total_pct
+            "TOTAL UA", hares_total, ref_total_ua, total_pct
         );
 
         // Aggregate unmatched HARES window boundaries and compare to OCHRE "Window"
@@ -916,10 +919,10 @@ mod tests {
             .filter(|(name, _)| name.starts_with("Unknown(Window"))
             .map(|(_, agg)| agg.area_m2)
             .sum();
-        let ochre_window = ochre_boundaries
+        let ref_window = ref_boundaries
             .iter()
             .find(|b| b["name"].as_str() == Some("Window"));
-        if let Some(ow) = ochre_window {
+        if let Some(ow) = ref_window {
             let o_win_ua = ow["ua_w_k"].as_f64().unwrap_or(0.0);
             let o_win_area = ow["area_m2"].as_f64().unwrap_or(0.0);
             let hares_u = if hares_window_area > 0.0 {
@@ -927,7 +930,7 @@ mod tests {
             } else {
                 0.0
             };
-            let ochre_u = if o_win_area > 0.0 {
+            let ref_u = if o_win_area > 0.0 {
                 o_win_ua / o_win_area
             } else {
                 0.0
@@ -938,8 +941,8 @@ mod tests {
                 hares_window_ua, hares_window_area, hares_u
             );
             eprintln!(
-                "    OCHRE: UA={:.2} W/K, area={:.2} m², U={:.3} W/(m²·K)",
-                o_win_ua, o_win_area, ochre_u
+                "    Ref:  UA={:.2} W/K, area={:.2} m², U={:.3} W/(m²·K)",
+                o_win_ua, o_win_area, ref_u
             );
             eprintln!(
                 "    Delta UA: {:.2} W/K ({:+.1}%)",
@@ -948,17 +951,17 @@ mod tests {
             );
             eprintln!(
                 "    NOTE: OCHRE uses raw HPXML UFactor={:.2} as SI W/(m²·K).",
-                ochre_u
+                ref_u
             );
             eprintln!(
                 "          HPXML UFactor is in BTU/(hr·ft²·°F). Correct SI = {:.2} × 5.678 = {:.3} W/(m²·K).",
-                ochre_u,
-                ochre_u * 5.678
+                ref_u,
+                ref_u * 5.678
             );
             eprintln!(
                 "          HARES correctly converts: U={:.3} W/(m²·K). OCHRE window R is {:.1}× too high.",
                 hares_u,
-                (1.0 / ochre_u) / (1.0 / hares_u)
+                (1.0 / ref_u) / (1.0 / hares_u)
             );
             // Area should match within 1%
             let area_pct = pct(hares_window_area, o_win_area);
@@ -986,24 +989,24 @@ mod tests {
             if name.starts_with("Unknown(Window") {
                 continue; // already handled above
             }
-            let matched = ochre_boundaries
+            let matched = ref_boundaries
                 .iter()
                 .any(|b| b["name"].as_str() == Some(name.as_str()));
             if !matched {
                 eprintln!(
-                    "  WARNING: HARES boundary '{}' (UA={:.2}, area={:.2}) has no OCHRE match",
+                    "  WARNING: HARES boundary '{}' (UA={:.2}, area={:.2}) has no reference match",
                     name, agg.ua_w_k, agg.area_m2
                 );
             }
         }
 
         eprintln!(
-            "\n  Matched: {}/{} OCHRE boundaries",
+            "\n  Matched: {}/{} reference boundaries",
             matched_count,
-            ochre_boundaries.len()
+            ref_boundaries.len()
         );
 
-        assert_within_pct(hares_total, ochre_total_ua, 8.0, "total building UA");
+        assert_within_pct(hares_total, ref_total_ua, 8.0, "total building UA");
 
         // Zone capacitances within 1%. Conditioned zone TCM = 1.0 because
         // furniture boundaries are present (see building_to_zone_inputs);
