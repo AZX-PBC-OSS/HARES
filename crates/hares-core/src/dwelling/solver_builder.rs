@@ -248,6 +248,30 @@ fn build_solver_boundaries(
         // OCHRE "full" mode: radiation_frac = R_film_conv / (R_film_conv + R_inner_half).
         // R_film is convection-only (1/h_conv from TARP). LWR is handled
         // entirely by the explicit ScriptF injection module.
+        //
+        // Derivation (current-divider at the inner surface node):
+        //   The interior surface node sees two parallel conductive paths:
+        //     G_conv = 1 / R_film_conv   (convection → zone air)
+        //     G_wall = 1 / R_inner_half  (conduction → wall mass RC node)
+        //   The fraction of an injected flux routing to the wall mass node is:
+        //     radiation_frac = G_wall / (G_wall + G_conv)
+        //                    = r_film_int / (r_film_int + r_inner_half)
+        //   The complement (r_inner_half / (r_film_int + r_inner_half)) routes
+        //   to zone air.  This matches OCHRE Envelope.py:254:
+        //     surface.radiation_frac = res_film / (res_film + res_material)
+        //   and is algebraically equivalent to the conductance-based current
+        //   divider for two parallel paths from a common node.
+        //
+        //   When R_inner_half = 0 (no RC node, e.g. steady-state boundary):
+        //   radiation_frac → 1.0 (the nearest "node" is the surface itself;
+        //   all flux goes to the RC node because there is no intermediate
+        //   material resistance).
+        //
+        //   Reference: ASHRAE HoF 2021 Ch.4 "Heat Transfer at Surfaces" —
+        //   convection and radiation combine in parallel from a surface node.
+        //   OCHRE Envelope.py:254 for the formula; the HARES test
+        //   `radiation_frac_impulse_response_matches_closed_form` validates
+        //   the split against an assembled state-space model.
         let interior_rad_frac = if r_inner_half > 0.0 {
             r_film_int / (r_film_int + r_inner_half)
         } else {

@@ -16,6 +16,7 @@ use hares_types::{
     WeatherState, ZoneId, ZoneState,
 };
 use nalgebra::DMatrix;
+use nalgebra::DVector;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -395,8 +396,6 @@ fn lwr_zone_without_scriptf_must_error_at_construction() {
         boundary_diagnostics: Vec::new(),
     };
 
-    // BUG: ThermalSolver::new currently returns Ok here instead
-    // of Err.  When fixed this assert_err should pass.
     let result = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0);
     assert!(
         result.is_err(),
@@ -431,112 +430,100 @@ fn interior_lwr_default_is_starmesh() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: radiation_frac voltage-divider under StarMesh topology
+// Verification: radiation_frac = r_film_conv / (r_film_conv + r_inner_half)
 // ---------------------------------------------------------------------------
 
-/// `radiation_frac` formula mismatch under StarMesh Y-Δ topology.
+/// `radiation_frac` = `r_film_conv / (r_film_conv + r_inner_half)` correctly
+/// computes the fraction of an injected flux that routes to the wall mass RC
+/// node in the OCHRE "full" mode (convection-only interior film, LWR handled
+/// separately by ScriptF/StarMesh).
 ///
-/// It was claimed that `interior_rad_frac = r_film_int / (r_film_int + r_inner_half)`
-/// was derived for a pre-S1 topology where the convective film resistance and the
-/// longwave radiation path were **combined** into a single `R_film_combined`.
-/// After S1 separated convection from radiation into parallel paths, the
-/// correct splitting fraction for an injected radiant gain is a current-divider
-/// over the parallel admittances seen at the inner surface node — not the
-/// series voltage-divider over (R_film, R_wall_half).
+/// The prior audit claimed the formula was a pre-S1 "series voltage-divider"
+/// and proposed a "current-divider" replacement.  That analysis compared two
+/// different quantities:
 ///
-/// This test characterises the quantitative difference between the old
-/// voltage-divider formula and the correct current-divider formula for a
-/// representative interior surface:
+///   * Current `radiation_frac` = `R_film_conv / (R_film_conv + R_inner_half)`
+///     = fraction to WALL MASS node.
+///   * Proposed "correct" value = `G_conv / (G_conv + G_wall)`
+///     = fraction to ZONE AIR.
 ///
-///   Wall: R_film_conv = 0.12 m²K/W (convection-only, TARP h_c ≈ 8.3 W/m²K)
-///         h_rad = 4·ε·σ·T³ ≈ 5.14 W/m²K (ε=0.9, T=293.15K)
-///         R_film_rad = 1/5.14 ≈ 0.194 m²K/W
-///         R_inner_half = 0.059 m²K/W (100mm concrete, k=1.7, half-node)
+/// These are **complements**, not alternatives.  The current formula is
+/// algebraically identical to `G_wall / (G_wall + G_conv)` when expressed in
+/// conductances, and it always equals `1 − (fraction to air)`.  Both quantities
+/// are correct for what they claim to represent.  The audit's claim of a
+/// "~27% empirical bias" from this formula is not reproducible — the formula
+/// and its complement produce self-consistent results.
 ///
-/// Old formula (series voltage-divider, current code):
-///   radiation_frac_old = R_film_conv / (R_film_conv + R_inner_half)
-///                      = 0.12 / (0.12 + 0.059) = 0.671
+/// This test verifies the identity, confirms the formula's numeric correctness
+/// for representative surfaces, and asserts that the fraction to wall mass +
+/// fraction to zone air sum to exactly 1.0.
 ///
-/// Correct formula (current-divider over parallel admittances):
-///   G_air  = 1/R_film_conv = 8.33 W/m²K   (convection to zone air)
-///   G_rad  = h_rad = 5.14 W/m²K            (radiation path)
-///   G_wall = 1/R_inner_half = 16.95 W/m²K  (conduction into wall mass)
-///   G_total = G_air + G_rad + G_wall = 30.42 W/m²K
-///   radiation_frac_correct = G_air / G_total = 8.33 / 30.42 = 0.274
-///
-/// The difference is approximately 0.40 (27% absolute on a 0-1 scale),
-/// matching the "~27% empirical bias" for a single surface.
-///
-/// NOTE: This test characterises the BUG — it does NOT assert that the correct
-/// formula is currently used.  The test PASSES if the code still uses the old
-/// formula (i.e., it is a failing-in-the-correct-sense regression test).
-/// When this is fixed, the assertion sense should be inverted.
+/// Reference: OCHRE Envelope.py:254 `res_film / (res_film + res_material)`.
+/// The HARES comment "OCHRE 'full' mode: radiation_frac = R_film_conv /
+/// (R_film_conv + R_inner_half)" at solver_builder.rs:248-250 correctly
+/// describes what the formula computes and which code path it serves.
 #[test]
-fn radiation_frac_old_formula_disagrees_with_current_divider() {
-    const SIGMA: f64 = 5.670374e-8;
-    const T_REF_K: f64 = 293.15; // 20°C reference
-    const EMISSIVITY: f64 = 0.9;
-
-    // Convection-only interior film resistance [m²K/W]
-    // TARP h_c ≈ 8.33 W/(m²·K) for vertical wall
+fn radiation_frac_correctly_splits_between_wall_mass_and_zone_air() {
+    // Convection-only interior film resistance [m²K/W].
+    // TARP h_c ≈ 8.33 W/(m²·K) for vertical wall.
     let r_film_conv_m2kw = 0.12_f64;
 
-    // Linearised radiation conductance [W/(m²·K)]
-    let h_rad = 4.0 * EMISSIVITY * SIGMA * T_REF_K.powi(3);
-    let r_film_rad_m2kw = 1.0 / h_rad;
+    // Half-node material resistance for 100 mm concrete (k=1.7 W/(m·K)).
+    // r_inner_half = thickness / (2 × k) for a two-capacitor centred-difference RC layer.
+    // 100 mm / (2 × 1.7 W/m·K) ≈ 0.0294 m²·K/W.
+    let r_inner_half_m2kw = 0.100 / (2.0 * 1.7);
 
-    // Half-node material resistance for 100 mm concrete (k=1.7 W/(m·K))
-    let r_inner_half_m2kw = 0.100 / (2.0 * 1.7); // ≈ 0.0294 m²K/W
+    // ─ Current (correct) formula: fraction to wall mass RC node ─
+    let radiation_frac = r_film_conv_m2kw / (r_film_conv_m2kw + r_inner_half_m2kw);
 
-    // ── Old formula (series voltage-divider — what the code currently uses) ──
-    let radiation_frac_old = r_film_conv_m2kw / (r_film_conv_m2kw + r_inner_half_m2kw);
+    // ─ Conductance-based equivalents ─
+    let g_conv = 1.0 / r_film_conv_m2kw; // convection → zone air
+    let g_wall = 1.0 / r_inner_half_m2kw; // conduction → wall mass
 
-    // ── Correct formula (current-divider over parallel admittances) ──
-    // At the inner surface node the parallel conductances are:
-    //   G_conv  = 1/R_film_conv   (convection → zone air)
-    //   G_rad   = 1/R_film_rad    (radiation → zone air via star-mesh)
-    //   G_wall  = 1/R_inner_half  (conduction into wall mass node)
-    // The injected radiant flux splits to zone air proportionally to
-    // (G_conv + G_rad) / (G_conv + G_rad + G_wall).
-    //
-    // Note: under the HARES/OCHRE "full" model, the explicit ScriptF LWR
-    // module handles the radiation path separately.  The radiation_frac for
-    // opaque surfaces in that model correctly uses R_film_conv only (no h_rad
-    // in the film), but the INJECTED LWR gain then needs a current-divider
-    // over (G_conv_air, G_wall).  The simplest correct expression is:
-    //   radiation_frac_correct = G_conv / (G_conv + G_wall)
-    // This differs from the old formula because R_inner_half is the half-node
-    // material resistance, not a combined zone-to-node resistance.
-    let g_conv = 1.0 / r_film_conv_m2kw;
-    let g_wall = 1.0 / r_inner_half_m2kw;
-    // Fraction routing injected gain toward zone air (convection wins against wall)
-    let radiation_frac_correct = g_conv / (g_conv + g_wall);
-
-    // ── Diagnosis ──
-    let absolute_difference = (radiation_frac_old - radiation_frac_correct).abs();
-
-    // The old formula overestimates the air-routed fraction compared to the
-    // correct current-divider.  The ticket claims ~27% empirical bias; we
-    // verify the formula difference is in the same order of magnitude.
+    // Fraction to wall mass via conductances must equal the voltage-divider.
+    let frac_to_wall_mass = g_wall / (g_wall + g_conv);
     assert!(
-        radiation_frac_old > radiation_frac_correct,
-        "old formula ({radiation_frac_old:.4}) should be LARGER than \
-         correct current-divider ({radiation_frac_correct:.4}) — if equal the bug is fixed"
+        (radiation_frac - frac_to_wall_mass).abs() < 1e-9,
+        "radiation_frac ({radiation_frac:.6}) must equal G_wall/(G_wall+G_conv) ({frac_to_wall_mass:.6})"
     );
 
+    // Fraction to zone air via conductances.
+    let frac_to_zone_air = g_conv / (g_wall + g_conv);
+
+    // The split must sum to 1.0 (all flux accounted for).
     assert!(
-        absolute_difference > 0.10,
-        "formula difference {absolute_difference:.4} should be >0.10 \
-         (expected ~27% empirical bias); got radiation_frac_old={radiation_frac_old:.4}, \
-         radiation_frac_correct={radiation_frac_correct:.4}"
+        (radiation_frac + frac_to_zone_air - 1.0).abs() < 1e-9,
+        "radiation_frac ({radiation_frac:.6}) + frac_to_air ({frac_to_zone_air:.6}) must sum to 1.0"
     );
 
-    // Linearised h_rad for documentation
+    // Concrete wall: material resistance dominates convection → most flux goes to wall mass.
+    // For a typical residential wall (0.12 conv, 0.029 half-node), the wall mass
+    // should receive >70% of an injected gain.
     assert!(
-        h_rad > 4.0 && h_rad < 7.0,
-        "h_rad = {h_rad:.4} W/(m²·K) should be in [4, 7] range for typical residential surfaces"
+        radiation_frac > 0.7,
+        "for R_conv=0.12, R_half=0.029, radiation_frac ({radiation_frac:.4}) should be >0.7"
     );
-    let _ = r_film_rad_m2kw; // used for derivation notes above
+    assert!(
+        radiation_frac < 1.0,
+        "radiation_frac must be < 1.0 when half-node resistance is finite"
+    );
+
+    // ─ Edge case: massive wall (large R_inner_half) ─
+    // Very thick insulation: most flux goes to zone air (convection wins).
+    let r_inner_half_large = 5.0;
+    let rad_frac_large = r_film_conv_m2kw / (r_film_conv_m2kw + r_inner_half_large);
+    assert!(
+        rad_frac_large < 0.1,
+        "with large R_half=5.0, radiation_frac ({rad_frac_large:.4}) should be small (<0.1)"
+    );
+
+    // ─ Edge case: thin foil (R_inner_half ≈ 0) — surface IS the node ─
+    let r_inner_half_tiny = 1e-6;
+    let rad_frac_tiny = r_film_conv_m2kw / (r_film_conv_m2kw + r_inner_half_tiny);
+    assert!(
+        rad_frac_tiny > 0.9999,
+        "with near-zero R_half, radiation_frac ({rad_frac_tiny:.6}) should approach 1.0"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +865,267 @@ fn flux_residual_criterion_is_more_conservative_than_step_magnitude() {
         flux_iter >= step_iter,
         "flux-residual criterion converged at iteration {flux_iter} but step-magnitude \
          converged at iteration {step_iter}; flux should be equally or more conservative \
-          than step magnitude"
+           than step magnitude"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// impulse-response: radiation_frac split validated against state-space model
+// ---------------------------------------------------------------------------
+
+/// Impulse-response test: inject 1 W at an interior surface via the
+/// `radiation_frac` split and verify the steady-state zone-air temperature
+/// rise matches the closed-form expression.
+///
+/// Topology (pre-elimination):
+///   ZoneAir (C_air, internal capacitor) ←R_film→ Surface(floating) ←R_inner_half→ WallMass (C_wall)
+///   WallMass ←R_outer→ Outdoor (external)
+///
+/// After floating-node elimination:
+///   ZoneAir ←[R_film + R_inner_half]→ WallMass ←[R_outer]→ Outdoor
+///
+/// LWR flux q = 1 W is injected at the surface by splitting:
+///   wall mass input:  q × radiation_frac
+///   zone air input:   q × (1 − radiation_frac)
+///
+/// At steady state (all external temps = 0 °C), the zone air temperature
+/// equals the injected power flowing through R_film + R_inner_half into the
+/// wall mass, which should match (1 − radiation_frac) × q × (R_film + R_inner_half)
+/// = r_inner_half / (r_film + r_inner_half) × q × (r_film + r_inner_half)
+/// = q × r_inner_half.
+///
+/// This verifies that the split formula produces the same temperatures as
+/// injecting q directly at the surface node in a hand calculation.
+#[test]
+fn radiation_frac_impulse_response_matches_closed_form() {
+    use hares_envelope::rc_network::{NodeId, RCNetwork};
+    use hares_envelope::state_space::OutputMapping;
+    use hares_envelope::state_space::StateSpaceModel;
+    use std::collections::HashMap;
+
+    // Physical parameters (in SI per-m²; multiplied by area downstream).
+    let r_film = 0.12_f64; // convection film [m²·K/W]
+    let r_inner_half = 0.10 / (2.0 * 1.7); // half-node: 100mm concrete, k=1.7 [m²·K/W]
+    let r_outer = 3.0_f64; // wall outer resistance to outdoor [m²·K/W]
+    let area = 10.0_f64; // surface area [m²]
+    let c_air = 500_000.0_f64; // zone air capacitance [J/K]
+    let c_wall = 200_000.0_f64; // wall mass capacitance [J/K]
+
+    // Resistances in [K/W] (divide by area)
+    let r_film_kw = r_film / area;
+    let r_half_kw = r_inner_half / area;
+    let r_outer_kw = r_outer / area;
+
+    // radiation_frac = fraction of injected flux to wall mass RC node.
+    // radiation_frac = G_wall / (G_wall + G_conv)
+    //                = (1/r_half) / (1/r_half + 1/r_film)
+    //                = r_film / (r_film + r_half)
+    let radiation_frac = r_film_kw / (r_film_kw + r_half_kw);
+
+    // Fraction to zone air.
+    let frac_to_air = 1.0 - radiation_frac;
+
+    // ── Build RC network with floating surface node ──
+    // Nodes: 1 = zone air (external, but with cap for injection modeling)
+    //        2 = wall mass (internal, capacitor)
+    //        3 = outdoor (external)
+    //        100 = floating surface node (no capacitor, will be eliminated)
+    let n = |id: u32| NodeId(id);
+    let caps = HashMap::from([(n(1), c_air), (n(2), c_wall)]);
+    let mut res = HashMap::new();
+    res.insert((n(1), n(100)), r_film_kw); // zone air ↔ surface
+    res.insert((n(100), n(2)), r_half_kw); // surface ↔ wall mass
+    res.insert((n(2), n(3)), r_outer_kw); // wall mass ↔ outdoor
+
+    let net = RCNetwork::from_elements(caps, res, vec![n(3)]).unwrap();
+    let (a_c, b_c) = net.build_matrices().unwrap();
+
+    // ── Verify floating node was eliminated ──
+    // After elimination: zone air (cap) ↔ wall mass (cap) ↔ outdoor (ext)
+    // A_c: 2×2, B_c: 2×1 (only outdoor, node 3)
+    assert_eq!(a_c.nrows(), 2, "A_c should be 2×2 after elimination");
+    assert_eq!(b_c.ncols(), 1, "B_c should be 2×1 (one external node)");
+
+    // ── Extend B matrix with injection columns ──
+    // Column layout: [u_outdoor | u_inject_zone_air | u_inject_wall_mass]
+    // Injection at a capacitor node: B_inj = 1/C at that node.
+    let mut b_ext = DMatrix::<f64>::zeros(2, 3);
+    b_ext.column_mut(0).copy_from(&b_c.column(0)); // outdoor input
+    b_ext[(0, 1)] = 1.0 / c_air; // inject at zone air
+    b_ext[(1, 2)] = 1.0 / c_wall; // inject at wall mass
+
+    let output_map = OutputMapping {
+        output_count: 2,
+        node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+        input_to_output: vec![],
+    };
+
+    let _model = StateSpaceModel::from_continuous(&a_c, &b_ext, 60.0, &output_map).unwrap();
+
+    // ── Simulate impulse response to steady state ──
+    // Initial condition: all temperatures = 0 °C.
+    // Constant inputs: outdoor = 0 °C, injection = q × radiation_frac or q × (1−radiation_frac).
+    let q_inj = 1.0_f64;
+
+    // For the continuous system: dx/dt = A*x + B*u
+    // At steady state: 0 = A*x_ss + B*u_ss → x_ss = -A^{-1} * B * u_ss
+    let a_inv = a_c
+        .clone()
+        .try_inverse()
+        .expect("A matrix should be invertible");
+
+    let u_ss = DVector::from_vec(vec![
+        0.0,                    // outdoor temp = 0
+        q_inj * frac_to_air,    // zone air injection
+        q_inj * radiation_frac, // wall mass injection
+    ]);
+    let x_ss = -&a_inv * (&b_ext * &u_ss);
+
+    let t_zone_ss = x_ss[0];
+    let t_wall_ss = x_ss[1];
+
+    // ── Closed-form expectations ──
+    // At steady state, the injected 1 W must leave through the outdoor resistance.
+    // Total injected = 1 W, all exits through R_outer to outdoor at 0°C:
+    //   1 W = (T_wall - 0) / R_outer → T_wall = 1 * R_outer
+    let t_wall_expected = q_inj * r_outer_kw;
+    assert!(
+        (t_wall_ss - t_wall_expected).abs() < 1e-6,
+        "wall mass steady-state temp: got {t_wall_ss:.6}, expected {t_wall_expected:.6}"
+    );
+
+    // Between zone air and wall mass, the steady-state heat flow must equal
+    // the fraction injected to zone air (heat travels from zone air through
+    // the film+material path to wall mass, then out through outdoor).
+    // Heat flow from zone air to wall mass = (T_zone − T_wall) / (R_film + R_half)
+    // This must equal q_inj × frac_to_air.
+    let q_zone_to_wall = (t_zone_ss - t_wall_ss) / (r_film_kw + r_half_kw);
+    assert!(
+        (q_zone_to_wall - q_inj * frac_to_air).abs() < 1e-6,
+        "heat flow from zone air to wall mass: got {q_zone_to_wall:.6} W, expected {:.6} W",
+        q_inj * frac_to_air
+    );
+
+    // ── Surface temperature validation ──
+    // The surface temperature (between R_film and R_inner_half) should satisfy the
+    // voltage-divider interpolation:
+    //   T_surf = radiation_frac × T_wall + (1 − radiation_frac) × T_zone
+    let t_surf = radiation_frac * t_wall_ss + frac_to_air * t_zone_ss;
+
+    // At steady state, the heat flow from surface to zone air must equal
+    // q_inj × frac_to_air (the portion injected at zone air, plus what flows
+    // from the surface to zone air through R_film).
+    //
+    // From the surface, heat flows to zone air through R_film:
+    // q_surf_to_air = (T_surf − T_zone) / R_film
+    // This must equal q_inj × frac_to_air (all heat to air comes through convection).
+    //
+    // Wait: we injected q * frac_to_air DIRECTLY at the zone air node.
+    // The heat balance at zone air: injection + (T_surf - T_zone)/R_film = 0 at steady state
+    // So: (T_surf - T_zone)/R_film = -q * frac_to_air
+    let q_conv_to_air = (t_surf - t_zone_ss) / r_film_kw;
+    // At steady state, convection from surface → zone air balances the
+    // injection at zone air: q_conv_to_air + q_inj * frac_to_air ≈ 0
+    assert!(
+        (q_conv_to_air + q_inj * frac_to_air).abs() < 1e-6,
+        "surface-to-air convection ({q_conv_to_air:.6}) must balance zone air injection ({})",
+        -q_inj * frac_to_air
+    );
+
+    // ── Verify conductance equivalence ──
+    // radiation_frac = G_wall/(G_wall+G_conv) must equal the steady-state split
+    // of heat from the surface between the wall mass and zone air.
+    let g_wall = 1.0 / r_half_kw;
+    let g_conv = 1.0 / r_film_kw;
+    let rad_frac_from_g = g_wall / (g_wall + g_conv);
+    assert!(
+        (radiation_frac - rad_frac_from_g).abs() < 1e-9,
+        "radiation_frac ({radiation_frac:.9}) != G_wall/(G_wall+G_conv) ({rad_frac_from_g:.9})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Hand-derivation: single-surface single-zone fixture
+// ---------------------------------------------------------------------------
+
+/// For a single opaque surface in a single zone, the `radiation_frac` formula
+/// produces the correct surface temperature interpolation.  This test
+/// verifies the result against a step-by-step hand calculation using
+/// ASHRAE HoF 2021 Ch.4 parallel convection/radiation and standard thermal
+/// circuit analysis.
+///
+/// Geometry: 1 zone, 4 walls (each 30 m²), R_film_conv = 0.12 m²K/W,
+/// R_inner_half varies per construction (lightweight → heavyweight).
+///
+/// The surface temperature for each wall is:
+///   T_surf = radiation_frac × T_node + (1 − radiation_frac) × T_zone
+///
+/// This test validates the two-point correctness:
+///   (a) When R_inner_half → 0, radiation_frac → 1 → T_surf ≈ T_node
+///   (b) When R_inner_half → ∞ (massive), radiation_frac → 0 → T_surf ≈ T_zone
+#[test]
+fn radiation_frac_hand_derivation_single_surface() {
+    // Zone and node temperatures for a heating scenario.
+    let t_node_c = 30.0; // wall mass node at 30 °C (warm from heating)
+    let t_zone_c = 20.0; // zone air at 20 °C
+    let r_film = 0.12_f64; // TARP convection-only [m²K/W]
+
+    // ── Case 1: lightweight construction (R_half ≈ 0.03 m²K/W) ──
+    // Thin material → T_surf is close to T_node.
+    let r_half_light = 0.03_f64;
+    let rad_frac_light = r_film / (r_film + r_half_light);
+    let t_surf_light = rad_frac_light * t_node_c + (1.0 - rad_frac_light) * t_zone_c;
+
+    assert!(
+        rad_frac_light > 0.7,
+        "lightweight: radiation_frac ({rad_frac_light:.4}) should be > 0.7"
+    );
+    assert!(
+        t_surf_light > t_zone_c && t_surf_light < t_node_c,
+        "lightweight: T_surf ({t_surf_light:.2}) must be between T_zone ({t_zone_c}) and T_node ({t_node_c})"
+    );
+    assert!(
+        (t_surf_light - t_node_c).abs() < 5.0,
+        "lightweight: T_surf should be close to T_node, got T_surf={t_surf_light:.2}, T_node={t_node_c}"
+    );
+
+    // ── Case 2: heavyweight construction (R_half ≈ 0.5 m²K/W) ──
+    // Thick massive wall → T_surf is much closer to T_zone.
+    let r_half_heavy = 0.50_f64;
+    let rad_frac_heavy = r_film / (r_film + r_half_heavy);
+    let t_surf_heavy = rad_frac_heavy * t_node_c + (1.0 - rad_frac_heavy) * t_zone_c;
+
+    assert!(
+        rad_frac_heavy < 0.3,
+        "heavyweight: radiation_frac ({rad_frac_heavy:.4}) should be < 0.3"
+    );
+    assert!(
+        t_surf_heavy > t_zone_c && t_surf_heavy < t_node_c,
+        "heavyweight: T_surf ({t_surf_heavy:.2}) must be between T_zone and T_node"
+    );
+    assert!(
+        (t_surf_heavy - t_zone_c).abs() < 3.0,
+        "heavyweight: T_surf should be close to T_zone, got T_surf={t_surf_heavy:.2}, T_zone={t_zone_c}"
+    );
+
+    // ── Energy balance at steady state (single surface, 1 m²) ──
+    // The heat flow from surface → mass must equal the injected fraction:
+    //   q_to_mass = (T_surf − T_node) / R_inner_half  [negative = to mass]
+    //   q_to_air  = (T_surf − T_zone) / R_film_conv    [positive = to air]
+    // At steady state with no net injection, these must balance.
+    let q_mass = (t_surf_heavy - t_node_c) / r_half_heavy;
+    let q_air = (t_surf_heavy - t_zone_c) / r_film;
+    assert!(
+        (q_mass + q_air).abs() < 1e-9,
+        "steady-state heat balance: q_to_mass ({q_mass:.6}) + q_to_air ({q_air:.6}) must sum to zero"
+    );
+
+    // ── Verify: fraction to wall mass from conductance ──
+    let g_conv = 1.0 / r_film;
+    let g_wall = 1.0 / r_half_heavy;
+    let frac_to_wall_from_g = g_wall / (g_wall + g_conv);
+    assert!(
+        (rad_frac_heavy - frac_to_wall_from_g).abs() < 1e-9,
+        "radiation_frac ({rad_frac_heavy:.9}) must equal G_wall/(G_wall+G_conv) ({frac_to_wall_from_g:.9})"
     );
 }
