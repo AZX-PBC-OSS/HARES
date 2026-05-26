@@ -477,6 +477,8 @@ mod tests {
             parameters: Map::new(),
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         }
     }
 

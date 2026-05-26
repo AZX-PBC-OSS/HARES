@@ -1787,6 +1787,8 @@ impl Dwelling {
                         parameters: Map::new(),
                         zip_params: None,
                         typed_config: None,
+                        system_id: None,
+                        related_hvac_idref: None,
                     }
                 })
                 .collect();
@@ -6035,6 +6037,8 @@ occupancy = 1.0
             parameters: Map::new(),
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         };
 
         let err = match create_equipment_from_spec(&registry, &spec) {

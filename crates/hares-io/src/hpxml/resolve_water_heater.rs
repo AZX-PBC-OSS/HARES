@@ -66,7 +66,7 @@ pub(super) fn resolve_water_heaters(
             .map(conv::r_value_ip_to_si);
 
         // RelatedHVACSystem cross-reference for combi boiler / indirect tank.
-        let _related_hvac_idref = wh
+        let related_hvac_idref = wh
             .child("RelatedHVACSystem")
             .and_then(|n| n.attrs.get("idref").cloned());
 
@@ -93,7 +93,7 @@ pub(super) fn resolve_water_heaters(
         };
         let ua_w_per_k = ua_result.map(|r| r.ua_w_per_k);
 
-        let spec = match name.as_str() {
+        let mut spec = match name.as_str() {
             "Gas Water Heater" => {
                 let conversion_efficiency = ua_result.map(|r| r.conversion_efficiency);
                 let gas_flue_loss_fraction = child_f64(wh, "FlueLossFraction")
@@ -300,6 +300,9 @@ pub(super) fn resolve_water_heaters(
             ),
         };
 
+        if name == "Indirect Tank" {
+            spec.related_hvac_idref = related_hvac_idref;
+        }
         specs.push(spec);
     }
     Ok(())
@@ -401,6 +404,8 @@ where
         parameters,
         zip_params: defaults.zip_params(&name).cloned(),
         typed_config: Some(typed_config),
+        system_id: None,
+        related_hvac_idref: None,
     }
 }
 

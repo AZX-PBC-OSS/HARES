@@ -573,6 +573,8 @@ pub(crate) fn merged_equipment_config(
         parameters: merged,
         zip_params: spec.zip_params.clone(),
         typed_config: spec.typed_config.clone(),
+        system_id: spec.system_id.clone(),
+        related_hvac_idref: spec.related_hvac_idref.clone(),
     };
     equipment_config_from_spec(&merged_spec)
 }
@@ -1031,6 +1033,8 @@ mod tests {
                 "Gas Furnace".to_string(),
                 typed_cfg,
             )),
+            system_id: None,
+            related_hvac_idref: None,
         }
     }
 
@@ -1108,6 +1112,8 @@ mod tests {
             parameters,
             zip_params: None,
             typed_config: Some(eq_cfg),
+            system_id: None,
+            related_hvac_idref: None,
         }
     }
 

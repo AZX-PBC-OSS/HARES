@@ -56,6 +56,8 @@ fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
         parameters,
         zip_params: None,
         typed_config: None,
+        system_id: None,
+        related_hvac_idref: None,
     }
 }
 

@@ -1185,6 +1185,8 @@ mod tests {
             parameters: serde_json::Map::new(),
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         }];
         let schema = crate::output::build_schema(&specs, 1, &[]);
         let result = MetricsCalculator::new(&schema, 3600, &test_config(None));

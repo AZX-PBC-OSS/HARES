@@ -614,6 +614,8 @@ mod tests {
             parameters: params,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         };
         let mut specs = vec![spec];
 
@@ -662,6 +664,8 @@ mod tests {
             parameters: params,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         };
         let mut specs = vec![spec];
 
@@ -709,12 +713,14 @@ mod tests {
         params.insert("autosize_cooling".to_string(), json!(true));
         params.insert("autosize_cooling_factor".to_string(), json!(1.0));
         let spec = EquipmentSpec {
-            name: "Air Conditioner".to_string(),
+            name: "Gas Furnace".to_string(),
             instance_name: None,
-            fuel_type: hares_types::FuelType::Electric,
+            fuel_type: hares_types::FuelType::Gas,
             parameters: params,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         };
         let mut specs = vec![spec];
 
@@ -769,6 +775,8 @@ mod tests {
             parameters: params,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         };
         let mut specs = vec![spec];
 
@@ -951,6 +959,8 @@ mod tests {
             parameters: params,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         };
         let mut specs = vec![spec];
 
@@ -1005,6 +1015,8 @@ mod tests {
             parameters: params,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         };
         let mut specs = vec![spec];
 
@@ -1063,6 +1075,8 @@ mod tests {
             parameters: params,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         };
         let mut specs = vec![spec];
 

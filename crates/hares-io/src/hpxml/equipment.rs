@@ -28,6 +28,10 @@ pub struct EquipmentSpec {
     /// Typed config, populated for equipment types that have been migrated.
     /// When present, consumers should prefer this over raw `parameters`.
     pub typed_config: Option<hares_equipment::EquipmentConfig>,
+    /// HPXML SystemIdentifier/@id from the source element, for cross-referencing.
+    pub system_id: Option<String>,
+    /// HPXML RelatedHVACSystem/@idref from WaterHeatingSystem elements.
+    pub related_hvac_idref: Option<String>,
 }
 
 pub fn resolve_equipment(
@@ -48,6 +52,7 @@ pub fn resolve_equipment(
     resolve_ventilation(details, defaults, &mut specs);
 
     apply_overrides(&mut specs, overrides);
+    resolve_loop_wiring(&mut specs);
     Ok(specs)
 }
 
@@ -119,6 +124,8 @@ pub(super) fn build_spec(
         parameters,
         zip_params,
         typed_config: None,
+        system_id: None,
+        related_hvac_idref: None,
     }
 }
 
@@ -143,6 +150,8 @@ where
         parameters,
         zip_params: defaults.zip_params(&name).cloned(),
         typed_config: Some(typed_config),
+        system_id: None,
+        related_hvac_idref: None,
     }
 }
 
@@ -158,6 +167,108 @@ fn fuel_type_label(fuel_type: FuelType) -> String {
         FuelType::None => "none",
     }
     .to_string()
+}
+
+/// Post-resolution wiring pass: assigns consistent fluid loop IDs across
+/// cross-referenced equipment (boiler + indirect tank) based on HPXML
+/// `RelatedHVACSystem` idrefs.
+///
+/// Without this pass, both boiler and indirect tank default to `LoopId(1)`
+/// independently — the cross-reference is parsed but never applied.
+fn resolve_loop_wiring(specs: &mut [EquipmentSpec]) {
+    let mut next_loop_id: u16 = 1;
+
+    // Build a lookup: HPXML SystemIdentifier/id → index for boiler specs.
+    let boiler_indices: Vec<(String, usize)> = specs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.name.as_str(), "Gas Boiler" | "Electric Boiler"))
+        .filter_map(|(i, s)| s.system_id.clone().map(|id| (id, i)))
+        .collect();
+
+    // Collect wiring jobs to avoid borrow-checker friction.
+    let mut wiring_jobs: Vec<(usize, usize, u16)> = Vec::new();
+    for (tank_idx, tank_spec) in specs.iter().enumerate() {
+        if tank_spec.name != "Indirect Tank" {
+            continue;
+        }
+        let Some(ref related_hvac_idref) = tank_spec.related_hvac_idref else {
+            continue;
+        };
+        let Some(&(_, boiler_idx)) = boiler_indices
+            .iter()
+            .find(|(id, _)| id == related_hvac_idref)
+        else {
+            tracing::warn!(
+                related_hvac_idref = %related_hvac_idref,
+                "IndirectTank references HVAC system but no matching boiler found in resolved specs"
+            );
+            continue;
+        };
+        let loop_id = next_loop_id;
+        next_loop_id += 1;
+        wiring_jobs.push((tank_idx, boiler_idx, loop_id));
+    }
+
+    // Apply wiring jobs.
+    for (tank_idx, boiler_idx, loop_id) in wiring_jobs {
+        set_boiler_loop_id(specs, boiler_idx, loop_id);
+        set_indirect_tank_boiler_loop_id(specs, tank_idx, loop_id);
+    }
+}
+
+fn set_boiler_loop_id(specs: &mut [EquipmentSpec], idx: usize, loop_id: u16) {
+    use hares_equipment::{ElectricBoilerConfig, GasBoilerConfig};
+
+    let Some(ref mut cfg) = specs[idx].typed_config else {
+        return;
+    };
+    match specs[idx].name.as_str() {
+        "Gas Boiler" => {
+            if let Ok(mut typed) = cfg.typed::<GasBoilerConfig>() {
+                typed.loop_id = Some(loop_id);
+                *cfg =
+                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed);
+            } else {
+                tracing::warn!(
+                    name = %specs[idx].name,
+                    loop_id,
+                    "set_boiler_loop_id: failed to deserialize GasBoilerConfig"
+                );
+            }
+        }
+        "Electric Boiler" => {
+            if let Ok(mut typed) = cfg.typed::<ElectricBoilerConfig>() {
+                typed.loop_id = Some(loop_id);
+                *cfg =
+                    EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed);
+            } else {
+                tracing::warn!(
+                    name = %specs[idx].name,
+                    loop_id,
+                    "set_boiler_loop_id: failed to deserialize ElectricBoilerConfig"
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn set_indirect_tank_boiler_loop_id(specs: &mut [EquipmentSpec], idx: usize, loop_id: u16) {
+    use hares_equipment::IndirectTankConfig;
+
+    if let Some(ref mut cfg) = specs[idx].typed_config {
+        if let Ok(mut typed) = cfg.typed::<IndirectTankConfig>() {
+            typed.boiler_loop_id = Some(loop_id);
+            *cfg = EquipmentConfig::from_typed(cfg.name.clone(), cfg.ochre_class.clone(), typed);
+        } else {
+            tracing::warn!(
+                name = %specs[idx].name,
+                loop_id,
+                "set_indirect_tank_boiler_loop_id: failed to deserialize IndirectTankConfig"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1725,5 +1836,216 @@ mod tests {
             .expect("ASHP Cooler spec must be present");
         assert_eq!(heater.fuel_type, FuelType::Electric);
         assert_eq!(cooler.fuel_type, FuelType::Electric);
+    }
+
+    // ── loop wiring tests (T-0141) ────────────────────────────────────
+
+    fn minimal_combi_xml(systems_inner: &str) -> String {
+        format!(
+            r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea></BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems>{systems_inner}</Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#
+        )
+    }
+
+    #[test]
+    fn combi_boiler_indirect_tank_get_consistent_loop_id_via_related_hvac_system() {
+        let xml = minimal_combi_xml(
+            r#"<HVAC>
+              <HeatingSystem>
+                <SystemIdentifier id="boiler1"/>
+                <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+                <HeatingSystemType><Boiler/></HeatingSystemType>
+                <HeatingCapacity>60000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                  <Units>AFUE</Units><Value>0.95</Value>
+                </AnnualHeatingEfficiency>
+              </HeatingSystem>
+            </HVAC>
+            <WaterHeating>
+              <WaterHeatingSystem>
+                <SystemIdentifier id="wh1"/>
+                <FuelType>natural gas</FuelType>
+                <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                <RelatedHVACSystem idref="boiler1"/>
+                <TankVolume>40</TankVolume>
+              </WaterHeatingSystem>
+            </WaterHeating>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+
+        let boiler = specs
+            .iter()
+            .find(|s| s.name == "Gas Boiler")
+            .expect("Gas Boiler spec must be present");
+        let indirect_tank = specs
+            .iter()
+            .find(|s| s.name == "Indirect Tank")
+            .expect("Indirect Tank spec must be present");
+
+        // Verify the loop ID was wired to both typed configs.
+        let boiler_cfg: hares_equipment::GasBoilerConfig = boiler
+            .typed_config
+            .as_ref()
+            .expect("boiler typed config")
+            .typed()
+            .expect("GasBoilerConfig");
+        let tank_cfg: hares_equipment::IndirectTankConfig = indirect_tank
+            .typed_config
+            .as_ref()
+            .expect("tank typed config")
+            .typed()
+            .expect("IndirectTankConfig");
+
+        assert_eq!(
+            boiler_cfg.loop_id,
+            Some(1),
+            "boiler loop_id must be 1, got {:?}",
+            boiler_cfg.loop_id
+        );
+        assert_eq!(
+            tank_cfg.boiler_loop_id,
+            Some(1),
+            "indirect tank boiler_loop_id must be 1, got {:?}",
+            tank_cfg.boiler_loop_id
+        );
+    }
+
+    #[test]
+    fn indirect_tank_without_related_hvac_system_keeps_none_boiler_loop_id() {
+        let xml = minimal_combi_xml(
+            r#"<HVAC>
+              <HeatingSystem>
+                <SystemIdentifier id="boiler1"/>
+                <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+                <HeatingSystemType><Boiler/></HeatingSystemType>
+                <HeatingCapacity>60000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                  <Units>AFUE</Units><Value>0.95</Value>
+                </AnnualHeatingEfficiency>
+              </HeatingSystem>
+            </HVAC>
+            <WaterHeating>
+              <WaterHeatingSystem>
+                <SystemIdentifier id="wh1"/>
+                <FuelType>natural gas</FuelType>
+                <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                <TankVolume>40</TankVolume>
+              </WaterHeatingSystem>
+            </WaterHeating>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+
+        let tank_cfg: hares_equipment::IndirectTankConfig = specs
+            .iter()
+            .find(|s| s.name == "Indirect Tank")
+            .expect("Indirect Tank spec")
+            .typed_config
+            .as_ref()
+            .expect("tank typed config")
+            .typed()
+            .expect("IndirectTankConfig");
+
+        assert_eq!(
+            tank_cfg.boiler_loop_id, None,
+            "without RelatedHVACSystem, boiler_loop_id must remain None"
+        );
+    }
+
+    #[test]
+    fn standalone_boiler_without_indirect_tank_keeps_none_loop_id() {
+        let xml = minimal_hvac_xml(
+            r#"<HeatingSystem>
+              <SystemIdentifier id="boiler1"/>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Boiler/></HeatingSystemType>
+              <HeatingCapacity>60000</HeatingCapacity>
+              <AnnualHeatingEfficiency>
+                <Units>AFUE</Units><Value>0.95</Value>
+              </AnnualHeatingEfficiency>
+            </HeatingSystem>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+
+        let boiler_cfg: hares_equipment::GasBoilerConfig = specs
+            .iter()
+            .find(|s| s.name == "Gas Boiler")
+            .expect("Gas Boiler spec")
+            .typed_config
+            .as_ref()
+            .expect("boiler typed config")
+            .typed()
+            .expect("GasBoilerConfig");
+
+        assert_eq!(
+            boiler_cfg.loop_id, None,
+            "standalone boiler without indirect tank must keep loop_id None"
+        );
+    }
+
+    #[test]
+    fn electric_boiler_indirect_tank_pair_wired_correctly() {
+        let xml = minimal_combi_xml(
+            r#"<HVAC>
+              <HeatingSystem>
+                <SystemIdentifier id="boiler1"/>
+                <HeatingSystemFuel>electricity</HeatingSystemFuel>
+                <HeatingSystemType><Boiler/></HeatingSystemType>
+                <HeatingCapacity>30000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                  <Units>Percent</Units><Value>100</Value>
+                </AnnualHeatingEfficiency>
+              </HeatingSystem>
+            </HVAC>
+            <WaterHeating>
+              <WaterHeatingSystem>
+                <SystemIdentifier id="wh1"/>
+                <FuelType>electricity</FuelType>
+                <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                <RelatedHVACSystem idref="boiler1"/>
+                <TankVolume>40</TankVolume>
+              </WaterHeatingSystem>
+            </WaterHeating>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+
+        let boiler_cfg: hares_equipment::ElectricBoilerConfig = specs
+            .iter()
+            .find(|s| s.name == "Electric Boiler")
+            .expect("Electric Boiler spec")
+            .typed_config
+            .as_ref()
+            .expect("boiler typed config")
+            .typed()
+            .expect("ElectricBoilerConfig");
+        let tank_cfg: hares_equipment::IndirectTankConfig = specs
+            .iter()
+            .find(|s| s.name == "Indirect Tank")
+            .expect("Indirect Tank spec")
+            .typed_config
+            .as_ref()
+            .expect("tank typed config")
+            .typed()
+            .expect("IndirectTankConfig");
+
+        assert_eq!(boiler_cfg.loop_id, Some(1));
+        assert_eq!(tank_cfg.boiler_loop_id, Some(1));
     }
 }

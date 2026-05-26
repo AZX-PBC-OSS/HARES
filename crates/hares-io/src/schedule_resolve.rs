@@ -1161,6 +1161,8 @@ mod tests {
             parameters,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         }
     }
 
@@ -1183,6 +1185,8 @@ mod tests {
             parameters,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         }
     }
 
@@ -1454,6 +1458,8 @@ mod tests {
                 ochre_class.to_string(),
                 config,
             )),
+            system_id: None,
+            related_hvac_idref: None,
         }
     }
 
@@ -1705,6 +1711,8 @@ mod tests {
             parameters: Map::new(),
             zip_params: None,
             typed_config: Some(typed_config),
+            system_id: None,
+            related_hvac_idref: None,
         }
     }
 
@@ -1738,6 +1746,8 @@ mod tests {
             parameters: Map::new(),
             zip_params: None,
             typed_config: Some(typed_config),
+            system_id: None,
+            related_hvac_idref: None,
         }
     }
 
@@ -1911,6 +1921,8 @@ mod tests {
             parameters,
             zip_params: None,
             typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
         };
 
         let result = determine_max_kw(&spec, mean_fraction);

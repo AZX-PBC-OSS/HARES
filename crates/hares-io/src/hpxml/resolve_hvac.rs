@@ -21,7 +21,7 @@ use hares_types::{FuelType, ScheduleSourceConfig};
 use super::HpxmlError;
 use super::building::{Boundary, BoundaryType, Building, DuctLocation, XmlNode, Zone, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec};
-use super::xml_helpers::{child_f64, child_text, descendants_named};
+use super::xml_helpers::{child_f64, child_text, descendants_named, element_id};
 use hares_physics::constants::{
     BOILER_AUXILIARY_HOURS_PER_YEAR, BTU_PER_HR_PER_W, CFM_TO_M3_S, HOURS_PER_YEAR, KW_TO_W,
     W_PER_TON,
@@ -1780,6 +1780,7 @@ pub(super) fn resolve_hvac(
         };
         let mut spec = build_spec(name, fuel, params, defaults);
         spec.typed_config = typed_config;
+        spec.system_id = element_id(heating);
         specs.push(spec);
     }
 
