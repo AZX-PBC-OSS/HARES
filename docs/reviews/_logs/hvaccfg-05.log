@@ -1,0 +1,54 @@
+# opencode log for hvaccfg-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump_config.rs
+[0m• [0mExplore EnergyPlus heat pump configs[90m Explore Agent[0m
+[0m✱ [0mGrep "HeatPump|heat_pump"[90m in crates/hares-equipment/src/hvac · 232 matches[0m
+[0m✓ [0mExplore EnergyPlus heat pump configs[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/defrost.rs
+[0m✱ [0mGrep "hp_lockout_temp_c|er_lockout_temp_c|max_oat_supplemental_c|lockout"[90m in crates/hares-equipment/src/hvac/heat_pump/heater.rs · 356 matches[0m
+[0m✱ [0mGrep "MinOATCompressor|MaxOATCompressor|lockout|MinOAT.*Cooling|MinOAT.*Heating"[90m in vendors/EnergyPlus/src/EnergyPlus/UnitarySystem.cc · 18 matches[0m
+Now let me read the defrost config and check how lockout temperatures are actually enforced in the heater implementation:
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=85, limit=160][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=1800, limit=120][0m
+[0m✱ [0mGrep "DEFAULT_HP_LOCKOUT|DEFAULT_ER_LOCKOUT|MAX_OAT_SUPPLEMENTAL|lockout.*temp|lockout.*hysteresis"[90m in crates/hares-equipment/src/hvac/heat_pump · 161 matches[0m
+[0m✱ [0mGrep "MinOAT.*Cool|MinOAT.*Heat|compressor.*lockout.*cool|cooling.*lockout|lockout.*cool"[90m in crates/hares-equipment/src/hvac/heat_pump/cooler.rs · 0 matches[0m
+Let me read the key lockout enforcement areas and the constants:
+[0m✱ [0mGrep "DEFAULT_HP_LOCKOUT|DEFAULT_ER_LOCKOUT|MAX_OAT_SUPPLEMENTAL|DEFAULT_HP_LOCKOUT_HYSTERESIS|DEFROST_ENABLE_TEMP|DEFAULT_DEFROST"[90m in crates/hares-equipment/src/hvac/heat_pump · 7 matches[0m
+[0m✱ [0mGrep "lockout|crankcase|min_oat|max_oat|outdoor_temp"[90m in crates/hares-equipment/src/hvac/heat_pump/cooler.rs · 48 matches[0m
+Let me check the constants file and the cooler for any cooling lockout:
+[0m✱ [0mGrep "max_oat.*heat|max.*outdoor.*heat|min_oat.*cool|min.*outdoor.*cool|heating.*max.*oat|cooling.*min.*oat"[90m in crates/hares-equipment/src/hvac · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/constants.rs
+Let me check if there's a maximum OAT for HP heating or minimum OAT for cooling anywhere else:
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/cooler.rs[90m [limit=100, offset=95][0m
+[0m✱ [0mGrep "fn control|fn step|compressor|cooling_available|hp_available"[90m in crates/hares-equipment/src/hvac/heat_pump/cooler.rs · 9 matches[0m
+Let me check the cooler's control logic more closely for lockout enforcement:
+[0m✱ [0mGrep "lockout|min_oat|max_oat|compressor.*oat"[90m in crates/hares-equipment/src/hvac/ac_config.rs · 0 matches[0m
+Good. Now I have enough information. Let me create the output directory and write the review.
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/hvac-config
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/hvac-config/hvaccfg-05-heat-pump-config.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/hvac-config/hvaccfg-05-heat-pump-config.md`.
+
+**Summary**: 7 findings across the 4 review areas:
+
+| Area | Findings |
+|------|----------|
+| **Heating/cooling independence** | Medium: shared airflow, fan power, number_of_speeds (F5); Low: `shr` misplaced on common config (F6) |
+| **Compressor lockout** | High: no cooling compressor lockout (F1); Medium: no max OAT for heating (F2); Low: no thermal balance point for ER (F7) |
+| **Defrost** | Medium: `cycle_duration_s` and `max_defrost_duration_s` not configurable from `DefrostConfig` (F3); Low: no direct defrost interval config (F4) |
+| **Supplemental heat** | Generally well-implemented with `backup_fuel`, `backup_capacity_w`, `er_stages`, two-stage ER lockout (hard + soft), and OAT-based ER blocking |
+
+The most actionable finding is **F1** — the cooling side has no compressor lockout temperature at all, while EnergyPlus tracks `m_MinOATCompressorCooling` separately from the heating lockout.

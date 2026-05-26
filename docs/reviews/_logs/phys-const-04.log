@@ -1,0 +1,18 @@
+# opencode log for phys-const-04
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs[90m [offset=240, limit=20][0m
+[0m• [0mFind vendor water density[90m Explore Agent[0m
+[0m✓ [0mFind vendor water density[90m Explore Agent[0m
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"Kell 1975 water density polynomial coefficients 999.83952 16.945176 Journal Chemical Engineering Data","max_results":10}
+[0m✱ [0mGlob "docs/reviews/physics-constants/**/*"[90m 1 match[0m
+[0m→ [0mRead docs/tickets/122-water-density-temperature-correction.md[90m [offset=60, limit=110][0m
+Now let me verify the Kell (1975) coefficients against the original published values. Let me check multiple authoritative sources.

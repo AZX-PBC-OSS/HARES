@@ -1,0 +1,112 @@
+# opencode log for hvaccfg-08
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/dehumidifier_defaults.rs
+[0m• [0mExplore EnergyPlus dehumidifier refs[90m Explore Agent[0m
+[0m✓ [0mExplore EnergyPlus dehumidifier refs[90m Explore Agent[0m
+[0m• [0mFind EnergyPlus dehumidifier curves[90m Explore Agent[0m
+[0m✓ [0mFind EnergyPlus dehumidifier curves[90m Explore Agent[0m
+[0m✱ [0mGrep "dehumidifier.*default|DEFAULT_WATER_REMOVAL|DEFAULT_ENERGY_FACTOR|RATED_DB_C|RATED_RH"[90m in crates · 26 matches[0m
+[0m✱ [0mGrep "BiquadraticCurve"[90m in crates/hares-physics/src · 12 matches[0m
+Now let me check how HARES uses these defaults and the biquadratic curve to verify RH/fraction consistency:
+[0m→ [0mRead crates/hares-physics/src/biquadratic.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/dehumidifier.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/ZoneDehumidifier.cc[90m [offset=680, limit=80][0m
+[0m✱ [0mGrep "WaterRemovalRateFactor.*value|WaterRemovalCurve.*value"[90m in vendors/EnergyPlus/src/EnergyPlus · 4 matches[0m
+Now let me check the EnergyPlus curve clamping behavior for verification:
+[0m
+[0m$ [0mpython3 -c "
+# Verify coefficient scaling
+ep_wr = [-2.724878664080, 0.100711983591, -0.000990538285, 0.050053043874, -0.000203629282, -0.000341750531]
+hares_wr = [-2.724878664080, 0.100711983591, -0.000990538285, 5.0053043874, -2.03629282, -0.0341750531]
+
+# Check d scaling: d_hares should equal d_ep * 100
+print('d_hares:', hares_wr[3], 'd_ep*100:', ep_wr[3]*100)
+print('d match:', abs(hares_wr[3] - ep_wr[3]*100) < 1e-12)
+
+# Check e scaling: e_hares should equal e_ep * 10000
+print('e_hares:', hares_wr[4], 'e_ep*10000:', ep_wr[4]*10000)
+print('e match:', abs(hares_wr[4] - ep_wr[4]*10000) < 1e-12)
+
+# Check f scaling: f_hares should equal f_ep * 100
+print('f_hares:', hares_wr[5], 'f_ep*100:', ep_wr[5]*100)
+print('f match:', abs(hares_wr[5] - ep_wr[5]*100) < 1e-12)
+
+# Verify evaluation equivalence at rated conditions
+T = 26.6666666666667
+RH_pct = 60.0
+RH_frac = 0.60
+
+ep_result = ep_wr[0] + ep_wr[1]*T + ep_wr[2]*T**2 + ep_wr[3]*RH_pct + ep_wr[4]*RH_pct**2 + ep_wr[5]*T*RH_pct
+hares_result = hares_wr[0] + hares_wr[1]*T + hares_wr[2]*T**2 + hares_wr[3]*RH_frac + hares_wr[4]*RH_frac**2 + hares_wr[5]*T*RH_frac
+print()
+print(f'EP result:  {ep_result:.10f}')
+print(f'HARES result: {hares_result:.10f}')
+print(f'Match: {abs(ep_result - hares_result) < 1e-10}')
+
+# Energy factor curve verification
+ep_ef = [-2.388319068955, 0.093047739452, -0.001369700327, 0.066533716758, -0.000343198063, -0.000562490295]
+hares_ef = [-2.388319068955, 0.093047739452, -0.001369700327, 6.6533716758, -3.43198063, -0.0562490295]
+
+print()
+print('EF d_hares:', hares_ef[3], 'd_ep*100:', ep_ef[3]*100)
+print('EF d match:', abs(hares_ef[3] - ep_ef[3]*100) < 1e-12)
+print('EF e_hares:', hares_ef[4], 'e_ep*10000:', ep_ef[4]*10000)
+print('EF e match:', abs(hares_ef[4] - ep_ef[4]*10000) < 1e-12)
+print('EF f_hares:', hares_ef[5], 'f_ep*100:', ep_ef[5]*100)
+print('EF f match:', abs(hares_ef[5] - ep_ef[5]*100) < 1e-12)
+
+# RATED_DB_C = 80F exact
+print()
+print('RATED_DB_C:', 26.6666666666667)
+print('80F to C:', (80-32)*5/9)
+print('Match:', abs(26.6666666666667 - (80-32)*5/9) < 1e-12)
+"
+
+d_hares: 5.0053043874 d_ep*100: 5.005304387400001
+d match: True
+e_hares: -2.03629282 e_ep*10000: -2.03629282
+e match: True
+f_hares: -0.0341750531 f_ep*100: -0.0341750531
+f match: True
+
+EP result:  0.9797078189
+HARES result: 0.9797078189
+Match: True
+
+EF d_hares: 6.6533716758 d_ep*100: 6.6533716758
+EF d match: True
+EF e_hares: -3.43198063 e_ep*10000: -3.43198063
+EF e match: True
+EF f_hares: -0.0562490295 f_ep*100: -0.056249029500000006
+EF f match: True
+
+RATED_DB_C: 26.6666666666667
+80F to C: 26.666666666666668
+Match: True
+[0m
+Now I have all the data needed. Let me verify the algebraic equivalence of the electrical power formula and then write the review.
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/hvac-config
+(no output)
+[0m
+All scaling is verified correct. Now let me write the review document:
+[0m← [0mWrite docs/reviews/hvac-config/hvaccfg-08-dehumidifier-default-curves.md
+Wrote file successfully.
+[0m
+Review complete. The file has been written to `docs/reviews/hvac-config/hvaccfg-08-dehumidifier-default-curves.md`.
+
+**Summary of findings:**
+
+- **Coefficient scaling (d×100, e×10000, f×100)**: Mathematically verified — all 6 coefficients for both curves match EnergyPlus to machine precision after scaling.
+- **RATED_DB_C = 26.666...°C**: Correctly equals 80°F exactly. The self-normalisation approach cancels any minor difference from EnergyPlus's rounded 26.7 constant.
+- **RH fraction consistency**: All RH inputs/outputs consistently use fraction [0,1] throughout. The `parse_rh_fraction` helper correctly handles percent values (>1.0) from control inputs.
+- **No low-RH quadratic transition in EnergyPlus**: Confirmed — `ZoneDehumidifier:DX` does not have one. HARES correctly does not implement one.
+- **2 low-severity findings**: (1) RH curve bounds are (0,1) instead of EnergyPlus's (0.40,0.80), causing extrapolation outside calibrated domain; (2) misleading constant name `WATTS_PER_KILOWATT_HOUR` for a joule-per-kWh quantity.

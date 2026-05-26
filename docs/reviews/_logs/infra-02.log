@@ -1,0 +1,64 @@
+# opencode log for infra-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead tests/bestest/mod.rs
+[0m→ [0mRead tests/bestest/reference_bands.rs
+[0m→ [0mRead tests/bestest/cases.rs
+[0m→ [0mRead tests/bestest/bestest_diagnostic.rs
+[0m✱ [0mGlob "docs/findings/consolidated.md"[90m in . · 1 match[0m
+Let me also check the diagnostic module and see if there's a consolidated findings file referenced.
+[0m→ [0mRead docs/findings/consolidated.md
+[0m✱ [0mGlob "docs/reviews/infrastructure/*.md"[90m in . · 0 matches[0m
+[0m✱ [0mGlob "tests/fixtures/bestest/*.toml"[90m in . · 10 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/infrastructure
+(no output)
+[0m
+Now I have all the information needed. Let me also quickly verify how `#[should_panic]` + `#[ignore]` interact in Rust.
+[0m$ [0mcd /Users/rich/source/HARES && cargo test bestest_case_900ff 2>&1 | head -20
+Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling hares-envelope v0.1.0 (/Users/rich/source/HARES/crates/hares-envelope)
+   Compiling zstd-safe v7.2.4
+   Compiling zstd v0.13.3
+   Compiling parquet v58.0.0
+   Compiling hares-equipment v0.1.0 (/Users/rich/source/HARES/crates/hares-equipment)
+   Compiling hares-io v0.1.0 (/Users/rich/source/HARES/crates/hares-io)
+   Compiling hares-core v0.1.0 (/Users/rich/source/HARES/crates/hares-core)
+   Compiling hares-fleet v0.1.0 (/Users/rich/source/HARES/crates/hares-fleet)
+    Finished `test` profile [unoptimized] target(s) in 11.72s
+     Running unittests src/lib.rs (target/debug/deps/hares_control-223f672126b94b08)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/hares_core-d58d5592d8af4c22)
+
+running 0 tests
+[0m
+[0m← [0mWrite docs/reviews/infrastructure/infra-02-bestest-should-panic-xfail.md
+Wrote file successfully.
+[0m
+Now let me write the review document.
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/infrastructure/infra-02-bestest-should-panic-xfail.md
+119 /Users/rich/source/HARES/docs/reviews/infrastructure/infra-02-bestest-should-panic-xfail.md
+[0m
+Review written to `docs/reviews/infrastructure/infra-02-bestest-should-panic-xfail.md` (119 lines).
+
+**Summary of findings:**
+
+- **Critical (1)**: `#[should_panic(expected = "metric=min_zone_temp_c")]` at `tests/bestest/mod.rs:142` is a soundness hazard. The `expected` parameter provides partial protection, but a coincidental panic message containing the substring would produce a false PASS. The pattern doesn't verify the simulation completed, the known failure's magnitude (+0.90°C vs band upper bound of −1.6°C), or that other metrics aren't also failing.
+
+- **Medium (1)**: The `run_single_case` assertion message format (`metric={}` at line 47) and the `BestestMetric::MinZoneTempC` Display impl (`r"min_zone_temp_c"` at `reference_bands.rs:16`) are implicitly coupled — changing either breaks the xfail pattern silently.
+
+- **Low (2)**: Vague `#[ignore]` reason strings don't state actual vs. expected values per case; BESTEST cases 910–960 and extended-case simulation tests are unimplemented.
+
+Primary recommendation: replace `#[should_panic]` with an explicit test that runs the simulation, catches and inspects band violations, and asserts the specific min_zone_temp_c failure is present (with value-range check) while failing on any other unexpected failure.

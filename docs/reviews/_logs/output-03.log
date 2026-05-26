@@ -1,0 +1,39 @@
+# opencode log for output-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/output/metrics.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Analysis.py
+[0m→ [0mRead crates/hares-io/src/output/metrics.rs[90m [offset=1341][0m
+[0m✱ [0mGrep "leap|monthly|month|annual|year"[90m in crates/hares-io/src/output · 14 matches[0m
+[0m✱ [0mGrep "skipna|NaN|nan|is_nan|f64::NAN"[90m in crates/hares-io/src/output · 0 matches[0m
+[0m✱ [0mGrep "resample|upscale|time.weight"[90m in crates/hares-io/src · 166 matches[0m
+Now let me also check for any related modules that might have monthly/yearly handling:
+[0m✱ [0mGrep "is_nan|f64::NAN|\.nan|NaN|skipna"[90m in crates/hares-io/src · 36 matches[0m
+[0m✱ [0mGrep "pub struct SimulationConfig"[90m in crates/hares-io/src · 1 match[0m
+[0m→ [0mRead crates/hares-io/src/config.rs[90m [offset=35, limit=40][0m
+[0m
+[0m← [0mWrite docs/reviews/output/output-03-output-metrics-computation.md
+Wrote file successfully.
+[0m
+Now I have a comprehensive understanding of both files. Let me write the review document.
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/output/output-03-output-metrics-computation.md
+133 /Users/rich/source/HARES/docs/reviews/output/output-03-output-metrics-computation.md
+[0m
+Review written to `docs/reviews/output/output-03-output-metrics-computation.md` — 7 findings:
+
+| Severity | Count | Summary |
+|----------|-------|---------|
+| Critical | 1 | NaN silently contaminates all accumulators (`value_at` checks `is_null()` but not `is_nan()`) |
+| High | 2 | `continue` in setpoint block skips envelope/HVAC/battery tracking for rows with null setpoints; no leap year awareness |
+| Medium | 2 | No monthly aggregation; inconsistent peak init (`0.0` vs `NEG_INFINITY`) |
+| Low | 2 | No hourly resampling of energy; null test coverage gap |
+
+The most critical issue is Finding 1: a single NaN timestep poisons every accumulator with no detection — OCHRE uses `skipna=False` to make this visible.

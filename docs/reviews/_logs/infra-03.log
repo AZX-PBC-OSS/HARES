@@ -1,0 +1,134 @@
+# opencode log for infra-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead tests/fixtures/golden
+[0m→ [0mRead tests/fixtures/schedules
+[0m✱ [0mGlob "tests/fixtures/**/*"[90m in . · 100 matches[0m
+[0m✱ [0mGlob "tests/**/*"[90m in . · 100 matches[0m
+[0m→ [0mRead tests/fixtures/golden/.gitkeep
+[0m→ [0mRead tests/fixtures/schedules/.gitkeep
+[0m✱ [0mGrep "golden"[90m in tests · 0 matches[0m
+[0m✱ [0mGrep "schedules"[90m in tests · 30 matches[0m
+[0m✱ [0mGrep "golden"[90m in . · 5 matches[0m
+[0m✱ [0mGrep "tests/fixtures/schedules"[90m in . · 4 matches[0m
+[0m✱ [0mGrep "tests/fixtures/golden"[90m in . · 4 matches[0m
+[0m→ [0mRead tests/fixtures/weather/.gitkeep
+[0m→ [0mRead tests/fixtures/hpxml/.gitkeep
+[0m→ [0mRead tests/fixtures/hpxml/README.md
+[0m→ [0mRead tests/fixtures/parity/README.md
+[0m✱ [0mGlob "tests/fixtures/weather/*"[90m in . · 2 matches[0m
+[0m✱ [0mGrep "weather/"[90m in tests · 0 matches[0m
+[0m✱ [0mGrep "tests.*weather"[90m in tests · 0 matches[0m
+[0m→ [0mRead tests/fixtures/parity/resstock_bldg0112631_24h/config.toml
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -l "fixtures" tests/ --include="*.rs" | sort
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+[0m
+[0m✱ [0mGrep "fixture_dir|fixtures_dir|fixture_path|FIXTURES_DIR|fixtures_Path"[90m in tests · 23 matches[0m
+[0m✱ [0mGrep "crate::tests|mod tests"[90m in crates · 157 matches[0m
+[0m→ [0mRead tests/regression/mod.rs
+[0m→ [0mRead tests/regression/smoke_test.rs
+[0m→ [0mRead tests/regression/helpers.rs
+[0m✱ [0mGrep "snapshot|insta|golden"[90m in . · 358 matches[0m
+[0m✱ [0mGrep "mkdir|create_dir|ensure.*dir"[90m in tests · 0 matches[0m
+[0m→ [0mRead tests/warmup_regression.rs[90m [limit=60][0m
+Now let me check for any existing golden-file or snapshot-testing patterns in the codebase, and verify directory creation logic:
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -c "insta" --type rust | grep -v ":0$" | head -20
+crates/hares-equipment/src/generator.rs:4
+tests/regression/mod.rs:4
+crates/hares-equipment/src/battery/mod.rs:2
+tests/regression/multi_instance.rs:9
+crates/hares-equipment/src/config.rs:2
+crates/hares-tariff/src/evaluator.rs:1
+crates/hares-equipment/src/event_load.rs:4
+crates/hares-tariff/src/billing.rs:1
+crates/hares-types/src/equipment.rs:2
+crates/hares-core/src/environment.rs:9
+crates/hares-equipment/src/hvac/ideal_hvac.rs:1
+crates/hares-types/src/telemetry_keys.rs:1
+crates/hares-equipment/src/water_heater/tankless.rs:5
+crates/hares-python/src/py_fleet.rs:3
+crates/hares-equipment/src/ventilation.rs:1
+crates/hares-equipment/src/hvac/heat_pump/heater.rs:2
+crates/hares-core/src/actors/ev_driver/mod.rs:6
+crates/hares-python/src/py_dwelling.rs:6
+crates/hares-equipment/src/hvac/heat_pump/constants.rs:1
+crates/hares-python/src/py_config.rs:1
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg "insta|goldenfile|expect_test" Cargo.toml Cargo.lock 2>/dev/null | head -20
+(no output)
+[0m
+[0m✱ [0mGrep "insta|golden|snapshot"[90m in . · 0 matches[0m
+[0m✱ [0mGlob ".github/workflows/*.yml"[90m in . · 1 match[0m
+[0m✱ [0mGrep "fixtures.*golden|fixtures.*schedules"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "fixtures.*golden|fixtures.*schedules"[90m in . · 0 matches[0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && git log --oneline --all -- tests/fixtures/golden/ tests/fixtures/schedules/ 2>/dev/null
+34e201e feat: bootstrap initial HARES implementation baseline
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && git log --oneline --follow -- tests/fixtures/golden/.gitkeep tests/fixtures/schedules/.gitkeep 2>/dev/null
+(no output)
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && git show 34e201e --stat -- tests/fixtures/golden/ tests/fixtures/schedules/ 2>/dev/null
+commit 34e201e59c765b9bd0a24c88857539f31230356b
+Author: Rich Evans <re@azx.io>
+Date:   Wed Mar 18 19:52:11 2026 -0700
+
+    feat: bootstrap initial HARES implementation baseline
+
+ tests/fixtures/golden/.gitkeep    | 0
+ tests/fixtures/schedules/.gitkeep | 0
+ 2 files changed, 0 insertions(+), 0 deletions(-)
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/infrastructure/ 2>/dev/null || echo "Directory does not exist"
+(no output)
+[0m
+[0m$ [0mls -d /Users/rich/source/HARES/docs/reviews/ 2>/dev/null && ls /Users/rich/source/HARES/docs/reviews/ 2>/dev/null || echo "Parent directory check"
+/Users/rich/source/HARES/docs/reviews/
+_logs
+_test
+agents
+air-properties
+architecture
+ashrae152-deep
+build
+config-io
+control-deep
+core
+core-deep
+cross-cutting
+defaults-data
+der-catalog
+envelope
+envelope-rc-mat
+equipment-der
+equipment-hvac
+equipment-loads
+equipment-util
+equipment-wh
+fleet-python
+hpxml
+hvac-config
+infiltration-deep
+infrastructure
+[0m
+[0m← [0mWrite docs/reviews/infrastructure/infra-03-empty-fixture-directories.md
+Wrote file successfully.
+[0m
+Review written to `/Users/rich/source/HARES/docs/reviews/infrastructure/infra-03-empty-fixture-directories.md`. Summary:
+
+- **3 findings**: 1 medium, 2 low
+- **`golden/` (medium)**: Dead directory — no golden-file testing framework exists, no test code references it, created at bootstrap and never populated. Represents an acknowledged-but-unrealized gap in regression protection.
+- **`schedules/` (low)**: Dead directory — schedule fixtures already exist co-located with building/weather files in scenario directories. The centralized pattern was superseded by the co-located design.
+- **Recommendation**: Remove both directories or document them with README files following the `hpxml/` and `parity/` precedent. Consider introducing actual golden-file testing as a complement to existing parity/oracle suites.

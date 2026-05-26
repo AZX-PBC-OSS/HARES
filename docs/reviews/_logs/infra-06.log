@@ -1,0 +1,73 @@
+# opencode log for infra-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead docs/HANDOFF.md
+[0m✱ [0mGlob "docs/reviews/**/*.md"[90m in . · 100 matches[0m
+[0m✱ [0mGrep "bestest_case_900ff|bestest_case_900"[90m in . · 3 matches[0m
+[0m✱ [0mGrep "SOLAR_ABSORPTANCE_DEFAULT"[90m in . · 14 matches[0m
+[0m✱ [0mGrep "AIR_DENSITY_KG_M3"[90m in . · 7 matches[0m
+[0m✱ [0mGrep "OCCUPANT_SENSIBLE_GAIN_W|OCCUPANT_LATENT_GAIN_W"[90m in . · 17 matches[0m
+[0m✱ [0mGrep "mass_multiplier_for_zone"[90m in . · 13 matches[0m
+[0m✱ [0mGrep "#[should_panic]"[90m in tests · 0 matches[0m
+[0m✱ [0mGlob "tests/python/**/*.py"[90m in . · 45 matches[0m
+Now let me investigate the current status of each HANDOFF item in parallel:
+[0m✱ [0mGlob "**/.github/workflows/*.yml"[90m in . · 19 matches[0m
+[0m→ [0mRead tests/bestest/mod.rs[90m [limit=200][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [limit=80][0m
+[0m→ [0mRead crates/hares-envelope/src/longwave_radiation.rs[90m [offset=55, limit=30][0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs[90m [offset=170, limit=30][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=1, limit=30][0m
+[0m→ [0mRead .github/workflows/ci.yml
+[0m✱ [0mGrep "Marked.*ignore|marked.*ignore"[90m in crates/hares-io/tests · 0 matches[0m
+[0m→ [0mRead crates/hares-envelope/tests/bestest_900ff_root_cause.rs[90m [limit=100][0m
+[0m✱ [0mGrep "ach50|ach20|ACH"[90m in crates/hares-io/src/hpxml · 82 matches[0m
+[0m✱ [0mGrep "deadband|dead_band|0\.2.*asym|asymm"[90m in crates/hares-core/src/actors · 37 matches[0m
+[0m✱ [0mGrep "BESTEST 900FF root cause|900ff_root|root.cause.*900ff|bestest_900ff_root"[90m in . · 0 matches[0m
+[0m→ [0mRead crates/hares-envelope/tests/bestest_900ff_root_cause.rs[90m [offset=100][0m
+[0m✱ [0mGrep "ac_has_startup_capacity|ashp_backup_lockout"[90m in crates/hares-io/tests · 2 matches[0m
+[0m✱ [0mGrep "garage.*ach|ACH.*garage|garage.*leak|leak.*garage"[90m in crates/hares-io · 8 matches[0m
+[0m→ [0mRead crates/hares-core/src/actors/ideal_thermostat.rs[90m [offset=220, limit=80][0m
+[0m✱ [0mGrep "deadband.*0\.[0-9]|heating.*tolerance|cooling.*tolerance|0\.[0-9].*deadband"[90m in crates/hares-core/src · 3 matches[0m
+[0m✱ [0mGlob "**/pyproject.toml"[90m in . · 3 matches[0m
+[0m→ [0mRead crates/hares-io/tests/hpxml_parity.rs[90m [offset=690, limit=80][0m
+[0m✱ [0mGrep "heating.*setpoint.*0\.[0-9]|cooling.*setpoint.*0\.[0-9]|setpoint.*tolerance|tolerance.*setpoint|DEFAULT_DEADBAND|HEATING_DEADBAND|COOLING_DEADBAND"[90m in crates · 114 matches[0m
+[0m✱ [0mGrep "pytest|python.*test"[90m in .github · 0 matches[0m
+[0m✱ [0mGlob "**/.github/workflows/*.yml"[90m in . · 19 matches[0m
+[0m✱ [0mGrep "garage.*ach50|ach50.*garage|garage.*ACH50|ACH50.*garage"[90m in crates · 2 matches[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=1020, limit=40][0m
+[0m→ [0mRead crates/hares-physics/tests/physics_validation_tests.rs[90m [offset=740, limit=40][0m
+[0m✱ [0mGrep "garage_ela|garage.*ACH|garage_ach50"[90m in crates/hares-physics · 8 matches[0m
+[0m✱ [0mGrep "#[ignore].*ac_|#[ignore].*ashp|Marked.*#\[ignore\]"[90m in crates/hares-io/tests · 0 matches[0m
+[0m→ [0mRead crates/hares-io/tests/hpxml_parity.rs[90m [offset=695, limit=10][0m
+[0m→ [0mRead crates/hares-io/tests/hpxml_parity.rs[90m [offset=740, limit=5][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=930, limit=100][0m
+[0m→ [0mRead crates/hares-physics/src/infiltration.rs[90m [offset=680, limit=50][0m
+[0m✱ [0mGrep "heating.*hysteresis|cooling.*hysteresis|hysteresis.*heat|hysteresis.*cool|0\.2.*heat|0\.2.*cool|heat.*0\.[0-9]|cool.*0\.[0-9]"[90m in crates/hares-core/src · 55 matches[0m
+[0m✱ [0mGrep "pytest|python.test|python-test"[90m in . · 4 matches[0m
+[0m✱ [0mGrep "deadband_offset|DEADBAND_OFFSET|deadband.*0\.2|0\.2.*deadband"[90m in crates · 61 matches[0m
+[0m✱ [0mGrep "resolve.*garage|garage.*resolve|garage.*infiltration|infiltration.*garage"[90m in crates/hares-io/src/hpxml · 0 matches[0m
+[0m→ [0mRead pyproject.toml[90m [offset=60, limit=30][0m
+[0m✱ [0mGrep "hysteresis|hysteresis_c|TOLERANCE|tolerance_c"[90m in crates/hares-equipment/src/hvac · 206 matches[0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/infrastructure/
+infra-01-dead-module-aggregation-check.md
+infra-02-bestest-should-panic-xfail.md
+infra-03-empty-fixture-directories.md
+[0m
+Now I have enough data. Let me verify the output directory exists and write the review.
+[0m→ [0mRead docs/reviews/infrastructure/infra-02-bestest-should-panic-xfail.md[90m [limit=50][0m
+[0m
+[0m← [0mWrite docs/reviews/infrastructure/infra-06-docs-handoff-items-remaining.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/infrastructure/infra-06-docs-handoff-items-remaining.md`.
+
+**Summary of findings**: 3 of 12 items resolved (solar absorptance, mass multiplier wildcard, stale comments), 2 likely resolved (garage ACH, deadband asymmetry being intentional), 5 not resolved with varying severity. The critical finding is that the BESTEST 900FF root cause was diagnosed in a dedicated test file but the fix was never applied — and the situation regressed from 2 xfailed tests to 5 completely ignored tests. The Python test suite has 45+ test files but is not wired into CI.

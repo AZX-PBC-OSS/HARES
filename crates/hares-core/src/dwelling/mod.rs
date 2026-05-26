@@ -49,6 +49,7 @@ use serde_json::{Map, Value};
 
 use crate::actors::{BatteryManagementActor, EvDriverActor, SolverFeedbackActor};
 use crate::checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
+use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 use crate::invariants::InvariantChecker;
 use crate::telemetry::DwellingTelemetry;
@@ -770,6 +771,8 @@ pub struct Dwelling {
     output_format: hares_io::OutputFormat,
     output_path: PathBuf,
     write_output: bool,
+    /// Diagnostic CSV writer, opened when `output_verbosity >= 4`.
+    diagnostic_writer: Option<std::io::BufWriter<std::fs::File>>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
     #[cfg(feature = "actor_profiling")]
@@ -1327,6 +1330,7 @@ impl Dwelling {
             output_format: config.sim_config.output_format,
             output_path: output_path.clone(),
             write_output: config.sim_config.write_output,
+            diagnostic_writer: None,
             #[cfg(feature = "profiling")]
             profiling: DwellingProfilingSummary::default(),
             #[cfg(feature = "actor_profiling")]
@@ -1359,6 +1363,23 @@ impl Dwelling {
             );
         }
 
+        // Initialise diagnostic CSV when output_verbosity >= 4.
+        dwelling.diagnostic_writer = if dwelling.output_verbosity >= 4 {
+            let stem = output_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("dwelling_{}", dwelling.bldg_id));
+            let diag_path = output_path.with_file_name(format!("{stem}_diagnostics.csv"));
+            let file = std::fs::File::create(&diag_path)
+                .map_err(|err| HaresError::Io(format!("diagnostic file create failed: {err}")))?;
+            let mut writer = std::io::BufWriter::new(file);
+            let n_zones = dwelling.latest_env.zones.len();
+            diagnostics::write_header(&mut writer, n_zones);
+            Some(writer)
+        } else {
+            None
+        };
+
         Ok(dwelling)
     }
 
@@ -1372,6 +1393,10 @@ impl Dwelling {
             recorder
                 .flush_and_close()
                 .map_err(|err| HaresError::Io(format!("output close failed: {err}")))?;
+        }
+        if let Some(ref mut writer) = self.diagnostic_writer {
+            std::io::Write::flush(writer)
+                .map_err(|err| HaresError::Io(format!("diagnostic close failed: {err}")))?;
         }
         Ok(self.simulation_results.clone())
     }
@@ -2653,6 +2678,24 @@ impl Dwelling {
                 &self.fluid_update_buf,
                 &self.thermal_solver,
             ));
+        }
+
+        // Step 4 diagnostic: capture per-timestep diagnostics for CSV output.
+        if let Some(ref mut writer) = self.diagnostic_writer {
+            let gains = self.thermal_solver.component_gains();
+            let envelope = EnvelopeDiag {
+                window_solar_w: gains.window_solar_w,
+                opaque_solar_lwr_w: gains.opaque_solar_lwr_w,
+                interior_lwr_w: gains.interior_lwr_w,
+                infiltration_by_zone: Vec::new(),
+                internal_gain_w: gains.internal_gain_w,
+                port_convective_w: gains.port_convective_w,
+                port_radiant_w: gains.port_radiant_w,
+            };
+            let step = self.clock.current_step();
+            let diag = diagnostics::capture(step, &self.latest_env, &self.ports, Some(envelope));
+            let n_zones = self.latest_env.zones.len();
+            diagnostics::write_row(writer, &diag, n_zones);
         }
 
         self.latest_env.upsert_domain_ref(&self.humidity_update_buf);

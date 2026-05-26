@@ -1,0 +1,42 @@
+# opencode log for output-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/output/columns.rs
+[0m→ [0mRead crates/hares-types/src/telemetry.rs
+[0m→ [0mRead crates/hares-types/src/telemetry_keys.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/OutputProcessor.cc
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/OutputProcessor.cc[90m [offset=1033][0m
+[0m• [0mFind telemetry-to-column mapping[90m Explore Agent[0m
+Let me continue reading the EnergyPlus file and also search for how telemetry keys are mapped to output columns in the HARES codebase.
+[0m✓ [0mFind telemetry-to-column mapping[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=140, limit=110][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2900, limit=160][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3060, limit=100][0m
+Let me read the specific mapping code in `record_step` for detailed cross-referencing.
+[0m
+[0m← [0mWrite docs/reviews/output/output-02-output-column-definitions.md
+Wrote file successfully.
+[0m
+Now I have a thorough understanding. Let me write the review document.
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/output/output-02-output-column-definitions.md
+183 /Users/rich/source/HARES/docs/reviews/output/output-02-output-column-definitions.md
+[0m
+The review file has been written. Let me verify it:
+Review complete. 183-line markdown file written to `docs/reviews/output/output-02-output-column-definitions.md`.
+
+**Summary of findings**:
+
+| Severity | Count | Description |
+|----------|-------|-------------|
+| Critical | 1 | No compile-time or runtime validation of telemetry key → column mapping; silent null-fill on any mismatch |
+| High | 2 | 125+ telemetry keys defined, <20 have output columns (no documented internal/external distinction); unconditional attic columns always-null for single-zone buildings |
+| Medium | 3 | Naming convention inconsistencies (Outdoor Dry Bulb vs Temperature pattern); column ordering deterministic but undocumented; MODE_ORDINALS metadata missing OperatingMode::On (ordinal 12) |
+| Low | 2 | Duct Losses aggregate column misclassified as per-equipment; unconditionally added attic/ground temperature columns

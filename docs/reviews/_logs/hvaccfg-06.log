@@ -1,0 +1,76 @@
+# opencode log for hvaccfg-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/constants.rs
+[0m• [0mExplore EnergyPlus heat pump constants[90m Explore Agent[0m
+[0m✓ [0mExplore EnergyPlus heat pump constants[90m Explore Agent[0m
+[0m✱ [0mGrep "biquadratic|compressor.map|compressor_map|COMPRESSOR_MAP|ARI|RATED_CONDITIONS|rating_condition"[90m in crates/hares-equipment/src/hvac/heat_pump · 85 matches[0m
+[0m✱ [0mGrep "mass_flow|massflow|MassFlow|refrigerant|Refrigerant|R410A|R410a|R-410A|R32"[90m in crates/hares-equipment/src/hvac/heat_pump · 2 matches[0m
+Now let me check for compressor map usage in HARES:
+[0m✱ [0mGrep "struct.*Hvac|biquadratic_coeffs|biquadratic_x1|x1_is|INDOOR_DB|OUTDOOR_DB|rated.*temp|cooling.*rated|heating.*rated""[90m in crates/hares-equipment/src/hvac/heat_pump · 31 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump
+[0m✱ [0mGrep "x1_is_indoor|x2_is_outdoor|rated.*temp_c|RATED_TEMP|indoor_db|outdoor_db""[90m in crates/hares-equipment/src/hvac · 0 matches[0m
+[0m✱ [0mGrep "DEFROST_EIR_TEMP_MODIFIER|defrost_eir_temp"[90m in crates/hares-equipment · 4 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/defrost.rs
+[0m✱ [0mGrep "8\.33|21\.11|26\.67|35\.0|ARI|AHRI|rated_indoor|rated_outdoor""[90m in crates · 344 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=1, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/default_curves.rs
+[0m✱ [0mGrep "0\.1528|defrost.*eir.*temp.*mod|temp_modifier|update_eir""[90m in vendors · 2 matches[0m
+[0m✱ [0mGrep "4\.4445|40.*defrost|max_oat_defrost|defrost.*threshold|defrost.*enable""[90m in vendors/OCHRE · 1 match[0m
+[0m✱ [0mGrep "MaxOATDefrost|Maximum Outdoor Dry-Bulb Temperature for Defrost""[90m in vendors/EnergyPlus · 7 matches[0m
+[0m
+[0m$ [0mfind /Users/rich/source/HARES/vendors/EnergyPlus -name "*.idd" -exec grep -l "Defrost" {} \; 2>/dev/null | head -5
+/Users/rich/source/HARES/vendors/EnergyPlus/idd/versions/V1-0-3-Energy+.idd
+/Users/rich/source/HARES/vendors/EnergyPlus/idd/versions/V8-7-0-Energy+.idd
+/Users/rich/source/HARES/vendors/EnergyPlus/idd/versions/V8-3-0-Energy+.idd
+/Users/rich/source/HARES/vendors/EnergyPlus/idd/versions/V2-2-0-Energy+.idd
+/Users/rich/source/HARES/vendors/EnergyPlus/idd/versions/V1-2-1-Energy+.idd
+[0m
+[0m$ [0mgrep -A5 "Maximum Outdoor Dry-Bulb Temperature for Defrost" /Users/rich/source/HARES/vendors/EnergyPlus/idd/versions/V8-7-0-Energy+.idd 2>/dev/null | head -20
+N7 , \field Maximum Outdoor Dry-Bulb Temperature for Defrost Operation
+       \type real
+       \minimum 0.0
+       \maximum 7.22
+       \default 5.0
+       \units C
+--
+  N5 , \field Maximum Outdoor Dry-Bulb Temperature for Defrost Operation
+       \type real
+       \minimum 0.0
+       \maximum 7.22
+       \default 5.0
+       \units C
+--
+   N7,  \field Maximum Outdoor Dry-Bulb Temperature for Defrost Operation
+        \type real
+        \minimum 0.0
+        \maximum 7.22
+        \default 5.0
+        \units C
+[0m
+[0m$ [0mgrep -n "0.35\|35000\|heating.*eir\|DEFAULT.*EIR\|BACKUP.*EIR" /Users/rich/source/HARES/vendors/OCHRE/ochre/Equipment/HVAC.py | head -30
+(no output)
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/staging.rs[90m [offset=1, limit=30][0m
+Now I have sufficient data. Let me also verify the `DEFAULT_HEATING_EIR` source and check the EnergyPlus comparison for the `DEFROST_CAPACITY_MULTIPLIER_BASE` constant usage:
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/hvac-config
+(no output)
+[0m
+Now I have all the information needed. Let me write the review:
+[0m← [0mWrite docs/reviews/hvac-config/hvaccfg-06-heat-pump-constants.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/hvac-config/hvaccfg-06-heat-pump-constants.md`.
+
+**Summary: 7 findings** — 0 critical, 0 high, 1 medium, 2 low, 4 informational.
+
+The key finding is that **all 14 defrost formula coefficients exactly match EnergyPlus** — the core physics is correct. The medium-severity item is that `DEFROST_EIR_TEMP_MODIFIER` (0.1528) is OCHRE-derived, not directly an EnergyPlus constant, despite the comment claiming it is. The defrost enable temperature (4.4445°C/40°F) is within 0.56°C of EnergyPlus's IDD default (5.0°C). ARI/AHRI rated-condition temperatures are correct but scattered as bare literals rather than centralized. No refrigerant property or mass flow constants are needed since HARES uses EIR/capacity curves, not refrigerant-side models.

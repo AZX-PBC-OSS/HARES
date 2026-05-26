@@ -69,6 +69,11 @@ pub fn write_header(w: &mut impl Write, n_zones: usize) {
     }
     cols.push("electrical_net_kw".to_string());
     cols.push("port_radiant_w".to_string());
+    cols.push("port_convective_w".to_string());
+    cols.push("window_solar_w".to_string());
+    cols.push("opaque_solar_lwr_w".to_string());
+    cols.push("interior_lwr_w".to_string());
+    cols.push("internal_gain_w".to_string());
     let _ = writeln!(w, "{}", cols.join(","));
 }
 
@@ -108,6 +113,36 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
         d.envelope
             .as_ref()
             .map(|e| format!("{:.1}", e.port_radiant_w))
+            .unwrap_or_default(),
+    );
+    vals.push(
+        d.envelope
+            .as_ref()
+            .map(|e| format!("{:.1}", e.port_convective_w))
+            .unwrap_or_default(),
+    );
+    vals.push(
+        d.envelope
+            .as_ref()
+            .map(|e| format!("{:.1}", e.window_solar_w))
+            .unwrap_or_default(),
+    );
+    vals.push(
+        d.envelope
+            .as_ref()
+            .map(|e| format!("{:.1}", e.opaque_solar_lwr_w))
+            .unwrap_or_default(),
+    );
+    vals.push(
+        d.envelope
+            .as_ref()
+            .map(|e| format!("{:.1}", e.interior_lwr_w))
+            .unwrap_or_default(),
+    );
+    vals.push(
+        d.envelope
+            .as_ref()
+            .map(|e| format!("{:.1}", e.internal_gain_w))
             .unwrap_or_default(),
     );
     let _ = writeln!(w, "{}", vals.join(","));

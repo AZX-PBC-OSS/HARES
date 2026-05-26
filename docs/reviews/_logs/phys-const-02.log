@@ -1,0 +1,22 @@
+# opencode log for phys-const-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/psychrometrics.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/Psychrometrics*"[90m in . · 2 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/**/*psychro*"[90m in . · 1 match[0m
+[0m✱ [0mGrep "2\.381|2\.006|2\.326|wet.?bulb.*specific.?heat|cp.*wet|wet.*cp"[90m in crates/hares-physics · 12 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/psychrolib_jit.py[90m [offset=1, limit=100][0m
+[0m✱ [0mGrep "2\.381|2\.006|2\.326|c_s_wb|wet.?bulb|psychrometric.*coefficient|specific.*heat.*wet"[90m in vendors/OCHRE/ochre/utils · 28 matches[0m
+[0m✱ [0mGrep "2\.381|2\.006|2\.326|PsychrometricConstant|wet.?bulb|wetBulb|PsychrometerConstant"[90m in vendors/EnergyPlus/src/EnergyPlus · 21 matches[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.hh[90m [offset=1415, limit=80][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.cc[90m [offset=360, limit=150][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/psychrolib_jit.py[90m [offset=170, limit=30][0m

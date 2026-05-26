@@ -553,7 +553,9 @@ pub enum ThermalSolverError {
         "indoor zone {id:?} is not registered in zone_state_indices; registered zones: {registered:?}"
     )]
     IndoorZoneIdNotRegistered { id: ZoneId, registered: Vec<ZoneId> },
-    #[error("zone {zone_id:?} state index {index} is out of bounds for state dimension {state_dim}")]
+    #[error(
+        "zone {zone_id:?} state index {index} is out of bounds for state dimension {state_dim}"
+    )]
     ZoneStateIndexOutOfBounds {
         zone_id: ZoneId,
         index: usize,

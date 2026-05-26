@@ -593,10 +593,7 @@ mod tests {
                 assert_eq!(zone_id, ZoneId(1));
                 assert!(present_zones.is_empty());
             }
-            Ok(x) => panic!(
-                "expected Err(ZoneNotInEnvironment), but got Ok({:?})",
-                x
-            ),
+            Ok(x) => panic!("expected Err(ZoneNotInEnvironment), but got Ok({:?})", x),
             Err(other) => {
                 panic!("expected Err(ZoneNotInEnvironment) but got different error: {other:?}")
             }

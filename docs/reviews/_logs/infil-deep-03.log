@@ -1,0 +1,31 @@
+# opencode log for infil-deep-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/infiltration.rs
+[0m• [0mFind EnergyPlus WeatherManager.cc[90m Explore Agent[0m
+[0m✓ [0mFind EnergyPlus WeatherManager.cc[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-physics/src/infiltration.rs[90m [offset=1349][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/ZoneEquipmentManager.cc[90m [offset=6780, limit=30][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/DataHeatBalance.hh[90m [offset=1105, limit=20][0m
+[0m→ [0mRead docs/reviews/infiltration-deep
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceAirManager.cc[90m [offset=1035, limit=50][0m
+[0m
+[0m← [0mWrite docs/reviews/infiltration-deep/infil-deep-03-aim2-coefficients.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/infiltration-deep/infil-deep-03-aim2-coefficients.md`.
+
+**Summary of findings:**
+
+- **5 total findings** (0 critical, 0 high, 2 medium, 3 low)
+- **No coefficient errors discovered** that would produce systematic infiltration biases — the HARES implementation passes cross-validation against OCHRE at <0.5% tolerance and the runtime quadrature formula matches EnergyPlus exactly.
+
+The key structural finding is that EnergyPlus doesn't compute AIM-2 coefficients at all (they're user inputs via `ZoneInfiltration:FlowCoefficient`), so direct code-to-code comparison of the coefficient derivation wasn't possible. The two medium findings concern documentation mismatches with Walker & Wilson (1998) source material and a possible flue-exponent refinement in the wind factor formula inherited from OCHRE.

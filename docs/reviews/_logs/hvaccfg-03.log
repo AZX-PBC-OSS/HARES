@@ -11,3 +11,46 @@
 [0m
 [0m→ [0mRead crates/hares-equipment/src/hvac/cooling_config.rs
 [0m• [0mExplore EnergyPlus DX coil defaults[90m Explore Agent[0m
+[0m✓ [0mExplore EnergyPlus DX coil defaults[90m Explore Agent[0m
+[0m✱ [0mGrep "AIRFLOW_CENTRAL_AC_M3_S_PER_W|AIRFLOW_ROOM_AC_M3_S_PER_W"[90m 30 matches[0m
+[0m✱ [0mGrep "startup_cd|derived_cooling_startup_cd|cooling_speed_control_mode"[90m 110 matches[0m
+[0m✱ [0mGrep "PLFFPLR|plf_curve|part.?load.*fraction|PLR|cycling.*curve"[90m in vendors/EnergyPlus/src/EnergyPlus · 2535 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=100, limit=120][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [offset=510, limit=120][0m
+[0m✱ [0mGrep "struct AirConditioner|fn new|fn default|AirConditioner \{"[90m in crates/hares-equipment/src/hvac · 50 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [offset=470, limit=45][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=337, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [offset=416, limit=56][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/default_curves.rs
+[0m✱ [0mGrep "PLF.*curve|PLFFPLR|CycDegradationCoef|degradation.*coeff|PLFCurve|PartLoadFractionCorrelation"[90m in vendors/EnergyPlus/src/EnergyPlus · 428 matches[0m
+[0m✱ [0mGrep "PLFFPLR|PartLoadFraction|PLFCurve|plf_curve"[90m in vendors/EnergyPlus/src/EnergyPlus · 88 matches[0m
+[0m✱ [0mGrep "load_curve_pair|biquadratic.*room|biquadratic.*central|room.*biquadratic|central.*biquadratic"[90m in crates/hares-equipment/src/hvac · 10 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ac_config.rs[90m [limit=200, offset=220][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ac_config.rs[90m [offset=1, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [offset=320, limit=30][0m
+[0m✱ [0mGrep "fn apply_cooling_startup_cd"[90m in crates/hares-equipment/src/hvac · 1 match[0m
+[0m✱ [0mGrep "plf_cooling_degradation_coeff|cycling.*degradation|PLF.*PLR|1\.0.*cd.*plr"[90m in crates/hares-equipment/src/hvac · 80 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/staging.rs[90m [offset=270, limit=30][0m
+[0m✱ [0mGrep "SHR|EIR|COP|PLF|sensible.*heat|default.*curve|rated.*airflow"[90m in vendors/EnergyPlus/src/EnergyPlus · 12 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/hvac-config
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/hvac-config/hvaccfg-03-cooling-config-variants.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/hvac-config/hvaccfg-03-cooling-config-variants.md`.
+
+**Summary of 9 findings:**
+
+| Severity | Finding |
+|----------|---------|
+| **High** | Room AC uses hardcoded `startup_cd=0.22` instead of SEER-derived or speed-aware degradation like central AC |
+| **Medium** | Both configs share identical default SHR=0.75, but room ACs should be 0.65–0.75 |
+| **Medium** | Central AC Cd=0.07 (SEER≥13) under-predicts cycling losses vs EnergyPlus Cd=0.20–0.25 |
+| **Medium** | RoomAcConfig has no multi-speed support — can't model inverter window ACs |
+| **Low** | RoomAcConfig doesn't validate `startup_cd` |
+| **Low** | RoomAcConfig lacks `charge_defect_ratio` field |
+| Info | Default biquadratic curves correctly differ between room/central AC |
+| Info | Airflow constants correctly computed: 400 CFM/ton (central) vs 320 CFM/ton (room) |
+| Info | Compressor speed → PLF model association is architecturally sound |

@@ -1,0 +1,1960 @@
+# opencode log for infra-08
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m✱ [0mGrep "\.unwrap\(\)|\.expect\(|unreachable!\(|panic!\(""[90m 6093 matches[0m
+[0m✱ [0mGlob "**/Cargo.toml"[90m 11 matches[0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -c '\.unwrap\(\)' --include '*.rs' --no-filename | awk -F: '{sum+=$2} END {print "unwrap total:", sum}' && rg -c '\.expect\(' --include '*.rs' --no-filename | awk -F: '{sum+=$2} END {print "expect total:", sum}' && rg -c 'unreachable!\(' --include '*.rs' --no-filename | awk -F: '{sum+=$2} END {print "unreachable! total:", sum}' && rg -c 'panic!\(' --include '*.rs' --no-filename | awk -F: '{sum+=$2} END {print "panic! total:", sum}'
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+unwrap total: 
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+expect total: 
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+unreachable! total: 
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+panic! total:
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && echo "=== Production (non-test) ===" && rg -c '\.unwrap\(\)' --include '*.rs' -g '!tests/' -g '!**/tests/**' --no-filename | awk -F: '{sum+=$2} END {print "unwrap:", sum}' && rg -c '\.expect\(' --include '*.rs' -g '!tests/' -g '!**/tests/**' --no-filename | awk -F: '{sum+=$2} END {print "expect:", sum}' && rg -c 'unreachable!\(' --include '*.rs' -g '!tests/' -g '!**/tests/**' --no-filename | awk -F: '{sum+=$2} END {print "unreachable!:", sum}' && rg -c 'panic!\(' --include '*.rs' -g '!tests/' -g '!**/tests/**' --no-filename | awk -F: '{sum+=$2} END {print "panic!:", sum}' && echo "=== Test files only ===" && rg -c '\.unwrap\(\)' --include '*.rs' -g 'tests/' -g '**/tests/**' --no-filename | awk -F: '{sum+=$2} END {print "unwrap:", sum}' && rg -c '\.expect\(' --include '*.rs' -g 'tests/' -g '**/tests/**' --no-filename | awk -F: '{sum+=$2} END {print "expect:", sum}' && rg -c 'unreachable!\(' --include '*.rs' -g 'tests/' -g '**/tests/**' --no-filename | awk -F: '{sum+=$2} END {print "unreachable!:", sum}' && rg -c 'panic!\(' --include '*.rs' -g 'tests/' -g '**/tests/**' --no-filename | awk -F: '{sum+=$2} END {print "panic!:", sum}'
+=== Production (non-test) ===
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+unwrap: 
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+expect: 
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+unreachable!: 
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+panic!: 
+=== Test files only ===
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+unwrap: 
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+expect: 
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+unreachable!: 
+rg: unrecognized flag --include
+
+similar flags that are available: --include-zero
+panic!:
+[0m
+There are ~6093 matches total — far too many for a line-by-line audit. Let me gather precise statistics across production vs test code, then sample the most impactful occurrences.
+[0m$ [0mcd /Users/rich/source/HARES && for crate in hares-core hares-envelope hares-physics hares-types hares-tariff hares-io hares-equipment hares-control hares-fleet hares-python; do echo "=== $crate (prod only) ===" && rg -c '\.unwrap\(\)' "crates/$crate/src/" --no-filename 2>/dev/null | awk -F: '{sum+=$2} END {print "unwrap:", sum+0}' && rg -c '\.expect\(' "crates/$crate/src/" --no-filename 2>/dev/null | awk -F: '{sum+=$2} END {print "expect:", sum+0}' && rg -c 'unreachable!\(' "crates/$crate/src/" --no-filename 2>/dev/null | awk -F: '{sum+=$2} END {print "unreachable!:", sum+0}' && rg -c 'panic!\(' "crates/$crate/src/" --no-filename 2>/dev/null | awk -F: '{sum+=$2} END {print "panic!:", sum+0}' ; done
+=== hares-core (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+=== hares-envelope (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+=== hares-physics (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+=== hares-types (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+=== hares-tariff (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+=== hares-io (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+=== hares-equipment (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+=== hares-control (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+=== hares-fleet (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+=== hares-python (prod only) ===
+unwrap: 0
+expect: 0
+unreachable!: 0
+panic!: 0
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg --version
+ripgrep 15.1.0
+
+features:+pcre2
+simd(compile):+NEON
+simd(runtime):+NEON
+
+PCRE2 10.45 is available (JIT is available)
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -c '\.unwrap\(\)' -g '*.rs' | awk -F: '{sum+=$2} END {print "unwrap:", sum}' && rg -c '\.expect\(' -g '*.rs' | awk -F: '{sum+=$2} END {print "expect:", sum}' && rg -c 'unreachable!\(' -g '*.rs' | awk -F: '{sum+=$2} END {print "unreachable!:", sum}' && rg -c 'panic!\(' -g '*.rs' | awk -F: '{sum+=$2} END {print "panic!:", sum}'
+unwrap: 3350
+expect: 2585
+unreachable!: 5
+panic!: 184
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && echo "=== Production code ===" && rg -c '\.unwrap\(\)' -g '*.rs' -g '!tests/' -g '!**/tests/**' | awk -F: '{sum+=$2} END {print "unwrap:", sum}' && rg -c '\.expect\(' -g '*.rs' -g '!tests/' -g '!**/tests/**' | awk -F: '{sum+=$2} END {print "expect:", sum}' && rg -c 'unreachable!\(' -g '*.rs' -g '!tests/' -g '!**/tests/**' | awk -F: '{sum+=$2} END {print "unreachable!:", sum}' && rg -c 'panic!\(' -g '*.rs' -g '!tests/' -g '!**/tests/**' | awk -F: '{sum+=$2} END {print "panic!:", sum}' && echo "=== Test code ===" && rg -c '\.unwrap\(\)' -g '*.rs' -g 'tests/' | awk -F: '{sum+=$2} END {print "unwrap:", sum}' && rg -c '\.expect\(' -g '*.rs' -g 'tests/' | awk -F: '{sum+=$2} END {print "expect:", sum}' && rg -c 'unreachable!\(' -g '*.rs' -g 'tests/' | awk -F: '{sum+=$2} END {print "unreachable!:", sum}' && rg -c 'panic!\(' -g '*.rs' -g 'tests/' | awk -F: '{sum+=$2} END {print "panic!:", sum}'
+=== Production code ===
+unwrap: 2661
+expect: 1559
+unreachable!: 5
+panic!: 118
+=== Test code ===
+unwrap: 3350
+expect: 2585
+unreachable!: 5
+panic!: 184
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for crate_dir in crates/*/src; do crate=$(echo "$crate_dir" | cut -d'/' -f2) ; echo "=== $crate ===" ; rg -c '\.unwrap\(\)' "$crate_dir" | awk -F: '{sum+=$2} END {print "unwrap:", sum+0}' ; rg -c '\.expect\(' "$crate_dir" | awk -F: '{sum+=$2} END {print "expect:", sum+0}' ; rg -c 'unreachable!\(' "$crate_dir" | awk -F: '{sum+=$2} END {print "unreachable!:", sum+0}' ; rg -c 'panic!\(' "$crate_dir" | awk -F: '{sum+=$2} END {print "panic!:", sum+0}' ; done
+=== hares-control ===
+unwrap: 0
+expect: 9
+unreachable!: 0
+panic!: 2
+=== hares-core ===
+unwrap: 83
+expect: 154
+unreachable!: 3
+panic!: 55
+=== hares-envelope ===
+unwrap: 246
+expect: 42
+unreachable!: 0
+panic!: 10
+=== hares-equipment ===
+unwrap: 1973
+expect: 383
+unreachable!: 1
+panic!: 12
+=== hares-fleet ===
+unwrap: 1
+expect: 23
+unreachable!: 0
+panic!: 1
+=== hares-io ===
+unwrap: 128
+expect: 725
+unreachable!: 1
+panic!: 33
+=== hares-physics ===
+unwrap: 36
+expect: 9
+unreachable!: 0
+panic!: 0
+=== hares-python ===
+unwrap: 17
+expect: 14
+unreachable!: 0
+panic!: 1
+=== hares-tariff ===
+unwrap: 50
+expect: 20
+unreachable!: 0
+panic!: 0
+=== hares-types ===
+unwrap: 127
+expect: 156
+unreachable!: 0
+panic!: 4
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)' -g '!tests/' crates/hares-equipment/src/ | head -80
+crates/hares-equipment/src/generator.rs:1210:            .unwrap();
+crates/hares-equipment/src/generator.rs:1218:                .unwrap();
+crates/hares-equipment/src/generator.rs:1351:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1357:            .unwrap();
+crates/hares-equipment/src/generator.rs:1359:        let output_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+crates/hares-equipment/src/generator.rs:1360:        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+crates/hares-equipment/src/generator.rs:1401:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1409:            .unwrap();
+crates/hares-equipment/src/generator.rs:1413:            .unwrap();
+crates/hares-equipment/src/generator.rs:1414:        let eta_full = generator.telemetry().get(tk::ETA_ELECTRIC).unwrap();
+crates/hares-equipment/src/generator.rs:1426:            .unwrap();
+crates/hares-equipment/src/generator.rs:1430:            .unwrap();
+crates/hares-equipment/src/generator.rs:1431:        let eta_partial = generator.telemetry().get(tk::ETA_ELECTRIC).unwrap();
+crates/hares-equipment/src/generator.rs:1453:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1461:            .unwrap();
+crates/hares-equipment/src/generator.rs:1465:            .unwrap();
+crates/hares-equipment/src/generator.rs:1467:            (generator.telemetry().get(tk::ETA_ELECTRIC).unwrap() - 0.40).abs() < 1e-6,
+crates/hares-equipment/src/generator.rs:1477:            .unwrap();
+crates/hares-equipment/src/generator.rs:1481:            .unwrap();
+crates/hares-equipment/src/generator.rs:1483:            (generator.telemetry().get(tk::ETA_ELECTRIC).unwrap() - 0.25).abs() < 1e-6,
+crates/hares-equipment/src/generator.rs:1496:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1502:            .unwrap();
+crates/hares-equipment/src/generator.rs:1506:            .unwrap();
+crates/hares-equipment/src/generator.rs:1522:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1528:            .unwrap();
+crates/hares-equipment/src/generator.rs:1533:        generator.step(&base_env(), dt, &mut slots).unwrap();
+crates/hares-equipment/src/generator.rs:1539:        assert_eq!(generator.telemetry().get(tk::RAMP_LIMITED).unwrap(), 1.0);
+crates/hares-equipment/src/generator.rs:1543:            generator.step(&base_env(), dt, &mut slots).unwrap();
+crates/hares-equipment/src/generator.rs:1558:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1571:            .unwrap();
+crates/hares-equipment/src/generator.rs:1575:            .unwrap();
+crates/hares-equipment/src/generator.rs:1592:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1598:            .unwrap();
+crates/hares-equipment/src/generator.rs:1613:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1619:            .unwrap();
+crates/hares-equipment/src/generator.rs:1631:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1636:            .unwrap();
+crates/hares-equipment/src/generator.rs:1650:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1657:            .unwrap();
+crates/hares-equipment/src/generator.rs:1669:            .unwrap();
+crates/hares-equipment/src/generator.rs:1686:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1694:            .unwrap();
+crates/hares-equipment/src/generator.rs:1698:            .unwrap();
+crates/hares-equipment/src/generator.rs:1711:            .unwrap();
+crates/hares-equipment/src/generator.rs:1715:            .unwrap();
+crates/hares-equipment/src/generator.rs:1732:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1744:            .unwrap();
+crates/hares-equipment/src/generator.rs:1748:            .unwrap();
+crates/hares-equipment/src/generator.rs:1770:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1776:            .unwrap();
+crates/hares-equipment/src/generator.rs:1781:            .unwrap();
+crates/hares-equipment/src/generator.rs:1783:        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+crates/hares-equipment/src/generator.rs:1784:        let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+crates/hares-equipment/src/generator.rs:1785:        let electric_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+crates/hares-equipment/src/generator.rs:1807:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1813:            .unwrap();
+crates/hares-equipment/src/generator.rs:1818:            .unwrap();
+crates/hares-equipment/src/generator.rs:1822:        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+crates/hares-equipment/src/generator.rs:1823:        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+crates/hares-equipment/src/generator.rs:1824:        let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+crates/hares-equipment/src/generator.rs:1825:        let flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
+crates/hares-equipment/src/generator.rs:1845:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1851:            .unwrap();
+crates/hares-equipment/src/generator.rs:1856:            .unwrap();
+crates/hares-equipment/src/generator.rs:1858:        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+crates/hares-equipment/src/generator.rs:1859:        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+crates/hares-equipment/src/generator.rs:1882:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1888:            .unwrap();
+crates/hares-equipment/src/generator.rs:1893:            .unwrap();
+crates/hares-equipment/src/generator.rs:1936:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1942:            .unwrap();
+crates/hares-equipment/src/generator.rs:1947:            .unwrap();
+crates/hares-equipment/src/generator.rs:1949:        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+crates/hares-equipment/src/generator.rs:1950:        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+crates/hares-equipment/src/generator.rs:1951:        let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+crates/hares-equipment/src/generator.rs:1952:        let flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
+crates/hares-equipment/src/generator.rs:1988:        generator.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1995:        generator2.init(&config, &base_env()).unwrap();
+crates/hares-equipment/src/generator.rs:1996:        generator2.load_state(&bytes).unwrap();
+crates/hares-equipment/src/generator.rs:2001:            (generator2.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() - saved).abs()
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)' -g '!tests/' crates/hares-io/src/ | head -80
+crates/hares-io/src/defaults.rs:725:            std::fs::create_dir_all(root.join(name)).unwrap();
+crates/hares-io/src/defaults.rs:743:        .unwrap();
+crates/hares-io/src/defaults.rs:750:            .unwrap()
+crates/hares-io/src/defaults.rs:752:            .unwrap()
+crates/hares-io/src/defaults.rs:773:        let dir = tempfile::tempdir().unwrap();
+crates/hares-io/src/defaults.rs:783:        let dir = tempfile::tempdir().unwrap();
+crates/hares-io/src/defaults.rs:785:        std::fs::write(&zip_path, "this is { not valid toml").unwrap();
+crates/hares-io/src/defaults.rs:797:        let dir = tempfile::tempdir().unwrap();
+crates/hares-io/src/defaults.rs:801:        std::fs::create_dir_all(&hvac_dir).unwrap();
+crates/hares-io/src/defaults.rs:802:        let mut f = std::fs::File::create(hvac_dir.join("air_conditioner.toml")).unwrap();
+crates/hares-io/src/defaults.rs:817:        .unwrap();
+crates/hares-io/src/defaults.rs:847:        let dir = tempfile::tempdir().unwrap();
+crates/hares-io/src/defaults.rs:851:        std::fs::create_dir_all(&battery_dir).unwrap();
+crates/hares-io/src/defaults.rs:860:        .unwrap();
+crates/hares-io/src/defaults.rs:886:        let dir = tempfile::tempdir().unwrap();
+crates/hares-io/src/defaults.rs:893:        .unwrap();
+crates/hares-io/src/defaults.rs:906:        let dir = tempfile::tempdir().unwrap();
+crates/hares-io/src/defaults.rs:935:        .unwrap();
+crates/hares-io/src/defaults.rs:947:        let dir = tempfile::tempdir().unwrap();
+crates/hares-io/src/defaults.rs:978:            .unwrap();
+crates/hares-io/src/defaults.rs:993:        let dir = tempfile::tempdir().unwrap();
+crates/hares-io/src/defaults.rs:994:        std::fs::write(dir.path().join("zip_parameters.toml"), "").unwrap();
+crates/hares-io/src/hpxml/resolve_loads.rs:1047:        let ext = node.child("extension").unwrap();
+crates/hares-io/src/hpxml/xml_helpers.rs:213:        let c = child_temperature_c(&node).unwrap();
+crates/hares-io/src/hpxml/xml_helpers.rs:220:        let c = child_temperature_c(&node).unwrap();
+crates/hares-io/src/hpxml/xml_helpers.rs:227:        let c = child_temperature_c(&node).unwrap();
+crates/hares-io/src/hpxml/xml_helpers.rs:234:        let c = child_temperature_c(&node).unwrap();
+crates/hares-io/src/hpxml/water_heater_ua.rs:322:            .unwrap()
+crates/hares-io/src/hpxml/water_heater_ua.rs:323:            .unwrap();
+crates/hares-io/src/hpxml/water_heater_ua.rs:325:            .unwrap()
+crates/hares-io/src/hpxml/water_heater_ua.rs:326:            .unwrap();
+crates/hares-io/src/hpxml/water_heater_ua.rs:380:            .unwrap()
+crates/hares-io/src/hpxml/water_heater_ua.rs:381:            .unwrap();
+crates/hares-io/src/hpxml/water_heater_ua.rs:403:            ua_from_energy_factor(&inputs).unwrap().is_none(),
+crates/hares-io/src/resstock_csv.rs:453:            .unwrap()
+crates/hares-io/src/resstock_csv.rs:455:            .unwrap();
+crates/hares-io/src/resstock_csv.rs:459:            let hour_of_day = dt.format("%H").to_string().parse::<u32>().unwrap();
+crates/hares-io/src/resstock_csv.rs:792:            .unwrap()
+crates/hares-io/src/resstock_csv.rs:794:            .unwrap();
+crates/hares-io/src/hpxml/resolve_hvac.rs:4671:            .map(|v| v.as_f64().unwrap())
+crates/hares-io/src/hpxml/resolve_hvac.rs:4677:            .map(|v| v.as_f64().unwrap())
+crates/hares-io/src/hpxml/resolve_hvac.rs:4683:            .map(|v| v.as_f64().unwrap())
+crates/hares-io/src/hpxml/resolve_hvac.rs:4689:            .map(|v| v.as_f64().unwrap())
+crates/hares-io/src/hpxml/resolve_hvac.rs:4827:                .unwrap()
+crates/hares-io/src/hpxml/resolve_hvac.rs:4868:        eq.init(&ec, &env).unwrap();
+crates/hares-io/src/hpxml/resolve_hvac.rs:4879:            .unwrap();
+crates/hares-io/src/hpxml/resolve_hvac.rs:4948:                .unwrap()
+crates/hares-io/src/hpxml/resolve_hvac.rs:4956:        eq.init(&ec, &env).unwrap();
+crates/hares-io/src/hpxml/resolve_hvac.rs:4968:            .unwrap();
+crates/hares-io/src/hpxml/resolve_hvac.rs:5046:            .unwrap()
+crates/hares-io/src/hpxml/resolve_hvac.rs:5048:            .unwrap()
+crates/hares-io/src/hpxml/equipment.rs:281:            .unwrap()
+crates/hares-io/src/hpxml/equipment.rs:283:            .unwrap()
+crates/hares-io/src/hpxml/equipment.rs:1072:        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1074:        let sens = cw.parameters["sensible_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1075:        let lat = cw.parameters["latent_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1084:        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1086:        let sens = dw.parameters["sensible_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1087:        let lat = dw.parameters["latent_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1098:        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1100:        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1101:        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1116:        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1118:        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1119:        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1131:        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1133:        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1134:        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1149:        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1151:        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1152:        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1163:        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+crates/hares-io/src/hpxml/equipment.rs:1165:        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+crates/hares-io/src/hpxml/building.rs:2960:        assert!((supply.surface_area_m2.unwrap() - 50.0 * 0.092903).abs() < 0.01);
+crates/hares-io/src/hpxml/building.rs:2961:        assert!((return_duct.surface_area_m2.unwrap() - 30.0 * 0.092903).abs() < 0.01);
+crates/hares-io/src/hpxml/building.rs:2971:            (building.conditioned_volume_m3.unwrap() - expected_volume_m3).abs() < 0.01,
+crates/hares-io/src/hpxml/building.rs:2973:            building.conditioned_volume_m3.unwrap(),
+crates/hares-io/src/hpxml/building.rs:2980:        assert!((building.ceiling_height_m.unwrap() - expected_ceiling_height).abs() < 1e-6,);
+crates/hares-io/src/hpxml/building.rs:3142:        let effective = w.shgc.unwrap() * w.interior_shading_fraction;
+crates/hares-io/src/hpxml/building.rs:3164:        let effective = w.shgc.unwrap() * w.interior_shading_fraction;
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'panic!\(' -g '!tests/' crates/hares-core/src/ | head -60
+crates/hares-core/src/actors/ideal_thermostat.rs:371:            _ => panic!("expected ThermalSetpoint signal"),
+crates/hares-core/src/actors/ideal_thermostat.rs:393:            _ => panic!("expected ThermalSetpoint signal"),
+crates/hares-core/src/actors/ideal_thermostat.rs:415:            _ => panic!("expected ThermalSetpoint signal"),
+crates/hares-core/src/actors/ideal_thermostat.rs:434:            _ => panic!("expected ThermalSetpoint signal"),
+crates/hares-core/src/actors/ideal_thermostat.rs:502:            _ => panic!("expected ThermalSetpoint signal"),
+crates/hares-core/src/actors/ev_driver/v2g.rs:76:            Constraint::Inactive => panic!("expected Override"),
+crates/hares-core/src/actors/ev_driver/composer.rs:286:            other => panic!("expected SOCTarget, got {other:?}"),
+crates/hares-core/src/actors/ev_driver/composer.rs:329:            other => panic!("expected SOCTarget, got {other:?}"),
+crates/hares-core/src/actors/ev_driver/composer.rs:373:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/solver_feedback.rs:156:            _ => panic!("expected IdealCapacity signal"),
+crates/hares-core/src/actors/ev_driver/departure.rs:188:            Constraint::Inactive => panic!("expected Override"),
+crates/hares-core/src/actors/ev_driver/departure.rs:320:            Constraint::Inactive => panic!("buffer=4 should Override within buffer window"),
+crates/hares-core/src/actors/ev_driver/soc_gate.rs:73:            Constraint::Inactive => panic!("expected Override"),
+crates/hares-core/src/actors/ev_driver/time_window.rs:90:            Constraint::Inactive => panic!("expected Override outside window"),
+crates/hares-core/src/actors/ev_driver/time_window.rs:132:            Constraint::Inactive => panic!("expected Override outside window"),
+crates/hares-core/src/actors/ev_driver/time_window.rs:153:            Constraint::Inactive => panic!("expected Override for wrong day"),
+crates/hares-core/src/actors/bms.rs:697:            other => panic!("expected SelfConsumption, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:772:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:813:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:882:            other => panic!("expected SOCTarget, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:892:            other => panic!("expected PowerLimit, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:956:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1036:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1094:            other => panic!("expected SOCTarget, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1445:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1497:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1548:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1600:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1647:            other => panic!("expected PowerSetpoint for Disabled export, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1692:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1776:            other => panic!("expected PowerSetpoint for SolarOnly, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1825:            other => panic!("expected PowerSetpoint, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1870:            other => panic!("expected SelfConsumption signal, got {other:?}"),
+crates/hares-core/src/actors/bms.rs:1914:            other => panic!("expected SelfConsumption signal, got {other:?}"),
+crates/hares-core/src/actors/ev_driver/v2h.rs:79:            Constraint::Inactive => panic!("expected Override"),
+crates/hares-core/src/actors/dr_compliance.rs:726:            other => panic!("expected ThermalSetpointDelta, got {other:?}"),
+crates/hares-core/src/actors/dr_compliance.rs:754:            other => panic!("expected ThermalSetpoint, got {other:?}"),
+crates/hares-core/src/actor_registry.rs:420:            _ => panic!("expected Control error"),
+crates/hares-core/src/dwelling/solver_builder.rs:1805:            other => panic!("expected ELA, got {other:?}"),
+crates/hares-core/src/dwelling/solver_builder.rs:1959:            other => panic!("expected ELA, got {other:?}"),
+crates/hares-core/src/dwelling/solver_builder.rs:1979:            other => panic!("expected ELA, got {other:?}"),
+crates/hares-core/src/dwelling/solver_builder.rs:2006:            other => panic!("expected ELA, got {other:?}"),
+crates/hares-core/src/dwelling/solver_builder.rs:2019:            other => panic!("expected ELA, got {other:?}"),
+crates/hares-core/src/dwelling/mod.rs:3814:            .unwrap_or_else(|e| panic!("failed to read directory {}: {e}", root.display()));
+crates/hares-core/src/dwelling/mod.rs:3817:                panic!(
+crates/hares-core/src/dwelling/mod.rs:3892:                .unwrap_or_else(|e| panic!("failed reading {}: {e}", path.display()));
+crates/hares-core/src/dwelling/mod.rs:4450:            Ok(_) => panic!("unknown HVAC class must fail dwelling construction"),
+crates/hares-core/src/dwelling/mod.rs:4788:            _ => panic!("expected IdealCapacity signal"),
+crates/hares-core/src/dwelling/mod.rs:5270:            _ => panic!("expected IdealCapacity"),
+crates/hares-core/src/dwelling/mod.rs:5276:            _ => panic!("expected IdealCapacity"),
+crates/hares-core/src/dwelling/mod.rs:6003:            Ok(_) => panic!("expected Err(HaresError::Dwelling(...)) but construction succeeded"),
+crates/hares-core/src/dwelling/mod.rs:6005:                panic!("expected Err(HaresError::Dwelling(...)) but got different error: {e}")
+crates/hares-core/src/dwelling/mod.rs:6024:            Ok(_) => panic!("unknown equipment class must return Err"),
+crates/hares-core/src/dwelling/conversions.rs:1157:            panic!("key '{expected_key}' must be present in HumiditySolver telemetry")
+crates/hares-core/src/dwelling/conversions.rs:1187:            panic!("key '{expected_key}' must be present in HumiditySolver telemetry")
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'panic!\(' -g '!tests/' crates/hares-io/src/ | head -40
+crates/hares-io/src/resstock.rs:550:            other => panic!("expected VersionMismatch, got {other}"),
+crates/hares-io/src/resstock.rs:585:            other => panic!("expected VersionMismatch, got {other}"),
+crates/hares-io/src/resstock.rs:616:            other => panic!("expected MissingCharacteristic for in.state, got {other}"),
+crates/hares-io/src/schedule.rs:894:            other => panic!("expected MissingRequiredColumns, got {other}"),
+crates/hares-io/src/hpxml/resolve_hvac.rs:4046:            other => panic!("expected DailyProfile source, got {other:?}"),
+crates/hares-io/src/hpxml/resolve_hvac.rs:4109:            other => panic!("expected heating DailyProfile source, got {other:?}"),
+crates/hares-io/src/hpxml/resolve_hvac.rs:4115:            other => panic!("expected cooling DailyProfile source, got {other:?}"),
+crates/hares-io/src/hpxml/resolve_hvac.rs:4221:                panic!("expected cooling DailyProfile source");
+crates/hares-io/src/hpxml/resolve_hvac.rs:4224:            panic!("expected heating DailyProfile source");
+crates/hares-io/src/hpxml/resolve_hvac.rs:4266:            other => panic!("expected heating DailyProfile source, got {other:?}"),
+crates/hares-io/src/hpxml/resolve_hvac.rs:4275:            other => panic!("expected cooling DailyProfile source, got {other:?}"),
+crates/hares-io/src/hpxml/resolve_hvac.rs:4478:            other => panic!("expected DailyProfile setpoint source, got {other:?}"),
+crates/hares-io/src/schedule_resolve.rs:543:                    panic!(
+crates/hares-io/src/schedule_resolve.rs:560:        panic!(
+crates/hares-io/src/schedule_resolve.rs:568:            panic!(
+crates/hares-io/src/schedule_resolve.rs:574:        panic!(
+crates/hares-io/src/schedule_resolve.rs:588:                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+crates/hares-io/src/schedule_resolve.rs:592:                    panic!(
+crates/hares-io/src/schedule_resolve.rs:598:                panic!(
+crates/hares-io/src/schedule_resolve.rs:608:                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+crates/hares-io/src/schedule_resolve.rs:610:                panic!(
+crates/hares-io/src/schedule_resolve.rs:616:                panic!(
+crates/hares-io/src/schedule_resolve.rs:626:                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+crates/hares-io/src/schedule_resolve.rs:630:                    panic!(
+crates/hares-io/src/schedule_resolve.rs:636:                panic!(
+crates/hares-io/src/schedule_resolve.rs:642:        other => panic!("unsupported water heater type for draw normalization: {other}"),
+crates/hares-io/src/schedule_resolve.rs:1539:            other => panic!("expected typed payload, got {other:?}"),
+crates/hares-io/src/schedule_resolve.rs:1562:            other => panic!("expected typed payload, got {other:?}"),
+crates/hares-io/src/schedule_resolve.rs:1694:            other => panic!("unsupported water heater type for schedule test: {other}"),
+crates/hares-io/src/hpxml/equipment.rs:785:            other => panic!("expected parse error, got {other:?}"),
+crates/hares-io/src/hpxml/equipment.rs:1065:            .unwrap_or_else(|| panic!("spec '{name}' not found"))
+crates/hares-io/src/hpxml/equipment.rs:1247:            other => panic!("expected DailyProfile setpoint source, got {other:?}"),
+crates/hares-io/src/hpxml/equipment.rs:1297:            other => panic!("expected heating DailyProfile setpoint source, got {other:?}"),
+[0m
+Now I have the full picture. Let me focus on the most critical areas: HPXML/EPW input parsing (hares-io), simulation hot paths (hares-equipment, hares-envelope), and dwelling setup (hares-core).
+[0m$ [0mcd /Users/rich/source/HARES && for file in crates/hares-io/src/hpxml/building.rs crates/hares-io/src/hpxml/resolve_hvac.rs crates/hares-io/src/hpxml/equipment.rs crates/hares-io/src/hpxml/resolve_loads.rs crates/hares-io/src/hpxml/water_heater_ua.rs crates/hares-io/src/hpxml/xml_helpers.rs crates/hares-io/src/schedule.rs crates/hares-io/src/schedule_resolve.rs crates/hares-io/src/resstock.rs crates/hares-io/src/resstock_csv.rs; do echo "=== $file ===" && rg -n '(\.unwrap\(\)|\.expect\()' "$file" | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v '#\[cfg\(test\)\]' | grep -v 'mod tests' | head -30 ; done
+=== crates/hares-io/src/hpxml/building.rs ===
+2908:        let building = parse_building(SAMPLE_XML).expect("expected parser success");
+2924:            .expect("wall boundary expected");
+2937:            .expect("material layer expected");
+2944:            .expect("attic zone expected");
+2950:            .expect("supply duct expected");
+2955:            .expect("return duct expected");
+2960:        assert!((supply.surface_area_m2.unwrap() - 50.0 * 0.092903).abs() < 0.01);
+2961:        assert!((return_duct.surface_area_m2.unwrap() - 30.0 * 0.092903).abs() < 0.01);
+2971:            (building.conditioned_volume_m3.unwrap() - expected_volume_m3).abs() < 0.01,
+2973:            building.conditioned_volume_m3.unwrap(),
+2980:        assert!((building.ceiling_height_m.unwrap() - expected_ceiling_height).abs() < 1e-6,);
+2987:            .expect("conditioned zone");
+2995:            .expect("attic zone");
+3050:        let building = parse_building(&xml).expect("should parse FrameFloor XML");
+3055:            .expect("FrameFloor1 boundary should exist");
+3087:        let building = parse_building(&xml).expect("should parse crawlspace FrameFloor");
+3092:            .expect("FrameFloor2 boundary should exist");
+3137:        let building = parse_building(&xml).expect("should parse");
+3142:        let effective = w.shgc.unwrap() * w.interior_shading_fraction;
+3160:        let building = parse_building(&xml).expect("should parse");
+3164:        let effective = w.shgc.unwrap() * w.interior_shading_fraction;
+3180:        let building = parse_building(&xml).expect("should parse");
+3188:        let effective = w.shgc.unwrap() * w.interior_shading_fraction;
+3199:        let building = parse_building(&xml).expect("parse should succeed");
+3208:            .expect("foundation wall expected");
+3222:        let building = parse_building(&xml).expect("parse should succeed");
+3228:            .expect("foundation wall expected");
+3245:        let building = parse_building(&xml).expect("parse should succeed");
+3250:            .expect("foundation wall expected");
+3293:        let building = parse_building(&xml).expect("parse should succeed");
+=== crates/hares-io/src/hpxml/resolve_hvac.rs ===
+547:    serde_json::to_value(source).expect("ScheduleSourceConfig serialization must succeed")
+2957:                .expect("SetpointReconciliation must serialize");
+3090:                .expect("SetpointReconciliation must serialize");
+3141:                .expect("writer lock poisoned")
+3164:        String::from_utf8(buffer.lock().expect("log lock poisoned").clone())
+3165:            .expect("logs must be valid utf8")
+3269:            .expect("duct DSE params must resolve when lat/lon/volume are set");
+3289:            .expect("duct DSE params must resolve when lat/lon/volume are set");
+3374:        let selected = select_primary_curve_pair(&curve_set, 4).expect("variable speed pair");
+3447:        let selected = select_primary_curve_pair(&curve_set, 4).expect("should find pair");
+3554:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3564:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3577:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3593:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3609:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3622:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3638:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3654:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3667:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3680:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3696:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3713:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3729:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3739:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3749:            zone_type_to_ashrae152_str(&zone, &building).expect("valid zone type"),
+3850:            .expect("gas furnace builder must not error with valid params")
+3851:            .expect("gas furnace builder must produce a typed config when capacity is present");
+3854:        let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
+3883:            .expect("gas furnace builder must not error with explicit airflow")
+3884:            .expect("gas furnace builder must produce a typed config when capacity is present");
+=== crates/hares-io/src/hpxml/equipment.rs ===
+237:        let building = parse_building(xml).expect("building should parse");
+239:            .expect("resolve_equipment");
+270:        let building = parse_building(xml).expect("building should parse");
+272:            .expect("resolve_equipment");
+281:            .unwrap()
+283:            .unwrap()
+285:        DefaultsStore::load(&defaults_dir).expect("load defaults")
+317:        let building = parse_building(&xml).expect("should parse");
+319:            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+323:            .expect("ASHP Cooler");
+339:        let building = parse_building(&xml).expect("should parse");
+341:            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+345:            .expect("ASHP Cooler");
+361:        let building = parse_building(&xml).expect("should parse");
+363:            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+367:            .expect("ASHP Cooler");
+372:            .expect("ASHP Heater");
+385:        let building = parse_building(&xml).expect("should parse");
+387:            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+391:            .expect("Air Conditioner");
+404:        let building = parse_building(&xml).expect("should parse");
+406:            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+410:            .expect("Air Conditioner");
+423:        let building = parse_building(&xml).expect("should parse");
+425:            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+429:            .expect("Air Conditioner");
+445:        let building = parse_building(&xml).expect("should parse");
+447:            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+451:            .expect("ASHP Cooler");
+499:        let building = parse_building(&xml).expect("should parse");
+=== crates/hares-io/src/hpxml/resolve_loads.rs ===
+1002:        let root = parse_xml_document(xml).expect("parse test XML");
+1046:        let node = parse_xml_document(xml).expect("parse");
+1047:        let ext = node.child("extension").unwrap();
+1065:        let node = parse_xml_document(xml).expect("parse");
+=== crates/hares-io/src/hpxml/water_heater_ua.rs ===
+301:            .expect("no error")
+302:            .expect("some result");
+322:            .unwrap()
+323:            .unwrap();
+325:            .unwrap()
+326:            .unwrap();
+341:            .expect("no error")
+342:            .expect("some result");
+358:            .expect("no error")
+359:            .expect("some result");
+380:            .unwrap()
+381:            .unwrap();
+403:            ua_from_energy_factor(&inputs).unwrap().is_none(),
+=== crates/hares-io/src/hpxml/xml_helpers.rs ===
+213:        let c = child_temperature_c(&node).unwrap();
+220:        let c = child_temperature_c(&node).unwrap();
+227:        let c = child_temperature_c(&node).unwrap();
+234:        let c = child_temperature_c(&node).unwrap();
+=== crates/hares-io/src/schedule.rs ===
+491:        .unwrap_or(FixedOffset::east_opt(0).expect("UTC offset is valid"));
+569:        .expect("series timestamps are non-empty")
+689:            .expect("system time before UNIX_EPOCH")
+692:        fs::write(&path, csv_contents).expect("failed to write temporary schedule CSV");
+720:        DateTime::parse_from_rfc3339(ts).expect("valid RFC3339 timestamp")
+732:        .expect("schedule should parse");
+743:        let series = parse_schedule_csv_str(&csv, &[], None, None).expect("schedule should parse");
+744:        let upsampled = series.resample(60).expect("upsample should work");
+782:        let series = parse_schedule_csv_str(&csv, &[], None, None).expect("schedule should parse");
+787:            .expect("5-minute downsample should work");
+811:            parse_schedule_csv_str(&csv, &[], None, None).expect("schedule should parse");
+817:            .expect("5-minute downsample should work");
+838:            parse_schedule_csv_str(&csv, &[], None, None).expect("schedule should parse");
+844:            .expect("5-minute downsample should work");
+856:        let series = parse_schedule_csv_str(&csv, &[], None, None).expect("schedule should parse");
+862:            .expect("5-minute downsample should work");
+875:        let series = parse_schedule_csv_str(&csv, &[], None, None).expect("schedule should parse");
+921:            .expect("weather timezone fallback should parse");
+947:            parse_schedule_csv_str(&csv, &[], None, None).expect("schedule should parse");
+=== crates/hares-io/src/schedule_resolve.rs ===
+1000:                .expect("writer lock poisoned")
+1024:        String::from_utf8(buffer.lock().expect("log lock poisoned").clone())
+1025:            .expect("logs must be valid utf8")
+1030:            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+1047:            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+1076:            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+1102:            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+1130:            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+1197:            .expect("power_schedule_col must be present") as usize;
+1213:            .expect("write default profile csv");
+1218:        let dir = tempdir().expect("create temp dir");
+1240:        let dir = tempdir().expect("create temp dir");
+1253:            .expect("power_constant_kw must be set");
+1260:        let dir = tempdir().expect("create temp dir");
+1274:            .expect("power_profile_max_kw should be set");
+1279:            .expect("power_profile_max_kw should be set");
+1307:            .expect("power_schedule_col should be present") as usize;
+1347:        let dir = tempdir().expect("create temp dir");
+1358:            .expect("power_profile_max_kw should be present");
+1386:        let dir = tempdir().expect("create temp dir");
+1403:            .expect("power_constant_kw should be present");
+1536:            .expect("heater typed config must remain present");
+1545:                .expect("heater heating_setpoint_source must be injected"),
+1547:        .expect("heater source must deserialize");
+1559:            .expect("cooler typed config must remain present");
+1568:                .expect("cooler cooling_setpoint_source must be injected"),
+1570:        .expect("cooler source must deserialize");
+1763:                .expect("storage water heater should retain typed config");
+1767:                    .expect("typed HPWH config should decode");
+1773:                    .expect("typed resistance config should decode");
+=== crates/hares-io/src/resstock.rs ===
+354:        let file = File::create(path).expect("create parquet");
+355:        let mut writer = ArrowWriter::try_new(file, batch.schema(), None).expect("writer");
+356:        writer.write(batch).expect("write");
+357:        writer.close().expect("close");
+380:        .expect("batch")
+401:        let tmp = tempdir().expect("tmp");
+406:            parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).expect("parse");
+418:        let tmp = tempdir().expect("tmp");
+423:            parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).expect("parse");
+432:        let tmp = tempdir().expect("tmp");
+437:            parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).expect("parse");
+469:        .expect("batch")
+474:        let tmp = tempdir().expect("tmp");
+479:            parse_resstock_metadata(&pq, ResStockVersion::V2024_2, tmp.path()).expect("parse");
+503:        .expect("batch")
+508:        let tmp = tempdir().expect("tmp");
+513:            parse_resstock_metadata(&pq, ResStockVersion::V2025_1, tmp.path()).expect("parse");
+523:        let tmp = tempdir().expect("tmp");
+537:        .expect("batch");
+556:        let tmp = tempdir().expect("tmp");
+572:        .expect("batch");
+591:        let tmp = tempdir().expect("tmp");
+607:        .expect("batch");
+622:        let tmp = tempdir().expect("tmp");
+627:            parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).expect("parse");
+636:        let tmp = tempdir().expect("tmp");
+641:            parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).expect("parse");
+=== crates/hares-io/src/resstock_csv.rs ===
+162:        .expect("non-empty array");
+453:            .unwrap()
+455:            .unwrap();
+459:            let hour_of_day = dt.format("%H").to_string().parse::<u32>().unwrap();
+494:            .expect("should parse 8760-row CSV");
+612:        let result = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0).expect("should parse");
+660:        let dir = tempfile::tempdir().expect("create temp dir");
+663:        std::fs::write(&path, &csv).expect("write temp file");
+665:        let fmt = crate::weather::detect_weather_format(&path).expect("should detect ResStock CSV");
+701:            .expect("should parse CSV with midnight row");
+740:        let dir = tempfile::tempdir().expect("create temp dir");
+743:        std::fs::write(&path, &csv).expect("write temp file");
+746:            .expect("should parse from file path");
+755:            parse_resstock_csv_str(&csv, 1609.0, 39.7, -105.0, -7.0).expect("should parse");
+765:        let result = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0).expect("should parse");
+792:            .unwrap()
+794:            .unwrap();
+814:            .expect("should parse 17568-row leap-year CSV");
+828:            .expect("should parse 8784-row leap-year CSV");
+851:            .expect("should parse 8760-row CSV");
+868:            .expect("should parse 8760-row CSV");
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -c '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/ | sort -t: -k2 -rn | head -20
+crates/hares-equipment/src/ev/tests.rs:283
+crates/hares-equipment/src/hvac/heat_pump/heater.rs:221
+crates/hares-equipment/src/battery/mod.rs:199
+crates/hares-equipment/src/hvac/air_conditioner.rs:179
+crates/hares-equipment/src/water_heater/heat_pump_wh.rs:144
+crates/hares-equipment/src/generator.rs:130
+crates/hares-equipment/src/event_load.rs:127
+crates/hares-equipment/src/pv/mod.rs:119
+crates/hares-equipment/src/hvac/ideal_hvac.rs:103
+crates/hares-equipment/src/hvac/hvac_core.rs:92
+crates/hares-equipment/src/water_heater/tankless.rs:85
+crates/hares-equipment/src/scheduled_load.rs:84
+crates/hares-equipment/src/water_heater/resistance.rs:76
+crates/hares-equipment/src/hvac/dehumidifier.rs:62
+crates/hares-equipment/src/water_heater/gas.rs:53
+crates/hares-equipment/src/ventilation.rs:52
+crates/hares-equipment/src/hvac/boiler.rs:48
+crates/hares-equipment/src/hvac/furnace.rs:47
+crates/hares-equipment/src/water_heater/tank.rs:32
+crates/hares-equipment/src/water_heater/mod.rs:25
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -c '\.unwrap\(\)|\.expect\(' crates/hares-envelope/src/ | sort -t: -k2 -rn | head -20
+crates/hares-envelope/src/thermal_solver/mod.rs:88
+crates/hares-envelope/src/boundary_rc.rs:78
+crates/hares-envelope/src/state_space.rs:27
+crates/hares-envelope/src/rc_network.rs:27
+crates/hares-envelope/src/electrical_solver.rs:24
+crates/hares-envelope/src/fluid_solver.rs:15
+crates/hares-envelope/src/thermal_solver/initialization.rs:13
+crates/hares-envelope/src/humidity_solver.rs:7
+crates/hares-envelope/src/thermal_solver/longwave.rs:4
+crates/hares-envelope/src/thermal_solver/infiltration.rs:4
+crates/hares-envelope/src/thermal_solver/stepping.rs:1
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)' crates/hares-equipment/src/hvac/heat_pump/heater.rs | head -30
+978:                let zone = zone.unwrap();
+2228:                .unwrap()
+2370:        eq.init(&cfg, &e).unwrap();
+2405:        eq.init(&cfg, &e).unwrap();
+2435:        eq.init(&cfg, &e).unwrap();
+2485:        eq.init(&cfg, &e).unwrap();
+2532:        eq.init(&cfg, &e).unwrap();
+2615:        eq.init(&cfg, &environment).unwrap();
+2625:        eq.init(&cfg, &environment).unwrap();
+2639:        eq.init(&cfg, &env).unwrap();
+2641:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2655:        eq.init(&cfg, &env).unwrap();
+2657:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2668:        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
+2692:        eq.init(&cfg, &env_hour0).unwrap();
+2714:        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
+2737:        eq.init(&cfg, &env0).unwrap();
+2749:        eq.step(&env0, Duration::from_secs(60), &mut ports).unwrap();
+2756:                .unwrap();
+2776:        eq.init(&cfg, &env).unwrap();
+2778:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2792:        eq.init(&cfg, &env).unwrap();
+2794:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2799:        restored.init(&cfg, &env).unwrap();
+2800:        restored.load_state(&state).unwrap();
+2817:        eq.init(&cfg, &env).unwrap();
+2822:        .unwrap();
+2824:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2848:        eq.init(&cfg, &env).unwrap();
+2852:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)' crates/hares-equipment/src/hvac/hvac_core.rs | head -30
+2879:            hvac.thermostat_fsm.schedule_setpoints.unwrap().heating_c,
+3090:        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+3107:        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+3120:        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+3138:        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+3151:        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+3266:        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+3282:        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+3294:        hvac.init(&config, &env(20.0, 60, 0)).unwrap();
+3305:        let defaults = default_biquadratic_coeffs(HvacEquipmentType::AshpHeatPumpOnly).unwrap();
+3335:        let defaults = default_biquadratic_coeffs(HvacEquipmentType::MiniSplitHeat).unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)' crates/hares-envelope/src/thermal_solver/mod.rs | head -40
+1058:                .unwrap()
+1078:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+1110:        ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
+1135:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+1196:        ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
+1255:            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+1256:            .unwrap()
+1261:            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+1262:            .unwrap()
+1300:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+1330:        let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();
+1393:                .unwrap();
+1425:        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
+1638:            RCNetwork::from_elements(caps, resistances, vec![NodeId(1), NodeId(2)]).unwrap();
+1639:        let (a_c, b_c_rc) = network.build_matrices().unwrap();
+1660:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping).unwrap();
+1853:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+1886:                .unwrap();
+1905:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+1937:                .unwrap();
+2079:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+2109:        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+2148:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+2178:        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+2201:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+2231:        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+2258:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+2288:        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+2335:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+2365:        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+2396:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+2426:        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+2467:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+2497:        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+2539:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+2588:                    .unwrap()
+2591:                    .unwrap(),
+2646:                    .unwrap();
+2699:        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+2747:                .unwrap()
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)' crates/hares-envelope/src/boundary_rc.rs | head -40
+1644:        let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
+1660:        let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
+1675:        let caps = derive_zone_capacitances(&zones, p_pa).unwrap();
+1691:                .unwrap();
+1706:        let caps_sea = derive_zone_capacitances(&zones, p_sea).unwrap();
+1707:        let caps_denver = derive_zone_capacitances(&zones, p_denver).unwrap();
+1760:                .unwrap();
+1763:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+1790:                .unwrap();
+1797:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+1837:                .unwrap();
+1843:            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+1864:                .unwrap();
+1868:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+1887:                .unwrap();
+1891:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+1907:                .unwrap();
+1922:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+1937:                .unwrap();
+1952:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+1973:                .unwrap();
+1980:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+2003:                .unwrap();
+2020:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+2052:                .unwrap();
+2056:            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+2075:                .unwrap();
+2076:        let (rc, _diag) = assemble_building_rc(&[], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+2100:                .unwrap();
+2104:            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+2130:                .unwrap();
+2137:            assemble_building_rc(&boundaries, 2, &caps, InteriorLwrMethod::ScriptF).unwrap();
+2154:                .unwrap();
+2158:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+2180:                .unwrap();
+2184:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+2221:                .unwrap();
+2234:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+2255:                .unwrap();
+2278:            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)' crates/hares-equipment/src/hvac/ --no-filename -g '*.rs' -g '!tests.rs' -g '!**/tests/**' | grep -v '#\[cfg\(test\)\]' | grep -v 'mod tests' | grep -v 'fn test' | grep -v '//' | head -60
+336:                .unwrap()
+363:        eq.init(&cfg, &env).unwrap();
+371:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+381:        eq.init(&cfg, &env).unwrap();
+388:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+392:        restored.init(&cfg, &env).unwrap();
+393:        restored.load_state(&state).unwrap();
+424:            .unwrap();
+433:        eq.init(&cfg, &env).unwrap();
+439:        .unwrap();
+443:        .unwrap();
+450:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+966:                .unwrap()
+1000:        eq.init(&cfg, &env).unwrap();
+1007:        let (zone, temp) = target.unwrap();
+1025:        eq.init(&cfg, &env).unwrap();
+1045:        eq.init(&cfg, &env).unwrap();
+1061:        eq.init(&cfg, &env).unwrap();
+1065:        eq.apply_control(&signal).unwrap();
+1076:        eq.init(&cfg, &env).unwrap();
+1083:        eq.apply_control(&signal).unwrap();
+1086:        let sp = eq.thermostat_fsm.runtime_setpoints.unwrap();
+1104:        eq.init(&cfg, &env).unwrap();
+1130:        eq.init(&cfg, &env).unwrap();
+1136:        eq.apply_control_unchecked(&signal).unwrap();
+1148:        eq.init(&cfg, &env).unwrap();
+1158:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+1176:        eq.init(&cfg, &env).unwrap();
+1186:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+1205:        eq.init(&cfg, &env).unwrap();
+1211:        restored.init(&cfg, &env).unwrap();
+1212:        restored.load_state(&state).unwrap();
+1244:        eq.init(&cfg, &env_coarse).unwrap();
+1261:        eq.init(&cfg, &env_fine).unwrap();
+1275:        eq.init(&cfg, &env_coarse).unwrap();
+1293:        eq.init(&cfg, &env).unwrap();
+1318:        eq.init(&cfg, &env).unwrap();
+1328:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+1344:        eq.init(&cfg, &env_fine).unwrap();
+1357:        eq.init(&cfg, &env).unwrap();
+1362:        eq.apply_control_unchecked(&signal).unwrap();
+1378:        eq.init(&cfg, &env).unwrap();
+1384:        eq.apply_control_unchecked(&signal).unwrap();
+1391:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+1423:        eq.init(&cfg, &env).unwrap();
+1473:        eq.init(&cfg, &env).unwrap();
+1481:        .unwrap();
+1503:        .unwrap();
+1524:        eq.init(&cfg, &environment).unwrap();
+1533:        .unwrap();
+1540:        .unwrap();
+1559:        eq.init(&cfg, &env).unwrap();
+1567:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+1628:        eq.init(&cfg, &env_h0).unwrap();
+1680:        eq.init(&cfg, &env_h0).unwrap();
+1719:        eq.init(&cfg, &env_h0).unwrap();
+1752:        eq.init(&cfg, &env_cold).unwrap();
+1758:        eq.apply_control_unchecked(&signal).unwrap();
+1776:            .unwrap();
+1799:        eq.init(&cfg, &env_hot).unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)' crates/hares-equipment/src/hvac/heat_pump/heater.rs | head -80
+978:                let zone = zone.unwrap();
+2228:                .unwrap()
+2370:        eq.init(&cfg, &e).unwrap();
+2405:        eq.init(&cfg, &e).unwrap();
+2435:        eq.init(&cfg, &e).unwrap();
+2485:        eq.init(&cfg, &e).unwrap();
+2532:        eq.init(&cfg, &e).unwrap();
+2615:        eq.init(&cfg, &environment).unwrap();
+2625:        eq.init(&cfg, &environment).unwrap();
+2639:        eq.init(&cfg, &env).unwrap();
+2641:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2655:        eq.init(&cfg, &env).unwrap();
+2657:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2668:        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
+2692:        eq.init(&cfg, &env_hour0).unwrap();
+2714:        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
+2737:        eq.init(&cfg, &env0).unwrap();
+2749:        eq.step(&env0, Duration::from_secs(60), &mut ports).unwrap();
+2756:                .unwrap();
+2776:        eq.init(&cfg, &env).unwrap();
+2778:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2792:        eq.init(&cfg, &env).unwrap();
+2794:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2799:        restored.init(&cfg, &env).unwrap();
+2800:        restored.load_state(&state).unwrap();
+2817:        eq.init(&cfg, &env).unwrap();
+2822:        .unwrap();
+2824:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2848:        eq.init(&cfg, &env).unwrap();
+2852:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2904:        eq.init(&cfg, &env_cold).unwrap();
+2914:            .unwrap();
+2974:        eq.init(&cfg, &env_cold).unwrap();
+2977:            .unwrap();
+2987:            .unwrap();
+3027:        eq.init(&cfg, &env_cold).unwrap();
+3037:            .unwrap();
+3057:        eq2.init(&cfg, &env_cold).unwrap();
+3064:            .unwrap();
+3105:        eq.init(&cfg, &env_cold).unwrap();
+3108:            .unwrap();
+3162:        let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
+3187:        eq.init(&cfg, &env).unwrap();
+3194:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+3224:        eq.init(&cfg, &env).unwrap();
+3227:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+3251:        eq.init(&cfg, &environment).unwrap();
+3254:            .unwrap();
+3272:        eq.init(&cfg, &cold_env).unwrap();
+3289:        eq.init(&cfg, &mild_env).unwrap();
+3323:        eq_a.init(&cfg, &env_a).unwrap();
+3326:            .unwrap();
+3335:        eq_b.init(&cfg, &env_b).unwrap();
+3338:            .unwrap();
+3395:                .unwrap()
+3420:        eq.init(&cfg, &initial_env).unwrap();
+3468:        eq.init(&cfg, &make_env(16.0, 0.0, 0)).unwrap();
+3517:        eq.init(&cfg, &environment).unwrap();
+3520:            .unwrap();
+3544:        eq.init(&cfg, &env_above).unwrap();
+3570:        eq.init(&cfg, &env_below).unwrap();
+3602:        eq.init(&cfg, &env_midband).unwrap();
+3624:        eq.init(&cfg, &env_at(19.0, 0.0, 0.005, 0)).unwrap();
+3659:        eq.init(&cfg, &env_above).unwrap();
+3694:        eq_base.init(&cfg, &e).unwrap();
+3702:            .unwrap();
+3707:        eq_dr.init(&cfg, &e).unwrap();
+3713:            .unwrap();
+3721:            .unwrap();
+3739:        eq.init(&cfg, &e).unwrap();
+3745:        .unwrap();
+3751:        .unwrap();
+3769:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+3783:        eq.init(&cfg, &e).unwrap();
+3788:        .unwrap();
+3794:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+3810:        eq.init(&cfg, &e).unwrap();
+3815:            .unwrap();
+3820:        eq.step(&e, Duration::from_secs(60), &mut ports1).unwrap();
+3830:        eq.step(&e, Duration::from_secs(60), &mut ports2).unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.expect\(|\.unwrap\(\)' crates/hares-io/src/weather/ -g '*.rs' | head -60
+rg: crates/hares-io/src/weather/: IO error for operation on crates/hares-io/src/weather/: No such file or directory (os error 2)
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-io/src/weather.rs 2>/dev/null | grep -v '#\[cfg\(test\)\]' | grep -v 'mod tests' | grep -v '//' | head -60
+1340:            .expect("resample should succeed");
+1366:        let resampled = series.resample(60).expect("resample should succeed");
+1394:        let resampled = series.resample(3600).expect("same-res should succeed");
+1418:        let down = series.resample(3600).expect("downsample should succeed");
+1431:        let resampled = series.resample(600).expect("resample should succeed");
+1435:            .expect("albedo should be Some");
+1461:        let down = series.resample(3600).expect("downsample should succeed");
+1462:        let albedo = down.surface_albedo.as_ref().expect("albedo should be Some");
+1577:        let resampled = series.resample(600).expect("resample should succeed");
+1588:        let resampled = series.resample(600).expect("resample should succeed");
+1597:        let resampled = series.resample(60).expect("resample should succeed");
+1613:        let dir = tempfile::tempdir().expect("create temp dir");
+1615:        std::fs::write(&path, "dummy").expect("write temp file");
+1616:        let fmt = super::detect_weather_format(&path).expect("should detect EPW");
+1622:        let dir = tempfile::tempdir().expect("create temp dir");
+1628:        std::fs::write(&path, header).expect("write temp file");
+1629:        let fmt = super::detect_weather_format(&path).expect("should detect PSM3");
+1635:        let dir = tempfile::tempdir().expect("create temp dir");
+1637:        std::fs::write(&path, "col1,col2,col3\n1,2,3\n").expect("write temp file");
+1647:        let dir = tempfile::tempdir().expect("create temp dir");
+1649:        std::fs::write(&path, "{}").expect("write temp file");
+1686:        let resampled = series.resample(600).expect("resample should succeed");
+1758:        let down = series.resample(3600).expect("downsample should succeed");
+2218:        let resampled = series.resample(600).expect("resample should succeed");
+2254:            .expect("resample should succeed");
+2475:            .expect("resample should succeed");
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -l 'weather' crates/hares-io/src/ --glob '*.rs'
+crates/hares-io/src/resstock.rs
+crates/hares-io/src/tmy3.rs
+crates/hares-io/src/schedule.rs
+crates/hares-io/src/resstock_csv.rs
+crates/hares-io/src/weather.rs
+crates/hares-io/src/psm3.rs
+crates/hares-io/src/hpxml/resolve_hvac.rs
+crates/hares-io/src/lib.rs
+crates/hares-io/src/hpxml/validation.rs
+crates/hares-io/src/epw.rs
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)' crates/hares-equipment/src/hvac/heat_pump/heater.rs | grep -v '#\[cfg' | grep -v 'fn test' | grep -v '//' | grep -v 'mod tests'
+978:                let zone = zone.unwrap();
+2228:                .unwrap()
+2370:        eq.init(&cfg, &e).unwrap();
+2405:        eq.init(&cfg, &e).unwrap();
+2435:        eq.init(&cfg, &e).unwrap();
+2485:        eq.init(&cfg, &e).unwrap();
+2532:        eq.init(&cfg, &e).unwrap();
+2615:        eq.init(&cfg, &environment).unwrap();
+2625:        eq.init(&cfg, &environment).unwrap();
+2639:        eq.init(&cfg, &env).unwrap();
+2641:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2655:        eq.init(&cfg, &env).unwrap();
+2657:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2668:        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
+2692:        eq.init(&cfg, &env_hour0).unwrap();
+2714:        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
+2737:        eq.init(&cfg, &env0).unwrap();
+2749:        eq.step(&env0, Duration::from_secs(60), &mut ports).unwrap();
+2756:                .unwrap();
+2776:        eq.init(&cfg, &env).unwrap();
+2778:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2792:        eq.init(&cfg, &env).unwrap();
+2794:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2799:        restored.init(&cfg, &env).unwrap();
+2800:        restored.load_state(&state).unwrap();
+2817:        eq.init(&cfg, &env).unwrap();
+2822:        .unwrap();
+2824:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2848:        eq.init(&cfg, &env).unwrap();
+2852:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2904:        eq.init(&cfg, &env_cold).unwrap();
+2914:            .unwrap();
+2974:        eq.init(&cfg, &env_cold).unwrap();
+2977:            .unwrap();
+2987:            .unwrap();
+3027:        eq.init(&cfg, &env_cold).unwrap();
+3037:            .unwrap();
+3057:        eq2.init(&cfg, &env_cold).unwrap();
+3064:            .unwrap();
+3105:        eq.init(&cfg, &env_cold).unwrap();
+3108:            .unwrap();
+3162:        let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
+3187:        eq.init(&cfg, &env).unwrap();
+3194:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+3224:        eq.init(&cfg, &env).unwrap();
+3227:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+3251:        eq.init(&cfg, &environment).unwrap();
+3254:            .unwrap();
+3272:        eq.init(&cfg, &cold_env).unwrap();
+3289:        eq.init(&cfg, &mild_env).unwrap();
+3323:        eq_a.init(&cfg, &env_a).unwrap();
+3326:            .unwrap();
+3335:        eq_b.init(&cfg, &env_b).unwrap();
+3338:            .unwrap();
+3395:                .unwrap()
+3420:        eq.init(&cfg, &initial_env).unwrap();
+3468:        eq.init(&cfg, &make_env(16.0, 0.0, 0)).unwrap();
+3517:        eq.init(&cfg, &environment).unwrap();
+3520:            .unwrap();
+3544:        eq.init(&cfg, &env_above).unwrap();
+3570:        eq.init(&cfg, &env_below).unwrap();
+3602:        eq.init(&cfg, &env_midband).unwrap();
+3624:        eq.init(&cfg, &env_at(19.0, 0.0, 0.005, 0)).unwrap();
+3659:        eq.init(&cfg, &env_above).unwrap();
+3694:        eq_base.init(&cfg, &e).unwrap();
+3702:            .unwrap();
+3707:        eq_dr.init(&cfg, &e).unwrap();
+3713:            .unwrap();
+3721:            .unwrap();
+3739:        eq.init(&cfg, &e).unwrap();
+3745:        .unwrap();
+3751:        .unwrap();
+3769:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+3783:        eq.init(&cfg, &e).unwrap();
+3788:        .unwrap();
+3794:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+3810:        eq.init(&cfg, &e).unwrap();
+3815:            .unwrap();
+3820:        eq.step(&e, Duration::from_secs(60), &mut ports1).unwrap();
+3830:        eq.step(&e, Duration::from_secs(60), &mut ports2).unwrap();
+3857:        eq.init(&cfg, &environment).unwrap();
+3862:        restored.init(&cfg, &environment).unwrap();
+3863:        restored.load_state(&state).unwrap();
+3882:        eq.init(&cfg, &environment).unwrap();
+3889:        .unwrap();
+3894:        restored.init(&cfg, &environment).unwrap();
+3895:        restored.load_state(&saved).unwrap();
+3939:        eq.init(&cfg, &env_test).unwrap();
+3968:        eq.init(&cfg, &env_test).unwrap();
+3991:        eq.init(&cfg, &make_env(19.3, 0.0, 0)).unwrap();
+4032:        eq.init(&cfg, &make_env(18.0, 0.0, 0)).unwrap();
+4070:        eq.init(&cfg, &make_env(18.0, 0.0, 0)).unwrap();
+4082:        restored.init(&cfg, &make_env(18.0, 0.0, 0)).unwrap();
+4083:        restored.load_state(&state).unwrap();
+4114:        eq.init(&cfg, &e).unwrap();
+4126:        .unwrap();
+4146:        .unwrap();
+4170:        eq.init(&cfg, &e).unwrap();
+4185:        .unwrap();
+4205:        eq.init(&cfg, &e).unwrap();
+4214:        .unwrap();
+4219:        .unwrap();
+4257:        eq_no_fan.init(&cfg, &e).unwrap();
+4261:            .unwrap();
+4288:        eq_fan.init(&cfg_fan, &e).unwrap();
+4292:            .unwrap();
+4321:        eq.init(&cfg, &e).unwrap();
+4323:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+4359:        eq.init(&ec, &environment).unwrap();
+4404:        eq.init(&cfg, &environment).unwrap();
+4418:        eq.init(&cfg, &environment).unwrap();
+4437:        eq.init(&cfg, &environment).unwrap();
+4440:            .unwrap();
+4470:        eq.init(&cfg, &environment).unwrap();
+4474:            .unwrap();
+4518:        eq.init(&cfg, &environment).unwrap();
+4526:            .unwrap();
+4593:        eq.init(&cfg, &e_above).unwrap();
+4637:        eq.init(&cfg, &e).unwrap();
+4645:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+4666:        eq.init(&cfg, &make_env(15.0, 0.0, 0)).unwrap();
+4726:        eq.init(&cfg, &e).unwrap();
+4736:        .unwrap();
+4737:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+4762:        eq.init(&cfg, &e).unwrap();
+4801:        eq.init(&cfg, &e).unwrap();
+4807:        .unwrap();
+4814:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+4840:        eq2.init(&cfg, &e).unwrap();
+4844:        .unwrap();
+4849:        .unwrap();
+4851:        eq2.step(&e, Duration::from_secs(60), &mut ports2).unwrap();
+4892:        eq.init(&cfg, &make_env(15.0, 0.0, 0)).unwrap();
+4956:        eq.init(&cfg, &e).unwrap();
+4960:        .unwrap();
+4962:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+5132:        eq.init(&cfg, &cold_env).unwrap();
+5173:        eq.init(&cfg, &e).unwrap();
+5176:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+5210:        eq.init(&cfg, &e).unwrap();
+5213:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+5249:        eq_warm.init(&cfg, &env_warm).unwrap();
+5253:            .unwrap();
+5265:        eq_cold.init(&cfg, &env_cold).unwrap();
+5269:            .unwrap();
+5316:        eq.init(&cfg, &cold_env).unwrap();
+5329:            eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+5357:        eq.init(&cfg, &e).unwrap();
+5366:        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+5400:        eq.init(&cfg, &e).unwrap();
+5428:        eq.init(&cfg, &e).unwrap();
+5454:        eq.init(&cfg, &environment).unwrap();
+5463:            .unwrap();
+5504:        eq.init(&cfg, &environment).unwrap();
+5507:            .unwrap();
+5527:            extra_power.unwrap() > 0.0,
+5531:            q_w.unwrap() > 0.0,
+5535:            cap_mult.unwrap() > 0.0 && cap_mult.unwrap() < 1.0,
+5537:            cap_mult.unwrap()
+5550:        eq.init(&cfg, &environment).unwrap();
+5553:            .unwrap();
+5622:        eq.init(&cfg, &environment).unwrap();
+5630:        .unwrap();
+5639:            .unwrap();
+5644:        restored.init(&cfg, &environment).unwrap();
+5650:        restored.load_state(&state).unwrap();
+5666:        eq.init(&cfg, &environment).unwrap();
+5675:                .unwrap();
+5687:        restored.init(&cfg, &environment).unwrap();
+5690:        restored.load_state(&state).unwrap();
+5732:        eq_default.init(&cfg_default, &cold_env).unwrap();
+5733:        eq_identity.init(&cfg_identity, &cold_env).unwrap();
+5754:            eq_default.step(&cold_env, dt, &mut ports_default).unwrap();
+5757:                .unwrap();
+5806:        eq.init(&cfg, &env).unwrap();
+5924:        hp.init(&cfg, &e).unwrap();
+5964:        eq.init(&cfg, &e).unwrap();
+5980:        eq.init(&cfg, &e).unwrap();
+5994:        eq.init(&cfg, &e).unwrap();
+5998:        .unwrap();
+6008:        .unwrap();
+6063:                .unwrap()
+6154:        eq.init(&cfg, &env).unwrap();
+6159:        .unwrap();
+6162:            .unwrap();
+6177:        eq.init(&cfg, &env_cold).unwrap();
+6180:            .unwrap();
+6187:            .unwrap();
+6206:        eq.init(&cfg, &env).unwrap();
+6211:        .unwrap();
+6214:            .unwrap();
+6234:        eq.init(&cfg, &env).unwrap();
+6238:        .unwrap();
+6241:            .unwrap();
+6263:        eq.init(&cfg, &env).unwrap();
+6266:            .unwrap();
+6364:        eq.init(&cfg, &env).unwrap();
+6368:        .unwrap();
+6371:            .unwrap();
+6413:        eq.init(&cfg, &env).unwrap();
+6417:        .unwrap();
+6420:            .unwrap();
+6505:        eq.init(&cfg, &env).unwrap();
+6513:            .unwrap();
+6609:        eq.init(&cfg, &env).unwrap();
+6613:        .unwrap();
+6616:            .unwrap();
+6651:        eq.init(&cfg, &env).unwrap();
+6655:        .unwrap();
+6658:            .unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/hvac/heat_pump/heater.rs | grep -v 'mod tests' | head -20
+978:                let zone = zone.unwrap();
+2228:                .unwrap()
+2231:                .expect("valid"),
+2370:        eq.init(&cfg, &e).unwrap();
+2405:        eq.init(&cfg, &e).unwrap();
+2435:        eq.init(&cfg, &e).unwrap();
+2485:        eq.init(&cfg, &e).unwrap();
+2532:        eq.init(&cfg, &e).unwrap();
+2615:        eq.init(&cfg, &environment).unwrap();
+2625:        eq.init(&cfg, &environment).unwrap();
+2639:        eq.init(&cfg, &env).unwrap();
+2641:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2655:        eq.init(&cfg, &env).unwrap();
+2657:        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+2668:        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
+2692:        eq.init(&cfg, &env_hour0).unwrap();
+2714:        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
+2737:        eq.init(&cfg, &env0).unwrap();
+2749:        eq.step(&env0, Duration::from_secs(60), &mut ports).unwrap();
+2756:                .unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'mod tests' crates/hares-equipment/src/hvac/heat_pump/heater.rs
+2179:mod tests {
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/hvac/hvac_core.rs | grep -v 'fn test' | grep -v '#\[cfg\(test\)\]' | grep -v 'mod tests' | grep -v '^\s*//' | grep -v '\*' | head -30
+845:                .expect("UTC offset")
+848:                .expect("valid")
+873:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+881:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+895:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+903:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+909:        let mode = hvac.update_mode(&env(18.0, 60, 0)).expect("turns on");
+912:        let mode = hvac.update_mode(&env(22.0, 60, 30)).expect("still locked");
+915:        let mode = hvac.update_mode(&env(22.0, 60, 61)).expect("lock expired");
+948:        let mode = hvac.update_mode(&env(18.9, 60, 0)).expect("mode updates");
+951:        let mode = hvac.update_mode(&env(20.6, 60, 61)).expect("mode updates");
+965:        let mode = hvac.update_mode(&env(18.0, 60, 0)).expect("mode updates");
+968:        let mode = hvac.update_mode(&env(22.0, 60, 120)).expect("locked");
+971:        let mode = hvac.update_mode(&env(22.0, 60, 301)).expect("unlocked");
+1009:        let mode = hvac.update_mode(&env(-20.0, 60, 0)).expect("mode updates");
+1028:        let mode = hvac.update_mode(&env(45.0, 60, 0)).expect("mode updates");
+1074:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+1086:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+1098:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+1112:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+1127:            .expect("write a");
+1130:            .expect("write b");
+1538:        let mode = hvac.update_mode(&env(18.0, 60, 0)).expect("initial mode");
+1546:        let mode = hvac.update_mode(&env(30.0, 60, 60)).expect("mode at 60s");
+1554:        let mode = hvac.update_mode(&env(30.0, 60, 120)).expect("mode at 120s");
+1570:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+1591:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+1612:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+1628:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+1648:        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'mod tests' crates/hares-equipment/src/hvac/hvac_core.rs
+793:mod tests {
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=960, limit=40][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=2870, limit=20][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=2220, limit=20][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-io/src/epw.rs | grep -v '#\[cfg\(test\)\]' | grep -v 'mod tests' | grep -v '^\s*//' | grep -v 'fn test' | head -40
+958:            .expect("system time before UNIX_EPOCH")
+961:        fs::write(&path, epw_contents).expect("failed to write temporary EPW");
+983:            NaiveDate::from_ymd_opt(2020, 1, 1).expect("valid leap-year start")
+985:            NaiveDate::from_ymd_opt(2021, 1, 1).expect("valid non-leap-year start")
+989:            .expect("valid midnight timestamp");
+1048:        let weather = parse_epw(&fixture).expect("fixture should parse");
+1065:        let parsed = parse_epw_str(&epw).expect("8784 records should parse");
+1250:        let parsed = parse_epw_str(&epw).expect("synthetic EPW should parse");
+1266:        let parsed = parse_epw_str(&epw).expect("synthetic EPW should parse");
+1278:        let parsed = parse_epw_str(&epw).expect("synthetic EPW should parse");
+1317:            .expect("DOE-2 ground temp should succeed with valid dry-bulb data");
+1343:            .expect("DOE-2 ground temp should succeed with valid dry-bulb data");
+1421:        let parsed = parse_epw_str(&epw).expect("EPW should parse");
+1447:        let parsed = parse_epw_str(&epw).expect("EPW should parse");
+1554:        let parsed = parse_epw_str(&epw).expect("EPW should parse");
+1590:        let ts = parse_epw_str(&epw).expect("should parse");
+1831:        let parsed = parse_epw_str(&epw).expect("EPW with 30 fields should parse");
+1857:        let parsed = parse_epw_str(&epw).expect("EPW with sentinel 999 should parse");
+1878:            .expect("EPW with non-numeric field 33 should not error (substitutes 0.0)");
+1921:        let weather = result.expect("EPW should parse without error");
+1947:        let weather = result.expect("EPW should parse without error");
+1973:        let weather = result.expect("EPW should parse without error");
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-io/src/tmy3.rs | grep -v '#\[cfg\(test\)\]' | grep -v 'mod tests' | grep -v '^\s*//' | grep -v 'fn test' | head -40
+423:        let ts = parse_tmy3_str(&csv).expect("should parse standard TMY3 year");
+436:        let ts = parse_tmy3_str(&csv).expect("should parse leap TMY3 year");
+443:        let ts = parse_tmy3_str(&csv).expect("should parse");
+455:        let ts = parse_tmy3_str(&csv).expect("should parse");
+467:        let ts = parse_tmy3_str(&csv).expect("should parse");
+526:        let ts = parse_tmy3_str(&csv).expect("should parse");
+552:        let ts = parse_tmy3_str(&csv).expect("should parse standard TMY3 year");
+564:        let ts = parse_tmy3_str(&csv).expect("should parse standard TMY3 year");
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-io/src/psm3.rs | grep -v '#\[cfg\(test\)\]' | grep -v 'mod tests' | grep -v '^\s*//' | grep -v 'fn test' | head -40
+217:                .expect("pre-allocated")
+257:        .expect("validated step");
+581:        let ts = parse_psm3_str(&csv).expect("should parse hourly PSM3");
+594:        let ts = parse_psm3_str(&csv).expect("should parse 5-min PSM3");
+602:        let ts = parse_psm3_str(&csv).expect("should parse 5-min PSM3 leap year");
+610:        let ts = parse_psm3_str(&csv).expect("should parse");
+658:        let ts = parse_psm3_str(&csv).expect("should parse 15-min PSM3");
+662:        let hourly = ts.resample(3600).expect("should downsample to hourly");
+675:        let ts = parse_psm3_str(&csv).expect("should parse");
+713:        let ts = parse_psm3_str(&csv).expect("should parse PSM3 with albedo");
+717:            .expect("should be Some when column present");
+747:        let ts = parse_psm3_str(&csv).expect("should parse");
+809:        let ts = parse_psm3_str(&csv).expect("should parse PSM3 with Lwdown column");
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-io/src/epw.rs | grep -v '#\[cfg\(test\)\]' | grep -v 'fn test' | grep -v '^\s*//' | head -15 && echo "---" && rg -n 'mod tests' crates/hares-io/src/epw.rs
+958:            .expect("system time before UNIX_EPOCH")
+961:        fs::write(&path, epw_contents).expect("failed to write temporary EPW");
+983:            NaiveDate::from_ymd_opt(2020, 1, 1).expect("valid leap-year start")
+985:            NaiveDate::from_ymd_opt(2021, 1, 1).expect("valid non-leap-year start")
+989:            .expect("valid midnight timestamp");
+1048:        let weather = parse_epw(&fixture).expect("fixture should parse");
+1065:        let parsed = parse_epw_str(&epw).expect("8784 records should parse");
+1250:        let parsed = parse_epw_str(&epw).expect("synthetic EPW should parse");
+1266:        let parsed = parse_epw_str(&epw).expect("synthetic EPW should parse");
+1278:        let parsed = parse_epw_str(&epw).expect("synthetic EPW should parse");
+1317:            .expect("DOE-2 ground temp should succeed with valid dry-bulb data");
+1343:            .expect("DOE-2 ground temp should succeed with valid dry-bulb data");
+1421:        let parsed = parse_epw_str(&epw).expect("EPW should parse");
+1447:        let parsed = parse_epw_str(&epw).expect("EPW should parse");
+1554:        let parsed = parse_epw_str(&epw).expect("EPW should parse");
+---
+938:mod tests {
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-io/src/hpxml/building.rs | grep -v '#\[cfg\(test\)\]' | grep -v 'mod tests' | grep -v '^\s*//' | grep -v 'fn test' | head -20 && echo "---" && rg -n 'mod tests' crates/hares-io/src/hpxml/building.rs
+2908:        let building = parse_building(SAMPLE_XML).expect("expected parser success");
+2924:            .expect("wall boundary expected");
+2937:            .expect("material layer expected");
+2944:            .expect("attic zone expected");
+2950:            .expect("supply duct expected");
+2955:            .expect("return duct expected");
+2960:        assert!((supply.surface_area_m2.unwrap() - 50.0 * 0.092903).abs() < 0.01);
+2961:        assert!((return_duct.surface_area_m2.unwrap() - 30.0 * 0.092903).abs() < 0.01);
+2971:            (building.conditioned_volume_m3.unwrap() - expected_volume_m3).abs() < 0.01,
+2973:            building.conditioned_volume_m3.unwrap(),
+2980:        assert!((building.ceiling_height_m.unwrap() - expected_ceiling_height).abs() < 1e-6,);
+2987:            .expect("conditioned zone");
+2995:            .expect("attic zone");
+3050:        let building = parse_building(&xml).expect("should parse FrameFloor XML");
+3055:            .expect("FrameFloor1 boundary should exist");
+3087:        let building = parse_building(&xml).expect("should parse crawlspace FrameFloor");
+3092:            .expect("FrameFloor2 boundary should exist");
+3137:        let building = parse_building(&xml).expect("should parse");
+3142:        let effective = w.shgc.unwrap() * w.interior_shading_fraction;
+3160:        let building = parse_building(&xml).expect("should parse");
+---
+2745:mod tests {
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in crates/hares-io/src/hpxml/*.rs; do echo "=== $(basename $f) ===" && rg -c '\.unwrap\(\)|\.expect\(' "$f" && rg -c '#\[cfg\(test\)\]' "$f"; done
+=== building.rs ===
+148
+1
+=== equipment.rs ===
+172
+1
+=== mod.rs ===
+=== resolve_der.rs ===
+5
+1
+=== resolve_hvac.rs ===
+165
+2
+=== resolve_loads.rs ===
+4
+1
+=== resolve_water_heater.rs ===
+59
+1
+=== validation.rs ===
+5
+1
+=== water_heater_ua.rs ===
+13
+1
+=== xml_helpers.rs ===
+4
+1
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in crates/hares-io/src/hpxml/building.rs crates/hares-io/src/hpxml/equipment.rs crates/hares-io/src/hpxml/resolve_hvac.rs crates/hares-io/src/hpxml/resolve_loads.rs crates/hares-io/src/hpxml/xml_helpers.rs crates/hares-io/src/hpxml/water_heater_ua.rs crates/hares-io/src/schedule_resolve.rs crates/hares-io/src/schedule.rs; do test_line=$(rg -n '^(pub )?mod tests \{$' "$f" | head -1 | cut -d: -f1) ; if [ -z "$test_line" ]; then test_line=99999; fi; count=$(rg -n '\.unwrap\(\)|\.expect\(' "$f" | awk -F: -v t="$test_line" '$1 < t {count++} END {print count+0}'); echo "$(basename $f): test line=$test_line, prod=$count"; done
+building.rs: test line=2745, prod=0
+equipment.rs: test line=164, prod=0
+resolve_hvac.rs: test line=3114, prod=3
+resolve_loads.rs: test line=988, prod=0
+xml_helpers.rs: test line=187, prod=0
+water_heater_ua.rs: test line=248, prod=0
+schedule_resolve.rs: test line=965, prod=0
+schedule.rs: test line=672, prod=2
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in crates/hares-io/src/epw.rs crates/hares-io/src/tmy3.rs crates/hares-io/src/psm3.rs crates/hares-io/src/weather.rs crates/hares-io/src/resstock.rs crates/hares-io/src/resstock_csv.rs; do test_line=$(rg -n '^(pub )?mod tests \{$' "$f" | head -1 | cut -d: -f1) ; if [ -z "$test_line" ]; then test_line=99999; fi; count=$(rg -n '\.unwrap\(\)|\.expect\(' "$f" | awk -F: -v t="$test_line" '$1 < t {count++} END {print count+0}'); echo "$(basename $f): test line=$test_line, prod=$count"; done
+epw.rs: test line=938, prod=0
+tmy3.rs: test line=377, prod=0
+psm3.rs: test line=530, prod=2
+weather.rs: test line=1254, prod=0
+resstock.rs: test line=345, prod=0
+resstock_csv.rs: test line=431, prod=1
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-io/src/hpxml/resolve_hvac.rs | awk -F: '$1 < 3114'
+547:    serde_json::to_value(source).expect("ScheduleSourceConfig serialization must succeed")
+2957:                .expect("SetpointReconciliation must serialize");
+3090:                .expect("SetpointReconciliation must serialize");
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-io/src/schedule.rs | awk -F: '$1 < 672'
+491:        .unwrap_or(FixedOffset::east_opt(0).expect("UTC offset is valid"));
+569:        .expect("series timestamps are non-empty")
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in crates/hares-core/src/dwelling/mod.rs crates/hares-core/src/actor_registry.rs crates/hares-envelope/src/thermal_solver/mod.rs crates/hares-envelope/src/thermal_solver/stepping.rs crates/hares-envelope/src/boundary_rc.rs; do test_line=$(rg -n '^(pub )?mod tests \{$' "$f" 2>/dev/null | head -1 | cut -d: -f1) ; if [ -z "$test_line" ]; then test_line=99999; fi; count=$(rg -n '\.unwrap\(\)|\.expect\(' "$f" | awk -F: -v t="$test_line" '$1 < t {count++} END {print count+0}'); echo "$(basename $f) [$f]: prod=$count, test starts=$test_line"; done
+mod.rs [crates/hares-core/src/dwelling/mod.rs]: prod=8, test starts=3540
+actor_registry.rs [crates/hares-core/src/actor_registry.rs]: prod=0, test starts=328
+mod.rs [crates/hares-envelope/src/thermal_solver/mod.rs]: prod=0, test starts=988
+stepping.rs [crates/hares-envelope/src/thermal_solver/stepping.rs]: prod=1, test starts=99999
+boundary_rc.rs [crates/hares-envelope/src/boundary_rc.rs]: prod=0, test starts=1593
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in $(rg -l '\.unwrap\(\)|\.expect\(' -g '!tests/' crates/*/src/); do test_line=$(rg -n '^(pub )?mod tests \{$' "$f" 2>/dev/null | head -1 | cut -d: -f1); if [ -z "$test_line" ]; then test_line=99999; fi; count=$(rg -n '\.unwrap\(\)|\.expect\(' "$f" | awk -F: -v t="$test_line" '$1 < t {c++} END {print c+0}'); if [ "$count" -gt 0 ]; then echo "$count $f"; fi; done | sort -rn
+283 crates/hares-equipment/src/ev/tests.rs
+20 crates/hares-equipment/src/hvac/coil_physics.rs
+18 crates/hares-equipment/src/pv/lut.rs
+13 crates/hares-python/src/py_dwelling.rs
+8 crates/hares-core/src/dwelling/mod.rs
+4 crates/hares-equipment/src/battery/ocv.rs
+3 crates/hares-tariff/src/billing.rs
+3 crates/hares-physics/src/pv_sizing.rs
+3 crates/hares-io/src/hpxml/resolve_hvac.rs
+2 crates/hares-types/src/schedule.rs
+2 crates/hares-types/src/lib.rs
+2 crates/hares-io/src/schedule.rs
+2 crates/hares-io/src/psm3.rs
+2 crates/hares-fleet/src/fleet.rs
+2 crates/hares-equipment/src/water_heater/resistance.rs
+2 crates/hares-equipment/src/water_heater/heat_pump_wh.rs
+2 crates/hares-equipment/src/water_heater/gas.rs
+2 crates/hares-equipment/src/battery/degradation.rs
+2 crates/hares-envelope/src/thermal_solver/initialization.rs
+2 crates/hares-core/src/actor.rs
+1 crates/hares-tariff/src/evaluator.rs
+1 crates/hares-python/src/py_config.rs
+1 crates/hares-physics/src/ashrae152.rs
+1 crates/hares-io/src/resstock_csv.rs
+1 crates/hares-io/src/output/metrics.rs
+1 crates/hares-io/src/output/columns.rs
+1 crates/hares-io/src/hpxml/validation.rs
+1 crates/hares-io/src/config.rs
+1 crates/hares-fleet/src/aggregation.rs
+1 crates/hares-equipment/src/water_heater/tankless.rs
+1 crates/hares-equipment/src/hvac/speed_control.rs
+1 crates/hares-equipment/src/hvac/heat_pump/heater.rs
+1 crates/hares-envelope/src/thermal_solver/stepping.rs
+1 crates/hares-core/src/environment.rs
+1 crates/hares-control/src/compat.rs
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in $(rg -l 'panic!\(' -g '!tests/' crates/*/src/); do test_line=$(rg -n '^(pub )?mod tests \{$' "$f" 2>/dev/null | head -1 | cut -d: -f1); if [ -z "$test_line" ]; then test_line=99999; fi; count=$(rg -n 'panic!\(' "$f" | awk -F: -v t="$test_line" '$1 < t {c++} END {print c+0}'); if [ "$count" -gt 0 ]; then echo "$count $f"; fi; done | sort -rn
+14 crates/hares-io/src/schedule_resolve.rs
+3 crates/hares-envelope/src/boundary_rc.rs
+1 crates/hares-types/src/telemetry.rs
+1 crates/hares-equipment/src/lib.rs
+1 crates/hares-equipment/src/ev/tests.rs
+1 crates/hares-equipment/src/config.rs
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in $(rg -l 'panic!\(' -g '!tests/' crates/*/src/); do test_line=$(rg -n '^(pub )?mod tests \{$' "$f" 2>/dev/null | head -1 | cut -d: -f1); if [ -z "$test_line" ]; then test_line=99999; fi; rg -n 'panic!\(' "$f" | awk -F: -v t="$test_line" '$1 < t {print $1, $f}' | head -40; done | head -60
+awk: illegal field $(), name "f"
+ input record number 1, file 
+ source line number 1
+awk: illegal field $(), name "f"
+ input record number 1, file 
+ source line number 1
+awk: illegal field $(), name "f"
+ input record number 1, file 
+ source line number 1
+awk: illegal field $(), name "f"
+ input record number 1, file 
+ source line number 1
+awk: illegal field $(), name "f"
+ input record number 1, file 
+ source line number 1
+awk: illegal field $(), name "f"
+ input record number 1, file 
+ source line number 1
+518 35 543 1834 267 293
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && head -5 crates/hares-equipment/src/ev/tests.rs && rg -c 'mod tests' crates/hares-equipment/src/ev/tests.rs
+use std::collections::HashMap;
+use std::time::Duration;
+
+use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+use hares_types::{
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in crates/hares-io/src/schedule_resolve.rs crates/hares-envelope/src/boundary_rc.rs crates/hares-types/src/telemetry.rs crates/hares-equipment/src/lib.rs crates/hares-equipment/src/config.rs; do echo "=== $f ===" && rg -n 'panic!\(' "$f"; done
+=== crates/hares-io/src/schedule_resolve.rs ===
+543:                    panic!(
+560:        panic!(
+568:            panic!(
+574:        panic!(
+588:                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+592:                    panic!(
+598:                panic!(
+608:                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+610:                panic!(
+616:                panic!(
+626:                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+630:                    panic!(
+636:                panic!(
+642:        other => panic!("unsupported water heater type for draw normalization: {other}"),
+1539:            other => panic!("expected typed payload, got {other:?}"),
+1562:            other => panic!("expected typed payload, got {other:?}"),
+1694:            other => panic!("unsupported water heater type for schedule test: {other}"),
+=== crates/hares-envelope/src/boundary_rc.rs ===
+518:                    panic!(
+1068:                    panic!(
+1097:                panic!(
+=== crates/hares-types/src/telemetry.rs ===
+35:            panic!(
+=== crates/hares-equipment/src/lib.rs ===
+267:    panic!("equipment state serialization failed: {e}")
+=== crates/hares-equipment/src/config.rs ===
+293:            panic!(
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && test_line=$(rg -n '^(pub )?mod tests' crates/hares-io/src/schedule_resolve.rs | head -1 | cut -d: -f1) && rg -n 'panic!\(' crates/hares-io/src/schedule_resolve.rs | while IFS=: read -r line rest; do if [ "$line" -lt "$test_line" ] 2>/dev/null; then echo "PROD: $line $rest"; elif [ "$line" -ge "$test_line" ] 2>/dev/null; then echo "TEST: $line $rest"; fi; done
+PROD: 543                     panic!(
+PROD: 560         panic!(
+PROD: 568             panic!(
+PROD: 574         panic!(
+PROD: 588                 .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+PROD: 592                     panic!(
+PROD: 598                 panic!(
+PROD: 608                 .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+PROD: 610                 panic!(
+PROD: 616                 panic!(
+PROD: 626                 .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+PROD: 630                     panic!(
+PROD: 636                 panic!(
+PROD: 642         other => panic!("unsupported water heater type for draw normalization: {other}"),
+TEST: 1539             other => panic!("expected typed payload, got {other:?}"),
+TEST: 1562             other => panic!("expected typed payload, got {other:?}"),
+TEST: 1694             other => panic!("unsupported water heater type for schedule test: {other}"),
+[0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [offset=530, limit=120][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=510, limit=30][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=1060, limit=50][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-core/src/dwelling/mod.rs | awk -F: '$1 < 3540'
+934:                .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC offset"));
+1427:        Ok(self.simulation_results.steps.last().unwrap().clone())
+2176:            .expect(
+2526:                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+2574:                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+2759:                    .expect("invariant: equipment_id_by_name is built from this equipment set")
+2782:                .expect("invariant: equipment_id_by_name is built from this equipment set");
+3142:            .expect("write to String is infallible");
+[0m
+[0m→ [0mRead crates/hares-equipment/src/config.rs[90m [offset=280, limit=25][0m
+[0m→ [0mRead crates/hares-equipment/src/lib.rs[90m [offset=255, limit=25][0m
+[0m→ [0mRead crates/hares-types/src/telemetry.rs[90m [offset=25, limit=25][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn step\(|fn init\(|fn do_step\(' crates/hares-equipment/src/hvac/heat_pump/heater.rs | grep -v test
+338:    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+346:    fn step(
+531:    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+958:    fn step(
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/hvac/heat_pump/heater.rs | awk -F: '$1 < 2179'
+978:                let zone = zone.unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/hvac/coil_physics.rs
+961:        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+974:        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.74).unwrap();
+988:        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+989:        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, ao).unwrap();
+1003:        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+1016:        let result = calculate_shr(T_DB, 1e-8, P_KPA, Q_KW, FLOW_M3S, 1.0).unwrap();
+1029:        let result = calculate_shr(T_DB, W_IN, P_KPA, 0.0, FLOW_M3S, 1.0).unwrap();
+1039:        let bf = coil_bypass_factor(29.44, 0.014690, P_KPA, Q_KW, FLOW_M3S, 0.68).unwrap();
+1051:        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+1066:        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, 0.0, 0.70).unwrap();
+1085:        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+1086:        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, ao).unwrap();
+1115:        let ao = coil_ao_factor(db_c, w_high, P_KPA, Q_KW, FLOW_M3S, shr_seed).unwrap();
+1116:        let result = calculate_shr(db_c, w_high, P_KPA, Q_KW, FLOW_M3S, ao).unwrap();
+1133:        let bf = coil_bypass_factor(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, shr).unwrap();
+1134:        let ao = coil_ao_factor(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, shr).unwrap();
+1135:        let result = calculate_shr(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, ao).unwrap();
+1187:        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 1.0).unwrap();
+1209:        let ao = result.unwrap();
+1254:        let bf = result.unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'mod tests' crates/hares-equipment/src/hvac/coil_physics.rs
+(no output)
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '#\[cfg\(test\)\]' crates/hares-equipment/src/hvac/coil_physics.rs
+554:#[cfg(test)]
+942:#[cfg(test)]
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/pv/lut.rs | head -20 && echo "---" && rg -n '#\[cfg\(test\)\]|mod tests' crates/hares-equipment/src/pv/lut.rs
+235:                    .expect("month index exists"),
+238:                    .expect("hour index exists"),
+241:                    .expect("ghi index exists"),
+244:                    .expect("dni index exists"),
+247:                    .expect("dhi index exists"),
+250:                    .expect("temp index exists"),
+291:            *self.month_values.first().expect("month axis non-empty"),
+292:            *self.month_values.last().expect("month axis non-empty"),
+295:            *self.hour_values.first().expect("hour axis non-empty"),
+296:            *self.hour_values.last().expect("hour axis non-empty"),
+299:            *self.ghi_values.first().expect("ghi axis non-empty"),
+300:            *self.ghi_values.last().expect("ghi axis non-empty"),
+303:            *self.dni_values.first().expect("dni axis non-empty"),
+304:            *self.dni_values.last().expect("dni axis non-empty"),
+307:            *self.dhi_values.first().expect("dhi axis non-empty"),
+308:            *self.dhi_values.last().expect("dhi axis non-empty"),
+311:            *self.temp_values.first().expect("temp axis non-empty"),
+312:            *self.temp_values.last().expect("temp axis non-empty"),
+---
+404:#[cfg(test)]
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-python/src/py_dwelling.rs | head -15
+273:    let first_surface: Bound<'_, PyDict> = dict.get_item(surface_ids[0])?.unwrap().extract()?;
+274:    let direct_val = first_surface.get_item("direct")?.unwrap();
+282:            let surface_dict: Bound<'_, PyDict> = dict.get_item(sid)?.unwrap().extract()?;
+285:                extract_array_element(&surface_dict.get_item("direct")?.unwrap(), step_idx)?;
+287:                extract_array_element(&surface_dict.get_item("diffuse")?.unwrap(), step_idx)?;
+289:                extract_array_element(&surface_dict.get_item("reflected")?.unwrap(), step_idx)?;
+291:                extract_array_element(&surface_dict.get_item("aoi")?.unwrap(), step_idx)?;
+350:            let surface_id: u32 = surface_dict.get_item("surface_id")?.unwrap().extract()?;
+351:            let direct_w_m2: f64 = surface_dict.get_item("direct_w_m2")?.unwrap().extract()?;
+352:            let diffuse_w_m2: f64 = surface_dict.get_item("diffuse_w_m2")?.unwrap().extract()?;
+355:                .unwrap()
+639:            .zip(self.zone_keys.as_ref().unwrap().iter())
+1753:    DateTime::parse_from_rfc3339(DEFAULT_START).expect("DEFAULT_START is a valid RFC3339 constant")
+2014:            let _guard = mutex_static.lock().unwrap();
+2037:        let dt = result.unwrap();
+[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/lut.rs[90m [offset=225, limit=100][0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=265, limit=100][0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/stepping.rs[90m [offset=220, limit=20][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=40, offset=490][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=15, offset=1][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn assemble_building_rc' crates/hares-envelope/src/boundary_rc.rs | head -5
+451:pub fn assemble_building_rc(
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [limit=100, offset=958][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn step\(|fn update_mode\(|fn resolve_profile_setpoints\(' crates/hares-equipment/src/hvac/hvac_core.rs | grep -v test
+686:    pub fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn lookup_zone' crates/hares-equipment/src/hvac/heat_pump/heater.rs
+(no output)
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'Telemetry::set|\.set\(' crates/hares-equipment/src/hvac/heat_pump/heater.rs | head -20
+565:        self.telemetry.set(
+804:            .set(tk::HP_LOCKOUT_TEMP_C, self.hp_lockout_temp_c);
+806:            .set(tk::ER_LOCKOUT_TEMP_C, self.er_lockout_temp_c);
+808:            .set(tk::ER_SETPOINT_OFFSET_C, self.er_setpoint_offset_c);
+810:            .set(tk::ER_HARD_LOCKOUT_TIME_S, self.er_hard_lockout_time_s);
+812:            .set(tk::BACKUP_CAPACITY_W, self.backup_capacity_w);
+813:        self.telemetry.set(tk::BACKUP_EIR, self.backup_eir);
+814:        self.telemetry.set(
+1082:        self.telemetry.set(tk::ELECTRIC_KW, scaled_electric_kw);
+1084:            .set(tk::THERMAL_OUTPUT_W, delivered_thermal_w);
+1086:            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+1088:            .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
+1089:        self.telemetry.set(
+1102:        self.telemetry.set(tk::COP, cop);
+1109:        self.telemetry.set(tk::RUNTIME_FRACTION, rtf);
+1110:        self.telemetry.set(
+1114:        self.telemetry.set(tk::MAIN_POWER_KW, main_power_kw);
+1115:        self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
+1117:            .set(tk::DEFROST_TIME_FRACTION, step.defrost_time_fraction);
+1119:            .set(tk::DEFROST_EXTRA_POWER_W, step.defrost_extra_power_w);
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn lookup_zone' crates/hares-equipment/src/
+crates/hares-equipment/src/hvac/thermostat.rs:163:pub(super) fn lookup_zone_temp(env: &EnvironmentState, zone: ZoneId) -> crate::Result<f64> {
+crates/hares-equipment/src/hvac/helpers.rs:61:pub fn lookup_zone(
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/hvac/hvac_core.rs | awk -F: '$1 < 793'
+(no output)
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/hvac/air_conditioner.rs | awk -F: '$1 < 100 || $1 > 200' | head -5 && echo "---" && rg -n 'mod tests' crates/hares-equipment/src/hvac/air_conditioner.rs
+1620:                .unwrap()
+1623:                .expect("valid"),
+1667:        let mut typed = ac_config().typed::<CentralAirConditionerConfig>().unwrap();
+1700:        eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).unwrap();
+1724:        eq.init(&cfg, &environment).unwrap();
+---
+1566:mod tests {
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/helpers.rs[90m [limit=30, offset=61][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=20, offset=925][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=15, offset=1420][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-core/src/dwelling/mod.rs | awk -F: '$1 < 3540 {print NR, $0}'
+1 934:                .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC offset"));
+2 1426:        Ok(self.simulation_results.steps.last().unwrap().clone())
+3 2175:            .expect(
+4 2525:                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+5 2573:                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+6 2758:                    .expect("invariant: equipment_id_by_name is built from this equipment set")
+7 2781:                .expect("invariant: equipment_id_by_name is built from this equipment set");
+8 3141:            .expect("write to String is infallible");
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/water_heater/resistance.rs crates/hares-equipment/src/water_heater/heat_pump_wh.rs crates/hares-equipment/src/water_heater/gas.rs crates/hares-equipment/src/battery/degradation.rs crates/hares-equipment/src/battery/ocv.rs crates/hares-equipment/src/hvac/speed_control.rs | awk -F: '$1 < 500 {print}' | head -20
+(no output)
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in crates/hares-equipment/src/water_heater/resistance.rs crates/hares-equipment/src/water_heater/heat_pump_wh.rs crates/hares-equipment/src/water_heater/gas.rs crates/hares-equipment/src/battery/degradation.rs crates/hares-equipment/src/battery/ocv.rs crates/hares-equipment/src/hvac/speed_control.rs; do test_line=$(rg -n '^(pub )?mod tests' "$f" 2>/dev/null | head -1 | cut -d: -f1); if [ -z "$test_line" ]; then test_line=99999; fi; count=$(rg -n '\.unwrap\(\)|\.expect\(' "$f" | awk -F: -v t="$test_line" '$1 < t {c++} END {print c+0}'); name=$(basename $f); echo "$name: test@$test_line, prod=$count"; done
+resistance.rs: test@867, prod=2
+heat_pump_wh.rs: test@1191, prod=2
+gas.rs: test@855, prod=2
+degradation.rs: test@350, prod=2
+ocv.rs: test@285, prod=4
+speed_control.rs: test@207, prod=1
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in crates/hares-tariff/src/billing.rs crates/hares-physics/src/pv_sizing.rs crates/hares-types/src/schedule.rs crates/hares-types/src/lib.rs crates/hares-fleet/src/fleet.rs crates/hares-core/src/actor.rs crates/hares-core/src/environment.rs crates/hares-control/src/compat.rs; do test_line=$(rg -n '^(pub )?mod tests' "$f" 2>/dev/null | head -1 | cut -d: -f1); if [ -z "$test_line" ]; then test_line=99999; fi; count=$(rg -n '\.unwrap\(\)|\.expect\(' "$f" | awk -F: -v t="$test_line" '$1 < t {c++} END {print c+0}'); echo "$(basename $f): test@$test_line, prod=$count"; done
+billing.rs: test@385, prod=3
+pv_sizing.rs: test@524, prod=3
+schedule.rs: test@991, prod=2
+lib.rs: test@99999, prod=2
+fleet.rs: test@597, prod=2
+actor.rs: test@344, prod=2
+environment.rs: test@1074, prod=1
+compat.rs: test@91, prod=1
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in crates/hares-equipment/src/water_heater/resistance.rs crates/hares-equipment/src/water_heater/heat_pump_wh.rs crates/hares-equipment/src/water_heater/gas.rs crates/hares-equipment/src/battery/degradation.rs crates/hares-equipment/src/battery/ocv.rs crates/hares-equipment/src/hvac/speed_control.rs crates/hares-tariff/src/billing.rs crates/hares-physics/src/pv_sizing.rs crates/hares-types/src/schedule.rs crates/hares-types/src/lib.rs crates/hares-fleet/src/fleet.rs crates/hares-core/src/actor.rs crates/hares-core/src/environment.rs crates/hares-control/src/compat.rs; do test_line=$(rg -n '^(pub )?mod tests' "$f" 2>/dev/null | head -1 | cut -d: -f1); if [ -z "$test_line" ]; then test_line=99999; fi; rg -n '\.unwrap\(\)|\.expect\(' "$f" | awk -F: -v t="$test_line" '$1 < t {print FILENAME ":" $0}' | head -5; done 2>/dev/null
+:138:        .expect("default resistance water-heater tank config must be valid");
+:390:            .expect("node_temps is never empty");
+:190:        .expect("default HPWH tank config must be valid");
+:519:            .expect("node_temps is never empty");
+:129:        .expect("default gas water-heater tank config must be valid");
+:381:            .expect("node_temps is never empty");
+:46:            *self.reversals.last_mut().expect("reversals.len() >= 2") = soc;
+:94:                let last = self.reversals.pop().expect("reversals.len() >= 4");
+:112:            *self.soc_points.last().expect("non-empty LUT"),
+:128:        *self.voltage_v.last().expect("non-empty LUT")
+:229:            *self.soc_points.last().expect("non-empty LUT"),
+:245:        *self.potential_v.last().expect("non-empty LUT")
+:184:    if lf >= *capacity_fractions.last().expect("non-empty") {
+:91:        NaiveDate::from_ymd_opt(next_year, next_month, 1).expect("valid NaiveDate for day=1");
+:92:    let this = NaiveDate::from_ymd_opt(year, month, 1).expect("valid NaiveDate for day=1");
+:110:                .expect("computed billing period date must be valid after day clamp")
+:185:            .unwrap();
+:259:            .unwrap()
+:269:            .unwrap()
+:650:                *draw_count = draw_count.checked_add(1).expect("draw_count overflow");
+:827:            st.draw_count = st.draw_count.checked_add(1).expect("draw_count overflow");
+:94:                .expect("offset")
+:97:                .expect("valid timestamp"),
+:545:            .expect("valid UTC offset")
+:548:            .expect("valid constant simulation start timestamp"),
+:204:                    .expect("offset")
+:207:                    .expect("valid timestamp"),
+:479:            .expect("step counter exceeds usize on this target");
+:42:            .expect("at least one SOC key must be Some");
+[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/resistance.rs[90m [limit=15, offset=385][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/speed_control.rs[90m [limit=15, offset=178][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/ocv.rs[90m [limit=15, offset=122][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/ocv.rs[90m [limit=50, offset=131][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn node_temps\(' crates/hares-equipment/src/water_heater/ -g '*.rs'
+crates/hares-equipment/src/water_heater/tank.rs:224:    pub fn node_temps(&self) -> &[f64] {
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'capacity_fractions' crates/hares-equipment/src/hvac/speed_control.rs | head -10
+135:/// This is the same algorithm as the former `HvacEquipment::capacity_fractions_for`
+137:pub fn capacity_fractions_for(caps: &[f64]) -> Vec<f64> {
+148:/// `capacity_fractions` must be sorted ascending. When `capacity_fractions` is
+161:    capacity_fractions: &[f64],
+169:    if capacity_fractions.is_empty() || lf <= 0.0 {
+176:    if lf <= capacity_fractions[0] {
+177:        let plr = (lf / capacity_fractions[0].max(f64::MIN_POSITIVE)).clamp(0.0, 1.0);
+184:    if lf >= *capacity_fractions.last().expect("non-empty") {
+186:            speed_index: capacity_fractions.len() - 1,
+191:    let hi = capacity_fractions.partition_point(|&f| f < lf);
+[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/tank.rs[90m [limit=20, offset=220][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn new|fn from_config|n_nodes' crates/hares-equipment/src/water_heater/tank.rs | head -10
+20:    pub n_nodes: usize,
+108:    pub fn new(config: StratifiedTankConfig) -> Result<Self> {
+109:        validate_n_nodes(config.n_nodes)?;
+115:        validate_element_nodes(config.n_nodes, config.element_nodes)?;
+119:                if volumes.len() != config.n_nodes {
+121:                        "node_volumes_m3 length {} does not match n_nodes {}",
+123:                        config.n_nodes
+133:                if config.n_nodes == 2 {
+138:                    let node_volume_m3 = total_volume_m3 / config.n_nodes as f64;
+139:                    vec![node_volume_m3; config.n_nodes]
+[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/tank.rs[90m [limit=20, offset=90][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn normalize_water_heater_draws|fn water_heater_avg_daily_draw_l' crates/hares-io/src/schedule_resolve.rs
+581:fn water_heater_avg_daily_draw_l(spec: &EquipmentSpec) -> f64 {
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'normalize_water_heater_draws|water_heater_avg_daily_draw' crates/hares-io/src/schedule_resolve.rs | head -10
+528:            let avg_daily_l = water_heater_avg_daily_draw_l(spec);
+581:fn water_heater_avg_daily_draw_l(spec: &EquipmentSpec) -> f64 {
+[0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=15, offset=460][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn normalize_water' crates/hares-io/src/schedule_resolve.rs
+(no output)
+[0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=10, offset=500][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'fn.*draw' crates/hares-io/src/schedule_resolve.rs
+558:fn tankless_avg_daily_draw_l(spec: &EquipmentSpec) -> f64 {
+581:fn water_heater_avg_daily_draw_l(spec: &EquipmentSpec) -> f64 {
+1580:    fn make_water_heater_spec(name: &str, avg_water_draw_l_per_day: f64) -> EquipmentSpec {
+1710:    fn make_typed_tankless_spec(avg_water_draw_l_per_day: Option<f64>) -> EquipmentSpec {
+1744:    fn water_heaters_receive_draw_and_mains_schedule_columns() {
+1821:    fn water_heater_draw_fractions_normalized_to_kg_s() {
+1875:    fn tankless_draw_fractions_require_typed_avg_water_draw() {
+[0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=50, offset=451][0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=60, offset=505][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=15, offset=2170][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=20, offset=2520][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=15, offset=2750][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=10, offset=3135][0m
+Now I have all the data needed. Let me compile the final report.
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && for f in crates/hares-io/src/output/metrics.rs crates/hares-io/src/output/columns.rs crates/hares-io/src/hpxml/validation.rs crates/hares-io/src/config.rs crates/hares-fleet/src/aggregation.rs crates/hares-envelope/src/thermal_solver/initialization.rs; do test_line=$(rg -n '^(pub )?mod tests' "$f" 2>/dev/null | head -1 | cut -d: -f1); if [ -z "$test_line" ]; then test_line=99999; fi; echo "=== $(basename $f) (test@$test_line) ===" && rg -n '\.unwrap\(\)|\.expect\(' "$f" | awk -F: -v t="$test_line" '$1 < t {print $0}'; done
+=== metrics.rs (test@949) ===
+937:        .expect("schema type is validated at construction")
+=== columns.rs (test@465) ===
+354:    serde_json::to_string(&MODE_ORDINALS).expect("static map serialises")
+=== validation.rs (test@552) ===
+516:    let schedule_end_exclusive = *schedule.timestamps.last().expect("non-empty timestamps")
+=== config.rs (test@161) ===
+132:        usize::try_from(steps).expect("validated positive timestep count")
+=== aggregation.rs (test@408) ===
+404:    RecordBatch::try_new(schema, arrays).expect("empty aggregate record batch")
+=== initialization.rs (test@220) ===
+132:                .expect("verified above");
+138:                .expect("pre-check above guarantees zone is in env.zones");
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-equipment/src/ev/tests.rs | head -30
+14:        .expect("UTC offset")
+16:        .unwrap()
+188:    ev.init(&config, &env).unwrap();
+193:    .unwrap();
+196:    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+214:    ev.init(&config, &env).unwrap();
+217:    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+219:    let p = ev.telemetry().get("active_power_kw").unwrap();
+228:    ev.init(&config, &env).unwrap();
+231:    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+232:    let p_low_soc = ev.telemetry().get("active_power_kw").unwrap();
+237:    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+238:    let p_taper = ev.telemetry().get("active_power_kw").unwrap();
+244:    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+245:    let p_full = ev.telemetry().get("active_power_kw").unwrap();
+254:    ev.init(&config, &env).unwrap();
+274:    a.init(&config, &env).unwrap();
+278:        a.step(&env, Duration::minutes(5), &mut ports).unwrap();
+283:    b.init(&config, &env).unwrap();
+284:    b.load_state(&checkpoint).unwrap();
+289:        a.step(&env, Duration::minutes(5), &mut pa).unwrap();
+290:        b.step(&env, Duration::minutes(5), &mut pb).unwrap();
+306:    ev.init(&config, &sample_env()).unwrap();
+316:    ev.init(&config, &env).unwrap();
+319:    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+330:        .expect("EV registered");
+340:    ev.init(&config, &env).unwrap();
+348:    .unwrap();
+352:        ev.step(&env, Duration::minutes(5), &mut ports).unwrap();
+377:    ev.init(&config, &sample_env()).unwrap();
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-python/src/py_config.rs
+64:    DateTime::parse_from_rfc3339(DEFAULT_START).expect("valid default start time")
+[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/validation.rs[90m [limit=10, offset=510][0m
+[0m→ [0mRead crates/hares-io/src/config.rs[90m [limit=15, offset=125][0m
+[0m→ [0mRead crates/hares-fleet/src/aggregation.rs[90m [limit=12, offset=398][0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/initialization.rs[90m [limit=15, offset=127][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && head -5 crates/hares-equipment/src/ev/tests.rs && echo "---" && rg -n '#!\[cfg\(test\)\]|#\[cfg\(test\)\]' crates/hares-equipment/src/ev/tests.rs
+use std::collections::HashMap;
+use std::time::Duration;
+
+use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+use hares_types::{
+---
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'mod tests' crates/hares-equipment/src/ev/mod.rs
+1076:mod tests;
+[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/validation.rs[90m [limit=8, offset=505][0m
+[0m→ [0mRead crates/hares-equipment/src/ev/mod.rs[90m [limit=5, offset=1074][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-io/src/psm3.rs | awk -F: '$1 < 530'
+217:                .expect("pre-allocated")
+257:        .expect("validated step");
+[0m
+[0m→ [0mRead crates/hares-io/src/psm3.rs[90m [limit=5, offset=215][0m
+[0m→ [0mRead crates/hares-io/src/psm3.rs[90m [limit=5, offset=255][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n '\.unwrap\(\)|\.expect\(' crates/hares-types/src/lib.rs | grep -v '#\[cfg\(test\)\]' | grep -v 'mod tests' | grep -v '^\s*//' | head -5
+94:                .expect("offset")
+97:                .expect("valid timestamp"),
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && rg -n 'mod tests' crates/hares-types/src/lib.rs
+(no output)
+[0m
+[0m→ [0mRead crates/hares-types/src/lib.rs[90m [limit=15, offset=86][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/infrastructure/ 2>/dev/null || mkdir -p /Users/rich/source/HARES/docs/reviews/infrastructure
+infra-01-dead-module-aggregation-check.md
+infra-02-bestest-should-panic-xfail.md
+infra-03-empty-fixture-directories.md
+infra-04-ci-no-test-execution.md
+infra-05-benchmark-coverage-gaps.md
+infra-06-docs-handoff-items-remaining.md
+infra-07-docs-citation-verification.md
+[0m
+Now I have all the data needed. Let me write the final report.

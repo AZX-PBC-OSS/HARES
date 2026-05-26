@@ -1,0 +1,37 @@
+# opencode log for infil-deep-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/infiltration.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/*WeatherManager*"[90m in . · 2 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/*{terrain,wind,Wind,WindSpeed}*"[90m in . · 21 matches[0m
+[0m✱ [0mGrep "terrain|Terrain|alpha|ALPHA|delta|BOUNDARY|power.?law|wind.?speed|Site:WeatherStation|WindSpeed"[90m in vendors/EnergyPlus/src/EnergyPlus · 54 matches[0m
+[0m→ [0mRead crates/hares-physics/src/infiltration.rs[90m [offset=1349][0m
+[0m✱ [0mGrep "Site.?Weather.?Station|WeatherStation|ATanZ|PBanZ|wind.?exp|alpha.?building|alpha.?station|HeightVariation|Wind Speed Profile|power.?law"[90m in vendors/EnergyPlus/src/EnergyPlus · 5 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=7220, limit=150][0m
+[0m✱ [0mGrep "HeightVariation|Sizing:Site|ATanZ|PBanZ|windExp|WindExp|BlHeight|blHeight|SiteHeight|site.?height|wind.?height"[90m in vendors/EnergyPlus/src/EnergyPlus · 37 matches[0m
+[0m✱ [0mGrep "WeatherFileWindModCoeff|ATanZ|PBanZ"[90m in vendors/EnergyPlus/src/EnergyPlus · 8 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc[90m [offset=555, limit=100][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/DataEnvironment.cc[90m [offset=170, limit=120][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc[90m [offset=1260, limit=80][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/infiltration-deep
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/infiltration-deep/infil-deep-02-terrain-class-wind-params.md
+Wrote file successfully.
+[0m
+The review is written to `docs/reviews/infiltration-deep/infil-deep-02-terrain-class-wind-params.md`.
+
+**Summary**: 5 findings (0 critical, 1 high, 1 medium, 3 low):
+
+- **High**: Only 3 of 5 terrain classes are implemented. HARES has Rural/Suburban/Urban; EnergyPlus adds Ocean (α=0.10) and Urban-as-alias (α=0.22 vs HARES Urban α=0.33). The missing Ocean class biases coastal-site infiltration upward by 5–15%.
+- **Medium**: HARES `Urban` maps to EnergyPlus `CITY` parameters, not EnergyPlus `URBAN` — naming mismatch could confuse users migrating from EP.
+- **Low**: Hardcoded met station constants (no `Site:WeatherStation` override), two-stage correction formula is mathematically correct, and a test comment references a marginally incorrect ASHRAE HOF chapter section.

@@ -1,0 +1,38 @@
+# opencode log for infra-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead benches/fleet.rs
+[0m→ [0mRead benches/rl_step.rs
+[0m→ [0mRead benches/single_building.rs
+[0m→ [0mRead benches/common.rs
+[0m• [0mExplore aggregation & RL patterns[90m Explore Agent[0m
+[0m✓ [0mExplore aggregation & RL patterns[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-fleet/src/aggregation.rs[90m [limit=80][0m
+[0m✱ [0mGrep "\[\[bench\]\]"[90m 4 matches[0m
+[0m→ [0mRead python/ochre_next/rl/gym_env.py[90m [limit=80][0m
+[0m→ [0mRead python/ochre_next/helics/fleet.py[90m [offset=220, limit=30][0m
+Let me check the benchmark Cargo.toml and existing aggregation code for precise line references.
+[0m→ [0mRead crates/hares-core/Cargo.toml[90m [offset=40][0m
+[0m✱ [0mGrep "aggregate|batch_step|episode|helics"[90m in benches · 0 matches[0m
+[0m→ [0mRead docs/reviews/infrastructure
+[0m→ [0mRead docs/reviews/infrastructure/infra-01-dead-module-aggregation-check.md
+[0m
+[0m← [0mWrite docs/reviews/infrastructure/infra-05-benchmark-coverage-gaps.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/infrastructure/infra-05-benchmark-coverage-gaps.md`.
+
+**Summary**: 5 findings across the three benchmark files:
+- **2 high**: Missing aggregation benchmark (aggregation.rs:131 has no bench coverage) and missing full RL episode benchmark (only `step()` measured, no `reset`/`to_observation_vec`/`batch_step_py`)
+- **2 medium**: No HELICS co-simulation latency benchmarks and all data is synthetic (no ResStock HPXML)
+- **1 low**: No multi-zone dwelling benchmarks
+
+Prioritized recommendations: aggregation benchmark first (fleet-scale bottleneck), RL episode benchmark second (training throughput), HELICS benchmarks third (latency-sensitive).
