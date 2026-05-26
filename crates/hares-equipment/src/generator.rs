@@ -114,10 +114,10 @@ impl GeneratorConfig {
             match efficiency_type {
                 "constant" | "curve" | "quadratic" => {}
                 _ => {
-                    return Err(HaresError::Equipment(
-                        "generator efficiency_type must be one of: constant, curve, quadratic"
-                            .to_string(),
-                    ));
+                    return Err(HaresError::Equipment(format!(
+                        "unrecognised generator efficiency_type '{efficiency_type}'; \
+                         expected one of: constant, curve, quadratic"
+                    )));
                 }
             }
         }
@@ -376,7 +376,10 @@ impl EfficiencyModel {
     }
 
     /// Build from the typed generator config.
-    fn from_typed_config(config: &GeneratorConfig, kind: GeneratorKind) -> Self {
+    fn from_typed_config(
+        config: &GeneratorConfig,
+        kind: GeneratorKind,
+    ) -> Result<Self, HaresError> {
         let rated = config.eta_electric.unwrap_or(DEFAULT_ETA_ELECTRIC);
         let eff_type = config
             .efficiency_type
@@ -389,10 +392,14 @@ impl EfficiencyModel {
                     .as_deref()
                     .map(Self::curve_pairs)
                     .unwrap_or_else(Self::default_curve_points);
-                Self::Curve { rated, points }
+                Ok(Self::Curve { rated, points })
             }
-            "quadratic" => Self::Quadratic { rated },
-            _ => Self::Constant { rated },
+            "quadratic" => Ok(Self::Quadratic { rated }),
+            "constant" => Ok(Self::Constant { rated }),
+            _ => Err(HaresError::Equipment(format!(
+                "unrecognised generator efficiency_type '{eff_type}'; \
+                 expected one of: constant, curve, quadratic"
+            ))),
         }
     }
 }
@@ -525,12 +532,20 @@ impl Generator {
             telemetry_fields: generator_telemetry_fields(has_chp),
         };
 
-        let efficiency = typed
-            .as_ref()
-            .map(|c| EfficiencyModel::from_typed_config(c, kind))
-            .unwrap_or_else(|| EfficiencyModel::Constant {
+        let efficiency = typed.as_ref().map_or_else(
+            || EfficiencyModel::Constant {
                 rated: DEFAULT_ETA_ELECTRIC,
-            });
+            },
+            |c| match EfficiencyModel::from_typed_config(c, kind) {
+                Ok(model) => model,
+                Err(e) => {
+                    tracing::warn!("{e}: falling back to constant efficiency");
+                    EfficiencyModel::Constant {
+                        rated: DEFAULT_ETA_ELECTRIC,
+                    }
+                }
+            },
+        );
 
         Self {
             descriptor,
@@ -652,7 +667,7 @@ impl Generator {
         self.supply_temp_c = c.supply_temp_c.unwrap_or(self.supply_temp_c);
         self.return_temp_c = c.return_temp_c.unwrap_or(self.return_temp_c);
 
-        self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind);
+        self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind)?;
         self.efficiency.validate()?;
 
         if self.eta_thermal > 0.0 {
@@ -1818,7 +1833,6 @@ mod tests {
             .unwrap();
 
         // fuel_input_w, thermal_output_w, flue_loss_w are in W; electric_output_kw is in kW
-        // fuel_input_w, thermal_output_w, flue_loss_w are in W; electric_output_kw is in kW
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
         let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
@@ -2061,6 +2075,27 @@ mod tests {
         let config = gen_config(&[(KEY_CAPACITY_MIN_KW, 20.0.into())]); // > rated 10
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         assert!(generator.init(&config, &base_env()).is_err());
+    }
+
+    #[test]
+    fn init_rejects_unrecognised_efficiency_type_with_named_value() {
+        let config = gen_config(&[(
+            KEY_EFFICIENCY_TYPE,
+            "quadractic".into(), // typo: should be "quadratic"
+        )]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        let err = generator
+            .init(&config, &base_env())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("quadractic"),
+            "error message must name the unrecognised value; got: {err}"
+        );
+        assert!(
+            err.contains("efficiency_type"),
+            "error message must mention the field name; got: {err}"
+        );
     }
 
     // =======================================================================
@@ -2335,10 +2370,6 @@ mod tests {
     }
 
     // =======================================================================
-    // Regression: FuelCell defaults to curve efficiency
-    // =======================================================================
-
-    // =======================================================================
     // Telemetry field names are in watts (regression tests)
     // =======================================================================
 
@@ -2434,7 +2465,7 @@ mod tests {
     }
 
     // =======================================================================
-    // Telemetry field names are in watts (regression tests)
+    // FuelCell defaults to curve efficiency
     // =======================================================================
 
     #[test]
