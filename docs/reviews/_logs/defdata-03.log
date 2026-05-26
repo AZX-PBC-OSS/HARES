@@ -1,0 +1,61 @@
+# opencode log for defdata-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead defaults/HVAC Multispeed Parameters.csv
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*.{hh,cc,f90,h}"[90m 100 matches[0m
+[0m✱ [0mGrep "UnitarySystem|MultiSpeed|VariableSpeed|Coil.*Cooling.*DX.*Multi|Coil.*Heating.*DX.*Multi"[90m in vendors/EnergyPlus/src/EnergyPlus · 210 matches[0m
+[0m• [0mFind HARES code using CSV[90m Explore Agent[0m
+[0m• [0mFind EnergyPlus multi-speed curves[90m Explore Agent[0m
+[0m✓ [0mFind HARES code using CSV[90m Explore Agent[0m
+[0m✓ [0mFind EnergyPlus multi-speed curves[90m Explore Agent[0m
+[0m→ [0mRead vendors/OCHRE/ochre/defaults/HVAC Multispeed Parameters.csv
+[0m✱ [0mGrep "FanPowerPerEvapAirFlowRate|fan_power|fan power|DefaultFanPower"[90m in vendors/EnergyPlus/src/EnergyPlus · 473 matches[0m
+[0m→ [0mRead crates/hares-io/src/defaults.rs[90m [offset=70, limit=30][0m
+[0m→ [0mRead crates/hares-io/src/defaults.rs[90m [offset=580, limit=90][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [offset=2680, limit=160][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [offset=2640, limit=45][0m
+[0m✱ [0mGrep "equipment_name.*MSHP|equipment_name.*ASHP|hvac_heating_curves|hvac_cooling_curves|hvac_multispeed_parameters"[90m in crates/hares-io/src · 9 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/speed_control.rs[90m [offset=130, limit=80][0m
+Now let me verify a few more specifics before writing the review.
+[0m✱ [0mGrep "normalize_equipment_key"[90m in crates/hares-io/src · 12 matches[0m
+[0m→ [0mRead crates/hares-io/src/defaults.rs[90m [offset=696, limit=20][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [limit=40, offset=650][0m
+[0m
+[0m$ [0mdiff "/Users/rich/source/HARES/defaults/HVAC Multispeed Parameters.csv" "/Users/rich/source/HARES/vendors/OCHRE/ochre/defaults/HVAC Multispeed Parameters.csv"
+41,42d40
+< Gas Furnace,80 AFUE,2,0.65,0.80,0.78,1,1,0.80,Manual,,,,,,,,,,
+< Gas Furnace,90 AFUE,2,0.65,0.80,0.88,1,1,0.90,Manual,,,,,,,,,,
+[0m
+[0m✱ [0mGrep "apply_multispeed_cooling_parameters|apply_multispeed_heating_parameters|apply_multispeed_furnace_parameters"[90m in crates · 8 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [offset=1750, limit=30][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [offset=2070, limit=25][0m
+[0m✱ [0mGrep "let name = |resolved_name|heater_name|cooler_name"[90m in crates/hares-io/src/hpxml/resolve_hvac.rs · 16 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [offset=2225, limit=50][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [offset=1825, limit=30][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=35, offset=2170][0m
+[0m✱ [0mGrep "insert_mode_and_speed_metadata"[90m in crates/hares-io/src/hpxml/resolve_hvac.rs · 3 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=80, offset=2477][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/defaults-data
+(no output)
+[0m
+Now I have all the information needed. Let me write the review.
+[0m← [0mWrite docs/reviews/defaults-data/defdata-03-hvac-multispeed-parameters-csv.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/defaults-data/defdata-03-hvac-multispeed-parameters-csv.md`.
+
+Key findings summary:
+
+- **1 critical**: Missing CSV entries for "Air Conditioner" and "GSHP" equipment types — multi-speed standalone ACs and ground-source heat pumps silently fail to get per-stage capacity/COP data
+- **2 high**: All MSHP Cooler/Heater rows have no capacity ratio of 1.0 (all max at 1.2, violating EnergyPlus rated-speed convention); MSHP SHR/capacity ratios identically replicated across 20 SEER tiers suggesting copied rather than measured data
+- **4 medium**: Non-monotonic COP in 22/24 SEER ASHP Cooler, anomalous COP in 14.5 SEER MSHP Cooler, 11.0 HSPF ASHP Heater COPs appear miscopied from ~9 HSPF unit, airflow ratios follow linear rather than cube-law fan power
+- **2 low**: Sparse gas furnace tier coverage (only 80/90 AFUE), SHR source-inconsistency across "Manual" vs "testing_500" entries

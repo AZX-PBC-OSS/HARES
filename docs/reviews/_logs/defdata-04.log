@@ -1,0 +1,197 @@
+# opencode log for defdata-04
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead defaults/water_heating
+[0m✱ [0mGlob "defaults/water_heating/**/*"[90m in . · 3 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*WaterHeater*"[90m in . · 0 matches[0m
+[0m→ [0mRead defaults/water_heating/WH Medium UEF Schedule.csv
+[0m→ [0mRead defaults/water_heating/default_paramters.csv
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*[Ww]ater*"[90m in . · 47 matches[0m
+[0m• [0mCompute daily water draw total[90m General Agent[0m
+[0m✱ [0mGrep "T_set|setpoint|T_db|deadband|UA|U_value|tank.*volume|capacity|recovery"[90m in vendors/EnergyPlus/src/EnergyPlus · 137 matches[0m
+[0m✱ [0mGrep "T_set|setpoint|T_db|deadband|UA|U_value|tank.*volume|capacity|recovery"[90m in vendors/EnergyPlus/src/EnergyPlus · 6 matches[0m
+[0m✱ [0mGrep "perf_mode|PERF_MODE|UEF|ef_rating|efficiency"[90m in . · 214 matches[0m
+Now let me check EnergyPlus reference files for default water heating parameters and compute the total daily draw from the schedule file.
+[0m✓ [0mCompute daily water draw total[90m General Agent[0m
+[0m✱ [0mGrep "UEF|uniform_energy_factor|energy_factor"[90m in vendors/OCHRE/ochre · 34 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=1000, limit=200][0m
+[0m✱ [0mGrep "water_heating|water_heater|WH.*Medium|default_param"[90m in python · 0 matches[0m
+[0m✱ [0mGrep "default_paramters|WH Medium UEF|water_heating"[90m in . · 2 matches[0m
+[0m✱ [0mGrep "default_param|WH Medium|water_heating/default"[90m in . · 4 matches[0m
+[0m✱ [0mGlob "python/**/water*"[90m in . · 0 matches[0m
+[0m→ [0mRead vendors/OCHRE/bin/run_equipment.py[90m [offset=210, limit=50][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/WaterHeater.py[90m [offset=1, limit=100][0m
+[0m→ [0mRead crates/hares-io/src/defaults.rs[90m [offset=830, limit=100][0m
+[0m✱ [0mGrep "water_heating|water_heater|WaterHeater|water heater|Water Heater"[90m in crates · 673 matches[0m
+[0m✱ [0mGlob "defaults/**/*.toml"[90m in . · 1 match[0m
+[0m✱ [0mGlob "crates/hares-equipment/src/water_heater/**/*.rs"[90m in . · 8 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WaterThermalTanks.hh[90m [offset=480, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/wh_config.rs
+[0m
+[0m$ [0mawk -F',' 'NR>1 && $2!=0 {day=substr($1,4,2); total[day]+=$2} END {for (d in total) printf "Day %s: %.2f L/day\n", d, total[d]}' /Users/rich/source/HARES/defaults/water_heating/WH\ Medium\ UEF\ Schedule.csv
+Day /2: 416.40 L/day
+[0m
+[0m$ [0mawk -F',' 'NR>1 && $2!=0 {print $0}' /Users/rich/source/HARES/defaults/water_heating/WH\ Medium\ UEF\ Schedule.csv | head -5
+1/1/2018 0:00,6.435200033,20,7
+1/1/2018 0:01,6.435200033,20,7
+1/1/2018 0:02,6.435200033,20,7
+1/1/2018 0:03,6.435200033,20,7
+1/1/2018 0:04,6.435200033,20,7
+[0m
+[0m✱ [0mGrep "T_set|P_hw1|P_hw2|T_db|Element.*Lower|Element.*Upper"[90m in vendors/OCHRE · 1 match[0m
+Now let me compute the daily draw and check the schedule file format against EnergyPlus:
+[0m
+[0m$ [0mpython3 -c "
+import csv
+t1, t2 = 0, 0
+with open('/Users/rich/source/HARES/defaults/water_heating/WH Medium UEF Schedule.csv') as f:
+    r = csv.reader(f)
+    next(r)
+    for row in r:
+        v = float(row[1])
+        if v == 0: continue
+        if '1/1/2018' in row[0]: t1 += v
+        elif '1/2/2018' in row[0]: t2 += v
+print(f'Day 1 (1/1/2018): {t1:.2f} L')
+print(f'Day 2 (1/2/2018): {t2:.2f} L')
+print(f'Total (2 days): {t1+t2:.2f} L')
+print(f'Daily avg: {(t1+t2)/2:.2f} L/day')
+print(f'ASHR\AE family-of-four target: 240 L/day')
+print(f'Ratio: {(t1+t2)/2/240*100:.1f}%')
+"
+<string>:16: SyntaxWarning: "\A" is an invalid escape sequence. Such sequences will not work in the future. Did you mean "\\A"? A raw string is also an option.
+Day 1 (1/1/2018): 208.20 L
+Day 2 (1/2/2018): 208.20 L
+Total (2 days): 416.40 L
+Daily avg: 208.20 L/day
+ASHR\AE family-of-four target: 240 L/day
+Ratio: 86.7%
+[0m
+[0m$ [0mpython3 -c "
+import csv
+# Analyze draw pattern times
+events = []
+with open('/Users/rich/source/HARES/defaults/water_heating/WH Medium UEF Schedule.csv') as f:
+    r = csv.reader(f)
+    next(r)
+    for row in r:
+        v = float(row[1])
+        if v == 0: continue
+        if '1/1/2018' not in row[0]: continue
+        hm = row[0].split()[1]  # HH:MM
+        events.append((hm, v))
+
+print('Draw events (Day 1):')
+print(f'Total events: {len(events)}')
+for t, v in events:
+    print(f'  {t}: {v:.2f} L/min')
+# Group by hour
+hourly = {}
+for t, v in events:
+    h = int(t.split(':')[0])
+    hourly[h] = hourly.get(h, 0) + v
+print()
+print('Hourly totals (L):')
+for h in sorted(hourly):
+    print(f'  {h:02d}:00 = {hourly[h]:.2f} L')
+"
+Draw events (Day 1):
+Total events: 39
+  0:00: 6.44 L/min
+  0:01: 6.44 L/min
+  0:02: 6.44 L/min
+  0:03: 6.44 L/min
+  0:04: 6.44 L/min
+  0:05: 6.44 L/min
+  0:06: 6.44 L/min
+  0:07: 6.44 L/min
+  0:08: 5.30 L/min
+  0:30: 3.79 L/min
+  0:31: 3.79 L/min
+  1:43: 6.44 L/min
+  1:44: 6.44 L/min
+  1:45: 6.44 L/min
+  1:46: 6.44 L/min
+  1:47: 6.44 L/min
+  1:48: 1.89 L/min
+  10:33: 6.44 L/min
+  10:34: 6.44 L/min
+  10:35: 6.44 L/min
+  10:36: 6.44 L/min
+  10:37: 6.44 L/min
+  10:38: 1.89 L/min
+  11:33: 6.44 L/min
+  11:34: 6.44 L/min
+  11:35: 6.06 L/min
+  12:03: 3.79 L/min
+  12:48: 3.79 L/min
+  12:53: 3.79 L/min
+  16:03: 3.79 L/min
+  16:18: 3.79 L/min
+  16:19: 3.79 L/min
+  16:48: 6.44 L/min
+  16:49: 1.14 L/min
+  17:03: 6.44 L/min
+  17:04: 6.44 L/min
+  17:05: 6.44 L/min
+  17:06: 6.44 L/min
+  17:07: 0.76 L/min
+
+Hourly totals (L):
+  00:00 = 64.35 L
+  01:00 = 34.07 L
+  10:00 = 34.07 L
+  11:00 = 18.93 L
+  12:00 = 11.36 L
+  16:00 = 18.93 L
+  17:00 = 26.50 L
+[0m
+[0m$ [0mgrep -n 'Schedule.*Week\|Weekday\|Weekend\|setpt.*Sched\|daytype\|day_type\|DayType' /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/WaterThermalTanks.cc | head -20
+645:                sched = state.dataWaterThermalTanks->HPWaterHeater(Tank.HeatPumpNum).setptTempSched;
+647:                sched = state.dataWaterThermalTanks->WaterHeaterDesuperheater(Tank.DesuperheaterNum).setptTempSched;
+649:                sched = Tank.setptTempSched;
+732:        } else if ((DesupHtr.setptTempSched = Sched::GetSchedule(state, cAlphaArgs(3))) == nullptr) {
+1258:        } else if ((HPWH.setptTempSched = Sched::GetSchedule(state, hpwhAlpha[3])) == nullptr) {
+2330:        } else if ((Tank.setptTempSched = Sched::GetSchedule(state, state.dataIPShortCut->cAlphaArgs(2))) == nullptr) {
+2875:        } else if ((Tank.setptTempSched = Sched::GetSchedule(state, state.dataIPShortCut->cAlphaArgs(5))) == nullptr) {
+2918:        } else if ((Tank.setptTemp2Sched = Sched::GetSchedule(state, state.dataIPShortCut->cAlphaArgs(6))) == nullptr) {
+3441:        } else if ((Tank.setptTempSched = Sched::GetSchedule(state, state.dataIPShortCut->cAlphaArgs(2))) == nullptr) {
+3781:            } else if ((Tank.setptTempSched = Sched::GetSchedule(state, Util::makeUPPER(setpointTempScheduleName.value().get<std::string>()))) ==
+3803:            } else if ((Tank.setptTempSchedTop =
+3814:            } else if ((Tank.setptTempSchedBottom =
+3859:        Tank.setptTemp2Sched = nullptr;
+6446:            sched = state.dataWaterThermalTanks->HPWaterHeater(this->HeatPumpNum).setptTempSched;
+6449:            sched = state.dataWaterThermalTanks->WaterHeaterDesuperheater(this->DesuperheaterNum).setptTempSched;
+6451:            sched = this->setptTempSched;
+6516:            sched = state.dataWaterThermalTanks->HPWaterHeater(this->HeatPumpNum).setptTempSched;
+6519:            sched = state.dataWaterThermalTanks->WaterHeaterDesuperheater(this->DesuperheaterNum).setptTempSched;
+6521:            sched = this->setptTempSched;
+6561:            this->SetPointTemp = this->setptTempSchedTop->getCurrentVal();
+[0m
+[0m$ [0mgrep -rn 'ScheduleFile\|Schedule:File\|schedule.*csv\|schedule.*file' /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataWater.hh 2>/dev/null; grep -rn 'Weekday\|Weekend\|Holiday\|SummerDesignDay\|WinterDesignDay' /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataWater.hh 2>/dev/null || echo "no day-type schedule in DataWater"
+no day-type schedule in DataWater
+[0m
+Now I have all the data needed to write the review. Let me also check for EnergyPlus setpoint schedule day-type differentiation:
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/defaults-data
+(no output)
+[0m
+Now let me create the output directory and write the review:
+[0m← [0mWrite docs/reviews/defaults-data/defdata-04-water-heating-defaults.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/defaults-data/defdata-04-water-heating-defaults.md`.
+
+**Key findings summary:**
+- **8 findings** (0 critical, 2 high, 4 medium, 2 low)
+- **High**: `default_paramters.csv` is critically incomplete — missing tank volumes, UA values, UEF ratings, recovery efficiencies; only has 4 stub parameters with empty units
+- **High**: Draw schedule uses the DOE UEF test procedure pattern (midnight-dominant, ~24h uniform) rather than occupancy-based residential profile (6-9 AM / 5-9 PM peaks)
+- **Medium**: Schedule file misnamed "UEF" — contains draw profile, not efficiency values; daily draw 208 L vs ASHRAE 240 L target; missing units on all parameters; 49°C setpoint is at Legionella minimum
+- **Low**: Filename typo "paramters"; no weekday/weekend schedule differentiation

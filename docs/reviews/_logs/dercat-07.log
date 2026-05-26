@@ -1,0 +1,37 @@
+# opencode log for dercat-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/config.rs
+[0m✱ [0mGlob "vendors/OCHRE/ochre/Equipment/*PV*"[90m in . · 1 match[0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/Equipment/*pv*"[90m in . · 0 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/*Photovoltaic*"[90m in . · 5 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/*PV*"[90m in . · 3 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/PV.py
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Photovoltaics.cc
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Photovoltaics.hh
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.cc
+[0m• [0mFind solar position azimuth convention[90m Explore Agent[0m
+[0m✱ [0mGrep "tilt.*surface|surface.*tilt|Tilt2"[90m in vendors/EnergyPlus/src/EnergyPlus · 24 matches[0m
+[0m✓ [0mFind solar position azimuth convention[90m Explore Agent[0m
+[0m✱ [0mGrep "dc.*ac.*ratio|dc_ac|inverter_capacity_kw.*capacity_kw|capacity_kw.*inverter_capacity_kw"[90m in crates · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/array_config.rs
+Now let me check the DC-to-AC ratio handling in the PV module and look for any existing validation:
+[0m✱ [0mGrep "noct_c|surface_resolution_deg|module_type"[90m in crates/hares-equipment/src/pv · 47 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=60, limit=30][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=340, limit=60][0m
+[0m✱ [0mGrep "DEFAULT_NOCT_C"[90m in crates/hares-equipment/src/pv · 10 matches[0m
+[0m✱ [0mGrep "inverter_capacity_kw|dc_to_ac|inverter.*limit|clipping"[90m in crates/hares-equipment/src/pv/mod.rs · 28 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=265, limit=35][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/der-catalog
+(no output)
+[0m
+Now I have all the information needed. Let me write the review file:

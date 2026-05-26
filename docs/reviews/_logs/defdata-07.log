@@ -1,0 +1,230 @@
+# opencode log for defdata-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead defaults/zip_parameters.toml
+[0m• [0mFind ZIP model usage in code[90m Explore Agent[0m
+[0m✓ [0mFind ZIP model usage in code[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/mod.rs[90m [offset=295, limit=35][0m
+[0m→ [0mRead crates/hares-equipment/src/scheduled_load.rs[90m [offset=490, limit=25][0m
+[0m→ [0mRead crates/hares-io/src/defaults.rs[90m [offset=24, limit=25][0m
+Let me verify the reactive power formulas in both the water heater and scheduled load implementations before writing findings.
+[0m→ [0mRead crates/hares-equipment/src/water_heater/mod.rs[90m [offset=326, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/scheduled_load.rs[90m [offset=55, limit=30][0m
+[0m→ [0mRead crates/hares-equipment/src/scheduled_load.rs[90m [offset=855, limit=60][0m
+[0m
+[0m$ [0mpython3 -c "
+import toml
+data = toml.load('/Users/rich/source/HARES/defaults/zip_parameters.toml')
+print('TOML file parsed successfully')
+for name, params in sorted(data.items()):
+    zp, ip, pp = params['zp'], params['ip'], params['pp']
+    zq, iq, pq = params['zq'], params['iq'], params['pq']
+    sum_p = zp + ip + pp
+    sum_q = zq + iq + pq
+    has_neg = any(v < 0 for v in [zp, ip, pp])
+    has_large = any(abs(v) > 2 for v in [zp, ip, pp])
+    issues = []
+    if abs(sum_p - 1.0) > 1e-12:
+        issues.append(f'P sum={sum_p:.10f}')
+    if abs(sum_q - 1.0) > 1e-12:
+        issues.append(f'Q sum={sum_q:.10f}')
+    print(f'  {name:35s} zp={zp:8.4f} ip={ip:8.4f} pp={pp:8.4f} | sum={sum_p:8.4f} | zq={zq:8.4f} iq={iq:8.4f} pq={pq:8.4f} | pf={params[\"pf\"]:5.2f} {\"NEG\" if has_neg else \"   \"} {\"LARGE\" if has_large else \"     \"} {\"!\" + \",\".join(issues) if issues else \"\"}')
+"
+
+Traceback (most recent call last):
+  File "<string>", line 2, in <module>
+    import toml
+ModuleNotFoundError: No module named 'toml'
+[0m
+[0m$ [0mpython3 -c "
+import sys
+# Python 3.11+ has tomllib
+if sys.version_info >= (3, 11):
+    import tomllib
+    with open('/Users/rich/source/HARES/defaults/zip_parameters.toml', 'rb') as f:
+        data = tomllib.load(f)
+    print('TOML parsed successfully with tomllib')
+else:
+    try:
+        import tomli
+        with open('/Users/rich/source/HARES/defaults/zip_parameters.toml', 'rb') as f:
+            data = tomli.load(f)
+        print('TOML parsed successfully with tomli')
+    except:
+        print('No toml parser available, checking with pip...')
+" && python3 -V
+TOML parsed successfully with tomllib
+Python 3.14.5
+[0m
+[0m→ [0mRead docs/reviews/config-io/config-io-02-defaults-csv-loading.md[90m [offset=190, limit=25][0m
+[0m→ [0mRead crates/hares-envelope/src/electrical_solver.rs[90m [offset=100, limit=40][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Equipment.py[90m [offset=190, limit=40][0m
+[0m→ [0mRead crates/hares-equipment/src/scheduled_load.rs[90m [offset=78, limit=10][0m
+[0m✱ [0mGrep "zip_data|self\.zip_data"[90m in vendors/OCHRE · 11 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/defaults/ZIP Parameters.csv
+[0m→ [0mRead vendors/OCHRE/test/test_equipment/test_equipment.py[90m [offset=160, limit=50][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Equipment.py[90m [offset=65, limit=20][0m
+[0m
+[0m$ [0mpython3 << 'PYEOF'
+# Compute all Z+I+P sums and check for pf conversion issues
+from math import tan, acos
+
+data = {
+    "ashp_heater": (0.72, -0.98, 1.26, 14.78, -23.71, 9.93, 0.84),
+    "mshp_heater": (0.72, -0.98, 1.26, 14.78, -23.71, 9.93, 0.84),
+    "electric_baseboard": (0.92, 0.10, -0.02, 0.15, 0.86, -0.01, 1.0),
+    "electric_furnace": (0.92, 0.10, -0.02, 0.15, 0.86, -0.01, 1.0),
+    "electric_boiler": (0.92, 0.10, -0.02, 0.15, 0.86, -0.01, 1.0),
+    "air_conditioner": (1.60, -2.69, 2.09, 12.53, -21.11, 9.58, 0.96),
+    "ashp_cooler": (1.60, -2.69, 2.09, 12.53, -21.11, 9.58, 0.96),
+    "mshp_cooler": (1.60, -2.69, 2.09, 12.53, -21.11, 9.58, 0.96),
+    "room_ac": (1.60, -2.69, 2.09, 12.53, -21.11, 9.58, 0.96),
+    "ideal_cooler": (0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0),
+    "ideal_heater": (0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0),
+    "electric_resistance_water_heater": (1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0),
+    "heat_pump_water_heater": (0.825, -0.44, 0.615, 7.465, -11.425, 4.96, 0.97),
+    "clothes_washer": (0.05, 0.31, 0.64, -0.56, 2.20, -0.64, 0.65),
+    "clothes_dryer": (1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.99),
+    "dishwasher": (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.99),
+    "refrigerator": (5.03, -8.48, 4.45, 17.44, -28.62, 12.18, 0.80),
+    "freezer": (5.03, -8.48, 4.45, 17.44, -28.62, 12.18, 0.80),
+    "range": (1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0),
+    "lighting": (0.54, 0.50, -0.04, 0.46, 0.51, 0.03, 1.0),
+    "exterior_lighting": (0.54, 0.50, -0.04, 0.46, 0.51, 0.03, 1.0),
+    "mels": (0.36147, -0.08583, 0.72436, 8.39985, -14.1677, 6.76785, 0.80),
+    "ventilation_fan": (0.26, 0.90, -0.16, 0.50, 0.62, -0.12, 0.87),
+    "ceiling_fan": (0.26, 0.90, -0.16, 0.50, 0.62, -0.12, 0.87),
+    "pool_heater": (0.92, 0.10, -0.02, 0.15, 0.86, -0.01, 1.0),
+    "pool_pump": (0.72, -0.98, 1.26, 14.78, -23.71, 9.93, 0.84),
+    "spa_heater": (0.92, 0.10, -0.02, 0.15, 0.86, -0.01, 1.0),
+    "spa_pump": (0.72, -0.98, 1.26, 14.78, -23.71, 9.93, 0.84),
+    "well_pump": (0.72, -0.98, 1.26, 14.78, -23.71, 9.93, 0.84),
+    "dehumidifier": (1.60, -2.69, 2.09, 12.53, -21.11, 9.58, 0.96),
+}
+
+print("=== Z+I+P Sum Verification ===")
+bad_p = 0
+bad_q = 0
+for name, (zp, ip, pp, zq, iq, pq, pf) in sorted(data.items()):
+    sum_p = zp + ip + pp
+    sum_q = zq + iq + pq
+    p_ok = abs(sum_p - 1.0) < 1e-12
+    q_ok = abs(sum_q - 1.0) < 1e-12
+    if not p_ok or not q_ok:
+        print(f"  FAIL: {name}  P={sum_p:.10f}  Q={sum_q:.10f}")
+        if not p_ok: bad_p += 1
+        if not q_ok: bad_q += 1
+print(f"  P sum violations: {bad_p}, Q sum violations: {bad_q}")
+
+print("\n=== PF Interpretation Comparison ===")
+print("  Scheduled load: Q = P * pf (raw scalar)")
+print("  Water heater:   Q = P * tan(acos(pf))")
+for name, (zp, ip, pp, zq, iq, pq, pf) in sorted(data.items()):
+    raw = pf
+    correct = tan(acos(min(max(pf, 0.0001), 0.9999)))
+    diff = abs(raw - correct)
+    if diff > 0.001:
+        marker = " *** DIFF" if diff > 0.05 else ""
+        print(f"  {name:35s} pf={pf:.2f}  raw={raw:.4f}  tan(acos(pf))={correct:.4f}  Δ={diff:.4f}{marker}")
+
+print("\n=== OCHRE vs HARES at v=0.95 pu ===")
+for name in ["ashp_heater", "air_conditioner", "refrigerator"]:
+    zp, ip, pp, zq, iq, pq, pf = data[name]
+    v = 0.95
+    # HARES WH: real→real, reactive→reactive
+    hares_real = zp*v*v + ip*v + pp
+    hares_react = zq*v*v + iq*v + pq
+    # OCHRE: real→reactive coefficients, reactive→real coefficients
+    ochre_real = zq*v*v + iq*v + pq
+    ochre_react = zp*v*v + ip*v + pp
+    print(f"  {name}: HARES real={hares_real:.4f} react={hares_react:.4f} | OCHRE real={ochre_real:.4f} react={ochre_react:.4f}")
+
+print("\n=== Large-Magnitude Coefficients (>2 magnitude) ===")
+for name, (zp, ip, pp, zq, iq, pq, pf) in sorted(data.items()):
+    max_abs = max(abs(zp), abs(ip), abs(pp), abs(zq), abs(iq), abs(pq))
+    if max_abs > 2:
+        print(f"  {name:35s} max|coeff|={max_abs:.1f}  zp={zp}  ip={ip}  pp={pp}  zq={zq}  iq={iq}  pq={pq}")
+PYEOF
+=== Z+I+P Sum Verification ===
+  P sum violations: 0, Q sum violations: 0
+
+=== PF Interpretation Comparison ===
+  Scheduled load: Q = P * pf (raw scalar)
+  Water heater:   Q = P * tan(acos(pf))
+  air_conditioner                     pf=0.96  raw=0.9600  tan(acos(pf))=0.2917  Δ=0.6683 *** DIFF
+  ashp_cooler                         pf=0.96  raw=0.9600  tan(acos(pf))=0.2917  Δ=0.6683 *** DIFF
+  ashp_heater                         pf=0.84  raw=0.8400  tan(acos(pf))=0.6459  Δ=0.1941 *** DIFF
+  ceiling_fan                         pf=0.87  raw=0.8700  tan(acos(pf))=0.5667  Δ=0.3033 *** DIFF
+  clothes_dryer                       pf=0.99  raw=0.9900  tan(acos(pf))=0.1425  Δ=0.8475 *** DIFF
+  clothes_washer                      pf=0.65  raw=0.6500  tan(acos(pf))=1.1691  Δ=0.5191 *** DIFF
+  dehumidifier                        pf=0.96  raw=0.9600  tan(acos(pf))=0.2917  Δ=0.6683 *** DIFF
+  dishwasher                          pf=0.99  raw=0.9900  tan(acos(pf))=0.1425  Δ=0.8475 *** DIFF
+  electric_baseboard                  pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  electric_boiler                     pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  electric_furnace                    pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  electric_resistance_water_heater    pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  exterior_lighting                   pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  freezer                             pf=0.80  raw=0.8000  tan(acos(pf))=0.7500  Δ=0.0500 *** DIFF
+  heat_pump_water_heater              pf=0.97  raw=0.9700  tan(acos(pf))=0.2506  Δ=0.7194 *** DIFF
+  ideal_cooler                        pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  ideal_heater                        pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  lighting                            pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  mels                                pf=0.80  raw=0.8000  tan(acos(pf))=0.7500  Δ=0.0500 *** DIFF
+  mshp_cooler                         pf=0.96  raw=0.9600  tan(acos(pf))=0.2917  Δ=0.6683 *** DIFF
+  mshp_heater                         pf=0.84  raw=0.8400  tan(acos(pf))=0.6459  Δ=0.1941 *** DIFF
+  pool_heater                         pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  pool_pump                           pf=0.84  raw=0.8400  tan(acos(pf))=0.6459  Δ=0.1941 *** DIFF
+  range                               pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  refrigerator                        pf=0.80  raw=0.8000  tan(acos(pf))=0.7500  Δ=0.0500 *** DIFF
+  room_ac                             pf=0.96  raw=0.9600  tan(acos(pf))=0.2917  Δ=0.6683 *** DIFF
+  spa_heater                          pf=1.00  raw=1.0000  tan(acos(pf))=0.0141  Δ=0.9859 *** DIFF
+  spa_pump                            pf=0.84  raw=0.8400  tan(acos(pf))=0.6459  Δ=0.1941 *** DIFF
+  ventilation_fan                     pf=0.87  raw=0.8700  tan(acos(pf))=0.5667  Δ=0.3033 *** DIFF
+  well_pump                           pf=0.84  raw=0.8400  tan(acos(pf))=0.6459  Δ=0.1941 *** DIFF
+
+=== OCHRE vs HARES at v=0.95 pu ===
+  ashp_heater: HARES real=0.9788 react=0.7444 | OCHRE real=0.7444 react=0.9788
+  air_conditioner: HARES real=0.9785 react=0.8338 | OCHRE real=0.8338 react=0.9785
+  refrigerator: HARES real=0.9336 react=0.7306 | OCHRE real=0.7306 react=0.9336
+
+=== Large-Magnitude Coefficients (>2 magnitude) ===
+  air_conditioner                     max|coeff|=21.1  zp=1.6  ip=-2.69  pp=2.09  zq=12.53  iq=-21.11  pq=9.58
+  ashp_cooler                         max|coeff|=21.1  zp=1.6  ip=-2.69  pp=2.09  zq=12.53  iq=-21.11  pq=9.58
+  ashp_heater                         max|coeff|=23.7  zp=0.72  ip=-0.98  pp=1.26  zq=14.78  iq=-23.71  pq=9.93
+  clothes_washer                      max|coeff|=2.2  zp=0.05  ip=0.31  pp=0.64  zq=-0.56  iq=2.2  pq=-0.64
+  dehumidifier                        max|coeff|=21.1  zp=1.6  ip=-2.69  pp=2.09  zq=12.53  iq=-21.11  pq=9.58
+  freezer                             max|coeff|=28.6  zp=5.03  ip=-8.48  pp=4.45  zq=17.44  iq=-28.62  pq=12.18
+  heat_pump_water_heater              max|coeff|=11.4  zp=0.825  ip=-0.44  pp=0.615  zq=7.465  iq=-11.425  pq=4.96
+  mels                                max|coeff|=14.2  zp=0.36147  ip=-0.08583  pp=0.72436  zq=8.39985  iq=-14.1677  pq=6.76785
+  mshp_cooler                         max|coeff|=21.1  zp=1.6  ip=-2.69  pp=2.09  zq=12.53  iq=-21.11  pq=9.58
+  mshp_heater                         max|coeff|=23.7  zp=0.72  ip=-0.98  pp=1.26  zq=14.78  iq=-23.71  pq=9.93
+  pool_pump                           max|coeff|=23.7  zp=0.72  ip=-0.98  pp=1.26  zq=14.78  iq=-23.71  pq=9.93
+  refrigerator                        max|coeff|=28.6  zp=5.03  ip=-8.48  pp=4.45  zq=17.44  iq=-28.62  pq=12.18
+  room_ac                             max|coeff|=21.1  zp=1.6  ip=-2.69  pp=2.09  zq=12.53  iq=-21.11  pq=9.58
+  spa_pump                            max|coeff|=23.7  zp=0.72  ip=-0.98  pp=1.26  zq=14.78  iq=-23.71  pq=9.93
+  well_pump                           max|coeff|=23.7  zp=0.72  ip=-0.98  pp=1.26  zq=14.78  iq=-23.71  pq=9.93
+[0m
+Now I have all the information needed. Let me verify one more detail and compute the arithmetic checks, then write the review.
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/defaults-data
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/defaults-data/defdata-07-zip-load-parameters.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/defaults-data/defdata-07-zip-load-parameters.md`.
+
+**Summary of findings**:
+
+- **2 High**: (1) Scheduled load reactive power formula uses `pf` as raw scalar instead of `tan(acos(pf))` — causes e.g. resistive loads to report Q=P instead of Q=0. (2) HARES coefficient assignment (real→real, reactive→reactive) diverges from OCHRE (which swaps them), causing 15–24% power differences at non-nominal voltages — undocumented.
+
+- **2 Medium**: Compressor pf values (0.96–0.97) are at the top of the range for modern equipment but may not represent older stock. No frequency sensitivity parameters.
+
+- **3 Low**: All Z+I+P sums verified at exactly 1.0 (no violations). Dishwasher has asymmetric real (constant-impedance) vs reactive (constant-power) ZIP parameters. No load-time validation in the deserialization struct.

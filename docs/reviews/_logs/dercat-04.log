@@ -1,0 +1,37 @@
+# opencode log for dercat-04
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/ev/catalog.rs
+[0m✱ [0mGlob "vendors/OCHRE/ochre/Equipment/**/*.py"[90m 11 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*.cc"[90m 100 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/EV.py
+[0m✱ [0mGrep "[Ee]lectric.*[Vv]ehicle|[Ee]v |[Ee]v_[Ss]pec|[Bb]attery.*[Cc]apacity|[Cc]harg.*[Pp]ower|phev|bev|VehicleSpec"[90m in vendors/EnergyPlus/src/EnergyPlus · 241 matches[0m
+[0m✱ [0mGrep "VehicleType|BatteryChemistry"[90m in crates/hares-types/src · 35 matches[0m
+Let me check the vendor EV reference files and search EnergyPlus for EV-related content.
+[0m• [0mResearch EV vehicle specs[90m General Agent[0m
+[0m✓ [0mResearch EV vehicle specs[90m General Agent[0m
+[0m✱ [0mGlob "docs/reviews/der-catalog/**/*.md"[90m 1 match[0m
+[0m→ [0mRead docs/reviews/der-catalog/dercat-03-battery-thermal-config.md
+[0m
+[0m← [0mWrite docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md
+Wrote file successfully.
+[0m
+Now I have all the data needed. Let me compile the findings and write the review.
+The review has been written to `/Users/rich/source/HARES/docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md`.
+
+**12 findings** across 13 vehicles:
+
+| Severity | Count | Key Issues |
+|----------|-------|-----------|
+| Critical | 3 | System-wide efficiency error (capacity/range omits charging losses, 10-20% underprediction); IONIQ 5 range 303 vs EPA ~260; Mach-E OBC 11.5 kW vs actual 10.5 kW |
+| High | 3 | Nissan Leaf S OBC 6.6 vs 3.3 kW; Jeep 4xe range 25 vs EPA 21 mi; RAV4 Prime OBC 3.3 vs 6.6 kW |
+| Medium | 3 | Tesla & Mach-E capacities out of date; Tesla chemistry ambiguities; Model Y SR LFP specs dated |
+| Low | 3 | Mach-E capacity minor deviations; Lightning optional OBC not noted; no model year field |

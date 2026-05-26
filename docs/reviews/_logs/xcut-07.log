@@ -39,3 +39,15 @@ xcut-04-enduse-string-consistency.md
 xcut-05-postcard-serialization-stability.md
 xcut-08-nd-interpolation-extrapolation.md
 [0m
+[0m← [0mWrite docs/reviews/cross-cutting/xcut-07-simerror-panic-wrapper.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/cross-cutting/xcut-07-simerror-panic-wrapper.md`.
+
+**Summary of key findings**:
+
+- **No custom panic hook**: The default Rust panic hook prints backtraces to stderr for every dwelling panic, creating noise in fleet logs and missing file/line/column metadata in captured panic messages.
+- **`AssertUnwindSafe` on `&mut Dwelling`**: After a panic is caught, the damaged `Dwelling` is retried on every subsequent step — no mechanism exists to mark a dwelling as permanently failed and skip it.
+- **No timestep in `SimError::Panic`**: The fleet-level error type carries `bldg_id` and `message` but lacks `current_step` or structured `error_code`, making temporal clustering and programmatic triage of panics difficult.
+
+9 findings total: 3 high, 4 medium, 2 low.

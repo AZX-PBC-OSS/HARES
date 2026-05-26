@@ -1112,4 +1112,309 @@ mod tests {
              solar={solar}, zero-solar={zero_solar}"
         );
     }
+
+    // ── Full-pipeline integration tests (parse → resolve → autosize) ────
+
+    use hares_io::defaults::DefaultsStore;
+    use hares_io::hpxml::building::parse_building;
+    use hares_io::hpxml::equipment::resolve_equipment;
+
+    /// Build a minimal HPXML document with a gas furnace that omits
+    /// `<HeatingCapacity>` but includes efficiency and building metadata.
+    fn furnace_without_heating_capacity_hpxml() -> &'static str {
+        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+          <Latitude>39.74</Latitude>
+          <Longitude>-104.87</Longitude>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems>
+        <HVAC>
+          <HeatingSystem>
+            <SystemIdentifier id="fur1"/>
+            <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+            <HeatingSystemType><Furnace/></HeatingSystemType>
+            <AnnualHeatingEfficiency>
+              <Units>AFUE</Units>
+              <Value>0.92</Value>
+            </AnnualHeatingEfficiency>
+          </HeatingSystem>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#
+    }
+
+    /// Build a minimal HPXML document with a gas furnace that includes an
+    /// explicit `<HeatingCapacity>` — happy-path control for the autosizing
+    /// pipeline test.
+    fn furnace_with_heating_capacity_hpxml() -> &'static str {
+        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+          <Latitude>39.74</Latitude>
+          <Longitude>-104.87</Longitude>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems>
+        <HVAC>
+          <HeatingSystem>
+            <SystemIdentifier id="fur1"/>
+            <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+            <HeatingSystemType><Furnace/></HeatingSystemType>
+            <AnnualHeatingEfficiency>
+              <Units>AFUE</Units>
+              <Value>0.92</Value>
+            </AnnualHeatingEfficiency>
+            <HeatingCapacity units="Btuh">60000</HeatingCapacity>
+          </HeatingSystem>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#
+    }
+
+    /// Resolve equipment from an HPXML string. Returns the gas furnace spec
+    /// (the first HVAC spec in the resolved list).
+    fn resolve_furnace_spec(xml: &str) -> EquipmentSpec {
+        let building = parse_building(xml).expect("HPXML must parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("equipment must resolve");
+        specs
+            .into_iter()
+            .find(|s| s.name == "Gas Furnace")
+            .expect("Gas Furnace must be in resolved specs")
+    }
+
+    #[test]
+    fn autosize_pipeline_parse_to_capacity_with_epw_conditions() {
+        let xml = furnace_without_heating_capacity_hpxml();
+        let spec = resolve_furnace_spec(xml);
+
+        // After resolve: autosize flag must be set, no capacity, no typed config.
+        assert!(
+            spec.parameters
+                .get("autosize_heating")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "autosize_heating must be true when HeatingCapacity is omitted"
+        );
+        assert!(
+            !spec.parameters.contains_key("heating_capacity_w"),
+            "heating_capacity_w must be absent before autosizing"
+        );
+        assert!(
+            spec.typed_config.is_none(),
+            "typed_config must be None before autosizing"
+        );
+
+        // Build a 1R1C solver and run autosizing with EPW-derived design conditions.
+        let env = one_zone_env(20.0, -5.0);
+        let thermal = build_1r1c_solver(&env, 20.0);
+        let building = minimal_building();
+        let ctx = AutosizeContext {
+            design_conditions: Some(DesignConditions {
+                heating_design_db_c: -15.0,
+                cooling_design_db_c: 38.0,
+            }),
+            weather_lat: 39.74,
+            weather_lon: -104.87,
+            duct_params: DuctDseParams::default(),
+        };
+
+        let mut specs = vec![spec];
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("heating_capacity_w must be set after autosizing");
+
+        // Autosize flag must be consumed.
+        assert!(
+            !result.parameters.contains_key("autosize_heating"),
+            "autosize_heating must be removed after autosizing"
+        );
+
+        // Typed config must be rebuilt.
+        assert!(
+            result.typed_config.is_some(),
+            "typed_config must be Some after autosizing"
+        );
+
+        // Capacity must be positive.
+        assert!(
+            capacity_w > 0.0,
+            "autosized capacity {capacity_w} must be positive"
+        );
+
+        // Plausible range for this building: ΔT = 21.1 - (-15.0) = 36.1 K,
+        // UA = 20 W/K, raw ≈ 722 W, after 1.4x ≈ 1010 W.
+        let min_plausible = 100.0;
+        let max_plausible = 50_000.0;
+        assert!(
+            capacity_w > min_plausible,
+            "autosized capacity {capacity_w} W below plausible minimum {min_plausible} W"
+        );
+        assert!(
+            capacity_w < max_plausible,
+            "autosized capacity {capacity_w} W above plausible maximum {max_plausible} W"
+        );
+
+        // Capacity should scale with ΔT: computed value matches raw × Manual S factor.
+        let raw_capacity = thermal
+            .autosize_capacity(ZONE, DEFAULT_HEATING_SETPOINT_C, -15.0)
+            .abs();
+        let expected = raw_capacity * HEATING_OVERSIZE_FACTOR;
+        assert!(
+            (capacity_w - expected).abs() < 1e-6,
+            "capacity {capacity_w} should equal raw {raw_capacity} × Manual S factor {HEATING_OVERSIZE_FACTOR} = {expected}"
+        );
+    }
+
+    #[test]
+    fn autosize_pipeline_parse_to_capacity_with_ashrae_152_fallback() {
+        let xml = furnace_without_heating_capacity_hpxml();
+        let spec = resolve_furnace_spec(xml);
+
+        assert!(
+            spec.parameters
+                .get("autosize_heating")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "autosize_heating must be true when HeatingCapacity is omitted"
+        );
+
+        // Build a 1R1C solver and run autosizing with design_conditions = None
+        // to exercise the ASHRAE 152 climate station fallback.
+        let env = one_zone_env(20.0, -5.0);
+        let thermal = build_1r1c_solver(&env, 20.0);
+        let building = minimal_building();
+        let ctx = AutosizeContext {
+            design_conditions: None,
+            weather_lat: 39.74,
+            weather_lon: -104.87,
+            duct_params: DuctDseParams::default(),
+        };
+
+        let mut specs = vec![spec];
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("heating_capacity_w must be set after autosizing via ASHRAE 152 fallback");
+
+        assert!(
+            !result.parameters.contains_key("autosize_heating"),
+            "autosize_heating must be removed after autosizing"
+        );
+        assert!(
+            result.typed_config.is_some(),
+            "typed_config must be Some after autosizing via ASHRAE 152 fallback"
+        );
+        assert!(
+            capacity_w > 0.0,
+            "autosized capacity {capacity_w} must be positive with ASHRAE 152 fallback"
+        );
+
+        // Denver ASHRAE 152 heating design temp is 3 °F (≈ -16 °C).
+        // ΔT = 21.1 − (−16.1) ≈ 37 K, UA = 20 W/K → raw ≈ 740 W, after 1.4× ≈ 1040 W.
+        let min_plausible = 100.0;
+        let max_plausible = 50_000.0;
+        assert!(
+            capacity_w > min_plausible,
+            "ASHRAE 152 fallback capacity {capacity_w} W below plausible minimum {min_plausible} W"
+        );
+        assert!(
+            capacity_w < max_plausible,
+            "ASHRAE 152 fallback capacity {capacity_w} W above plausible maximum {max_plausible} W"
+        );
+    }
+
+    #[test]
+    fn autosize_pipeline_explicit_capacity_skips_autosizing() {
+        let xml = furnace_with_heating_capacity_hpxml();
+        let spec = resolve_furnace_spec(xml);
+
+        // With explicit HeatingCapacity, autosize should NOT be flagged.
+        assert!(
+            !spec
+                .parameters
+                .get("autosize_heating")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "autosize_heating must be false when HeatingCapacity is explicitly provided"
+        );
+
+        // The explicit capacity is stored in params by the resolver.
+        let capacity_before = spec
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("heating_capacity_w must be present when capacity is explicit");
+
+        // The typed config should already be populated.
+        assert!(
+            spec.typed_config.is_some(),
+            "typed_config must be Some when capacity is explicitly provided"
+        );
+
+        // Running autosize should not change the spec (no autosize flags
+        // means the spec is skipped entirely).
+        let env = one_zone_env(20.0, -5.0);
+        let thermal = build_1r1c_solver(&env, 20.0);
+        let building = minimal_building();
+        let ctx = AutosizeContext {
+            design_conditions: Some(DesignConditions {
+                heating_design_db_c: -15.0,
+                cooling_design_db_c: 38.0,
+            }),
+            weather_lat: 39.74,
+            weather_lon: -104.87,
+            duct_params: DuctDseParams::default(),
+        };
+
+        let mut specs = vec![spec];
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+
+        let result = &specs[0];
+        assert!(
+            !result.parameters.contains_key("autosize_heating"),
+            "autosize_heating was not set, must not appear after autosizing"
+        );
+        // Explicit capacity must still be present and unchanged.
+        let capacity_after = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("heating_capacity_w must still be present after autosizing");
+        assert!(
+            (capacity_after - capacity_before).abs() < 1e-6,
+            "explicit capacity must be unchanged by autosizing"
+        );
+    }
 }

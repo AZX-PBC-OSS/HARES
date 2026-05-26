@@ -33,3 +33,25 @@ Let me dig deeper into the specific Physics, Envelope, and other variant usages 
 [0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [limit=20, offset=498][0m
 [0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=30, offset=1646][0m
 [0m→ [0mRead crates/hares-core/src/invariants.rs[90m [limit=200][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/cross-cutting
+(no output)
+[0m
+[0m✱ [0mGrep "HaresError::"[90m in crates/hares-physics · 0 matches[0m
+[0m✱ [0mGrep "negative|absolute.temp|conservation|mass.flow|violat"[90m in crates/hares-physics · 21 matches[0m
+[0m✱ [0mGrep "reqwest|hyper |hyper::|ureq|isahc|http::|HttpError|Network"[90m 61 matches[0m
+[0m✱ [0mGrep "panic.*HaresError|\.expect\(|\.unwrap\(|debug_assert!"[90m in crates/hares-physics · 63 matches[0m
+[0m→ [0mRead crates/hares-types/src/error.rs[90m [offset=55, limit=20][0m
+Now I have all the data needed. Let me write the review.
+[0m
+[0m← [0mWrite docs/reviews/cross-cutting/xcut-06-hares-error-variant-usage.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/cross-cutting/xcut-06-hares-error-variant-usage.md`.
+
+Key findings:
+
+- **CRITICAL**: All 6 production uses of `HaresError::Physics` are misattributed — config validation, type conversions, and logic errors, not genuine physics violations. Zero genuine physics errors exist in the codebase using this variant.
+- **HIGH**: The `hares-physics` crate uses `debug_assert!`/`unwrap()` instead of returning `HaresError::Physics`, meaning physically impossible conditions silently propagate in release builds.
+- **MEDIUM**: `Dwelling` variant missing from JSON round-trip test; InvariantViolation lacks the documented "warning in production" behavior; Display messages lack file/line context.
+- **LOW**: Equipment and Envelope variants have some borderline usages outside their respective crates; URDB errors bypass HaresError entirely.

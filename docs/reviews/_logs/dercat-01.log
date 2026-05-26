@@ -1,0 +1,60 @@
+# opencode log for dercat-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/battery/catalog.rs
+[0m• [0mExplore vendor battery refs[90m Explore Agent[0m
+[0m✓ [0mExplore vendor battery refs[90m Explore Agent[0m
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"Enphase IQ 5P datasheet specifications capacity kWh power efficiency 2024 2025","max_results":5}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"Enphase IQ Battery 10C datasheet specifications capacity continuous power kW specifications","max_results":5}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"FranklinWH aPower 2 specifications 15 kWh datasheet continuous power round trip efficiency","max_results":5}
+Now let me research the manufacturer datasheets to verify key specifications.
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"LG RESU 10H datasheet specifications total capacity kWh chemistry cell type NMC round trip efficiency","max_results":5}
+The web search returned no results. Let me try direct fetches of manufacturer datasheets.
+[0m✗ [0mWebFetch https://www.tesla.com/sites/default/files/pdfs/powerwall/Powerwall_3_Datasheet.pdf failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://www.tesla.com/sites/default/files/pdfs/powerwall/Powerwall_3_Datasheet.pdf)
+[0m✗ [0mWebFetch https://www.franklinwh.com/sites/default/files/2024-11/aPower2_Datasheet_EN.pdf failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://www.franklinwh.com/sites/default/files/2024-11/aPower2_Datasheet_EN.pdf)
+[0m✗ [0mWebFetch https://enphase.com/sites/default/files/downloads/support/IQ-Battery-5P-DS-EN-US.pdf failed
+[91m[1mError: [0mTransport error (GET https://enphase.com/sites/default/files/downloads/support/IQ-Battery-5P-DS-EN-US.pdf)
+[0m✗ [0mWebFetch https://www.tesla.com/powerwall failed
+[91m[1mError: [0mStatusCode: non 2xx status code (403 GET https://www.tesla.com/powerwall)
+[0m✗ [0mWebFetch https://www.franklinwh.com/apower2/ failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://www.franklinwh.com/apower2/)
+[0m% [0mWebFetch https://enphase.com/store/storage/iq-battery-5p
+[0m% [0mWebFetch https://www.lgessbattery.com/us/main/main.lg?lang=en_US
+[0m% [0mWebFetch https://enphase.com/store/storage/iq-battery-10c
+[0m✗ [0mWebFetch https://www4.enphase.com/sites/default/files/IQ-Battery-5P-DS-EN-US.pdf failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://www4.enphase.com/sites/default/files/IQ-Battery-5P-DS-EN-US.pdf)
+[0m✗ [0mWebFetch https://www.solaredge.com/sites/default/files/solaredge-home-battery-datasheet.pdf failed
+[91m[1mError: [0mStatusCode: non 2xx status code (403 GET https://www.solaredge.com/sites/default/files/solaredge-home-battery-datasheet.pdf)
+[0m✗ [0mWebFetch https://www.franklinwh.com/product/apower failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://www.franklinwh.com/product/apower)
+[0m✗ [0mWebFetch https://www.tesla.com/support/energy/powerwall/learn/how-powerwall-works failed
+[91m[1mError: [0mStatusCode: non 2xx status code (403 GET https://www.tesla.com/support/energy/powerwall/learn/how-powerwall-works)
+[0m→ [0mRead crates/hares-types/src/lib.rs
+[0m✗ [0mWebFetch https://www.solarreviews.com/blog/tesla-powerwall-3-vs-powerwall-2 failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://www.solarreviews.com/blog/tesla-powerwall-3-vs-powerwall-2)
+Now let me fetch a couple more datasheets for verification, and check the RTE values more carefully.
+[0m✱ [0mGrep "BatteryChemistry"[90m 110 matches[0m
+[0m✱ [0mGrep "pub enum BatteryChemistry"[90m 1 match[0m
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=255, limit=45][0m
+[0m✱ [0mGrep "min_charge_temp_c|full_power_temp_c"[90m 110 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/der-catalog
+(no output)
+[0m
+Now I have all the data needed. Let me create the directory and write the review report.
+[0m← [0mWrite docs/reviews/der-catalog/dercat-01-battery-spec-catalog.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/der-catalog/dercat-01-battery-spec-catalog.md`.
+
+**Summary**: 9 findings across 11 products. The most impactful discovery is that Enphase IQ 5P, IQ 5P x2, and IQ 10C all have `round_trip_efficiency = 0.90` (90%), while manufacturer datasheets specify up to 96%. Since `cell_resistance_ohm` is derived from RTE (line 108-110), the 6-ppt gap causes a 4x inflation of internal resistance for these products, over-predicting ohmic losses and under-reporting usable energy — both directly relevant to NEM 3.0 dispatch constraints.

@@ -16,3 +16,18 @@
 [0m→ [0mRead defaults/envelope/Envelope Boundary Types.csv
 [0m→ [0mRead defaults/envelope/Envelope Materials.csv[90m [offset=795][0m
 Let me read the remaining lines of the Materials CSV:
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/defaults-data
+(no output)
+[0m
+Now I have all the data I need to write the report. Let me compile my findings and write the output.
+[0m← [0mWrite docs/reviews/defaults-data/defdata-01-envelope-materials-csv.md
+Wrote file successfully.
+[0m
+The review is complete. Results written to `docs/reviews/defaults-data/defdata-01-envelope-materials-csv.md`.
+
+Summary of 8 findings:
+- **1 Critical**: Specific heat column header mislabeled (kJ/kg·K vs actual J/kg·K)
+- **3 High**: R/t/k inconsistency in STUD AND CAVITY materials, missing common materials (XPS, polyiso, spray foam, etc.), HPXML vocabulary incompatibility
+- **2 Medium**: Gypsum board thickness inconsistency, small systematic R deviations
+- **2 Low**: Inconsistent material naming, "Ficticious" typo
