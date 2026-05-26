@@ -90,6 +90,16 @@ pub enum HvacEquipmentType {
     /// Ground-source heat pump cooling coil. Source-side temperature is entering water/ground
     /// temperature. No crankcase heater (compressor is indoors). Uses central-cooling airflow baseline.
     GshpHeatPumpCooling,
+    /// Water-source heat pump heating coil. Source-side temperature is entering water from a
+    /// water loop (boiler/condenser loop) or groundwater/surface water. No defrost.
+    /// Supply air temp follows ASHP HP-only profile: the water-to-air coil produces similar
+    /// discharge temperatures to air-source DX regardless of source medium. ASHRAE HoF 2021
+    /// Ch. 34 (Geothermal Energy): water-to-air heat pumps typically deliver 32-49°C supply air.
+    WshpHeatPumpHeating,
+    /// Water-source heat pump cooling coil. Source-side temperature is entering water from a
+    /// water loop or groundwater. No crankcase heater (compressor is indoors). Uses central-cooling
+    /// airflow baseline.
+    WshpHeatPumpCooling,
     Baseboard,
     Other,
 }
@@ -185,8 +195,10 @@ impl HvacEquipmentType {
             // produces similar discharge temperatures to air-source DX regardless of
             // source medium. ASHRAE HoF 2021 Ch. 34 (Geothermal Energy): water-to-air
             // heat pumps typically deliver 32–49 °C supply air.
-            Self::GshpHeatPumpHeating => 32.2 + 0.15 * (outdoor_temp_c - 8.3),
-            Self::GshpHeatPumpCooling => 40.6,
+            Self::GshpHeatPumpHeating | Self::WshpHeatPumpHeating => {
+                32.2 + 0.15 * (outdoor_temp_c - 8.3)
+            }
+            Self::GshpHeatPumpCooling | Self::WshpHeatPumpCooling => 40.6,
             Self::Baseboard => 0.0,
             Self::Other => 40.6,
         }
@@ -194,7 +206,9 @@ impl HvacEquipmentType {
 
     pub fn default_airflow_m3_s_per_w(self) -> f64 {
         match self {
-            Self::AcCooler | Self::GshpHeatPumpCooling => AIRFLOW_CENTRAL_AC_M3_S_PER_W,
+            Self::AcCooler | Self::GshpHeatPumpCooling | Self::WshpHeatPumpCooling => {
+                AIRFLOW_CENTRAL_AC_M3_S_PER_W
+            }
             Self::MiniSplitCool => AIRFLOW_MSHP_COOLING_M3_S_PER_W,
             Self::GasFurnace
             | Self::ElectricFurnace
@@ -202,6 +216,7 @@ impl HvacEquipmentType {
             | Self::AshpHeatPumpAux
             | Self::MiniSplitHeat
             | Self::GshpHeatPumpHeating
+            | Self::WshpHeatPumpHeating
             | Self::Baseboard
             | Self::Other => AIRFLOW_HEATING_M3_S_PER_W,
         }
@@ -217,6 +232,7 @@ impl HvacEquipmentType {
                 | Self::AshpHeatPumpAux
                 | Self::MiniSplitHeat
                 | Self::GshpHeatPumpHeating
+                | Self::WshpHeatPumpHeating
                 | Self::Baseboard
         )
     }
@@ -352,9 +368,9 @@ impl HvacEquipment {
                 supply_air_temp_c: equipment_type
                     .default_supply_air_temp_c(DEFAULT_INIT_OUTDOOR_TEMP_C),
                 airflow_m3_s_per_w: match equipment_type {
-                    HvacEquipmentType::AcCooler | HvacEquipmentType::GshpHeatPumpCooling => {
-                        AIRFLOW_CENTRAL_AC_M3_S_PER_W
-                    }
+                    HvacEquipmentType::AcCooler
+                    | HvacEquipmentType::GshpHeatPumpCooling
+                    | HvacEquipmentType::WshpHeatPumpCooling => AIRFLOW_CENTRAL_AC_M3_S_PER_W,
                     HvacEquipmentType::MiniSplitCool => AIRFLOW_MSHP_COOLING_M3_S_PER_W,
                     HvacEquipmentType::GasFurnace
                     | HvacEquipmentType::ElectricFurnace
@@ -362,6 +378,7 @@ impl HvacEquipment {
                     | HvacEquipmentType::AshpHeatPumpAux
                     | HvacEquipmentType::MiniSplitHeat
                     | HvacEquipmentType::GshpHeatPumpHeating
+                    | HvacEquipmentType::WshpHeatPumpHeating
                     | HvacEquipmentType::Baseboard
                     | HvacEquipmentType::Other => AIRFLOW_HEATING_M3_S_PER_W,
                 },

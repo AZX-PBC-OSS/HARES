@@ -73,6 +73,7 @@ enum HeaterVariant {
     Ashp,
     Minisplit,
     Gshp,
+    Wshp,
 }
 
 pub struct ASHPHeater {
@@ -338,6 +339,24 @@ impl GshpHeater {
     }
 }
 
+pub struct WshpHeater {
+    core: HeatPumpHeaterCore,
+}
+
+impl WshpHeater {
+    #[must_use]
+    pub fn new(config: EquipmentConfig) -> Self {
+        Self {
+            core: HeatPumpHeaterCore::new(config, HeaterVariant::Wshp),
+        }
+    }
+
+    /// Return the heating coil's runtime fraction from the most recent step.
+    pub fn last_heating_rtf(&self) -> f64 {
+        self.core.last_heating_rtf
+    }
+}
+
 impl Equipment for HeatPumpHeaterCore {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
@@ -388,6 +407,7 @@ impl Equipment for HeatPumpHeaterCore {
 delegate_equipment!(ASHPHeater, core);
 delegate_equipment!(MinisplitHeater, core);
 delegate_equipment!(GshpHeater, core);
+delegate_equipment!(WshpHeater, core);
 
 impl HeatPumpHeaterCore {
     fn new(config: EquipmentConfig, variant: HeaterVariant) -> Self {
@@ -396,11 +416,13 @@ impl HeatPumpHeaterCore {
             HeaterVariant::Ashp => "ASHP Heater",
             HeaterVariant::Minisplit => "MSHP Heater",
             HeaterVariant::Gshp => "GSHP Heater",
+            HeaterVariant::Wshp => "WSHP Heater",
         };
         let default_backup = match variant {
             HeaterVariant::Ashp => DEFAULT_BACKUP_CAPACITY_W,
             HeaterVariant::Minisplit => 0.0,
             HeaterVariant::Gshp => 0.0,
+            HeaterVariant::Wshp => 0.0,
         };
         let backup_capacity_w = config
             .typed::<HeatPumpHeaterConfig>()
@@ -426,6 +448,7 @@ impl HeatPumpHeaterCore {
             }
             HeaterVariant::Minisplit => HvacEquipmentType::MiniSplitHeat,
             HeaterVariant::Gshp => HvacEquipmentType::GshpHeatPumpHeating,
+            HeaterVariant::Wshp => HvacEquipmentType::WshpHeatPumpHeating,
         };
 
         Self {
@@ -470,9 +493,10 @@ impl HeatPumpHeaterCore {
                         ),
                     ),
                 },
+                HeaterVariant::Wshp => SourceTemperature::Constant(10.0),
                 _ => SourceTemperature::OutdoorAir,
             },
-            defrost_config: if matches!(variant, HeaterVariant::Gshp) {
+            defrost_config: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
                 DefrostConfig {
                     control: DefrostControl::Disabled,
                     ..DefrostConfig::on_demand(1.0, 0.0)
@@ -480,23 +504,25 @@ impl HeatPumpHeaterCore {
             } else {
                 DefrostConfig::on_demand(1.0, 0.0)
             },
-            hp_lockout_temp_c: if matches!(variant, HeaterVariant::Gshp) {
+            hp_lockout_temp_c: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
                 f64::NEG_INFINITY
             } else {
                 DEFAULT_HP_LOCKOUT_TEMP_C
             },
-            hp_lockout_hysteresis_c: if matches!(variant, HeaterVariant::Gshp) {
+            hp_lockout_hysteresis_c: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp)
+            {
                 0.0
             } else {
                 DEFAULT_HP_LOCKOUT_HYSTERESIS_C
             },
             hp_available: false,
-            er_lockout_temp_c: if matches!(variant, HeaterVariant::Gshp) {
+            er_lockout_temp_c: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
                 f64::INFINITY
             } else {
                 DEFAULT_ER_LOCKOUT_TEMP_C
             },
-            max_oat_supplemental_c: if matches!(variant, HeaterVariant::Gshp) {
+            max_oat_supplemental_c: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp)
+            {
                 f64::INFINITY
             } else {
                 MAX_OAT_SUPPLEMENTAL_C
@@ -529,32 +555,34 @@ impl HeatPumpHeaterCore {
             soft_lockout_elapsed_s: 0.0,
             last_heating_rtf: 0.0,
             heating_shr: 1.0,
-            pump_loop_depth_m: if matches!(variant, HeaterVariant::Gshp) {
+            pump_loop_depth_m: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
                 60.0
             } else {
                 0.0
             },
-            pump_pipe_diameter_m: if matches!(variant, HeaterVariant::Gshp) {
+            pump_pipe_diameter_m: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
                 0.025
             } else {
                 0.0
             },
-            pump_flow_rate_m3_per_s: if matches!(variant, HeaterVariant::Gshp) {
+            pump_flow_rate_m3_per_s: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp)
+            {
                 0.00019
             } else {
                 0.0
             },
-            pump_efficiency: if matches!(variant, HeaterVariant::Gshp) {
+            pump_efficiency: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
                 0.35
             } else {
                 0.0
             },
-            pump_motor_efficiency: if matches!(variant, HeaterVariant::Gshp) {
+            pump_motor_efficiency: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
                 0.40
             } else {
                 0.0
             },
-            pump_system_head_loss_m: if matches!(variant, HeaterVariant::Gshp) {
+            pump_system_head_loss_m: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp)
+            {
                 3.0
             } else {
                 0.0
@@ -789,7 +817,7 @@ impl HeatPumpHeaterCore {
                             .into(),
                     ));
                 }
-                HeaterVariant::Minisplit | HeaterVariant::Gshp => 0.0,
+                HeaterVariant::Minisplit | HeaterVariant::Gshp | HeaterVariant::Wshp => 0.0,
             }
         };
         self.backup_eir = cfg
@@ -804,7 +832,7 @@ impl HeatPumpHeaterCore {
         } else {
             0.0
         };
-        if !matches!(self.variant, HeaterVariant::Gshp) {
+        if !matches!(self.variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
             self.hp_lockout_temp_c = cfg.hp_lockout_temp_c.unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
             self.hp_lockout_hysteresis_c = DEFAULT_HP_LOCKOUT_HYSTERESIS_C;
             self.er_lockout_temp_c = cfg.er_lockout_temp_c.unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
@@ -863,7 +891,7 @@ impl HeatPumpHeaterCore {
 
         self.heating_shr = cfg.heating_shr.unwrap_or(1.0);
 
-        if matches!(self.variant, HeaterVariant::Gshp) {
+        if matches!(self.variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
             self.pump_loop_depth_m = cfg
                 .common
                 .pump_loop_depth_m
@@ -887,7 +915,13 @@ impl HeatPumpHeaterCore {
                 .unwrap_or(self.pump_system_head_loss_m);
         }
 
-        if !matches!(self.variant, HeaterVariant::Gshp)
+        if matches!(self.variant, HeaterVariant::Wshp) {
+            if let Some(ewt) = cfg.common.enter_water_temp_c {
+                self.source_temp = SourceTemperature::Constant(ewt);
+            }
+        }
+
+        if !matches!(self.variant, HeaterVariant::Gshp | HeaterVariant::Wshp)
             || cfg.defrost.control != DefrostControl::OnDemand
         {
             self.defrost_config = cfg.defrost;
@@ -1777,7 +1811,7 @@ impl HeatPumpHeaterCore {
             latent_gain_w = step_hp_capacity_w * (1.0 - self.heating_shr) * defrost_time_fraction;
         }
 
-        // Ground-loop circulation pump: runs whenever the GSHP compressor is
+        // Water-loop circulation pump: runs whenever the GSHP or WSHP compressor is
         // active (heating or reverse-cycle defrost). Not scaled by effective_load
         // (duty cycle / load fraction) or ctrl_power_limit_kw because residential
         // circulators are switched by the compressor contactor / flow switch and
@@ -1787,7 +1821,8 @@ impl HeatPumpHeaterCore {
         // the compressor kW is scaled but the full pump kW is reported, so the
         // time-averaged pump energy is not scaled to match compressor PLR.
         // space_fraction is applied in step() to the combined electric_kw.
-        let pump_kw = if matches!(self.variant, HeaterVariant::Gshp) && hp_on {
+        let pump_kw = if matches!(self.variant, HeaterVariant::Gshp | HeaterVariant::Wshp) && hp_on
+        {
             hares_physics::pump::compute_ground_loop_pump_power_kw(
                 self.pump_loop_depth_m,
                 self.pump_pipe_diameter_m,

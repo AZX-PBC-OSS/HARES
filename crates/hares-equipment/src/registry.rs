@@ -30,9 +30,11 @@ pub const CANONICAL_EQUIPMENT_NAMES: &[&str] = &[
     "ASHP Heater",
     "MSHP Heater",
     "GSHP Heater",
+    "WSHP Heater",
     "ASHP Cooler",
     "MSHP Cooler",
     "GSHP Cooler",
+    "WSHP Cooler",
     // HVAC – ideal
     "Ideal HVAC",
     // Water heaters

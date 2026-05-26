@@ -1274,6 +1274,7 @@ fn try_build_heat_pump_heater_config(
             pump_system_head_loss_m: params
                 .get("pump_system_head_loss_m")
                 .and_then(Value::as_f64),
+            enter_water_temp_c: params.get("enter_water_temp_c").and_then(Value::as_f64),
         },
         hp_lockout_temp_c: params.get("hp_lockout_temp_c").and_then(Value::as_f64),
         er_lockout_temp_c: params.get("er_lockout_temp_c").and_then(Value::as_f64),
@@ -1451,6 +1452,7 @@ fn try_build_heat_pump_cooler_config(
             pump_system_head_loss_m: params
                 .get("pump_system_head_loss_m")
                 .and_then(Value::as_f64),
+            enter_water_temp_c: params.get("enter_water_temp_c").and_then(Value::as_f64),
         },
         stage_shrs: extract_stage_values(params, "shr"),
         // Crankcase heater: power (W) from HPXML extension → kW.
@@ -1886,10 +1888,13 @@ pub(super) fn resolve_hvac(
             "air-to-air" => ("ASHP Heater", "ASHP Cooler"),
             "mini-split" => ("MSHP Heater", "MSHP Cooler"),
             "ground-to-air" => ("GSHP Heater", "GSHP Cooler"),
+            "water-loop-to-air" => ("WSHP Heater", "WSHP Cooler"),
+            "water-to-air" => ("WSHP Heater", "WSHP Cooler"),
             other => {
                 return Err(HpxmlError::Parse(format!(
                     "HeatPump: unsupported HeatPumpType '{other}'; \
-                     supported types are: air-to-air, mini-split, ground-to-air"
+                     supported types are: air-to-air, mini-split, ground-to-air, \
+                     water-loop-to-air, water-to-air"
                 )));
             }
         };

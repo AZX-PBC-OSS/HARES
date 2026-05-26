@@ -553,6 +553,263 @@ impl Equipment for GshpCooler {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Water-source heat pump cooler
+// ---------------------------------------------------------------------------
+
+pub struct WshpCooler {
+    inner: AirConditioner,
+    descriptor: EquipmentDescriptor,
+    ports: Vec<PortDeclaration>,
+    pump_loop_depth_m: f64,
+    pump_pipe_diameter_m: f64,
+    pump_flow_rate_m3_per_s: f64,
+    pump_efficiency: f64,
+    pump_motor_efficiency: f64,
+    pump_system_head_loss_m: f64,
+}
+
+impl WshpCooler {
+    #[must_use]
+    pub fn new(config: EquipmentConfig) -> Self {
+        let mut inner = AirConditioner::new(config.clone());
+        let wshp_type = crate::hvac::hvac_core::HvacEquipmentType::WshpHeatPumpCooling;
+        inner.core.hvac.config.equipment_type = wshp_type;
+        inner.core.hvac.config.airflow_m3_s_per_w = wshp_type.default_airflow_m3_s_per_w();
+        // WSHP: compressor is indoors; no crankcase heater needed.
+        inner.set_crankcase_defaults_if_unconfigured(&config, 0.0, f64::NEG_INFINITY);
+        // Source temperature: constant entering water temperature.
+        inner.core.source_temp = SourceTemperature::Constant(10.0);
+        let zone = zone_id_from_config(&config).unwrap_or(hares_types::ZoneId(DEFAULT_ZONE_ID));
+        Self {
+            descriptor: EquipmentDescriptor {
+                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
+                name: config.name,
+                end_use: EndUse::HVAC_COOLING,
+                equipment_type: Cow::Borrowed("WSHP Cooler"),
+                zone: Some(zone),
+                fuel: FuelType::Electric,
+                stage: ExecutionStage::Thermal,
+                control_capabilities: ControlCapabilities::THERMAL_SETPOINT
+                    | ControlCapabilities::THERMAL_SETPOINT_DELTA
+                    | ControlCapabilities::DUTY_CYCLE
+                    | ControlCapabilities::LOAD_FRACTION
+                    | ControlCapabilities::POWER_LIMIT
+                    | ControlCapabilities::MODE_OVERRIDE
+                    | ControlCapabilities::DEMAND_RESPONSE
+                    | ControlCapabilities::IDEAL_CAPACITY,
+                core_capabilities: CoreCapabilities::ELECTRIC
+                    | CoreCapabilities::HAS_MODE
+                    | CoreCapabilities::THERMAL
+                    | CoreCapabilities::HAS_SPEED
+                    | CoreCapabilities::HAS_SETPOINT
+                    | CoreCapabilities::HAS_COP,
+                telemetry_fields: inner.descriptor().telemetry_fields.clone(),
+            },
+            ports: inner.ports().to_vec(),
+            inner,
+            pump_loop_depth_m: 60.0,
+            pump_pipe_diameter_m: 0.025,
+            pump_flow_rate_m3_per_s: 0.00019,
+            pump_efficiency: 0.35,
+            pump_motor_efficiency: 0.40,
+            pump_system_head_loss_m: 3.0,
+        }
+    }
+
+    fn typed_wshp_to_central_ac_config(
+        source: &EquipmentConfig,
+        hp_cfg: &HeatPumpCoolerConfig,
+    ) -> crate::Result<EquipmentConfig> {
+        let eir = hp_cfg
+            .common
+            .cooling_eir
+            .or_else(|| {
+                hp_cfg
+                    .common
+                    .stage_cooling_eirs
+                    .as_ref()
+                    .and_then(|eirs| eirs.first().copied())
+            })
+            .ok_or_else(|| {
+                HaresError::Equipment(
+                    "WSHP Cooler requires cooling_eir or stage_cooling_eirs".to_string(),
+                )
+            })?;
+
+        let capacity_w = hp_cfg
+            .common
+            .cooling_capacity_w
+            .or_else(|| {
+                hp_cfg
+                    .common
+                    .stage_cooling_capacities_w
+                    .as_ref()
+                    .and_then(|caps| caps.last().copied())
+            })
+            .unwrap_or(8_000.0);
+
+        let mapped = CentralAirConditionerConfig {
+            equipment_id: hp_cfg.common.equipment_id,
+            zone_id: hp_cfg.common.zone_id,
+            capacity_w,
+            eir,
+            shr: hp_cfg.common.shr,
+            number_of_speeds: hp_cfg.effective_number_of_speeds(),
+            stage_capacities_w: hp_cfg.common.stage_cooling_capacities_w.clone(),
+            stage_eirs: hp_cfg.common.stage_cooling_eirs.clone(),
+            stage_shrs: hp_cfg.stage_shrs.clone(),
+            fan_power_w: hp_cfg.common.fan_power_w,
+            fan_power_w_per_cfm: hp_cfg.common.fan_power_w_per_cfm,
+            cooling_setpoint_c: hp_cfg.common.cooling_setpoint_c,
+            heating_setpoint_c: hp_cfg.common.heating_setpoint_c,
+            hysteresis_c: hp_cfg.common.hysteresis_c,
+            heating_setpoint_source: hp_cfg.common.heating_setpoint_source.clone(),
+            cooling_setpoint_source: hp_cfg.common.cooling_setpoint_source.clone(),
+            airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
+            fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: hp_cfg.common.duct.clone(),
+            system_type: None,
+            startup_cd: hp_cfg.derived_cooling_startup_cd(),
+            biquadratic_x1_min: hp_cfg.common.biquadratic_x1_min,
+            biquadratic_x1_max: hp_cfg.common.biquadratic_x1_max,
+            biquadratic_x2_min: hp_cfg.common.biquadratic_x2_min,
+            biquadratic_x2_max: hp_cfg.common.biquadratic_x2_max,
+            ff_min: hp_cfg.common.ff_min,
+            ff_max: hp_cfg.common.ff_max,
+            plf_min: hp_cfg.common.plf_min,
+            plf_max: hp_cfg.common.plf_max,
+            charge_defect_ratio: hp_cfg.common.charge_defect_ratio,
+        };
+
+        Ok(EquipmentConfig::from_typed(
+            source.name.clone(),
+            "Air Conditioner".to_string(),
+            mapped,
+        ))
+    }
+
+    pub fn last_cooling_rtf(&self) -> f64 {
+        self.inner.core.last_cooling_rtf
+    }
+}
+
+impl Equipment for WshpCooler {
+    fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed_hp_cfg = config.require_typed::<HeatPumpCoolerConfig>("WSHP Cooler")?;
+        typed_hp_cfg.validate()?;
+        let mapped = Self::typed_wshp_to_central_ac_config(config, &typed_hp_cfg)?;
+        self.inner.init(&mapped, env)?;
+        // WSHP: compressor is indoors; no crankcase heater needed.
+        self.inner.core.crankcase_rated_kw = 0.0;
+        self.inner.core.crankcase_threshold_c = f64::NEG_INFINITY;
+
+        self.pump_loop_depth_m = typed_hp_cfg
+            .common
+            .pump_loop_depth_m
+            .unwrap_or(self.pump_loop_depth_m);
+        self.pump_pipe_diameter_m = typed_hp_cfg
+            .common
+            .pump_pipe_diameter_m
+            .unwrap_or(self.pump_pipe_diameter_m);
+        self.pump_flow_rate_m3_per_s = typed_hp_cfg
+            .common
+            .pump_flow_rate_m3_per_s
+            .unwrap_or(self.pump_flow_rate_m3_per_s);
+        self.pump_efficiency = typed_hp_cfg
+            .common
+            .pump_efficiency
+            .unwrap_or(self.pump_efficiency);
+        self.pump_motor_efficiency = typed_hp_cfg
+            .common
+            .pump_motor_efficiency
+            .unwrap_or(self.pump_motor_efficiency);
+        self.pump_system_head_loss_m = typed_hp_cfg
+            .common
+            .pump_system_head_loss_m
+            .unwrap_or(self.pump_system_head_loss_m);
+
+        if let Some(ewt) = typed_hp_cfg.common.enter_water_temp_c {
+            self.inner.core.source_temp = SourceTemperature::Constant(ewt);
+        }
+
+        Ok(())
+    }
+
+    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        self.inner.update_control(env)
+    }
+
+    fn step(
+        &mut self,
+        env: &EnvironmentState,
+        dt: Duration,
+        ports: &mut PortSlots,
+    ) -> std::result::Result<(), HaresError> {
+        self.inner.step(env, dt, ports)?;
+
+        let compressor_ran = self.inner.core.last_cooling_rtf > 0.0;
+        let pump_kw = if compressor_ran {
+            hares_physics::pump::compute_ground_loop_pump_power_kw(
+                self.pump_loop_depth_m,
+                self.pump_pipe_diameter_m,
+                self.pump_flow_rate_m3_per_s,
+                self.pump_efficiency,
+                self.pump_motor_efficiency,
+                self.pump_system_head_loss_m,
+            )
+        } else {
+            0.0
+        };
+
+        if pump_kw > 0.0 {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_kw: pump_kw,
+                reactive_power_kvar: 0.0,
+            })?;
+        }
+
+        self.inner.set_telemetry(tk::PUMP_POWER_KW, pump_kw);
+
+        Ok(())
+    }
+
+    fn telemetry(&self) -> &Telemetry {
+        self.inner.telemetry()
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        self.inner.core_output()
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        self.inner.save_state()
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
+        self.inner.load_state(state)
+    }
+
+    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        self.inner.apply_control_unchecked(signal)
+    }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        self.inner.ideal_target()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

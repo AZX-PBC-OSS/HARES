@@ -1656,8 +1656,7 @@ mod tests {
     }
 
     #[test]
-    fn heat_pump_water_loop_to_air_rejected_with_error() {
-        // water-loop-to-air is another valid HPXML 4.x HeatPumpType that is unhandled.
+    fn heat_pump_water_loop_to_air_produces_wshp_specs() {
         let xml = minimal_hvac_xml(
             r#"<HeatPump>
           <HeatPumpType>water-loop-to-air</HeatPumpType>
@@ -1666,17 +1665,42 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let err = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-            .expect_err("water-loop-to-air must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unsupported HeatPumpType"),
-            "error message must mention unsupported HeatPumpType, got: {msg}"
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("water-loop-to-air must resolve to WSHP equipment");
+        let heater = specs
+            .iter()
+            .find(|s| s.name == "WSHP Heater")
+            .expect("WSHP Heater spec must be present");
+        let cooler = specs
+            .iter()
+            .find(|s| s.name == "WSHP Cooler")
+            .expect("WSHP Cooler spec must be present");
+        assert_eq!(heater.fuel_type, FuelType::Electric);
+        assert_eq!(cooler.fuel_type, FuelType::Electric);
+    }
+
+    #[test]
+    fn heat_pump_water_to_air_produces_wshp_specs() {
+        let xml = minimal_hvac_xml(
+            r#"<HeatPump>
+          <HeatPumpType>water-to-air</HeatPumpType>
+          <HeatingCapacity>36000</HeatingCapacity>
+          <CoolingCapacity>36000</CoolingCapacity>
+        </HeatPump>"#,
         );
-        assert!(
-            msg.contains("water-loop-to-air"),
-            "error message must name the rejected type, got: {msg}"
-        );
+        let building = parse_building(&xml).expect("xml parses");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("water-to-air must resolve to WSHP equipment");
+        let heater = specs
+            .iter()
+            .find(|s| s.name == "WSHP Heater")
+            .expect("WSHP Heater spec must be present");
+        let cooler = specs
+            .iter()
+            .find(|s| s.name == "WSHP Cooler")
+            .expect("WSHP Cooler spec must be present");
+        assert_eq!(heater.fuel_type, FuelType::Electric);
+        assert_eq!(cooler.fuel_type, FuelType::Electric);
     }
 
     #[test]

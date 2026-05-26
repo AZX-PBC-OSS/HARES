@@ -169,7 +169,17 @@ pub(super) fn default_biquadratic_coeffs(
         HvacEquipmentType::GshpHeatPumpHeating => {
             Some(vec![GSHP_HEATING_CAPACITY, GSHP_HEATING_EIR])
         }
+        HvacEquipmentType::WshpHeatPumpHeating => {
+            // Water-source heat pumps use the same biquadratic coefficients as
+            // ground-source: both model a water-to-air coil with indoor DB and
+            // entering water temperature as the independent variables. The same
+            // curves from DOE/ORNL (Tang et al. 2013) FSEC-PF-463-13 apply.
+            Some(vec![GSHP_HEATING_CAPACITY, GSHP_HEATING_EIR])
+        }
         HvacEquipmentType::GshpHeatPumpCooling => {
+            Some(vec![GSHP_COOLING_CAPACITY, GSHP_COOLING_EIR])
+        }
+        HvacEquipmentType::WshpHeatPumpCooling => {
             Some(vec![GSHP_COOLING_CAPACITY, GSHP_COOLING_EIR])
         }
         HvacEquipmentType::GasFurnace

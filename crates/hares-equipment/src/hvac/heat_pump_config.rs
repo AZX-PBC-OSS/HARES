@@ -149,6 +149,13 @@ pub struct HeatPumpCommonConfig {
     /// Set to 0.0 for borehole‑loop‑only head loss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pump_system_head_loss_m: Option<f64>,
+
+    // ── Water-source heat pump entering water temperature ───
+    /// Entering water temperature [°C] for water-source (water-loop-to-air,
+    /// water-to-air) heat pumps. Default 10°C (typical US groundwater temperature).
+    /// For water-loop applications (boiler/condenser loop), 20–30°C is typical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enter_water_temp_c: Option<f64>,
 }
 
 impl Default for HeatPumpCommonConfig {
@@ -199,6 +206,7 @@ impl Default for HeatPumpCommonConfig {
             pump_efficiency: None,
             pump_motor_efficiency: None,
             pump_system_head_loss_m: None,
+            enter_water_temp_c: None,
         }
     }
 }
