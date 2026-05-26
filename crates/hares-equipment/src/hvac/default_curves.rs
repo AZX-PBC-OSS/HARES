@@ -60,6 +60,68 @@ const MSHP_VARIABLE_HEATING_EIR: [f64; 6] = [
     -0.000524003,
 ];
 
+/// GSHP single-speed heating capacity curve.
+///
+/// Biquadratic in entering air dry-bulb temperature (°C, x1) and entering
+/// water temperature (°C, x2).  Coefficients derived from ASHRAE
+/// Handbook of Fundamentals 2021 Ch.34 (Geothermal Energy Systems)
+/// Fig.10 water-to-air heat pump performance data, cross-checked
+/// against ClimateMaster Tranquility 22 (TCH072) manufacturer data
+/// published in EnergyPlus dataset `WaterToAirHeatPumps.idf`.
+///
+/// Rated at ISO 13256-1 GLHP conditions: 21.1 °C (70 °F) entering air
+/// dry-bulb, 10 °C (50 °F) entering water.
+///
+/// Verification at rated: cap_ratio = 1.000.
+///   - 0 °C EWT, 21.1 °C air: cap_ratio ≈ 0.825 (17.5 % capacity loss)
+///   - 21.1 °C EWT, 21.1 °C air: cap_ratio ≈ 1.183 (18 % capacity gain)
+const GSHP_HEATING_CAPACITY: [f64; 6] = [0.9016563, -0.003, -0.00003, 0.018, -0.00005, 0.0];
+
+/// GSHP single-speed heating EIR curve.
+///
+/// Biquadratic in entering air dry-bulb temperature (°C, x1) and entering
+/// water temperature (°C, x2).  Same sources as `GSHP_HEATING_CAPACITY`.
+///
+/// Rated at ISO 13256-1 GLHP conditions (21.1 °C air, 10 °C water).
+/// EIR increases (efficiency worsens) as entering water temperature drops.
+///
+/// Verification at rated: eir_ratio = 1.000.
+///   - 0 °C EWT, 21.1 °C air: eir_ratio ≈ 1.173 (17 % worse COP)
+///   - 21.1 °C EWT, 21.1 °C air: eir_ratio ≈ 0.815 (18 % better COP)
+const GSHP_HEATING_EIR: [f64; 6] = [1.1472279, 0.001, 0.00001, -0.018, 0.00003, 0.00002];
+
+/// GSHP single-speed cooling capacity curve.
+///
+/// Biquadratic in entering air **wet-bulb** temperature (°C, x1) and entering
+/// water temperature (°C, x2).  Fitted for wet-bulb x1 to match the shared
+/// cooling path in `air_conditioner.rs`, which passes `coil_entering_wb_c` as
+/// x1 for all cooling equipment types (consistent with ASHP cooling curve
+/// convention).  Same source references as heating.
+///
+/// Rated at ISO 13256-1 GLHP conditions: 27 °C (80.6 °F) entering air
+/// dry-bulb, 19.4 °C entering air wet-bulb (~50 % RH), 15 °C (59 °F)
+/// entering water (with 15 % methanol antifreeze).
+///
+/// Verification at rated: cap_ratio = 1.000.
+///   - 5 °C EWT, 19.4 °C WB: cap_ratio ≈ 1.222 (22 % capacity gain)
+///   - 25 °C EWT, 19.4 °C WB: cap_ratio ≈ 0.762 (24 % capacity loss)
+const GSHP_COOLING_CAPACITY: [f64; 6] = [1.412307, -0.004, -0.00002, -0.021, -0.00008, 0.00002];
+
+/// GSHP single-speed cooling EIR curve.
+///
+/// Biquadratic in entering air **wet-bulb** temperature (°C, x1) and entering
+/// water temperature (°C, x2).  Fitted for wet-bulb x1 to match the shared
+/// cooling path in `air_conditioner.rs` (see `GSHP_COOLING_CAPACITY`).
+/// Same source references as heating.
+///
+/// Rated at ISO 13256-1 GLHP conditions (19.4 °C WB, 15 °C water).
+/// EIR increases (efficiency worsens) as entering water temperature rises.
+///
+/// Verification at rated: eir_ratio = 1.000.
+///   - 5 °C EWT, 19.4 °C WB: eir_ratio ≈ 0.774 (22 % better EER)
+///   - 25 °C EWT, 19.4 °C WB: eir_ratio ≈ 1.236 (23 % worse EER)
+const GSHP_COOLING_EIR: [f64; 6] = [0.602606, 0.003, 0.00001, 0.022, 0.00005, -0.00002];
+
 /// Provenance of the biquadratic curve set currently in use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BiquadraticCurveSource {
@@ -104,12 +166,16 @@ pub(super) fn default_biquadratic_coeffs(
             MSHP_VARIABLE_HEATING_CAPACITY,
             MSHP_VARIABLE_HEATING_EIR,
         ]),
+        HvacEquipmentType::GshpHeatPumpHeating => {
+            Some(vec![GSHP_HEATING_CAPACITY, GSHP_HEATING_EIR])
+        }
+        HvacEquipmentType::GshpHeatPumpCooling => {
+            Some(vec![GSHP_COOLING_CAPACITY, GSHP_COOLING_EIR])
+        }
         HvacEquipmentType::GasFurnace
         | HvacEquipmentType::ElectricFurnace
         | HvacEquipmentType::AcCooler
         | HvacEquipmentType::MiniSplitCool
-        | HvacEquipmentType::GshpHeatPumpHeating
-        | HvacEquipmentType::GshpHeatPumpCooling
         | HvacEquipmentType::Baseboard
         | HvacEquipmentType::Other => None,
     }
@@ -282,5 +348,201 @@ mod tests {
         assert_eq!(BiquadraticCurveSource::Identity.label(), "identity");
         assert_eq!(BiquadraticCurveSource::Default.label(), "default");
         assert_eq!(BiquadraticCurveSource::User.label(), "user");
+    }
+
+    /// Helper: evaluate biquadratic at (x1, x2).
+    fn eval_biquadratic(coeffs: &[f64; 6], x1: f64, x2: f64) -> f64 {
+        coeffs[0]
+            + coeffs[1] * x1
+            + coeffs[2] * x1 * x1
+            + coeffs[3] * x2
+            + coeffs[4] * x2 * x2
+            + coeffs[5] * x1 * x2
+    }
+
+    #[test]
+    fn gshp_heating_capacity_at_rated_approximately_unity() {
+        let cap = eval_biquadratic(&GSHP_HEATING_CAPACITY, 21.1, 10.0);
+        assert!(
+            (cap - 1.0).abs() < 0.02,
+            "GSHP heating cap_ratio at rated (21.1 °C air, 10 °C water) must be 1.0 ± 2 %; got {cap:.6}"
+        );
+    }
+
+    #[test]
+    fn gshp_heating_capacity_drops_at_freezing_ewt() {
+        let cap_rated = eval_biquadratic(&GSHP_HEATING_CAPACITY, 21.1, 10.0);
+        let cap_cold = eval_biquadratic(&GSHP_HEATING_CAPACITY, 21.1, 0.0);
+        assert!(
+            cap_cold < cap_rated,
+            "GSHP heating capacity at 0 °C EWT ({cap_cold:.4}) must be below rated ({cap_rated:.4})"
+        );
+        assert!(
+            cap_cold > 0.7,
+            "GSHP heating capacity at 0 °C EWT ({cap_cold:.4}) must stay above 0.7"
+        );
+    }
+
+    #[test]
+    fn gshp_heating_eir_worse_at_freezing_ewt() {
+        let eir_rated = eval_biquadratic(&GSHP_HEATING_EIR, 21.1, 10.0);
+        let eir_cold = eval_biquadratic(&GSHP_HEATING_EIR, 21.1, 0.0);
+        assert!(
+            eir_cold > eir_rated,
+            "GSHP heating EIR at 0 °C EWT ({eir_cold:.4}) must exceed rated ({eir_rated:.4})"
+        );
+        assert!(
+            eir_cold > 1.0,
+            "GSHP heating EIR at 0 °C EWT must exceed 1.0; got {eir_cold:.4}"
+        );
+    }
+
+    #[test]
+    fn gshp_heating_eir_better_at_warm_ewt() {
+        let eir_rated = eval_biquadratic(&GSHP_HEATING_EIR, 21.1, 10.0);
+        let eir_warm = eval_biquadratic(&GSHP_HEATING_EIR, 21.1, 21.1);
+        assert!(
+            eir_warm < eir_rated,
+            "GSHP heating EIR at 21.1 °C EWT ({eir_warm:.4}) must be below rated ({eir_rated:.4})"
+        );
+    }
+
+    #[test]
+    fn gshp_cooling_capacity_at_rated_approximately_unity() {
+        let cap = eval_biquadratic(&GSHP_COOLING_CAPACITY, 19.4, 15.0);
+        assert!(
+            (cap - 1.0).abs() < 0.02,
+            "GSHP cooling cap_ratio at rated (19.4 °C WB air, 15 °C water) must be 1.0 ± 2 %; got {cap:.6}"
+        );
+    }
+
+    #[test]
+    fn gshp_cooling_capacity_higher_at_cold_ewt() {
+        let cap_rated = eval_biquadratic(&GSHP_COOLING_CAPACITY, 19.4, 15.0);
+        let cap_cold = eval_biquadratic(&GSHP_COOLING_CAPACITY, 19.4, 5.0);
+        assert!(
+            cap_cold > cap_rated,
+            "GSHP cooling capacity at 5 °C EWT ({cap_cold:.4}) must exceed rated ({cap_rated:.4})"
+        );
+        assert!(
+            cap_cold > 1.0,
+            "GSHP cooling capacity at 5 °C EWT must exceed 1.0; got {cap_cold:.4}"
+        );
+    }
+
+    #[test]
+    fn gshp_cooling_capacity_lower_at_warm_ewt() {
+        let cap_rated = eval_biquadratic(&GSHP_COOLING_CAPACITY, 19.4, 15.0);
+        let cap_warm = eval_biquadratic(&GSHP_COOLING_CAPACITY, 19.4, 25.0);
+        assert!(
+            cap_warm < cap_rated,
+            "GSHP cooling capacity at 25 °C EWT ({cap_warm:.4}) must be below rated ({cap_rated:.4})"
+        );
+        assert!(
+            cap_warm > 0.5,
+            "GSHP cooling capacity at 25 °C EWT ({cap_warm:.4}) must stay above 0.5"
+        );
+    }
+
+    #[test]
+    fn gshp_cooling_eir_better_at_cold_ewt() {
+        let eir_rated = eval_biquadratic(&GSHP_COOLING_EIR, 19.4, 15.0);
+        let eir_cold = eval_biquadratic(&GSHP_COOLING_EIR, 19.4, 5.0);
+        assert!(
+            eir_cold < eir_rated,
+            "GSHP cooling EIR at 5 °C EWT ({eir_cold:.4}) must be below rated ({eir_rated:.4})"
+        );
+        assert!(
+            eir_cold > 0.5,
+            "GSHP cooling EIR at 5 °C EWT ({eir_cold:.4}) must stay above 0.5"
+        );
+    }
+
+    #[test]
+    fn gshp_cooling_eir_worse_at_warm_ewt() {
+        let eir_rated = eval_biquadratic(&GSHP_COOLING_EIR, 19.4, 15.0);
+        let eir_warm = eval_biquadratic(&GSHP_COOLING_EIR, 19.4, 25.0);
+        assert!(
+            eir_warm > eir_rated,
+            "GSHP cooling EIR at 25 °C EWT ({eir_warm:.4}) must exceed rated ({eir_rated:.4})"
+        );
+        assert!(
+            eir_warm > 1.0,
+            "GSHP cooling EIR at 25 °C EWT must exceed 1.0; got {eir_warm:.4}"
+        );
+    }
+
+    #[test]
+    fn gshp_heating_capacity_all_positive_in_operating_range() {
+        // Typical GSHP operating range: 16–27 °C indoor air, −1–33 °C EWT
+        for ta in [16.0, 18.0, 20.0, 22.0, 24.0, 27.0] {
+            for tw in [-1.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 32.2] {
+                let cap = eval_biquadratic(&GSHP_HEATING_CAPACITY, ta, tw);
+                assert!(
+                    cap > 0.0,
+                    "GSHP heating capacity must be > 0 at T_air={ta} °C, T_water={tw} °C; got {cap:.4}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gshp_cooling_capacity_all_positive_in_operating_range() {
+        // Ground loop cooling wet-bulb range: 13–24 °C indoor WB, −5–35 °C EWT
+        for ta in [13.0, 15.0, 17.0, 19.4, 22.0, 24.0] {
+            for tw in [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0] {
+                let cap = eval_biquadratic(&GSHP_COOLING_CAPACITY, ta, tw);
+                assert!(
+                    cap > 0.0,
+                    "GSHP cooling capacity must be > 0 at T_air={ta} °C WB, T_water={tw} °C; got {cap:.4}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn substitute_defaults_gshp_heating_replaces_identity() {
+        let mut coeffs = vec![DEFAULT_BIQUADRATIC_COEFFS];
+        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::GshpHeatPumpHeating);
+        assert_eq!(source, BiquadraticCurveSource::Default);
+        assert_eq!(coeffs.len(), 2);
+        assert_eq!(coeffs[0], GSHP_HEATING_CAPACITY);
+        assert_eq!(coeffs[1], GSHP_HEATING_EIR);
+    }
+
+    #[test]
+    fn substitute_defaults_gshp_cooling_replaces_identity() {
+        let mut coeffs = vec![DEFAULT_BIQUADRATIC_COEFFS];
+        let source = maybe_substitute_defaults(&mut coeffs, HvacEquipmentType::GshpHeatPumpCooling);
+        assert_eq!(source, BiquadraticCurveSource::Default);
+        assert_eq!(coeffs.len(), 2);
+        assert_eq!(coeffs[0], GSHP_COOLING_CAPACITY);
+        assert_eq!(coeffs[1], GSHP_COOLING_EIR);
+    }
+
+    #[test]
+    fn gshp_heating_eir_all_positive_in_operating_range() {
+        for ta in [16.0, 18.0, 20.0, 22.0, 24.0, 27.0] {
+            for tw in [-1.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 32.2] {
+                let eir = eval_biquadratic(&GSHP_HEATING_EIR, ta, tw);
+                assert!(
+                    eir > 0.0,
+                    "GSHP heating EIR must be > 0 at T_air={ta} °C, T_water={tw} °C; got {eir:.4}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gshp_cooling_eir_all_positive_in_operating_range() {
+        for ta in [13.0, 15.0, 17.0, 19.4, 22.0, 24.0] {
+            for tw in [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0] {
+                let eir = eval_biquadratic(&GSHP_COOLING_EIR, ta, tw);
+                assert!(
+                    eir > 0.0,
+                    "GSHP cooling EIR must be > 0 at T_air={ta} °C WB, T_water={tw} °C; got {eir:.4}"
+                );
+            }
+        }
     }
 }
