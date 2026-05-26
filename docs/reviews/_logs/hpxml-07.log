@@ -46,3 +46,30 @@
 [0m→ [0mRead vendors/OCHRE/ochre/utils/envelope.py[90m [limit=60, offset=294][0m
 [0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=50, offset=185][0m
 [0m✱ [0mGrep "TODO.*[Aa]djacent|FIXME.*[Aa]djacent|TODO.*adiabatic|TODO.*party|FIXME.*multifamily"[90m in crates · 0 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [limit=30, offset=1030][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/hpxml/ 2>/dev/null || echo "Directory does not exist"
+hpxml-01-duct-leakage-cfm25-silent-skip.md
+hpxml-02-wh-jacket-ua-reduction-mismatch.md
+hpxml-03-ceiling-height-fallback.md
+hpxml-04-foundation-wall-area-zero.md
+hpxml-05-refrigerator-location-string-match.md
+hpxml-06-infiltration-unit-conversion-exponent.md
+hpxml-08-wh-uef-ef-regression-constants.md
+[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=2720, limit=20][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [offset=580, limit=30][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=115, limit=60][0m
+[0m✱ [0mGrep "resolve_exterior"[90m 2 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [limit=30, offset=120][0m
+[0m
+[0m← [0mWrite docs/reviews/hpxml/hpxml-07-adjacent-zone-boundaries-filtered.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/hpxml/hpxml-07-adjacent-zone-boundaries-filtered.md`.
+
+**Summary**: 3 findings (2 medium, 1 low).
+
+The core finding is that both HARES and OCHRE treat party walls to adjacent dwelling units as same-zone internal thermal mass (the standard residential energy modeling approach), but HARES's implementation relies on an implicit `find_zone_idx` fallback to index 0 rather than OCHRE's explicit `exterior = interior` rewrite. This creates a latent correctness bug: if the interior zone is not Conditioned (e.g., Attic→Adjacent), the same-zone detection fails and incorrect heat transfer is modeled.
+
+The primary recommendation is to match OCHRE's approach by rewriting the Adjacent zone reference to the non-Adjacent zone at parse time, making the adiabatic intent explicit before boundary classification.

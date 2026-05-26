@@ -559,6 +559,14 @@ pub enum ThermalSolverError {
         index: usize,
         state_dim: usize,
     },
+    #[error(
+        "zone {zone_id:?} is registered in zone_state_indices but absent from env.zones; \
+         zones in env: {present_zones:?}"
+    )]
+    ZoneNotInEnvironment {
+        zone_id: ZoneId,
+        present_zones: Vec<ZoneId>,
+    },
     #[error("failed to initialize steady-state vector: {0}")]
     Initialization(String),
     #[error("{0}")]

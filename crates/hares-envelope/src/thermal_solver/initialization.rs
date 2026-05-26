@@ -100,6 +100,21 @@ pub(crate) fn initialize_steady_state(
         }
     }
 
+    // Verify all pinned zones are present in env.zones.
+    // A zone registered in zone_state_indices but absent from env.zones
+    // represents a wiring/environment consistency issue. Silently substituting
+    // indoor_temp_c hides the misconfiguration and produces physically wrong
+    // initial conditions — the solver cannot know the correct temperature.
+    for zone_id in pinned_zones {
+        if !env.zones.iter().any(|z| z.id == *zone_id) {
+            let present_zones: Vec<ZoneId> = env.zones.iter().map(|z| z.id).collect();
+            return Err(ThermalSolverError::ZoneNotInEnvironment {
+                zone_id: *zone_id,
+                present_zones,
+            });
+        }
+    }
+
     // Collect zone state indices to fix as boundary conditions.
     // Only conditioned zones listed in `pinned_zones` are pinned; unconditioned
     // zones (attic, garage, foundation) are left free so their steady-state
@@ -109,7 +124,8 @@ pub(crate) fn initialize_steady_state(
         .iter()
         .map(|zone_id| {
             // SAFETY: pre-checks above guarantee every pinned zone is present
-            // in zone_state_indices and its index is within bounds.
+            // in zone_state_indices, its index is within bounds, and it is
+            // present in env.zones.
             let idx = *wiring
                 .zone_state_indices
                 .get(zone_id)
@@ -119,7 +135,7 @@ pub(crate) fn initialize_steady_state(
                 .iter()
                 .find(|z| z.id == *zone_id)
                 .map(|z| z.temperature_c)
-                .unwrap_or(indoor_temp_c);
+                .expect("pre-check above guarantees zone is in env.zones");
             (idx, t)
         })
         .collect();
@@ -524,6 +540,65 @@ mod tests {
             ),
             Err(other) => {
                 panic!("expected Err(ZoneStateIndexOutOfBounds) but got different error: {other:?}")
+            }
+        }
+    }
+
+    /// `initialize_steady_state` returns `Err(ZoneNotInEnvironment)` when
+    /// a pinned zone is registered in `zone_state_indices` but absent from
+    /// `env.zones`, surfacing the wiring/environment consistency error rather
+    /// than silently substituting `indoor_temp_c`.
+    #[test]
+    fn missing_zone_in_env_zones_errors() {
+        let a_d = DMatrix::from_row_slice(2, 2, &[0.8, 0.0, 0.1, 0.9]);
+        let b_d = DMatrix::from_row_slice(2, 1, &[0.2, 0.1]);
+        let c = DMatrix::identity(2, 2);
+        let d = DMatrix::zeros(2, 1);
+
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
+
+        let mut zone_state_indices = HashMap::new();
+        zone_state_indices.insert(ZoneId(1), 0_usize);
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices,
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::new(),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+
+        let indoor = 21.0;
+        // env.zones is empty — ZoneId(1) is in zone_state_indices but absent
+        // from the environment's zone list.
+        let env = minimal_env(indoor, -5.0);
+        let env = EnvironmentState {
+            zones: vec![],
+            ..env
+        };
+
+        let result = initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]);
+
+        match result {
+            Err(ThermalSolverError::ZoneNotInEnvironment {
+                zone_id,
+                present_zones,
+            }) => {
+                assert_eq!(zone_id, ZoneId(1));
+                assert!(present_zones.is_empty());
+            }
+            Ok(x) => panic!(
+                "expected Err(ZoneNotInEnvironment), but got Ok({:?})",
+                x
+            ),
+            Err(other) => {
+                panic!("expected Err(ZoneNotInEnvironment) but got different error: {other:?}")
             }
         }
     }
