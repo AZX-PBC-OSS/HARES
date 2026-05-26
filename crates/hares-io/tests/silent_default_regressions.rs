@@ -879,6 +879,123 @@ fn ashp_extension_backup_autosizing_factor_stored_in_params() {
     );
 }
 
+// --- T-0120: autosize_backup flag gated on backup system evidence ---
+
+/// ASHP with <BackupSystemFuel> but no <BackupHeatingCapacity> must set
+/// autosize_backup: true — the backup system is declared, capacity is omitted
+/// for autosizing.
+#[test]
+fn ashp_with_backup_fuel_no_backup_capacity_flags_autosize() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatPump>
+              <SystemIdentifier id="hp1"/>
+              <HeatPumpType>air-to-air</HeatPumpType>
+              <HeatPumpFuel>electricity</HeatPumpFuel>
+              <HeatingCapacity>24000</HeatingCapacity>
+              <CoolingCapacity>24000</CoolingCapacity>
+              <BackupSystemFuel>electricity</BackupSystemFuel>
+              <AnnualCoolingEfficiency><Units>SEER2</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+              <AnnualHeatingEfficiency><Units>HSPF2</Units><Value>7.5</Value></AnnualHeatingEfficiency>
+              <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+              <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+            </HeatPump>
+          </HVAC>
+        </Systems>"#,
+    );
+    let specs = resolve(&xml).expect("ASHP with BackupSystemFuel must resolve");
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "ASHP Heater")
+        .expect("ASHP Heater spec must exist");
+    let autosize = heater
+        .parameters
+        .get("autosize_backup")
+        .and_then(|v| v.as_bool())
+        .expect("autosize_backup must be set when BackupSystemFuel is present and BackupHeatingCapacity is absent");
+    assert!(
+        autosize,
+        "autosize_backup must be true when BackupSystemFuel declared but BackupHeatingCapacity absent"
+    );
+    assert!(
+        !heater.parameters.contains_key("backup_capacity_w"),
+        "backup_capacity_w must not be set when BackupHeatingCapacity is absent"
+    );
+}
+
+/// ASHP with neither <BackupSystemFuel> nor <BackupHeatingCapacity> must NOT
+/// set autosize_backup — no backup system exists.
+#[test]
+fn ashp_no_backup_elements_no_autosize_backup() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatPump>
+              <SystemIdentifier id="hp1"/>
+              <HeatPumpType>air-to-air</HeatPumpType>
+              <HeatPumpFuel>electricity</HeatPumpFuel>
+              <HeatingCapacity>24000</HeatingCapacity>
+              <CoolingCapacity>24000</CoolingCapacity>
+              <AnnualCoolingEfficiency><Units>SEER2</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+              <AnnualHeatingEfficiency><Units>HSPF2</Units><Value>7.5</Value></AnnualHeatingEfficiency>
+              <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+              <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+            </HeatPump>
+          </HVAC>
+        </Systems>"#,
+    );
+    let specs = resolve(&xml).expect("ASHP must resolve");
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "ASHP Heater")
+        .expect("ASHP Heater spec must exist");
+    assert!(
+        !heater.parameters.contains_key("autosize_backup"),
+        "autosize_backup must NOT be set when no backup system is declared"
+    );
+    assert!(
+        !heater.parameters.contains_key("backup_capacity_w"),
+        "backup_capacity_w must not be set when no backup system exists"
+    );
+}
+
+/// MSHP (ductless mini-split) with no backup elements must NOT set
+/// autosize_backup — mini-splits typically have no backup system.
+#[test]
+fn mshp_no_backup_elements_no_autosize_backup() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatPump>
+              <SystemIdentifier id="hp1"/>
+              <HeatPumpType>mini-split</HeatPumpType>
+              <HeatPumpFuel>electricity</HeatPumpFuel>
+              <HeatingCapacity>12000</HeatingCapacity>
+              <CoolingCapacity>12000</CoolingCapacity>
+              <AnnualCoolingEfficiency><Units>SEER2</Units><Value>20.0</Value></AnnualCoolingEfficiency>
+              <AnnualHeatingEfficiency><Units>HSPF2</Units><Value>10.0</Value></AnnualHeatingEfficiency>
+              <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+              <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+            </HeatPump>
+          </HVAC>
+        </Systems>"#,
+    );
+    let specs = resolve(&xml).expect("MSHP must resolve");
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "MSHP Heater")
+        .expect("MSHP Heater spec must exist");
+    assert!(
+        !heater.parameters.contains_key("autosize_backup"),
+        "autosize_backup must NOT be set when no backup system is declared"
+    );
+    assert!(
+        !heater.parameters.contains_key("backup_capacity_w"),
+        "backup_capacity_w must not be set when no backup system exists"
+    );
+}
+
 /// Gas furnace with <AutosizingLimits> in extension must store min/max capacity
 /// bounds in params.
 #[test]

@@ -32,6 +32,11 @@ const DEFAULT_COOLING_SETPOINT_C: f64 = 23.9; // 75 °F
 const HEATING_OVERSIZE_FACTOR: f64 = 1.4;
 const COOLING_OVERSIZE_FACTOR: f64 = 1.15;
 
+/// Backup heating capacity factor: sized to 100% of design heating load
+/// with no oversizing per ACCA Manual S-2017
+/// (overridden by HPXML `<BackupHeatingAutosizingFactor>`).
+const BACKUP_CAPACITY_FACTOR: f64 = 1.0;
+
 /// Context bundle for autosizing: weather-derived design conditions and
 /// duct parameters needed to rebuild typed equipment configs.
 ///
@@ -55,8 +60,8 @@ pub struct AutosizeContext {
 /// Runs after the thermal solver has been built, using the building's RC
 /// model to compute the heating and cooling loads at ASHRAE design conditions.
 ///
-/// For each equipment spec with `autosize_heating` or `autosize_cooling`
-/// flags in its params:
+/// For each equipment spec with `autosize_heating`, `autosize_cooling`, or
+/// `autosize_backup` flags in its params:
 ///
 /// 1. Determine design outdoor temperature from EPW "Extremes" header or
 ///    ASHRAE 152 climate station lookup (fallback).
@@ -65,6 +70,7 @@ pub struct AutosizeContext {
 /// 3. Apply oversizing factor from HPXML `<HeatingAutosizingFactor>` /
 ///    `<CoolingAutosizingFactor>` when present; fall back to Manual S
 ///    defaults (1.4x heating, 1.15x cooling) when absent.
+///    Backup heating uses 100% of design load (no Manual S oversizing).
 /// 4. Apply capacity limits from HPXML `<AutosizingLimits>` when present
 ///    (clamp to Min/Max after oversizing).
 /// 5. Update the equipment spec's parameters and rebuild its typed config.
@@ -104,8 +110,18 @@ pub fn autosize_equipment_capacities(
             .get("autosize_cooling")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // Cooler specs share the base params (cloned before heater/cooler split
+        // in resolve_hvac.rs), so they also inherit autosize_backup when a backup
+        // system is declared. Cooler configs do not consume backup_capacity_w —
+        // computing backup capacity for them is wasted work and surprising.
+        let needs_backup = spec
+            .parameters
+            .get("autosize_backup")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            && !spec.name.ends_with(" Cooler");
 
-        if !needs_heating && !needs_cooling {
+        if !needs_heating && !needs_cooling && !needs_backup {
             continue;
         }
 
@@ -261,6 +277,53 @@ pub fn autosize_equipment_capacities(
                     factor,
                     design_outdoor_c = cooling_design_c,
                     "autosize cooling capacity: solve returned zero — \
+                     check model configuration"
+                );
+            }
+        }
+
+        if needs_backup {
+            // Backup heating autosizing: sized to 100% of design heating load
+            // with no Manual S oversizing factor.
+            // When heating capacity was already computed above, the same raw
+            // capacity applies. Otherwise recompute it.
+            let raw_capacity = thermal
+                .autosize_capacity(indoor_zone_id, heating_setpoint_c, heating_design_c)
+                .abs();
+
+            // Backup factor: prefer HPXML <BackupHeatingAutosizingFactor>;
+            // fall back to 100% of design load (BACKUP_CAPACITY_FACTOR = 1.0).
+            let factor = spec
+                .parameters
+                .get("autosize_backup_factor")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(BACKUP_CAPACITY_FACTOR);
+
+            let backup_capacity = raw_capacity * factor;
+
+            // Remove factor param consumed by autosizing.
+            spec.parameters.remove("autosize_backup_factor");
+
+            if backup_capacity > 0.0 {
+                spec.parameters
+                    .insert("backup_capacity_w".to_string(), json!(backup_capacity));
+                spec.parameters.remove("autosize_backup");
+                tracing::info!(
+                    equipment = %spec.name,
+                    backup_capacity_w = backup_capacity,
+                    factor,
+                    raw_capacity_w = raw_capacity,
+                    design_outdoor_c = heating_design_c,
+                    indoor_setpoint_c = heating_setpoint_c,
+                    "autosized backup heating capacity"
+                );
+            } else {
+                error!(
+                    equipment = %spec.name,
+                    raw_capacity_w = raw_capacity,
+                    factor,
+                    design_outdoor_c = heating_design_c,
+                    "autosize backup capacity: solve returned zero — \
                      check model configuration"
                 );
             }
@@ -868,6 +931,164 @@ mod tests {
             "zero-solar heating capacity {heating_capacity} W should exceed \
              solar-included heating capacity {cooling_method_on_heating} W \
              because July solar reduces the apparent heating load"
+        );
+    }
+
+    // ── Backup heating autosizing (T-0120) ──────────────────────────
+
+    #[test]
+    fn autosize_backup_capacity_uses_design_heating_load() {
+        let env = one_zone_env(20.0, 10.0);
+        let thermal = build_1r1c_solver(&env, 20.0);
+
+        let mut params = Map::new();
+        params.insert("autosize_backup".to_string(), json!(true));
+        // ASHP Heater — NOT ending in " Cooler" so needs_backup applies.
+        let spec = EquipmentSpec {
+            name: "ASHP Heater".to_string(),
+            instance_name: None,
+            fuel_type: hares_types::FuelType::Electric,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+        };
+        let mut specs = vec![spec];
+
+        let ctx = AutosizeContext {
+            design_conditions: Some(DesignConditions {
+                heating_design_db_c: -10.0,
+                cooling_design_db_c: 35.0,
+            }),
+            weather_lat: 0.0,
+            weather_lon: 0.0,
+            duct_params: DuctDseParams::default(),
+        };
+        let building = minimal_building();
+
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+
+        let result = &specs[0];
+        let backup_w = result
+            .parameters
+            .get("backup_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("backup_capacity_w must be set after backup autosizing");
+
+        // Default factor = BACKUP_CAPACITY_FACTOR = 1.0 (no oversizing).
+        let raw_capacity = thermal
+            .autosize_capacity(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
+            .abs();
+        let expected = raw_capacity * BACKUP_CAPACITY_FACTOR;
+        assert!(
+            (backup_w - expected).abs() < 1e-6,
+            "backup capacity {backup_w} should equal raw {raw_capacity} × factor 1.0 = {expected}"
+        );
+        // autosize_backup flag must be consumed.
+        assert!(
+            !result.parameters.contains_key("autosize_backup"),
+            "autosize_backup flag must be removed after backup autosizing"
+        );
+    }
+
+    #[test]
+    fn autosize_backup_applies_factor_override() {
+        let env = one_zone_env(20.0, 10.0);
+        let thermal = build_1r1c_solver(&env, 20.0);
+
+        let mut params = Map::new();
+        params.insert("autosize_backup".to_string(), json!(true));
+        params.insert("autosize_backup_factor".to_string(), json!(1.5));
+        let spec = EquipmentSpec {
+            name: "ASHP Heater".to_string(),
+            instance_name: None,
+            fuel_type: hares_types::FuelType::Electric,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+        };
+        let mut specs = vec![spec];
+
+        let ctx = AutosizeContext {
+            design_conditions: Some(DesignConditions {
+                heating_design_db_c: -10.0,
+                cooling_design_db_c: 35.0,
+            }),
+            weather_lat: 0.0,
+            weather_lon: 0.0,
+            duct_params: DuctDseParams::default(),
+        };
+        let building = minimal_building();
+
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+
+        let result = &specs[0];
+        let backup_w = result
+            .parameters
+            .get("backup_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("backup_capacity_w must be set after backup autosizing");
+
+        let raw_capacity = thermal
+            .autosize_capacity(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
+            .abs();
+        let with_override = raw_capacity * 1.5;
+        let with_default = raw_capacity * BACKUP_CAPACITY_FACTOR;
+        assert!(
+            (backup_w - with_override).abs() < 1e-6,
+            "with factor 1.5 override, backup {backup_w} should equal raw {raw_capacity} × 1.5 = {with_override}, not {with_default}"
+        );
+        assert!(
+            (backup_w - with_default).abs() > 1.0,
+            "with factor 1.5 override, backup {backup_w} must differ from default result {with_default}"
+        );
+        // autosize_backup flag must be consumed.
+        assert!(
+            !result.parameters.contains_key("autosize_backup"),
+            "autosize_backup flag must be removed after backup autosizing"
+        );
+    }
+
+    #[test]
+    fn cooler_spec_excluded_from_backup_autosizing() {
+        let env = one_zone_env(20.0, 10.0);
+        let thermal = build_1r1c_solver(&env, 20.0);
+
+        let mut params = Map::new();
+        params.insert("autosize_backup".to_string(), json!(true));
+        // Ends with " Cooler" — should be excluded from backup autosizing.
+        let spec = EquipmentSpec {
+            name: "ASHP Cooler".to_string(),
+            instance_name: None,
+            fuel_type: hares_types::FuelType::Electric,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+        };
+        let mut specs = vec![spec];
+
+        let ctx = AutosizeContext {
+            design_conditions: Some(DesignConditions {
+                heating_design_db_c: -10.0,
+                cooling_design_db_c: 35.0,
+            }),
+            weather_lat: 0.0,
+            weather_lon: 0.0,
+            duct_params: DuctDseParams::default(),
+        };
+        let building = minimal_building();
+
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+
+        let result = &specs[0];
+        // Cooler specs should NOT receive backup_capacity_w.
+        assert!(
+            !result.parameters.contains_key("backup_capacity_w"),
+            "cooler spec must not receive backup_capacity_w"
+        );
+        // autosize_backup flag should be left intact (not consumed).
+        assert!(
+            result.parameters.contains_key("autosize_backup"),
+            "cooler spec should retain autosize_backup flag since it was excluded"
         );
     }
 

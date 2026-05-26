@@ -730,24 +730,23 @@ impl HeatPumpHeaterCore {
         self.hvac.rebuild_thermal_ports(&mut self.ports);
 
         // Backup heating from typed config.
-        let default_backup = match self.variant {
-            HeaterVariant::Ashp => DEFAULT_BACKUP_CAPACITY_W,
-            HeaterVariant::Minisplit => 0.0,
-            HeaterVariant::Gshp => 0.0,
-        };
-        self.backup_capacity_w = cfg
-            .common
-            .backup_capacity_w
-            .unwrap_or_else(|| {
-                if default_backup > 0.0 {
-                    tracing::warn!(
-                        "HeatPumpHeater backup_capacity_w not specified; \
-                         falling back to default {default_backup} W"
-                    );
+        // For ASHP, backup capacity is required — either explicit in HPXML
+        // or computed by autosizing from the design heating load.
+        // For MSHP and GSHP, backup is optional (defaults to 0.0 W).
+        self.backup_capacity_w = if let Some(cap) = cfg.common.backup_capacity_w {
+            cap.max(0.0)
+        } else {
+            match self.variant {
+                HeaterVariant::Ashp => {
+                    return Err(HaresError::Equipment(
+                        "backup_capacity_w required for ASHP Heater; \
+                         backup capacity must be provided in HPXML or computed by autosizing"
+                            .into(),
+                    ));
                 }
-                default_backup
-            })
-            .max(0.0);
+                HeaterVariant::Minisplit | HeaterVariant::Gshp => 0.0,
+            }
+        };
         self.backup_eir = cfg
             .common
             .backup_eir

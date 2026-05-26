@@ -1,0 +1,64 @@
+# opencode log for core-10
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/actors/occupant.rs
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_loads.rs
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py
+[0m✱ [0mGrep "occup|sensible.*latent|internal.*gain|metabolic|number_of_occupants|ASHRAE.*55|schedule.*occup"[90m in crates/hares-core/src · 216 matches[0m
+[0m✱ [0mGrep "occup|internal.*gain|sensible.*latent|metabolic|ASHRAE.*55"[90m in vendors/OCHRE/ochre/utils · 36 matches[0m
+[0m✱ [0mGrep "occupancy|occupant_gain|occupant_load|internal_gain|occupant_sensible|occupant_latent"[90m in crates · 161 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1050, limit=50][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2065, limit=80][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=690, limit=20][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=940, limit=40][0m
+[0m✱ [0mGrep "OCCUPANT_SENSIBLE_GAIN_W|OCCUPANT_LATENT_GAIN_W|OCCUPANT_CONVECTIVE_FRACTION|OCCUPANT_RADIATIVE_FRACTION"[90m in crates/hares-core/src · 11 matches[0m
+[0m✱ [0mGrep "occupant.*gain|internal.*gain.*occup|sensible.*70|latent.*45|metabolic|ASHRAE.*55"[90m in vendors/OCHRE/ochre · 6 matches[0m
+[0m✱ [0mGrep "OCCUPANT_SENSIBLE_GAIN_W|OCCUPANT_LATENT_GAIN_W|OCCUPANT_CONVECTIVE_FRACTION|OCCUPANT_RADIATIVE_FRACTION"[90m in crates/hares-physics/src · 7 matches[0m
+[0m✱ [0mGrep "occupancy_sensible_gain|occupancy_latent_gain|metabolic"[90m in vendors/OCHRE/ochre/Models · 6 matches[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs[90m [offset=165, limit=50][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=895, limit=30][0m
+[0m✱ [0mGrep "weekday_fractions|weekend_fractions|occupancy.*fraction|schedule.*fraction"[90m in crates · 45 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/schedule.py[90m [offset=372, limit=100][0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=100][0m
+[0m✱ [0mGrep "ALL_SCHEDULE_NAMES|Occupancy"[90m in vendors/OCHRE/ochre/utils · 10 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/schedule.py[90m [limit=75][0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=80, offset=220][0m
+[0m✱ [0mGrep "ScheduleCategory::Occupancy"[90m in crates/hares-io/src · 1 match[0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=120, offset=680][0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=200, offset=600][0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=130, offset=525][0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=120, offset=380][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=30, offset=425][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/synthetic.rs[90m [limit=30, offset=900][0m
+[0m✱ [0mGrep "Occupancy.*default|default.*occupancy|Occupancy.*profile|make_occupancy|occupants.*column"[90m in crates/hares-io/src · 0 matches[0m
+[0m✱ [0mGrep "occupancy_schedule|Occupancy.*schedule|schedule.*Occupancy"[90m in crates/hares-io/src · 0 matches[0m
+[0m✱ [0mGlob "**/Default Schedule Parameters.csv"[90m 2 matches[0m
+[0m✱ [0mGrep "Occupancy|occupancy|occupants"[90m in defaults · 3 matches[0m
+[0m→ [0mRead defaults/Default Schedule Parameters.csv[90m [limit=10][0m
+[0m✱ [0mGrep "occupants.*Occupancy"[90m in vendors/OCHRE/ochre/defaults · 3 matches[0m
+[0m✱ [0mGrep "Occupancy"[90m in vendors/OCHRE/ochre/defaults · 39 matches[0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=50, offset=396][0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=50, offset=305][0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs[90m [limit=30, offset=355][0m
+[0m
+[0m← [0mWrite docs/reviews/core/core-10-occupancy-gains.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core/core-10-occupancy-gains.md`.
+
+**Key findings summary:**
+
+| Severity | Finding |
+|----------|---------|
+| **High** | HPXML-embedded occupancy weekday/weekend schedule fractions are parsed and stored in the Occupancy spec but **never used** to generate the occupancy timeseries — `schedule_resolve.rs:404` silently drops `ScheduleCategory::Occupancy` |
+| **Medium** | Occupancy gain constants (66 W sensible, 51.2 W latent) derive from OCHRE's 400 BTU/h convention, not ASHRAE 55 (~70/45 W); no metabolic rate scaling for sleeping vs active states |
+| **Medium** | No fallback from `NumberofBedrooms` to occupant count when HPXML `NumberofResidents` is absent |
+| **Low** | Default schedule has identical weekday/weekend fractions (per standard), fractional occupancy is correctly supported, actor/thermal models are cleanly separated |

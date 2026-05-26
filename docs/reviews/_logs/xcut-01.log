@@ -1,0 +1,74 @@
+# opencode log for xcut-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs
+[0m• [0mExplore HARES codebase structure[90m Explore Agent[0m
+[0m✓ [0mExplore HARES codebase structure[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1229, limit=500][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/helpers.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1729, limit=800][0m
+[0m→ [0mRead crates/hares-equipment/src/config.rs[90m [limit=150][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [offset=1550, limit=200][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=200, offset=1750][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/baseboard.rs[90m [limit=100, offset=40][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [limit=100, offset=220][0m
+Now let me check the specific equipment init/step patterns and the HVAC zone_id propagation more closely.
+[0m✱ [0mGrep "fn try_build_gas_furnace_config"[90m 1 match[0m
+[0m✱ [0mGrep "fn try_build_electric_baseboard_config"[90m 1 match[0m
+[0m✱ [0mGrep "fn try_build_heat_pump_heater_config"[90m 1 match[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=100, offset=627][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=60, offset=893][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=80, offset=1133][0m
+[0m✱ [0mGrep "fn try_build_gas_water_heater_config|fn try_build_electric_water_heater_config|fn try_build.*wh_config|fn try_build.*water_heater"[90m 0 matches[0m
+[0m✱ [0mGrep "fn try_build_battery_config|fn try_build_pv_config"[90m 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/duct_distribution.rs
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=160, offset=88][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/heat_pump_wh.rs[90m [limit=80, offset=155][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [limit=60, offset=90][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [limit=120, offset=150][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [limit=80, offset=980][0m
+[0m✱ [0mGrep "zone_id.*water_heater|water_heater.*zone_id"[90m in crates/hares-io/src/hpxml · 0 matches[0m
+[0m✱ [0mGrep "fn resolve_water_heater|WaterHeating|resolve_wh"[90m in crates/hares-io/src · 79 matches[0m
+[0m✱ [0mGrep "GasWaterHeaterConfig|ElectricResistanceWaterHeaterConfig|TanklessWaterHeaterConfig|HeatPumpWaterHeaterConfig"[90m in crates/hares-io/src · 39 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_water_heater.rs[90m [limit=210, offset=20][0m
+[0m✱ [0mGrep "fn resolve_equipment"[90m in crates/hares-io/src · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [limit=50, offset=135][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=160, offset=2529][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/equipment.rs[90m [limit=80, offset=33][0m
+[0m✱ [0mGrep "zone_type.*init|init.*zone_type|fn init_from_typed"[90m in crates/hares-equipment/src/water_heater · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/resistance.rs[90m [limit=40, offset=100][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/gas.rs[90m [limit=40, offset=100][0m
+[0m✱ [0mGrep "zone_type.*zone_id.*map|zone_type.*to.*zone_id|zone_key"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m✱ [0mGrep "KEY_ZONE_ID|zone_id"[90m in crates/hares-equipment/src/water_heater · 35 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/mod.rs[90m [limit=60, offset=695][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/heat_pump_wh.rs[90m [limit=60, offset=730][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/cross-cutting
+(no output)
+[0m
+Now I have a thorough understanding of the full propagation chain. Let me write the findings document.
+[0m← [0mWrite docs/reviews/cross-cutting/xcut-01-equipment-zone-id-propagation.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/cross-cutting/xcut-01-equipment-zone-id-propagation.md`.
+
+**Summary**: 8 findings across the zone_id propagation chain:
+
+| Severity | Count | Key issue |
+|----------|-------|-----------|
+| **Critical** | 1 | Non-baseboard HVAC zone_id _never_ propagated from HPXML — always falls back to `ZoneId(1)` |
+| **High** | 2 | Water heater zone_id same gap; the `unwrap_or(ZoneId(1))` fallback silently masks both issues |
+| **Medium** | 1 | Battery zone_id optional but HPXML parser never populates it |
+| **Low** | 2 | No zone_id=0 leakage confirmed; PV zone=None correct |
+| **Info** | 2 | Duct multi-zone routing works; zone topology is immutable |
+
+The core bug is in `resolve_hvac.rs:1693` — `conditioned_zone_id(building)` is only called for Electric Baseboard but not for any other HVAC type. The main recommendation is a one-line change to inject zone_id for all HVAC equipment, plus a water heater analog in `resolve_water_heater.rs`.

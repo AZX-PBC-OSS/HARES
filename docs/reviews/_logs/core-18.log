@@ -1,0 +1,42 @@
+# opencode log for core-18
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs
+[0m→ [0mRead crates/hares-physics/src/ground.rs
+[0m→ [0mRead crates/hares-physics/src/water_mains.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc
+[0m✱ [0mGrep "SetCurrentWeather|InterpolateWeather|resample"[90m in vendors/EnergyPlus/src/EnergyPlus · 18 matches[0m
+[0m✱ [0mGrep "resample|interpolat"[90m in crates · 559 matches[0m
+Let me read the critical sections of the EnergyPlus WeatherManager for interpolation, and also find the weather resampling code in HARES.
+[0m→ [0mRead crates/hares-io/src/weather.rs[90m [offset=289, limit=350][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=2000, limit=500][0m
+[0m✱ [0mGrep "SetupInterpolationValues|CalcWaterMainsTemp"[90m in vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc · 4 matches[0m
+[0m→ [0mRead crates/hares-io/src/weather.rs[90m [offset=639, limit=300][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [limit=250, offset=7121][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [limit=250, offset=8311][0m
+[0m✱ [0mGrep "resample_field"[90m in crates/hares-io/src/weather.rs · 11 matches[0m
+[0m→ [0mRead crates/hares-io/src/weather.rs[90m [limit=100, offset=939][0m
+Now let me check a couple more specific things about the code to verify my analysis.
+[0m→ [0mRead crates/hares-io/src/weather.rs[90m [limit=60, offset=1202][0m
+[0m
+[0m← [0mWrite docs/reviews/core/core-18-environment-state-management.md
+Wrote file successfully.
+[0m
+Now I have a thorough understanding of all the code. Let me write the review document.
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core/core-18-environment-state-management.md`.
+
+**Key findings summary:**
+
+- **1 medium**: Water mains model is missing EnergyPlus's 32 °F (0 °C) minimum clamp — in very cold climates it can return sub-freezing mains water temperatures, which is physically impossible for liquid water in buried pipes.
+- **3 low**: Soil diffusivity differs from EnergyPlus (0.05 vs 0.0208 m²/day); parameter naming between `dt_annual_range_c` (full range) and the Kusuda-Achenbach half-amplitude risks confusion; Southern Hemisphere phase uses symmetric 182.5-day offset.
+- **1 informational**: HARES correctly defaults to ZOH (not linear interpolation) for solar radiation fields, preserving hourly energy integrals — the main concern in the review instructions is already addressed.
+
+The positive findings: HARES uses PCHIP interpolation for continuous fields (temperature, humidity, pressure), the Kusuda-Achenbach phase day (35) matches EnergyPlus, the Burch-Christensen water mains formulation matches the reference, and solar fields are explicitly handled with ZOH by default with clear documentation about the trade-offs.

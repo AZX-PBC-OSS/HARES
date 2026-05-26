@@ -1902,13 +1902,29 @@ pub(super) fn resolve_hvac(
             }
         }
 
-        // Backup heating parameters
+        // Backup heating parameters.
+        // HPXML does not encode "no backup system" via an explicit element —
+        // absence of BackupHeatingCapacity alone does not distinguish between
+        // (a) a backup system exists but capacity is omitted for autosizing,
+        // and (b) no backup system exists at all.
+        // Gate autosizing on evidence that a backup system is declared.
         if let Some(cap_btu) = child_f64(heat_pump, "BackupHeatingCapacity") {
             params.insert(
                 "backup_capacity_w".to_string(),
                 json!(conv::power_btu_h_to_w(cap_btu)),
             );
+        } else if child_text(heat_pump, "BackupSystemFuel").is_some()
+            || child_text(heat_pump, "BackupType").is_some()
+        {
+            // Backup system declared but capacity omitted — autosize to 100%
+            // of design heating load (no oversizing) per ACCA Manual S-2017.
+            params.insert("autosize_backup".to_string(), json!(true));
         }
+        // else: no backup system declared — backup_capacity_w stays absent.
+        // For MSHP this means 0 W backup (correct — MSHP typically has no
+        // backup). For ASHP, init_from_typed will return Err if a required
+        // backup capacity is missing, guarding against a genuinely incomplete
+        // HPXML rather than silently inferring an absent backup system.
         if let Some(eff_node) = heat_pump.child("BackupAnnualHeatingEfficiency") {
             if let Some(val) = child_f64(eff_node, "Value") {
                 let units_raw = child_text(eff_node, "Units").unwrap_or_default();

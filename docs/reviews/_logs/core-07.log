@@ -1,0 +1,100 @@
+# opencode log for core-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/checkpoint.rs
+[0m→ [0mRead crates/hares-equipment/src/ev/checkpoint.rs
+[0m→ [0mRead crates/hares-core/src/engine.rs
+[0m• [0mFind checkpoint usage in Dwelling[90m Explore Agent[0m
+[0m• [0mFind RNG and envelope state capture[90m Explore Agent[0m
+[0m• [0mFind EV checkpoint integration[90m Explore Agent[0m
+[0m✓ [0mFind checkpoint usage in Dwelling[90m Explore Agent[0m
+[0m✓ [0mFind EV checkpoint integration[90m Explore Agent[0m
+[0m✓ [0mFind RNG and envelope state capture[90m Explore Agent[0m
+[0m→ [0mRead tests/regression/checkpoint_restart.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1990, limit=100][0m
+[0m✱ [0mGrep "fn simulate|fn step\b|pub fn step"[90m in crates/hares-core/src/dwelling/mod.rs · 8 matches[0m
+[0m✱ [0mGrep "struct Dwelling|pub struct Dwelling"[90m in crates/hares-core/src/dwelling/mod.rs · 3 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1341, limit=80][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=631, limit=100][0m
+[0m✱ [0mGrep "fn run_timestep"[90m in crates/hares-core/src/dwelling/mod.rs · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2209, limit=120][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2329, limit=200][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2529, limit=200][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2729, limit=100][0m
+[0m✱ [0mGrep "fn update_in_place|struct EnvironmentState|equipment_core|equipment_telemetry"[90m in crates/hares-core/src/environment.rs · 3 matches[0m
+[0m✱ [0mGrep "struct EnvironmentState|equipment_core|equipment_telemetry"[90m in crates/hares-types/src · 11 matches[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=477, limit=80][0m
+[0m✱ [0mGrep "equipment_core|equipment_telemetry"[90m in crates/hares-core/src/actors · 7 matches[0m
+[0m✱ [0mGrep "\.equipment_core|\.equipment_telemetry"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/mod.rs[90m [offset=420, limit=50][0m
+[0m→ [0mRead crates/hares-core/src/actors/bms.rs[90m [offset=100, limit=50][0m
+[0m✱ [0mGlob "tests/regression/helpers*"[90m 1 match[0m
+[0m→ [0mRead tests/regression/helpers.rs
+[0m✱ [0mGrep "fn build_dwelling_config|fn write_schedule_csv|fn write_weather_epw"[90m in tests/regression · 0 matches[0m
+[0m✱ [0mGrep "fn build_dwelling_config|fn write_schedule_csv|fn write_weather_epw"[90m in . · 4 matches[0m
+[0m→ [0mRead benches/common.rs[90m [limit=100, offset=1][0m
+[0m→ [0mRead benches/common.rs[90m [limit=80, offset=101][0m
+[0m✱ [0mGrep "build_dwelling_config"[90m in tests/regression · 2 matches[0m
+[0m
+[0m$ [0mgrep -rn "fn build_dwelling_config" /Users/rich/source/HARES/ --include="*.rs"
+/Users/rich/source/HARES/crates/hares-core/tests/alignment_oracles_regressions.rs:1014:fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
+/Users/rich/source/HARES/benches/common.rs:108:pub fn build_dwelling_config(
+[0m
+[0m→ [0mRead tests/regression/checkpoint_restart.rs[90m [limit=10][0m
+[0m✱ [0mGlob "tests/regression/*.rs"[90m 7 matches[0m
+[0m→ [0mRead tests/regression/mod.rs
+[0m✱ [0mGrep "struct EvDriver|estimated_soc|current_step"[90m in crates/hares-core/src/actors/ev_driver · 38 matches[0m
+[0m✱ [0mGrep "struct BmsActor|prev_soc|day"[90m in crates/hares-core/src/actors/bms.rs · 35 matches[0m
+[0m✱ [0mGrep "trait Actor|fn save|fn load|fn checkpoint"[90m in crates/hares-core/src/actors · 0 matches[0m
+[0m✱ [0mGrep "trait Actor"[90m in crates/hares-types/src · 0 matches[0m
+[0m✱ [0mGrep "pub trait Actor"[90m 1 match[0m
+[0m→ [0mRead crates/hares-core/src/actor.rs
+[0m✱ [0mGrep "\.iter\(\)|\.values\(\)|\.keys\(\)"[90m in crates/hares-envelope/src/humidity_solver.rs · 4 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/humidity_solver.rs[90m [limit=200][0m
+[0m✱ [0mGrep "prior_electrical_summary"[90m in crates/hares-core/src/dwelling/mod.rs · 4 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=50, offset=1230][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=50, offset=2000][0m
+[0m✱ [0mGrep "struct EquipmentId|struct ZoneId"[90m in crates/hares-types/src · 2 matches[0m
+[0m→ [0mRead crates/hares-types/src/environment.rs[90m [limit=80, offset=312][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=30, offset=557][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=40, offset=587][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=40, offset=627][0m
+[0m✱ [0mGrep "struct ControlDispatcher|begin_step|ledger"[90m in crates/hares-control/src · 0 matches[0m
+[0m✱ [0mGrep "struct ControlDispatcher"[90m in . · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=40, offset=339][0m
+[0m✱ [0mGrep "price_signal|set_price|set_tariff|\.price_signal"[90m in crates/hares-core/src/dwelling/mod.rs · 13 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/ev/mod.rs[90m [limit=80, offset=60][0m
+[0m→ [0mRead crates/hares-equipment/src/ev/mod.rs[90m [limit=80, offset=793][0m
+[0m✱ [0mGrep "away_charge_actual_kw"[90m in crates/hares-equipment/src/ev/mod.rs · 8 matches[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=5, offset=477][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/core
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/core/core-07-checkpoint-round-trip.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/core/core-07-checkpoint-round-trip.md
+148 /Users/rich/source/HARES/docs/reviews/core/core-07-checkpoint-round-trip.md
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core/core-07-checkpoint-round-trip.md` (148 lines).
+
+**Summary**: 7 findings — 3 high, 2 medium, 2 low.
+
+Key issues:
+
+1. **Actor state not checkpointed** — `EvDriverActor.estimated_soc`, `Occupant.current_step`, and other actor mutable state is lost on restore, causing decision divergence.
+2. **`prior_electrical_summary` not checkpointed** — first post-restore step sees all-zero electrical state, confusing actors that read `env.electrical`.
+3. **`latest_env.equipment_core` empty on restore** — actors reading committed equipment core outputs (SOC, power) get empty maps, forcing fallback to stale actor-internal estimates.
+4. **`save_postcard` panics** — serialization failure crashes the entire simulation instead of returning an error.
+5. **Test gap** — the checkpoint restart regression test only exercises the simple BEopt example, missing actor/electrical-dependent code paths.
+6. The EV checkpoint module is correctly integrated through the main `Equipment` trait path (positive finding).
+7. `humidity_ratios` `HashMap` has non-deterministic iteration order (latent risk, no current impact).

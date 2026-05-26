@@ -1,0 +1,78 @@
+# opencode log for core-09
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/weather.rs
+[0m→ [0mRead crates/hares-io/src/tmy3.rs
+[0m→ [0mRead crates/hares-io/src/psm3.rs
+[0m→ [0mRead crates/hares-io/src/epw.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=872][0m
+[0m✱ [0mGrep "synthetic|generate|generator|fallback|default.*weather"[90m in crates · 828 matches[0m
+[0m✱ [0mGrep "clear.?sky|clear_sky|clearsky|cloud.*cover|stochastic"[90m in crates · 111 matches[0m
+Let me continue reading the EnergyPlus WeatherManager.cc for relevant sections on interpolation, sky temperature, and any synthetic weather generation, and also search for synthetic weather generation in HARES.
+[0m→ [0mRead crates/hares-core/src/dwelling/synthetic.rs
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=186, limit=80][0m
+[0m→ [0mRead crates/hares-core/tests/weather_integration.rs[90m [offset=1, limit=100][0m
+[0m✱ [0mGrep "SetCurrentWeather|InterpolateWeather|interpolateWind"[90m in vendors/EnergyPlus/src/EnergyPlus · 20 matches[0m
+[0m✱ [0mGrep "build_synthetic_weather|synthetic.*weather"[90m in crates · 23 matches[0m
+Let me continue reading the EnergyPlus WeatherManager for the interpolation and SetCurrentWeather sections that are relevant to this review.
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=2030, limit=200][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=3080, limit=130][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=860, limit=40][0m
+[0m✱ [0mGrep "solar_noon|clear_sky.*irradiance|solar_position"[90m in crates/hares-core/src/dwelling · 0 matches[0m
+Now let me check the environment setup to see how the synthetic weather is consumed:
+Now I have a complete understanding of the codebase. Let me write the review.
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/core/
+core-01-thermal-invariant-unwired.md
+core-02-moisture-balance-invariant.md
+core-03-solver-feedback-loop-ordering.md
+core-04-control-dispatch-cross-pass-ledger.md
+core-05-equipment-execution-stage-ordering.md
+[0m
+[0m← [0mWrite docs/reviews/core/core-09-synthetic-weather.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/core/core-09-synthetic-weather.md && head -20 /Users/rich/source/HARES/docs/reviews/core/core-09-synthetic-weather.md
+146 /Users/rich/source/HARES/docs/reviews/core/core-09-synthetic-weather.md
+# Synthetic weather generation statistical fidelity
+**Review ID**: core-09
+**Category**: core
+**Date**: 2026-05-26
+
+## Files Reviewed
+crates/hares-io/src/weather.rs crates/hares-io/src/tmy3.rs crates/hares-io/src/psm3.rs crates/hares-io/src/epw.rs
+
+## Vendor/Reference Files Consulted
+vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc
+
+## Key Source of Synthetic Weather Generation
+crates/hares-core/src/dwelling/synthetic.rs (function `build_synthetic_weather`, lines 795-890)
+crates/hares-physics/src/solar.rs (function `clear_sky_irradiance`, lines 194-220)
+
+## Findings
+### Finding 1: [Severity: critical]
+**Description**: Synthetic weather generates zero solar radiation (GHI/DNI/DHI = 0.0) for all 8760 hours. Solar radiation is the primary driver of envelope heat gains, cooling loads, and PV generation. With zero irradiance, any simulation using the synthetic weather path will see no solar-driven cooling load, no window solar gains, and no PV output — making the results physically meaningless for any purpose beyond conduction-only steady-state tests.
+
+**Code Location**: `crates/hares-core/src/dwelling/synthetic.rs:878-880`
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core/core-09-synthetic-weather.md`. 
+
+Summary of the 8 findings:
+
+| Severity | Count | Key Issue |
+|----------|-------|-----------|
+| Critical | 1 | Zero solar radiation — no GHI/DNI/DHI for all 8760 hours |
+| High | 3 | No diurnal temperature cycle, no cross-correlations, no cloud cover |
+| Medium | 2 | Midpoint offset inconsistency, no inter-day persistence |
+| Low | 2 | Positive: recent thermodynamic improvements; missing scope documentation |
+
+The core issue is that `build_synthetic_weather` is a constant-value generator for BESTEST-style validation, not a statistically representative weather generator. The existing `clear_sky_irradiance` function in `hares-physics` is fully implemented and tested but never wired into synthetic weather.

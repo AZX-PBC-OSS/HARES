@@ -1,0 +1,53 @@
+# opencode log for core-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/actors/solver_feedback.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs
+[0m→ [0mRead crates/hares-envelope/src/electrical_solver.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs[90m [offset=1203][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc[90m [limit=200][0m
+[0m✱ [0mGlob "crates/hares-core/src/**/*.rs"[90m 37 matches[0m
+Let me read the remaining parts of the thermal solver and the simulation loop orchestration, plus the EnergyPlus reference.
+[0m→ [0mRead crates/hares-core/src/engine.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/stepping.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1229][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc[90m [offset=200, limit=200][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2477][0m
+[0m✱ [0mGrep "ManageSurfaceHeatBalance|PredictorCorrector|air heat balance|iteration|converge"[90m in vendors/EnergyPlus · 2906 matches[0m
+[0m✱ [0mGrep "void ManageSurfaceHeatBalance|void CalcHeatBalanceOutsideSurf|void CalcHeatBalanceInsideSurf|PredictSystemLoads|CalcZoneAirTempSetpoints|CorrectZoneHumRat|CorrectZoneAirTemp"[90m in vendors/EnergyPlus/src/EnergyPlus · 12 matches[0m
+[0m✱ [0mGrep "class.*ZoneTempPredictorCorrector|void PredictSystemLoads"[90m in vendors/EnergyPlus/src/EnergyPlus · 1 match[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceSurfaceManager.cc[90m [offset=149, limit=200][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/ZoneTempPredictorCorrector.cc[90m [offset=180, limit=100][0m
+[0m✱ [0mGrep "ExecutionStage|stage_rank|enum.*Stage"[90m in crates/hares-types/src · 13 matches[0m
+[0m✱ [0mGrep "fn stage_rank|ExecutionStage""[90m in crates/hares-core/src · 2 matches[0m
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=164, limit=30][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [offset=458, limit=20][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/core/ 2>/dev/null || echo "directory does not exist"
+core-01-thermal-invariant-unwired.md
+core-02-moisture-balance-invariant.md
+[0m
+Now I have all the information needed. Let me check the `docs/reviews` directory exists, then write the review.
+[0m← [0mWrite docs/reviews/core/core-03-solver-feedback-loop-ordering.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core/core-03-solver-feedback-loop-ordering.md`.
+
+Summary of findings:
+
+1. **High** — Single-pass equipment-solver coupling with no within-timestep convergence iteration. The `run_timestep` method separates prepare/equipment/integrate into three sequential phases but never iterates. EnergyPlus uses explicit predictor-corrector with optional full iteration.
+
+2. **Medium** — PV generation unavailable for same-step BMS decisions. The battery BMS actor decides charge power (Step 1f) using the *prior* step's electrical summary; PV generates in Step 3b but that data arrives too late for the actor.
+
+3. **Low** — Stale exterior surface temperatures in the ideal capacity solve path. `prepare_inputs_inner` at `stepping.rs:370-373` saves/restores surface temps, creating different boundary conditions for the ideal solve vs. the final integration.
+
+4. **Low** — Electrical solver ordering relative to humidity/thermal solvers is correct but undocumented. No data dependency contract exists among domain solvers.

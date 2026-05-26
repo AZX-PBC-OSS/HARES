@@ -1,0 +1,63 @@
+# opencode log for core-04
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-control/src/dispatch.rs
+[0m→ [0mRead crates/hares-control/src/types.rs
+[0m→ [0mRead crates/hares-core/src/engine.rs
+[0m✗ [0mRead vendors/OCHRE/ochre/Equipment/Controller.py failed
+[91m[1mError: [0mFile not found: /Users/rich/source/HARES/vendors/OCHRE/ochre/Equipment/Controller.py
+[0m✱ [0mGlob "**/Controller*"[90m in vendors · 4 matches[0m
+[0m✱ [0mGlob "**/controller*"[90m in vendors · 0 matches[0m
+[0m✱ [0mGrep "dispatch.*ledger|DispatchLedger|dispatch_ledger"[90m in crates · 3 matches[0m
+[0m✱ [0mGrep "control.*pass|ControlPass|control_pass|dispatch.*pass"[90m in crates · 5 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=310, limit=180][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2260, limit=120][0m
+[0m→ [0mRead crates/hares-core/tests/dispatch_ordering_regressions.rs[90m [offset=430, limit=80][0m
+[0m✱ [0mGlob "**/OCHRE/**/*Controller*"[90m in vendors · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=80, offset=2380][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=100, offset=1][0m
+[0m→ [0mRead vendors/OCHRE/docs/source/ControllerIntegration.rst
+[0m✱ [0mGlob "**/Controller.py"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "apply_control"[90m in crates/hares-equipment/src · 348 matches[0m
+[0m✱ [0mGrep "fn apply_control\b"[90m in crates/hares-equipment/src · 1 match[0m
+[0m✱ [0mGlob "**/*.*"[90m in vendors/OCHRE/ochre/Equipment · 11 matches[0m
+[0m✱ [0mGrep "seen_targets"[90m in crates · 7 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/lib.rs[90m [offset=100, limit=60][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Equipment.py
+[0m• [0mFind battery control persistence[90m Explore Agent[0m
+[0m✱ [0mGrep "actor_dispatch_buf"[90m in crates/hares-core/src/dwelling · 8 matches[0m
+[0m✓ [0mFind battery control persistence[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=60, offset=700][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=50, offset=490][0m
+[0m✱ [0mGrep "fn queue_dispatch|fn apply_control_validated"[90m in crates/hares-core/src/dwelling · 2 matches[0m
+[0m✱ [0mGrep "fn begin_step"[90m in crates/hares-core/src · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=60, offset=1390][0m
+[0m✱ [0mGrep "fn begin_step|fn step_batch"[90m in crates/hares-core/src/dwelling · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=80, offset=2200][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/core/ 2>/dev/null || echo "Directory does not exist"
+core-01-thermal-invariant-unwired.md
+core-02-moisture-balance-invariant.md
+core-03-solver-feedback-loop-ordering.md
+core-05-equipment-execution-stage-ordering.md
+[0m
+[0m← [0mWrite docs/reviews/core/core-04-control-dispatch-cross-pass-ledger.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core/core-04-control-dispatch-cross-pass-ledger.md`.
+
+**Summary of findings:**
+
+- **2 medium**: Cross-variant `conflicts_with` gap (ByName vs ByEndUse can't detect same-equipment conflicts, enabling priority inversion), and `seen_targets` Vec accumulates duplicate entries per target with O(n) scanning.
+- **3 low**: Same-tier signals aren't deduplicated (by design but could grow the ledger), persistent vs ephemeral control paradigm differs from OCHRE, and no test exercises 3+ tiers targeting the same equipment in a single step.
+- No critical or high findings.
+
+The dispatcher's core cross-pass ledger behavior is **functionally correct** for the common path: `seen_targets` persists across both dispatch passes within a step (explicitly NOT cleared in `drain_tiers` at line 403), `begin_step()` clears it at step boundaries (line 2292), and priority checks at lines 414-429 correctly enforce tier ordering.

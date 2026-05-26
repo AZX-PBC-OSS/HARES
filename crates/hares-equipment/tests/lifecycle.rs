@@ -737,7 +737,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                     stage_heating_capacities_w: None,
                     stage_heating_eirs: None,
                     backup_fuel: None,
-                    backup_capacity_w: None,
+                    backup_capacity_w: Some(5_000.0),
                     backup_eir: None,
                     fraction_heating_load_served: Some(1.0),
                     cooling_capacity_w: Some(8_000.0),

@@ -1,0 +1,41 @@
+# opencode log for core-16
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs
+[0m→ [0mRead crates/hares-io/src/hpxml/mod.rs
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1229][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [offset=1292][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=1234][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=1158][0m
+Let me continue reading the remaining parts of the files.
+[0m→ [0mRead crates/hares-io/src/hpxml/validation.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs
+Now let me look at the validation module and solver builder for additional context on defaults and validation.
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=1231][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=2572][0m
+[0m✱ [0mGrep "DEFAULT_R_M2_K_W"[90m 5 matches[0m
+[0m✱ [0mGrep "fn ensure_referenced_zones_exist"[90m 1 match[0m
+Now let me check one more area - the boundary zone index function and the DEFAULT_R_M2_K_W constant.
+[0m
+[0m← [0mWrite docs/reviews/core/core-16-dwelling-assembly.md
+Wrote file successfully.
+[0m
+Now I have all the information needed. Let me write the review.
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core/core-16-dwelling-assembly.md`.
+
+**Summary of findings**: 8 issues identified across the dwelling assembly pipeline:
+
+- **2 High**: Missing foundation-type handling (silent no-foundation-zone default) and attic vented-status inconsistency between the two zone-creation paths
+- **3 Medium**: Unrealistic R-value fallback default (R-14 IP), crawlspace vented default mismatch with OCHRE, silent clamping of negative material R-values after film subtraction
+- **3 Low**: Zero-area wall from window subtraction only logged, narrow framing-factor default table, and undocumented single-zone-per-type assumption

@@ -27,3 +27,23 @@ Let me also check the thermal solver's integration method and how it provides it
 [0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs[90m [offset=950, limit=40][0m
 Now let me check the `DomainSolver` trait to understand the `resolve` vs `resolve_new` methods and the thermal solver's `integrate` method.
 [0m✱ [0mGrep "DOMAIN_ORDER|domain_order|domain.*priority|domain.*dependency|DOMAIN_THERMAL|DOMAIN_HUMIDITY"[90m 0 matches[0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/core/ 2>/dev/null || echo "Directory does not exist"
+core-01-thermal-invariant-unwired.md
+[0m
+Now I have enough information to write the comprehensive review. Let me create the output file.
+[0m← [0mWrite docs/reviews/core/core-02-moisture-balance-invariant.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/core/core-02-moisture-balance-invariant.md
+140 /Users/rich/source/HARES/docs/reviews/core/core-02-moisture-balance-invariant.md
+[0m
+Review written to `docs/reviews/core/core-02-moisture-balance-invariant.md` — 8 findings spanning 140 lines.
+
+**Key results:**
+
+| Severity | Count |
+|----------|-------|
+| High | 1 — The moisture balance invariant is a mathematical tautology when the 15x buffering multiplier is active (computes `dW * rho * V * M` and checks against `Q * dt / h_fg`, but `dW` was derived from those exact terms) |
+| Medium | 4 — Thermal invariant never called; condensation mass discarded at clamping; sequential coupling (no iterative feedback); 15x multiplier is uncalibrated for construction type |
+| Low | 3 — Absolute 1e-6 kg tolerance is ~3-4 orders too tight; h_fg constant duplicated in 4 locations; no dt validation in humidity solver |

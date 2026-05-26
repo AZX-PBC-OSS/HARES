@@ -1,0 +1,49 @@
+# opencode log for core-11
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/autosize.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/SizingManager.cc[90m [limit=300][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/SizingManager.cc[90m [offset=300, limit=400][0m
+[0m✱ [0mGrep "fn autosize_capacity|fn autosize_capacity_cooling"[90m 2 matches[0m
+[0m✱ [0mGrep "water.?heater|WaterHeater|dhw|domestic"[90m in crates/hares-core/src · 12 matches[0m
+Let me continue reading the EnergyPlus SizingManager to understand its sizing methodology, and also look at the ThermalSolver's autosize methods.
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/stepping.rs[90m [offset=1, limit=250][0m
+[0m✱ [0mGrep "sizing|SizingFactory|IdealLoads|ideal.?loads"[90m in vendors/EnergyPlus/src/EnergyPlus · 114 matches[0m
+[0m✱ [0mGrep "water_heater.*autosize|autosize.*water_heater|water_heater.*capacity|first.?hour|FHR|storage.?volume"[90m in crates · 75 matches[0m
+[0m✱ [0mGrep "solve_for_output_input"[90m in crates · 5 matches[0m
+[0m✱ [0mGrep "IdealLoads|ideal.?load|IdealHVAC|PurchasedAir"[90m in vendors/EnergyPlus/src/EnergyPlus · 0 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/state_space.rs[90m [offset=370, limit=80][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_water_heater.rs[90m [offset=30, limit=130][0m
+[0m✱ [0mGrep "fn solve_for_scalar_input"[90m in crates/hares-envelope/src · 3 matches[0m
+[0m✱ [0mGrep "water|dhw|Water"[90m 1 match[0m
+[0m✱ [0mGrep "autosize_water|wh_autosize|water_heater_autosize"[90m in crates · 0 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/state_space.rs[90m [limit=120, offset=540][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=125, limit=30][0m
+[0m✱ [0mGrep "autosize_equipment_capacities"[90m in crates · 7 matches[0m
+Now I have a thorough understanding of the autosizing code. Let me also verify whether there's any water heater capacity autosizing anywhere in the codebase, and check the dwelling mod.rs for water heater orchestration:
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1020, limit=40][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/core
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/core/core-11-autosizing.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core/core-11-autosizing.md`.
+
+**Key findings summary:**
+
+- **3 High**: (1) Single algebraic solve instead of iterative design-day simulation — misses thermal mass lag and diurnal peak timing; (2) No internal gains in cooling sizing — potential undersizing; (3) No water heater autosizing methodology at all.
+- **1 Medium**: Cooling sizing at solar noon only misses west-facing window peaks.
+- **2 Low**: Oversizing factors and limits correctly implemented (positive); heating sizing correctly ignores solar/internal gains (positive).
+
+The fundamental architectural difference from EnergyPlus is that HARES uses a one-shot `solve_for_output_input` algebraic solve rather than running actual design-day simulations with ideal loads systems across a 24-hour weather profile.

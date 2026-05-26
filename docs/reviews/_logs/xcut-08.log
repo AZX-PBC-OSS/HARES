@@ -1,0 +1,49 @@
+# opencode log for xcut-08
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/ndinterp.rs
+[0m✱ [0mGrep "RegularGridInterpolator"[90m 59 matches[0m
+[0m✱ [0mGrep "ndinterp|nd_interp"[90m 18 matches[0m
+[0m✱ [0mGrep "\.interpolate\("[90m 31 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=1240, limit=50][0m
+Now let me check how `interpolate` is called at runtime and understand usage of the LUT in battery/EV code:
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=600, limit=30][0m
+[0m✱ [0mGrep "fn interpolate"[90m 25 matches[0m
+Let me check the PV interpolator for comparison and also look at how the battery uses the LUT at runtime:
+[0m→ [0mRead crates/hares-equipment/src/pv/lut.rs[90m [offset=270, limit=120][0m
+[0m→ [0mRead crates/hares-python/src/py_equipment.rs[90m [offset=1, limit=100][0m
+[0m✱ [0mGrep "fn axis_bracket"[90m 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/lut.rs[90m [limit=60, offset=390][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/lut.rs[90m [limit=40, offset=488][0m
+Now let me read the existing reviews directory to check the format:
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/cross-cutting/ 2>/dev/null || echo "Directory does not exist"
+xcut-01-equipment-zone-id-propagation.md
+xcut-02-fuel-type-enum-consistency.md
+xcut-03-thermal-category-tagging.md
+xcut-04-enduse-string-consistency.md
+[0m
+[0m→ [0mRead docs/reviews/cross-cutting/xcut-01-equipment-zone-id-propagation.md[90m [limit=50][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/cross-cutting
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/cross-cutting/xcut-08-nd-interpolation-extrapolation.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/cross-cutting/xcut-08-nd-interpolation-extrapolation.md`.
+
+**7 findings**: 1 critical, 2 high, 3 medium, 1 low.
+
+Key issues:
+- **No extrapolation strategy enum** — `interpolate()` hardcodes per-dimension clamp, violating requirements (b) and (c). LUT generation can't produce NaN to signal coverage gaps.
+- **PV LUT uses linear scan** O(N) for grid bracket (`pv/lut.rs:503`) vs binary search O(log N) in `ndinterp::bracket` (`ndinterp.rs:190`).
+- Per-dimension clamping (line 143), binary search (`partition_point`), cache-friendly flat array with precomputed strides, and irregular grid handling are all correct.

@@ -1,0 +1,54 @@
+# opencode log for core-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/clock.rs
+[0m→ [0mRead crates/hares-io/src/schedule.rs
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc
+[0m✱ [0mGrep "DST|daylight.?sav|spring.?forward|fall.?back|duplicate|hour.?skip|23.?hour|25.?hour|DaylightSaving"[90m in vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc · 135 matches[0m
+[0m✱ [0mGrep "DST|daylight.?sav|spring.?forward|fall.?back|duplicate|hour.?skip|23.?hour|25.?hour|civil_timezone|local.?standard|wall.?clock"[90m in . · 428 matches[0m
+[0m✱ [0mGrep "current_time|get_value|timestep_index|schedule.*index|index.*schedule|hour\(\)"[90m in crates · 353 matches[0m
+Let me find the DST-relevant sections in WeatherManager.cc and also look for schedule indexing patterns in the HARES codebase.
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=100, limit=200][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=370, limit=120][0m
+[0m→ [0mRead crates/hares-core/tests/timezone_weather_regressions.rs[90m [offset=140, limit=200][0m
+Let me read the critical DST-related areas in environment.rs and compare with EnergyPlus's approach.
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=872, limit=300][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=1520, limit=120][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=1790, limit=200][0m
+[0m✱ [0mGrep "fn compute_schedule_offset|fn compute_annual_offset"[90m in crates/hares-core/src/environment.rs · 2 matches[0m
+[0m✱ [0mGrep "energyplus|epw|TMY|tmy|local.?standard|local.?clock|DST.*weather|weather.*DST|civil_time"[90m in crates · 348 matches[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=100, offset=688][0m
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [limit=120, offset=80][0m
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [limit=80, offset=290][0m
+[0m✱ [0mGrep "records_to_series|hours_to_datetime|offset.*local|EPW_RECORD_MIN_FIELDS|date.*year.*month.*day|generate.*timestamp"[90m in crates/hares-io/src · 9 matches[0m
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [limit=80, offset=200][0m
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [limit=100, offset=803][0m
+[0m✱ [0mGrep "struct WeatherTimeSeries"[90m in crates/hares-io/src · 1 match[0m
+[0m✱ [0mGrep "record_datetimes|generate_weather_timestamps"[90m in crates/hares-io/src · 3 matches[0m
+[0m→ [0mRead crates/hares-io/src/weather.rs[90m [limit=50, offset=469][0m
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [limit=25, offset=280][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=200, offset=2330][0m
+[0m→ [0mRead crates/hares-io/src/schedule.rs[90m [offset=480, limit=50][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=1, limit=95][0m
+Now let me also check how the `generate_annual_timestamps` function handles the year choice for index-based schedules and whether the `parse_timestamp` function's offset handling could interact with DST-aware conversions.
+[0m
+[0m← [0mWrite docs/reviews/core/core-06-dst-schedule-indexing.md
+Wrote file successfully.
+[0m
+Now I have all the information needed to write the review. Let me compile the findings.
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core/core-06-dst-schedule-indexing.md`.
+
+**Key findings summary:**
+
+- **No critical or high-severity issues.** The DST schedule indexing is functionally correct for both spring-forward (hour skip) and fall-back (hour repeat) transitions, with regression tests confirming both.
+- **1 medium finding**: EPW HOLIDAYS/DAYLIGHT SAVING header data is parsed but discarded — HARES relies entirely on IANA timezone lookups and cannot use weather-file-embedded DST transition dates that EnergyPlus supports.
+- **4 low findings**: documentation gaps around the `clock.rs`/DST interaction, the `infer_step_secs` error message not mentioning DST, the `doy0*86400` formula's implicit assumption about day length, and the hardcoded year 2007 in schedule timestamp generation.

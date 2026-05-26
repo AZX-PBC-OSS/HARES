@@ -1,0 +1,56 @@
+# opencode log for core-13
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/engine.rs
+[0m→ [0mRead crates/hares-core/src/lib.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/SimulationManager.cc
+[0m• [0mExplore dwelling simulate loop[90m Explore Agent[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/SimulationManager.cc[90m [offset=983][0m
+[0m✓ [0mExplore dwelling simulate loop[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1330, limit=50][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2130, limit=90][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2205, limit=80][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2400, limit=130][0m
+[0m→ [0mRead crates/hares-core/src/clock.rs
+[0m✗ [0mRead crates/hares-core/src/actors/solver_feedback.rs failed[90m [offset=250, limit=100][0m
+[91m[1mError: [0mOffset 250 is out of range for this file (187 lines)
+[0m→ [0mRead crates/hares-core/src/actors/solver_feedback.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1280, limit=55][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2530, limit=90][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2630, limit=200][0m
+[0m→ [0mRead crates/hares-core/src/invariants.rs
+[0m✱ [0mGrep "rng.*reset|reset.*rng|warmup.*rng|rng.*warmup"[90m in crates/hares-core/src/dwelling/mod.rs · 0 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1989, limit=85][0m
+[0m✱ [0mGrep "validate_core_contract"[90m in crates/hares-core/src · 3 matches[0m
+[0m✱ [0mGrep "fn validate_core_contract|pub fn validate_core_contract"[90m in crates/hares-core/src · 0 matches[0m
+[0m✱ [0mGrep "validate_core_contract"[90m in . · 20 matches[0m
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=930, limit=80][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3048, limit=220][0m
+[0m✱ [0mGrep "solve_ideal_capacity_for_target"[90m in . · 24 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/stepping.rs[90m [offset=252, limit=100][0m
+[0m
+[0m← [0mWrite docs/reviews/core/core-13-engine-main-loop.md
+Wrote file successfully.
+[0m
+Now I have all the information. Let me write the review.
+The review has been written to `docs/reviews/core/core-13-engine-main-loop.md`.
+
+**Summary of 7 findings:**
+
+| # | Severity | Topic |
+|---|----------|-------|
+| 1 | High | No adaptive time-stepping/retry; solver non-convergence returns 0.0 silently |
+| 2 | High | Equipment failure isolation incomplete -- ports not rolled back after failed `step()` |
+| 3 | Medium | Invariant checks elided in release builds; NaN propagates undetected |
+| 4 | Medium | Warmup RNG state not isolated -- breaks deterministic reproducibility |
+| 5 | Medium | `total_steps()` integer division silently truncates partial remainder |
+| 6 | Low | Engine panic catch prevents crash but discards all prior output |
+| 7 | Low | Checkpoint infrastructure exists but never called in main loop |

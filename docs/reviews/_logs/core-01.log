@@ -36,3 +36,9 @@ Now I have all the information needed. Let me write the review.
 [0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/core
 (no output)
 [0m
+[0m← [0mWrite docs/reviews/core/core-01-thermal-invariant-unwired.md
+Wrote file successfully.
+[0m
+Review written to `/Users/rich/source/HARES/docs/reviews/core/core-01-thermal-invariant-unwired.md`.
+
+**Summary**: The `check_thermal` invariant is fully implemented and well-tested in `invariants.rs` but never wired into the simulation engine. The dwelling's `check_invariants` method (`dwelling/mod.rs:3135–3142`) explicitly defers it with a comment acknowledging the gap. 6 findings total: 1 high (thermal invariant unwired), 2 medium (failure mode always hard-stop; non-scaling electrical tolerance), 3 low (non-scaling moisture tolerance; doc-comment discrepancy; coarse-grained enable/disable gating).
