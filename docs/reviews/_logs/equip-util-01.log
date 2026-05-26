@@ -1,0 +1,50 @@
+# opencode log for equip-util-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/ndinterp.rs
+[0m• [0mExplore vendor OCHRE interp[90m Explore Agent[0m
+[0m• [0mExplore vendor EnergyPlus interp[90m Explore Agent[0m
+[0m✓ [0mExplore vendor OCHRE interp[90m Explore Agent[0m
+[0m✓ [0mExplore vendor EnergyPlus interp[90m Explore Agent[0m
+[0m→ [0mRead vendors/EnergyPlus/third_party/btwxt/src/regular-grid-interpolator-implementation.cpp
+[0m→ [0mRead vendors/EnergyPlus/third_party/btwxt/include/btwxt/grid-axis.h
+[0m→ [0mRead vendors/EnergyPlus/third_party/btwxt/src/grid-axis.cpp
+[0m✱ [0mGlob "**/*.rs"[90m in crates/hares-equipment · 77 matches[0m
+Now let me dig into the BTWXT core implementation for detailed comparison, and also check for any OCHRE files that may still be relevant.
+[0m✱ [0mGrep "ndinterp|RegularGridInterpolator"[90m in crates/hares-equipment/src · 48 matches[0m
+[0m✱ [0mGrep "compute_fraction"[90m in vendors/EnergyPlus/third_party/btwxt · 2 matches[0m
+[0m✱ [0mGlob "**/*.h"[90m in vendors/EnergyPlus/third_party/btwxt/include/btwxt · 5 matches[0m
+Let me check how the ndinterp is used and look for any caller-side issues, plus look at the BTWXT compute_fraction function.
+[0m→ [0mRead vendors/EnergyPlus/third_party/btwxt/src/regular-grid-interpolator-implementation.h
+[0m→ [0mRead vendors/EnergyPlus/third_party/btwxt/include/btwxt/regular-grid-interpolator.h
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=1240, limit=40][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=3680, limit=200][0m
+[0m→ [0mRead crates/hares-equipment/src/ev/tests.rs[90m [offset=865, limit=160][0m
+[0m✱ [0mGrep "charging_curve_lut.*interpolate|\.interpolate\("[90m in crates/hares-equipment/src/battery · 1 match[0m
+[0m✱ [0mGrep "charging_curve_lut.*interpolate|\.interpolate\("[90m in crates/hares-equipment/src/ev · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=595, limit=35][0m
+[0m→ [0mRead crates/hares-equipment/src/ev/mod.rs[90m [offset=415, limit=25][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/equipment-util/ 2>/dev/null || echo "directory does not exist"
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/equipment-util/equip-util-01-nd-interpolation.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/equipment-util/equip-util-01-nd-interpolation.md`.
+
+**Summary**: 5 findings — 1 high, 1 medium, 3 low.
+
+- **High**: Missing index caching/hunting for temporal coherence — the interpolator does a full binary search from scratch on every call, unlike both BTWXT (hypercube caching) and scipy (index caching).
+- **Medium**: No query-point validation — NaN/infinite coordinates silently produce garbage outputs.
+- **Low**: f32 values storage limits precision; no anisotropic grid tests; `Deserialize` derive bypasses constructor validation.
+
+The multilinear interpolation formula and row-major indexing are **mathematically correct** (verified analytically against BTWXT's weight formulas). Boundary handling via clamping is **safe** (no unbounded extrapolation), and binary search via `partition_point` gives O(log n) per-axis search.

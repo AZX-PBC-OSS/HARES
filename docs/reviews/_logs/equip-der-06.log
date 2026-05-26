@@ -26,3 +26,19 @@ equip-der-04-ev-degradation-sharing-with-battery.md
 equip-der-05-pv-soiling-lut-interaction.md
 [0m
 Now I have all the information needed. Let me write the review document.
+[0m← [0mWrite docs/reviews/equipment-der/equip-der-06-pv-inverter-priority-reactive-power.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/equipment-der/equip-der-06-pv-inverter-priority-reactive-power.md`.
+
+**Summary of findings (5 total, 2 Medium / 3 Low):**
+
+| # | Severity | Issue |
+|---|----------|-------|
+| 1 | Medium | `ReactiveSetpoint { kvar: 0.0 }` is indistinguishable from "no Q setpoint," causing static PF to override the explicit zero command |
+| 2 | Medium | PF enforcement applied as post-processing clip rather than integrated constraint (matches OCHRE behavior) |
+| 3 | Low | PF-derived Q computed from pre-inverter-clip P — logically suboptimal though not incorrect |
+| 4 | Low | Var-priority Q sign derived from stored `q_setpoint_kvar` field rather than function parameter |
+| 5 | Low | `enforce_min_pf` forces Q=0 at P=0 (matches OCHRE; may surprise controllers expecting nighttime reactive support) |
+
+The priority modes (Watt/Var/CPF) are implemented correctly and produce the same constraint resolution as OCHRE. The `sqrt(P²+Q²)` enforcement against inverter kVA rating and DC-to-AC ratio clipping are both handled inside `apply_inverter_limits` at `mod.rs:269–320`. The main actionable issue is Finding 1 — the need to distinguish an explicit zero-var command from an absent Q setpoint.

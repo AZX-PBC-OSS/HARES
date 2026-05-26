@@ -1,0 +1,44 @@
+# opencode log for equip-hvac-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/duct_distribution.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/furnace.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py[90m [offset=1147][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/cooler.rs
+[0m✱ [0mGrep "basement_zone_id|basement_heat_frac"[90m in crates/hares-equipment/src/hvac · 37 matches[0m
+[0m✱ [0mGrep "fn init.*HvacEquipment"[90m in crates/hares-equipment/src/hvac · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=600, limit=60][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=2090, limit=80][0m
+[0m✱ [0mGrep "update_zone_heat_fractions"[90m in crates/hares-equipment/src/hvac · 37 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [limit=40, offset=600][0m
+[0m✱ [0mGrep "duct_dse|duct_zone_id"[90m in crates/hares-equipment/src/hvac · 16 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [limit=100, offset=490][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [limit=60, offset=845][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [limit=60, offset=815][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [limit=60, offset=770][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/equipment-hvac
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/equipment-hvac/equip-hvac-07-duct-heat-fraction-basement-dedup.md
+Wrote file successfully.
+[0m
+Review written to `/Users/rich/source/HARES/docs/reviews/equipment-hvac/equip-hvac-07-duct-heat-fraction-basement-dedup.md`.
+
+**Summary**: 4 findings — 1 high, 1 medium, 2 low.
+
+- **High**: Energy conservation violation when `basement_heat_frac > 0` but `basement_zone_id` is `None` — the fraction subtraction reduces conditioned-zone delivery but the basement portion is silently dropped (up to ~21% capacity loss). OCHRE guards against this by only setting a positive fraction when a Foundation zone exists.
+- **Medium**: Merged basement/duct zone entry mis-categorized as `DuctLoss` (diagnostic labeling only; energy balance is correct).
+- **Low**: `DUCT_LOSS_W` telemetry excludes the fan-heat portion routed to ducts, under-reporting by `fan_heat_w * (1 - DSE)`.
+- **Low**: Zone-ID equality guards are fragile — no init-time validation that configured zones are distinct.

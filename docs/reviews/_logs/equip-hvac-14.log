@@ -1,0 +1,68 @@
+# opencode log for equip-hvac-14
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Read HARES source files for startup capacity degradation ramp implementation
+[ ] Read OCHRE vendor reference file for comparison
+[ ] Analyze and compare implementations, write review findings
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/cooler.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py
+[0m✱ [0mGrep "apply_startup_capacity_degradation|StartupConfig|current_multiplier|time_since_start"[90m 68 matches[0m
+[0m✱ [0mGrep "calc_startup_capacity_degredation|startup_cap_mult|time_from_start"[90m 11 matches[0m
+[0m✱ [0mGrep "derived_cooling_startup_cd"[90m 13 matches[0m
+Now let me search for the specific startup capacity degradation implementation details.
+[0m→ [0mRead crates/hares-equipment/src/hvac/speed_control.rs[90m [offset=30, limit=130][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/staging.rs[90m [offset=290, limit=60][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/cooling_config.rs[90m [offset=120, limit=80][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py[90m [offset=971, limit=18][0m
+[0m✱ [0mGrep "time_from_start"[90m 4 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [offset=1340, limit=60][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=1280, limit=100][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py[90m [offset=1147, limit=200][0m
+[0m✱ [0mGrep "self\.mode\s*=.*HP"[90m 1 match[0m
+[0m✱ [0mGrep "apply_startup_capacity_degradation"[90m 16 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/staging.rs[90m [offset=230, limit=90][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/staging.rs[90m [offset=745, limit=120][0m
+[0m✱ [0mGrep "class.*ASHPCooler|class.*ASHP.*Cooler|class.*Mini.*Cooler|class.*RoomAC"[90m 3 matches[0m
+[0m✱ [0mGrep "mode_prev"[90m 3 matches[0m
+Let me check the OCHRE `ASHPCooler` code and how it sets mode, to confirm whether startup degradation applies to the heat pump cooling side.
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py[90m [offset=606, limit=15][0m
+[0m✱ [0mGrep "self\.mode\s*="[90m 23 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Equipment.py[90m [offset=230, limit=30][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py[90m [offset=760, limit=10][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/speed_control.rs[90m [offset=1, limit=30][0m
+Now I have all the information needed. Let me check one more area — how the OCHRE `c_d` default differs from HARES defaults:
+[0m✱ [0mGrep "DEFAULT_PLF_DEGRADATION_COEFF"[90m 8 matches[0m
+Now let me create the review directory and write the findings file.
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/equipment-hvac
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/equipment-hvac/equip-hvac-14-startup-capacity-degradation-ramp.md
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Read HARES source files for startup capacity degradation ramp implementation
+[✓] Read OCHRE vendor reference file for comparison
+[✓] Analyze and compare implementations, write review findings
+[0m
+Review written to `docs/reviews/equipment-hvac/equip-hvac-14-startup-capacity-degradation-ramp.md`.
+
+Key findings (7 total):
+
+- **Critical**: HARES applies startup degradation to all DX equipment, while OCHRE restricts it to heat pump heating mode only via `"HP" in self.mode` gate (HVAC.py:977). Air conditioners and HP coolers get a non-unity multiplier in HARES but always receive 1.0 in OCHRE.
+- **High**: OCHRE defaults Cd to 0.0 (disabled); HARES defaults to 0.25 (enabled), refined via SEER-based lookup but always active. Also, the ASHP heater startup timer advances during ER-only operation when the compressor is off, because the `on_now` signal uses generic `duty_cycle` rather than an HP-specific check.
+- **Medium**: Full restart degradation on every off-step (neither implementation models off-time recovery). PLR cycling can cause repeated ramp resets within a single timestep.
+- **Low**: Variable-speed correctly bypasses the ramp but accepts explicit non-zero Cd overrides. Room AC uses hardcoded Cd=0.22, diverging from both OCHRE default (0.0) and central-AC SEER-based defaults.

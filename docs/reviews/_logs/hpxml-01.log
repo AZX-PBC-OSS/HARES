@@ -1,0 +1,42 @@
+# opencode log for hpxml-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=4993, limit=60][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=1, limit=50][0m
+[0m✱ [0mGrep "DuctLeakage|duct.leakage|CFM25|cfm25|DuctLeakageMeasurement"[90m in crates/hares-io/src/hpxml/building.rs · 20 matches[0m
+[0m✱ [0mGrep "DSE|duct.leakage|duct_leakage|cfm25|CFM25"[90m in crates/hares-io/src/hpxml · 19 matches[0m
+[0m✱ [0mGrep "DSE|duct.leakage|cfm25|CFM25|duct_leakage"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 11 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [limit=80, offset=1820][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=80, offset=965][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [limit=80, offset=5048][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=120, offset=145][0m
+[0m✱ [0mGrep "fan.flow|fan_flow|FanFlow|Airflow|airflow|cooling_airflow|heating_airflow"[90m in crates/hares-io/src/hpxml · 76 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=120, offset=325][0m
+[0m✱ [0mGrep "struct DuctDseParams"[90m in crates/hares-io/src/hpxml · 1 match[0m
+[0m✱ [0mGrep "struct DuctDseParams"[90m in crates · 1 match[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=60, offset=87][0m
+[0m✱ [0mGrep "struct.*Duct[^s]|pub struct Duct"[90m in crates/hares-io/src/hpxml/building.rs · 1 match[0m
+[0m✱ [0mGrep "ashrae152|calculate_dse|fan_flow|CFM25"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 0 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [limit=60, offset=197][0m
+Now let me check how OCHRE's DSE calculation works - does it also convert CFM25?
+[0m✱ [0mGrep "DSE|ashrae.152|fan_flow|duct"[90m in vendors/OCHRE/ochre · 141 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/equipment.py[90m [limit=80, offset=161][0m
+[0m✱ [0mGrep "CFM25|cfm25|cfm_25|CFM_25|CFM.to.frac|convert.*leak"[90m in vendors/OCHRE/ochre · 0 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=20, offset=994][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [limit=10, offset=1868][0m
+[0m✱ [0mGrep "leakage_fraction"[90m in crates/hares-io/src/hpxml/resolve_hvac.rs · 2 matches[0m
+Let me now verify the full path of how zero leakage propagates through the DSE calculation:
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [limit=20, offset=3228][0m
+[0m
+[0m$ [0mls docs/reviews/hpxml/ 2>/dev/null || echo "directory does not exist"
+(no output)
+[0m
+Now I have all the information needed. Let me write the findings.

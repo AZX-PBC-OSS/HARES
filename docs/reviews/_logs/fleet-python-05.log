@@ -1,0 +1,61 @@
+# opencode log for fleet-python-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-python/src/conversions.rs
+[0m✱ [0mGrep "obs_to_numpy"[90m in . · 2 matches[0m
+[0m✱ [0mGrep "record_batch_arc_to_polars_df"[90m in . · 2 matches[0m
+[0m✱ [0mGrep "batch_step_py"[90m in . · 9 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_gym.rs
+[0m→ [0mRead crates/hares-python/src/py_fleet.rs
+[0m✱ [0mGrep "aggregate_timeseries"[90m in . · 27 matches[0m
+[0m✱ [0mGrep "obs_to_numpy|record_batch_arc_to_polars_df"[90m in . · 2 matches[0m
+[0m→ [0mRead crates/hares-python/src/lib.rs
+Now let me check for any other callers or references, and also look at the `FleetResults` struct to understand the `aggregate_timeseries` field type.
+[0m→ [0mRead crates/hares-fleet/src/aggregation.rs[90m [offset=25, limit=20][0m
+[0m
+[0m$ [0mgit log --oneline --all -20 -- crates/hares-python/src/conversions.rs
+639432a checkpoint
+55640c3 checkpoint
+419467b checkpoint
+dc69f82 snapshot partial recovery
+34e201e feat: bootstrap initial HARES implementation baseline
+[0m
+[0m$ [0mgit log --oneline --all -30 -- crates/hares-python/src/py_gym.rs
+ba133ca fix: close dispatch ordering, silent-default, and test-integrity blockers
+c1abb8a chore: clean up pre-v0 cruft and internal review artifacts
+621afd7 checkpoint
+8c07651 checkpoint
+806746e checkpoint
+e960dd7 checkpoint
+be1d00f checkpoint
+731bd9a checkpoint
+55640c3 checkpoint
+419467b checkpoint
+a1f370a checkpoint
+dc69f82 snapshot partial recovery
+34e201e feat: bootstrap initial HARES implementation baseline
+[0m
+Let me check the `FleetResults` struct to confirm the `aggregate_timeseries` type and look for any git history on these functions.
+[0m$ [0mgit log --format="%H %s" -1 -- crates/hares-python/src/conversions.rs
+639432aed94bffb297bf642ef4ce80852a0b47ab checkpoint
+[0m
+[0m✱ [0mGrep "Arc<RecordBatch>"[90m in crates/hares-python · 1 match[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/fleet-python
+(no output)
+[0m
+Now I have all the data. Let me write the review file.
+[0m← [0mWrite docs/reviews/fleet-python/fleet-python-05-python-dead-code-cleanup.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/fleet-python/fleet-python-05-python-dead-code-cleanup.md`.
+
+**Summary**: Two low-severity findings. Both `obs_to_numpy` and `record_batch_arc_to_polars_df` are trivial wrappers with no callers. The existing API paths work correctly without them — observations are returned as Python lists (via PyO3's automatic `Vec<f64>` conversion) and Arrow batches are converted directly from `RecordBatch` references. Neither represents incomplete feature wiring; they are speculative forward-compatibility wrappers that should be removed.

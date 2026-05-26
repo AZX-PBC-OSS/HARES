@@ -1,0 +1,189 @@
+# opencode log for equip-loads-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/ventilation.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/infiltration.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatRecovery.cc
+[0m
+[0m$ [0mgrep -n "defrost\|frost\|Frost\|Defrost\|bypass\|Bypass" /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/HeatRecovery.cc | head -60
+121:    constexpr std::array<std::string_view, static_cast<int>(FrostControlOption::Num)> frostControlNamesUC = {
+487:                    ShowSevereError(state, "Rotary HX Speed Modulation or Plate Bypass for Temperature Control for ");
+495:            // Added additional inputs for frost control
+496:            thisExchanger.FrostControlType = static_cast<FrostControlOption>(getEnumValue(frostControlNamesUC, state.dataIPShortCut->cAlphaArgs(9)));
+498:            if (thisExchanger.FrostControlType != FrostControlOption::None) {
+500:                thisExchanger.InitialDefrostTime = state.dataIPShortCut->rNumericArgs(8);
+501:                thisExchanger.RateofDefrostTimeIncrease = state.dataIPShortCut->rNumericArgs(9);
+1165:                                "Heat Exchanger Supply Air Bypass Mass Flow Rate",
+1167:                                thisExchanger.SupBypassMassFlow,
+1172:                                "Heat Exchanger Exhaust Air Bypass Mass Flow Rate",
+1174:                                thisExchanger.SecBypassMassFlow,
+1179:                                "Heat Exchanger Defrost Time Fraction",
+1181:                                thisExchanger.DefrostFraction,
+1424:        this->SupBypassMassFlow = 0.0;
+1425:        this->SecBypassMassFlow = 0.0;
+1701:        int hxBypassControlType = -1;
+1714:                        hxBypassControlType = oaCntrlr.HeatRecoveryBypassControlType;
+1730:            if (hxBypassControlType == HVAC::BypassWhenOAFlowGreaterThanMinimum) {
+1732:            } else if ((hxBypassControlType == HVAC::BypassWhenWithinEconomizerLimits) || this->hasZoneERVController) {
+1790:            UnitSupMassFlow = 0.0; // set HX supply flow to 0, all supply air will go through supply bypass
+1791:            UnitSecMassFlow = 0.0; // set HX secondary flow to 0, all secondary air will got through secondary bypass
+1869:            // calculate outlet conditions by mixing bypass air stream with air that went through the
+1871:            Real64 local_SupBypassMassFlow = max(0.0, this->SupInMassFlow - UnitSupMassFlow); // supply air mass flow rate bypassing unit [kg/s]
+1872:            Real64 local_SecBypassMassFlow = max(0.0, this->SecInMassFlow - UnitSecMassFlow); // secondary air mass flow rate bypassing unit [kg/s]
+1874:            this->SupOutEnth = (UnitSupMassFlow * EnthSupOut + local_SupBypassMassFlow * this->SupInEnth) / this->SupInMassFlow;
+1875:            this->SupOutHumRat = (UnitSupMassFlow * HumRatSupOut + local_SupBypassMassFlow * this->SupInHumRat) / this->SupInMassFlow;
+1878:            this->SecOutEnth = (UnitSecMassFlow * EnthSecOut + local_SecBypassMassFlow * this->SecInEnth) / this->SecInMassFlow;
+1879:            this->SecOutHumRat = (UnitSecMassFlow * HumRatSecOut + local_SecBypassMassFlow * this->SecInHumRat) / this->SecInMassFlow;
+1973:        Real64 ControlFraction; // fraction of effectiveness when rotary HX speed or plate bypass modulation is used for
+1991:        Real64 MassFlowSupBypass; // supply air bypass mass flow rate around HX core
+2006:        this->DefrostFraction = 0.0;
+2022:        // Determine mass flow through heat exchanger and mass flow being bypassed (only flat plate bypasses flow)
+2024:            this->SupBypassMassFlow = this->SupInMassFlow;
+2026:            this->SecBypassMassFlow = this->SecInMassFlow;
+2028:        } else { // No bypass mass flow
+2031:            this->SupBypassMassFlow = 0.0;
+2032:            this->SecBypassMassFlow = 0.0;
+2034:        // Unit is scheduled OFF, so bypass heat exchange calcs
+2038:        //! Economizer is active, so bypass heat exchange calcs. This applies to both flat plate and rotary HX's
+2057:            bool FrostControlFlag = false; // unit is in frost control mode when TRUE
+2074:                this->SupBypassMassFlow /= AirSidePLR;
+2075:                this->SecBypassMassFlow /= AirSidePLR;
+2231:            //   (ControlFraction = 0 HX fully bypassed, ControlFraction = 1 air passed entirely through HX)
+2232:            //   (supply air stream bypass mass flow rate proportional to ControlFraction except when frost control is active)
+2245:                    //     ELSE fully bypass HX to maintain supply outlet temp as high as possible
+2249:                    //       Rotary HX's never get bypassed, rotational speed is modulated
+2252:                } else { // HX is a plate heat exchanger, bypass air to control SA temperature
+2257:                    MassFlowSupBypass = this->SupBypassMassFlow;
+2265:                        MassFlowSupBypass = MassFlowSupIn * (1.0 - ControlFraction);
+2341:                            //          IF CSup = 0, then supply air mass flow rate = 0 and HX is fully bypassed. Fix divide by 0 error below DO loop.
+2347:                                      MassFlowSupBypass * TempSupIn) /
+2350:                        //         IF supply inlet temp = supply outlet temp, fully bypass HX - ELSE control to SP
+2358:                            //           or HX is fully bypassed (ControlFraction = 0) which actually should be caught in IF(CSup .EQ. 0.0)THEN above.
+2361:                            MassFlowSupBypass = MassFlowSupIn * (1.0 - ControlFraction);
+2371:                    this->SupBypassMassFlow = MassFlowSupBypass;
+2402:                this->SupBypassMassFlow *= AirSidePLR;
+2403:                this->SecBypassMassFlow *= AirSidePLR;
+2413:            if ((this->FrostControlType == FrostControlOption::MinimumExhaustTemperature && this->SecOutTemp < this->ThresholdTemperature) ||
+2414:                (this->FrostControlType == FrostControlOption::ExhaustAirRecirculation && this->SupInTemp <= this->ThresholdTemperature) ||
+2415:                (this->FrostControlType == FrostControlOption::ExhaustOnly && this->SupInTemp <= this->ThresholdTemperature)) {
+[0m
+[0m$ [0mgrep -rn "sensible_recovery_efficiency\|effective_ventilation_effectiveness\|ThermalSolverConfig.*ventil\|ventilation.*effectiveness" /Users/rich/source/HARES/crates/ --include="*.rs" | head -40
+/Users/rich/source/HARES/crates/hares-core/src/dwelling/solver_builder.rs:1055:                        thermal_cfg.ventilation.sensible_recovery_efficiency = sens;
+/Users/rich/source/HARES/crates/hares-core/src/dwelling/solver_builder.rs:1084:                thermal_cfg.ventilation.sensible_recovery_efficiency = sens_re;
+/Users/rich/source/HARES/crates/hares-core/src/dwelling/solver_builder.rs:1872:    fn ventilation_effectiveness_keys_map_to_recovery_efficiency() {
+/Users/rich/source/HARES/crates/hares-core/src/dwelling/solver_builder.rs:1901:            sensible_recovery_efficiency: recovered.sensible_effectiveness.unwrap_or_default(),
+/Users/rich/source/HARES/crates/hares-core/src/dwelling/solver_builder.rs:1908:            (ventilation.sensible_recovery_efficiency - 0.75).abs() < 1e-12,
+/Users/rich/source/HARES/crates/hares-core/src/dwelling/solver_builder.rs:1910:            ventilation.sensible_recovery_efficiency
+/Users/rich/source/HARES/crates/hares-core/src/dwelling/mod.rs:2550:        // Step 3c: propagate per-timestep ventilation recovery effectiveness
+/Users/rich/source/HARES/crates/hares-core/src/dwelling/mod.rs:2563:            if let Some((eff_s, eff_l)) = eq.effective_ventilation_effectiveness() {
+/Users/rich/source/HARES/crates/hares-core/src/dwelling/mod.rs:2565:                vent.sensible_recovery_efficiency = eff_s;
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/config.rs:122:/// `sensible_recovery_efficiency` and `latent_recovery_efficiency` both default to `0.0`
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/config.rs:136:    pub sensible_recovery_efficiency: f64,
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/config.rs:728:            sensible_recovery_efficiency: 0.75,
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/config.rs:734:        assert_eq!(params.sensible_recovery_efficiency, 0.75);
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/config.rs:740:        assert_eq!(default.sensible_recovery_efficiency, 0.0);
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/mod.rs:231:    /// updates (e.g. ventilation recovery effectiveness from equipment
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/mod.rs:4349:                sensible_recovery_efficiency: 0.70,
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/mod.rs:4412:                sensible_recovery_efficiency: 0.70,
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/infiltration.rs:212:                    + forced_flow_m3_s * (1.0 - config.ventilation.sensible_recovery_efficiency),
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/infiltration.rs:253:            1.0 - config.ventilation.sensible_recovery_efficiency
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/infiltration.rs:842:                sensible_recovery_efficiency: sens_recovery,
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/infiltration.rs:883:    // The bug: `ThermalSolverConfig.ventilation.sensible_recovery_efficiency` is
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/infiltration.rs:913:                sensible_recovery_efficiency: 0.0, // bypass: no recovery
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/infiltration.rs:958:    /// orchestration layer has NOT updated `sensible_recovery_efficiency`.  Confirming
+/Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/infiltration.rs:970:                sensible_recovery_efficiency: eff,
+/Users/rich/source/HARES/crates/hares-equipment/src/lib.rs:168:    /// propagated to `ThermalSolverConfig.ventilation` before each thermal
+/Users/rich/source/HARES/crates/hares-equipment/src/lib.rs:170:    fn effective_ventilation_effectiveness(&self) -> Option<(f64, f64)> {
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:169:    // Read by the dwelling orchestration layer to update ThermalSolverConfig.ventilation
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:333:        // consumers calling effective_ventilation_effectiveness() before
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:448:        // to ThermalSolverConfig.ventilation before the thermal solver integrates.
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:525:    fn effective_ventilation_effectiveness(&self) -> Option<(f64, f64)> {
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:900:            .effective_ventilation_effectiveness()
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:907:            .effective_ventilation_effectiveness()
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:1096:    fn ventilation_config_validate_rejects_out_of_range_effectiveness() {
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:1196:            .effective_ventilation_effectiveness()
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:1212:            .effective_ventilation_effectiveness()
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:1228:            .effective_ventilation_effectiveness()
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:1238:    fn ventilation_effectiveness_returns_some_for_hrv() {
+/Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs:1243:        let result = hrv.effective_ventilation_effectiveness();
+[0m
+[0m$ [0mgrep -n "defrost\|frost\|Frost\|Defrost" /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/HeatRecovery.cc
+121:    constexpr std::array<std::string_view, static_cast<int>(FrostControlOption::Num)> frostControlNamesUC = {
+495:            // Added additional inputs for frost control
+496:            thisExchanger.FrostControlType = static_cast<FrostControlOption>(getEnumValue(frostControlNamesUC, state.dataIPShortCut->cAlphaArgs(9)));
+498:            if (thisExchanger.FrostControlType != FrostControlOption::None) {
+500:                thisExchanger.InitialDefrostTime = state.dataIPShortCut->rNumericArgs(8);
+501:                thisExchanger.RateofDefrostTimeIncrease = state.dataIPShortCut->rNumericArgs(9);
+1179:                                "Heat Exchanger Defrost Time Fraction",
+1181:                                thisExchanger.DefrostFraction,
+2006:        this->DefrostFraction = 0.0;
+2057:            bool FrostControlFlag = false; // unit is in frost control mode when TRUE
+2232:            //   (supply air stream bypass mass flow rate proportional to ControlFraction except when frost control is active)
+2413:            if ((this->FrostControlType == FrostControlOption::MinimumExhaustTemperature && this->SecOutTemp < this->ThresholdTemperature) ||
+2414:                (this->FrostControlType == FrostControlOption::ExhaustAirRecirculation && this->SupInTemp <= this->ThresholdTemperature) ||
+2415:                (this->FrostControlType == FrostControlOption::ExhaustOnly && this->SupInTemp <= this->ThresholdTemperature)) {
+2416:                this->FrostControl(state);
+2417:                FrostControlFlag = true;
+2428:            // heat exchanger core.  Perform this mixing only when no frost control is used or
+2429:            // heat exchanger is not in frost control mode.  Mixing similar to this is performed
+2430:            // in the frost control subroutine when in frost control mode.
+2431:            if (!FrostControlFlag) {
+2549:        this->DefrostFraction = 0.0;
+2811:    void HeatExchCond::FrostControl(EnergyPlusData &state)
+2821:        // Calculates fraction of timestep necessary to eliminate frost on ERV surface
+2822:        // by comparing secondary outlet or outdoor temperature to a frost control threshold
+2824:        // based on frost control method selected.
+2830:        Real64 DFFraction = 0.0;    // fraction of timestep ERV is in frost control mode
+2862:        // threshold temperature below which frost control is active
+2867:            // because defrost will override those results
+2898:        // Check frost control by type
+2900:        switch (this->FrostControlType) {
+2901:        case FrostControlOption::MinimumExhaustTemperature:
+2912:            } else { // HX is a plate heat exchanger, bypass air to eliminate frost
+2993:        case FrostControlOption::ExhaustAirRecirculation:
+2995:            // Assume no heat exchange when in frost control mode, full heat exchange otherwise
+2996:            DFFraction = max(0.0, min((this->InitialDefrostTime + this->RateofDefrostTimeIncrease * (TempThreshold - this->SupInTemp)), 1.0));
+2998:            //    Calculate derated heat transfer using outlet air conditions assuming no defrost (calculated earlier)
+2999:            //    and (1-DefrostFraction)
+3016:            //    Derate effectiveness based on frost control time fraction for reporting purposes
+3021:            //    in defrost, and this is what we want to report so no changes here.
+3022:            //    Average SupInMassFlow and SecOutMassFlow rates have been reduced due to frost control
+3029:        case FrostControlOption::ExhaustOnly:
+3031:            //   Perform frost control by bypassing the supply air around the HX core during the defrost
+3032:            //   time period. HX heat transfer is reduced proportionally to (1 - defrosttimefraction)
+3034:            DFFraction = max(0.0, min((this->InitialDefrostTime + this->RateofDefrostTimeIncrease * (TempThreshold - this->SupInTemp)), 1.0));
+3036:            //   Calculate derated heat transfer based on defrost time
+3041:            //   Heat exchanger effectiveness is not derated, HX is fully bypassed during frost control
+3063:        this->DefrostFraction = DFFraction;
+[0m
+Let me read the frost-control sections of the EnergyPlus file and find the propagation path from ventilation to `ThermalSolverConfig`.
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatRecovery.cc[90m [offset=2811, limit=260][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=1040, limit=60][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2540, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/lib.rs[90m [offset=155, limit=40][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=1860, limit=60][0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/config.rs[90m [offset=110, limit=50][0m
+Now let me check additional details needed for the review.
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/equipment-loads
+(no output)
+[0m
+Now I have all the information needed. Let me create the output directory and write the review.
+[0m← [0mWrite docs/reviews/equipment-loads/equip-loads-01-ventilation-bypass-defrost-derating.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/equipment-loads/equip-loads-01-ventilation-bypass-defrost-derating.md`. Here's a quick summary of the 5 findings:
+
+- **2 medium-severity findings**: (1) HARES' defrost model uses a simple binary threshold/constant-derating approach versus EnergyPlus' continuous temperature-dependent defrost fraction; (2) `effective_sensible_effectiveness` / `effective_latent_effectiveness` are not cleared to zero when equipment enters OFF/emergency state, causing stale recovery efficiencies to propagate to the solver.
+
+- **3 low-severity findings**: (3) bypass and defrost operate in disjoint temperature ranges with no interaction possible (HARES bypass is comfort-based free-cooling, not frost-control bypass); (4) `save_state`/`load_state` doesn't persist effectiveness fields (harmless given current orchestration ordering); (5) the supply-air equation and solver flow-reduction formulation are mathematically equivalent — no sign or units errors.
+
+The primary actionable recommendation is to replace the binary defrost threshold with a temperature-dependent defrost fraction formula matching EnergyPlus' approach.

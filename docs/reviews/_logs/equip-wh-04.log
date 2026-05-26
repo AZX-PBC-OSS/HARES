@@ -1,0 +1,46 @@
+# opencode log for equip-wh-04
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/tankless.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/WaterHeater.py
+[0m→ [0mRead crates/hares-equipment/src/water_heater/tankless.rs[90m [offset=1357][0m
+[0m✱ [0mGrep "fn resolve_storage_step_inputs"[90m 1 match[0m
+[0m✱ [0mGrep "fn read_dhw_demand_kg_s"[90m 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/mod.rs[90m [offset=1, limit=120][0m
+[0m✱ [0mGrep "class IdealWaterModel"[90m in vendors/OCHRE · 1 match[0m
+[0m✱ [0mGrep "fn read_dhw_demand_kg_s|DHW_DEMAND_LOOP"[90m 30 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Water.py[90m [offset=478, limit=60][0m
+[0m✱ [0mGrep "fn require_mains_temp_c"[90m 1 match[0m
+[0m✱ [0mGrep "def update_water_draw"[90m in vendors/OCHRE · 1 match[0m
+[0m✱ [0mGrep "class OneNodeWaterModel"[90m in vendors/OCHRE/ochre/Models · 1 match[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Water.py[90m [offset=280, limit=60][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Water.py[90m [offset=455, limit=25][0m
+[0m✱ [0mGrep "_water_draw_1node|_water_draw_2node|def _water_draw"[90m in vendors/OCHRE/ochre/Models/Water.py · 3 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Water.py[90m [offset=340, limit=70][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Water.py[90m [limit=18][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/equipment-wh
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/equipment-wh/equip-wh-04-tankless-model-correctness.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/equipment-wh/equip-wh-04-tankless-model-correctness.md
+131 /Users/rich/source/HARES/docs/reviews/equipment-wh/equip-wh-04-tankless-model-correctness.md
+[0m
+Review written to `docs/reviews/equipment-wh/equip-wh-04-tankless-model-correctness.md` (131 lines).
+
+**Summary**: 7 findings — 2 medium, 5 low, 0 critical/high.
+
+Key issues:
+- **Medium #1**: No minimum flow activation threshold — heating fires for any flow > 0 kg/s. Real units need ~0.03 kg/s to trigger.
+- **Medium #2**: Over-capacity outlet temperature uses `rated_thermal_power_w` instead of `effective_max_w` when PowerLimit is active, producing overly optimistic outlet temperatures during power-limited events.
+- **Low**: No thermal mass, constant efficiency (matches OCHRE), outlet telemetry semantics at partial duty. Correct handling of zero-standby heat injection and simultaneous draw aggregation.

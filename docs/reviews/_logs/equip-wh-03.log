@@ -1,0 +1,46 @@
+# opencode log for equip-wh-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/heat_pump_wh.rs
+[0m→ [0mRead crates/hares-equipment/src/water_heater/hpwh_compressor.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/WaterHeater.py
+[0m✱ [0mGrep "pub struct BiquadraticCurve"[90m in . · 2 matches[0m
+[0m✱ [0mGlob "**/biquadratic*"[90m in . · 1 match[0m
+Now let me read the BiquadraticCurve implementation and the config file to understand the full coefficient application chain:
+[0m→ [0mRead crates/hares-physics/src/biquadratic.rs
+[0m✱ [0mGlob "**/wh_config*"[90m in . · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/wh_config.rs
+[0m✱ [0mGrep "low_power|low.power|UEF|uef|UniformEnergyFactor|uniform_energy_factor"[90m in crates/hares-equipment/src/water_heater · 27 matches[0m
+[0m✱ [0mGrep "4\.9"[90m in crates/hares-equipment/src/water_heater · 0 matches[0m
+Let me search for any low-power HPWH or UEF-related handling elsewhere in HARES:
+[0m→ [0mRead crates/hares-equipment/src/water_heater/heat_pump_wh.rs[90m [offset=1430, limit=120][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/equipment-wh
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/equipment-wh/equip-wh-03-hpwh-compressor-curves.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/equipment-wh/equip-wh-03-hpwh-compressor-curves.md`.
+
+**5 findings** (0 critical, 1 high, 2 medium, 2 low):
+
+- **Finding 1 (high)**: Low-power HPWH path (UEF >= 4.9) with distinct coefficient sets and widened ambient bounds is entirely absent. HARES uses only the standard OCHRE/EnergyPlus coefficients with no UEF detection.
+
+- **Finding 2 (medium)**: COP normalization via `cop_scale` diverges from OCHRE's `cop_nominal * cop_curve()` convention, producing ~12% different COP at domain midpoint.
+
+- **Finding 3 (medium)**: Source citation comment points to wrong OCHRE lines (446-448 instead of 469-474).
+
+- **Finding 4 (low)**: Curve uses volume-weighted average tank temp instead of OCHRE's condenser-weighted lower-node temp.
+
+- **Finding 5 (low)**: No UEF threshold discontinuity exists only because no transition exists — risk for future implementation.
+
+Variable order matches OCHRE correctly (wet-bulb first, tank temp second) for both curves. Default coefficients are identical to OCHRE's non-low-power set.

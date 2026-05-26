@@ -225,6 +225,25 @@ fn build_equipment_column_map(
         .collect()
 }
 
+fn extend_schema_with_actor_columns(
+    schema: &arrow::datatypes::Schema,
+    actors: &[Box<dyn Actor>],
+) -> arrow::datatypes::Schema {
+    use arrow::datatypes::{DataType, Field};
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    for actor in actors {
+        if let Some(tel) = actor.telemetry() {
+            for key in tel.0.keys() {
+                let col_name = format!("actor:{}:{}", actor.name(), key);
+                if !fields.iter().any(|f| f.name() == &col_name) {
+                    fields.push(Field::new(&col_name, DataType::Float64, true));
+                }
+            }
+        }
+    }
+    arrow::datatypes::Schema::new_with_metadata(fields, schema.metadata().clone())
+}
+
 /// Pre-resolved zone column indices for record_step, avoiding per-step format!() allocations.
 struct ZoneColumnCaches {
     /// (ZoneId, column_index) for temperature columns, sorted by ZoneId.
@@ -672,6 +691,11 @@ pub struct Dwelling {
     /// Pre-resolved output column indices for each equipment piece, avoiding
     /// per-timestep name allocation in `record_step`.
     equipment_column_map: Vec<EquipmentColumns>,
+    /// Pre-resolved actor telemetry column indices per actor, avoiding
+    /// per-timestep `format!()` allocation in `record_step`.
+    /// Each inner vec maps telemetry key → column index.
+    /// Empty for actors returning `None` telemetry.
+    actor_column_map: Vec<Vec<(String, usize)>>,
     /// Number of numeric columns expected by the recorder (schema fields minus timestamp).
     output_value_count: usize,
     /// Pre-allocated scratch buffer for `record_step`, reused each timestep.
@@ -1276,6 +1300,7 @@ impl Dwelling {
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             prev_humidity_ratios: init_humidity_ratios,
             actors: Vec::new(),
+            actor_column_map: Vec::new(),
             auto_registered_actor_names: HashSet::new(),
             actor_dispatch_buf: Vec::with_capacity(16),
             solver_feedback_actor,
@@ -1444,6 +1469,7 @@ impl Dwelling {
         #[cfg(feature = "actor_profiling")]
         self.actor_name_cache.push(actor.name().to_string());
         self.actors.push(actor);
+        self.refresh_equipment_caches();
     }
 
     /// Creates and adds an actor from the registry using the provided config.
@@ -1458,6 +1484,7 @@ impl Dwelling {
     ) -> Result<()> {
         let actor = registry.create(config)?;
         self.actors.push(actor);
+        self.refresh_equipment_caches();
         Ok(())
     }
 
@@ -1520,6 +1547,7 @@ impl Dwelling {
             self.actor_name_cache
                 .extend(self.actors.iter().map(|a| a.name().to_string()));
         }
+        self.refresh_equipment_caches();
     }
 }
 
@@ -1691,7 +1719,7 @@ impl Dwelling {
         self.solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&self.equipment));
 
-        // Rebuild output schema so dynamically added equipment gets columns.
+        // Rebuild output schema so dynamically added equipment and actors get columns.
         // Only safe before any rows have been recorded; mid-simulation schema
         // changes would corrupt the output file.
         if self
@@ -1716,7 +1744,7 @@ impl Dwelling {
                 })
                 .collect();
 
-            let schema = build_schema(
+            let mut schema = build_schema(
                 &specs,
                 self.output_verbosity,
                 &self
@@ -1741,10 +1769,31 @@ impl Dwelling {
                     })
                     .collect::<Vec<_>>(),
             );
+            schema = extend_schema_with_actor_columns(&schema, &self.actors);
             self.output_value_count = schema.fields().len() - 1;
             self.output_column_index = build_output_column_index(&schema);
             self.equipment_column_map =
                 build_equipment_column_map(&self.equipment, &self.output_column_index);
+
+            // Pre-resolve actor telemetry column indices; avoids format!() per step.
+            self.actor_column_map.clear();
+            self.actor_column_map.reserve(self.actors.len());
+            for actor in &self.actors {
+                if let Some(tel) = actor.telemetry() {
+                    let actor_name = actor.name();
+                    let mut entries = Vec::with_capacity(tel.0.len());
+                    for key in tel.0.keys() {
+                        let col_name = format!("actor:{}:{}", actor_name, key);
+                        if let Some(&idx) = self.output_column_index.get(&col_name) {
+                            entries.push((key.clone(), idx));
+                        }
+                    }
+                    self.actor_column_map.push(entries);
+                } else {
+                    self.actor_column_map.push(Vec::new());
+                }
+            }
+
             let zone_types = self.environment.zone_types().to_vec();
             let zone_caches = build_zone_column_caches(
                 &self.latest_env.zones,
@@ -2922,6 +2971,18 @@ impl Dwelling {
                 // Only the first equipment's index is used; all HVAC contributions
                 // are accumulated into the same row slot.
                 row[idx] += eq.telemetry().get(tk::DUCT_LOSS_W).unwrap_or(0.0); // allowed: duct loss remains telemetry-only until CoreOutput gains a duct loss field.
+            }
+        }
+
+        // Actor telemetry columns: pre-resolved column indices avoid
+        // per-timestep format!() allocation (parallel to equipment_column_map).
+        for (actor, pre_resolved) in self.actors.iter().zip(&self.actor_column_map) {
+            if let Some(tel) = actor.telemetry() {
+                for (key, column_idx) in pre_resolved {
+                    if let Some(value) = tel.get(key) {
+                        row[*column_idx] = value;
+                    }
+                }
             }
         }
 
@@ -6037,5 +6098,75 @@ occupancy = 1.0
         record_scratch[cool_idx] = indoor_cooling.abs();
         assert!((record_scratch[heat_idx] - 500.0).abs() < 1e-9);
         assert!((record_scratch[cool_idx] - 200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn actor_telemetry_columns_appended_to_schema_and_populated_in_output() {
+        use crate::actors::Occupant;
+        use crate::actors::Presence;
+
+        // Build a schema with 2 zones at verbosity 0 (minimum columns).
+        let schema = hares_io::build_schema(&[], 0, &[]);
+        let base_fields = schema.fields().len();
+
+        // Create an actor with telemetry keys.
+        let schedule = vec![Presence::Home, Presence::Home];
+        let mut actor = Occupant::new("Occupant").with_presence_schedule(schedule);
+
+        // decide() populates telemetry values.
+        let env = crate::actor::testing::test_env().build();
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        let actors: Vec<Box<dyn Actor>> = vec![Box::new(actor)];
+        let extended = extend_schema_with_actor_columns(&schema, &actors);
+        let extended_fields = extended.fields().len();
+
+        // Schema must gain columns (one per actor telemetry key).
+        let n_actor_keys = 3; // away, transition, signals_count
+        assert_eq!(
+            extended_fields,
+            base_fields + n_actor_keys,
+            "schema must include actor telemetry columns"
+        );
+
+        let field_names: Vec<&str> = extended
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+
+        for key in &["away", "transition", "signals_count"] {
+            let col = format!("actor:Occupant:{key}");
+            assert!(
+                field_names.contains(&col.as_str()),
+                "schema must contain '{col}'"
+            );
+        }
+
+        // Build column index and exercise record_step pattern.
+        let column_index = build_output_column_index(&extended);
+        let mut scratch = vec![0.0; column_index.len()];
+
+        for actor in &actors {
+            if let Some(tel) = actor.telemetry() {
+                for (key, &value) in &tel.0 {
+                    let col_name = format!("actor:{}:{}", actor.name(), key);
+                    if let Some(&idx) = column_index.get(&col_name) {
+                        scratch[idx] = value;
+                    }
+                }
+            }
+        }
+
+        // Verify values populated in scratch at correct indices.
+        for key in &["away", "transition", "signals_count"] {
+            let col = format!("actor:Occupant:{key}");
+            let idx = column_index[&col];
+            assert!(
+                scratch[idx] >= 0.0,
+                "actor telemetry value for '{col}' must be present in scratch"
+            );
+        }
     }
 }
