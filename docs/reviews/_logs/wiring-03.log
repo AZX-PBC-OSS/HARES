@@ -1,0 +1,55 @@
+# opencode log for wiring-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-types/src/ports.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Dwelling.py
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/ElectricPowerServiceManager.cc
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1224, limit=500][0m
+[0m✱ [0mGrep "net_electric|electric_power|electrical|load_power|generation_power|active_power|reactive_power|total_p_kw"[90m in crates/hares-core · 370 matches[0m
+Let me continue reading the dwelling module and search for how electrical power is reported and aggregated.
+[0m✱ [0mGrep "net_electric|electric_power|electrical|net_active|StepResult"[90m in crates/hares-core/src/dwelling · 49 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2830, limit=120][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2015, limit=100][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3230, limit=50][0m
+[0m✱ [0mGrep "net_active_kw|net_reactive_kvar"[90m in crates/hares-envelope · 29 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/electrical_solver.rs
+[0m✱ [0mGrep "signed_kw|electric_kw"[90m in crates/hares-types · 23 matches[0m
+[0m✱ [0mGrep "ElectricPower|electric_kw|signed_kw"[90m in crates/hares-types/src · 38 matches[0m
+[0m✱ [0mGrep "struct ElectricalSummary|pv_generation_kw|base_load_kw|net_grid_kw|battery_power_kw|ev_power_kw"[90m in crates/hares-types · 17 matches[0m
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=782, limit=110][0m
+[0m→ [0mRead crates/hares-types/src/environment.rs[90m [offset=35, limit=40][0m
+[0m✱ [0mGrep "fn check_electrical"[90m in crates/hares-core · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2625, limit=80][0m
+[0m→ [0mRead crates/hares-core/src/invariants.rs[90m [offset=50, limit=50][0m
+[0m→ [0mRead crates/hares-core/src/invariants.rs[90m [limit=30][0m
+[0m→ [0mRead crates/hares-core/src/diagnostics.rs[90m [offset=160, limit=30][0m
+[0m✱ [0mGrep "electric_kw|reactive_kvar|total_p_kw"[90m in vendors/OCHRE/ochre · 67 matches[0m
+Now let me read a few more relevant spots to ensure thoroughness:
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Equipment.py[90m [offset=185, limit=40][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/wiring
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/wiring/wiring-03-electrical-power-accumulation.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/wiring/wiring-03-electrical-power-accumulation.md`.
+
+**Summary of findings:**
+
+| Severity | Count | Key Issue |
+|----------|-------|-----------|
+| High | 1 | Electrical balance invariant check fails with non-trivial ZIP configs (compares ZIP-adjusted solver output against raw port accumulation) |
+| Medium | 2 | (a) Reactive power lacks ZIP voltage correction (OCHRE scales both P and Q; HARES only scales P). (b) No defensive sign validation at port boundary |
+| Low | 2 | Non-obvious generation sign storage (negative in `generation_power_kw`); no per-contribution finiteness checks |
+
+**Sign convention audit passed**: Load (+), generation (−), battery charging (+), battery discharging (−), ZIP applied only to load, cross-equipment boundaries correct, reactive power signage correct per IEEE 1547. The overall architecture is sound — the main actionable issue is the debug invariant check (Finding 1) and the reactive-power ZIP gap (Finding 2).

@@ -477,7 +477,7 @@ impl HvacEquipment {
                     .default_supply_air_temp_c(env.weather.outdoor_temp_c)
             });
 
-        self.config.speed_control_mode = parse_speed_control_mode(config);
+        self.config.speed_control_mode = parse_speed_control_mode(config)?;
         self.config.low_speed_capacity_fraction =
             extract_numeric(config, "low_speed_capacity_fraction")
                 .unwrap_or(DEFAULT_LOW_SPEED_CAPACITY_FRACTION);
@@ -2264,6 +2264,56 @@ mod tests {
         assert_eq!(
             hvac.config.speed_control_mode,
             SpeedControlMode::TwoSpeedAlternating
+        );
+    }
+
+    #[test]
+    fn speed_control_mode_rejects_unrecognised_text_value() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config
+            .test_extras_mut()
+            .insert("speed_control_mode".to_string(), "foobar".into());
+        let err = hvac.init(&config, &env(20.0, 60, 0)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("foobar"),
+            "error must name the unrecognised value, got: {msg}"
+        );
+        assert!(
+            msg.contains("unrecognised"),
+            "error must indicate the value was unrecognised, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn speed_control_mode_rejects_unrecognised_numeric_value() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config
+            .test_extras_mut()
+            .insert("speed_control_mode".to_string(), 99.0_f64.into());
+        let err = hvac.init(&config, &env(20.0, 60, 0)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("99"),
+            "error must name the unrecognised value, got: {msg}"
+        );
+        assert!(
+            msg.contains("unrecognised"),
+            "error must indicate the value was unrecognised, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn speed_control_mode_defaults_to_single_speed_when_absent() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        let config = EquipmentConfig::default();
+        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+        assert_eq!(
+            hvac.config.speed_control_mode,
+            SpeedControlMode::SingleSpeed,
+            "absent speed_control_mode must default to SingleSpeed"
         );
     }
 

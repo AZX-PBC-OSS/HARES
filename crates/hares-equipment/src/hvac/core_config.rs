@@ -206,35 +206,48 @@ pub(super) fn load_bounds_pair(
     (lo, hi)
 }
 
-pub(super) fn parse_speed_control_mode(config: &EquipmentConfig) -> SpeedControlMode {
+pub(super) fn parse_speed_control_mode(
+    config: &EquipmentConfig,
+) -> crate::Result<SpeedControlMode> {
     let from_text = config.get_str("speed_control_mode").map(normalize_ascii);
     if let Some(value) = from_text {
         return match value.as_str() {
-            "single" | "single_speed" | "single-speed" => SpeedControlMode::SingleSpeed,
+            "single" | "single_speed" | "single-speed" => Ok(SpeedControlMode::SingleSpeed),
             "two" | "two_speed" | "two-speed" | "two_speed_setpoint" => {
-                SpeedControlMode::TwoSpeedSetpoint
+                Ok(SpeedControlMode::TwoSpeedSetpoint)
             }
-            "two_speed_time" | "two-speed-time" | "time" => SpeedControlMode::TwoSpeedTime,
+            "two_speed_time" | "two-speed-time" | "time" => Ok(SpeedControlMode::TwoSpeedTime),
             "two_speed_alternating" | "two-speed-alternating" | "time2" | "alternating" => {
-                SpeedControlMode::TwoSpeedAlternating
+                Ok(SpeedControlMode::TwoSpeedAlternating)
             }
             "four"
             | "four_speed"
             | "four-speed"
             | "multi_speed"
             | "multi-speed"
-            | "multi_speed_interpolated" => SpeedControlMode::MultiSpeedInterpolated,
+            | "multi_speed_interpolated" => Ok(SpeedControlMode::MultiSpeedInterpolated),
             "variable" | "variable_speed" | "variable-speed" | "ideal" => {
-                SpeedControlMode::VariableSpeedIdeal
+                Ok(SpeedControlMode::VariableSpeedIdeal)
             }
-            _ => SpeedControlMode::SingleSpeed,
+            _ => Err(HaresError::Equipment(format!(
+                "unrecognised speed_control_mode '{value}'; \
+                 expected one of: single, single_speed, single-speed, two, two_speed, two-speed, \
+                 two_speed_setpoint, two_speed_time, two-speed-time, time, two_speed_alternating, \
+                 two-speed-alternating, time2, alternating, four, four_speed, four-speed, \
+                 multi_speed, multi-speed, multi_speed_interpolated, variable, variable_speed, \
+                 variable-speed, ideal"
+            ))),
         };
     }
     match config.get_f64("speed_control_mode") {
-        Some(2.0) => SpeedControlMode::TwoSpeedSetpoint,
-        Some(4.0) => SpeedControlMode::MultiSpeedInterpolated,
-        Some(3.0) | Some(0.0) => SpeedControlMode::VariableSpeedIdeal,
-        _ => SpeedControlMode::SingleSpeed,
+        None => Ok(SpeedControlMode::SingleSpeed),
+        Some(1.0) => Ok(SpeedControlMode::SingleSpeed),
+        Some(2.0) => Ok(SpeedControlMode::TwoSpeedSetpoint),
+        Some(4.0) => Ok(SpeedControlMode::MultiSpeedInterpolated),
+        Some(3.0) | Some(0.0) => Ok(SpeedControlMode::VariableSpeedIdeal),
+        Some(v) => Err(HaresError::Equipment(format!(
+            "unrecognised numeric speed_control_mode {v}; expected one of: 0, 1, 2, 3, 4"
+        ))),
     }
 }
 

@@ -10,9 +10,134 @@
 > build · deepseek-v4-pro
 [0m
 [0m→ [0mRead crates/hares-physics/src/ground.rs[90m [offset=140, limit=40][0m
-[0m• [0mFind F2 perimeter loss in EnergyPlus[90m Explore Agent[0m
-[0m• [0mFind F2 perimeter loss in OCHRE[90m Explore Agent[0m
-[0m✓ [0mFind F2 perimeter loss in EnergyPlus[90m Explore Agent[0m
-[0m✓ [0mFind F2 perimeter loss in OCHRE[90m Explore Agent[0m
-[0m→ [0mRead crates/hares-physics/src/ground.rs[90m [offset=280, limit=90][0m
-[0m• [0mVerify F2 against ASHRAE Table A6.3.1[90m General Agent[0m
+[0m• [0mSearch EnergyPlus F2 values[90m Explore Agent[0m
+[0m• [0mSearch OCHRE F2 values[90m Explore Agent[0m
+[0m✓ [0mSearch OCHRE F2 values[90m Explore Agent[0m
+[0m✓ [0mSearch EnergyPlus F2 values[90m Explore Agent[0m
+[0m✱ [0mGrep "f2_coefficient"[90m in . · 23 matches[0m
+[0m✱ [0mGrep "F2|f2_factor|perimeter_loss"[90m in crates/hares-physics/src/ground.rs · 16 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [offset=170, limit=25][0m
+[0m→ [0mRead docs/tickets/035-slab-f-factor-method-not-called.md[90m [offset=130, limit=30][0m
+[0m✱ [0mGrep "F1|f1_factor|f1_coefficient"[90m in crates/hares-physics/src/ground.rs · 0 matches[0m
+[0m% [0mWebFetch https://www.ashrae.org/technical-resources/standards-and-guidelines/read-only-versions-of-ashrae-standards
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"ASHRAE 90.1-2022 Table A6.3.1 F-factor slab-on-grade perimeter insulation values Btu/h·ft·°F","max_results":10}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"\"F-factor\" \"slab-on-grade\" \"0.73\" \"0.72\" \"0.71\" ASHRAE residential","max_results":10}
+[0m✗ [0mGrep "0\.73|0\.72|0\.71|1\.35|1\.31|1\.30.*F.factor|F.factor.*0\.73|F.factor.*0\.72|F.factor.*0\.71|F.factor.*1\.35|F.factor.*1\.31|F.factor.*1\.30" failed[90m in vendors/EnergyPlus[0m
+[91m[1mError: [0minvalid ripgrep output
+[0m✱ [0mGrep "F-factor|Ffactor.*slab|slab.*Ffactor"[90m in vendors/EnergyPlus/doc · 12 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/doc/engineering-reference/src/surface-heat-balance-manager-processes/ground-heat-transfer-calculations-using-c.tex[90m [offset=1, limit=175][0m
+[0m→ [0mRead crates/hares-physics/src/ground.rs[90m [limit=120][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [offset=140, limit=60][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/physics-constants/ 2>/dev/null || echo "directory does not exist"
+phys-const-01-psychrometric-saturation-pressure-coefficients.md
+phys-const-02-wet-bulb-specific-heat-constants.md
+phys-const-03-ice-specific-heat-constant.md
+phys-const-04-kell-water-density-polynomial.md
+phys-const-05-gas-therm-hour-to-watt.md
+phys-const-06-boiler-auxiliary-hours-per-year.md
+phys-const-07-occupant-gain-constants.md
+phys-const-08-cp-liquid-water-constant.md
+phys-const-09-isa-pressure-exponent-precision.md
+phys-const-10-btu-per-hr-per-watt.md
+phys-const-11-cfm-to-m3s.md
+phys-const-12-watts-per-ton-refrigeration.md
+phys-const-13-soil-thermal-diffusivity.md
+phys-const-15-stefan-boltzmann-precision.md
+phys-const-16-linearised-radiative-h.md
+[0m
+Now I have all the information needed. Let me write the review.
+[0m$ [0mpython3 -c "
+# Verify ASHRAE 90.1-2022 Table A6.3.1 F-factor conversions
+# Conversion: 1 Btu/(h·ft·°F) = 1.730734666... W/(m·K)
+# HARES uses 1.73074
+
+conv = 1.73074
+
+# Standard ASHRAE values for 2ft vertical insulation (Btu/h·ft·°F)
+ashrae_ip = {
+    ('uninsulated', 'unheated'): 0.73,
+    ('R-5', 'unheated'): 0.72,
+    ('R-10', 'unheated'): 0.71,
+    ('uninsulated', 'heated'): 1.35,
+    ('R-5', 'heated'): 1.31,
+    ('R-10', 'heated'): 1.30,
+}
+
+# HARES code values
+hares_si = {
+    ('uninsulated', 'unheated'): 1.263,
+    ('R-5', 'unheated'): 1.246,
+    ('R-10', 'unheated'): 1.229,
+    ('uninsulated', 'heated'): 2.336,
+    ('R-5', 'heated'): 2.267,
+    ('R-10', 'heated'): 2.250,
+}
+
+print('=== F2 Coefficient Verification ===')
+print(f'Conversion factor: {conv} W/(m·K) per Btu/(h·ft·°F)')
+print()
+print(f'{\"Insulation\":<15} {\"Heated?\":<10} {\"ASHRAE IP\":>12} {\"Computed SI\":>12} {\"HARES SI\":>10} {\"Match?\":>8}')
+print('-' * 72)
+
+all_match = True
+for (insul, heated), ip_val in ashrae_ip.items():
+    computed = round(ip_val * conv, 3)
+    hares = hares_si[(insul, heated)]
+    match = 'YES' if computed == hares else 'NO'
+    if match == 'NO':
+        all_match = False
+    print(f'{insul:<15} {heated:<10} {ip_val:>12.2f} {computed:>12.3f} {hares:>10.3f} {match:>8}')
+
+# Also verify with exact conversion
+print()
+print('=== With exact conversion factor (1.730734666...) ===')
+conv_exact = 1.7307346666666667
+for (insul, heated), ip_val in ashrae_ip.items():
+    computed_exact = ip_val * conv_exact
+    hares = hares_si[(insul, heated)]
+    diff = abs(computed_exact - hares)
+    rel_err = diff / computed_exact * 100
+    print(f'{insul:<15} {heated:<10} exact={computed_exact:.6f} hares={hares:.3f} diff={diff:.6f} rel_err={rel_err:.4f}%')
+
+# R-value threshold verification
+print()
+print('=== R-Value Threshold Verification ===')
+print(f'R-5 IP = 5 h·ft²·°F/Btu × 0.17611 = {5*0.17611:.5f} m²·K/W → rounded to 0.88')
+print(f'R-10 IP = 10 h·ft²·°F/Btu × 0.17611 = {10*0.17611:.5f} m²·K/W → rounded to 1.76')
+print(f'Exact: R-5 = {5*0.1761101845:.6f}, R-10 = {10*0.1761101845:.6f}')
+"
+
+=== F2 Coefficient Verification ===
+Conversion factor: 1.73074 W/(m·K) per Btu/(h·ft·°F)
+
+Insulation      Heated?       ASHRAE IP  Computed SI   HARES SI   Match?
+------------------------------------------------------------------------
+uninsulated     unheated           0.73        1.263      1.263      YES
+R-5             unheated           0.72        1.246      1.246      YES
+R-10            unheated           0.71        1.229      1.229      YES
+uninsulated     heated             1.35        2.336      2.336      YES
+R-5             heated             1.31        2.267      2.267      YES
+R-10            heated             1.30        2.250      2.250      YES
+
+=== With exact conversion factor (1.730734666...) ===
+uninsulated     unheated   exact=1.263436 hares=1.263 diff=0.000436 rel_err=0.0345%
+R-5             unheated   exact=1.246129 hares=1.246 diff=0.000129 rel_err=0.0103%
+R-10            unheated   exact=1.228822 hares=1.229 diff=0.000178 rel_err=0.0145%
+uninsulated     heated     exact=2.336492 hares=2.336 diff=0.000492 rel_err=0.0210%
+R-5             heated     exact=2.267262 hares=2.267 diff=0.000262 rel_err=0.0116%
+R-10            heated     exact=2.249955 hares=2.250 diff=0.000045 rel_err=0.0020%
+
+=== R-Value Threshold Verification ===
+R-5 IP = 5 h·ft²·°F/Btu × 0.17611 = 0.88055 m²·K/W → rounded to 0.88
+R-10 IP = 10 h·ft²·°F/Btu × 0.17611 = 1.76110 m²·K/W → rounded to 1.76
+Exact: R-5 = 0.880551, R-10 = 1.761102
+[0m
+[0m← [0mWrite docs/reviews/physics-constants/phys-const-14-f2-perimeter-loss-coefficients.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/physics-constants/phys-const-14-f2-perimeter-loss-coefficients.md`.
+
+**Summary**: All six F2 values and both R-value thresholds (0.88, 1.76 m²·K/W) are correctly converted from ASHRAE 90.1-2022 Table A6.3.1. Two low-severity design observations noted:
+1. Step-function binning with no interpolation for intermediate R-values
+2. F2 capped at R-10 (no support for R-15+ insulation)

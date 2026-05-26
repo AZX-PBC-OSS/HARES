@@ -1,0 +1,68 @@
+# opencode log for wiring-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m• [0mExplore HARES source files[90m Explore Agent[0m
+[0m• [0mFind thermal-related HARES code[90m Explore Agent[0m
+[0m• [0mExplore OCHRE equipment reference[90m Explore Agent[0m
+[0m✓ [0mExplore OCHRE equipment reference[90m Explore Agent[0m
+[0m✓ [0mExplore HARES source files[90m Explore Agent[0m
+[0m✓ [0mFind thermal-related HARES code[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/duct_distribution.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=1, limit=150][0m
+[0m✱ [0mGrep "struct Descriptor|pub zone:"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m✱ [0mGrep "descriptor\.zone|\.zone\s*=|self\.zone"[90m in crates/hares-equipment/src/water_heater · 18 matches[0m
+Now let me dig deeper into specific areas that need scrutiny.
+[0m✱ [0mGrep "struct Descriptor"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m✱ [0mGrep "zone_id.*=|ZoneId\(|zone_count|num_zones"[90m in crates/hares-core/src · 71 matches[0m
+[0m✱ [0mGrep "descriptor\.zone\s*=\s*None|zone\s*=\s*None"[90m in crates/hares-equipment/src · 1 match[0m
+[0m✱ [0mGrep "pub zone:\s*Option<ZoneId>"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/mod.rs
+[0m✱ [0mGrep "descriptor\(\)\.zone|eq\.descriptor"[90m in crates/hares-core/src/dwelling · 26 matches[0m
+[0m✱ [0mGrep "struct Descriptor"[90m in crates/hares-types/src · 0 matches[0m
+[0m✱ [0mGrep "pub struct ZoneId"[90m in crates/hares-types/src · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1970, limit=90][0m
+[0m✱ [0mGrep "pub struct Descriptor|pub zone:"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3190, limit=80][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=750, limit=30][0m
+[0m✱ [0mGrep "pub struct Descriptor"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m✱ [0mGrep "zone.*Option.*ZoneId|pub zone.*ZoneId"[90m in crates/hares-equipment/src · 8 matches[0m
+[0m✱ [0mGrep "pub struct Descriptor\b"[90m in crates · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/helpers.rs
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [limit=60, offset=1530][0m
+[0m✱ [0mGrep "fn descriptor\b|pub zone\b.*Option|Descriptor\s*\{"[90m in crates/hares-equipment/src · 51 matches[0m
+[0m✱ [0mGlob "crates/hares-equipment/src/lib.rs"[90m 1 match[0m
+[0m✱ [0mGrep "pub struct EquipmentDescriptor"[90m in crates/hares-types/src · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/lib.rs[90m [offset=90, limit=120][0m
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [limit=200, offset=1110][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [limit=50, offset=380][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=100, offset=2420][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=70, offset=3100][0m
+[0m✱ [0mGrep "zone_is_conditioned"[90m in crates/hares-core/src/dwelling · 7 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs[90m [limit=100, offset=700][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=10, offset=3320][0m
+[0m✱ [0mGrep "zone_sensible_input_indices"[90m in crates/hares-envelope/src/thermal_solver · 56 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [limit=50, offset=220][0m
+Now let me do a few final targeted checks before writing the review.
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=30, offset=1330][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=40, offset=2245][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/wiring
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/wiring/wiring-02-thermal-zone-routing.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/wiring/wiring-02-thermal-zone-routing.md`.
+
+**Summary**: The thermal zone routing pipeline is well-designed and correct for all critical paths. Zero off-by-one issues, zero cases of None-defaulting-to-zone-0, duct loss and jacket loss routing are correct, and unconditioned spaces are properly handled. 4 findings identified:
+
+- **Medium (2)**: ZoneId(0) accepted as input (silent output loss); jacket loss diagnostic reads only indoor zone
+- **Low (2)**: Unrecoverable duct loss has no telemetry; merged basement+duct zone loses category fidelity

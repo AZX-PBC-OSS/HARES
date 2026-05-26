@@ -1,0 +1,42 @@
+# opencode log for types-physics-08
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-tariff/src/evaluator.rs
+[0m→ [0mRead crates/hares-tariff/src/types.rs
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py
+[0m→ [0mRead crates/hares-tariff/src/evaluator.rs[90m [offset=1408][0m
+[0m✱ [0mGrep "BillingState"[90m in crates/hares-tariff/src · 21 matches[0m
+[0m✱ [0mGrep "peak_demand|demand_window|demand_ratchet|ratchet|sliding_window|rolling_window"[90m in crates/hares-tariff/src · 127 matches[0m
+[0m→ [0mRead crates/hares-tariff/src/billing.rs
+[0m✱ [0mGrep "demand|peak|ratchet|window"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 9 matches[0m
+[0m✱ [0mGrep "interval.*demand|step.*demand|60.*minute.*demand|demand.*interval"[90m in crates/hares-tariff/src · 4 matches[0m
+[0m✱ [0mGrep "first.*period|initial.*peak|ratchet.*first|first.*ratchet|zero.*initial"[90m in crates/hares-tariff/src · 0 matches[0m
+Now let me look at the vendor reference file's relevant portions and search for any existing tests on the step-size > demand-window scenario.
+[0m✱ [0mGrep "demand|tariff|billing|ratchet"[90m in vendors/OCHRE · 12 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/**/*tariff*"[90m 0 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/**/*billing*"[90m 0 matches[0m
+[0m
+[0m← [0mWrite docs/reviews/types-physics/types-physics-08-tariff-demand-averaging-window-collapse.md
+Wrote file successfully.
+[0m
+Now I have all the information needed. Let me write the review findings.
+The review has been written to `docs/reviews/types-physics/types-physics-08-tariff-demand-averaging-window-collapse.md`.
+
+**Summary of findings:**
+
+| Finding | Severity | Issue |
+|---|---|---|
+| #1 | **High** | Demand window silently collapses to 1 sample when `interval > demand_window`. Integer division `(15 * 60) / 3600 = 0` → capped to 1 → no averaging, no sub-step aggregation |
+| #2 | **Medium** | No warning/error when step size exceeds demand window (the reverse case is checked) |
+| #3 | **Low** | Periodic `running_sum` recomputation every 1000 pushes (unnecessary f64 drift guard) |
+| #4-5 | None | Ratchet initialization and ring buffer off-by-one — both confirmed correct |
+
+The key issue is at `billing.rs:125-130`: a 60-minute simulation step with a 15-minute demand window produces `capacity = 0`, silently clamped to `1`. An hourly average of 2.5 kW would be reported as demand instead of the true 10 kW 15-minute peak — a potential 4x undercharge with no user notification. The code comment at `evaluator.rs:184-187` defends this as "physically correct" but treats the step-average as if it were a peak, which is wrong for typical hourly building simulation data.

@@ -1,0 +1,106 @@
+# opencode log for wiring-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Read HARES source files: fluid.rs, fluid_solver.rs, water_heater/mod.rs
+[ ] Read vendor reference files: OCHRE WaterHeater.py and EnergyPlus Plant/
+[ ] Trace fluid loop connectivity and analyze findings
+[ ] Write review report to docs/reviews/wiring/wiring-07-fluid-loop-port-wiring.md
+[0m
+[0m→ [0mRead crates/hares-types/src/fluid.rs
+[0m→ [0mRead crates/hares-envelope/src/fluid_solver.rs
+[0m→ [0mRead crates/hares-equipment/src/water_heater/mod.rs
+[0m
+[0m# [0mTodos
+[✓] Read HARES source files: fluid.rs, fluid_solver.rs, water_heater/mod.rs
+[•] Read vendor reference files: OCHRE WaterHeater.py and EnergyPlus Plant/
+[ ] Trace fluid loop connectivity and analyze findings
+[ ] Write review report to docs/reviews/wiring/wiring-07-fluid-loop-port-wiring.md
+[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/WaterHeater.py
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Plant
+[0m✱ [0mGrep "pub struct PortContribution|pub enum PortContribution|Fluid \{|FluidAccumulator"[90m in crates/hares-types/src · 21 matches[0m
+[0m✱ [0mGrep "pub struct FluidAccumulator"[90m in crates/hares-types/src · 1 match[0m
+Now let me read the vendor reference files and key HARES types:
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [offset=1, limit=200][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Plant/Loop.cc
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Plant/DataPlant.hh
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [offset=320, limit=250][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/heat_pump_wh.rs
+[0m→ [0mRead crates/hares-equipment/src/water_heater/resistance.rs
+[0m✱ [0mGrep "cp_water|cp_glycol|cp_refrigerant|specific_heat|fluid_property|fluid.*density|density.*fluid|viscosity"[90m in crates/hares-envelope/src/fluid_solver.rs · 3 matches[0m
+[0m✱ [0mGrep "cp_water|cp_glycol|cp_refrigerant|specific_heat|FluidType"[90m in crates/hares-types/src · 39 matches[0m
+[0m✱ [0mGrep "FluidType|cp_water|heat_capacity_cp"[90m in crates/hares-physics/src · 0 matches[0m
+[0m✱ [0mGrep "PortContribution::Fluid"[90m in crates/hares-equipment/src · 9 matches[0m
+[0m✱ [0mGlob "**/boiler*"[90m in crates/hares-equipment/src · 1 match[0m
+[0m✱ [0mGlob "**/hvac/**"[90m in crates/hares-equipment/src · 29 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [limit=100, offset=220][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/baseboard.rs[90m [limit=100, offset=1][0m
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [limit=50, offset=235][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [limit=130][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [offset=900, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [offset=131, limit=90][0m
+[0m✱ [0mGrep "fn loop_return_temp_c"[90m in crates/hares-equipment/src · 1 match[0m
+[0m✱ [0mGrep "loop_return_temp_c"[90m in crates/hares-equipment/src · 3 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [offset=690, limit=30][0m
+[0m✗ [0mGrep "fluid.*domains|FluidSolver|fluid_solver" failed[90m in crates/hares-app/src[0m
+[91m[1mError: [0mNo such file or directory: '/Users/rich/source/HARES/crates/hares-app'
+[0m✱ [0mGrep "FluidDomainPayload::decode"[90m in . · 11 matches[0m
+[0m✱ [0mGlob "**/dwelling*"[90m in . · 3 matches[0m
+[0m✱ [0mGlob "**/orchestrat*"[90m in . · 1 match[0m
+[0m✱ [0mGlob "**/simulation*"[90m in . · 8 matches[0m
+[0m✱ [0mGrep "FluidSolver::new|fluid_domains|declared_loops|FLUID"[90m in crates · 26 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=1170, limit=60][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=1, limit=50][0m
+[0m✱ [0mGrep "\.fluid\.push\(|\.fluid\.retain|\.fluid\.clear|fluid\.push|fluid_slot|fluid_update|SOLVE.*FLUID|resolve.*fluid|fluid.*resolve"[90m in crates · 11 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2665, limit=80][0m
+[0m→ [0mRead crates/hares-envelope/tests/fluid_solver_tests.rs[90m [offset=100, limit=130][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [offset=820, limit=200][0m
+[0m→ [0mRead crates/hares-envelope/tests/fluid_solver_tests.rs[90m [offset=230, limit=30][0m
+[0m✱ [0mGrep "Glycol|Refrig"[90m in crates/hares-envelope · 1 match[0m
+[0m✱ [0mGrep "FluidType::Glycol|FluidType::Refrigerant"[90m in crates · 22 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/fluid_solver.rs[90m [offset=414, limit=15][0m
+[0m→ [0mRead crates/hares-core/tests/port_accumulation_tests.rs[90m [offset=270, limit=30][0m
+[0m✱ [0mGrep "fluid_type.*Glycol|Glycol.*fluid"[90m in crates/hares-equipment/src/hvac · 0 matches[0m
+[0m✱ [0mGrep "CP_LIQUID_WATER|cp_water"[90m in crates/hares-equipment/src/hvac · 3 matches[0m
+[0m✱ [0mGrep "fluid_type"[90m in crates/hares-equipment/src/hvac · 16 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heating_config.rs[90m [offset=373, limit=10][0m
+[0m✱ [0mGrep "FluidType|getSpecificHeat|Water.*Glycol|glycol"[90m in vendors/EnergyPlus/src/EnergyPlus/Plant · 47 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/baseboard.rs[90m [offset=100, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/generator.rs[90m [offset=790, limit=30][0m
+[0m✱ [0mGrep "hydronic|radiator|baseboard.*fluid|WATER.*BASEBOARD|HotWaterBaseboard"[90m in crates · 14 matches[0m
+[0m
+[0m# [0mTodos
+[✓] Read HARES source files: fluid.rs, fluid_solver.rs, water_heater/mod.rs
+[✓] Read vendor reference files: OCHRE WaterHeater.py and EnergyPlus Plant/
+[✓] Trace fluid loop connectivity and analyze findings
+[•] Write review report to docs/reviews/wiring/wiring-07-fluid-loop-port-wiring.md
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/wiring
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/wiring/wiring-07-fluid-loop-port-wiring.md
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Read HARES source files: fluid.rs, fluid_solver.rs, water_heater/mod.rs
+[✓] Read vendor reference files: OCHRE WaterHeater.py and EnergyPlus Plant/
+[✓] Trace fluid loop connectivity and analyze findings
+[✓] Write review report to docs/reviews/wiring/wiring-07-fluid-loop-port-wiring.md
+[0m
+Review `wiring-07` complete. Report written to `docs/reviews/wiring/wiring-07-fluid-loop-port-wiring.md`.
+
+**Key findings**: 7 total (2 high, 3 medium, 2 low). The two high-severity issues are:
+
+1. **Fluid solver uses water cp (4186 J/kg·K) for all fluid types** — Glycol and refrigerant property differences are ignored in `FluidSolver::resolve` (`fluid_solver.rs:136`).
+2. **Boiler supply temperature hardcodes `CP_LIQUID_WATER_J_KG_K`** — even when `fluid_type: Glycol` is configured (`boiler.rs:229, :522`).
+
+Medium findings include: `PortSlots` silently splits same-loop different-fluid-type contributions, DHW port supply/return semantics are inverted vs hydronic convention, and no hydronic consumer model exists (boiler bypasses the fluid loop for zone heating).

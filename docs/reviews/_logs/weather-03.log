@@ -1,0 +1,65 @@
+# opencode log for weather-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/ground.rs
+[0m→ [0mRead crates/hares-io/src/epw.rs
+[0m→ [0mRead vendors/OCHRE/ochre/utils/schedule.py
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc
+[0m✱ [0mGrep "ground.*temp|CalcSoilSurfTemp|GTEMP|site.*ground.*temperature|shallow.*ground|deep.*ground|ground.*depth|0\.5|1\.524|5\s*ft|2\s*m|ground_temp"[90m in vendors/EnergyPlus/src/EnergyPlus · 1072 matches[0m
+[0m✱ [0mGrep "ground.*temp|GTEMP|beta.*depth|10\s*\*|reference.*depth|shallow|deep|0\.025|gm|depth_m"[90m in vendors/OCHRE/ochre/utils · 15 matches[0m
+Now let me search for the specific ground temperature depth constants and models in both vendor files.
+[0m✱ [0mGrep "CalcSoilSurfTemp|GroundTemperature|GroundTemp.*Shallow|GroundTemp.*Deep|GroundTempType|sitel:groundtemp"[90m in vendors/EnergyPlus/src/EnergyPlus · 131 matches[0m
+[0m✱ [0mGrep "1\.524|5\.0\s*\*\s*ft|0\.5.*depth|depth.*0\.5|shallow.*depth|depth.*shallow"[90m in vendors/EnergyPlus/src/EnergyPlus · 9 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=2070, limit=60][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=6880, limit=100][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/GroundTemperatureModeling/SiteShallowGroundTemperatures.cc
+[0m✱ [0mGrep "CalcSoilSurfTemp|Kusuda|Achenbach|undisturbed.*ground"[90m in vendors/EnergyPlus/src/EnergyPlus · 26 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/GroundTemperatureModeling/KusudaAchenbachGroundTemperatureModel.cc
+[0m✱ [0mGrep "0\.5.*m|depth.*0\.5|0\.5.*depth|ground.*surface.*depth|Surface.*0\.5"[90m in vendors/EnergyPlus/src/EnergyPlus · 243 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=7790, limit=60][0m
+[0m✱ [0mGrep "DOE.*2.*ground|GTEMP|doe.*ground.*temp|0\.025.*10|depth.*10|5\s*ft.*ground|ground.*5\s*ft"[90m in vendors/EnergyPlus/src/EnergyPlus · 8 matches[0m
+[0m✱ [0mGlob "**/DOE-2/**"[90m in vendors · 0 matches[0m
+[0m✱ [0mGrep "GTEMP|ground_temp|10\.0|depth.*ft|ft.*depth|3\.048"[90m in vendors/OCHRE · 13 matches[0m
+Now let me look at any DOE-2 reference in the vendor tree and verify the original depth.
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=970, limit=60][0m
+[0m✱ [0mGrep "slab|foundation|basement.*wall|below.*grade"[90m in vendors/OCHRE · 56 matches[0m
+[0m✱ [0mGrep "ground_temp_c|ground_t_mean|ground_t_amplitude|ground_phase_day"[90m in crates · 376 matches[0m
+Now let me check how the HARES ground temperature flows through to the simulation to understand impact.
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=85, limit=60][0m
+[0m✱ [0mGrep "ground_t_mean_c.*=|ground_t_amplitude_c.*=|ground_phase_day.*=""[90m in crates · 5 matches[0m
+[0m✱ [0mGrep "ground_t_mean|ground_t_amplitude|ground_phase|min\b.*\bamplitude|compute.*ground|ground.*annual"[90m in crates/hares-core/src/environment.rs · 16 matches[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=80, offset=220][0m
+[0m✱ [0mGrep "fn compute_mains_inputs"[90m in crates/hares-core/src/environment.rs · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=60, offset=744][0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs[90m [offset=760, limit=60][0m
+Now let me check how the thermal solver uses the ground temperature for below-grade walls to understand the full impact chain.
+[0m✱ [0mGrep "GROUND TEMPERATURES,0"[90m in data · 0 matches[0m
+[0m
+[0m$ [0mhead -4 /Users/rich/source/HARES/data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw 2>/dev/null || echo "No EPW in data dir"
+LOCATION,Denver Intl Ap,CO,USA,TMY3,725650,39.83,-104.65,-7.0,1650.0
+DESIGN CONDITIONS,1,Climate Design Data 2009 ASHRAE Handbook,,Heating,12,-17.4,-14,-21.5,0.7,-11.7,-18.9,0.9,-6.9,14.1,1.8,12,2.4,3.3,160,Cooling,7,15.2,34.6,15.7,33.2,15.6,31.8,15.4,18.3,27.3,17.6,27,17,26.5,4.2,80,16,14,19.9,15.2,13.2,19.7,14.1,12.3,19.6,58.3,27,55.9,26.9,53.8,26.3,722,Extremes,11.9,10.4,8.8,20.7,-22.7,37.1,2.8,1.3,-24.7,38,-26.3,38.8,-27.9,39.5,-29.9,40.5
+TYPICAL/EXTREME PERIODS,6,Summer - Week Nearest Max Temperature For Period,Extreme,6/22,6/28,Summer - Week Nearest Average Temperature For Period,Typical,6/ 8,6/14,Winter - Week Nearest Min Temperature For Period,Extreme,1/27,2/ 2,Winter - Week Nearest Average Temperature For Period,Typical,1/ 6,1/12,Autumn - Week Nearest Average Temperature For Period,Typical,10/13,10/19,Spring - Week Nearest Average Temperature For Period,Typical,4/26,5/ 2
+GROUND TEMPERATURES,3,.5,,,,0.36,2.33,6.17,9.79,16.66,20.28,21.27,19.44,15.20,9.93,4.73,1.30,2,,,,3.08,3.56,5.74,8.18,13.45,16.83,18.51,18.13,15.72,12.07,7.97,4.74,4,,,,5.88,5.54,6.50,7.88,11.37,13.98,15.68,16.09,15.03,12.89,10.11,7.59
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/weather
+(no output)
+[0m
+Now I have enough information to write the comprehensive review. Let me create the output file.
+[0m← [0mWrite docs/reviews/weather/weather-03-ground-temp-reference-depth.md
+Wrote file successfully.
+[0m
+Review written to `/Users/rich/source/HARES/docs/reviews/weather/weather-03-ground-temp-reference-depth.md`.
+
+**Summary of findings:**
+
+- **1 high**: DOE-2 fallback uses 0.5 m depth producing `gm ≈ 0.97` (3% damping), while the original DOE-2 GTEMP/OCHRE uses 10 ft (3.048 m) giving `gm ≈ 0.55` (45% damping). This matters whenever EPW files lack ground-temperature header data.
+- **2 medium**: Incorrect comment claiming DOE-2 used 5 ft (it used 10 ft); depth is hard-coded and not configurable.
+- **1 low**: EPW header path correctly picks 0.5 m per EPW spec, but deeper levels in multi-depth EPWs are discarded instead of being preserved for foundation heat transfer use.

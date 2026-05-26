@@ -1,0 +1,138 @@
+# opencode log for wiring-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Read core port declaration files (types, equipment, thermal_solver)
+[ ] Search for all PortDeclaration usages across codebase
+[ ] Search for all port accumulator/consumer usages across codebase
+[ ] Cross-reference declared vs consumed ports for orphans, missing, mismatches
+[ ] Check vendor reference (OCHRE) for port naming patterns
+[ ] Write findings to docs/reviews/wiring/wiring-01-port-naming-consistency.md
+[0m
+[0m→ [0mRead crates/hares-types/src/ports.rs
+[0m→ [0mRead crates/hares-equipment/src/ports.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/ports.rs
+[0m
+[0m# [0mTodos
+[✓] Read core port declaration files (types, equipment, thermal_solver)
+[•] Search for all PortDeclaration usages across codebase
+[ ] Search for all port accumulator/consumer usages across codebase
+[ ] Cross-reference declared vs consumed ports for orphans, missing, mismatches
+[ ] Check vendor reference (OCHRE) for port naming patterns
+[ ] Write findings to docs/reviews/wiring/wiring-01-port-naming-consistency.md
+[0m
+Now let me search for where `PortDeclaration` is actually created and consumed across the codebase.
+[0m✱ [0mGrep "PortDeclaration"[90m 233 matches[0m
+[0m✱ [0mGrep "PortSlots"[90m 997 matches[0m
+[0m✱ [0mGrep "PortContribution"[90m 179 matches[0m
+[0m✱ [0mGrep "port_declarations|ports_decl|decl_ports"[90m 4 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/lib.rs[90m [offset=1, limit=120][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1170, limit=60][0m
+[0m→ [0mRead crates/hares-core/src/observer.rs[90m [offset=1, limit=120][0m
+[0m• [0mAudit equipment port declarations[90m Explore Agent[0m
+[0m• [0mAudit solver/actor port consumption[90m Explore Agent[0m
+Now let me trace all the equipment port declarations and the solver/actor consumption patterns in parallel.
+[0m✓ [0mAudit equipment port declarations[90m Explore Agent[0m
+[0m✓ [0mAudit solver/actor port consumption[90m Explore Agent[0m
+[0m
+[0m# [0mTodos
+[✓] Read core port declaration files (types, equipment, thermal_solver)
+[✓] Search for all PortDeclaration usages across codebase
+[✓] Search for all port accumulator/consumer usages across codebase
+[•] Cross-reference declared vs consumed ports for orphans, missing, mismatches
+[ ] Check vendor reference (OCHRE) for port naming patterns
+[ ] Write findings to docs/reviews/wiring/wiring-01-port-naming-consistency.md
+[0m
+Now let me do deep-dive checks for specific mismatch patterns.
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [offset=540, limit=30][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [offset=680, limit=30][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [offset=1050, limit=25][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [offset=1200, limit=25][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [offset=1540, limit=20][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [limit=60, offset=386][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [limit=60, offset=890][0m
+[0m✱ [0mGrep "DHW_DEMAND_LOOP"[90m 29 matches[0m
+[0m✱ [0mGrep "PortDeclaration::custom"[90m 5 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/dehumidifier.rs[90m [limit=50, offset=350][0m
+[0m→ [0mRead crates/hares-envelope/src/humidity_solver.rs[90m [limit=60, offset=150][0m
+[0m→ [0mRead crates/hares-envelope/src/fluid_solver.rs[90m [limit=60, offset=100][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/tankless.rs[90m [limit=30, offset=540][0m
+[0m✱ [0mGrep ""thermal"|"electric"|"humidity"|"fuel"|"fluid"|"custom".*port|port.*"thermal"|"electric"|"humidity"|"fuel"|"fluid"|"custom""[90m 8 matches[0m
+[0m✱ [0mGrep "port_name|port_type|port_kind|port id"[90m 19 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/duct_distribution.rs[90m [limit=50, offset=130][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/duct_distribution.rs[90m [limit=30, offset=590][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [limit=40, offset=1][0m
+[0m✱ [0mGrep "fn ports\(&self\).*->.*\[PortDeclaration\]"[90m 33 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ideal_hvac.rs[90m [limit=40, offset=280][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [limit=60, offset=230][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [limit=60, offset=530][0m
+[0m→ [0mRead crates/hares-equipment/src/generator.rs[90m [limit=60, offset=1170][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ideal_hvac.rs[90m [limit=40, offset=1][0m
+[0m✱ [0mGrep "write_zone_thermal_contributions"[90m 28 matches[0m
+[0m✱ [0mGrep "fn rebuild_thermal_ports"[90m 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/duct_distribution.rs[90m [limit=50, offset=90][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [limit=40, offset=1010][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [limit=60, offset=790][0m
+[0m→ [0mRead crates/hares-equipment/src/generator.rs[90m [limit=100, offset=600][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [limit=50, offset=140][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [limit=40, offset=190][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [limit=40, offset=380][0m
+[0m→ [0mRead crates/hares-equipment/src/generator.rs[90m [limit=80, offset=700][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment
+[0m→ [0mRead crates/hares-equipment/src/generator.rs[90m [limit=50, offset=780][0m
+Now let me check the vendor reference and a couple more critical spots.
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Equipment.py[90m [limit=80, offset=1][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [limit=40, offset=440][0m
+[0m✱ [0mGrep "PortDeclaration::humidity"[90m 8 matches[0m
+[0m✱ [0mGrep "PortContribution::Custom"[90m 6 matches[0m
+[0m✱ [0mGrep "PortType::Custom"[90m 2 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ideal_hvac.rs[90m [limit=20, offset=155][0m
+[0m✱ [0mGrep "PortContribution::Humidity"[90m 7 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/mod.rs[90m [limit=30, offset=28][0m
+[0m→ [0mRead crates/hares-equipment/src/scheduled_load.rs[90m [limit=30, offset=340][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py[90m [limit=80, offset=1][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/tankless.rs[90m [limit=80, offset=340][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ideal_hvac.rs[90m [limit=50, offset=319][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [limit=50, offset=320][0m
+[0m✱ [0mGrep "rebuild_thermal_ports"[90m 9 matches[0m
+[0m
+[0m# [0mTodos
+[✓] Read core port declaration files (types, equipment, thermal_solver)
+[✓] Search for all PortDeclaration usages across codebase
+[✓] Search for all port accumulator/consumer usages across codebase
+[✓] Cross-reference declared vs consumed ports for orphans, missing, mismatches
+[✓] Check vendor reference (OCHRE) for port naming patterns
+[•] Write findings to docs/reviews/wiring/wiring-01-port-naming-consistency.md
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/wiring/ 2>/dev/null || echo "DIR_NOT_FOUND"
+wiring-03-electrical-power-accumulation.md
+[0m
+[0m← [0mWrite docs/reviews/wiring/wiring-01-port-naming-consistency.md
+Wrote file successfully.
+[0m
+[0m→ [0mRead docs/reviews/wiring/wiring-01-port-naming-consistency.md[90m [limit=5, offset=1][0m
+[0m
+[0m# [0mTodos
+[✓] Read core port declaration files (types, equipment, thermal_solver)
+[✓] Search for all PortDeclaration usages across codebase
+[✓] Search for all port accumulator/consumer usages across codebase
+[✓] Cross-reference declared vs consumed ports for orphans, missing, mismatches
+[✓] Check vendor reference (OCHRE) for port naming patterns
+[✓] Write findings to docs/reviews/wiring/wiring-01-port-naming-consistency.md
+[0m
+Report written to `docs/reviews/wiring/wiring-01-port-naming-consistency.md`.
+
+**Key findings**: 6 issues identified. No missing (consumed-but-undeclared) ports found, and no string-naming mismatches (the typed struct approach eliminates that class of bug).
+
+**Top 3**:
+1. **High** — `rebuild_thermal_ports` unconditionally adds humidity ports. 5 of 6 callers (boilers, furnaces, HP heaters) never write humidity, creating orphaned accumulators.
+2. **Medium** — `PortType::Custom` has zero production usage (dead code).
+3. **Medium** — `ScheduledLoad` hardcodes `ZoneId(1,2,3)` for auto-routing, risking mismatch with actual zone configs.

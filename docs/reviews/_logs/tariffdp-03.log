@@ -31,3 +31,17 @@ Now I have all the data needed. Let me write the review document:
 [0m← [0mWrite docs/reviews/tariff-deep/tariffdp-03-tariff-type-enum-coverage.md
 Wrote file successfully.
 [0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/tariff-deep/tariffdp-03-tariff-type-enum-coverage.md
+188 /Users/rich/source/HARES/docs/reviews/tariff-deep/tariffdp-03-tariff-type-enum-coverage.md
+[0m
+Review written to `docs/reviews/tariff-deep/tariffdp-03-tariff-type-enum-coverage.md` (188 lines, 8 findings).
+
+**Key findings:**
+
+- **Critical (1)**: No support for real-time pricing, critical peak pricing, or EV-only rates — the `ElectricTariff` compositional model has no data fields for time-varying import prices, CPP event calendars, or sub-metered EV consumption. These collectively affect ~5–6M US households.
+
+- **High (2)**: (a) time-varying export rates only support static TOU bands, not 8760-hour avoided cost profiles required for California NEM 3.0; (b) NEM 2.0 non-bypassable charges have no dedicated field and cannot be modeled correctly.
+
+- **Medium (2)**: `SeasonFilter` is a binary Summer/Winter enum insufficient for 3+ season tariffs; no multi-tariff or sub-metered rate support for dual-meter EV households.
+
+- **Low (3)**: Declining block rates structurally work but lack tests; `DemandRate.period_name = None` is mis-labeled as "coincident peak" when it actually computes non-coincident peak; compositional model silently allows zero-cost tariffs with no validation warning.

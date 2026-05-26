@@ -1,0 +1,87 @@
+# opencode log for wm-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/water_mains.rs
+[0m• [0mExplore OCHRE vendor code[90m Explore Agent[0m
+[0m✱ [0mGrep "DEG_PER_DAY|0\.986|Burch|Christensen|360/365|degree.day.*temp|water.main.*temp"[90m in . · 3780 matches[0m
+[0m✓ [0mExplore OCHRE vendor code[90m Explore Agent[0m
+[0m✱ [0mGrep "0\.986|DEG_PER_DAY|deg_per_day|DegPerDay"[90m in vendors/EnergyPlus/tst/EnergyPlus/unit/WeatherManager.unit.cc · 0 matches[0m
+[0m• [0mSearch EnergyPlus WeatherManager source[90m Explore Agent[0m
+[0m✱ [0mGlob "**/weather-pipeline.md"[90m in . · 1 match[0m
+Let me dig deeper into the EnergyPlus reference implementation and look for documentation on the DEG_PER_DAY constant.
+[0m✓ [0mSearch EnergyPlus WeatherManager source[90m Explore Agent[0m
+[0m→ [0mRead docs/weather-pipeline.md[90m [offset=280, limit=60][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/schedule.py[90m [offset=220, limit=30][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=7186, limit=30][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/water-mains
+(no output)
+[0m
+[0m$ [0mpython3 -c "
+# Compute the exact values
+print('=== DEG_PER_DAY Analysis ===')
+print(f'0.986                 = {0.986:.10f}')
+print(f'360.0 / 365.25        = {360.0 / 365.25:.10f}')
+print(f'360.0 / 365.0         = {360.0 / 365.0:.10f}')
+print(f'360.0 / 365.2422      = {360.0 / 365.2422:.10f}')
+print(f'360.0 / 365.242190    = {360.0 / 365.242190:.10f}')
+print()
+print(f'Relative diff (0.986 vs 360/365.25): {(0.986 - 360.0/365.25)/(360.0/365.25)*100:.5f}%')
+print(f'Relative diff (0.986 vs 360/365.0):  {(0.986 - 360.0/365.0)/(360.0/365.0)*100:.5f}%')
+print()
+# Impact on sine argument after 182.5 days
+import math
+diff_per_day = 0.986 - 360.0/365.25
+angular_diff_182 = diff_per_day * 182.5
+print(f'Angular diff at day 182.5: {angular_diff_182:.6f} degrees')
+print(f'sin diff at day 182.5 (worst case): {abs(math.sin(math.radians(angular_diff_182))):.6f}')
+# For amplitude ~10 degF
+amp = 10.0
+temp_diff = amp * abs(math.sin(math.radians(angular_diff_182)))
+print(f'Max temp diff with 10°F amplitude: {temp_diff:.6f} °F = {temp_diff*5/9:.6f} °C')
+# For extreme amplitude ~35 °F peak-to-peak = 17.5 half-swing, ratio ~1.0
+amp_extreme = 17.5
+temp_diff_extreme = amp_extreme * abs(math.sin(math.radians(angular_diff_182)))
+print(f'Max temp diff with 17.5°F amplitude: {temp_diff_extreme:.6f} °F = {temp_diff_extreme*5/9:.6f} °C')
+# End of year phase
+print()
+print(f'0.986 * 365:   {0.986 * 365:.6f}° (error from 360°: {0.986 * 365 - 360:.6f}°)')
+print(f'0.9856 * 365:  {0.9856 * 365:.6f}° (error from 360°: {0.9856 * 365 - 360:.6f}°)')
+print(f'true * 365:    {360.0/365.2422 * 365:.6f}° (error from 360°: {360.0/365.2422 * 365 - 360:.6f}°)')
+"
+
+=== DEG_PER_DAY Analysis ===
+0.986                 = 0.9860000000
+360.0 / 365.25        = 0.9856262834
+360.0 / 365.0         = 0.9863013699
+360.0 / 365.2422      = 0.9856473321
+360.0 / 365.242190    = 0.9856473591
+
+Relative diff (0.986 vs 360/365.25): 0.03792%
+Relative diff (0.986 vs 360/365.0):  -0.03056%
+
+Angular diff at day 182.5: 0.068203 degrees
+sin diff at day 182.5 (worst case): 0.001190
+Max temp diff with 10°F amplitude: 0.011904 °F = 0.006613 °C
+Max temp diff with 17.5°F amplitude: 0.020832 °F = 0.011573 °C
+
+0.986 * 365:   359.890000° (error from 360°: -0.110000°)
+0.9856 * 365:  359.744000° (error from 360°: -0.256000°)
+true * 365:    359.761276° (error from 360°: -0.238724°)
+[0m
+Now let me check the actual Earth orbit math and the review directory exists before writing:
+[0m← [0mWrite docs/reviews/water-mains/wm-01-deg-per-day-source-verification.md
+Wrote file successfully.
+[0m
+Now I'll write the review document:
+Review written to `docs/reviews/water-mains/wm-01-deg-per-day-source-verification.md`.
+
+**Key result**: `DEG_PER_DAY = 0.986` is correct. All 3 implementations (HARES, EnergyPlus, OCHRE) agree. The value likely derives from `360/365 ≈ 0.9863` rounded to 3 significant figures — not from `360/365.25`. The `360/365.25 = 0.9856` alternative is neither more nor less correct; both are approximations. The impact of the difference is **<0.012 °C maximum** on mains temperature predictions, far below any physically meaningful threshold.

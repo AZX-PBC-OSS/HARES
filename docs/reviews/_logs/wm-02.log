@@ -1,0 +1,37 @@
+# opencode log for wm-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/water_mains.rs[90m [offset=1, limit=60][0m
+[0m• [0mExplore OCHRE water mains constants[90m Explore Agent[0m
+[0m✓ [0mExplore OCHRE water mains constants[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-physics/src/water_mains.rs[90m [offset=60, limit=120][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/schedule.py[90m [offset=220, limit=30][0m
+Let me read the actual model function in HARES and the OCHRE implementation to compare how the constants are used.
+[0m→ [0mRead crates/hares-physics/src/water_mains.rs[90m [offset=280, limit=120][0m
+[0m✱ [0mGrep "Burch|Christensen|water.mains|mains.temp"[90m in vendors/OCHRE/ochre · 25 matches[0m
+Let me also read the test/validation section to check for any OCHRE cross-validation data.
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/water-mains/ 2>/dev/null || echo "Directory does not exist"
+(no output)
+[0m
+Now let me check if the review output directory exists.
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/water-mains
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/water-mains/wm-02-water-mains-model-constants.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/water-mains/wm-02-water-mains-model-constants.md
+57 /Users/rich/source/HARES/docs/reviews/water-mains/wm-02-water-mains-model-constants.md
+[0m
+Review written to `docs/reviews/water-mains/wm-02-water-mains-model-constants.md`.
+
+**Result**: All 5 constants match. Cross-referenced against OCHRE (`schedule.py:230-241`) — every value (OFFSET_F=6, RATIO_BASE=0.4, RATIO_SLOPE=0.01, LAG_BASE=35, LAG_SLOPE=1.0) is identical. The Chicago TMY2 cross-validation test at `water_mains.rs:308` further confirms numerical equivalence to within 0.001 °C. Two low-severity observations: ratio clamping at line 98 is a documented defensive addition beyond the original paper, and the paper itself isn't archived in-repo for direct audit.

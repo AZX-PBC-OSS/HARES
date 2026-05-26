@@ -1,0 +1,46 @@
+# opencode log for weather-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/weather.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc
+[0m✱ [0mGrep "triangular|solar.*interpol|InterpolSolar|SkySolar|interpolateSolar|beamSolarRad|DifSolarRad"[90m in vendors/EnergyPlus/src/EnergyPlus · 143 matches[0m
+[0m✱ [0mGrep "triangular|Triangular"[90m in crates/hares-io · 59 matches[0m
+Let me search for the solar interpolation sections in the EnergyPlus file and continue reading the HARES weather.rs file.
+[0m✱ [0mGrep "wgtPrevHrSolar|wgtCurrHrSolar|wgtNextHrSolar|SetupInterpolationValues|interpolateWindDirection|wvarsLastHr"[90m in vendors/EnergyPlus/src/EnergyPlus · 31 matches[0m
+[0m→ [0mRead crates/hares-io/src/weather.rs[90m [offset=2260, limit=500][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=3040, limit=200][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=8310, limit=100][0m
+[0m✱ [0mGrep "SolarInterpolation|half.hour|hourly.*average.*solar|solar.*energy.*conserv"[90m in vendors/EnergyPlus/src/EnergyPlus · 17 matches[0m
+[0m✱ [0mGrep "ResampleOverrides|triangular|energy.*conserv|footgun"[90m in crates/hares-io · 63 matches[0m
+Now let me look for additional relevant documentation in the EnergyPlus codebase and search for how the solar interpolation is documented elsewhere.
+[0m→ [0mRead crates/hares-io/tests/weather_parity.rs[90m [offset=814, limit=100][0m
+[0m✱ [0mGrep "Energy.*conserv|non.*conserv|interpolat.*solar.*energy|solar.*interpolat.*method|engineering.*reference"[90m in vendors/EnergyPlus/src/EnergyPlus · 0 matches[0m
+[0m✱ [0mGrep "hourly.*average|midpoint.*interpol|triangular.*solar|solar.*is.*average|EPW.*solar.*average|solar.*energy.*error|solar.*hour.*mean"[90m in vendors/EnergyPlus · 3 matches[0m
+[0m✱ [0mGrep "triangular|energy.*non.*conserv|non.cons"[90m in docs · 61 matches[0m
+[0m→ [0mRead docs/findings/weather.md[90m [offset=1, limit=30][0m
+[0m→ [0mRead docs/findings/weather.md[90m [offset=240, limit=30][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/weather
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/weather/weather-05-triangular-resampling-footgun.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/weather/weather-05-triangular-resampling-footgun.md`.
+
+**Quick summary of findings:**
+
+| Severity | Count | Key points |
+|----------|-------|-----------|
+| Medium | 1 | EnergyPlus uses the same non-conservative triangular scheme as its **mandatory** default with zero warnings, normalising an unsafe practice for migrating users |
+| Low | 2 | (1) `ResampleOverrides` has no runtime warning when solar fields are set to `Triangular`; (2) legitimate use cases exist (E+ parity, high-res control modelling, transient comfort) that justify keeping the method as opt-in |
+
+**Recommendation**: Keep `Triangular`, but strengthen the guardrails — add a `tracing::warn!` in `resample_with` when any solar override is `Triangular`, add docstrings to `ResampleOverrides`, and document EnergyPlus's equivalent non-conservation in the `Triangular` variant's own docstring so users coming from E+ understand that HARES's ZOH default is the architecturally superior choice.

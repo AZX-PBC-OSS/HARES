@@ -1,0 +1,49 @@
+# opencode log for weather-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/epw.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc
+[0m✱ [0mGrep "(Brunt|Idso|Berdahl|SkyTempModel|SkyTemperature|sky_temp|SKYTEMP|brunt|idso|berdahl)"[90m in vendors/EnergyPlus/src/EnergyPlus · 82 matches[0m
+[0m✱ [0mGrep "(sky_temp|sky_model|sky_temperature_model|SkyTempModel|brunt|idso)"[90m in crates · 336 matches[0m
+[0m✱ [0mGrep "(dead_code|allow\(dead)"[90m in crates/hares-io/src/epw.rs · 3 matches[0m
+Let me search for the specific sky temperature model implementations and selection logic in the EnergyPlus vendor file, and also check the HARES configuration system.
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=3192, limit=80][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.hh[90m [offset=160, limit=60][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=6695, limit=200][0m
+Let me read the key EnergyPlus implementation sections and the HARES configuration system.
+[0m✱ [0mGrep "(config|Config|configuration|Configuration)"[90m in crates/hares-io/src · 600 matches[0m
+[0m✱ [0mGrep "struct.*WeatherConfig|struct.*Weather.*Opt"[90m in crates · 1 match[0m
+Let me check the HARES configuration system and see if there's any sky model configuration planned.
+[0m→ [0mRead crates/hares-core/src/dwelling/synthetic.rs[90m [offset=80, limit=60][0m
+[0m✱ [0mGrep "(brunt|idso|berdahl|sky.model|sky_emissivity|sky_emission)"[90m in . · 37 matches[0m
+[0m→ [0mRead docs/reviews/architecture/arch-02-core-state-structs.md[90m [offset=60, limit=30][0m
+[0m→ [0mRead docs/reviews/weather
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [offset=617, limit=70][0m
+Let me read the architecture review that mentions sky temperature model gaps:
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/weather/ 2>/dev/null || echo "directory does not exist"
+(no output)
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/weather
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/weather/weather-02-brunt-idso-sky-emissivity-dead-code.md
+Wrote file successfully.
+[0m
+Now I have all the information needed. Let me write the review document.
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [offset=945, limit=10][0m
+Let me verify the test imports match what I documented:
+The review file has been written to `/Users/rich/source/HARES/docs/reviews/weather/weather-02-brunt-idso-sky-emissivity-dead-code.md`.
+
+Summary of findings:
+- **2 medium-severity** and **1 low-severity** finding
+- `brunt_sky_emissivity()`, `idso_sky_emissivity()`, and `magnus_saturation_pressure_hpa()` are dead code (~60 lines) with no configuration pathway to activate them — unlike EnergyPlus which has `WeatherProperty:SkyTemperature` for user-selectable sky models
+- The Brunt/Idso implementations also differ from EnergyPlus in their water-vapor pressure source (HARES uses dew-point Magnus saturation; E+ uses dry-bulb saturation × RH), which would cause silent divergence if ever wired in

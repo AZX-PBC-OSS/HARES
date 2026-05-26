@@ -21,6 +21,7 @@ use hares_types::{
     PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
 use hares_types::telemetry_keys as tk;
 
@@ -133,13 +134,22 @@ pub enum VentilationType {
     Erv,
 }
 
-fn parse_ventilation_type(raw: Option<&str>) -> VentilationType {
-    match raw.unwrap_or("hrv").trim().to_ascii_lowercase().as_str() {
+fn parse_ventilation_type(raw: Option<&str>) -> crate::Result<VentilationType> {
+    let Some(raw) = raw else {
+        return Ok(VentilationType::Hrv);
+    };
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
         "exhaust_fan" | "exhaust fan" | "exhaust only" | "supply only" | "whole house fan" => {
-            VentilationType::ExhaustFan
+            Ok(VentilationType::ExhaustFan)
         }
-        "erv" | "energy recovery ventilator" => VentilationType::Erv,
-        _ => VentilationType::Hrv,
+        "hrv" | "heat recovery ventilator" => Ok(VentilationType::Hrv),
+        "erv" | "energy recovery ventilator" => Ok(VentilationType::Erv),
+        _ => Err(HaresError::Equipment(format!(
+            "unrecognised ventilation_type '{value}'; \
+             expected one of: exhaust_fan, exhaust fan, exhaust only, supply only, \
+             whole house fan, hrv, heat recovery ventilator, erv, energy recovery ventilator"
+        ))),
     }
 }
 
@@ -198,7 +208,13 @@ impl Ventilation {
             .map(|v| ZoneId(v as u16))
             .unwrap_or(ZoneId(1));
 
-        let ventilation_type = parse_ventilation_type(config.get_str("ventilation_type"));
+        let ventilation_type = match parse_ventilation_type(config.get_str("ventilation_type")) {
+            Ok(vt) => vt,
+            Err(e) => {
+                error!("{e}");
+                VentilationType::Hrv
+            }
+        };
 
         let end_use = EndUse::VENTILATION;
 
@@ -290,7 +306,7 @@ impl Ventilation {
         let c = config.require_typed::<VentilationConfig>("Ventilation")?;
         c.validate()?;
 
-        self.ventilation_type = parse_ventilation_type(c.ventilation_type.as_deref());
+        self.ventilation_type = parse_ventilation_type(c.ventilation_type.as_deref())?;
         self.descriptor.equipment_type = Cow::Borrowed(match self.ventilation_type {
             VentilationType::ExhaustFan => "ExhaustFan",
             VentilationType::Hrv => "HRV",
@@ -711,6 +727,60 @@ mod tests {
                 hours_in_operation: None,
             },
         )
+    }
+
+    #[test]
+    fn parse_ventilation_type_rejects_unrecognised_text_value() {
+        let err = parse_ventilation_type(Some("hrv_plus")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("hrv_plus"),
+            "error must name the unrecognised value, got: {msg}"
+        );
+        assert!(
+            msg.contains("unrecognised"),
+            "error must indicate the value was unrecognised, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_ventilation_type_accepts_known_string_aliases() {
+        for text in [
+            "exhaust_fan",
+            "exhaust fan",
+            "exhaust only",
+            "supply only",
+            "whole house fan",
+        ] {
+            assert_eq!(
+                parse_ventilation_type(Some(text)).unwrap(),
+                VentilationType::ExhaustFan,
+                "text '{text}' must map to ExhaustFan"
+            );
+        }
+        for text in ["hrv", "heat recovery ventilator"] {
+            assert_eq!(
+                parse_ventilation_type(Some(text)).unwrap(),
+                VentilationType::Hrv,
+                "text '{text}' must map to Hrv"
+            );
+        }
+        for text in ["erv", "energy recovery ventilator"] {
+            assert_eq!(
+                parse_ventilation_type(Some(text)).unwrap(),
+                VentilationType::Erv,
+                "text '{text}' must map to Erv"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ventilation_type_none_defaults_to_hrv() {
+        assert_eq!(
+            parse_ventilation_type(None).unwrap(),
+            VentilationType::Hrv,
+            "absent ventilation_type must default to Hrv"
+        );
     }
 
     #[test]

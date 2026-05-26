@@ -1,0 +1,50 @@
+# opencode log for types-physics-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/psychrometrics.rs
+[0m→ [0mRead crates/hares-physics/src/constants.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.cc
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.cc[90m [offset=1065][0m
+[0m✱ [0mGrep "2\.45e6|2\.501e6|2450|2501|latent.?heat|vapori[sz]ation|laten.*heat|h_fg|hfg"[90m 136 matches[0m
+[0m✱ [0mGrep "2_450|2_501|2450|2501"[90m 38 matches[0m
+[0m✱ [0mGrep "LATENT_HEAT_VAPORISATION_J_KG"[90m 2 matches[0m
+[0m✱ [0mGrep "PsyHFnTdbW|hfg|latent.*heat|2501|2450|2454"[90m 879 matches[0m
+[0m✱ [0mGrep "2450|2454|2450_000|2_454_000"[90m 11 matches[0m
+Now let me search for where the potentially dangerous `LATENT_HEAT_VAPORISATION_J_KG` (2450) is used, and check the EnergyPlus enthalpy formula.
+[0m✱ [0mGrep "PsyHFnTdbW"[90m in vendors/EnergyPlus/src · 463 matches[0m
+[0m✱ [0mGrep "LATENT_HEAT_VAPORISATION_J_KG"[90m in crates · 2 matches[0m
+Let me find the EnergyPlus enthalpy function to compare reference-state conventions.
+[0m✱ [0mGrep "^Real64 PsyHFnTdbW|^ *Real64 PsyHFnTdbW"[90m in vendors/EnergyPlus/src · 0 matches[0m
+[0m✱ [0mGlob "**/Psychrometrics.hh"[90m in vendors/EnergyPlus · 1 match[0m
+[0m✱ [0mGrep "PsyHFnTdbW|hfg|2501|2500|Enthalpy|enthalpy"[90m in vendors/EnergyPlus/src/EnergyPlus · 38 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.hh[90m [offset=600, limit=120][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.hh[90m [offset=1430, limit=70][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/types-physics/ 2>/dev/null || echo "Directory does not exist"
+(no output)
+[0m
+Now I have a comprehensive picture. Let me check the docs/reviews directory structure and then write the review.
+[0m→ [0mRead crates/hares-equipment/src/hvac/dehumidifier.rs[90m [offset=925, limit=50][0m
+[0m✱ [0mGrep "2_454|2454000"[90m 2 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/humidity_solver.rs[90m [limit=40, offset=1436][0m
+[0m✱ [0mGrep "latent_gain_w.*water_removal|water_removal.*latent_gain|h_fg|LATENT_HEAT"[90m in crates/hares-equipment/src/hvac/dehumidifier.rs · 20 matches[0m
+[0m
+[0m← [0mWrite docs/reviews/types-physics/types-physics-01-latent-heat-reference-state-inconsistency.md
+Wrote file successfully.
+[0m
+Now I have all the data needed. Let me write the review.
+The review has been written to `docs/reviews/types-physics/types-physics-01-latent-heat-reference-state-inconsistency.md`.
+
+**Key conclusion**: The 2450 vs 2501 kJ/kg inconsistency is **not an active bug** in HARES. All production code consistently uses the 2501 kJ/kg (0°C ASHRAE reference). The 2450 kJ/kg constant (`LATENT_HEAT_VAPORISATION_J_KG`) is dead code — defined but never imported anywhere. The enthalpy formula correctly pairs 2501 kJ/kg with cp_v = 1.86 kJ/(kg·K), forming a self-consistent 0°C reference state.
+
+**Main finding**: `LATENT_HEAT_VAPORISATION_J_KG = 2_450_000` should be removed or deprecated — it's a silent reintroduction hazard with a misleading comment that still says "Used in moisture balance calculations."
+
+**Bonus finding**: EnergyPlus itself has internal inconsistency — its enthalpy function uses 2500.94 kJ/kg while its wet-bulb function uses 2501.0 kJ/kg, so E+ cannot serve as an authoritative reference for which constant set is "correct."

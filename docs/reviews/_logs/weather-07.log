@@ -1,0 +1,51 @@
+# opencode log for weather-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/epw.rs
+[0m→ [0mRead crates/hares-io/src/weather.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/autosize.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc"[90m 1 match[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/weather/*"[90m 97 matches[0m
+[0m✱ [0mGrep "design_temperatures_f|ashrae152"[90m in crates · 32 matches[0m
+Now let me examine the vendor EnergyPlus reference files and the ASHRAE 152 lookup mechanism.
+[0m→ [0mRead vendors/EnergyPlus/weather/USA_CO_Denver-Aurora-Buckley.AFB.724695_TMY3.ddy[90m [limit=100][0m
+[0m→ [0mRead vendors/EnergyPlus/weather/USA_CO_Denver-Aurora-Buckley.AFB.724695_TMY3.stat[90m [limit=100][0m
+[0m✱ [0mGrep "\.ddy|\.stat|DDY|STAT|design.?day|SizingPeriod"[90m in vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc · 26 matches[0m
+[0m✱ [0mGrep "stat|STAT|\.ddy|DDY|SizingPeriod|DesignDay|design_day|design.?day"[90m in vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc · 2159 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=8650, limit=80][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=5920, limit=200][0m
+[0m→ [0mRead crates/hares-physics/src/ashrae152.rs[90m [offset=300, limit=100][0m
+[0m✱ [0mGrep "DDY|read.*ddy|ddy.*parse|parse.*ddy|\.stat.*read|read.*stat|readEnergyPlusWeather"[90m in . · 6 matches[0m
+[0m✱ [0mGrep "manual.?j|manual.?s|Manual.?J|Manual.?S|ACCA|residential.*sizing|sizing.*residential"[90m in . · 33 matches[0m
+Now let me look at the ASHRAE 152 design temperature lookup and the EnergyPlus WeatherManager sections that handle DDY/STAT files to understand how these affect sizing.
+[0m→ [0mRead crates/hares-physics/src/ashrae152.rs[90m [limit=300][0m
+[0m✱ [0mGrep "SizingPeriod|DesignDay|GetDesignDay|DDY|\.ddy"[90m in vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc · 63 matches[0m
+[0m✱ [0mGlob "**/ASHRAE152_climate_data.csv"[90m in . · 3 matches[0m
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/crates/hares-physics/data/ASHRAE152_climate_data.csv
+224 /Users/rich/source/HARES/crates/hares-physics/data/ASHRAE152_climate_data.csv
+[0m
+[0m→ [0mRead crates/hares-physics/data/ASHRAE152_climate_data.csv[90m [limit=5][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/weather
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/weather/weather-07-missing-ddy-stat-format.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/weather/weather-07-missing-ddy-stat-format.md`.
+
+**Summary of findings (5 total, 0 critical/high):**
+
+- **Medium (2)**: No DDY/STAT format support at all; EPW "Extremes" header lacks humidity/wind/pressure context needed for Manual J latent + infiltration load calculations.
+- **Low (3)**: ASHRAE 152 station database (224 sites) has coarser coverage than 1,000+ TMY3 locations; STAT could validate DOE-2 ground temps; EnergyPlus's DDY processing design isn't mirrored.
+
+**Key conclusion**: For residential HVAC autosizing using *only* design dry-bulb temperature, the EPW header "Extremes" + ASHRAE 152 fallback is sufficient. But Manual J requires humidity and wind at design conditions for proper latent load and infiltration calculations — data that only the DDY format provides.

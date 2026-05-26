@@ -1134,21 +1134,18 @@ mod tests {
 
         let merged = merged_equipment_config(&spec, &overrides);
 
-        let sr = merged
-            .setpoints_reconciled
-            .as_ref()
-            .expect("setpoints_reconciled must propagate from typed config through merged_equipment_config");
+        let sr = merged.setpoints_reconciled.as_ref().expect(
+            "setpoints_reconciled must propagate from typed config through merged_equipment_config",
+        );
         assert_eq!(sr.len(), 2);
         assert_eq!(sr[0].day, "weekday");
         assert_eq!(
-            sr[0].original_heating_c,
-            [21.0; 24],
+            sr[0].original_heating_c, [21.0; 24],
             "original heating setpoints must be preserved"
         );
         assert_eq!(sr[1].day, "weekend");
         assert_eq!(
-            sr[1].adjusted_cooling_c,
-            [22.5; 24],
+            sr[1].adjusted_cooling_c, [22.5; 24],
             "adjusted cooling setpoints must be preserved"
         );
     }

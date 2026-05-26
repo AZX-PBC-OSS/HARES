@@ -1,0 +1,79 @@
+# opencode log for types-physics-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Read HARES source files for window U-factor decomposition
+[ ] Read EnergyPlus WindowModel.cc reference
+[ ] Read OCHRE hpxml.py reference
+[ ] Analyze and compare implementations, write findings
+[0m
+[0m→ [0mRead crates/hares-envelope/src/rc_network.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/config.rs
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs
+[0m✱ [0mGrep "u_factor|U.factor|ufactor|r_film|film_coeff|film_resistance|window.*resistance|glazing.*resistance|three.resistance|exterior_film|interior_film"[90m 339 matches[0m
+[0m✱ [0mGrep "solver_builder|boundary_rc|assemble.*window|window.*rc.*network|window.*node|SteadyState.*window"[90m 93 matches[0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=660, limit=80][0m
+[0m→ [0mRead crates/hares-physics/src/film_coefficients.rs
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=750, limit=150][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=1, limit=60][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [offset=255, limit=130][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=100][0m
+[0m✱ [0mGrep "window|u_factor|Ufactor|ufactor|SHGC|res_window|r_window|window_resistance"[90m in vendors/OCHRE/ochre/utils/envelope.py · 36 matches[0m
+[0m✱ [0mGrep "WindowModel|SimpleWindow|window.*model|CalcWindow|window.*U.factor|window.*SHGC|interior.*film|exterior.*film|Ri,w|Ro,w|Rl,w"[90m in vendors/EnergyPlus · 250 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/envelope.py[90m [offset=280, limit=80][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/envelope.py[90m [offset=395, limit=80][0m
+[0m✱ [0mGrep "SimpleWindow|SimpleGlazing|SetupSimple|res.*int.*w|res.*ext.*w|r_int|r_ext|insideConv|outsideConv|film.*coefficient"[90m in vendors/EnergyPlus/src/EnergyPlus · 262 matches[0m
+[0m✱ [0mGrep "SetupSimpleWindowGlazingSystem|SimpleWindowConstruction"[90m in vendors/EnergyPlus/src/EnergyPlus · 3 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Material.cc[90m [offset=3088, limit=180][0m
+[0m✱ [0mGrep "create_rc_data|u_window|window.*rc"[90m in vendors/OCHRE/ochre/utils · 6 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WindowManager.cc[90m [offset=5400, limit=100][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WindowManager.cc[90m [limit=60, offset=6240][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WindowManager.cc[90m [limit=60, offset=6640][0m
+[0m✱ [0mGrep "window|Window|UFactor|SHGC|U.factor|shgc.area.*window|glazing"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 12 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=80, offset=195][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=80, offset=355][0m
+[0m✱ [0mGrep "create_rc_data|u_window|get_boundary_rc_values|res_int_w|res_ext_w|r_window"[90m in vendors/OCHRE/ochre · 14 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [limit=80, offset=345][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=30, offset=700][0m
+[0m→ [0mRead crates/hares-envelope/src/longwave_radiation.rs[90m [limit=30][0m
+Now let me write the findings. Let me also check one more detail about the h_si value computation:
+[0m✱ [0mGrep "EMISSIVITY_WINDOW"[90m 10 matches[0m
+[0m
+[0m# [0mTodos
+[✓] Read HARES source files for window U-factor decomposition
+[✓] Read EnergyPlus WindowModel.cc reference
+[✓] Read OCHRE hpxml.py reference
+[•] Analyze and compare implementations, write findings
+[0m
+Now I have all the data needed. Let me write the review.
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/types-physics/ 2>/dev/null || echo "DIR_MISSING"
+types-physics-01-latent-heat-reference-state-inconsistency.md
+types-physics-02-perez-epsilon-formula-duplication.md
+[0m
+[0m← [0mWrite docs/reviews/types-physics/types-physics-03-window-u-factor-three-resistance.md
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Read HARES source files for window U-factor decomposition
+[✓] Read EnergyPlus WindowModel.cc reference
+[✓] Read OCHRE hpxml.py reference
+[✓] Analyze and compare implementations, write findings
+[0m
+Review written to `docs/reviews/types-physics/types-physics-03-window-u-factor-three-resistance.md`.
+
+**Summary of findings (6 total, 0 critical, 2 medium, 4 low):**
+
+1. **Medium** — Fixed exterior film coefficient for windows (~29.4 W/m²K) ignores actual wind speed; opaque surfaces use a wind-speed-dependent DOE-2 model, but windows use a frozen init-time value
+2. **Low** — Interior film decomposition correctly separates h_si into h_conv + h_rad using glass emissivity = 0.84, avoiding double-counting with star-mesh radiation
+3. **Low** — Glazing conductance is correctly derived from NFRC U-factor minus E+ film correlations; no independent data source needed
+4. **Low** — OCHRE absorbs exterior film into window material R (`res_ext_w = 0`); HARES correctly separates it per EnergyPlus
+5. **Low** — No summer interior film coefficient; only winter Ri,w is used year-round
+6. **Medium** — Missing window U-factor falls back to opaque-boundary generic film resistances with only a `tracing::warn!`, not a hard error

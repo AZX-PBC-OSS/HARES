@@ -1,0 +1,41 @@
+# opencode log for weather-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/resstock_csv.rs
+[0m→ [0mRead crates/hares-io/src/epw.rs
+[0m→ [0mRead crates/hares-io/src/tmy3.rs
+[0m→ [0mRead crates/hares-io/src/psm3.rs
+[0m✱ [0mGrep "GHI|GlobalHorizontalRadiation|global.*horizontal|solar.*rad|MaxSolar|1500|limitSolar"[90m in vendors · 8 matches[0m
+Now let me look at the EnergyPlus WeatherManager validation for comparison.
+[0m✱ [0mGrep "1500"[90m in vendors · 0 matches[0m
+[0m✱ [0mGrep "checkRange|checkBound|inRange|limit.*solar|solar.*limit|solar.*range|GlobalRadient|global.*radiation"[90m in vendors · 0 matches[0m
+[0m✱ [0mGrep "GHI|GloHorzRad|ExtraTerrestrial"[90m in vendors/EnergyPlus/src/EnergyPlus · 49 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=3880, limit=80][0m
+[0m✱ [0mGrep "InterpolateWeather|SolarRad|GloHorzRad|interpolate.*rad"[90m in vendors · 67 matches[0m
+[0m✱ [0mGrep "TotHoriz|outOfRangeCounts.*Solar|GlobalSolarConstant|Global.*Horizontal"[90m in vendors · 15 matches[0m
+[0m✱ [0mGrep "TotHoriz|Radiation.*W/m2|W_per_m|globalHorizontalRad|HorizRad"[90m in vendors · 7 matches[0m
+[0m✱ [0mGrep "\bcheckRange\b|outOfRange.*Solar|inRange.*radiation"[90m in vendors/EnergyPlus/src/EnergyPlus · 2 matches[0m
+[0m✱ [0mGrep "GHI|wvarsHr.*Solar|ReadWeatherForDay|setWeather|OutHor.*Rad"[90m in vendors · 8 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=2268, limit=200][0m
+[0m✱ [0mGrep "InterpretWeatherDataLine"[90m in vendors · 9 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [offset=3257, limit=200][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [limit=250, offset=2468][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [limit=200, offset=2718][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/weather
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/weather/weather-01-resstock-ghi-no-upper-bound.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/weather/weather-01-resstock-ghi-no-upper-bound.md`.
+
+**Key finding**: The ResStock CSV parser at `resstock_csv.rs:219` checks only `ghi_w_m2 < 0.0`, missing the `<= 1500` upper bound that EPW, TMY3, and PSM3 parsers all enforce. EnergyPlus itself validates no upper bound on GHI (only `< 0`), making HARES's 1500 W/m² limit a defensive improvement. The fix is a one-line change to add `!(0.0..=1500.0).contains(&ghi_w_m2)`.

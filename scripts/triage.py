@@ -95,13 +95,20 @@ def find_completed_reviews():
 
 def triage_one(review_path: Path) -> tuple[str, bool, str]:
     rid = review_path.stem  # e.g. "agents-01-actor-trait-registry-dispatch"
+    rid_category = review_path.parent.name
     prompt = f"""Read the review file at {review_path}.
 
-This file contains code review findings for the HARES codebase. For each finding:
+This file contains code review findings for the HARES codebase. For EACH INDIVIDUAL finding, create ONE TICKET per finding:
 
 1. Assess whether it's a valid, actionable issue.
 2. Classify it as a BUG or IMPROVEMENT using the concrete examples below.
 3. For INVALID findings or positive confirmations, skip — no ticket.
+
+Severity-to-classification guide (start here, then verify against concrete examples):
+  critical, high → BUG
+  medium → BUG if incorrect/silent-failure, else IMPROVEMENT
+  low → IMPROVEMENT (or SKIP if purely documentation)
+  none, verification, positive → SKIP
 
 ## BUG → T-0001 and up
 
@@ -145,6 +152,11 @@ Improvement tickets go in: {TICKETS_DIR}/T-XXXX/ticket.md starting from 1000. Sa
 
 ## Ticket file format
 
+Set the `complexity` field based on the finding's scope:
+  simple — one-function fix, one-line change, or documentation-only
+  medium — cross-function change, moderate refactor, or new test
+  complex — cross-crate change, architectural refactor, or new feature
+
 Create the directory `T-XXXX/` first, then write `ticket.md` inside it. Use this EXACT structure:
 
 ```markdown
@@ -163,7 +175,7 @@ iteration: 0
 max_iterations: 5
 created_at: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
 created_by: review-triage
-source_ticket: {rid}
+source_review: {rid}
 ---
 
 ## Problem

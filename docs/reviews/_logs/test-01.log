@@ -141,3 +141,21 @@ Let me check the pyproject.toml for dependency versions and look at the remainin
 (no output)
 [0m
 Now I have all the information to write the comprehensive review. Let me compile everything:
+[0m← [0mWrite docs/reviews/tests/test-01-test-oracle-infrastructure.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/tests/test-01-test-oracle-infrastructure.md`. Here's a summary of the key findings:
+
+**2 Critical issues:**
+- All 5 BESTEST oracle tests are `#[ignore]`'d — no ASHRAE 140 validation ever runs
+- Parity corpus has zero `reference_output.parquet` files — all 12 fixtures are incomplete
+
+**4 High-severity issues:**
+- Freefloat/conditioned oracle tests gated behind `#[cfg(feature = "observe")]` and never run in standard CI
+- Corpus covers only 4 of 10 IECC climate zones (missing hot-dry, marine, very-cold, subarctic)
+- BESTEST SHGC 0.789 is inconsistent with ASHRAE 140-2017 (documented in prior review scr-03)
+- Freefloat oracle tolerance of 5.0°C MAE masks model divergence; physically unjustified
+
+**3 Medium issues:** Non-reproducible reference data (unpinned OCHRE deps), 25% HVAC tolerance too wide for meaningful regression detection, stale `beopt_smoke_1h` CSV format.
+
+**1 Low issue:** Duplicate `AnnualHeatingLoadKwh` / `AnnualHeatingEnergyKwh` metric confusion.

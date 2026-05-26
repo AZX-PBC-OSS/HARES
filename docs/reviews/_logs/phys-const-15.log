@@ -10,6 +10,89 @@
 > build · deepseek-v4-pro
 [0m
 [0m→ [0mRead crates/hares-physics/src/constants.rs
-[0m• [0mSearch EnergyPlus for Stefan-Boltzmann constant[90m Explore Agent[0m
-[0m• [0mSearch OCHRE for Stefan-Boltzmann constant[90m Explore Agent[0m
-[0m✓ [0mSearch OCHRE for Stefan-Boltzmann constant[90m Explore Agent[0m
+[0m• [0mFind Stefan-Boltzmann in EnergyPlus[90m Explore Agent[0m
+[0m• [0mFind Stefan-Boltzmann in OCHRE[90m Explore Agent[0m
+[0m✓ [0mFind Stefan-Boltzmann in EnergyPlus[90m Explore Agent[0m
+[0m✓ [0mFind Stefan-Boltzmann in OCHRE[90m Explore Agent[0m
+[0m
+[0m$ [0mpython3 -c "
+import struct
+
+# CODATA 2018 Stefan-Boltzmann constant
+sigma = 5.670374419e-8
+
+# Get the f64 (double precision) bits
+bits = struct.pack('d', sigma)
+unpacked = struct.unpack('Q', bits)[0]
+
+# Decode IEEE 754
+sign = (unpacked >> 63) & 1
+exponent = ((unpacked >> 52) & 0x7FF) - 1023
+mantissa_bits = unpacked & ((1 << 52) - 1)
+mantissa = 1 + mantissa_bits / (2**52)
+
+value = ((-1)**sign) * mantissa * (2**exponent)
+
+# ULP in this range
+ulp = 2**(exponent - 52)
+
+print(f'CODATA 2018 sigma: {sigma}')
+print(f'Exact f64 representation: {value}')
+print(f'Relative error: {(value - sigma)/sigma}')
+print(f'ULP (unit in last place): {ulp}')
+print(f'ULP relative: {ulp/sigma:.2e}')
+print(f'Decimal digits of ULP: {abs(ulp/sigma):.2e}')
+
+# Check: is the error smaller than the last significant digit?
+# CODATA 2018 has 10 significant digits: 5.670374419e-8
+# The precision of the last digit (9) is at 1e-18 (since value is ~5.67e-8,
+# the 10th significant digit is at 1e-18)
+print(f'Last digit place: {1e-18}')
+print(f'F64 representation error << last digit? {(value - sigma) < 1e-18}')
+print()
+
+# Compare: what if we had only 9 significant digits?
+sigma_9 = 5.67037441e-8
+print(f'9 sigdig version: {sigma_9}')
+print(f'Difference from CODATA: {sigma_9 - sigma}')
+
+# Compare: what if we had 5.67e-8 (EnergyPlus lower precision)?
+sigma_ep_low = 5.67e-8
+print(f'EnergyPlus low (5.67e-8): diff = {sigma_ep_low - sigma}')
+
+# Compare: what if we had 5.6697e-8 (EnergyPlus/OCHRE)?
+sigma_ep = 5.6697e-8
+print(f'EnergyPlus/OCHRE (5.6697e-8): diff = {sigma_ep - sigma}')
+
+# Compare: what if we had 5.6704e-8 (OCHRE Envelope.py)?
+sigma_ochre = 5.6704e-8
+print(f'OCHRE Envelope.py (5.6704e-8): diff = {sigma_ochre - sigma}')
+"
+
+CODATA 2018 sigma: 5.670374419e-08
+Exact f64 representation: 5.670374419e-08
+Relative error: 0.0
+ULP (unit in last place): 6.617444900424222e-24
+ULP relative: 1.17e-16
+Decimal digits of ULP: 1.17e-16
+Last digit place: 1e-18
+F64 representation error << last digit? True
+
+9 sigdig version: 5.67037441e-08
+Difference from CODATA: -8.999999688540309e-17
+EnergyPlus low (5.67e-8): diff = -3.744190000000911e-12
+EnergyPlus/OCHRE (5.6697e-8): diff = -6.7441899999976955e-12
+OCHRE Envelope.py (5.6704e-8): diff = 2.5581000000362447e-13
+[0m
+Let me verify the f64 representation mathematically with a quick computation.
+[0m← [0mWrite docs/reviews/physics-constants/phys-const-15-stefan-boltzmann-precision.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/physics-constants/phys-const-15-stefan-boltzmann-precision.md`.
+
+**Summary**: The HARES constant `5.670_374_419e-8` is correct and f64 preserves full CODATA 2018 precision — the 53-bit mantissa provides ~5 extra guard digits beyond the 10 significant digits needed. ULP is ~6.62×10⁻²⁴, far smaller than the last digit's place value of 1×10⁻¹⁸.
+
+All three findings are confirmation/nit, not defects:
+- **Medium**: HARES is the most precise of the three codebases (EnergyPlus uses outdated 5.6697e-8; OCHRE has two inconsistent inline values with no named constant)
+- **Low**: The test at line 282 is tautological (same literal in both sides)
+- **Low**: f64 is adequate — no type change needed

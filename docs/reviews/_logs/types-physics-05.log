@@ -1,0 +1,51 @@
+# opencode log for types-physics-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/units.rs
+[0m→ [0mRead crates/hares-equipment/src/ports.rs
+[0m• [0mExplore HARES codebase structure[90m Explore Agent[0m
+[0m✓ [0mExplore HARES codebase structure[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-types/src/ports.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/ports.rs
+[0m→ [0mRead crates/hares-physics/src/lib.rs
+[0m→ [0mRead crates/hares-physics/src/psychrometrics.rs[90m [limit=80][0m
+[0m→ [0mRead crates/hares-physics/src/air_properties.rs[90m [limit=80][0m
+[0m✱ [0mGrep "use hares_physics::units::"[90m 2 matches[0m
+[0m✱ [0mGrep "use.*units::\{"[90m in crates/hares-equipment · 0 matches[0m
+[0m• [0mFind unit mismatch patterns[90m Explore Agent[0m
+Now let me check specific equipment files for how they write to the ports, and look for any unit mismatch patterns:
+[0m✓ [0mFind unit mismatch patterns[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs
+[0m→ [0mRead crates/hares-physics/src/psychrometrics.rs[90m [offset=81, limit=120][0m
+[0m✱ [0mGrep "HeatCapacity|SpecificHeatCapacity"[90m 4 matches[0m
+[0m✱ [0mGrep "temperature.*\*.*heat.*capacity|temp.*\*.*cp|heat_capacity.*\*|cp_water.*\*.*temp_s|specific_heat.*\*.*(temp|delta)"[90m in crates/hares-equipment · 0 matches[0m
+[0m✱ [0mGrep "\*.*CP_LIQUID_WATER|CP_LIQUID_WATER.*\*"[90m 44 matches[0m
+[0m✱ [0mGrep "pub type (ThermalResistance|SpecificHeatCapacity|MassDensity|HeatTransfer)"[90m 0 matches[0m
+[0m→ [0mRead crates/hares-physics/src/psychrometrics.rs[90m [offset=201, limit=100][0m
+[0m→ [0mRead crates/hares-equipment/src/generator.rs[90m [offset=210, limit=30][0m
+[0m→ [0mRead crates/hares-equipment/src/generator.rs[90m [offset=785, limit=30][0m
+[0m✱ [0mGrep "Gas|gas|power|Power|thermal|Thermal"[90m in crates/hares-equipment/src/water_heater/heat_pump_wh.rs · 150 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/heat_pump_wh.rs[90m [offset=700, limit=100][0m
+[0m
+[0m← [0mWrite docs/reviews/types-physics/types-physics-05-incomplete-uom-typed-wrapper-coverage.md
+Wrote file successfully.
+[0m
+Now I have all the information needed. Let me write the review file.
+The review has been written to `/Users/rich/source/HARES/docs/reviews/types-physics/types-physics-05-incomplete-uom-typed-wrapper-coverage.md`. Here's a summary of the 6 findings:
+
+| # | Severity | Summary |
+|---|----------|---------|
+| 1 | **High** | `uom` typed wrappers (`Temperature`, `Power`, `Energy`) are confined to `hares-physics`; all cross-crate interfaces (`PortContribution`, `PortSlots`, `ControlSignal`) use bare `f64` with name-suffix conventions |
+| 2 | **Medium** | `PortContribution` mixes W (thermal/fuel) and kW (electrical) scales within a single enum, creating ~20+ manual `/1000` conversion points across equipment files |
+| 3 | **Medium** | No custom `Add`/`Sub`/`Mul`/`Div` implementations with unit propagation — `Temperature × HeatCapacity` yields bare `f64`, not typed `Energy` |
+| 4 | **Low** | `IDLE_KW_THRESHOLD` (named as kW constant) compared against watt-valued variables in `generator.rs:793,806` — semantically misleading, functionally harmless |
+| 5 | **Low** | `SpecificHeatCapacity` and `MassDensity` `uom` types imported but not exposed as public aliases; `HeatCapacity` is exposed but `SpecificHeatCapacity` is not |
+| 6 | **Low** | Typed boundary wrappers in `psychrometrics.rs`/`air_properties.rs` convert to/from `f64` at the crate boundary — no true type safety propagation downstream |
