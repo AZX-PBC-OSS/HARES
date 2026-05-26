@@ -69,7 +69,8 @@ impl ElectricBaseboard {
                 | ControlCapabilities::IDEAL_CAPACITY,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::HAS_MODE
-                | CoreCapabilities::THERMAL,
+                | CoreCapabilities::THERMAL
+                | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: telemetry_fields(),
         };
 
@@ -137,10 +138,11 @@ impl Equipment for ElectricBaseboard {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
-        let thermal_output_w = self.rated_capacity_w * duty;
-        let electric_kw = thermal_output_w * self.eir / 1_000.0 * self.hvac.config.space_fraction;
+        let sf = self.hvac.config.space_fraction;
+        let thermal_output_w = self.rated_capacity_w * duty * sf;
+        let electric_kw = thermal_output_w * self.eir / 1_000.0;
 
-        if electric_kw > 0.0 {
+        if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_kw: electric_kw,
                 reactive_power_kvar: 0.0,
@@ -158,6 +160,8 @@ impl Equipment for ElectricBaseboard {
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+        let sp = self.hvac.effective_setpoints();
+        self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -171,7 +175,7 @@ impl Equipment for ElectricBaseboard {
                 operating_mode: Some(self.operating_mode),
                 soc: None,
                 speed_index: None,
-                setpoint_c: None,
+                setpoint_c: Some(sp.heating_c),
             },
             performance: CorePerformance::default(),
         };
@@ -242,10 +246,12 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(3);
+    let mut telemetry = Telemetry::with_capacity(5);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
     telemetry
 }
 
@@ -265,6 +271,16 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
+        },
+        TelemetryField {
+            name: tk::HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active heating setpoint from thermostat schedule".to_string(),
+        },
+        TelemetryField {
+            name: tk::COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active cooling setpoint from thermostat schedule".to_string(),
         },
     ]
 }

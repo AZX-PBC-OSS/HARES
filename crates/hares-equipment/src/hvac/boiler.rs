@@ -282,6 +282,8 @@ impl Equipment for ElectricBoiler {
             },
             performance: CorePerformance::default(),
         };
+        self.telemetry
+            .set(tk::HEATING_SETPOINT_C, active_setpoint_c);
 
         Ok(())
     }
@@ -606,6 +608,8 @@ impl Equipment for GasBoiler {
             },
             performance: CorePerformance::default(),
         };
+        self.telemetry
+            .set(tk::HEATING_SETPOINT_C, active_setpoint_c);
 
         Ok(())
     }
@@ -703,17 +707,19 @@ fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
 }
 
 fn electric_boiler_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(5);
+    let mut telemetry = Telemetry::with_capacity(7);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
     telemetry.insert(tk::RETURN_TEMP_C, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
     telemetry
 }
 
 fn gas_boiler_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(8);
+    let mut telemetry = Telemetry::with_capacity(10);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
@@ -722,11 +728,28 @@ fn gas_boiler_default_telemetry() -> Telemetry {
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
     telemetry.insert(tk::RETURN_TEMP_C, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
     telemetry
 }
 
-fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
+fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
     vec![
+        TelemetryField {
+            name: tk::HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active heating setpoint from thermostat schedule".to_string(),
+        },
+        TelemetryField {
+            name: tk::COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active cooling setpoint from thermostat schedule".to_string(),
+        },
+    ]
+}
+
+fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
+    let mut fields = vec![
         TelemetryField {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
@@ -752,11 +775,13 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
         },
-    ]
+    ];
+    fields.extend(setpoint_telemetry_fields());
+    fields
 }
 
 fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
-    vec![
+    let mut fields = vec![
         TelemetryField {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
@@ -797,7 +822,9 @@ fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
         },
-    ]
+    ];
+    fields.extend(setpoint_telemetry_fields());
+    fields
 }
 
 #[cfg(test)]

@@ -171,10 +171,10 @@ impl Equipment for ElectricFurnace {
     ) -> std::result::Result<(), HaresError> {
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
-        let gross_capacity_w = self.rated_capacity_w * duty;
+        let gross_capacity_w = self.rated_capacity_w * duty * sf;
         let fan_kw = (self.fan_power_w * duty) / 1_000.0 * sf;
         // Heating element power + fan power
-        let electric_kw = (self.rated_capacity_w * self.eir * duty) / 1_000.0 * sf + fan_kw;
+        let electric_kw = (gross_capacity_w * self.eir) / 1_000.0 + fan_kw;
 
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -477,10 +477,10 @@ impl Equipment for GasFurnace {
         let sf = self.hvac.config.space_fraction;
         // Fuel is computed from gross capacity: the furnace burns fuel regardless
         // of duct losses. zone_heat_fractions distributes gross output by DSE.
-        let gross_capacity_w = self.rated_capacity_w * duty;
+        let gross_capacity_w = self.rated_capacity_w * duty * sf;
         let fan_kw = (self.fan_power_w * duty) / 1_000.0 * sf;
         let fuel_input_w = if gross_capacity_w > 0.0 {
-            gross_capacity_w / self.fuel_efficiency * sf
+            gross_capacity_w / self.fuel_efficiency
         } else {
             0.0
         };
