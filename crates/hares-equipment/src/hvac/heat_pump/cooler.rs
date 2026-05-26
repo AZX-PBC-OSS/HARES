@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use hares_physics::constants::KW_TO_W;
 use hares_physics::ground::SourceTemperature;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
@@ -295,11 +296,12 @@ impl GshpCooler {
         inner.core.hvac.config.airflow_m3_s_per_w = gshp_type.default_airflow_m3_s_per_w();
         // GSHP: compressor is indoors; no crankcase heater needed.
         inner.set_crankcase_defaults_if_unconfigured(&config, 0.0, f64::NEG_INFINITY);
-        // Source temperature: use Kusuda-Achenbach ground model.
-        // Default borehole depth 60 m, typical for residential vertical boreholes.
-        inner.core.source_temp = SourceTemperature::KusudaAchenbach {
-            borehole_depth_m: 60.0,
-            soil_diffusivity_m2_per_day: 0.05,
+        // Source temperature: use transient borehole g-function model.
+        // Default borehole config: 60 m depth, 2.0 W/m·K soil, 0.05 m²/day diffusivity.
+        inner.core.source_temp = SourceTemperature::BoreholeGFunction {
+            model: std::sync::Arc::new(hares_physics::borehole::BoreholeGFunctionModel::new(
+                hares_physics::borehole::BoreholeConfig::default(),
+            )),
         };
         let zone = zone_id_from_config(&config).unwrap_or(hares_types::ZoneId(DEFAULT_ZONE_ID));
         Self {
@@ -482,6 +484,20 @@ impl Equipment for GshpCooler {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         self.inner.step(env, dt, ports)?;
+
+        // Record borehole heat exchange for transient ground model.
+        // Cooling mode: heat is rejected TO the ground (positive Q in
+        // Eskilson's convention). Q_condenser = cooling_output + compressor_power.
+        let dt_s = dt.as_secs_f64();
+        let tel = self.inner.telemetry();
+        let coil_sens_w = tel.get(tk::COIL_SENSIBLE_COOLING_W).unwrap_or(0.0);
+        let coil_lat_w = tel.get(tk::COIL_LATENT_COOLING_W).unwrap_or(0.0);
+        let compressor_kw = tel.get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let borehole_heat_w = coil_sens_w + coil_lat_w + compressor_kw * KW_TO_W;
+        self.inner
+            .core
+            .source_temp
+            .record_source_heat_rate(borehole_heat_w, dt_s);
 
         // Ground-loop circulation pump: runs whenever the GSHP compressor is
         // active. `last_cooling_rtf > 0` means the compressor was on this step.

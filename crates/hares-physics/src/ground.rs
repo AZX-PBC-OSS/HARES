@@ -20,6 +20,9 @@
 
 use hares_types::EnvironmentState;
 use std::f64::consts::PI;
+use std::sync::Arc;
+
+use crate::borehole::BoreholeGFunctionModel;
 
 /// Default soil thermal diffusivity [m²/day].
 ///
@@ -176,12 +179,13 @@ pub fn f2_coefficient(insulation_r_m2_k_w: f64, heated: bool) -> f64 {
 ///
 /// For air-source equipment (ASHP, MSHP), this is outdoor air dry-bulb temperature.
 /// For ground-source equipment (GSHP), this is entering water/ground temperature
-/// computed from the Kusuda-Achenbach model or a constant.
+/// computed from the Kusuda-Achenbach model, a constant, or a transient borehole
+/// heat exchanger model via g-function convolution.
 ///
 /// EnergyPlus supports `Coil:Cooling:WaterToAirHeatPump:EquationFit` and
 /// `Coil:Heating:WaterToAirHeatPump:EquationFit` objects that use entering water
 /// temperature as the source-side variable in place of outdoor air temperature.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum SourceTemperature {
     /// Use outdoor air dry-bulb temperature (standard air-source behavior).
     OutdoorAir,
@@ -198,6 +202,23 @@ pub enum SourceTemperature {
         /// Soil thermal diffusivity [m²/day]. Use
         /// [`DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY`] if unknown.
         soil_diffusivity_m2_per_day: f64,
+    },
+    /// Transient borehole heat exchanger model using g-function convolution.
+    ///
+    /// Computes time-varying entering water temperature from far-field ground
+    /// temperature (Kusuda-Achenbach), past heat extraction/rejection history,
+    /// and borehole thermal resistance. See [`BoreholeGFunctionModel`] for the
+    /// physics.
+    ///
+    /// # References
+    /// - Eskilson, P. (1987). *Thermal Analysis of Heat Extraction Boreholes.*
+    ///   PhD Thesis, Lund University.
+    /// - EnergyPlus Engineering Reference: `GroundHeatExchanger:Vertical`
+    BoreholeGFunction {
+        /// Shared borehole model. Wrapped in [`Arc`] so that the heater and
+        /// cooler equipment can share the same thermal history (they operate
+        /// on the same borehole loop).
+        model: Arc<BoreholeGFunctionModel>,
     },
 }
 
@@ -219,6 +240,34 @@ impl SourceTemperature {
                 env.weather.ground_phase_day,
                 *soil_diffusivity_m2_per_day,
             ),
+            Self::BoreholeGFunction { model } => model.compute_entering_water_temp(env),
+        }
+    }
+
+    /// Record the heat injection/extraction rate for the current timestep.
+    ///
+    /// # Sign convention (Eskilson 1987)
+    ///
+    /// Positive `heat_rate_w` = heat injected INTO the ground (cooling mode:
+    /// the condenser rejects heat, warming the ground). Negative = heat
+    /// extracted FROM the ground (heating mode: the evaporator removes energy,
+    /// cooling the ground).
+    ///
+    /// Call this **after** computing equipment performance for the current
+    /// step, so that this heat rate feeds into the convolution for *future*
+    /// timesteps. The current step's `compute` result is unaffected.
+    ///
+    /// This is a no-op for [`OutdoorAir`], [`Constant`], and
+    /// [`KusudaAchenbach`] variants.
+    ///
+    /// # Parameters
+    ///
+    /// * `heat_rate_w` — Net thermal power exchanged with the ground [W],
+    ///   positive for injection (cooling), negative for extraction (heating).
+    /// * `dt_s` — Duration of the timestep [s].
+    pub fn record_source_heat_rate(&self, heat_rate_w: f64, dt_s: f64) {
+        if let Self::BoreholeGFunction { model } = self {
+            model.record_heat_rate(heat_rate_w, dt_s);
         }
     }
 }

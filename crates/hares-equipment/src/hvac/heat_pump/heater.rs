@@ -37,6 +37,7 @@ use super::defrost::{
 use super::heater_config::{
     default_heater_telemetry, heater_telemetry_fields, operating_mode_code,
 };
+use hares_physics::constants::KW_TO_W;
 use hares_physics::ground::SourceTemperature;
 
 fn eir_from_backup_fuel(fuel: Option<FuelType>) -> f64 {
@@ -462,9 +463,12 @@ impl HeatPumpHeaterCore {
             hvac: HvacEquipment::new(hvac_type, zone),
             operating_mode: OperatingMode::Off,
             source_temp: match variant {
-                HeaterVariant::Gshp => SourceTemperature::KusudaAchenbach {
-                    borehole_depth_m: 60.0,
-                    soil_diffusivity_m2_per_day: 0.05,
+                HeaterVariant::Gshp => SourceTemperature::BoreholeGFunction {
+                    model: std::sync::Arc::new(
+                        hares_physics::borehole::BoreholeGFunctionModel::new(
+                            hares_physics::borehole::BoreholeConfig::default(),
+                        ),
+                    ),
                 },
                 _ => SourceTemperature::OutdoorAir,
             },
@@ -1100,6 +1104,14 @@ impl HeatPumpHeaterCore {
                 })?;
             }
         }
+
+        // Record borehole heat exchange for transient ground model.
+        // Heating mode: heat is extracted FROM the ground (negative Q in
+        // Eskilson's convention). Q_ground = -(thermal_output - compressor_power).
+        // Note: thermal_output_w is in W, compressor_kw is in kW.
+        let borehole_heat_w = -(step.thermal_output_w - step.compressor_kw * KW_TO_W);
+        self.source_temp
+            .record_source_heat_rate(borehole_heat_w, dt_s);
 
         // Record RTF for companion cooler crankcase accounting. When the HP
         // compressor is running the RTF equals the duty cycle (PLR).

@@ -3,6 +3,7 @@
 pub mod air_properties;
 pub mod ashrae152;
 pub mod biquadratic;
+pub mod borehole;
 pub mod constants;
 pub mod film_coefficients;
 pub mod ground;
