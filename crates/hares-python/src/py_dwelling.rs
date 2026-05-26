@@ -760,6 +760,35 @@ impl PyDwelling {
             .collect())
     }
 
+    /// Returns per-equipment HPXML setpoint reconciliation records as a
+    /// Python `dict[str, list[dict]]`, keyed by equipment instance name.
+    /// Each reconciliation record is a dict with keys ``day``,
+    /// ``original_heating_c``, ``original_cooling_c``, ``adjusted_heating_c``,
+    /// ``adjusted_cooling_c``.  Only equipment with setpoint reconciliation
+    /// appears in the dict; equipment without reconciliation is absent.
+    #[pyo3(name = "setpoints_reconciled")]
+    pub fn py_setpoints_reconciled(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        let sr_map = dwelling.setpoints_reconciled();
+        let result = PyDict::new(py);
+        for (name, reconciliations) in sr_map {
+            if let Some(records) = reconciliations {
+                let list = PyList::empty(py);
+                for r in records {
+                    let item = PyDict::new(py);
+                    item.set_item("day", r.day.clone())?;
+                    item.set_item("original_heating_c", r.original_heating_c.as_slice())?;
+                    item.set_item("original_cooling_c", r.original_cooling_c.as_slice())?;
+                    item.set_item("adjusted_heating_c", r.adjusted_heating_c.as_slice())?;
+                    item.set_item("adjusted_cooling_c", r.adjusted_cooling_c.as_slice())?;
+                    list.append(item)?;
+                }
+                result.set_item(name.as_str(), list)?;
+            }
+        }
+        Ok(result.into())
+    }
+
     pub fn add_battery(&mut self, battery: &PyBattery) -> PyResult<()> {
         let config = battery_config_from_py(battery);
 

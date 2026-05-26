@@ -1,0 +1,78 @@
+# opencode log for py-binding-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Read py_tariff.rs binding code
+[ ] Read hares-tariff crate source files
+[ ] Read vendor EnergyPlus reference files
+[ ] Analyze URDB parsing, TOU, demand, tiered rates, edge cases
+[ ] Write review findings to output file
+[0m
+[0m→ [0mRead crates/hares-python/src/py_tariff.rs
+[0m✱ [0mGlob "crates/hares-tariff/src/**/*.rs"[90m in . · 5 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/api/**/*"[90m in . · 24 matches[0m
+[0m→ [0mRead crates/hares-tariff/src/lib.rs
+[0m→ [0mRead crates/hares-tariff/src/types.rs
+[0m→ [0mRead crates/hares-tariff/src/urdb.rs
+[0m→ [0mRead crates/hares-tariff/src/evaluator.rs
+[0m→ [0mRead crates/hares-tariff/src/billing.rs
+Now let me read all the hares-tariff crate source files in parallel:
+[0m→ [0mRead crates/hares-tariff/src/evaluator.rs[90m [offset=1408][0m
+[0m→ [0mRead crates/hares-tariff/Cargo.toml
+[0m• [0mExplore EnergyPlus API files[90m Explore Agent[0m
+[0m✱ [0mGlob "crates/hares-python/**/*.rs"[90m in . · 16 matches[0m
+Let me continue reading the remaining parts of evaluator.rs and explore the EnergyPlus reference files:
+[0m✓ [0mExplore EnergyPlus API files[90m Explore Agent[0m
+[0m✱ [0mGrep "idempotent|idempot|same.*twice|identical.*result|repeatable|deterministic"[90m in crates/hares-tariff · 1 match[0m
+[0m✱ [0mGrep "negative.*consumption|PV export|net_meter|net.*negative"[90m in crates/hares-tariff · 2 matches[0m
+Let me check a few more relevant files for a thorough review:
+[0m→ [0mRead crates/hares-python/src/lib.rs
+[0m✱ [0mGrep "SeasonFilter|SeasonalSplit|BillingCycle|TouPeriod|TimeWindow"[90m in crates/hares-types/src · 142 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/EconomicTariff.hh[90m [limit=100][0m
+[0m✱ [0mGrep "py_tariff|PyTariffBuilder|PyElectricTariff|PyGasTariff"[90m in crates/hares-python/src · 31 matches[0m
+Let me check the supporting types and the EconomicTariff reference files:
+[0m→ [0mRead crates/hares-types/src/schedule.rs[90m [offset=862, limit=120][0m
+[0m→ [0mRead crates/hares-types/src/schedule.rs[90m [offset=52, limit=80][0m
+[0m→ [0mRead crates/hares-types/src/schedule.rs[90m [limit=60, offset=132][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/EconomicTariff.hh[90m [offset=100, limit=120][0m
+[0m✱ [0mGrep "SeasonFilter.*contains_month|seasonal_split"[90m in crates/hares-tariff/src · 15 matches[0m
+Now I have a thorough understanding of the codebase. Let me also check the EnergyPlus EconomicTariff header for demand-related patterns:
+[0m
+[0m# [0mTodos
+[✓] Read py_tariff.rs binding code
+[✓] Read hares-tariff crate source files
+[✓] Read vendor EnergyPlus reference files
+[✓] Analyze URDB parsing, TOU, demand, tiered rates, edge cases
+[•] Write review findings to output file
+[0m
+Now I have enough information to write a thorough review. Let me create the output file:
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/py-binding
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/py-binding/py-binding-06-py-tariff-binding.md
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Read py_tariff.rs binding code
+[✓] Read hares-tariff crate source files
+[✓] Read vendor EnergyPlus reference files
+[✓] Analyze URDB parsing, TOU, demand, tiered rates, edge cases
+[✓] Write review findings to output file
+[0m
+Review written to `docs/reviews/py-binding/py-binding-06-py-tariff-binding.md`.
+
+**Summary**: 6 findings — 2 high, 2 medium, 2 low. No critical issues.
+
+- **High**: `SeasonFilter::contains_month()` ignores the parsed `SeasonalSplit`, using hardcoded June-September boundaries — southern hemisphere or custom-summer tariffs produce wrong results. No standalone `evaluate()` method exposed in Python bindings (`TariffEvaluator` isn't wrapped).
+- **Medium**: No idempotency test for full evaluation reruns. `PyGasTariff` is missing `from_urdb_json`.
+- **Low**: `DemandWindow` float drift recorrection only fires every 1000 pushes. Unknown URDB `dgrules` values silently fall through to `ExportMode::None` without warning.
+
+Billing arithmetic, demand rolling-window averaging, tiered rate computation, and edge case handling are all correct.

@@ -5,6 +5,20 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Machine-readable record of per-hour setpoint widening performed by
+/// HPXML setpoint reconciliation during parsing.  Carried on `EquipmentConfig`
+/// so downstream consumers (dashboards, Python introspection, CSV diagnostics)
+/// can detect and report that the values they see are not the values the user
+/// supplied.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SetpointReconciliation {
+    pub day: String,
+    pub original_heating_c: [f64; 24],
+    pub original_cooling_c: [f64; 24],
+    pub adjusted_heating_c: [f64; 24],
+    pub adjusted_cooling_c: [f64; 24],
+}
+
 /// Common config key for equipment ID in `ConfigPayload::Raw` payloads.
 /// Typed configs carry this as a struct field instead.
 pub const KEY_EQUIPMENT_ID: &str = "equipment_id";
@@ -150,6 +164,11 @@ pub struct EquipmentConfig {
     pub name: String,
     pub ochre_class: String,
     pub payload: ConfigPayload,
+    /// HPXML setpoint reconciliation records for this equipment, if any
+    /// setpoint hours were widened during HPXML parsing.  `None` means
+    /// no reconciliation occurred (all setpoint pairs satisfied the gap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setpoints_reconciled: Option<Vec<SetpointReconciliation>>,
     #[cfg(test)]
     #[serde(skip, default)]
     test_extras: HashMap<String, ConfigValue>,
@@ -161,9 +180,19 @@ impl EquipmentConfig {
             name,
             ochre_class,
             payload,
+            setpoints_reconciled: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
+    }
+
+    /// Attach setpoint reconciliation records extracted from HPXML parsing.
+    pub fn with_setpoints_reconciled(
+        mut self,
+        reconciliations: Option<Vec<SetpointReconciliation>>,
+    ) -> Self {
+        self.setpoints_reconciled = reconciliations;
+        self
     }
 
     /// Deserialize a built-in equipment payload, surfacing a clearer error when
@@ -303,6 +332,7 @@ impl EquipmentConfig {
                 version: T::schema_version(),
                 data,
             },
+            setpoints_reconciled: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
@@ -315,6 +345,7 @@ impl EquipmentConfig {
             name,
             ochre_class,
             payload: ConfigPayload::Raw { data },
+            setpoints_reconciled: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }

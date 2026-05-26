@@ -2,10 +2,8 @@
 // Invariant: HVAC typed configs are built from typed/defaults-derived fields
 // (including curve metadata), not from ad-hoc string-key translation logic.
 
-use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use hares_equipment::EquipmentConfig;
 use hares_equipment::hvac::cooling_config::{
     CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
 };
@@ -17,6 +15,7 @@ use hares_equipment::hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
     GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
 };
+use hares_equipment::{EquipmentConfig, SetpointReconciliation};
 use hares_types::{FuelType, ScheduleSourceConfig};
 
 use super::HpxmlError;
@@ -592,6 +591,16 @@ fn fan_power_from_params(params: &Map<String, Value>) -> Option<f64> {
         .or_else(|| params.get("auxiliary_power_w").and_then(Value::as_f64))
 }
 
+/// Extract `SetpointReconciliation` records from the resolved params map,
+/// if any setpoint hours were widened during HPXML parsing.
+fn extract_setpoints_reconciled(
+    params: &Map<String, Value>,
+) -> Option<Vec<SetpointReconciliation>> {
+    params
+        .get("setpoints_reconciled")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct CurveBounds {
     x1_min: Option<f64>,
@@ -661,6 +670,7 @@ fn try_build_gas_furnace_config(
     ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let setpoints = extract_setpoints_reconciled(params);
     let cfg = GasFurnaceConfig {
         equipment_id: None,
         zone_id: None,
@@ -674,11 +684,10 @@ fn try_build_gas_furnace_config(
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
     };
-    Ok(Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Gas Furnace".to_string(),
-        cfg,
-    )))
+    Ok(Some(
+        EquipmentConfig::from_typed(name.to_string(), "Gas Furnace".to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    ))
 }
 
 /// Build an `ElectricFurnaceConfig` typed config.
@@ -709,6 +718,7 @@ fn try_build_electric_furnace_config(
     ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let setpoints = extract_setpoints_reconciled(params);
     let cfg = ElectricFurnaceConfig {
         equipment_id: None,
         zone_id: None,
@@ -720,11 +730,10 @@ fn try_build_electric_furnace_config(
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
     };
-    Ok(Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Electric Furnace".to_string(),
-        cfg,
-    )))
+    Ok(Some(
+        EquipmentConfig::from_typed(name.to_string(), "Electric Furnace".to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    ))
 }
 
 /// Build a `GasBoilerConfig` typed config.
@@ -791,6 +800,7 @@ fn try_build_gas_boiler_config(
         });
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let setpoints = extract_setpoints_reconciled(params);
     let cfg = GasBoilerConfig {
         equipment_id: None,
         zone_id: None,
@@ -810,11 +820,10 @@ fn try_build_gas_boiler_config(
         // with a 6-coefficient efficiency curve vs 10 coefficients for non-condensing.
         condensing: afue > 0.90,
     };
-    Ok(Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Gas Boiler".to_string(),
-        cfg,
-    )))
+    Ok(Some(
+        EquipmentConfig::from_typed(name.to_string(), "Gas Boiler".to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    ))
 }
 
 /// Build an `ElectricBoilerConfig` typed config.
@@ -864,6 +873,7 @@ fn try_build_electric_boiler_config(
         });
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let setpoints = extract_setpoints_reconciled(params);
     let cfg = ElectricBoilerConfig {
         equipment_id: None,
         zone_id: None,
@@ -878,11 +888,10 @@ fn try_build_electric_boiler_config(
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
     };
-    Ok(Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Electric Boiler".to_string(),
-        cfg,
-    )))
+    Ok(Some(
+        EquipmentConfig::from_typed(name.to_string(), "Electric Boiler".to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    ))
 }
 
 /// Build an `ElectricBaseboardConfig` typed config.
@@ -904,6 +913,7 @@ fn try_build_electric_baseboard_config(
     let heating_efficiency = resistance_efficiency_from_params(params, name, "Electric Baseboard")?;
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let setpoints = extract_setpoints_reconciled(params);
     let cfg = ElectricBaseboardConfig {
         equipment_id: None,
         zone_id,
@@ -912,11 +922,10 @@ fn try_build_electric_baseboard_config(
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
     };
-    Ok(Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Electric Baseboard".to_string(),
-        cfg,
-    )))
+    Ok(Some(
+        EquipmentConfig::from_typed(name.to_string(), "Electric Baseboard".to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    ))
 }
 
 /// Build an `IdealHvacConfig` typed config.
@@ -932,6 +941,7 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
     let fraction = params.get("fraction_load_served").and_then(Value::as_f64);
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
+    let setpoints = extract_setpoints_reconciled(params);
 
     let cfg = IdealHvacConfig {
         equipment_id: None,
@@ -955,11 +965,10 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
         capacity_biquadratic_coeffs: None,
         eir_biquadratic_coeffs: None,
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Ideal HVAC".to_string(),
-        cfg,
-    ))
+    Some(
+        EquipmentConfig::from_typed(name.to_string(), "Ideal HVAC".to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    )
 }
 
 /// Build a `CentralAirConditionerConfig` typed config.
@@ -999,6 +1008,7 @@ fn try_build_central_ac_config(
     );
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
+    let setpoints = extract_setpoints_reconciled(params);
 
     let cfg = CentralAirConditionerConfig {
         equipment_id: None,
@@ -1044,11 +1054,10 @@ fn try_build_central_ac_config(
         plf_max: curve_bounds.plf_max,
         charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Air Conditioner".to_string(),
-        cfg,
-    ))
+    Some(
+        EquipmentConfig::from_typed(name.to_string(), "Air Conditioner".to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    )
 }
 
 /// Build a `RoomAcConfig` typed config.
@@ -1068,6 +1077,7 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
             });
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
+    let setpoints = extract_setpoints_reconciled(params);
     let cfg = RoomAcConfig {
         equipment_id: None,
         zone_id: None,
@@ -1097,11 +1107,10 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
         crankcase_heater_threshold_c: None,
         crankcase_capacity_curve_coeffs: None,
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Room AC".to_string(),
-        cfg,
-    ))
+    Some(
+        EquipmentConfig::from_typed(name.to_string(), "Room AC".to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    )
 }
 
 /// Build a `DehumidifierConfig` typed config.
@@ -1109,6 +1118,7 @@ fn try_build_dehumidifier_config(
     name: &str,
     params: &Map<String, Value>,
 ) -> Option<EquipmentConfig> {
+    let setpoints = extract_setpoints_reconciled(params);
     let cfg = DehumidifierConfig {
         equipment_id: None,
         zone_id: None,
@@ -1122,11 +1132,10 @@ fn try_build_dehumidifier_config(
         fraction_served: params.get("fraction_served").and_then(Value::as_f64),
         target_rh: params.get("target_rh").and_then(Value::as_f64),
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        "Dehumidifier".to_string(),
-        cfg,
-    ))
+    Some(
+        EquipmentConfig::from_typed(name.to_string(), "Dehumidifier".to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    )
 }
 
 /// Build a `HeatPumpHeaterConfig` typed config from combined heat-pump params.
@@ -1172,6 +1181,7 @@ fn try_build_heat_pump_heater_config(
             });
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
+    let setpoints = extract_setpoints_reconciled(params);
 
     let ref_cap = heating_capacity_w.or(cooling_capacity_w).unwrap_or(0.0);
     let duct = if is_mini_split {
@@ -1289,11 +1299,10 @@ fn try_build_heat_pump_heater_config(
             d
         },
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        ochre_class.to_string(),
-        cfg,
-    ))
+    Some(
+        EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    )
 }
 
 /// Build a `HeatPumpCoolerConfig` typed config from combined heat-pump params.
@@ -1339,6 +1348,7 @@ fn try_build_heat_pump_cooler_config(
             });
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
+    let setpoints = extract_setpoints_reconciled(params);
 
     let ref_cap = cooling_capacity_w.or(heating_capacity_w).unwrap_or(0.0);
     let duct = if is_mini_split {
@@ -1430,11 +1440,10 @@ fn try_build_heat_pump_cooler_config(
             Some(12.78)
         },
     };
-    Some(EquipmentConfig::from_typed(
-        name.to_string(),
-        ochre_class.to_string(),
-        cfg,
-    ))
+    Some(
+        EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)
+            .with_setpoints_reconciled(setpoints),
+    )
 }
 
 /// OCHRE `get_duct_info` threshold for "insulated floor" (IP R-value 5.3 → SI).
@@ -2979,20 +2988,6 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
     out
 }
 
-/// Machine-readable record of per-hour setpoint widening performed by
-/// `reconcile_setpoint_pair`.  Carried in the resolved params map under the
-/// key `"setpoints_reconciled"` so downstream consumers (dashboards, Python
-/// introspection, CSV diagnostics) can detect and report that the values they
-/// see are not the values the user supplied.
-#[derive(Serialize, Debug, Clone)]
-struct SetpointReconciliation {
-    day: &'static str,
-    original_heating_c: [f64; 24],
-    original_cooling_c: [f64; 24],
-    adjusted_heating_c: [f64; 24],
-    adjusted_cooling_c: [f64; 24],
-}
-
 /// Clip inverted or too-close heating/cooling setpoint pairs to the daily
 /// midpoint with a symmetric offset, matching OCHRE's reconciliation
 /// (see `vendors/OCHRE/ochre/utils/schedule.py:617-625`).
@@ -3008,7 +3003,7 @@ const SETPOINT_RECONCILE_GAP_C: f64 = 2.0;
 fn reconcile_setpoint_pair(
     heating: &mut [f64; 24],
     cooling: &mut [f64; 24],
-    day_label: &'static str,
+    day_label: &str,
 ) -> Option<SetpointReconciliation> {
     let original_heating = *heating;
     let original_cooling = *cooling;
@@ -3035,7 +3030,7 @@ fn reconcile_setpoint_pair(
             "HPXML heating/cooling setpoints too close or inverted; clipped to midpoint with 2 °C separation"
         );
         Some(SetpointReconciliation {
-            day: day_label,
+            day: day_label.to_string(),
             original_heating_c: original_heating,
             original_cooling_c: original_cooling,
             adjusted_heating_c: *heating,
@@ -4796,6 +4791,70 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[test]
+    fn setpoints_reconciled_propagates_to_typed_config() {
+        // Build params with setpoints_reconciled recorded by HPXML parsing,
+        // then verify the typed EquipmentConfig carries them.
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(12_000.0));
+        params.insert("efficiency_afue".to_string(), json!(0.96));
+        params.insert("fan_power_w".to_string(), json!(0.0));
+        params.insert(
+            "setpoints_reconciled".to_string(),
+            serde_json::to_value(vec![
+                SetpointReconciliation {
+                    day: "weekday".to_string(),
+                    original_heating_c: [21.0; 24],
+                    original_cooling_c: [22.0; 24],
+                    adjusted_heating_c: [20.5; 24],
+                    adjusted_cooling_c: [22.5; 24],
+                },
+                SetpointReconciliation {
+                    day: "weekend".to_string(),
+                    original_heating_c: [20.0; 24],
+                    original_cooling_c: [22.0; 24],
+                    adjusted_heating_c: [20.0; 24],
+                    adjusted_cooling_c: [22.0; 24],
+                },
+            ])
+            .expect("SetpointReconciliation must serialize"),
+        );
+
+        let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
+            .expect("builder must not error")
+            .expect("builder must produce a typed config");
+
+        let reconciliations = ec
+            .setpoints_reconciled
+            .as_ref()
+            .expect("setpoints_reconciled must be present");
+        assert_eq!(reconciliations.len(), 2);
+        assert_eq!(reconciliations[0].day, "weekday");
+        assert_eq!(reconciliations[0].original_heating_c, [21.0; 24]);
+        assert_eq!(reconciliations[0].original_cooling_c, [22.0; 24]);
+        assert_eq!(reconciliations[0].adjusted_heating_c, [20.5; 24]);
+        assert_eq!(reconciliations[0].adjusted_cooling_c, [22.5; 24]);
+        assert_eq!(reconciliations[1].day, "weekend");
+    }
+
+    #[test]
+    fn setpoints_reconciled_none_when_not_present_in_params() {
+        // No setpoints_reconciled key in params -> EquipmentConfig field is None.
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(12_000.0));
+        params.insert("efficiency_afue".to_string(), json!(0.96));
+        params.insert("fan_power_w".to_string(), json!(0.0));
+
+        let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
+            .expect("builder must not error")
+            .expect("builder must produce a typed config");
+
+        assert!(
+            ec.setpoints_reconciled.is_none(),
+            "setpoints_reconciled must be None when params have no key"
+        );
     }
 
     // -----------------------------------------------------------------------

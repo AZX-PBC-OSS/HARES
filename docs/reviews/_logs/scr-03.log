@@ -1,0 +1,20 @@
+# opencode log for scr-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead scripts/ochre_bestest_600.py
+[0m• [0mFind HARES BESTEST reference[90m Explore Agent[0m
+[0m• [0mExplore OCHRE vendor files[90m Explore Agent[0m
+[0m✓ [0mExplore OCHRE vendor files[90m Explore Agent[0m
+[0m✓ [0mFind HARES BESTEST reference[90m Explore Agent[0m
+[0m→ [0mRead tests/fixtures/bestest/600.toml
+[0m• [0mFind OCHRE film resistance code[90m Explore Agent[0m
+[0m• [0mFind OCHRE interior gains handling[90m Explore Agent[0m
+[0m✓ [0mFind OCHRE film resistance code[90m Explore Agent[0m

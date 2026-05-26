@@ -15,3 +15,32 @@
 [0m• [0mSearch EnergyPlus solar/PV references[90m Explore Agent[0m
 [0m• [0mSearch HARES for climate/weather data[90m Explore Agent[0m
 Now let me look at the key EnergyPlus source files for their solar irradiance and PV models.
+[0m✓ [0mSearch HARES for climate/weather data[90m Explore Agent[0m
+[0m✓ [0mSearch EnergyPlus solar/PV references[90m Explore Agent[0m
+[0m→ [0mRead scripts/reviews/pv-sizing.json
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [limit=100][0m
+[0m✱ [0mGrep "diffuse.*frac|DIFFUSE.*FRAC|diffuse_fraction"[90m in vendors/EnergyPlus/src/EnergyPlus · 3 matches[0m
+Let me read the pv-sizing review script and the solar physics model for additional context.
+[0m✱ [0mGlob "vendors/EnergyPlus/third_party/ssc/**/*.{c,cpp,h,hpp}"[90m in . · 100 matches[0m
+[0m✱ [0mGrep "fn (clear_sky|irrad_decomp|irradiance_decom|diffuse_from|ktc)"[90m in crates/hares-physics/src · 4 matches[0m
+[0m
+[0m$ [0mmkdir -p docs/reviews/pv-sizing
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/pv-sizing/pvsize-03-diffuse-frac-latitude-exponent.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l docs/reviews/pv-sizing/pvsize-03-diffuse-frac-latitude-exponent.md && echo "---" && head -5 docs/reviews/pv-sizing/pvsize-03-diffuse-frac-latitude-exponent.md
+167 docs/reviews/pv-sizing/pvsize-03-diffuse-frac-latitude-exponent.md
+---
+# Plane solar score: DIFFUSE_FRAC=0.18 and latitude exponent formula
+**Review ID**: pvsize-03
+**Category**: pv-sizing
+**Date**: 2026-05-26
+[0m
+Review written to `docs/reviews/pv-sizing/pvsize-03-diffuse-frac-latitude-exponent.md` (167 lines, 4 findings).
+
+**Summary**:
+- **1 high**: `DIFFUSE_FRAC=0.18` ignores available TMY3/EPW DHI/GHI weather data — HARES already has Perez 1990 in `solar.rs` and a full weather pipeline, but the PV sizing heuristic doesn't use them. Fixed diffuse fraction introduces ±11% error in production factor for non-south arrays between cloudy (Seattle) and arid (Phoenix) climates.
+- **2 medium**: (a) The latitude exponent has zero effect on south-facing arrays (`cos(0)^n = 1`), so the most common orientation gets no latitude correction despite ~20-25% GHI difference across the continental US. (b) The heuristic omits time-varying transposition, cell temperature, IAM, and albedo — reasonable for a sizing step but the gap from the available Perez model in `solar.rs` is worth documenting.
+- **1 low**: Reference latitude 35°N is slightly south of the US population-weighted mean (~38°N), but impact is negligible (<2% on production factor).

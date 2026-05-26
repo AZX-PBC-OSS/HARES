@@ -1,0 +1,55 @@
+# opencode log for py-companion-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead python/ochre_next/adapters/pybamm_battery.py
+[0m→ [0mRead python/ochre_next/adapters/sam_battery.py
+[0m→ [0mRead python/ochre_next/adapters/sam_pv.py
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Battery.py
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/PV.py
+[0m• [0mFind Rust LUT consumers[90m Explore Agent[0m
+[0m• [0mFind Python adapter tests[90m Explore Agent[0m
+[0m• [0mFind SAM OCHRE reference[90m Explore Agent[0m
+Now let me look at the Rust LUT consumer interface and any related tests to understand the expected contract.
+[0m✓ [0mFind Python adapter tests[90m Explore Agent[0m
+[0m✓ [0mFind SAM OCHRE reference[90m Explore Agent[0m
+[0m✓ [0mFind Rust LUT consumers[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/lut.rs[90m [offset=65, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/ndinterp.rs[90m [offset=1, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=295, limit=20][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=596, limit=30][0m
+[0m→ [0mRead crates/hares-python/src/py_equipment.rs[90m [offset=19, limit=80][0m
+Let me verify a few more specific details in the Rust LUT consumer code and the Python tests.
+[0m→ [0mRead tests/python/test_adapters.py
+[0m✱ [0mGrep "module_type|array_type"[90m in crates/hares-python · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=195, limit=50][0m
+[0m✱ [0mGrep "C_rate|c_rate\.abs\(\)|crate_grid|C.*rate.*interp"[90m in python · 8 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Battery.py[90m [offset=365, limit=80][0m
+Let me check a few more specific integration points.
+[0m✱ [0mGrep "calendar_q|cycle_q|rainflow_arrhenius"[90m in crates/hares-equipment/src/battery · 0 matches[0m
+[0m✱ [0mGrep "resolve_battery_params"[90m in python/ochre_next · 2 matches[0m
+[0m✱ [0mGrep "degradation|Degradation"[90m in crates/hares-equipment/src/battery · 87 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/battery/degradation.rs[90m [limit=100][0m
+[0m→ [0mRead python/ochre_next/adapters/__init__.py
+[0m✱ [0mGrep "rainflow_arrhenius|calendar_q|cycle_q|degradation.*toml"[90m in crates · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/battery/config.rs
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [limit=130, offset=662][0m
+[0m
+[0m← [0mWrite docs/reviews/py-companion/py-companion-01-python-adapters.md
+Wrote file successfully.
+[0m
+Now I have a thorough understanding of all the files. Let me write the review.
+The review has been written to `/Users/rich/source/HARES/docs/reviews/py-companion/py-companion-01-python-adapters.md`.
+
+**Key findings summary:**
+
+- **3 High** issues: Hardcoded 3.6V cell voltage in PyBaMM efficiency (affects LFP/LTO), SAM PV AC/DC reconstruction assumes fixed 96% inverter efficiency, and PyBaMM degradation params are never actually computed.
+- **4 Medium** issues: SAM battery extracts only 2 parameters from PySAM, OCV generation is inefficient, LUT edge-case failures return zero power, and 60-second transients bias efficiency.
+- **3 Low** issues: Grid coarseness, `module_type`/`array_type` not wired end-to-end, and degradation TOML section never consumed by Rust.

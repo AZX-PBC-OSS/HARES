@@ -1,0 +1,60 @@
+# opencode log for pvsize-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/pv_sizing.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*"[90m in . · 100 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/Equipment/PV.py"[90m in . · 1 match[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/PV.py
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Photovoltaics.cc
+[0m✱ [0mGrep "infer_roof_shape|RoofShape"[90m in . · 58 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_pv_sizing.rs
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=1220, limit=80][0m
+[0m✱ [0mGrep "roof_shape|RoofShape|override"[90m in crates/hares-python · 78 matches[0m
+Now let me examine the Python bindings to understand the full call chain and check for any user override mechanism.
+[0m→ [0mRead docs/reviews/pv-sizing/pvsize-01-usable-roof-fractions.md
+[0m✱ [0mGrep "roof_shape|RoofShape|set_roof_shape"[90m in crates/hares-physics/src · 52 matches[0m
+[0m✱ [0mGrep "facility_type|num_dwelling_units|building_type"[90m in crates/hares-physics/src · 3 matches[0m
+[0m✱ [0mGlob "crates/hares-physics/src/dwelling*.rs"[90m in . · 0 matches[0m
+[0m✱ [0mGlob "crates/hares-physics/src/**/*dwelling*"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "facility_type|num_dwelling"[90m in crates · 27 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=660, limit=40][0m
+[0m✱ [0mGrep "num_dwelling|num_units|dwelling_unit"[90m in crates/hares-core/src · 0 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1215, limit=65][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=255, limit=50][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=470, limit=30][0m
+[0m✱ [0mGrep "NumberofUnits|num_dwelling|BuildingSummary|facility_type"[90m in crates/hares-io/src/hpxml · 85 matches[0m
+[0m✱ [0mGrep "extract_roof_info"[90m in crates/hares-io · 1 match[0m
+[0m→ [0mRead crates/hares-io/src/pv_sizing.rs
+[0m✱ [0mGrep "roof|Tilt|Azimuth|surface_type|triangle|shape"[90m in vendors/EnergyPlus/src/EnergyPlus · 46 matches[0m
+Now I have enough data to write the comprehensive review. Let me also quickly check the EnergyPlus Photovoltaics reference for surface/roof handling to complete the vendor comparison.
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/pv-sizing/
+pvsize-01-usable-roof-fractions.md
+pvsize-02-azimuth-production-factor-lut.md
+pvsize-03-diffuse-frac-latitude-exponent.md
+pvsize-04-flat-roof-gcr-table.md
+pvsize-05-default-panel-specs.md
+pvsize-06-system-losses-default.md
+[0m
+[0m← [0mWrite docs/reviews/pv-sizing/pvsize-07-roof-shape-inference.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/pv-sizing/pvsize-07-roof-shape-inference.md`.
+
+**Summary of findings:**
+
+| Severity | Count | Key Issues |
+|----------|-------|------------|
+| **High** | 2 | Gable default fallback is anti-conservative (2.14× overestimation for misclassified hips); no user override mechanism exists |
+| **Medium** | 3 | Tile/slate material as deterministic Hip predictor is unreliable; fragile string matching for apartment→Flat; latitude <30° heuristic has no empirical basis |
+| **Low** | 2 | Missing test coverage for 2-plane hip edge cases; no vendor reference implementation for roof shape classification |
+
+**Core concern**: The inference ruleset is ordered such that ambiguous evidence defaults to Gable (0.75), the most permissive shape, while Hip (0.35) is the correct conservative default. A hip roof with only 2 recorded planes (common HPXML limitation) receives a PV capacity estimate 2.14× too high, with no mechanism for users to correct it.

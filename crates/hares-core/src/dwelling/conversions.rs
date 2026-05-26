@@ -551,7 +551,7 @@ pub(crate) fn merged_equipment_config(
     {
         let mut merged = base.clone();
         apply_equipment_overrides(&mut merged, overrides, &spec.name);
-        return EquipmentConfig::with_payload(
+        let mut eq_cfg = EquipmentConfig::with_payload(
             typed.name.clone(),
             typed.ochre_class.clone(),
             ConfigPayload::Typed {
@@ -560,6 +560,8 @@ pub(crate) fn merged_equipment_config(
                 data: Value::Object(merged),
             },
         );
+        eq_cfg.setpoints_reconciled = typed.setpoints_reconciled.clone();
+        return eq_cfg;
     }
 
     let mut merged = spec.parameters.clone();
@@ -748,7 +750,10 @@ pub(crate) fn json_value_to_config_value(value: &serde_json::Value) -> Option<Co
 mod tests {
     use serde_json::json;
 
-    use hares_equipment::hvac::heating_config::{DuctConfig, GasFurnaceConfig};
+    use hares_equipment::{
+        SetpointReconciliation,
+        hvac::heating_config::{DuctConfig, GasFurnaceConfig},
+    };
     use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
     use hares_types::FuelType;
 
@@ -1065,6 +1070,101 @@ mod tests {
 
         assert!((cfg.afue - 0.96).abs() < 1e-12);
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
+    }
+
+    // ── setpoints_reconciled propagation through merged_equipment_config ─
+
+    fn gas_furnace_spec_with_reconciliation(
+        reconciliations: Vec<SetpointReconciliation>,
+    ) -> hares_io::EquipmentSpec {
+        let typed_cfg = GasFurnaceConfig {
+            equipment_id: Some(7),
+            zone_id: Some(1),
+            capacity_w: 12_000.0,
+            afue: 0.82,
+            fan_power_w: Some(350.0),
+            number_of_speeds: 1,
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
+            ducts: DuctConfig::default(),
+        };
+        let parameters = serde_json::to_value(&typed_cfg)
+            .expect("serializable furnace config")
+            .as_object()
+            .cloned()
+            .expect("furnace config object");
+        let mut eq_cfg = hares_equipment::EquipmentConfig::from_typed(
+            "Gas Furnace".to_string(),
+            "Gas Furnace".to_string(),
+            typed_cfg,
+        );
+        eq_cfg.setpoints_reconciled = Some(reconciliations);
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Gas Furnace".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters,
+            zip_params: None,
+            typed_config: Some(eq_cfg),
+        }
+    }
+
+    #[test]
+    fn merged_equipment_config_preserves_setpoints_reconciled() {
+        let reconciliations = vec![
+            SetpointReconciliation {
+                day: "weekday".to_string(),
+                original_heating_c: [21.0; 24],
+                original_cooling_c: [22.0; 24],
+                adjusted_heating_c: [20.5; 24],
+                adjusted_cooling_c: [22.5; 24],
+            },
+            SetpointReconciliation {
+                day: "weekend".to_string(),
+                original_heating_c: [20.0; 24],
+                original_cooling_c: [23.0; 24],
+                adjusted_heating_c: [20.5; 24],
+                adjusted_cooling_c: [22.5; 24],
+            },
+        ];
+        let spec = gas_furnace_spec_with_reconciliation(reconciliations);
+        let overrides = serde_json::Value::Object(serde_json::Map::new());
+
+        let merged = merged_equipment_config(&spec, &overrides);
+
+        let sr = merged
+            .setpoints_reconciled
+            .as_ref()
+            .expect("setpoints_reconciled must propagate from typed config through merged_equipment_config");
+        assert_eq!(sr.len(), 2);
+        assert_eq!(sr[0].day, "weekday");
+        assert_eq!(
+            sr[0].original_heating_c,
+            [21.0; 24],
+            "original heating setpoints must be preserved"
+        );
+        assert_eq!(sr[1].day, "weekend");
+        assert_eq!(
+            sr[1].adjusted_cooling_c,
+            [22.5; 24],
+            "adjusted cooling setpoints must be preserved"
+        );
+    }
+
+    #[test]
+    fn merged_equipment_config_preserves_setpoints_reconciled_none() {
+        // Use the existing spec helper which has setpoints_reconciled = None.
+        let spec = gas_furnace_spec();
+        let overrides = serde_json::Value::Object(serde_json::Map::new());
+
+        let merged = merged_equipment_config(&spec, &overrides);
+
+        assert!(
+            merged.setpoints_reconciled.is_none(),
+            "setpoints_reconciled must be None when typed config has None"
+        );
     }
 
     // ── apply_humidity_update_to_zones telemetry tests ──────────────────

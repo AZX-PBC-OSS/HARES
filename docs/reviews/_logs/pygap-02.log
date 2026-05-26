@@ -1,0 +1,83 @@
+# opencode log for pygap-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-python/src/utils.rs
+[0m✱ [0mGlob "crates/hares-python/src/**/*.rs"[90m in . · 16 matches[0m
+[0m✱ [0mGrep "parse_day_filter|day_filter|DayFilter"[90m in . · 180 matches[0m
+[0m→ [0mRead crates/hares-types/src/schedule.rs[90m [offset=1, limit=120][0m
+[0m✱ [0mGrep "parse_day_filter"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "holidays|peak_events|first_of_month|last_of_month|non_peak"[90m in . · 312 matches[0m
+[0m✱ [0mGrep "DayFilter|day_filter|day_filter"[90m in . · 12 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_enums.rs[90m [offset=2260, limit=80][0m
+[0m✱ [0mGrep "parse_day_filter|day_filter.*test"[90m in crates/hares-python · 6 matches[0m
+[0m✱ [0mGrep "schedule_rule.*filter|day_filter.*config|day.*filter.*python"[90m in . · 0 matches[0m
+Let me check the Python wrappers and test coverage more closely.
+[0m→ [0mRead crates/hares-python/src/py_enums.rs[90m [offset=2355, limit=50][0m
+[0m✱ [0mGrep "parse_day_filter|parse_day\b"[90m in crates/hares-python/src/py_tariff.rs · 2 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_tariff.rs[90m [limit=60][0m
+[0m→ [0mRead crates/hares-types/src/schedule.rs[90m [offset=120, limit=80][0m
+[0m✱ [0mGrep ""\ball\b""[90m in . · 28 matches[0m
+[0m✱ [0mGrep ""all""[90m in crates/hares-python · 1 match[0m
+[0m✱ [0mGrep ""any"|'any'|"Any""[90m in tests · 9 matches[0m
+[0m✱ [0mGrep ""day""[90m in tests · 0 matches[0m
+[0m✱ [0mGrep "parse_day|day_filter.*from|DayFilter.*from_str|DayFilter.*deserialize"[90m in crates/hares-types · 0 matches[0m
+[0m✱ [0mGrep "parse_day|DayFilter.*from|from_str"[90m in crates/hares-core · 13 matches[0m
+[0m✱ [0mGrep "day.filter|filter.*day|DayType|day_type"[90m in docs · 2 matches[0m
+[0m✱ [0mGlob "docs/**/*.md"[90m in . · 100 matches[0m
+[0m→ [0mRead docs/schedule-sources.md[90m [offset=90, limit=50][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/ 2>/dev/null
+_logs
+_test
+agents
+air-properties
+architecture
+ashrae152-deep
+build
+config-io
+control-deep
+core
+core-deep
+cross-cutting
+defaults-data
+der-catalog
+envelope
+envelope-rc-mat
+equipment-der
+equipment-hvac
+equipment-loads
+equipment-util
+equipment-wh
+fleet-python
+hpxml
+hvac-config
+infiltration-deep
+infrastructure
+output
+physics-constants
+pv-sizing
+py-binding
+py-companion
+python-gaps
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/python-gaps/ 2>/dev/null
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/python-gaps/pygap-02-python-utils-parse-day-filter.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/python-gaps/pygap-02-python-utils-parse-day-filter.md`.
+
+**Key findings:**
+
+- **4 medium-severity** issues: "all" vs "any" naming inconsistency (mirrors `parse_season` which accepts `"all"`), vague error message not listing day names, zero test coverage, and 5 missing filter categories from the `DayFilter` type system.
+- **6 low-severity** findings: no whitespace trimming, no combination filter support, and several positive observations (case insensitivity works, return type is directly usable, empty/Unicode strings handled gracefully).
+- **No critical or high** findings.

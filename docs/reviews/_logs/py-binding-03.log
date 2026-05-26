@@ -1,0 +1,52 @@
+# opencode log for py-binding-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-python/src/py_equipment.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/api/**/*.cc"[90m 6 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/api/**/*.hh"[90m 1 match[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/api/datatransfer.cc
+[0m• [0mFind Rust equipment types[90m Explore Agent[0m
+[0m✓ [0mFind Rust equipment types[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-equipment/src/ndinterp.rs
+[0m✱ [0mGrep "fn interpolate|fn eval|fn evaluate|clamp|extrapol|out.of.bound|ValueError|out_of_range"[90m in crates/hares-equipment/src/ndinterp.rs · 14 matches[0m
+Let me check the interpolation behavior for out-of-bounds access and examine how equipment parameters propagate to the Rust model.
+[0m• [0mTrace PyBattery to Rust model[90m Explore Agent[0m
+[0m✓ [0mTrace PyBattery to Rust model[90m Explore Agent[0m
+[0m✱ [0mGrep "charging_curve_lut\.interpolate"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m✱ [0mGrep "fn clamp_power|fn compute_electrical"[90m in crates/hares-equipment/src/battery · 2 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=596, limit=40][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/ocv.rs[90m [offset=70, limit=120][0m
+[0m✱ [0mGrep "charging_curve_lut\.interpolate|potential_at_soc"[90m in crates/hares-equipment/src · 9 matches[0m
+[0m✱ [0mGrep "fn interpolate"[90m in crates/hares-equipment/src/battery/ocv.rs · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/battery/ocv.rs[90m [offset=220, limit=60][0m
+[0m✱ [0mGrep "\.interpolate\("[90m in crates/hares-equipment/src/ev · 1 match[0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=807, limit=40][0m
+[0m✱ [0mGrep "fn set_charging_curve_lut|fn set_ocv_table|fn set_u_neg_table"[90m in crates/hares-equipment/src/battery · 6 matches[0m
+Now let me verify the setters and the `add_battery` function details:
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [limit=30, offset=1245][0m
+[0m✱ [0mGrep "fn set_charging_curve_lut|fn set_ocv_table|fn set_u_neg_table"[90m in crates/hares-equipment/src/lib.rs · 3 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [limit=60, offset=770][0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [limit=50, offset=865][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/py-binding
+(no output)
+[0m
+Now I have all the information needed to write the review. Let me create the output file.
+[0m← [0mWrite docs/reviews/py-binding/py-binding-03-py-equipment-binding.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/py-binding/py-binding-03-py-equipment-binding.md`.
+
+**Summary**: 8 findings (1 critical, 3 high, 2 medium, 2 low):
+
+- **Critical**: `RegularGridInterpolator::interpolate()` uses `assert!` on dimension mismatch — panics in Rust, not a Python exception. A wrong-dimensionality LUT from Python crashes the simulation at runtime.
+- **High**: (1) `add_equipment` accepts duplicate names silently; (2) post-init LUT mutation is un-guarded with no frozen-state protection; (3) no semantic validation of LUT axis physical ranges.
+- **Medium/ Low**: silent out-of-bounds clamping, debug-only duplicate check, opaque LUT fields on PyBattery, zero-capacity division.

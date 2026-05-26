@@ -1,0 +1,69 @@
+# opencode log for py-binding-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs
+[0m→ [0mRead crates/hares-python/src/py_enums.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/api/**/*"[90m in . · 24 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=1429][0m
+[0m→ [0mRead crates/hares-python/src/py_enums.rs[90m [offset=1787][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/api/state.py
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/api/runtime.py
+Now let me read the remaining portions of the files and the vendor reference files.
+[0m✱ [0mGrep "pub enum BmsMode"[90m in . · 1 match[0m
+[0m✱ [0mGrep "pub enum GridExportRule"[90m in . · 1 match[0m
+[0m✱ [0mGrep "pub enum StormWatchTrigger"[90m in . · 1 match[0m
+[0m✱ [0mGrep "impl Drop for.*Dwelling"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "pub enum BmsAction"[90m in . · 1 match[0m
+Now let me check for Rust-side enum definitions and Drop implementation for the Dwelling type:
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=580, limit=200][0m
+[0m✱ [0mGrep "pub enum (BmsAction|BmsMode|BmsScheduleWindow|BmsTimeWindow|DepartureConstraint|DayFilter|ChargingLevel|ChargingStrategy|PlugInPolicy|EvConnectionState|BatteryChemistry|FluidType|ExecutionStage|ControlCapabilities|EndUse|FuelType|InverterPriority|DutyCycleComponent|VehicleType|GridExportRule|StormWatchTrigger)"[90m in crates/hares-types/src · 16 matches[0m
+Let me check the Rust BmsMode and GridExportRule variants, and look for any missing enum bindings:
+[0m✱ [0mGrep "PyGridExportRule|PyStormWatchTrigger|PyBmsMode|PyBmsAction|PyBmsScheduleWindow|PyDepartureConstraint"[90m in crates/hares-python/src · 47 matches[0m
+[0m✱ [0mGrep "pub struct Dwelling"[90m in crates/hares-core/src · 5 matches[0m
+[0m✱ [0mGrep "fn (close|shutdown|finalize|release|cleanup|dispose)"[90m in crates/hares-core/src · 1 match[0m
+[0m✱ [0mGrep "pub enum ControlSignal|pub enum SignalType|ThermalCategory|pub enum SimStatus"[90m in crates · 211 matches[0m
+[0m✱ [0mGrep "ThermalCategory"[90m in crates/hares-python/src · 0 matches[0m
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [offset=18, limit=35][0m
+[0m✱ [0mGrep "Drop for Dwelling"[90m in crates/hares-core/src · 0 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=651, limit=120][0m
+[0m✱ [0mGrep "checkpoint|save_checkpoint|load_checkpoint"[90m in crates/hares-core/src/dwelling/mod.rs · 10 matches[0m
+[0m✱ [0mGrep "struct StreamingRecorder"[90m in crates/hares-core/src · 0 matches[0m
+[0m✱ [0mGrep "impl Drop for"[90m in crates/hares-core/src/dwelling · 0 matches[0m
+[0m✱ [0mGrep "pub enum SimStatus"[90m in crates/hares-core/src · 1 match[0m
+[0m✱ [0mGrep "pub enum SimStatus"[90m in crates/hares-fleet/src · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/engine.rs[90m [limit=30][0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=606, limit=45][0m
+[0m✱ [0mGrep "fn (from_str|solar_only|unrestricted|disabled)"[90m in crates/hares-python/src/py_enums.rs · 16 matches[0m
+[0m✱ [0mGrep "fn step"[90m in crates/hares-core/src/dwelling/mod.rs · 6 matches[0m
+Let me check a few more things about the step() initialization guard and control mode enums:
+[0m✱ [0mGrep "fn close|fn shutdown|fn release|fn destroy"[90m in crates/hares-core/src/dwelling · 0 matches[0m
+Now I have all the information needed. Let me also check if there's a close/shutdown method in the Dwelling struct:
+[0m✱ [0mGrep "pub enum ControlMessage"[90m in crates/hares-types/src · 0 matches[0m
+[0m→ [0mRead crates/hares-python/src/lib.rs[90m [limit=100][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/py-binding
+(no output)
+[0m
+Now I have all the information to write the review. Let me create the output file:
+[0m← [0mWrite docs/reviews/py-binding/py-binding-02-py-dwelling-binding.md
+Wrote file successfully.
+[0m
+Review report written to `docs/reviews/py-binding/py-binding-02-py-dwelling-binding.md`.
+
+**Summary**: 6 findings — 2 medium, 3 low, 1 informational, 0 critical/high.
+
+Key findings:
+- `step()` does not check the `initialized` flag, so the construction→init→step lifecycle is unenforced
+- `PyGridExportRule` is missing `from_str()` and static constructors, inconsistent with all other enums
+- `PyStormWatchTrigger` is missing `from_str()`
+- `ThermalCategory` (6 variants) is not exposed to Python
+- No explicit `close()`/`shutdown()` — relies on Rust `Drop` via Python GC
+- GIL handling in `step()` and `simulate()` is confirmed correct

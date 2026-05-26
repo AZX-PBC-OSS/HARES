@@ -1,0 +1,52 @@
+# opencode log for pvsize-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/pv_sizing.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/PV.py
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*PV*"[90m in . · 3 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.hh
+[0m✱ [0mGlob "**/hares-config/**/*.{toml,csv,json,yaml,yml}"[90m in . · 0 matches[0m
+[0m✱ [0mGlob "**/defaults*"[90m in . · 2 matches[0m
+[0m✱ [0mGrep "panel_watts|panel_area|PANEL_WATTS|PANEL_AREA|system_losses"[90m 71 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=1, limit=120][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=220, limit=100][0m
+[0m→ [0mRead crates/hares-io/src/defaults.rs
+[0m✱ [0mGlob "**/hares-config/**"[90m in . · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/array_config.rs
+[0m✱ [0mGlob "defaults/pv/*"[90m in . · 1 match[0m
+[0m✱ [0mGrep "DEFAULT_PANEL_WATTS|DEFAULT_PANEL_AREA|panel_watts|panel_area_m2"[90m in crates/hares-python · 2 matches[0m
+[0m✱ [0mGrep "compute_usable_area|size_pv_system|PvSizingResult"[90m 26 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_pv_sizing.rs
+[0m✱ [0mGrep "compute_usable_area\(|size_pv_system\("[90m in crates/hares-equipment · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=160, limit=60][0m
+[0m✱ [0mGrep "panel_watts|panel_area"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "defaults.*pv|DefaultsCategory::Pv|pv.*defaults"[90m in crates/hares-io · 6 matches[0m
+[0m✱ [0mGrep "gamma|temperature.coefficient|module_type|system_capacity|system_losses"[90m in vendors/EnergyPlus/src/EnergyPlus · 59 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.cc[90m [limit=100, offset=1][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.cc[90m [offset=140, limit=50][0m
+[0m✱ [0mGlob "**/*"[90m in defaults · 48 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/pv-sizing
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/pv-sizing/pvsize-05-default-panel-specs.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/pv-sizing/pvsize-05-default-panel-specs.md
+129 /Users/rich/source/HARES/docs/reviews/pv-sizing/pvsize-05-default-panel-specs.md
+[0m
+Review written to `docs/reviews/pv-sizing/pvsize-05-default-panel-specs.md` (129 lines, 4 findings).
+
+**Key results**:
+- **Finding 1 (low)**: 420W/2.0m² = 210 W/m² is a reasonable 2024 midpoint but already behind 2026 market (430-470W). Suitable for snapshots but not 2030+ projections.
+- **Finding 2 (medium)**: The Rust API supports overrides, but Python bindings hardcode `None` and no `DefaultsStore` integration exists. `defaults/pv/` is an empty placeholder.
+- **Finding 3 (low)**: Temperature coefficient IS applied correctly (-0.47%/°C for Standard, matching PVWatts v8) in the production model via SAM-NOCT cell temperature + gamma derating.
+- **Finding 4 (low)**: Packing efficiency correctly separates GCR (flat roofs, row-spacing) from `usable_fraction` (perimeter setbacks). Pitched roof inter-panel gaps are omitted, but this is a reasonable simplification given conservative usable fractions.

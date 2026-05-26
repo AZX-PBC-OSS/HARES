@@ -79,11 +79,7 @@ fn equipment_config_from_spec(spec: &EquipmentSpec) -> EquipmentConfig {
         .filter_map(|(k, v)| json_value_to_config_value(v).map(|cv| (k.clone(), cv)))
         .collect();
 
-    EquipmentConfig {
-        name: spec.name.clone(),
-        ochre_class: spec.name.clone(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw_config },
-    }
+    EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config)
 }
 
 fn equipment_config_from_spec_with_extras(
@@ -102,11 +98,7 @@ fn equipment_config_from_spec_with_extras(
     for (k, v) in insert {
         raw_config.insert(k.to_string(), v.clone());
     }
-    EquipmentConfig {
-        name: spec.name.clone(),
-        ochre_class: spec.name.clone(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw_config },
-    }
+    EquipmentConfig::raw(spec.name.clone(), spec.name.clone(), raw_config)
 }
 
 fn base_env(payload: Vec<f64>) -> EnvironmentState {

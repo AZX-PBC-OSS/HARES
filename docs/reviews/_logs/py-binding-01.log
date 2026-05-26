@@ -1,0 +1,84 @@
+# opencode log for py-binding-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Read primary source files: py_config.rs and conversions.rs
+[ ] Read vendor reference files in vendors/EnergyPlus/src/EnergyPlus/api/
+[ ] Read Rust Config struct to compare field coverage
+[ ] Analyze type conversion safety, error handling, optional handling, TOML round-tripping, mutation propagation
+[ ] Write review findings to docs/reviews/py-binding/py-binding-01-py-config-binding.md
+[0m
+[0m→ [0mRead crates/hares-python/src/py_config.rs
+[0m→ [0mRead crates/hares-python/src/conversions.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/api/**/*"[90m 24 matches[0m
+[0m✱ [0mGlob "crates/hares-python/src/**/*.rs"[90m 16 matches[0m
+[0m✱ [0mGrep "pub struct SimulationConfig"[90m 1 match[0m
+[0m✱ [0mGrep "pub struct DwellingConfig"[90m 1 match[0m
+[0m✱ [0mGrep "pub struct ResampleOverrides"[90m 1 match[0m
+[0m→ [0mRead crates/hares-python/src/lib.rs
+[0m→ [0mRead crates/hares-io/src/config.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=90, limit=80][0m
+[0m→ [0mRead crates/hares-io/src/weather.rs[90m [offset=375, limit=50][0m
+[0m→ [0mRead crates/hares-python/src/utils.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/api/state.py
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/api/runtime.py
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs
+[0m✱ [0mGrep "from_toml|load.*toml|toml.*config|ConfigError|HaresConfigError"[90m 102 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=1429, limit=500][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/api/datatransfer.py[90m [limit=100][0m
+Let me now read the `build_config` helper and the error conversion functions, as well as the EnergyPlus vendor API reference file for comparison.
+[0m✱ [0mGrep "from_py_object|from_toml|load.*toml|to_toml|serialize.*toml"[90m in crates/hares-python · 45 matches[0m
+[0m✱ [0mGrep "from_py_object"[90m in crates/hares-python/src · 45 matches[0m
+Let me check for TOML loading support and the `from_py_object` implementation:
+[0m
+[0m# [0mTodos
+[✓] Read primary source files: py_config.rs and conversions.rs
+[✓] Read vendor reference files in vendors/EnergyPlus/src/EnergyPlus/api/
+[✓] Read Rust Config struct to compare field coverage
+[•] Analyze type conversion safety, error handling, optional handling, TOML round-tripping, mutation propagation
+[ ] Write review findings to docs/reviews/py-binding/py-binding-01-py-config-binding.md
+[0m
+[0m✱ [0mGlob "**/test*config*.py"[90m 1 match[0m
+[0m✱ [0mGlob "**/*py_config*"[90m 2 matches[0m
+[0m✱ [0mGlob "**/conftest*"[90m 2 matches[0m
+[0m→ [0mRead tests/python/test_py_config.py
+[0m→ [0mRead tests/python/conftest.py
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/py-binding
+(no output)
+[0m
+Now I'll write the comprehensive review file. Let me first ensure the output directory exists.
+[0m# [0mTodos
+[✓] Read primary source files: py_config.rs and conversions.rs
+[✓] Read vendor reference files in vendors/EnergyPlus/src/EnergyPlus/api/
+[✓] Read Rust Config struct to compare field coverage
+[✓] Analyze type conversion safety, error handling, optional handling, TOML round-tripping, mutation propagation
+[•] Write review findings to docs/reviews/py-binding/py-binding-01-py-config-binding.md
+[0m
+[0m← [0mWrite docs/reviews/py-binding/py-binding-01-py-config-binding.md
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Read primary source files: py_config.rs and conversions.rs
+[✓] Read vendor reference files in vendors/EnergyPlus/src/EnergyPlus/api/
+[✓] Read Rust Config struct to compare field coverage
+[✓] Analyze type conversion safety, error handling, optional handling, TOML round-tripping, mutation propagation
+[✓] Write review findings to docs/reviews/py-binding/py-binding-01-py-config-binding.md
+[0m
+Review written to `docs/reviews/py-binding/py-binding-01-py-config-binding.md`.
+
+**Summary**: 8 findings across 32 files examined:
+
+- **2 High severity**: No TOML round-trip exposed to Python; `PyDwellingConfig` has zero property setters, making config mutation impossible
+- **3 Medium severity**: `extract_seconds` f64→i64 truncation without range/infinity checks; `expect()` in `default_start_time()` could panic the Python interpreter; duplicate `python_to_json` implementations creating maintenance hazard
+- **3 Low severity**: No upfront path validation for hpxml/schedule/weather; `output_chunk_size` setter accepts 0; divisibility constraint only validated at `to_sim_config()`, not at setter time
+
+**Field coverage** is complete — all Rust `SimulationConfig` (11 fields) and `DwellingConfig` (9 fields) are represented, with the `output_format` enum intentionally collapsed to an `output_to_parquet` bool. The `Option<T>` <-> Python None mapping is correct and panic-free in normal use.

@@ -273,11 +273,7 @@ fn config_mixed(
     for &(k, v) in strings {
         raw.insert(k.to_string(), ConfigValue::Text(v.to_string()));
     }
-    EquipmentConfig {
-        name: name.to_string(),
-        ochre_class: class.to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    }
+    EquipmentConfig::raw(name.to_string(), class.to_string(), raw)
 }
 
 // ---------------------------------------------------------------------------

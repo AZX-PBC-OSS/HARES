@@ -1,0 +1,60 @@
+# opencode log for py-binding-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-python/src/py_weather.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/api
+[0m• [0mExplore weather parsing[90m Explore Agent[0m
+[0m• [0mExplore EnergyPlus API reference[90m Explore Agent[0m
+[0m✓ [0mExplore weather parsing[90m Explore Agent[0m
+[0m✓ [0mExplore EnergyPlus API reference[90m Explore Agent[0m
+[0m→ [0mRead tests/python/test_py_weather.py
+[0m→ [0mRead crates/hares-python/src/py_config.rs[90m [offset=359, limit=270][0m
+[0m→ [0mRead crates/hares-io/src/weather.rs[90m [offset=468, limit=300][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=780, limit=200][0m
+[0m✱ [0mGrep "weather_slice|weather_index|timestep_index|WeatherQuery|slice_today|slice_hour"[90m 33 matches[0m
+[0m✱ [0mGrep "inconsistent.*record|record.*count.*mismatch|column.*length|len.*mismatch"[90m 7 matches[0m
+[0m✱ [0mGrep "fn current_step|fn current_weather|fn weather_at|slice_weather|weather_data_at"[90m 3 matches[0m
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [offset=1, limit=100][0m
+[0m→ [0mRead crates/hares-io/src/psm3.rs[90m [offset=1, limit=60][0m
+[0m→ [0mRead crates/hares-io/src/tmy3.rs[90m [offset=1, limit=60][0m
+[0m• [0mCheck weather query indexing[90m Explore Agent[0m
+[0m✓ [0mCheck weather query indexing[90m Explore Agent[0m
+[0m✱ [0mGrep "design_conditions"[90m in crates/hares-python · 0 matches[0m
+[0m✱ [0mGrep "py_weather|PyWeatherTimeSeries"[90m in crates/hares-python/src · 21 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=510, limit=60][0m
+Now let me verify a few more details before writing the review.
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/py-binding/ 2>/dev/null || echo "Directory does not exist"
+py-binding-01-py-config-binding.md
+py-binding-02-py-dwelling-binding.md
+py-binding-03-py-equipment-binding.md
+py-binding-04-py-control-binding.md
+py-binding-05-py-fleet-binding.md
+py-binding-06-py-tariff-binding.md
+py-binding-08-py-actor-binding.md
+[0m
+[0m← [0mWrite docs/reviews/py-binding/py-binding-07-py-weather-binding.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/py-binding/py-binding-07-py-weather-binding.md
+92 /Users/rich/source/HARES/docs/reviews/py-binding/py-binding-07-py-weather-binding.md
+[0m
+Review written to `docs/reviews/py-binding/py-binding-07-py-weather-binding.md`.
+
+**Summary**: 8 findings — 0 critical, 0 high, 4 medium, 4 low.
+
+Key observations:
+
+- **All three formats** (EPW/PSM3/TMY3) are supported with auto-detection via `parse_weather()`. Location metadata (lat, lon, timezone, elevation, site name) is correctly exposed as read-only Python properties — notably more than EnergyPlus's Python API which exposes none of these directly.
+
+- **Main gaps**: `resample()` is not exposed to Python; `PyWeatherTimeSeries` cannot be passed directly into `DwellingConfig` (weather is re-parsed from file path); no column-length invariant check exists on the struct; DNI/DHI/RH/sky-cover fields in EPW lack `is_finite()` guards.
+
+- **Weather indexing**: Cyclic modulo `(step + offset) % weather_len` with proper `midpoint_offset_secs` (1800s for EPW hour-ending convention). No off-by-one issues found at year boundaries or midnight transitions — tests verify this.

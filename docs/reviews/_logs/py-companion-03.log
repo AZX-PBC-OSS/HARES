@@ -1,0 +1,50 @@
+# opencode log for py-companion-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead python/ochre_next/data/resstock.py
+[0m→ [0mRead python/ochre_next/data/weather.py
+[0m→ [0mRead vendors/OCHRE
+[0m• [0mExplore OCHRE vendor data pipeline[90m Explore Agent[0m
+[0m✱ [0mGlob "python/ochre_next/data/**/*.py"[90m in . · 3 matches[0m
+[0m✱ [0mGlob "python/ochre_next/**/*.py"[90m in . · 17 matches[0m
+Let me explore the vendor OCHRE codebase for comparable implementations.
+[0m✓ [0mExplore OCHRE vendor data pipeline[90m Explore Agent[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Analysis.py[90m [offset=1, limit=100][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/schedule.py[90m [offset=115, limit=30][0m
+[0m✱ [0mGrep "resstock|weather|download|sample|retry|checksum|sha256|md5|backoff"[90m in python · 121 matches[0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/py-companion/ 2>/dev/null || echo "Directory does not exist"
+(no output)
+[0m
+[0m✱ [0mGlob "python/**/test*resstock*"[90m in . · 0 matches[0m
+[0m✱ [0mGlob "python/**/test*weather*"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "retry|backoff|checksum|sha256|md5|hash|resume|partial|cache.*invalid|cache.*corrupt"[90m in python/ochre_next/data · 1 match[0m
+[0m✱ [0mGrep "\.sample\("[90m in python · 1 match[0m
+[0m✱ [0mGrep "in\.weather|csv_weather|climate_zone|iecc|ashrae.169"[90m in python/ochre_next · 0 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/py-companion
+(no output)
+[0m
+Now I have a thorough understanding of the code. Let me create the output directory and write the review.
+[0m← [0mWrite docs/reviews/py-companion/py-companion-03-resstock-data-pipeline.md
+Wrote file successfully.
+[0m
+[0m→ [0mRead docs/reviews/py-companion/py-companion-03-resstock-data-pipeline.md[90m [limit=5][0m
+Review complete. Written to `docs/reviews/py-companion/py-companion-03-resstock-data-pipeline.md`.
+
+**Summary**: 9 findings (3 High, 4 Medium, 2 Low).
+
+Key issues:
+- **Weighted sampling is broken**: `df.sample()` uses uniform probability instead of housing stock weights, biasing all fleet-level analysis (line 482)
+- **No retry/backoff**: Download failures are fatal — a transient network error aborts the entire pipeline
+- **No checksum validation**: Corrupted downloads pass the `st_size > 0` check and pollute the cache silently
+- **Unbounded concurrency**: `asyncio.gather(*tasks)` fires all downloads simultaneously, risking S3 rate limits
+- **Brittle weather pairing**: FIPS extraction from station names via pattern matching (not structured metadata), with no climate zone validation

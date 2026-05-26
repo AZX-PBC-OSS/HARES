@@ -1,0 +1,84 @@
+# opencode log for pvsize-08
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Read hares-io/src/pv_sizing.rs for HPXML→RoofPlane extraction logic
+[ ] Read vendor reference files (EnergyPlus, OCHRE PV.py)
+[ ] Analyze tilt fallbacks, boundary wiring, area inheritance, azimuth, multi-building
+[ ] Write review to docs/reviews/pv-sizing/pvsize-08-hpxml-roof-plane-extraction.md
+[0m
+[0m→ [0mRead crates/hares-io/src/pv_sizing.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/PV.py
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/*.hh"[90m in . · 100 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/*.cc"[90m in . · 100 matches[0m
+[0m• [0mFind Building struct definition[90m Explore Agent[0m
+[0m• [0mFind RoofPlane and RoofInfo structs[90m Explore Agent[0m
+[0m• [0mFind HPXML parsing logic[90m Explore Agent[0m
+Now let me read the key data structures to understand the flow: the `Building` struct, `RoofPlane`, and how boundaries/area/azimuth are parsed from HPXML.
+[0m✓ [0mFind Building struct definition[90m Explore Agent[0m
+[0m✓ [0mFind RoofPlane and RoofInfo structs[90m Explore Agent[0m
+[0m✓ [0mFind HPXML parsing logic[90m Explore Agent[0m
+[0m✱ [0mGrep "shoelace|polygon.*area|roof.*boundary|RoofBoundary"[90m in crates · 9 matches[0m
+[0m✱ [0mGrep "azimuth|Azimuth|NORTH|South"[90m in vendors/EnergyPlus/src/EnergyPlus · 88 matches[0m
+[0m✱ [0mGrep "roof_shape|RoofShape|infer_roof|flat.*roof|gable"[90m in crates · 148 matches[0m
+Let me now check specific areas: how area is computed from boundary polygons, the EnergyPlus azimuth convention, and how roof shape inference works with tilt fallback.
+[0m→ [0mRead crates/hares-physics/src/pv_sizing.rs[90m [offset=1, limit=120][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/DataSurfaces.hh[90m [offset=85, limit=55][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.hh[90m [offset=150, limit=60][0m
+[0m→ [0mRead crates/hares-physics/src/pv_sizing.rs[90m [offset=155, limit=180][0m
+[0m✱ [0mGrep "infer_roof_shape"[90m in crates · 7 matches[0m
+[0m→ [0mRead crates/hares-physics/src/pv_sizing.rs[90m [offset=476, limit=150][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.cc[90m [limit=50, offset=1][0m
+[0m✱ [0mGrep "azimuth.*180|south.*azimuth|getAzimuth|Azimuth.*calc|CalcSurfaceAzimuth"[90m in vendors/EnergyPlus/src/EnergyPlus · 4 matches[0m
+[0m✱ [0mGrep "area.*polygon|polygon.*area|compute.*area|calc.*area|shoelace"[90m in crates · 20 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.cc[90m [offset=330, limit=140][0m
+[0m✱ [0mGrep "azimuth.*180|azimuth.*south|pitch|tilt|RoofPitch|Area.*roof"[90m in vendors/OCHRE/ochre · 53 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=155, limit=60][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=520, limit=130][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=1, limit=80][0m
+[0m✱ [0mGrep "parse_hpxml_boundaries|parse_boundar|Area.*polygon|polygon.*Area|RoofBoundary"[90m in vendors/OCHRE/ochre/utils · 2 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=248, limit=270][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=762, limit=200][0m
+[0m✱ [0mGrep "BuildingID|multiple.*build|multi.*build|parse_building"[90m in crates/hares-io · 185 matches[0m
+[0m✱ [0mGrep "BuildingID|parse_hpxml\b|def parse_hpxml"[90m in vendors/OCHRE/ochre · 7 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=1690, limit=130][0m
+[0m✱ [0mGrep "RoofBoundary|roof_boundary|Polygon|vertex|polygon"[90m in crates/hares-io · 0 matches[0m
+[0m✱ [0mGrep "RoofBoundary|roof.*polygon|polygon|boundary.*vertex"[90m in vendors/OCHRE/ochre · 0 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=60, offset=82][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=60, offset=136][0m
+[0m
+[0m# [0mTodos
+[✓] Read hares-io/src/pv_sizing.rs for HPXML→RoofPlane extraction logic
+[✓] Read vendor reference files (EnergyPlus, OCHRE PV.py)
+[✓] Analyze tilt fallbacks, boundary wiring, area inheritance, azimuth, multi-building
+[•] Write review to docs/reviews/pv-sizing/pvsize-08-hpxml-roof-plane-extraction.md
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/pv-sizing
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/pv-sizing/pvsize-08-hpxml-roof-plane-extraction.md
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Read hares-io/src/pv_sizing.rs for HPXML→RoofPlane extraction logic
+[✓] Read vendor reference files (EnergyPlus, OCHRE PV.py)
+[✓] Analyze tilt fallbacks, boundary wiring, area inheritance, azimuth, multi-building
+[✓] Write review to docs/reviews/pv-sizing/pvsize-08-hpxml-roof-plane-extraction.md
+[0m
+Review written to `docs/reviews/pv-sizing/pvsize-08-hpxml-roof-plane-extraction.md`. Summary of findings:
+
+**6 findings total**: 1 high, 3 medium, 2 low.
+
+- **High** — Missing `<Pitch>` defaults to tilt=0°, silently misclassifying sloped roofs as flat, changing GCR, usable fraction, and tilt selection downstream.
+- **Medium** — No polygon area validation (Area element is sole source with no cross-checks), no multi-building HPXML support, and `infer_roof_shape()` ignores planes with missing azimuth when counting distinct directions.
+- **Low** — Dead-code tilt fallback in `extract_roof_info`, azimuth convention consistent but under-documented at the API boundary.
+
+Boundary index wiring and azumith propagation are correct. No polygon/shoelace area computation exists in HARES — area comes directly from the `<Area>` element, which is architecturally fine but lacks defense-in-depth.

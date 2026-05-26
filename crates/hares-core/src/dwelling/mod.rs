@@ -24,7 +24,7 @@ use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
 use hares_equipment::{
     ActorSeed, BatteryLutType, Equipment, EquipmentRegistry, OcvTable, RegularGridInterpolator,
-    UNegTable,
+    SetpointReconciliation, UNegTable,
 };
 use hares_io::{
     Building, DefaultsStore, ScheduleTimeSeries, SimulationConfig, StreamingRecorder,
@@ -662,6 +662,10 @@ pub struct Dwelling {
     pub recorder: Option<StreamingRecorder>,
     pub rng: ChaCha8Rng,
     pub warnings: Vec<String>,
+    /// Per-equipment HPXML setpoint reconciliation records, keyed by instance name.
+    /// Populated during `from_config()` / `from_preparsed()` from the typed configs
+    /// attached to each `EquipmentSpec`.
+    pub setpoints_reconciled_by_equipment: HashMap<String, Option<Vec<SetpointReconciliation>>>,
 
     /// Roof geometry extracted from HPXML at construction time.
     pub roof_info: RoofInfo,
@@ -1120,6 +1124,11 @@ impl Dwelling {
         // simulation loop) -- silently skip them rather than emitting a warning.
         const HANDLED_OUTSIDE_REGISTRY: &[&str] = &["Occupancy"];
 
+        let mut setpoints_reconciled_by_equipment: HashMap<
+            String,
+            Option<Vec<SetpointReconciliation>>,
+        > = HashMap::new();
+
         let registry = EquipmentRegistry::new();
         let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
         for spec in &equipment_specs {
@@ -1129,6 +1138,10 @@ impl Dwelling {
             let mut eq = create_equipment_from_spec(&registry, spec)?;
 
             let merged_cfg = merged_equipment_config(spec, &override_root);
+            setpoints_reconciled_by_equipment.insert(
+                merged_cfg.name.clone(),
+                merged_cfg.setpoints_reconciled.clone(),
+            );
             match eq.init(&merged_cfg, &initial_env) {
                 Ok(()) => equipment.push(eq),
                 Err(err) => {
@@ -1262,6 +1275,7 @@ impl Dwelling {
             recorder,
             rng,
             warnings,
+            setpoints_reconciled_by_equipment,
             roof_info,
             wall_azimuths,
             latitude_deg,
@@ -1588,6 +1602,14 @@ impl Dwelling {
     #[must_use]
     pub fn equipment(&self) -> &[Box<dyn Equipment>] {
         &self.equipment
+    }
+
+    /// Returns per-equipment HPXML setpoint reconciliation records, keyed by
+    /// instance name.  `None` entries mean the equipment had no setpoint
+    /// reconciliation (no hours were widened).
+    #[must_use]
+    pub fn setpoints_reconciled(&self) -> &HashMap<String, Option<Vec<SetpointReconciliation>>> {
+        &self.setpoints_reconciled_by_equipment
     }
 
     /// Set a LUT on a battery equipment by name.

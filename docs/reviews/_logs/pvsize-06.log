@@ -1,0 +1,69 @@
+# opencode log for pvsize-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/pv_sizing.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*PV*"[90m in . · 3 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*Photovoltaic*"[90m in . · 5 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/**/PV*"[90m in . · 1 match[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.cc
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.hh
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/DataPhotovoltaics.hh
+[0m✱ [0mGrep "system_?loss"[90m in . · 42 matches[0m
+[0m✱ [0mGrep "DEFAULT_SYSTEM|system_loss|0\.14"[90m in . · 79 matches[0m
+Now let me read the vendor reference files and search for system losses usage throughout the codebase.
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=1, limit=120][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=230, limit=60][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=370, limit=40][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/config.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/PV.py[90m [limit=100][0m
+[0m✱ [0mGrep "system.?loss|0\.14|soiling|mismatch|wiring|inverter.?loss|derate|losses.?fraction"[90m in crates/hares-equipment/src/pv · 114 matches[0m
+[0m✱ [0mGrep "System.?Loss|system_loss|0\.14|Losses"[90m in vendors/EnergyPlus · 605 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/soiling.rs[90m [limit=60][0m
+[0m✱ [0mGrep "docs/.*pv|docs/.*solar|docs/.*PV|docs/.*sizing"[90m in . · 55 matches[0m
+[0m✱ [0mGrep "Generator:PVWatts"[90m in vendors/EnergyPlus/idd/versions · 32 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/doc/engineering-reference/src/on-site-generation/photovoltaic-arrays.tex[90m [offset=410, limit=60][0m
+Let me read the EnergyPlus IDD section for PVWatts Generator:PVWatts to understand the default and parameters, and look at the EnergyPlus engineering reference for PVWatts details.
+[0m→ [0mRead vendors/EnergyPlus/idd/versions/V9-6-0-Energy+.idd[90m [offset=88015, limit=90][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Photovoltaics.cc[90m [offset=1, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=190, limit=90][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=455, limit=70][0m
+[0m→ [0mRead crates/hares-equipment/tests/oracle_24h.rs[90m [limit=100, offset=280][0m
+[0m→ [0mRead crates/hares-equipment/tests/oracle_24h.rs[90m [limit=100, offset=380][0m
+Let me check one more thing — the oracle test for the system losses calculation:
+[0m✱ [0mGrep "soiling.*2|mismatch.*2|wiring.*2|inverter.*4|soiling.*mismatch"[90m in crates · 44 matches[0m
+[0m✱ [0mGrep "2%.*2%.*2%.*4%|2%.*2%|losses.*account|system_loss.*breakdown|loss.*breakdown"[90m in . · 3 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/soiling.rs[90m [limit=40, offset=55][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/pv-sizing
+(no output)
+[0m
+Now I have all the data I need. Let me write the review.
+[0m← [0mWrite docs/reviews/pv-sizing/pvsize-06-system-losses-default.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/pv-sizing/pvsize-06-system-losses-default.md
+163 /Users/rich/source/HARES/docs/reviews/pv-sizing/pvsize-06-system-losses-default.md
+[0m
+Review written to `docs/reviews/pv-sizing/pvsize-06-system-losses-default.md` (163 lines, 6 findings: 0 critical, 2 high, 2 medium, 2 low).
+
+Key findings:
+
+1. **High**: LUT vs non-LUT path apply losses differently — `system_losses_fraction` is only applied in the non-LUT path at `mod.rs:258`, skipped entirely in the LUT path at `:211`, creating ~14% yield discrepancy between the two code paths.
+
+2. **High**: Soiling double-counting — when the Kimber soiling model is active, its runtime `soiling_ratio` is applied alongside the 2% soiling component baked into `system_losses_fraction = 0.14`, over-estimating soiling losses by ~2 percentage points.
+
+3. **Medium**: No documented breakdown of the 0.14 into component losses anywhere in source. The PVWatts v5 breakdown is multiplicative (14.07% effective), not the 14% linear derate HARES uses.
+
+4. **Medium**: No geographic/climate/mount-type dependence in losses. Soiling varies 1–6% by climate, snow losses 0–5%, all baked into a single global constant.
+
+5. **Low**: Lumped derate conflates temperature-dependent losses with temperature-independent ones (minor impact since inverter efficiency is separate).
+
+6. **Low**: `pv_sizing.rs` stores and forwards `system_losses_fraction` but doesn't use it in sizing — purely a pass-through, which is architecturally fine but misleading.
