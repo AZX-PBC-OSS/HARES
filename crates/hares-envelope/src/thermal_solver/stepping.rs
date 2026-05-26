@@ -10,6 +10,7 @@
 use hares_physics::film_coefficients::tarp_h_natural;
 use hares_physics::solar::{clear_sky_irradiance, perez_tilted_irradiance, solar_position};
 use hares_types::{DEFAULT_GROUND_ALBEDO, DomainUpdate, EnvironmentState, PortSlots, ZoneId};
+use nalgebra::DVector;
 
 use super::ThermalSolver;
 use super::config::StateSpaceWiring;
@@ -21,14 +22,25 @@ impl ThermalSolver {
     /// Sets all non-outdoor inputs to zero (no solar, no internal gains),
     /// sets the outdoor temperature to `design_outdoor_c`, clears infiltration
     /// coupling, and solves for the zone sensible input that drives the zone
-    /// temperature to `target_c`.
+    /// temperature to `target_c` at steady state.
     ///
-    /// Returns the required capacity in watts (positive = heating needed),
+    /// The steady-state capacity is computed from the DC gain (steady-state gain)
+    /// of the state-space model. This avoids the overshoot that a one-step back-
+    /// solve from a cold-start state produces for high-R envelopes: the one-step
+    /// solve includes the energy to warm up thermally massive envelope nodes from
+    /// their uniform initial temperatures, inflating the apparent capacity by
+    /// multiples of the true steady-state load.
+    ///
+    /// The DC gain from the HVAC input column to the zone temperature output row
+    /// is computed by evaluating the steady-state response with zero HVAC, then
+    /// with a 1 W unit perturbation. Because the state-space model is linear,
+    /// the gain is constant and a single perturbation gives the exact slope.
+    ///
+    /// Returns the required capacity in watts (positive = heating, negative = cooling),
     /// or 0.0 if the zone is unknown or solving fails.
     ///
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
-    /// or `last_coupled_lu`). It constructs temporary vectors for the autosizing
-    /// solve and restores the original input afterward.
+    /// or `last_coupled_lu`).
     pub fn autosize_capacity(&self, zone: ZoneId, target_c: f64, design_outdoor_c: f64) -> f64 {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
@@ -57,28 +69,89 @@ impl ThermalSolver {
             }
         }
 
-        // Solve without coupling (no infiltration at design conditions).
-        let total = self
-            .model
-            .solve_for_output_input(&self.x, &u_design, target_c, output_idx, input_idx);
-
-        total
-            .map(|raw| raw - u_design[input_idx])
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    ?zone,
-                    ?e,
-                    target_c,
-                    design_outdoor_c,
-                    "autosize_capacity: solve failed, returning 0"
-                );
-                0.0
-            })
+        // ── Steady-state capacity via DC gain ─────────────────────────────
+        self.dc_gain_autosize(
+            &mut u_design,
+            target_c,
+            zone,
+            input_idx,
+            output_idx,
+            "autosize_capacity",
+        )
     }
 
     /// Access the wiring (zone ↔ state-space index mappings) for autosizing.
     pub fn wiring(&self) -> &StateSpaceWiring {
         &self.wiring
+    }
+
+    /// Compute the required HVAC capacity from the DC gain of the state-space
+    /// model, given a fully-prepared design-condition input vector `u_design`.
+    ///
+    /// Evaluates `steady_state` twice — once with the HVAC input at zero, once
+    /// with a 1 W unit perturbation — to measure the steady-state gain (K/W)
+    /// of the zone temperature output with respect to the HVAC input column.
+    /// Because the state-space model is linear, a single perturbation gives
+    /// the exact steady-state gain.
+    ///
+    /// Returns the required capacity in watts (positive = heating, negative =
+    /// cooling), or 0.0 on failure.  `caller` is used for `tracing::warn!`
+    /// context strings so the two upstream callers can be distinguished in logs.
+    fn dc_gain_autosize(
+        &self,
+        u_design: &mut DVector<f64>,
+        target_c: f64,
+        zone: ZoneId,
+        input_idx: usize,
+        output_idx: usize,
+        caller: &str,
+    ) -> f64 {
+        let x_ss_base = match self.model.steady_state(u_design) {
+            Some(x) => x,
+            None => {
+                tracing::warn!(
+                    ?zone,
+                    target_c,
+                    "{caller}: steady-state solve failed for baseline, returning 0"
+                );
+                return 0.0;
+            }
+        };
+        let y_ss_base = self.model.output(&x_ss_base, u_design);
+
+        // Perturb the HVAC input by 1 W, recompute the steady state, and
+        // measure the output difference to get the DC gain in K/W.
+        const UNIT_PERTURBATION_W: f64 = 1.0;
+        let saved = u_design[input_idx];
+        u_design[input_idx] = UNIT_PERTURBATION_W;
+        let x_ss_pert = match self.model.steady_state(u_design) {
+            Some(x) => x,
+            None => {
+                u_design[input_idx] = saved;
+                tracing::warn!(
+                    ?zone,
+                    target_c,
+                    "{caller}: steady-state solve failed for perturbation, returning 0"
+                );
+                return 0.0;
+            }
+        };
+        let y_ss_pert = self.model.output(&x_ss_pert, u_design);
+        u_design[input_idx] = saved;
+
+        let gain_k_per_w = y_ss_pert[output_idx] - y_ss_base[output_idx];
+        if gain_k_per_w.abs() <= f64::EPSILON {
+            tracing::warn!(
+                ?zone,
+                target_c,
+                gain_k_per_w,
+                "{caller}: zero steady-state gain, returning 0"
+            );
+            return 0.0;
+        }
+
+        let baseline_zone_temp = y_ss_base[output_idx];
+        (target_c - baseline_zone_temp) / gain_k_per_w
     }
 
     /// Compute the cooling HVAC capacity (W) required to maintain `target_c` at
@@ -95,7 +168,12 @@ impl ThermalSolver {
     /// clear-sky model and the Perez (1990) anisotropic tilted irradiance model
     /// for each surface.
     ///
-    /// Returns the required capacity in watts (absolute value — always positive),
+    /// As with [`autosize_capacity`], the steady-state capacity is computed
+    /// from the DC gain of the state-space model rather than a one-step back-
+    /// solve from the cold-start state. This avoids inflating the apparent
+    /// capacity due to transient wall-mass warm-up.
+    ///
+    /// Returns the required capacity in watts (positive = heating, negative = cooling),
     /// or 0.0 if the zone is unknown or solving fails.
     ///
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
@@ -212,26 +290,17 @@ impl ThermalSolver {
             u_design[info.input_index] += info.absorptance * info.area_m2 * poa_w_m2;
         }
 
-        // ── Solve without coupling (no infiltration at design conditions) ──
-        let total = self
-            .model
-            .solve_for_output_input(&self.x, &u_design, target_c, output_idx, input_idx);
-
-        total
-            .map(|raw| raw - u_design[input_idx])
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    ?zone,
-                    ?e,
-                    target_c,
-                    design_outdoor_c,
-                    solar_altitude = pos.altitude_deg,
-                    dni = dni_clear,
-                    ghi = ghi_clear,
-                    "autosize_capacity_cooling: solve failed, returning 0"
-                );
-                0.0
-            })
+        // ── Steady-state capacity via DC gain ─────────────────────────────
+        // Compute the zone temperature at steady state with zero HVAC input
+        // but all other design inputs (outdoor temp, solar gains) present.
+        self.dc_gain_autosize(
+            &mut u_design,
+            target_c,
+            zone,
+            input_idx,
+            output_idx,
+            "autosize_capacity_cooling",
+        )
     }
 
     /// Estimate the ideal HVAC capacity needed to reach an explicit target temperature.

@@ -1,0 +1,66 @@
+# opencode log for envelope-12
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs[90m [offset=1580, limit=200][0m
+[0m→ [0mRead crates/hares-envelope/src/rc_network.rs[90m [offset=890, limit=30][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs
+[0m✱ [0mGlob "crates/hares-envelope/tests/**/*.rs"[90m 11 matches[0m
+[0m✱ [0mGlob "docs/reviews/envelope/*"[90m 8 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs[90m [offset=1780, limit=100][0m
+[0m→ [0mRead crates/hares-envelope/src/rc_network.rs[90m [offset=860, limit=50][0m
+[0m→ [0mRead crates/hares-envelope/tests/thermal_pathway_physics.rs[90m [limit=100][0m
+[0m→ [0mRead crates/hares-envelope/tests/bestest_900ff_root_cause.rs[90m [limit=100][0m
+[0m→ [0mRead crates/hares-envelope/tests/bestest_900ff_root_cause.rs[90m [offset=100][0m
+[0m✱ [0mGrep "StarMesh|star.?mesh|multi.?layer|production.*grade|full.*model|simplified.*model|2R1C|2[rR]1[cC]"[90m in crates/hares-envelope/src/thermal_solver · 51 matches[0m
+[0m✱ [0mGrep "BESTEST|Case 600|Case 900|140-2017"[90m in crates/hares-envelope · 42 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs[90m [offset=3100, limit=100][0m
+[0m→ [0mRead crates/hares-envelope/src/rc_network.rs[90m [limit=60][0m
+[0m✱ [0mGrep "linearized_h_rad|simplified.*model|2R1C|full.*construction|production.*grade|multi.?layer.*wall"[90m in crates/hares-envelope · 7 matches[0m
+[0m→ [0mRead crates/hares-envelope/benches/rc_solver.rs[90m [offset=220, limit=60][0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*"[90m 100 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/Models/Envelope.py"[90m 1 match[0m
+[0m✱ [0mGrep "BESTEST|Case 600|Case 900|heatBalance|CTF|ConductionTransferFunction"[90m in vendors/EnergyPlus/src/EnergyPlus · 720 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [limit=60][0m
+[0m✱ [0mGrep "linearize|StarMesh|star.?mesh|interior.*radiation|int_rad|2R1C|simplified|R1C|R2C"[90m in vendors/OCHRE/ochre/Models · 27 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=730, limit=80][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=940, limit=80][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=86, limit=100][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=1020, limit=50][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=186, limit=80][0m
+[0m✱ [0mGrep "BESTEST|Case600|Case 600|simplif|2R1C|validation.*model|test.*model"[90m in vendors/OCHRE · 9 matches[0m
+[0m→ [0mRead docs/reviews/envelope/envelope-09-starmesh-cascading-elimination.md[90m [limit=60][0m
+[0m✱ [0mGrep "bestest_case|BESTEST.*test|Case.*600.*test|Case.*900.*test|simplified.*case|production.*case"[90m in crates/hares-envelope · 9 matches[0m
+[0m→ [0mRead crates/hares-envelope/tests/solver_energy_conservation.rs[90m [limit=60][0m
+[0m✱ [0mGrep "BESTEST|Case600|Case 600"[90m in vendors/EnergyPlus/src/EnergyPlus · 0 matches[0m
+[0m✱ [0mGrep "StarMesh.*mode.*default|production.*path|integration.*test|full.*build|assemble_building_rc.*test"[90m in crates/hares-envelope/tests · 7 matches[0m
+Now let me look at how EnergyPlus handles CTF for multi-layer and check if there's a `Construction.cc` with relevant details:
+[0m→ [0mRead crates/hares-envelope/tests/synthetic_box.rs[90m [limit=80][0m
+[0m→ [0mRead crates/hares-envelope/tests/thermal_pathway_physics.rs[90m [limit=60, offset=400][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/envelope
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/envelope/envelope-12-bestest-tolerance-widening.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/envelope/envelope-12-bestest-tolerance-widening.md`.
+
+**Key findings:**
+
+1. **High** — BESTEST Case 600/900 tests use simplified 2R1C models that completely bypass the production `assemble_building_rc` pipeline (multi-layer discretization, StarMesh, film decomposition, floating-node elimination). No test exercises the full production path with BESTEST parameters.
+
+2. **High** — The comment at `rc_network.rs:901-905` uses BESTEST's ~10% *aggregate* tolerance to justify a 10-12% *single-component* error, leaving zero error headroom for the additional error sources (discretization, wiring, framing) present in the production path.
+
+3. **Medium** — Case 900FF root-cause investigation used simplified models; structural validation (node count) but no behavioral validation (simulated temperature vs. EnergyPlus reference).
+
+4. **Medium** — Case 900 test reuses 2R1C topology with only capacitance scaling; does not validate production path's handling of distributed multi-layer thermal mass.
+
+5. **Low** — No CI regression guard that exercises the full production pipeline with BESTEST geometry/materials.

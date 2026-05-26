@@ -1,0 +1,42 @@
+# opencode log for equip-der-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/battery/ocv.rs
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Battery.py
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=1230][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/degradation.rs
+[0m✱ [0mGrep "set_ocv_table|set_u_neg_table|set_charging_curve_lut|fn reset_ocv"[90m 78 matches[0m
+[0m✱ [0mGrep "enum BatteryChemistry"[90m 1 match[0m
+Let me also check the Equipment trait interface and the BatteryChemistry enum to verify enumeration completeness.
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=255, limit=30][0m
+[0m→ [0mRead crates/hares-equipment/src/lib.rs[90m [offset=170, limit=60][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1540, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/ocv.rs[90m [offset=196, limit=10][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=2610, limit=120][0m
+Now let me check the full `UNegTable` dispatch to confirm LFP/NCA/TO mappings, and look at OCHRE's OCV comparison more carefully.
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=3700, limit=200][0m
+[0m✱ [0mGlob "vendors/OCHRE/**/degradation_curves*"[90m 1 match[0m
+[0m→ [0mRead vendors/OCHRE/ochre/defaults/Battery/degradation_curves.csv
+[0m
+[0m← [0mWrite docs/reviews/equipment-der/equip-der-02-battery-ocv-chemistry-injection.md
+Wrote file successfully.
+[0m
+Now I have all the information needed. Let me write the review report.
+Review written to `/Users/rich/source/HARES/docs/reviews/equipment-der/equip-der-02-battery-ocv-chemistry-injection.md`.
+
+**Summary:**
+
+- **6 findings**: 0 critical, 0 high, 1 medium, 3 low, 2 verification-only
+- **All four default OCV curves** (NMC, LFP, NCA, LTO) are strictly monotonic with physically correct voltage ranges. NCA fully wired.
+- **Custom table propagation verified** — `set_ocv_table()` correctly flows to terminal voltage (`compute_electrical:479`), per-timestep degradation Tafel (`accumulate:1025`), and daily degradation (`update_daily` uses `u_neg_table:1036`). No breaks found.
+- **Key concern**: `set_ocv_table()` and `set_u_neg_table()` are independent — injecting a custom OCV doesn't update the matching UNeg table. Harmless for LFP/NMC/NCA swaps (all share graphite anode) but no validation prevents an inconsistent LTO+graphite combination.
+- **Minor issues**: NMC/NMC811 naming gap, OCHRE OCV floor discrepancy (3.0V vs 2.5V at SOC=0), checkpoint doesn't persist custom table flags.

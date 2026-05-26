@@ -19,16 +19,12 @@ pub const ANNUAL_WATER_HEATER_ENERGY_REL_PCT_MAX: f64 = 0.5;
 pub const SHORT_WINDOW_TOTAL_SITE_ENERGY_REL_PCT_MAX: f64 = 25.0;
 /// Peak HVAC power relative tolerance for short-window fixtures.
 ///
-/// The step-0 ideal-capacity back-solve in
-/// `crates/hares-envelope/src/thermal_solver/stepping.rs:24-66` produces a
-/// larger initial demand than OCHRE for some envelopes. With only 60 samples
-/// in a 1-hour window the instantaneous peak is dominated by that single
-/// transient, so a loose band is the only way to gate against blow-ups while
-/// the step-0 physics issue is outstanding. Pending T-0123: once the
-/// back-solve at `crates/hares-envelope/src/thermal_solver/stepping.rs:24-66`
-/// is aligned with the reference this constant should drop to ~20 % for
-/// short-window cycling (the observed non-step-0 residual across the corpus).
-pub const PEAK_HVAC_POWER_REL_PCT_MAX: f64 = 80.0;
+/// The step-0 ideal-capacity back-solve now uses the steady-state DC gain of
+/// the state-space model (T-0123) instead of a one-step back-solve from the
+/// cold-start state. This eliminates the single-transient overshoot that
+/// previously dominated the instantaneous peak in high-R envelopes, allowing
+/// the tolerance to tighten from 80% to 20%.
+pub const PEAK_HVAC_POWER_REL_PCT_MAX: f64 = 20.0;
 pub const BATTERY_SOC_MAE_ABS_MAX: f64 = 0.01;
 pub const EQUIPMENT_MODE_CYCLE_COUNT_REL_PCT_MAX: f64 = 5.0;
 

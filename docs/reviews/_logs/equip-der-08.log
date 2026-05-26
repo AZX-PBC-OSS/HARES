@@ -1,0 +1,55 @@
+# opencode log for equip-der-08
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver
+[0m→ [0mRead crates/hares-equipment/src/ev/mod.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/EV.py
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/mod.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/departure.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/efficiency.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/preference.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/soc_gate.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/soc_target.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/time_window.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/composer.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/price.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/solar.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/v2g.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/v2h.rs
+[0m✱ [0mGrep "archetype|Archetype|lognormal|log.normal|LogNormal|Probabilistic|probabilistic"[90m 166 matches[0m
+[0m✱ [0mGrep "ScheduleSource|schedule_source|ev_driver|EvDriver"[90m 503 matches[0m
+Now let me look at the remaining driver files and search for archetype distribution definitions.
+[0m→ [0mRead crates/hares-equipment/src/ev/catalog.rs
+[0m→ [0mRead crates/hares-types/src/schedule.rs[90m [offset=170, limit=120][0m
+[0m✱ [0mGrep "fn value_at\b"[90m in crates/hares-types/src · 1 match[0m
+[0m✱ [0mGrep "EvDriverActor::new|EvDriver|ev_driver|ActorSeed::Ev"[90m in crates/hares-core/src · 40 matches[0m
+[0m✱ [0mGrep "from_vehicle_with_archetype|archetype_id|ActorSeed::Ev"[90m in crates/hares-python/src · 6 matches[0m
+Let me check the `ScheduleSource::value_at` method and the driver creation from archetypes.
+[0m→ [0mRead crates/hares-types/src/schedule.rs[90m [offset=580, limit=100][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3359, limit=80][0m
+[0m→ [0mRead crates/hares-core/src/actor_registry.rs[90m [offset=125, limit=80][0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/mod.rs[90m [offset=1517][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/equipment-der
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/equipment-der/equip-der-08-ev-driver-archetype-behavior.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/equipment-der/equip-der-08-ev-driver-archetype-behavior.md`.
+
+**Key findings summary:**
+
+| Severity | Count | Highlights |
+|----------|-------|------------|
+| High | 3 | `current_soc()` bypasses `estimated_soc` nullifying divergence model; no SOC reconciliation at plug-in; range anxiety uses static mean instead of day-specific miles |
+| Medium | 4 | Gaussian used instead of LogNormal; dead `arrival_fuzz_minutes`/`departure_fuzz_minutes` fields; range anxiety unreachable on non-driving days; hardcoded 0.9 efficiency |
+| Low | 3 | Misleading `env` parameter on stochastic draws; duration clamp boundary analysis; OCHRE comparison showing independent-vs-joint distribution differences |

@@ -1,0 +1,33 @@
+# opencode log for envelope-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-envelope/src/state_space.rs
+[0m✱ [0mGlob "vendors/OCHRE/ochre/Models/Envelope.py"[90m in . · 1 match[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*"[90m in . · 100 matches[0m
+[0m• [0mSearch OCHRE Envelope stability[90m Explore Agent[0m
+[0m• [0mSearch EnergyPlus eigenvalue stability[90m Explore Agent[0m
+[0m✱ [0mGrep "complex_eigenvalues|schur|ger?shgor|eigenvalue"[90m in crates · 93 matches[0m
+Now let me examine the vendor reference files for stability/eigenvalue handling:
+[0m✓ [0mSearch OCHRE Envelope stability[90m Explore Agent[0m
+[0m✓ [0mSearch EnergyPlus eigenvalue stability[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-envelope/src/state_space.rs[90m [offset=1640][0m
+Now let me check one more area — the test for Gershgorin bound tightness and how the singular A_c escape hatch interacts:
+[0m→ [0mRead crates/hares-envelope/tests/state_space_tests.rs[90m [offset=180, limit=80][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/envelope
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/envelope/envelope-06-gershgorin-vs-full-eigensystem.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/envelope/envelope-06-gershgorin-vs-full-eigensystem.md`.
+
+**Summary**: 5 findings (1 medium, 4 low). The key concern is that `from_continuous` rejects models based solely on Gershgorin bounds (conservative upper bound), which can cause false-positive rejections of stable multi-zone RC networks. The code already has full eigenvalue infrastructure (`eigenvalue_check`, `verify_stability`) but avoids it in the construction hot path due to nalgebra's Schur QR iteration concerns. Neither OCHRE nor EnergyPlus performs eigenvalue stability checks — both rely on physics-guaranteed stability from positive R/C parameters or Fourier-number-based heuristics.

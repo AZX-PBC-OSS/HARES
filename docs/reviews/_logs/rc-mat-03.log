@@ -1,0 +1,55 @@
+# opencode log for rc-mat-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs
+[0m• [0mRead EnergyPlus WindowManager[90m Explore Agent[0m
+[0m• [0mRead OCHRE envelope.py[90m Explore Agent[0m
+[0m✓ [0mRead OCHRE envelope.py[90m Explore Agent[0m
+[0m✓ [0mRead EnergyPlus WindowManager[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=1119][0m
+[0m✱ [0mGrep "sky|Sky|Tsky|T_sky|walton|Walton|effective.*temperature|longwave.*exterior|LWR.*exterior|horiz.*ir|sky.*temp"[90m in crates · 956 matches[0m
+[0m✱ [0mGrep "calculate_window_parameters|window_u_factor_decomposition|window_transmitted_solar_angular"[90m in crates · 37 matches[0m
+[0m✱ [0mGlob "crates/hares-physics/src/constants.rs"[90m 1 match[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [offset=100, limit=250][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=290, limit=60][0m
+[0m✱ [0mGrep "sky_temp|SkyTemp|T_sky|tsky|effective.*sky|sky.*temperature"[90m in crates/hares-envelope/src/thermal_solver · 29 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/longwave.rs[90m [limit=120][0m
+[0m✱ [0mGrep "walton|sky.*view|view_factor.*sky|F_sky|sky_view|exterior_sky"[90m in crates/hares-envelope/src · 80 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/longwave_radiation.rs[90m [limit=80][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=260, limit=100][0m
+[0m✱ [0mGrep "sky_temp_c|sky.*temp.*formula|opaque.*sky|ClarkAllen|clark.*allen|787|0\.764.*ln"[90m in crates · 410 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/longwave_radiation.rs[90m [offset=81, limit=80][0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=1428][0m
+[0m✱ [0mGrep "compute_sky_temp|fn.*sky_temp|787|ClarkAllen|Clark.*Allen"[90m in crates/hares-io/src · 105 matches[0m
+[0m✱ [0mGrep "fn compute_sky|sky_temp_c.*=|compute_sky_temp_c"[90m in crates/hares-io/src · 74 matches[0m
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [offset=540, limit=120][0m
+[0m→ [0mRead crates/hares-io/src/epw.rs[90m [limit=50, offset=660][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/envelope-rc-mat
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/envelope-rc-mat/rc-mat-03-window-material-model.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/envelope-rc-mat/rc-mat-03-window-material-model.md`.
+
+**Summary of findings:**
+
+- **0 critical, 0 high, 2 medium, 6 low** (8 total, including 3 confirmatory)
+
+Key observations:
+- IAM coefficients are correct but diverge ~0.5% from E+ source code (sourced via OCHRE, matching E+ tables)
+- Diffuse IAM uses per-curve hemispherical averages — physically better than OCHRE's constant 0.854
+- SHGC decomposition correctly implements E+ Steps 4-5 with an interpolation band that improves on OCHRE's hard threshold
+- `r_glass` is independently recomputed in `solver_builder.rs:310` rather than carried over from the U-factor decomposition — a latent risk if film resistances diverge
+- Walton effective-temperature correction for exterior window LWR is correctly applied per surface using the full Clark-Allen formula and 4-component β-split model

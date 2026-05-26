@@ -1,0 +1,59 @@
+# opencode log for envelope-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/longwave.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/config.rs
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus
+[0m✱ [0mGrep "H_OUT_NFRC"[90m 47 matches[0m
+[0m✱ [0mGrep "h_out|exterior.*film|film_exterior|exterior_lwr|exterior_radiation"[90m in vendors/OCHRE/ochre · 9 matches[0m
+[0m→ [0mRead crates/hares-physics/src/film_coefficients.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=125, limit=80][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=260, limit=50][0m
+[0m✱ [0mGrep "h_out|h_co|h_conv.*exterior|exterior.*film|exterior.*conv"[90m in vendors/EnergyPlus/src/EnergyPlus · 128 matches[0m
+Now let me examine OCHRE's `_solve_exterior_radiation` function and EnergyPlus convection handling for comparison.
+[0m✱ [0mGrep "h_out_w_m2_k"[90m in crates · 16 matches[0m
+[0m✱ [0mGrep "ExteriorConvectionModel|CalcExteriorConvCoeff|h_co|h\.c\.exterior"[90m in vendors/EnergyPlus/src/EnergyPlus · 106 matches[0m
+[0m✱ [0mGrep "outside|exterior""[90m in vendors/EnergyPlus/src/EnergyPlus/ConvectionCoefficients.cc · 19 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=710, limit=40][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/ConvectionCoefficients.cc[90m [offset=3160, limit=100][0m
+[0m✱ [0mGrep "DOE.?2|HnNatural|HfForced|h\.c\.nat|ext.*conv.*min|h_co.*min|min.*h.*ext"[90m in vendors/EnergyPlus/src/EnergyPlus/ConvectionCoefficients.cc · 20 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/ConvectionCoefficients.cc[90m [offset=6080, limit=100][0m
+[0m✱ [0mGrep "HcNatural.*1\.|Hnatural|natural.*outdoor|NatConv|ext.*nat"[90m in vendors/EnergyPlus/src/EnergyPlus/ConvectionCoefficients.cc · 9 matches[0m
+[0m✱ [0mGrep "CalcASHRAETARPNatural"[90m in vendors/EnergyPlus/src/EnergyPlus/ConvectionCoefficients.cc · 11 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/ConvectionCoefficients.cc[90m [offset=1902, limit=70][0m
+[0m✱ [0mGrep "WindAtZ.*0\.|wind.*zero|no.wind|zero.*wind|still.air|calm"[90m in vendors/EnergyPlus/src/EnergyPlus/ConvectionCoefficients.cc · 4 matches[0m
+[0m✱ [0mGrep "LowHConvLimit"[90m in vendors/EnergyPlus/src/EnergyPlus · 48 matches[0m
+[0m✱ [0mGrep "LowHConvLimit|HighHConvLimit|low.*conv.*limit"[90m in vendors/EnergyPlus/src/EnergyPlus · 2 matches[0m
+[0m✱ [0mGrep "LowHConvLimit|HighHConvLimit"[90m in vendors/EnergyPlus/src/EnergyPlus · 67 matches[0m
+Now let me check what EnergyPlus does for window exterior h_out minimum specifically, and the window LWR handling:
+[0m✱ [0mGrep "LowHConvLimit.*ext|ext.*LowHConvLimit|SurfHConvExt.*LowHConv|exterior.*lower.*limit"[90m in vendors/EnergyPlus/src/EnergyPlus/ConvectionCoefficients.cc · 0 matches[0m
+[0m✱ [0mGrep "calc_exterior|exterior.*lwr|window.*exterior.*rad|_solve_exterior"[90m in vendors/OCHRE/ochre/Models/Envelope.py · 2 matches[0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/envelope/ 2>/dev/null || echo "directory does not exist"
+envelope-01-radiation-frac-starmesh-formula.md
+envelope-02-frozen-interior-film-coefficients.md
+envelope-03-energy-balance-not-public-telemetry.md
+envelope-04-interior-lwr-diagnostic-zero.md
+envelope-06-gershgorin-vs-full-eigensystem.md
+[0m
+Now I have enough information. Let me write the review.
+[0m← [0mWrite docs/reviews/envelope/envelope-07-window-exterior-lwr-h-out-guard.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/envelope/envelope-07-window-exterior-lwr-h-out-guard.md`.
+
+**Summary of findings:**
+
+- **1 medium**: The `> 0.0` guard at `longwave.rs:86` allows division by near-zero h_out values producing enormous unphysical LWR corrections (e.g., h_out=0.01 → −57,600 W correction for a 12 m² window).
+- **3 low**: EnergyPlus has `LowHConvLimit=0.1` but only for interior convection (not applicable to this division path); OCHRE has no equivalent T_eff correction (no precedent); `H_OUT_NFRC` constant name is misleading (it's 34 W/m²·K ASHRAE peak-load, not NFRC 100).
+
+**Recommended threshold**: `1.0` W/(m²·K) — minimum natural convection at ΔT ≈ 0.4°C — rather than the 4-5 W/(m²·K) suggested in the review instructions, which would reject legitimate still-air natural convection coefficients.

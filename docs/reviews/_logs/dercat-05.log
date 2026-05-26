@@ -29,3 +29,20 @@ Now let me check for the truncation handling and the mean computation:
 (no output)
 [0m
 Now I have all the information needed. Let me create the output directory and write the review:
+[0m← [0mWrite docs/reviews/der-catalog/dercat-05-ev-driver-archetypes.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/der-catalog/dercat-05-ev-driver-archetypes.md
+200 /Users/rich/source/HARES/docs/reviews/der-catalog/dercat-05-ev-driver-archetypes.md
+[0m
+Review written to `docs/reviews/der-catalog/dercat-05-ev-driver-archetypes.md` (200 lines, 8 findings).
+
+**TL;DR of key issues found:**
+
+1. **Critical — Distribution mismatch**: Documentation claims log-normal for daily miles; all 12 archetypes use Gaussian. This produces ~0.17% negative-mile draws (clamped to 0) and misses NHTS's right-skewed VMT distribution. The `DistributionKind::LogNormal` variant exists in the type system but is never used by any preset.
+
+2. **High — Near-duplicate archetypes**: `DailyCommuterL2` and `TouOptimizerCa` are 100% behaviorally identical (same miles, departure, duration); differ only in charging strategy. `DailyCommuterL1`/`WorkplaceCharger` also near-identical. Effective unique driving profiles: ~6-7, not 12.
+
+3. **High — Arrival time not directly modeled**: Derived from departure+duration rather than sampled independently, losing the correlation structure present in NHTS data. OCHRE's `EV.py` does better by jointly sampling from empirical PDFs.
+
+4. **Medium — Simple clamping, not proper truncation**: `raw.clamp(lo, hi)` pins out-of-bounds values to boundaries without renormalization, as the code's own comments acknowledge at `schedule.rs:724-728`.

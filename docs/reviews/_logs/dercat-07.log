@@ -35,3 +35,18 @@ Now let me check the DC-to-AC ratio handling in the PV module and look for any e
 (no output)
 [0m
 Now I have all the information needed. Let me write the review file:
+[0m← [0mWrite docs/reviews/der-catalog/dercat-07-pv-config-plausibility.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/der-catalog/dercat-07-pv-config-plausibility.md`.
+
+**Summary**: 4 findings — 1 high, 1 medium, 2 low.
+
+| # | Severity | Issue |
+|---|----------|-------|
+| 1 | **high** | Tilt allows `[0, 180]` but should be `[0, 90]` — panels at tilt > 90° face the ground and produce zero generation |
+| 2 | **medium** | No DC-to-AC ratio cross-field check between `capacity_kw` and `inverter_capacity_kw` |
+| 3 | low | `noct_c` unvalidated in `validate()` |
+| 4 | low | `surface_resolution_deg` unvalidated in `validate()` |
+
+The azimuth convention (North=0°) is internally consistent between `PvConfig`, `solar_position()`, and the angle-of-incidence calculations. The existing `capacity_kw`, `azimuth_deg`, `inverter_efficiency`, `power_factor`, and `system_losses_fraction` validations are correct.

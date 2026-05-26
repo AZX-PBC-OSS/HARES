@@ -1113,6 +1113,164 @@ mod tests {
         );
     }
 
+    // ── Multi-node steady-state capacity regression (T-0123) ────────────────
+
+    /// Build a 2-node solver with a thermally massive wall node.
+    ///
+    /// Thermal network:
+    ///   zone (C=C_zone) ── UA_zo W/K ── outdoor
+    ///   zone (C=C_zone) ── UA_zw W/K ── wall (C=C_wall) ── UA_wo W/K ── outdoor
+    ///
+    /// This models a high-R envelope where the wall-mass node has much larger
+    /// capacitance than the zone-air node. The cold-start back-solve bug (prior
+    /// to T-0123) would dramatically inflate autosize capacity for this model
+    /// because it had to heat the wall mass from a uniform initial temperature.
+    fn build_2node_high_r_solver(
+        env: &EnvironmentState,
+        indoor_temp_c: f64,
+    ) -> (ThermalSolver, f64) {
+        const C_ZONE: f64 = 200_000.0;
+        const C_WALL: f64 = 2_000_000.0;
+        const UA_ZO: f64 = 20.0;
+        const UA_ZW: f64 = 100.0;
+        const UA_WO: f64 = 10.0;
+
+        // Effective steady-state UA from zone to outdoor (wall acts as an
+        // intermediate thermal path: zone → wall → outdoor).
+        // UA_eff = UA_zo + 1 / (1/UA_zw + 1/UA_wo)
+        //        = UA_zo + UA_zw × UA_wo / (UA_zw + UA_wo)
+        let ua_eff = UA_ZO + UA_ZW * UA_WO / (UA_ZW + UA_WO);
+
+        // A_c: 2×2, d/dt [T_zone; T_wall]
+        let a_c = DMatrix::from_row_slice(
+            2,
+            2,
+            &[
+                -(UA_ZO + UA_ZW) / C_ZONE,
+                UA_ZW / C_ZONE,
+                UA_ZW / C_WALL,
+                -(UA_ZW + UA_WO) / C_WALL,
+            ],
+        );
+
+        // B_c: 2×2, columns = [outdoor temp, HVAC to zone]
+        let b_c =
+            DMatrix::from_row_slice(2, 2, &[UA_ZO / C_ZONE, 1.0 / C_ZONE, UA_WO / C_WALL, 0.0]);
+
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping)
+            .expect("2-node model must be stable");
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZONE, 0)]),
+            zone_output_indices: HashMap::from([(ZONE, 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZONE, 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZONE,
+            ..ThermalSolverConfig::default()
+        };
+
+        let thermal = ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)
+            .expect("2-node ThermalSolver must construct");
+
+        (thermal, ua_eff)
+    }
+
+    #[test]
+    fn multi_node_autosize_matches_analytical_steady_state_load() {
+        // Regression test for T-0123: a 2-node model with a thermally massive
+        // wall node. The old code's cold-start one-step back-solve inflated
+        // the apparent capacity by a factor proportional to C_wall/C_zone
+        // (≈ 10× for this model). The fix computes the DC gain via two-call
+        // perturbation, which produces the analytical steady-state capacity.
+        let env = one_zone_env(20.0, -10.0);
+        let (thermal, ua_eff) = build_2node_high_r_solver(&env, 20.0);
+
+        let target_c = DEFAULT_HEATING_SETPOINT_C; // 21.1 °C
+        let design_outdoor_c = -10.0;
+
+        let capacity = thermal.autosize_capacity(ZONE, target_c, design_outdoor_c);
+
+        // Analytical steady-state load: UA_eff × (T_target − T_outdoor).
+        // For the parameters above: ~29.09 W/K × 31.1 K ≈ 904.7 W.
+        let expected = ua_eff * (target_c - design_outdoor_c);
+        let rel_error = (capacity - expected).abs() / expected.abs();
+
+        assert!(
+            rel_error < 0.02,
+            "autosize capacity {capacity:.3} W deviates by {:.3}% from analytical \
+             steady-state load {expected:.3} W (UA_eff={ua_eff:.3} W/K, \
+             ΔT={:.1} K)",
+            rel_error * 100.0,
+            target_c - design_outdoor_c,
+        );
+
+        // Sanity: the old cold-start back-solve would return capacity inflated
+        // by C_wall/C_zone + 1 ≈ 11×. The correct result should be well under 5×
+        // the analytical load.
+        assert!(
+            capacity < 5.0 * expected,
+            "capacity {capacity:.1} W is suspiciously inflated beyond 5× \
+             steady-state load {expected:.1} W — check DC gain computation"
+        );
+    }
+
+    #[test]
+    fn multi_node_autosize_delta_t_linearity() {
+        // The DC gain method is linear — doubling ΔT should double capacity
+        // (within numerical precision). This guards against the old cold-start
+        // behaviour where the transient energy to heat wall mass did NOT scale
+        // linearly with ΔT.
+        let env = one_zone_env(20.0, 0.0);
+        let (thermal, ua_eff) = build_2node_high_r_solver(&env, 20.0);
+
+        let target = 21.1;
+        let d1 = thermal.autosize_capacity(ZONE, target, 0.0); // ΔT = 21.1
+        let d2 = thermal.autosize_capacity(ZONE, target, -10.0); // ΔT = 31.1
+
+        let ratio = d2 / d1;
+        let expected_ratio = (target - (-10.0)) / (target - 0.0); // 31.1 / 21.1 ≈ 1.474
+        let ratio_error = (ratio - expected_ratio).abs() / expected_ratio;
+
+        assert!(
+            ratio_error < 0.02,
+            "capacity ratio ΔT=31.1 / ΔT=21.1 = {d2:.2} / {d1:.2} = {ratio:.4}, expected \
+             {expected_ratio:.4} (±2%): ratio_error={:.3}%",
+            ratio_error * 100.0,
+        );
+
+        // Both capacities must be positive (heating).
+        assert!(d1 > 0.0, "ΔT=21.1 capacity must be positive, got {d1:.2}");
+        assert!(d2 > 0.0, "ΔT=31.1 capacity must be positive, got {d2:.2}");
+
+        // Both should be close to the analytical UA_eff × ΔT.
+        let exp1 = ua_eff * (target - 0.0);
+        let exp2 = ua_eff * (target - (-10.0));
+        assert!(
+            (d1 - exp1).abs() / exp1 < 0.02,
+            "ΔT=21.1 deviates from analytical"
+        );
+        assert!(
+            (d2 - exp2).abs() / exp2 < 0.02,
+            "ΔT=31.1 deviates from analytical"
+        );
+    }
+
     // ── Full-pipeline integration tests (parse → resolve → autosize) ────
 
     use hares_io::defaults::DefaultsStore;

@@ -1,0 +1,71 @@
+# opencode log for envelope-10
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/initialization.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=1000, limit=60][0m
+[0m✱ [0mGrep "capacity.*zero|zero.*capacity|capacitance.*zero|zero.*capacitance|singular|pinned.*zone.*cap|no.*thermal.*mass|massless"[90m in crates/hares-envelope · 37 matches[0m
+[0m✱ [0mGrep "capacitance|c_zone_j_k|node_capacitances|capacitance_j_k"[90m in crates/hares-envelope/src/thermal_solver/initialization.rs · 8 matches[0m
+Now let me look at the vendor references and search for zero-capacitance zone handling:
+[0m→ [0mRead crates/hares-envelope/src/state_space.rs[90m [offset=230, limit=90][0m
+[0m✱ [0mGrep "initialize_state|init_state|steady.*state|envelope.*initial"[90m in vendors/EnergyPlus/src/EnergyPlus · 269 matches[0m
+[0m✱ [0mGrep "initialize|steady.*state|init_state"[90m in vendors/OCHRE/ochre/Models/Envelope.py · 5 matches[0m
+Let me look at the steady-state method on StateSpaceModel and check EnergyPlus initialization practices:
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=970, limit=40][0m
+[0m✱ [0mGrep "c_zone_j_k|zone_capacitance|zone_cap"[90m in crates/hares-envelope/src/thermal_solver · 36 matches[0m
+[0m✱ [0mGrep "c_zone|capacitance_j_k|zone.*cap|cap.*zone"[90m in crates/hares-envelope/src/thermal_solver/config.rs · 4 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/stepping.rs[90m [offset=615, limit=40][0m
+[0m✱ [0mGrep "node_capacitances|c_zone_j_k"[90m in crates/hares-envelope/src/boundary_rc.rs · 5 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=1095, limit=50][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=320, limit=30][0m
+[0m✱ [0mGrep "c_zone_j_k\.insert|zone_capacitances"[90m in crates/hares-envelope/src · 48 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=397, limit=100][0m
+[0m✱ [0mGrep "MIN_CAPACITANCE_J_K"[90m in crates/hares-envelope/src · 7 matches[0m
+[0m✱ [0mGrep "mass_multiplier"[90m in crates/hares-envelope/src · 50 matches[0m
+[0m✱ [0mGrep "fn (assemble_rc_matrix|build_a_c|build.*system|construct.*a_c)""[90m in crates/hares-envelope/src/boundary_rc.rs · 0 matches[0m
+[0m✱ [0mGrep "fn.*build_matrix|fn.*assemble.*matrix|a_c\[|diagonal.*cap|cap.*diagonal"[90m in crates/hares-envelope/src/boundary_rc.rs · 8 matches[0m
+[0m✱ [0mGrep "fn.*build_system|fn.*rc_to_state|fn.*assemble.*system|fn.*to_matrices"[90m in crates/hares-envelope/src/boundary_rc.rs · 0 matches[0m
+[0m✱ [0mGrep "1\.0.*\*.*capacit|capacit.*\*.*1\.0|\brecip\b|a_c\.row|a_c\.col|capacitances\["[90m in crates/hares-envelope/src/rc_network.rs · 1 match[0m
+[0m→ [0mRead crates/hares-envelope/src/rc_network.rs[90m [offset=140, limit=80][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=190, limit=30][0m
+[0m✱ [0mGrep "INTERIOR_MASS_MULTIPLIER"[90m in crates/hares-envelope/src · 48 matches[0m
+[0m✱ [0mGrep "InitHeatBalance|manage_heat_balance|HeatBalanceIntRadExchange|InitConductionTransferFunctions"[90m in vendors/EnergyPlus/src/EnergyPlus · 67 matches[0m
+[0m✱ [0mGrep "zero.*capacitance|singular.*matrix|zero.*volume|massless|purge.*massless"[90m in vendors/EnergyPlus/src/EnergyPlus · 11 matches[0m
+Let me look at EnergyPlus's envelope initialization approach:
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc[90m [offset=2592, limit=50][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/envelope/ 2>/dev/null || echo "Directory does not exist"
+envelope-01-radiation-frac-starmesh-formula.md
+envelope-02-frozen-interior-film-coefficients.md
+envelope-03-energy-balance-not-public-telemetry.md
+envelope-04-interior-lwr-diagnostic-zero.md
+envelope-06-gershgorin-vs-full-eigensystem.md
+envelope-07-window-exterior-lwr-h-out-guard.md
+[0m
+[0m✱ [0mGrep "fn steady_state|fn try_inverse"[90m in crates/hares-envelope/src/state_space.rs · 1 match[0m
+Now let me check the output directory exists and look at the EnergyPlus initialization more closely:
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/config.rs[90m [offset=414, limit=60][0m
+[0m✱ [0mGrep "node_capacitances|node_index"[90m in crates/hares-envelope/src/thermal_solver/config.rs · 2 matches[0m
+[0m✱ [0mGrep "zone.*air.*heat.*balance.*init|init.*zone.*air.*temp|zone.*temp.*predictor.*corrector.*init|set.*zone.*temp"[90m in vendors/EnergyPlus/src/EnergyPlus · 20 matches[0m
+Now I have enough context to write the comprehensive review. Let me also quickly verify one more thing about how EnergyPlus handles zone initialization:
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/envelope
+(no output)
+[0m
+Now let me write the comprehensive review document:
+[0m← [0mWrite docs/reviews/envelope/envelope-10-steady-state-init-zone-pinning.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/envelope/envelope-10-steady-state-init-zone-pinning.md`.
+
+**Summary**: 3 findings — 1 Medium, 2 Low.
+
+The key finding (Medium) is that `initialize_steady_state` has no defense-in-depth guard against zero-capacitance zones: while the standard construction pipeline clamps zone capacitance to ≥ 1,000 J/K, the initialization function itself never checks `wiring.c_zone_j_k` or `wiring.node_capacitances`. If a zero-capacitance zone were to reach it through a non-standard path, the singular reduced-matrix fallback silently fills all wall-mass state entries with `indoor_temp_c` — physically wrong and undiagnosed. By contrast, OCHRE's equivalent would raise `LinAlgError` via `np.linalg.inv`, failing loudly.

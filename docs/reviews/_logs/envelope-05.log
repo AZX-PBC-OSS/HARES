@@ -1,0 +1,86 @@
+# opencode log for envelope-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/ports.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/config.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs
+[0m✱ [0mGlob "vendors/OCHRE/ochre/Models/Envelope.py"[90m 1 match[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/*radiant*"[90m 0 matches[0m
+[0m• [0mExplore PortSlots and thermal ports[90m Explore Agent[0m
+Let me now examine the vendor reference files and understand how ports/thermal entries are constructed.
+[0m✓ [0mExplore PortSlots and thermal ports[90m Explore Agent[0m
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/vendors/OCHRE/ochre/Models/Envelope.py
+1465 /Users/rich/source/HARES/vendors/OCHRE/ochre/Models/Envelope.py
+[0m
+[0m✱ [0mGrep "radiant|radiative|surf.*frac|zone.*frac|area.*frac|TMULT|distribute|gain"[90m in vendors/OCHRE/ochre/Models · 146 matches[0m
+Let me read the OCHRE reference to compare against HARES.
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=1130, limit=80][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=1190, limit=40][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=420, limit=30][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [limit=50, offset=910][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [limit=70, offset=960][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [limit=60, offset=1225][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [limit=40, offset=1290][0m
+[0m✱ [0mGrep "interior_solar_zones|interior_lwr_zones"[90m in crates/hares-envelope · 99 matches[0m
+Let me check how the interior surface configurations are built per zone.
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/solar.rs[90m [limit=200, offset=100][0m
+[0m✱ [0mGrep "InteriorSolarZoneConfig \{|interior_solar_zones\.push|interior_solar_zones\s*=|InteriorSolarSurfaceInfo \{"[90m in crates/hares-envelope · 6 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs[90m [offset=5320, limit=80][0m
+[0m✱ [0mGrep "interior_solar_zones\.push|InteriorSolarZoneConfig\s*\{"[90m in crates/hares-core · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=880, limit=80][0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs[90m [limit=40, offset=5388][0m
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [limit=100, offset=1][0m
+Now I have a thorough understanding of the code. Let me examine one more critical detail - how `s.input_index` values are assigned per surface in multi-zone configurations.
+[0m
+[0m$ [0mls /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/ | head -20
+AirflowNetwork
+AirLoopHVACDOAS.cc
+AirLoopHVACDOAS.hh
+AirTerminalUnit.hh
+api
+Autosizing
+BaseboardElectric.cc
+BaseboardElectric.hh
+BaseboardRadiator.cc
+BaseboardRadiator.hh
+Boilers.cc
+Boilers.hh
+BoilerSteam.cc
+BoilerSteam.hh
+BranchInputManager.cc
+BranchInputManager.hh
+BranchNodeConnections.cc
+BranchNodeConnections.hh
+ChilledCeilingPanelSimple.cc
+ChilledCeilingPanelSimple.hh
+[0m
+[0m✱ [0mGrep "InternalHeatGains|TMULT|radiant.*distrib|HeatBalanceIntRadExchange"[90m in vendors/EnergyPlus/src/EnergyPlus · 34 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceIntRadExchange.hh[90m [limit=180, offset=48][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/InternalHeatGains.hh[90m [limit=230, offset=48][0m
+Now I have a thorough understanding of all the code paths. Let me write the review.
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/envelope
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/envelope/envelope-05-port-radiant-multi-zone-asymmetry.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/envelope/envelope-05-port-radiant-multi-zone-asymmetry.md`.
+
+**Summary of findings**: The reported concern -- that radiant ports inject their full magnitude into every zone simultaneously -- does **not** reflect the actual code behavior. `apply_port_radiant_inputs` correctly scopes each port's `radiant_gain_w` to only the port's zone, using `interior_lwr_zones` or `interior_solar_zones` lookup by `zone_id`. Energy is conserved per zone. Both OCHRE and EnergyPlus follow the same zone-scoped paradigm for radiant internal gain distribution.
+
+5 low-severity findings documented:
+1. Per-zone radiant scoping is correct (no bug)
+2. Missing multi-zone regression test
+3. Misleading doc comment on `InteriorSolarSurfaceInfo.input_index`
+4. Confirmation that all HVAC equipment sets `radiant_gain_w = 0.0`
+5. Comparison confirming HARES matches OCHRE/EnergyPlus zone-scoped approach

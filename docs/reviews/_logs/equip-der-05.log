@@ -1,0 +1,68 @@
+# opencode log for equip-der-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs
+[0m→ [0mRead crates/hares-equipment/src/pv/soiling.rs
+[0m→ [0mRead crates/hares-equipment/src/pv/lut.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/PV.py
+[0m→ [0mRead crates/hares-equipment/src/pv/shading.rs
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=1363][0m
+[0m✱ [0mGrep "soiling"[90m in vendors/OCHRE · 0 matches[0m
+Let me also check if there are additional shading-related files and the OCHRE test file for soiling patterns.
+[0m✱ [0mGrep "soiling"[90m in crates/hares-equipment/src/pv · 78 matches[0m
+[0m✱ [0mGrep "SoilingConfig"[90m in crates/hares-equipment/src/pv · 15 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/**/test*PV*"[90m 0 matches[0m
+[0m✱ [0mGrep "soiling|Soiling|dust|Dust|Kimber"[90m in vendors/OCHRE · 5 matches[0m
+Let me check how soiling config is parsed and how it's integrated into the PV initialization flow, and look at the OCHRE test files for any soiling references.
+[0m→ [0mRead crates/hares-equipment/src/pv/config.rs
+Let me check the config parsing to understand how soiling gets configured, and look at the struct definitions more carefully.
+[0m✱ [0mGrep "SoilingConfig|soiling_config"[90m in . · 28 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_equipment.rs[90m [offset=430, limit=100][0m
+[0m✱ [0mGrep "PyPvSoilingConfig|to_soiling"[90m in crates/hares-python/src · 6 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_equipment.rs[90m [offset=530, limit=100][0m
+[0m✱ [0mGrep "soiling|SoilingState|SoilingConfig"[90m in crates/hares-python/src · 13 matches[0m
+[0m✱ [0mGrep "soiling_config\s*=|soiling_state\s*="[90m in crates · 4 matches[0m
+[0m✱ [0mGrep "PvSoilingConfig|soiling"[90m in . · 7 matches[0m
+[0m✱ [0mGrep "fn step\(|apply_soiling|init_soiling|configure_soiling"[90m in crates/hares-python/src · 2 matches[0m
+[0m✱ [0mGrep "PV|soiling|PvSoiling"[90m in crates/hares-python/src/py_dwelling.rs · 23 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=400, limit=80][0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=775, limit=60][0m
+[0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [offset=1350, limit=70][0m
+[0m✱ [0mGrep "soiling_config = Some|soiling_state = Some|SoilingState::new"[90m in crates · 11 matches[0m
+[0m✱ [0mGrep "set_soiling|apply_soiling|configure_soiling"[90m in crates · 0 matches[0m
+[0m✱ [0mGrep "fn set_"[90m in crates · 79 matches[0m
+[0m✱ [0mGrep "soiling|PvConfig"[90m in crates/hares-core/src/dwelling · 0 matches[0m
+[0m✱ [0mGrep "soiling"[90m in crates/hares-core/src · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/lib.rs[90m [limit=250][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/equipment-der
+(no output)
+[0m
+Now I have all the information needed. Let me create the output directory and write the review.
+[0m← [0mWrite docs/reviews/equipment-der/equip-der-05-pv-soiling-lut-interaction.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/equipment-der/equip-der-05-pv-soiling-lut-interaction.md
+94 /Users/rich/source/HARES/docs/reviews/equipment-der/equip-der-05-pv-soiling-lut-interaction.md
+[0m
+Review written to `docs/reviews/equipment-der/equip-der-05-pv-soiling-lut-interaction.md`.
+
+**Key findings (5 total, 0 critical/high):**
+
+1. **Medium: LUT path applies soiling to AC, not DC** — At `mod.rs:227-231`, soiling multiplies the LUT's AC output post-inverter. For constant scalar efficiency it's mathematically equivalent by commutativity, but breaks down for LUTs with part-load inverter curves and produces misleading DC telemetry.
+
+2. **Medium: Soiling model never activated** — `PvConfig` has no soiling field; `init_typed()` hardcodes `soiling_config = None`; `pv_config_from_py()` ignores the Python `soiling` parameter. The only activation path is checkpoint restore—there is no initialization path.
+
+3. **Low: Linear accumulation with hard cap** — HARES uses `soiling += rate * dt` clamped at `max_soiling` instead of the exponential asymptote described in the Kimber 2006 paper.
+
+4. **Low: Sub-threshold rain never cleans** — Persistent drizzle just below the 6mm threshold produces perpetual soiling accumulation (capped at 30%).
+
+5. **Informational: OCHRE has no soiling model** — The vendor reference delegates to SAM's fixed system losses, providing no dynamic soiling comparison point.

@@ -1,0 +1,19 @@
+# opencode log for equip-hvac-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/defrost.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py[90m [offset=1147][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=1289][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=2423][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/constants.rs[90m [limit=80][0m

@@ -1,0 +1,52 @@
+# opencode log for rc-mat-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-envelope/src/rc_network.rs
+[0m→ [0mRead crates/hares-envelope/src/state_space.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Models/RCModel.py
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceSurfaceManager.cc
+[0m✱ [0mGrep "split_layer_count"[90m in . · 51 matches[0m
+[0m✱ [0mGrep "fn.*layer|fn.*node.*count|fn.*split|fn.*discret|fn.*penetration"[90m in crates/hares-envelope/src · 39 matches[0m
+[0m✱ [0mGlob "crates/hares-envelope/src/**/*.rs"[90m in . · 17 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/state_space.rs[90m [offset=1474][0m
+Now let me search for the `split_layer_count` function and explore the broader codebase for envelope construction code:
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=1, limit=200][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=200, limit=200][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=400, limit=200][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=1100, limit=200][0m
+Let me read the critical portions of `boundary_rc.rs`:
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=200, offset=1300][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=200, offset=1500][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=200, offset=1800][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=250, offset=600][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=250, offset=850][0m
+Let me read the critical section where same-zone boundaries are wired to zone air, and the `split_layer_count` tests:
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=300, offset=2700][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [limit=100, offset=2200][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/envelope-rc-mat
+(no output)
+[0m
+Now I have all the information needed. Let me write the review.
+[0m← [0mWrite docs/reviews/envelope-rc-mat/rc-mat-02-rc-network-discretization.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/envelope-rc-mat/rc-mat-02-rc-network-discretization.md`.
+
+**Key findings:**
+
+- **Finding 1 [HIGH]**: Same-zone boundary orientation is reversed in the material-layer path (`build_layered_boundary`). The cut (symmetry-plane) side connects to zone air with an incorrect exterior-film resistance, while the actual interior-facing side is dead-ended. The precomputed (OCHRE LUT) path correctly connects the interior side. The fix is guarding `boundary_rc.rs:1273` with `!params.same_zone` and removing the guard on the interior wiring at `boundary_rc.rs:1298`.
+
+- **Finding 2 [MEDIUM]**: `split_layer_count` has no upper bound. Thick walls (>1.5 m) could produce >20 nodes per construction, exceeding practical limits.
+
+- **Finding 3 [LOW]**: Minimum RC time constant is ~1 ms (R ≥ 1e-6 K/W, C ≥ 1000 J/K). ZOH exact discretization absorbs this stiffness, but the frozen-fast-mode behavior merits documentation.
+
+- **Findings 4-5**: Observability confirmed (no orphaned thermal mass); determinism confirmed (timestep-independent diurnal criterion).

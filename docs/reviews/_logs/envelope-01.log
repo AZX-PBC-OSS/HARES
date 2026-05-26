@@ -1,0 +1,64 @@
+# opencode log for envelope-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/config.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/mod.rs
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs
+[0m→ [0mRead crates/hares-envelope/src/rc_network.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/longwave.rs
+[0m✱ [0mGrep "radiation_frac"[90m in crates/hares-envelope/src · 146 matches[0m
+[0m✱ [0mGrep "radiation_frac|rad_frac|R_film.*R_total"[90m in vendors/OCHRE/ochre/Models · 23 matches[0m
+Now let me find where `radiation_frac` is actually computed in the solver_builder and look at the OCHRE reference:
+[0m✱ [0mGlob "**/solver_builder*"[90m in crates · 1 match[0m
+[0m✗ [0mGrep "radiation_frac.*=|r_film.*r_zone|r_zone_to_inner" failed[90m in crates/haares-envelope/src[0m
+[91m[1mError: [0mNo such file or directory: '/Users/rich/source/HARES/crates/haares-envelope'
+[0m✱ [0mGrep "radiation_frac.*=|r_zone_to_inner"[90m in crates/hares-core/src/dwelling · 14 matches[0m
+[0m✱ [0mGrep "radiation_frac|r_zone_to_inner"[90m in crates/hares-envelope/src · 173 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=240, limit=130][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=780, limit=130][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=60, limit=100][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=160, limit=80][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=245, limit=70][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=136, limit=120][0m
+[0m✱ [0mGrep "res_material|BoundarySurface"[90m in vendors/OCHRE/ochre/Models/Envelope.py · 14 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=320, limit=120][0m
+[0m✱ [0mGrep "r_inner_half|r_outer_half|split_layer|build_layered_boundary|build_precomputed_boundary"[90m in crates/hares-envelope/src · 58 matches[0m
+Let me look deeper at the RC graph construction and how `r_inner_half` is computed:
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=1196, limit=160][0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=1356, limit=150][0m
+[0m✱ [0mGrep "def create_rc_data"[90m in vendors/OCHRE · 1 match[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/envelope.py[90m [offset=294, limit=80][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=370, limit=30][0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/stepping.rs[90m [offset=430, limit=30][0m
+Now let me check how `r_zone_to_inner` is used for the boundary diagnostics and compare window radiation_frac computation:
+[0m✱ [0mGrep "apply_boundary_diagnostics|boundary_diagnostic"[90m in crates/hares-envelope/src/thermal_solver/stepping.rs · 2 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/stepping.rs[90m [offset=510, limit=80][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus
+Let me check the EnergyPlus reference for comparison:
+[0m✱ [0mGrep "InsideSurfTemp|TH\(1|CTF.*Inside|CalcHeatBalanceInsideSurf"[90m in vendors/EnergyPlus/src/EnergyPlus · 83 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/HeatBalanceSurfaceManager.cc[90m [offset=8010, limit=80][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/envelope
+(no output)
+[0m
+Now I have all the information I need. Let me write the review:
+[0m← [0mWrite docs/reviews/envelope/envelope-01-radiation-frac-starmesh-formula.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/envelope/envelope-01-radiation-frac-starmesh-formula.md`.
+
+**Key findings summary:**
+
+- **0 critical, 0 high, 1 medium, 5 low** findings
+- The `radiation_frac = R_film / (R_film + R_inner_half)` formula is **mathematically correct** as a local voltage divider for the floating interior surface node, independent of multi-layer complexity
+- The formula **matches OCHRE identically** — both use half-resistances of the innermost sub-layer
+- The one **medium-severity finding** (Finding 3): in StarMesh mode, the Y-Δ elimination redistributes conductances, so the diagnostic surface temperature reflects the pre-elimination surface node rather than the post-elimination network. This affects diagnostics only, not the A-matrix state evolution or heat balance.
+- Compared to EnergyPlus CTF, HARES's RC approach introduces a small effective lag from filtering through capacitor nodes, expected ≤2°C for typical residential walls. This is an architectural choice consistent with OCHRE.
