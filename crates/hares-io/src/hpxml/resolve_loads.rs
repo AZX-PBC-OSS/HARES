@@ -104,7 +104,14 @@ pub(super) fn resolve_scheduled_loads(
                     "Dishwasher" => Some(467.0),
                     "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
                     "Freezer" => Some(319.8),
-                    _ => None,
+                    other => {
+                        tracing::warn!(
+                            appliance_tag = other,
+                            "No default RatedAnnualkWh for appliance type; energy will be zero if \
+                             HPXML omits the element"
+                        );
+                        None
+                    }
                 };
                 let rated_kwh = node
                     .child("extension")
@@ -355,7 +362,13 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("target_rh".to_string(), json!(target_rh));
                         }
                     }
-                    _ => {}
+                    other => {
+                        tracing::warn!(
+                            appliance_tag = other,
+                            "No appliance-specific parameter extraction for this tag; \
+                             only generic fields will be parsed"
+                        );
+                    }
                 }
 
                 for (k, v) in parse_schedule_extension_params(node, "") {
@@ -437,7 +450,12 @@ pub(super) fn resolve_scheduled_loads(
                 "lightemittingdiode" => entry.led += frac,
                 "compactfluorescent" => entry.compact_fluorescent += frac,
                 "fluorescenttube" => entry.fluorescent_tube += frac,
-                _ => {}
+                other => {
+                    tracing::warn!(
+                        lighting_type = other,
+                        "Unrecognized lighting type; light fraction will not be accounted"
+                    );
+                }
             }
             if let Some(kwh) = child_load_kwh(group) {
                 entry.explicit_kwh = Some(kwh);
@@ -451,14 +469,26 @@ pub(super) fn resolve_scheduled_loads(
                 "exterior" => "Exterior Lighting",
                 "garage" => "Garage Lighting",
                 "basement" => "Basement Lighting",
-                _ => "Indoor Lighting",
+                other => {
+                    tracing::warn!(
+                        lighting_location = other,
+                        "Unrecognized lighting location; assuming Indoor Lighting"
+                    );
+                    "Indoor Lighting"
+                }
             }
             .to_string();
 
             let area_ft2 = match location.as_str() {
                 "garage" => garage_area_ft2,
                 "basement" => foundation_area_ft2,
-                _ => indoor_area_ft2,
+                other => {
+                    tracing::warn!(
+                        lighting_location = other,
+                        "Unrecognized lighting location; using indoor floor area"
+                    );
+                    indoor_area_ft2
+                }
             };
             let usage_multiplier = ext
                 .and_then(|n| child_f64(n, &format!("{}UsageMultiplier", capitalize(&location))))
@@ -579,7 +609,13 @@ pub(super) fn resolve_scheduled_loads(
                     }
                     continue;
                 }
-                _ => ("MELs", FuelType::Electric),
+                other => {
+                    tracing::warn!(
+                        plug_load_type = other,
+                        "Unrecognized PlugLoadType; treating as miscellaneous electric load (MELs)"
+                    );
+                    ("MELs", FuelType::Electric)
+                }
             };
 
             let mut params = Map::new();
@@ -600,7 +636,13 @@ pub(super) fn resolve_scheduled_loads(
                 "grill" => "Gas Grill",
                 "fireplace" => "Gas Fireplace",
                 "lighting" => "Gas Lighting",
-                _ => "Other",
+                other => {
+                    tracing::warn!(
+                        fuel_load_type = other,
+                        "Unrecognized FuelLoadType; defaulting to 'Other'"
+                    );
+                    "Other"
+                }
             }
             .to_string();
 
@@ -706,7 +748,13 @@ pub(super) fn resolve_ventilation(
                 "energy recovery ventilator" | "heat recovery ventilator" | "balanced" => 1.0,
                 "exhaust only" | "supply only" => 0.35,
                 "whole house fan" => 0.1,
-                _ => 0.35,
+                other => {
+                    tracing::warn!(
+                        fan_type = other,
+                        "Unrecognized FanType; defaulting to 0.35 W/CFM (exhaust/supply default)"
+                    );
+                    0.35
+                }
             };
             Some(cfm * w_per_cfm)
         } else {
@@ -720,7 +768,13 @@ pub(super) fn resolve_ventilation(
             "exhaust only" | "supply only" | "whole house fan" => "exhaust_fan",
             "energy recovery ventilator" => "erv",
             "heat recovery ventilator" | "balanced" => "hrv",
-            _ => "hrv",
+            other => {
+                tracing::warn!(
+                    fan_type = other,
+                    "Unrecognized FanType; defaulting ventilation type to 'hrv'"
+                );
+                "hrv"
+            }
         };
         let sensible_re = child_f64(fan, "SensibleRecoveryEfficiency").unwrap_or(0.0);
         let total_re = child_f64(fan, "TotalRecoveryEfficiency").unwrap_or(0.0);
@@ -794,7 +848,14 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
         | "Hot Tub Pump" | "Spa Pump" | "Spa Heater" => Some((0.00, 0.00)),
         // OCHRE: gas fireplace → (0.50, 0.10).
         "Gas Fireplace" => Some((0.50, 0.10)),
-        _ => None,
+        other => {
+            tracing::warn!(
+                equipment_name = other,
+                fuel_type = ?fuel_type,
+                "No default gain fractions for equipment; gains may be zero"
+            );
+            None
+        }
     }
 }
 
@@ -823,7 +884,14 @@ fn derive_lighting_annual_kwh(location: &str, area_ft2: f64, fractions: &Lightin
         }
         "exterior" => (100.0 + 0.05 * area_ft2) * adj,
         "garage" => 100.0 * adj,
-        _ => (0.9 / 0.925 * (455.0 + 0.8 * area_ft2) * adj) + (0.1 * (455.0 + 0.8 * area_ft2)),
+        other => {
+            tracing::warn!(
+                lighting_location = other,
+                "Unrecognized lighting location in derive_lighting_annual_kwh; \
+                 falling back to interior formula"
+            );
+            (0.9 / 0.925 * (455.0 + 0.8 * area_ft2) * adj) + (0.1 * (455.0 + 0.8 * area_ft2))
+        }
     }
 }
 

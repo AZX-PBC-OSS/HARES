@@ -154,7 +154,7 @@ Improvement tickets go in: {TICKETS_DIR}/T-XXXX/ticket.md starting from 1000. Sa
 
 Set the `complexity` field based on the finding's scope:
   simple — one-function fix, one-line change, or documentation-only
-  medium — cross-function change, moderate refactor, or new test
+  moderate — cross-function change, moderate refactor, or new test
   complex — cross-crate change, architectural refactor, or new feature
 
 Create the directory `T-XXXX/` first, then write `ticket.md` inside it. Use this EXACT structure:

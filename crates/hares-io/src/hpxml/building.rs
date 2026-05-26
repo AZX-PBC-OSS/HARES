@@ -530,7 +530,13 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                     }
                 }
                 "SlabOnGrade" | "Ambient" | "AboveApartment" => None,
-                _ => None,
+                other => {
+                    tracing::warn!(
+                        foundation_type = other,
+                        "Unrecognized FoundationType child tag; ignoring foundation"
+                    );
+                    None
+                }
             }
         });
     let foundation_floor_area_m2 = details
@@ -738,12 +744,17 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 };
                 let furniture_area = area * fraction;
                 if furniture_area > 0.0 {
-                    let lut_name = match zone_type {
-                        ZoneType::Conditioned => "Indoor Furniture",
-                        ZoneType::Foundation => "Foundation Furniture",
-                        ZoneType::Garage => "Garage Furniture",
-                        _ => "Indoor Furniture",
-                    };
+            let lut_name = match zone_type {
+                ZoneType::Conditioned => "Indoor Furniture",
+                ZoneType::Foundation => "Foundation Furniture",
+                ZoneType::Garage => "Garage Furniture",
+                // Unreachable: the FURNITURE_FRACTIONS loop above iterates
+                // exactly Conditioned, Foundation, and Garage — no other
+                // ZoneType variants can appear here.
+                _ => unreachable!(
+                    "FURNITURE_FRACTIONS iterated {zone_type:?} which has no furniture LUT entry"
+                ),
+            };
                     boundaries.push(Boundary {
                         id: format!("{}_furniture", zone_key(zone_type)),
                         boundary_type: BoundaryType::Wall,
@@ -1132,7 +1143,12 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
         BoundaryType::Floor => Some(0.0),
         BoundaryType::Slab => Some(180.0),
         BoundaryType::Door => Some(90.0),
-        _ => None,
+        BoundaryType::Window => Some(90.0),
+        BoundaryType::Other(_) => {
+            tracing::warn!("Unknown boundary type; no tilt inferred");
+            None
+        }
+    };
     };
 
     let interior_zone = parse_zone_ref(node.child("InteriorAdjacentTo"));
@@ -1162,7 +1178,13 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
             match n.text.trim().to_ascii_lowercase().as_str() {
                 "floor" => Some(FloorOrCeiling::Floor),
                 "ceiling" => Some(FloorOrCeiling::Ceiling),
-                _ => None,
+                other => {
+                    tracing::warn!(
+                        floor_or_ceiling = other,
+                        "Unrecognized FloorOrCeiling value; defaulting to None"
+                    );
+                    None
+                }
             }
         }),
         perimeter_m: None,
@@ -1293,7 +1315,15 @@ fn parse_framing_factor(node: &XmlNode, construction_type: Option<&str>) -> Opti
     // the silent use of wood-based parallel-path correction.
     match construction_type {
         Some("WoodStud") => Some(0.25),
-        _ => None,
+        Some(other) => {
+            tracing::warn!(
+                construction_type = other,
+                "Unrecognized construction type; no framing fraction applied \
+                 (SteelFrame requires explicit StudSpacing/StudWidth for zone method)"
+            );
+            None
+        }
+        None => None,
     }
 }
 
@@ -1554,7 +1584,7 @@ fn extract_construction_metadata(
                 .map(|child| child.name.clone());
             (construction_type, None)
         }
-        _ => (None, None),
+        BoundaryType::Other(_) => (None, None),
     }
 }
 
@@ -1629,7 +1659,15 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
             match (value_node, unit_node.as_deref()) {
                 (Some(v), Some("achnatural")) => (Some(v), None),
                 (Some(v), Some("sla")) => (None, Some(v)),
-                _ => (None, None),
+                (_, other) => {
+                    if let Some(u) = other {
+                        tracing::warn!(
+                            ventilation_unit = u,
+                            "Unrecognized ventilation rate unit; expected 'ACHnatural' or 'SLA'"
+                        );
+                    }
+                    (None, None)
+                }
             }
         }
     }
@@ -1897,7 +1935,13 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
             .map(|n| match normalize_ascii(&n.text).as_str() {
                 "supply" => DuctType::Supply,
                 "return" => DuctType::Return,
-                _ => DuctType::Unknown,
+                other => {
+                    tracing::warn!(
+                        duct_type = other,
+                        "Unrecognized duct type; defaulting to Unknown"
+                    );
+                    DuctType::Unknown
+                }
             })
             .unwrap_or(DuctType::Unknown);
 

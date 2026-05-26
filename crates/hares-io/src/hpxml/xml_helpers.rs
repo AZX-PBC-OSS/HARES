@@ -72,7 +72,15 @@ pub(crate) fn child_energy_kwh(node: &XmlNode, child_name: &str) -> Option<f64> 
     match units.as_str() {
         "kwh" | "kwh/year" | "kwh/yr" => Some(value),
         "wh" | "wh/year" | "wh/yr" => Some(value / 1000.0),
-        _ => None,
+        other => {
+            tracing::warn!(
+                units = other,
+                value,
+                field = child_name,
+                "Unrecognized energy unit; cannot convert child energy to kWh"
+            );
+            None
+        }
     }
 }
 
@@ -82,7 +90,14 @@ pub(crate) fn child_load_kwh(node: &XmlNode) -> Option<f64> {
     let units = child_text(load, "Units")?.to_ascii_lowercase();
     match units.as_str() {
         "kwh/year" | "kwh/yr" | "kwh" => Some(value),
-        _ => None,
+        other => {
+            tracing::warn!(
+                units = other,
+                value,
+                "Unrecognized load energy unit; cannot convert to kWh"
+            );
+            None
+        }
     }
 }
 
@@ -92,7 +107,14 @@ pub(crate) fn child_load_therms(node: &XmlNode) -> Option<f64> {
     let units = child_text(load, "Units")?.to_ascii_lowercase();
     match units.as_str() {
         "therm/year" | "therm/yr" | "therm" => Some(value),
-        _ => None,
+        other => {
+            tracing::warn!(
+                units = other,
+                value,
+                "Unrecognized load energy unit; cannot convert to therms"
+            );
+            None
+        }
     }
 }
 

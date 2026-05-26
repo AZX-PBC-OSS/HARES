@@ -258,11 +258,13 @@ pub(super) fn resolve_water_heaters(
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
-            _ => {
-                return Err(super::HpxmlError::Parse(format!(
-                    "unsupported canonical water heater name: {name}"
-                )));
-            }
+            // Unreachable: canonical_water_heater_name (called at the top of
+            // this loop) generates exactly the five names matched above and
+            // rejects all others with Err, so execution never reaches this arm.
+            _ => unreachable!(
+                "canonical_water_heater_name validated '{}' but match did not cover it",
+                name,
+            ),
         };
 
         specs.push(spec);
@@ -497,7 +499,15 @@ fn wh_category(wh_type: &str, fuel: FuelType) -> WhCategory {
         ("heat pump water heater", FuelType::Electric) => WhCategory::HeatPump,
         ("instantaneous water heater", _) => WhCategory::Instantaneous,
         (_, FuelType::Electric) => WhCategory::StorageElectric,
-        _ => WhCategory::StorageGas,
+        (other_type, other_fuel) => {
+            tracing::warn!(
+                wh_type = other_type,
+                fuel = ?other_fuel,
+                "Unrecognized water heater type/fuel combination; \
+                 defaulting UA category to StorageGas"
+            );
+            WhCategory::StorageGas
+        }
     }
 }
 
