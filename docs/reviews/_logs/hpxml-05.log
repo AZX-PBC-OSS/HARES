@@ -1,0 +1,38 @@
+# opencode log for hpxml-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_loads.rs
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py
+[0m✱ [0mGrep "parse_zone_name|is_conditioned|refrigerator.*location|fridge.*location|ZoneType"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 9 matches[0m
+[0m✱ [0mGrep "ZoneType|zone_type|Conditioned|Foundation|Garage|Attic|Outdoor"[90m in crates/hares-io/src/hpxml/building.rs · 396 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=1390, limit=50][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=30, limit=20][0m
+[0m✱ [0mGrep "parse_zone_name|location.*zone|Location.*ZoneType|location_to_zone|map.*location"[90m in crates/hares-io/src/hpxml · 4 matches[0m
+[0m✱ [0mGrep "conditioned space|Conditioned.*space|conditioned.*space"[90m in crates/hares-io/src/hpxml/building.rs · 13 matches[0m
+Let me look at how HARES maps HPXML location strings to zone types elsewhere in the codebase:
+[0m✱ [0mGrep "InteriorAdjacentTo|ExteriorAdjacentTo|infer_interior_zone|resolve_zone_from"[90m in crates/hares-io/src/hpxml/building.rs · 57 matches[0m
+[0m✱ [0mGrep "fn parse_zone_ref"[90m in crates/hares-io/src/hpxml/building.rs · 1 match[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=2342, limit=80][0m
+[0m✱ [0mGrep "fn normalize_ascii"[90m in crates/hares-io/src/hpxml/building.rs · 0 matches[0m
+[0m✱ [0mGrep "fn normalize_ascii"[90m in crates/hares-io/src/hpxml · 0 matches[0m
+[0m✱ [0mGrep "normalize_ascii"[90m in crates/hares-io/src/hpxml · 21 matches[0m
+[0m✱ [0mGrep "foundation.*condition|conditioned.*basement|finished.*basement|Foundation.*Type"[90m in crates/hares-io/src/hpxml/building.rs · 28 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/hpxml
+(no output)
+[0m
+Now let me create the output directory and write the review:
+[0m← [0mWrite docs/reviews/hpxml/hpxml-05-refrigerator-location-string-match.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/hpxml/hpxml-05-refrigerator-location-string-match.md`.
+
+Summary: 3 findings — 1 high, 1 medium, 1 low. The core issue is that `is_conditioned_location()` at `resolve_loads.rs:754` uses exact string matching on only 3 strings, while the codebase already has `parse_zone_label()` in `building.rs:2347` that does proper keyword-based classification. This causes refrigerators in conditions like "basement - conditioned" to silently get zeroed gains.

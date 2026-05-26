@@ -40,3 +40,9 @@ Let me now verify the full path of how zero leakage propagates through the DSE c
 (no output)
 [0m
 Now I have all the information needed. Let me write the findings.
+[0m← [0mWrite docs/reviews/hpxml/hpxml-01-duct-leakage-cfm25-silent-skip.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/hpxml/hpxml-01-duct-leakage-cfm25-silent-skip.md`.
+
+**Key finding**: CFM25 duct leakage is silently skipped at `building.rs:1840-1848` — the `tracing::warn` log is invisible to most users, and downstream `unwrap_or(0.0)` at `resolve_hvac.rs:191` produces zero duct loss in DSE. The comment correctly notes that conversion requires fan flow, which is available later (line 381) but never used. OCHRE doesn't convert CFM25 either, but fails loudly with an `assert` instead of silently producing incorrect results.

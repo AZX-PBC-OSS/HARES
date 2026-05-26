@@ -39,3 +39,33 @@ Now let me look deeper into the telemetry system, dwelling step output, and any 
 [0m✱ [0mGrep "fn run_timestep|fn step_core|run_until|is_finished|errors_only"[90m in crates/hares-core/src/dwelling/mod.rs · 1 match[0m
 [0m→ [0mRead crates/hares-types/src/environment.rs[90m [limit=20, offset=27][0m
 [0m→ [0mRead crates/hares-python/src/py_dwelling.rs[90m [limit=50, offset=1310][0m
+[0m→ [0mRead python/ochre_next/rl/gym_env.py[90m [offset=155, limit=10][0m
+[0m→ [0mRead python/ochre_next/rl/vec_env.py[90m [limit=50, offset=126][0m
+[0m
+[0m← [0mWrite docs/reviews/fleet-python/fleet-python-07-rl-gym-env-completeness.md
+Wrote file successfully.
+[0m
+[0m→ [0mRead docs/reviews/fleet-python/fleet-python-07-rl-gym-env-completeness.md
+The review is complete. Here's a summary of the 12 findings:
+
+**Critical (2):**
+1. Observation space bounds are `-inf` to `+inf` with no normalization/scaling
+2. Rust `batch_step` reward hardcodes `-net_electric_power_kw`, bypassing the user's `reward_fn` in `VecDwellingGymEnv` (Python fallback path correctly uses it)
+
+**High (3):**
+3. 6 of 14 required telemetry channels are missing from the observation interface (indoor humidity, occupancy, time sin/cos, day-of-week, price signal, equipment mode flags, PV generation, EV connected status)
+4. `outdoor_rh` field contains absolute humidity ratio (kg/kg), not relative humidity — misleading label
+5. No episode termination detection — agent can step past simulation end silently
+
+**Medium (4):**
+6. No action clipping applied before simulation ingestion
+7. `RewardContext` lacks fields for comfort/demand-charge penalty computation
+8. `VecDwellingGymEnv` doesn't implement standard Gymnasium `step_async`/`step_wait`
+9. `time_res_s` hardcoded to 60 in `VecDwellingGymEnv` but configurable in `DwellingGymEnv`
+
+**Low (3):**
+10. Rust and Python observation parsers have minor asymmetries (`reactive_power_kvar`, `outdoor_temp_c` suffix)
+11. Setpoint telemetry falls back to current temperature when no equipment in zone
+12. Observation error fallback produces wrong-dimension vector (3 elements vs user's N)
+
+Output written to `docs/reviews/fleet-python/fleet-python-07-rl-gym-env-completeness.md`.

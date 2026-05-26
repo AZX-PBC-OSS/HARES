@@ -9,3 +9,53 @@
 [0m
 > build · deepseek-v4-pro
 [0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=750, limit=60][0m
+[0m✱ [0mGrep "ceiling.height|ceil_ht|ceiling_height|CEILING_HEIGHT|2\.5"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 8 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=1, limit=50][0m
+[0m✱ [0mGrep "ceiling_height|conditioned_volume|conditioned_floor_area|conditioned_building_volume"[90m in crates/hares-io/src/hpxml/building.rs · 21 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [offset=240, limit=100][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [limit=50, offset=450][0m
+[0m✱ [0mGrep "default_height_m|ceiling_height_m"[90m in crates/hares-io/src/hpxml/building.rs · 9 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [limit=100, offset=850][0m
+[0m✱ [0mGrep "default_height_m|infiltration_height"[90m in crates/hares-io/src/hpxml/building.rs · 6 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=30, offset=248][0m
+[0m✱ [0mGrep "infiltration_height|infiltration.*height|InfiltrationHeight"[90m in crates/hares-io/src/hpxml/building.rs · 6 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [limit=40, offset=235][0m
+[0m✱ [0mGrep "conditioned_volume|conditioned_floor_area|ConditionedBuildingVolume|ConditionedFloorArea"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 6 matches[0m
+[0m✱ [0mGrep "AverageCeilingHeight"[90m in crates/hares-io/src/hpxml/building.rs · 0 matches[0m
+[0m✱ [0mGrep "AverageCeilingHeight"[90m in crates/hares-io/src/hpxml · 0 matches[0m
+[0m✱ [0mGrep "ceiling_height|Ceiling Height"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 7 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=100, offset=520][0m
+[0m✱ [0mGrep "parse_hpxml_zones|parse_hpxml_infiltration"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 3 matches[0m
+[0m✱ [0mGrep "infiltration|ach50|ACH|cfm50|CFM"[90m in vendors/OCHRE/ochre/utils/hpxml.py · 25 matches[0m
+[0m✱ [0mGrep "tracing::warn|tracing::error|HpxmlError"[90m in crates/hares-io/src/hpxml/building.rs · 49 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py[90m [limit=30, offset=502][0m
+[0m✱ [0mGrep "infiltration_ach_nat|infiltration_ach50|ach_nat_to_ach50|NATURAL_TO_50PA"[90m in crates/hares-io/src/hpxml/building.rs · 30 matches[0m
+[0m✱ [0mGrep "calculate_ashrae_infiltration_params"[90m in vendors/OCHRE/ochre · 2 matches[0m
+[0m✱ [0mGrep "conditioned_volume_m3.*default_height|volume.*ceil|ceil.*volume"[90m in crates/hares-io/src/hpxml/building.rs · 6 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/envelope.py[90m [limit=60, offset=488][0m
+[0m✱ [0mGrep "find_descendant.*AverageCeilingHeight"[90m in crates/hares-io/src/hpxml/building.rs · 0 matches[0m
+[0m✱ [0mGrep "AverageCeiling"[90m in crates/hares-io/src/hpxml · 0 matches[0m
+[0m✱ [0mGrep "AverageCeiling"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "ceiling_height_m"[90m in crates · 29 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [limit=80, offset=945][0m
+[0m→ [0mRead crates/hares-io/tests/hpxml_defaults_regressions.rs[90m [limit=40, offset=60][0m
+[0m✱ [0mGrep "ExtWallArea|FloorArea|ConditionedFloorArea"[90m in crates/hares-io/src/hpxml/building.rs · 39 matches[0m
+[0m✱ [0mGrep "AverageCeilingHeight|ExtWallArea"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "ExtWallArea"[90m in crates/hares-io/src/hpxml/building.rs · 0 matches[0m
+[0m✱ [0mGlob "docs/reviews/**/*.md"[90m in . · 100 matches[0m
+[0m✱ [0mGlob "docs/**/*.md"[90m in . · 100 matches[0m
+[0m→ [0mRead docs/reviews/hpxml/hpxml-01-duct-leakage-cfm25-silent-skip.md[90m [limit=50, offset=1][0m
+[0m✱ [0mGrep "AverageCeilingHeight|ExtWallArea"[90m in crates/hares-io/src/hpxml/building.rs · 0 matches[0m
+Now I have all the context needed. Let me write the review.
+[0m
+[0m← [0mWrite docs/reviews/hpxml/hpxml-03-ceiling-height-fallback.md
+Wrote file successfully.
+[0m
+Review written to `/Users/rich/source/HARES/docs/reviews/hpxml/hpxml-03-ceiling-height-fallback.md`.
+
+**Summary of findings:**
+
+- **1 High**: 2.5m ceiling height fallback with only `tracing::warn` — propagates silently into zone volumes, building height, and AIM-2 infiltration coefficients. OCHRE treats `ConditionedFloorArea`/`ConditionedBuildingVolume` as mandatory (KeyError on missing keys).
+- **1 Medium**: `AverageCeilingHeight` (a first-class HPXML element) is not parsed at all — would provide an alternative data source for cases where volume is absent.
+- **1 Low**: The 2.5m default is duplicated in `building.rs:790` and `solver_builder.rs:955` across crate boundaries, risking divergence.

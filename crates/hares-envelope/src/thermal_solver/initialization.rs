@@ -80,6 +80,26 @@ pub(crate) fn initialize_steady_state(
         }
     }
 
+    // Verify all pinned zone indices are within the state dimension.
+    // After the pre-check above guarantees every zone is registered in
+    // zone_state_indices, an index that exceeds the state dimension represents
+    // internally inconsistent wiring — a zone pointing beyond the state vector.
+    // This must be surfaced as an error rather than silently dropping the zone,
+    // which would cause the initial state to be computed without the pinned zone
+    // temperature and produce physically wrong initial conditions.
+    for zone_id in pinned_zones {
+        // SAFETY: the pre-check above guarantees every pinned_zone is
+        // present in zone_state_indices.
+        let idx = wiring.zone_state_indices[zone_id];
+        if idx >= n {
+            return Err(ThermalSolverError::ZoneStateIndexOutOfBounds {
+                zone_id: *zone_id,
+                index: idx,
+                state_dim: n,
+            });
+        }
+    }
+
     // Collect zone state indices to fix as boundary conditions.
     // Only conditioned zones listed in `pinned_zones` are pinned; unconditioned
     // zones (attic, garage, foundation) are left free so their steady-state
@@ -87,23 +107,20 @@ pub(crate) fn initialize_steady_state(
     // Sort descending so we can remove rows/cols without invalidating earlier indices.
     let mut zone_fixes: Vec<(usize, f64)> = pinned_zones
         .iter()
-        .filter_map(|zone_id| {
-            // SAFETY: the pre-check above guarantees every pinned_zone is
-            // present in zone_state_indices.
+        .map(|zone_id| {
+            // SAFETY: pre-checks above guarantee every pinned zone is present
+            // in zone_state_indices and its index is within bounds.
             let idx = *wiring
                 .zone_state_indices
                 .get(zone_id)
                 .expect("verified above");
-            if idx >= n {
-                return None;
-            }
             let t = env
                 .zones
                 .iter()
                 .find(|z| z.id == *zone_id)
                 .map(|z| z.temperature_c)
                 .unwrap_or(indoor_temp_c);
-            Some((idx, t))
+            (idx, t)
         })
         .collect();
     zone_fixes.sort_by_key(|b| std::cmp::Reverse(b.0));
@@ -454,6 +471,60 @@ mod tests {
                 "state {i}: expected fallback to {indoor}, got {}",
                 x[i]
             );
+        }
+    }
+
+    #[test]
+    fn zone_state_index_exceeds_state_dimension_errors() {
+        // 1-state model; wiring registers ZoneId(1) at index 5, which is >= n=1.
+        // This represents internally inconsistent wiring — a registered zone
+        // with an index pointing beyond the state vector.
+        let a_d = DMatrix::from_element(1, 1, 0.8);
+        let b_d = DMatrix::from_element(1, 1, 0.2);
+        let c = DMatrix::from_element(1, 1, 1.0);
+        let d = DMatrix::zeros(1, 1);
+
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
+
+        let mut zone_state_indices = HashMap::new();
+        zone_state_indices.insert(ZoneId(1), 5_usize);
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices,
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::new(),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+
+        let indoor = 21.0;
+        let env = minimal_env(indoor, -5.0);
+
+        let result = initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]);
+
+        match result {
+            Err(ThermalSolverError::ZoneStateIndexOutOfBounds {
+                zone_id,
+                index,
+                state_dim,
+            }) => {
+                assert_eq!(zone_id, ZoneId(1));
+                assert_eq!(index, 5);
+                assert_eq!(state_dim, 1);
+            }
+            Ok(x) => panic!(
+                "expected Err(ZoneStateIndexOutOfBounds), but got Ok({:?})",
+                x
+            ),
+            Err(other) => {
+                panic!("expected Err(ZoneStateIndexOutOfBounds) but got different error: {other:?}")
+            }
         }
     }
 }

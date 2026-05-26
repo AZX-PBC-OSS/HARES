@@ -1,0 +1,51 @@
+# opencode log for hpxml-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=5153, limit=100][0m
+[0m→ [0mRead crates/hares-physics/src/infiltration.rs
+[0m→ [0mRead vendors/OCHRE/ochre/utils/hpxml.py
+[0m✱ [0mGrep "cfm_natural|cfmnatural|CFMnatural|ach_nat_to_ach50|achnatural|ACHnatural|natural.*convert|convert.*natural"[90m in crates/hares-io/src/hpxml/building.rs · 59 matches[0m
+[0m✱ [0mGrep "CFM|cfm_natural|cfm50|ACH50|ach50|ach_nat|infiltration.*convert|convert.*infiltration"[90m in vendors/OCHRE/ochre/utils · 12 matches[0m
+[0m✱ [0mGrep "infiltration.*leakage|AirLeakage|BuildingAirLeakage|UnitofMeasure|unit_of_measure"[90m in crates/hares-io/src/hpxml/building.rs · 90 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=2174, limit=170][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/envelope.py[90m [offset=480, limit=80][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=2252, limit=80][0m
+[0m✱ [0mGrep "infiltration_cfm50|infiltration_ach50|infiltration_ach_natural|infiltration_cfm_natural"[90m in crates/hares-io/src/hpxml/building.rs · 46 matches[0m
+[0m✱ [0mGrep "infiltration_cfm50|infiltration_ach50"[90m in crates · 63 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [offset=225, limit=80][0m
+Now let me check how `infiltration_cfm50` and `infiltration_ach50` are used downstream, and look for any conversion between CFM and ACH:
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=935, limit=30][0m
+[0m✱ [0mGrep "cfm50|cfm_natural|CFM.*natural|natural.*volume"[90m in vendors/OCHRE/ochre · 0 matches[0m
+Let me see the CFM-to-ACH conversion in the solver builder:
+[0m→ [0mRead vendors/OCHRE/ochre/utils/envelope.py[90m [limit=120, offset=486][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/building.rs[90m [limit=80, offset=1][0m
+Now let me check how OCHRE handles the infiltration measurement types:
+[0m→ [0mRead crates/hares-physics/src/infiltration.rs[90m [offset=54, limit=28][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/hpxml/ 2>/dev/null || echo "directory does not exist"
+hpxml-01-duct-leakage-cfm25-silent-skip.md
+hpxml-02-wh-jacket-ua-reduction-mismatch.md
+hpxml-03-ceiling-height-fallback.md
+hpxml-04-foundation-wall-area-zero.md
+hpxml-05-refrigerator-location-string-match.md
+[0m
+Now I have all the information needed. Let me look at a few more things to confirm the mathematical analysis, then write the review.
+[0m← [0mWrite docs/reviews/hpxml/hpxml-06-infiltration-unit-conversion-exponent.md
+Wrote file successfully.
+[0m
+Review written to `/Users/rich/source/HARES/docs/reviews/hpxml/hpxml-06-infiltration-unit-conversion-exponent.md`.
+
+**Summary**: The core concern — that CFMnatural conversion is mathematically wrong because it doesn't normalize by volume before applying the exponent — is **not a bug**. The power law `Q = C × ΔP^n` applies directly to flow rate regardless of unit, and converting through ACH as an intermediate step is algebraically equivalent (volume cancels out). 
+
+Three findings reported:
+1. **Low**: `ach_nat_to_ach50()` has a misleading name when applied to CFM values
+2. **Low**: Exponent (0.65) is hardcoded at parse time with no user override path, unlike the runtime `Aim2Params::n_i`
+3. **Informational**: OCHRE does not handle CFMnatural/ACHnatural at all, so HARES provides additional functionality with no vendor comparison point
