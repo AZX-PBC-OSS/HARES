@@ -1,0 +1,38 @@
+# opencode log for core-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/invariants.rs
+[0m→ [0mRead crates/hares-core/src/engine.rs
+[0m✱ [0mGrep "InvariantChecker"[90m in . · 15 matches[0m
+[0m✱ [0mGrep "invariant"[90m in . · 113 matches[0m
+Now let me search for any usage of `InvariantChecker` across the codebase and look at the `Dwelling::simulate()` method to see if invariants are wired there.
+[0m✱ [0mGrep "fn simulate"[90m in crates/hares-core/src · 2 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=700, limit=60][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1270, limit=30][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2640, limit=30][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3040, limit=250][0m
+The invariants ARE wired in `dwelling/mod.rs`. Let me examine the relevant sections — the struct fields, initialization, and the `check_invariants` method and its call site.
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1341, limit=30][0m
+[0m✱ [0mGrep "InvariantViolation"[90m in crates/hares-types/src/error.rs · 2 matches[0m
+[0m→ [0mRead crates/hares-types/src/error.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=110, limit=20][0m
+Let me check how the invariant error propagates in the simulate loop and examine the error type definition.
+[0m✱ [0mGrep "fn run_timestep"[90m in crates/hares-core/src/dwelling/mod.rs · 1 match[0m
+Let me check the `run_timestep` method to understand the full error flow.
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2209, limit=60][0m
+Now I have all the information needed. Let me write the review.
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/core/
+(no output)
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/core
+(no output)
+[0m

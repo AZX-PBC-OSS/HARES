@@ -1,0 +1,117 @@
+# opencode log for build-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m✱ [0mGlob "crates/hares-*/Cargo.toml"[90m in . · 10 matches[0m
+[0m→ [0mRead Cargo.toml
+[0m→ [0mRead crates/hares-types/Cargo.toml
+[0m→ [0mRead crates/hares-physics/Cargo.toml
+[0m→ [0mRead crates/hares-envelope/Cargo.toml
+[0m→ [0mRead crates/hares-control/Cargo.toml
+[0m→ [0mRead crates/hares-equipment/Cargo.toml
+[0m→ [0mRead crates/hares-io/Cargo.toml
+[0m→ [0mRead crates/hares-core/Cargo.toml
+[0m→ [0mRead crates/hares-fleet/Cargo.toml
+[0m→ [0mRead crates/hares-tariff/Cargo.toml
+[0m→ [0mRead crates/hares-python/Cargo.toml
+[0m✱ [0mGrep "cfg\(feature\s*=\s*"(check_invariants|observe|observe_detailed|profiling|actor_profiling|dst)"\)"[90m in crates/hares-core · 76 matches[0m
+[0m✱ [0mGrep "cfg\(feature\s*=\s*"(observe_detailed)"\)"[90m in crates/hares-envelope · 0 matches[0m
+[0m✱ [0mGrep "cfg\(feature\s*=\s*"(observe)"\)"[90m in crates/hares-python · 3 matches[0m
+[0m✱ [0mGrep "use (serde_json|postcard|csv|approx)"[90m in crates/hares-equipment · 0 matches[0m
+[0m✱ [0mGrep "use chrono"[90m in crates/hares-physics · 3 matches[0m
+[0m✱ [0mGrep "use (parquet|arrow)"[90m in crates/hares-equipment · 8 matches[0m
+Now let me search for feature usage and dependency usage in source code to verify the findings.
+[0m✱ [0mGrep "cfg\(feature\s*=\s*"check_invariants"\)"[90m 0 matches[0m
+[0m✱ [0mGrep "observe_detailed"[90m in crates/hares-envelope · 39 matches[0m
+[0m✱ [0mGrep "use (serde_json|serde::)"[90m in crates/hares-equipment · 45 matches[0m
+[0m✱ [0mGrep "use postcard"[90m in crates/hares-equipment · 0 matches[0m
+[0m✱ [0mGrep "use csv"[90m in crates/hares-io · 0 matches[0m
+[0m✱ [0mGrep "use serde::"[90m in crates/hares-physics · 0 matches[0m
+[0m✱ [0mGrep "use serde_json"[90m in crates/hares-equipment · 0 matches[0m
+[0m✱ [0mGrep "serde_json"[90m in crates/hares-equipment · 94 matches[0m
+[0m✱ [0mGrep "csv"[90m in crates/hares-io/src · 256 matches[0m
+[0m✱ [0mGrep "use uom"[90m in crates/hares-equipment · 2 matches[0m
+[0m✱ [0mGrep "serde"[90m in crates/hares-physics/src · 0 matches[0m
+[0m✱ [0mGrep "serde_json"[90m in crates/hares-equipment/src · 75 matches[0m
+[0m✱ [0mGrep "postcard"[90m in crates/hares-equipment/src · 84 matches[0m
+[0m✱ [0mGrep "uom"[90m in crates/hares-equipment/src · 2 matches[0m
+[0m✱ [0mGrep "serde"[90m in crates/hares-physics/src · 0 matches[0m
+[0m✱ [0mGrep "serde"[90m in crates/hares-envelope/src · 5 matches[0m
+[0m✱ [0mGrep "bitflags"[90m in crates/hares-control/src · 0 matches[0m
+[0m✱ [0mGrep "bitflags"[90m in crates/hares-types/src · 4 matches[0m
+[0m✱ [0mGrep "use chrono"[90m in crates/hares-envelope/src · 9 matches[0m
+[0m✱ [0mGrep "use bitflags"[90m in crates/hares-control/src · 0 matches[0m
+[0m✱ [0mGrep "use (rand|rand_chacha|rand_distr)"[90m in crates/hares-types/src · 5 matches[0m
+[0m✱ [0mGrep "use (rand|rand_chacha|rand_distr)"[90m in crates/hares-core/src · 9 matches[0m
+[0m✱ [0mGrep "use nalgebra"[90m in crates/hares-core/src · 2 matches[0m
+[0m✱ [0mGrep "use arrow"[90m in crates/hares-core/src · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/autosize.rs[90m [offset=350, limit=20][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=498, limit=20][0m
+[0m✱ [0mGrep "nalgebra"[90m in crates/hares-core/src · 2 matches[0m
+[0m✱ [0mGrep "bitflags"[90m in crates/hares-control · 0 matches[0m
+[0m✱ [0mGrep "rand_distr"[90m in crates/hares-core/src · 0 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/solver_builder.rs[90m [offset=490, limit=15][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/autosize.rs[90m [offset=340, limit=15][0m
+[0m✱ [0mGrep "rand_distr"[90m in crates/hares-core · 0 matches[0m
+[0m✱ [0mGrep "rand_distr"[90m in crates/hares-types · 8 matches[0m
+[0m✱ [0mGrep "use toml"[90m in crates/hares-core/src · 0 matches[0m
+[0m✱ [0mGrep "serde"[90m in crates/hares-physics/src · 0 matches[0m
+[0m✱ [0mGrep "use arrow"[90m in crates/hares-core · 3 matches[0m
+[0m✱ [0mGrep "use rayon"[90m in crates/hares-fleet/src · 2 matches[0m
+[0m✱ [0mGrep "toml"[90m in crates/hares-core · 138 matches[0m
+[0m✱ [0mGrep "use toml"[90m in crates/hares-io/src · 0 matches[0m
+[0m✱ [0mGrep "use nalgebra"[90m in crates/hares-envelope/src · 17 matches[0m
+[0m✱ [0mGrep "toml"[90m in crates/hares-io/src · 59 matches[0m
+[0m✱ [0mGrep "use (rand_chacha|rand\b)"[90m in crates/hares-equipment/src · 11 matches[0m
+[0m✱ [0mGrep "use (thiserror|tracing)"[90m in crates/hares-equipment/src · 2 matches[0m
+[0m✱ [0mGrep "thiserror|derive.*Error"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m✱ [0mGrep "thiserror"[90m in crates/hares-control/src · 0 matches[0m
+[0m✱ [0mGrep "use tracing"[90m in crates/hares-control/src · 0 matches[0m
+[0m✱ [0mGrep "#\[derive\(.*Error"[90m in crates/hares-equipment/src · 0 matches[0m
+[0m✱ [0mGrep "#\[derive\(.*Error"[90m in crates/hares-control/src · 0 matches[0m
+[0m✱ [0mGrep "tracing"[90m in crates/hares-control/src · 1 match[0m
+[0m✱ [0mGrep "thiserror|Error\]"[90m in crates/hares-equipment · 0 matches[0m
+[0m✱ [0mGrep "thiserror|Error\]"[90m in crates/hares-control · 0 matches[0m
+[0m✱ [0mGrep "#\[derive\(.*Error"[90m in crates/hares-physics · 1 match[0m
+[0m✱ [0mGrep "tracing"[90m in crates/hares-physics/src · 5 matches[0m
+[0m✱ [0mGrep "tracing"[90m in crates/hares-tariff/src · 6 matches[0m
+[0m✱ [0mGrep "tracing"[90m in crates/hares-fleet/src · 3 matches[0m
+[0m✱ [0mGrep "thiserror|Error\]"[90m in crates/hares-physics · 1 match[0m
+[0m✱ [0mGrep "thiserror|Error\]"[90m in crates/hares-envelope · 5 matches[0m
+[0m✱ [0mGrep "thiserror|Error\]"[90m in crates/hares-io · 9 matches[0m
+[0m✱ [0mGrep "thiserror|Error\]"[90m in crates/hares-fleet · 1 match[0m
+[0m✱ [0mGrep "tracing"[90m in crates/hares-io/src · 70 matches[0m
+[0m✱ [0mGrep "use arrow"[90m in crates/hares-io/src · 10 matches[0m
+[0m✱ [0mGrep "use parquet"[90m in crates/hares-io/src · 6 matches[0m
+[0m✱ [0mGrep "serde_json"[90m in crates/hares-tariff/src · 10 matches[0m
+[0m✱ [0mGrep "chrono_tz"[90m in crates/hares-tariff/src · 4 matches[0m
+[0m✱ [0mGrep "chrono_tz"[90m in crates/hares-core/src · 5 matches[0m
+[0m✱ [0mGrep "chrono_tz"[90m in crates/hares-python/src · 4 matches[0m
+[0m✱ [0mGrep "serde"[90m in crates/hares-physics · 0 matches[0m
+[0m✱ [0mGrep "#\[derive\(.*Error"[90m in crates · 20 matches[0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/build/ 2>/dev/null || echo "Directory does not exist"
+build-01-workspace-cargo-deps.md
+build-03-ci-workflow-matrix.md
+[0m
+Now I have comprehensive data. Let me compile the findings into the review document.
+[0m← [0mWrite docs/reviews/build/build-02-per-crate-cargo-toml.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/build/build-02-per-crate-cargo-toml.md`.
+
+**Summary**: 10 findings across all 10 crates:
+
+| Severity | Count | Key Issues |
+|----------|-------|------------|
+| Critical | 1 | `check_invariants` feature in hares-core is a dead no-op — declared but never gated in any code |
+| High | 3 | Unused deps: `thiserror`+`bitflags` in hares-control, `thiserror`+`uom`(misplaced dev-dep) in hares-equipment, `rand_distr` in hares-core |
+| Medium | 4 | Workspace version management gaps: `tempfile`, `csv`, `chrono-tz`, `tracing-subscriber` not centralized |
+| Low | 2 | Style: inconsistent TOML key syntax in hares-envelope, empty `[dev-dependencies]` header in hares-equipment |

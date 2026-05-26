@@ -212,6 +212,12 @@ pub struct WindowSolarProperties {
     pub radiation_frac: f64,
     /// Precomputed EnergyPlus glazing curve from `u_factor_w_m2_k` and `shgc`.
     pub glazing_curve: GlazingCurve,
+    /// Surface tilt from horizontal [°]; 0° = horizontal, 90° = vertical.
+    /// Used by autosizing to compute per-surface design-day solar irradiance.
+    pub tilt_deg: f64,
+    /// Surface azimuth [°] clockwise from north.
+    /// Used by autosizing to compute per-surface design-day solar irradiance.
+    pub azimuth_deg: f64,
 }
 
 /// One interior surface participating in intra-zone longwave radiation exchange.
@@ -373,6 +379,9 @@ pub struct ExteriorSurfaceInfo {
     pub emissivity: f64,
     /// Surface tilt from horizontal [°]; 0° = horizontal roof, 90° = vertical wall.
     pub tilt_deg: f64,
+    /// Surface azimuth [°] clockwise from north.
+    /// Used by autosizing to compute per-surface design-day solar irradiance.
+    pub azimuth_deg: f64,
     /// Radiation fraction: `R_film / (R_film + R_outermost_half)` -- dimensionless [0,1].
     ///
     /// Controls how much the true surface temperature deviates from the RC node

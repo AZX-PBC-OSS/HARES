@@ -1,0 +1,50 @@
+# opencode log for coredeep-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/clock.rs
+[0m✱ [0mGrep "timezone|tz|IANA|Olson|chrono_tz|FixedOffset|local.*time|DST|daylight|saving"[90m in crates · 649 matches[0m
+[0m✱ [0mGrep "leap|feb.*29|february|day_of_year|ordinal|yearday"[90m in crates · 282 matches[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=390, limit=60][0m
+[0m→ [0mRead crates/hares-core/tests/timezone_weather_regressions.rs
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=495, limit=110][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=640, limit=30][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=690, limit=90][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=1, limit=50][0m
+[0m✱ [0mGrep "struct EnvironmentManager"[90m in crates/hares-core/src · 1 match[0m
+[0m✱ [0mGrep "feature.*dst|civil_tz|civil_timezone"[90m in crates/hares-core · 37 matches[0m
+[0m✱ [0mGrep "dst|chrono_tz|chrono"[90m in crates/hares-core · 3 matches[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=80, limit=240][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=320, limit=80][0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=85, limit=20][0m
+Now I have a thorough understanding of the code. Let me also verify one more critical detail about the `day_of_year` consumption path involving solar position:
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/core-deep/ 2>/dev/null || mkdir -p /Users/rich/source/HARES/docs/reviews/core-deep/
+(no output)
+[0m
+Now I have a comprehensive understanding of the code. Let me write the review.
+[0m← [0mWrite docs/reviews/core-deep/coredeep-01-clock-dst-transitions.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/core-deep/coredeep-01-clock-dst-transitions.md`.
+
+**Summary of findings across 6 issues:**
+
+1. **High** — `SimClock` uses `FixedOffset`; naive arithmetic can't model DST independently. The clock produces non-existent wall-clock times (e.g., `02:00` on spring-forward). Mitigated in `EnvironmentManager` schedule indexing via `with_timezone()`, but unprotected in `day_of_year` computations.
+
+2. **Medium** — `day_of_year` derived from raw `DateTime<FixedOffset>.ordinal()` differs from civil ordinal near spring-forward boundaries (1 hour/year off-by-one).
+
+3. **Medium** — Inconsistent day-of-year sources: `solar_position()` uses UTC ordinal internally; Perez irradiance functions receive local ordinal. During the spring-forward boundary hour these diverge.
+
+4. **Low** — `total_steps()` ignores DST day-length variation (always 86400s per `Duration::day(1)`).
+
+5. **Low** — Leap day Feb-29 handling is delegated entirely to chrono; correct for single-year but no independent awareness.
+
+6. **Low** — DST feature is opt-in (`--features dst`); deployment in NA/EU regions requires enabling it and passing an IANA timezone string or TOU tariff alignment will break for 7 months/year.

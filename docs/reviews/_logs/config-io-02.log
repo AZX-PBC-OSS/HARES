@@ -1,0 +1,60 @@
+# opencode log for config-io-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/defaults.rs
+[0m✱ [0mGlob "defaults/**/*.csv"[90m in . · 38 matches[0m
+[0m✱ [0mGlob "**/*.csv"[90m in vendors/OCHRE/ochre · 100 matches[0m
+[0m✱ [0mGlob "defaults/**/*.toml"[90m in . · 1 match[0m
+[0m✱ [0mGlob "defaults/zip_parameters.*"[90m in . · 1 match[0m
+[0m✱ [0mGlob "defaults/*"[90m in . · 5 matches[0m
+[0m→ [0mRead defaults/zip_parameters.toml
+[0m→ [0mRead defaults/HVAC Multispeed Parameters.csv
+[0m→ [0mRead defaults/hvac_cooling/Air Conditioner.csv
+[0m→ [0mRead defaults/hvac_cooling/ASHP Cooler.csv
+[0m→ [0mRead defaults/hvac_cooling/MSHP Cooler.csv
+[0m→ [0mRead defaults/hvac_cooling/Room AC.csv
+[0m→ [0mRead defaults/hvac_heating/ASHP Heater.csv
+[0m→ [0mRead defaults/hvac_heating/Heat Pump Heater.csv
+[0m→ [0mRead defaults/hvac_heating/MSHP Heater.csv
+[0m→ [0mRead defaults/battery/default_parameters.csv
+[0m→ [0mRead defaults/envelope/Envelope Materials.csv[90m [limit=30][0m
+[0m→ [0mRead defaults/ev/EV Profiles.csv[90m [limit=30][0m
+[0m✱ [0mGrep "envelope_lut"[90m 15 matches[0m
+[0m→ [0mRead defaults/envelope/Envelope Boundaries.csv[90m [limit=20][0m
+[0m→ [0mRead defaults/envelope/Envelope Boundary Types.csv
+[0m→ [0mRead defaults/generator/default_parameters.csv
+[0m→ [0mRead defaults/ASHRAE152_climate_data.csv[90m [limit=10][0m
+[0m→ [0mRead defaults/ASHRAE152_zone_temperatures.csv[90m [limit=10][0m
+Now let me examine the remaining data files, the envelope LUT loader, and the OCHRE reference files:
+[0m✱ [0mGlob "crates/hares-io/src/envelope_lut.rs"[90m in . · 1 match[0m
+[0m→ [0mRead defaults/generator/efficiency_curve.csv[90m [limit=10][0m
+[0m→ [0mRead defaults/water_heating/default_paramters.csv[90m [limit=30][0m
+[0m→ [0mRead vendors/OCHRE/ochre/defaults/HVAC Cooling/Biquadratic Air Conditioner.csv[90m [limit=30][0m
+[0m→ [0mRead crates/hares-io/src/envelope_lut.rs
+[0m✱ [0mGlob "defaults/pv/**/*"[90m in . · 1 match[0m
+[0m→ [0mRead vendors/OCHRE/ochre/defaults/ZIP Parameters.csv[90m [limit=30][0m
+[0m→ [0mRead defaults/Default Schedule Parameters.csv[90m [limit=10][0m
+[0m→ [0mRead defaults/water_heating/WH Medium UEF Schedule.csv[90m [limit=15][0m
+Now let me check one more crucial area — the pv subdirectory and look for the OCHRE reference ZIP Parameters CSV:
+[0m→ [0mRead defaults/loads/cooking_range_events.csv[90m [limit=5][0m
+[0m→ [0mRead defaults/battery/degradation_curves.csv[90m [limit=10][0m
+[0m→ [0mRead defaults/envelope/Envelope Boundaries.csv[90m [offset=21][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/config-io
+(no output)
+[0m
+Now I have enough data to write the comprehensive review. Let me create the output directory and write the report:
+[0m← [0mWrite docs/reviews/config-io/config-io-02-defaults-csv-loading.md
+Wrote file successfully.
+[0m
+Review complete. Findings written to `docs/reviews/config-io/config-io-02-defaults-csv-loading.md`.
+
+**Key results**: 1 critical, 2 high, 3 medium, 4 low severity findings. The critical issue is that `load_toml_dir()` filters on `.toml` extension but battery/ev/generator/loads/water_heating directories contain only CSV files — so all equipment default parameters in those categories are silently unavailable.

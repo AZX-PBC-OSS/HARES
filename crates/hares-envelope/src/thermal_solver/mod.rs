@@ -2621,6 +2621,7 @@ mod tests {
                     area_m2: 1.0,
                     emissivity: 0.90,
                     tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
                     rad_frac: 0.0,
                     rad_res_k_w: 0.0,
                     n_iter: 1,
@@ -2778,6 +2779,7 @@ mod tests {
                     area_m2: 1.0,
                     emissivity: 0.90,
                     tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
                     rad_frac: 0.0,
                     rad_res_k_w: 0.0,
                     n_iter: 1,
@@ -2946,6 +2948,7 @@ mod tests {
                     area_m2: 10.0,
                     emissivity: 0.90,
                     tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
                     rad_frac: 0.0,
                     rad_res_k_w: 0.0,
                     n_iter: 1,
@@ -3299,6 +3302,7 @@ mod tests {
                     area_m2: 1.0,
                     emissivity: 0.90,
                     tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
                     rad_frac: 0.0,
                     rad_res_k_w: 0.0,
                     n_iter: 1,
@@ -3577,7 +3581,8 @@ mod tests {
                     area_m2: 20.0,
                     emissivity: 0.90,
                     tilt_deg: 90.0, // vertical wall
-                    rad_frac: 0.0,  // no film resistance → use node temp directly
+                    azimuth_deg: 180.0,
+                    rad_frac: 0.0, // no film resistance → use node temp directly
                     rad_res_k_w: 0.0,
                     n_iter: 1,
                     absorptance: SOLAR_ABSORPTANCE_DEFAULT,
@@ -3682,6 +3687,8 @@ mod tests {
             winter_transmittance: transmittance,
             radiation_frac,
             glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(1.8, 0.4),
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
         };
 
         // 500 W/m² direct irradiance, no diffuse or reflected.
@@ -3852,6 +3859,7 @@ mod tests {
                     area_m2: 20.0,
                     emissivity: 0.90,
                     tilt_deg: 0.0, // horizontal roof: SVF=1, maximum sky exposure
+                    azimuth_deg: 180.0,
                     rad_frac,
                     rad_res_k_w,
                     n_iter: 4,
@@ -4561,6 +4569,8 @@ mod tests {
             winter_transmittance,
             radiation_frac,
             glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(1.8, summer_shgc),
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
         };
 
         let make_env = |year_month: (i32, u32)| -> EnvironmentState {

@@ -186,8 +186,19 @@ pub fn autosize_equipment_capacities(
         }
 
         if needs_cooling {
+            // Cooling autosizing: use peak solar design conditions per ACCA Manual J.
+            // July 21 solar noon clear-sky irradiance is computed inside
+            // autosize_capacity_cooling using the Perez (1990) model for each
+            // envelope surface. This captures solar gain through windows, which
+            // the heating path (zero-solar) does not.
             let raw_capacity = thermal
-                .autosize_capacity(indoor_zone_id, cooling_setpoint_c, cooling_design_c)
+                .autosize_capacity_cooling(
+                    indoor_zone_id,
+                    cooling_setpoint_c,
+                    cooling_design_c,
+                    ctx.weather_lat,
+                    ctx.weather_lon,
+                )
                 .abs();
 
             // Oversizing factor: prefer HPXML <CoolingAutosizingFactor>;
@@ -729,6 +740,155 @@ mod tests {
         assert!(
             (capacity_w - 600.0).abs() < 1e-6,
             "capacity must be clamped to max limit 600 W, got {capacity_w}"
+        );
+    }
+
+    // ── Cooling autosizing with peak solar conditions (T-0119) ────────────
+
+    /// Build a 1R1C solver with a south-facing window and a solar input
+    /// column so that `autosize_capacity_cooling` can exercise the solar path.
+    fn build_1r1c_solver_with_window(
+        env: &EnvironmentState,
+        indoor_temp_c: f64,
+    ) -> (ThermalSolver, u32) {
+        let ua = UA;
+        let c = C;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-ua / c]);
+        let b_c = DMatrix::from_row_slice(1, 3, &[ua / c, 1.0 / c, 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping)
+            .expect("1R1C state-space model must be stable");
+
+        let window_surface_id: u32 = 42;
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZONE, 0)]),
+            zone_output_indices: HashMap::from([(ZONE, 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZONE, 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::from([(window_surface_id, 2)]),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZONE,
+            window_zone_ids: HashMap::from([(window_surface_id, ZONE)]),
+            window_properties: HashMap::from([(
+                window_surface_id,
+                hares_envelope::WindowSolarProperties {
+                    shgc: 0.5,
+                    winter_shgc: 0.5,
+                    u_factor_w_m2_k: 2.0,
+                    area_m2: 2.0,
+                    transmittance: 0.4,
+                    winter_transmittance: 0.4,
+                    radiation_frac: 0.2,
+                    glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(2.0, 0.5),
+                    tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
+                },
+            )]),
+            ..ThermalSolverConfig::default()
+        };
+        let thermal = ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)
+            .expect("1R1C ThermalSolver with window must construct");
+        (thermal, window_surface_id)
+    }
+
+    #[test]
+    fn cooling_autosize_with_window_includes_solar_gain() {
+        // Zone starts at 26 °C (above cooling setpoint 23.9 °C) so the
+        // solver computes the COOLING capacity needed to reach the target.
+        // With outdoor at 35 °C and a south-facing window adding solar gain,
+        // more cooling capacity is required than the zero-solar case.
+        let env = one_zone_env(26.0, 35.0);
+        let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 26.0);
+
+        let zero_solar_capacity = thermal
+            .autosize_capacity(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0)
+            .abs();
+        let solar_capacity = thermal
+            .autosize_capacity_cooling(
+                ZONE,
+                DEFAULT_COOLING_SETPOINT_C,
+                35.0,
+                39.74, // Denver
+                -104.87,
+            )
+            .abs();
+
+        // Cooling with solar should be meaningfully larger than zero-solar.
+        assert!(
+            solar_capacity > zero_solar_capacity + 100.0,
+            "solar cooling capacity {solar_capacity} W should exceed zero-solar \
+             {zero_solar_capacity} W by >100 W for building with south-facing window"
+        );
+
+        // Both should be positive (cooling needed).
+        assert!(
+            zero_solar_capacity > 0.0,
+            "zero-solar capacity {zero_solar_capacity} should be positive"
+        );
+        assert!(
+            solar_capacity > 0.0,
+            "solar capacity {solar_capacity} should be positive"
+        );
+    }
+
+    #[test]
+    fn heating_autosize_still_uses_zero_solar() {
+        // Same solver with window, but heating mode with cold outdoor.
+        let env = one_zone_env(18.0, -10.0);
+        let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 18.0);
+
+        let heating_capacity = thermal
+            .autosize_capacity(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
+            .abs();
+        let cooling_method_on_heating = thermal
+            .autosize_capacity_cooling(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0, 39.74, -104.87)
+            .abs();
+
+        // Heating autosizing uses autosize_capacity (zero solar), not the
+        // cooling method which would add July solar gain. The zero-solar
+        // heating capacity should exceed the solar-included estimate
+        // because July solar reduces the apparent heating load.
+        assert!(
+            heating_capacity > 400.0,
+            "heating capacity {heating_capacity} W should be substantial at -10 °C"
+        );
+        assert!(
+            heating_capacity > cooling_method_on_heating + 10.0,
+            "zero-solar heating capacity {heating_capacity} W should exceed \
+             solar-included heating capacity {cooling_method_on_heating} W \
+             because July solar reduces the apparent heating load"
+        );
+    }
+
+    #[test]
+    fn cooling_autosize_without_windows_matches_zero_solar() {
+        // No windows in config → autosize_capacity_cooling should return the
+        // same result as autosize_capacity (pure conduction).
+        let env = one_zone_env(26.0, 35.0);
+        let thermal = build_1r1c_solver(&env, 26.0);
+
+        let zero_solar = thermal
+            .autosize_capacity(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0)
+            .abs();
+        let solar = thermal
+            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0)
+            .abs();
+
+        assert!(
+            (solar - zero_solar).abs() < 1e-6,
+            "without windows, solar and zero-solar should match: \
+             solar={solar}, zero-solar={zero_solar}"
         );
     }
 }

@@ -181,6 +181,44 @@ pub fn extraterrestrial_normal_irradiance(day_of_year: u32) -> f64 {
     extraterrestrial_irradiance(day_of_year)
 }
 
+/// Clear-sky beam normal and diffuse horizontal irradiance at design conditions.
+///
+/// Uses the ASHRAE HoF 2013 clear-sky model with optical depths appropriate
+/// for mid-latitude summer (July 21). Returns (dni_w_m2, dhi_w_m2, ghi_w_m2).
+///
+/// # References
+/// - ASHRAE HoF 2013 Ch.33 Table 9.8: τ_b ≈ 0.556, τ_d ≈ 2.0 for July.
+/// - ASHRAE HoF 2021 Ch.14: clear-sky atmospheric transmittance for design-day
+///   solar irradiance per ACCA Manual J.
+#[must_use]
+pub fn clear_sky_irradiance(day_of_year: u32, solar_altitude_deg: f64) -> (f64, f64, f64) {
+    const BEAM_OPTICAL_DEPTH: f64 = 0.556;
+    const BEAM_EXPONENT: f64 = 0.9;
+    const DIFFUSE_OPTICAL_DEPTH: f64 = 2.0;
+    const DIFFUSE_EXPONENT: f64 = 0.7;
+
+    if solar_altitude_deg <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let zenith_deg = 90.0 - solar_altitude_deg;
+    let etr = extraterrestrial_irradiance(day_of_year);
+    let am = relative_airmass(zenith_deg);
+
+    // ASHRAE 2013 clear-sky beam normal irradiance:
+    // E_bn = E_ext × exp(-τ_b × m^ab)
+    let dni = etr * (-BEAM_OPTICAL_DEPTH * am.powf(BEAM_EXPONENT)).exp();
+
+    // ASHRAE 2013 clear-sky diffuse horizontal irradiance:
+    // E_dh = E_ext × exp(-τ_d × m^ad)
+    let dhi = etr * (-DIFFUSE_OPTICAL_DEPTH * am.powf(DIFFUSE_EXPONENT)).exp();
+
+    // Global horizontal = beam normal × cos(zenith) + diffuse horizontal
+    let ghi = dni * zenith_deg.to_radians().cos() + dhi;
+
+    (dni, dhi.max(0.0), ghi.max(0.0))
+}
+
 /// Perez (1990) sky-diffuse component only, for a tilted surface.
 ///
 /// Returns the sky diffuse irradiance [W/m²] on a tilted plane using the
@@ -2591,5 +2629,49 @@ mod tests {
             omni.reflected_w_m2,
             single.reflected_w_m2
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Clear-sky irradiance for design-day autosizing (T-0119)
+    // -----------------------------------------------------------------------
+
+    /// At solar noon on July 21 at 40°N, clear-sky DNI should be in the range
+    /// 650–1050 W/m² for a clean atmosphere (ASHRAE HoF 2013 τ_b ≈ 0.556).
+    /// DHI should be 80–300 W/m². GHI should be 750–1100 W/m².
+    #[test]
+    fn clear_sky_irradiance_summer_noon_reasonable_values() {
+        // July 21 = ordinal 202 (non-leap year)
+        // Solar altitude ≈ 90 − 40 + 23.44 ≈ 73.44° at solar noon
+        let (dni, dhi, ghi) = clear_sky_irradiance(202, 73.44);
+        assert!(dni > 650.0, "clear-sky DNI {dni} should exceed 650 W/m²");
+        assert!(
+            dni < 1050.0,
+            "clear-sky DNI {dni} should be below 1050 W/m²"
+        );
+        assert!(dhi > 80.0, "clear-sky DHI {dhi} should exceed 80 W/m²");
+        assert!(dhi < 300.0, "clear-sky DHI {dhi} should be below 300 W/m²");
+        assert!(ghi > 750.0, "clear-sky GHI {ghi} should exceed 750 W/m²");
+        assert!(
+            ghi < 1100.0,
+            "clear-sky GHI {ghi} should be below 1100 W/m²"
+        );
+    }
+
+    /// Below-horizon solar altitude produces zero irradiance.
+    #[test]
+    fn clear_sky_below_horizon_is_zero() {
+        let (dni, dhi, ghi) = clear_sky_irradiance(202, -5.0);
+        assert_eq!(dni, 0.0);
+        assert_eq!(dhi, 0.0);
+        assert_eq!(ghi, 0.0);
+    }
+
+    /// At zero altitude (sunrise/sunset), the model returns zero.
+    #[test]
+    fn clear_sky_zero_altitude_is_zero() {
+        let (dni, dhi, ghi) = clear_sky_irradiance(202, 0.0);
+        assert_eq!(dni, 0.0);
+        assert_eq!(dhi, 0.0);
+        assert_eq!(ghi, 0.0);
     }
 }

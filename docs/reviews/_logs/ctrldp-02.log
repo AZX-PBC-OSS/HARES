@@ -1,0 +1,128 @@
+# opencode log for ctrldp-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Read ControlSignal enum definition and all variants
+[ ] Trace each variant: construction (where created)
+[ ] Trace each variant: dispatch handling (match arms)
+[ ] Trace each variant: equipment consumption (who responds)
+[ ] Check for catch-all/wildcard arms in dispatch match
+[ ] Check Python bindings for variant coverage
+[ ] Check variant documentation
+[ ] Write findings to output file
+[0m
+[0m→ [0mRead crates/hares-types/src/control_signal.rs
+[0m✱ [0mGlob "crates/hares-types/src/**/*.rs"[90m 12 matches[0m
+[0m✱ [0mGlob "crates/**/src/**/*.rs"[90m 100 matches[0m
+[0m→ [0mRead crates/hares-control/src/dispatch.rs
+[0m→ [0mRead crates/hares-control/src/types.rs
+[0m→ [0mRead crates/hares-control/src/signal.rs
+[0m→ [0mRead crates/hares-control/src/compat.rs
+Now let me trace construction, dispatch, and equipment consumption for all variants in parallel.
+[0m→ [0mRead crates/hares-core/src/engine.rs
+[0m→ [0mRead crates/hares-fleet/src/fleet.rs
+[0m✱ [0mGrep "apply_control_signal|handle_control|recv_control|ControlSignal::"[90m in crates/hares-equipment/src · 396 matches[0m
+Now let me trace equipment consumption and the actual dispatch routing in the engine.
+[0m✱ [0mGrep "fn apply_control"[90m in crates/hares-core · 9 matches[0m
+[0m✱ [0mGrep "fn apply_control\b"[90m in crates/hares-equipment · 1 match[0m
+[0m✱ [0mGlob "**/py/**/*.py"[90m 0 matches[0m
+[0m✱ [0mGlob "**/python/**/*.rs"[90m 0 matches[0m
+Let me look at the Dwelling's apply_control routing and search for Python bindings.
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1360, limit=120][0m
+[0m→ [0mRead crates/hares-equipment/src/lib.rs[90m [offset=60, limit=200][0m
+[0m✱ [0mGrep "ControlSignal"[90m 233 matches[0m
+[0m✱ [0mGlob "**/pyo3/**/*.rs"[90m 0 matches[0m
+[0m✱ [0mGlob "**/bindings/**/*.rs"[90m 0 matches[0m
+[0m✱ [0mGrep "#\[pyclass|#\[pymethods|#"__init__""[90m in . · 135 matches[0m
+[0m✱ [0mGrep "ControlSignal"[90m in crates/hares-python · 105 matches[0m
+[0m→ [0mRead crates/hares-python/src/py_control.rs
+[0m✱ [0mGrep "control_dispatcher\.process|control_dispatcher\.execute|dispatcher\.flush|dispatch_iter|dispatch_queued|process_dispatcher"[90m 0 matches[0m
+[0m✱ [0mGrep "struct ControlDispatcher|impl ControlDispatcher"[90m 2 matches[0m
+[0m✱ [0mGrep "fn apply_control_unchecked"[90m 36 matches[0m
+Let me find the dispatcher's execution logic and trace equipment consumption patterns.
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=339, limit=120][0m
+[0m→ [0mRead crates/hares-equipment/src/macros.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=450, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [offset=1417, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=2095, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=1201, limit=100][0m
+[0m→ [0mRead crates/hares-equipment/src/ev/mod.rs[90m [offset=880, limit=120][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=623, limit=100][0m
+Now let me systematically trace every variant through all equipment types. Let me read the key equipment `apply_control_unchecked` implementations in parallel.
+[0m→ [0mRead crates/hares-equipment/src/water_heater/resistance.rs[90m [offset=685, limit=60][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/heat_pump_wh.rs[90m [offset=967, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/gas.rs[90m [offset=659, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/tankless.rs[90m [offset=481, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/generator.rs[90m [offset=908, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/dehumidifier.rs[90m [offset=446, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/ventilation.rs[90m [offset=551, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [offset=658, limit=60][0m
+[0m→ [0mRead crates/hares-equipment/src/scheduled_load.rs[90m [offset=660, limit=30][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ideal_hvac.rs[90m [offset=714, limit=60][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=660, limit=50][0m
+[0m✱ [0mGrep "fn apply_heating_control_unchecked"[90m in crates/hares-equipment · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ideal_hvac.rs[90m [offset=774, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [offset=1162, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/helpers.rs[90m [offset=178, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/baseboard.rs[90m [offset=226, limit=40][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [offset=340, limit=40][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/furnace.rs[90m [offset=350, limit=40][0m
+[0m✱ [0mGrep "fn apply_thermal_setpoint_signal"[90m in crates/hares-equipment · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/thermostat.rs[90m [offset=445, limit=30][0m
+[0m✱ [0mGrep "ProtocolNative"[90m in crates/hares-equipment · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/ev/mod.rs[90m [offset=1000, limit=80][0m
+[0m→ [0mRead crates/hares-python/src/py_actor.rs[90m [offset=280, limit=100][0m
+[0m✱ [0mGrep "event_delay|EventDelay|max_capacity_fraction|MaxCapacityFraction"[90m 0 matches[0m
+[0m✱ [0mGrep "EventDelay"[90m in crates/hares-python · 7 matches[0m
+[0m✱ [0mGrep "MaxCapacityFraction"[90m in crates/hares-python · 3 matches[0m
+[0m✱ [0mGrep "enum PySignal"[90m in crates/hares-python · 1 match[0m
+[0m→ [0mRead crates/hares-python/src/py_actor.rs[90m [offset=201, limit=65][0m
+[0m✱ [0mGrep "PROTOCOL_NATIVE"[90m in crates/hares-equipment · 0 matches[0m
+[0m✱ [0mGrep "ControlCapabilities::HUMIDITY_SETPOINT"[90m in crates/hares-equipment · 1 match[0m
+[0m✱ [0mGrep "ControlCapabilities::CURTAILMENT_PERCENT|ControlCapabilities::REACTIVE_SETPOINT|ControlCapabilities::POWER_FACTOR_SETPOINT|ControlCapabilities::INVERTER_PRIORITY_MODE"[90m in crates/hares-equipment · 4 matches[0m
+[0m✱ [0mGrep "ThermalSetpointDelta"[90m in crates/hares-equipment · 3 matches[0m
+[0m✱ [0mGrep "IdealCapacityModeOverride"[90m in crates/hares-equipment · 3 matches[0m
+[0m✱ [0mGrep "IDEAL_CAPACITY_MODE_OVERRIDE"[90m in crates/hares-equipment · 1 match[0m
+[0m✱ [0mGrep "THERMAL_SETPOINT_DELTA"[90m in crates/hares-equipment · 11 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [offset=326, limit=30][0m
+Now I have comprehensive data. Let me check a few final details before writing.
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/cooler.rs[90m [offset=262, limit=60][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=371, limit=60][0m
+[0m✱ [0mGrep "MaxCapacityFraction"[90m in crates/hares-python/src/py_actor.rs · 0 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/control-deep
+(no output)
+[0m
+Now let me verify that `MaxCapacityFraction` has no Python static constructor and is not in `PySignal`, and check `EventDelay`:
+[0m← [0mWrite docs/reviews/control-deep/ctrldp-02-control-signal-variant-coverage.md
+Wrote file successfully.
+[0m
+Now I have all the data needed. Let me write the review.
+[0m# [0mTodos
+[✓] Read ControlSignal enum definition and all variants
+[✓] Trace each variant: construction (where created)
+[✓] Trace each variant: dispatch handling (match arms)
+[✓] Trace each variant: equipment consumption (who responds)
+[✓] Check for catch-all/wildcard arms in dispatch match
+[✓] Check Python bindings for variant coverage
+[✓] Check variant documentation
+[✓] Write findings to output file
+[0m
+Review complete. Findings written to `docs/reviews/control-deep/ctrldp-02-control-signal-variant-coverage.md`.
+
+**Summary**: 8 findings across all 25 ControlSignal variants:
+
+| Severity | Count | Key Issues |
+|----------|-------|-----------|
+| Critical | 2 | ProtocolNative is an orphan (no equipment consumer); AirConditioner silently ignores ThermalSetpointDelta via `_ => {}` catch-all |
+| High | 2 | 13 variants missing from Rust `ControlSignalConstructors` trait; MaxCapacityFraction has no Python static constructor or PySignal variant |
+| Medium | 2 | EventDelay missing Python static constructor; ThermalSetpointDelta gap extends to all AC/cooling variants |
+| Low | 2 | Inconsistent catch-all patterns across equipment; 17 variants lack doc comments |

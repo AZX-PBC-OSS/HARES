@@ -1,0 +1,62 @@
+# opencode log for coredeep-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/telemetry.rs
+[0m✱ [0mGlob "crates/hares-core/src/**/*.rs"[90m 37 matches[0m
+[0m✱ [0mGrep "CoreOutput|CoreState|PortContribution|FuelType|fuel_type"[90m in crates · 1231 matches[0m
+[0m✱ [0mGrep "reset_telemetry|reset.*telemetry|telemetry.*reset|clear_telemetry|new_step|new_period"[90m in crates · 6 matches[0m
+Let me search for the key structures and types referenced in the review.
+[0m✱ [0mGrep "struct CoreOutput|struct CoreState|struct PortContribution|enum FuelType|struct FuelPower"[90m in crates · 4 matches[0m
+[0m✱ [0mGrep "impl.*CoreOutput|impl.*PortContribution|fn accumulate|fn reset"[90m in crates · 28 matches[0m
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=140, limit=200][0m
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [offset=450, limit=200][0m
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=860, limit=200][0m
+[0m✱ [0mGrep "struct FuelAccumulator|struct ElectricalAccumulator|impl FuelAccumulator|fn add|fn zero"[90m in crates/hares-types/src · 16 matches[0m
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [limit=300, offset=250][0m
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [limit=120, offset=1][0m
+[0m→ [0mRead crates/hares-core/src/observer_capture.rs
+[0m✱ [0mGrep "ports\.accumulate|ports\.zero|\.accumulate\(|\.zero\(\)"[90m in crates/hares-core/src · 9 matches[0m
+[0m→ [0mRead crates/hares-core/src/engine.rs[90m [limit=100, offset=300][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=100, offset=2790][0m
+[0m→ [0mRead crates/hares-core/src/observer.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=100, offset=2890][0m
+[0m✱ [0mGrep "fn run_timestep|fn step_equipment|fn advance|ports\.zero|record_step"[90m in crates/hares-core/src/dwelling · 9 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=150, offset=2990][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=200, offset=2209][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=200, offset=2409][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=200, offset=2609][0m
+[0m✱ [0mGrep "struct StepResult"[90m in crates/hares-core/src · 1 match[0m
+[0m✱ [0mGrep "struct Telemetry|Telemetry|telemetry_keys"[90m in crates/hares-types/src · 13 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=308, limit=30][0m
+[0m→ [0mRead crates/hares-types/src/telemetry_keys.rs[90m [limit=100][0m
+[0m→ [0mRead crates/hares-types/src/telemetry_keys.rs[90m [offset=101][0m
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=1059, limit=120][0m
+[0m✱ [0mGrep "PortContribution::Fuel\s*\{"[90m in crates · 16 matches[0m
+[0m✱ [0mGrep "fuel_type|FuelType""[90m in crates/hares-equipment/src/hvac · 28 matches[0m
+[0m✱ [0mGrep "PortContribution::Fuel"[90m in crates/hares-equipment/src/battery · 0 matches[0m
+[0m✱ [0mGrep "PortContribution::Fuel"[90m in crates/hares-equipment/src/ev · 0 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/helpers.rs[90m [limit=60, offset=90][0m
+[0m✱ [0mGrep "FuelType::(Wood|Coal|WoodPellet)"[90m in crates/hares-equipment/src · 24 matches[0m
+[0m✱ [0mGrep "DwellingTelemetry\s*\{"[90m in crates/hares-core/src · 6 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=90, offset=1850][0m
+[0m
+[0m← [0mWrite docs/reviews/core-deep/coredeep-03-telemetry-accumulation.md
+Wrote file successfully.
+[0m
+Now I have a thorough understanding of the codebase. Let me write the review findings.
+Review written to `docs/reviews/core-deep/coredeep-03-telemetry-accumulation.md`.
+
+**Summary**: 6 findings (3 medium, 3 low, 0 critical/high):
+
+- **Medium**: Observer capture silently drops Wood/Coal/WoodPellet fuel data; `DwellingTelemetry` lacks indoor humidity and fuel consumption fields; `outdoor_rh` field contains humidity ratio, not relative humidity.
+- **Low**: `FUEL_TYPE_COUNT` not validated against `fuel_index` at compile time; `diff_ports` and `capture_ports` fuel type arrays are inconsistent; `validate_core_contract` doesn't check `sensible_cooling_w`/`latent_cooling_w`.
+
+The telemetry reset behavior (`ports.zero()` → `clock.next()` at end-of-step) is correct — no stale data contamination between timesteps.

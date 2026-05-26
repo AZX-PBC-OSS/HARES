@@ -8,7 +8,8 @@
 //! allocation.
 
 use hares_physics::film_coefficients::tarp_h_natural;
-use hares_types::{DomainUpdate, EnvironmentState, PortSlots, ZoneId};
+use hares_physics::solar::{clear_sky_irradiance, perez_tilted_irradiance, solar_position};
+use hares_types::{DEFAULT_GROUND_ALBEDO, DomainUpdate, EnvironmentState, PortSlots, ZoneId};
 
 use super::ThermalSolver;
 use super::config::StateSpaceWiring;
@@ -78,6 +79,159 @@ impl ThermalSolver {
     /// Access the wiring (zone ↔ state-space index mappings) for autosizing.
     pub fn wiring(&self) -> &StateSpaceWiring {
         &self.wiring
+    }
+
+    /// Compute the cooling HVAC capacity (W) required to maintain `target_c` at
+    /// design outdoor conditions with peak solar gains.
+    ///
+    /// Unlike [`autosize_capacity`] which zeros all solar inputs, this method
+    /// computes clear-sky solar irradiance for July 21 solar noon at the given
+    /// latitude/longitude and applies per-surface solar gains to the input vector
+    /// before solving. This produces a higher (more realistic) cooling capacity
+    /// for buildings with significant window area facing the summer solar azimuth.
+    ///
+    /// Per ACCA Manual J-2016: cooling design uses peak solar conditions
+    /// (July 21 solar noon). Solar irradiance is computed using the ASHRAE
+    /// clear-sky model and the Perez (1990) anisotropic tilted irradiance model
+    /// for each surface.
+    ///
+    /// Returns the required capacity in watts (absolute value — always positive),
+    /// or 0.0 if the zone is unknown or solving fails.
+    ///
+    /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
+    /// or `last_coupled_lu`).
+    pub fn autosize_capacity_cooling(
+        &self,
+        zone: ZoneId,
+        target_c: f64,
+        design_outdoor_c: f64,
+        site_lat_deg: f64,
+        site_lon_deg: f64,
+    ) -> f64 {
+        use chrono::{Datelike, FixedOffset, TimeZone};
+
+        let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
+            return 0.0;
+        };
+        let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
+            return 0.0;
+        };
+
+        // ── Build design-condition input vector ────────────────────────────
+        let mut u_design = self.last_u.clone();
+        u_design.fill(0.0);
+
+        // Outdoor temperature
+        for &col in &self.wiring.outdoor_temp_input_indices {
+            if col < u_design.len() {
+                u_design[col] = design_outdoor_c;
+            }
+        }
+
+        // Ground temperature: approximate as design_outdoor_c for
+        // conservative sizing.
+        for &col in &self.wiring.ground_temp_input_indices {
+            if col < u_design.len() {
+                u_design[col] = design_outdoor_c;
+            }
+        }
+
+        // ── Compute July 21 solar noon position and clear-sky irradiance ──
+        // July 21 is day 202 (non-leap year). Use 2025 (non-leap) for day-of-year.
+        let mut dt = FixedOffset::east_opt(0)
+            .and_then(|tz| tz.with_ymd_and_hms(2025, 7, 21, 12, 0, 0).single());
+        if dt.is_none() {
+            // Longitude == -180.0 edge case; fall back far enough east.
+            dt = FixedOffset::east_opt(12 * 3600)
+                .and_then(|tz| tz.with_ymd_and_hms(2025, 7, 21, 12, 0, 0).single());
+        }
+        // Adjust UTC hour so local solar noon is at 12:00 local (approximate).
+        let utc_hour = (12.0 - site_lon_deg / 15.0).round() as i64;
+        let base_utc = dt.expect("valid July 21 noon UTC");
+        let local_noon = base_utc + chrono::Duration::hours((utc_hour - 12).clamp(-12, 12));
+        let pos = solar_position(site_lat_deg, site_lon_deg, local_noon);
+        let doy = local_noon.ordinal();
+
+        let (dni_clear, dhi_clear, ghi_clear) = clear_sky_irradiance(doy, pos.altitude_deg);
+        let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
+
+        // ── Apply per-window solar gains ───────────────────────────────────
+        for (surface_id, win_props) in &self.config.window_properties {
+            let Some(&solar_idx) = self.wiring.solar_input_indices.get(surface_id) else {
+                continue;
+            };
+            if solar_idx >= u_design.len() {
+                continue;
+            }
+
+            let irr = perez_tilted_irradiance(
+                *surface_id,
+                ghi_clear,
+                dni_clear,
+                dhi_clear,
+                solar_zenith_deg,
+                pos.azimuth_deg,
+                win_props.tilt_deg,
+                win_props.azimuth_deg,
+                doy,
+                DEFAULT_GROUND_ALBEDO,
+            );
+
+            // Design-day approximation: total window solar gain = POA × SHGC × area.
+            // This bypasses the per-timestep beam/diffuse split and IAM correction
+            // used in full simulation, but captures the dominant solar heat gain
+            // for equipment sizing at a single solar position.
+            let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
+            u_design[solar_idx] += poa_w_m2 * win_props.shgc * win_props.area_m2;
+        }
+
+        // ── Apply per-opaque-surface solar gains ───────────────────────────
+        for info in &self.config.exterior_surfaces {
+            if info.input_index >= u_design.len() {
+                continue;
+            }
+            // Skip windows — they are handled above via SHGC.
+            if self.config.window_properties.contains_key(&info.surface_id) {
+                continue;
+            }
+
+            let irr = perez_tilted_irradiance(
+                info.surface_id,
+                ghi_clear,
+                dni_clear,
+                dhi_clear,
+                solar_zenith_deg,
+                pos.azimuth_deg,
+                info.tilt_deg,
+                info.azimuth_deg,
+                doy,
+                DEFAULT_GROUND_ALBEDO,
+            );
+
+            let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
+            u_design[info.input_index] += info.absorptance * info.area_m2 * poa_w_m2;
+        }
+
+        // ── Solve without coupling (no infiltration at design conditions) ──
+        let total = self
+            .model
+            .solve_for_output_input(&self.x, &u_design, target_c, output_idx, input_idx);
+
+        total
+            .map(|raw| raw - u_design[input_idx])
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    ?zone,
+                    ?e,
+                    target_c,
+                    design_outdoor_c,
+                    solar_altitude = pos.altitude_deg,
+                    dni = dni_clear,
+                    ghi = ghi_clear,
+                    "autosize_capacity_cooling: solve failed, returning 0"
+                );
+                0.0
+            })
     }
 
     /// Estimate the ideal HVAC capacity needed to reach an explicit target temperature.

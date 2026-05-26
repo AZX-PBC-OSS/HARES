@@ -56,3 +56,21 @@ Now I have enough information. Let me check one more thing about the pressure un
 [0m✱ [0mGrep "pressure_pa\(\)"[90m in crates · 12 matches[0m
 [0m✱ [0mGrep "fn calculate_shr"[90m in crates · 8 matches[0m
 [0m→ [0mRead crates/hares-equipment/src/hvac/coil_physics.rs[90m [offset=214, limit=50][0m
+[0m
+[0m← [0mWrite docs/reviews/architecture/arch-02-core-state-structs.md
+Wrote file successfully.
+[0m
+Now I have all the information needed. Let me write the review.
+Review written to `docs/reviews/architecture/arch-02-core-state-structs.md`.
+
+**Summary**: 6 findings — 0 critical, 0 high, 3 medium, 3 low.
+
+Key findings:
+- **Medium**: `ZoneState` missing `mean_radiant_temperature_c` for operative temperature control
+- **Medium**: `relative_humidity`/`wet_bulb_c` derived fields can go stale vs `temperature_c`
+- **Medium**: `opaque_sky_cover` parsed from weather files but not surfaced on `WeatherState`
+- **Low**: `equipment_telemetry`/`equipment_core` non-serializable (by design, checkpoint handles it separately)
+- **Low**: No pre-computed `outdoor_air_density` field
+- **Low**: `volume_m3` geometry parameter commingled with thermodynamic state
+
+Unit consistency is confirmed across all 30+ fields — temperatures in °C, pressure in kPa (with `pressure_pa()` accessor), irradiance in W/m². Weather refresh is verified complete at each timestep boundary. Checkpoint/restore is sufficient for exact resume via the purpose-built `DwellingCheckpoint` schema.

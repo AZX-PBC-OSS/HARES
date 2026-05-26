@@ -1,0 +1,71 @@
+# opencode log for coredeep-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/diagnostics.rs
+[0m• [0mExplore diagnostics usage[90m Explore Agent[0m
+[0m✓ [0mExplore diagnostics usage[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-core/src/invariants.rs
+[0m→ [0mRead crates/hares-core/src/lib.rs
+[0m✱ [0mGrep "output_verbosity.*>=.*4|verbosity.*>=.*4|verbosity >= 4"[90m 4 matches[0m
+[0m✱ [0mGrep "diagnostics::(write_header|write_row|capture)"[90m 0 matches[0m
+Let me dig deeper into the invocation path, invariants module, and how verbosity gates the diagnostics pipeline.
+[0m✱ [0mGrep "diagnostics"[90m in crates/hares-core/src/dwelling · 18 matches[0m
+[0m✱ [0mGrep "output_verbosity"[90m in crates/hares-core/src/dwelling · 10 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1700, limit=90][0m
+[0m→ [0mRead crates/hares-io/src/output/columns.rs[90m [offset=125, limit=50][0m
+[0m✱ [0mGrep "diagnostics::"[90m 1 match[0m
+[0m✱ [0mGrep "StepDiagnostics|EnvelopeDiag|EquipmentDiag"[90m 25 matches[0m
+[0m✱ [0mGrep "check_invariants"[90m in crates/hares-core/src · 20 matches[0m
+[0m✱ [0mGrep "\.csv|diagnostic.*csv|CSV|\.write.*diag"[90m in crates/hares-core/src/dwelling · 3 matches[0m
+[0m✱ [0mGrep "write_header|write_row"[90m in crates/hares-core/src · 2 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3048, limit=120][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=700, limit=50][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3168, limit=100][0m
+[0m→ [0mRead crates/hares-core/src/telemetry.rs
+[0m✱ [0mGrep "DwellingTelemetry"[90m in crates/hares-core/src/dwelling · 3 matches[0m
+[0m✱ [0mGrep "total_power_kw|total_electric|total_thermal|total_delivered|negative.*energy|negative.*total"[90m in crates/hares-core/src · 5 matches[0m
+[0m→ [0mRead crates/hares-core/src/observer.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=100, offset=1850][0m
+[0m→ [0mRead crates/hares-core/src/observer_capture.rs
+[0m✱ [0mGrep "observe_detailed|cfg.*feature.*observe"[90m in crates/hares-core/src/dwelling · 34 matches[0m
+[0m✱ [0mGrep "is_nan|is_finite|NAN""[90m in crates/hares-core/src/diagnostics.rs · 0 matches[0m
+[0m✱ [0mGrep "is_nan|is_finite""[90m in crates/hares-core/src/telemetry.rs · 0 matches[0m
+[0m✱ [0mGrep "negative.*delivered|delivered.*negative|heating.*negative|cooling.*negative""[90m 7 matches[0m
+[0m→ [0mRead crates/hares-io/src/output/columns.rs[90m [limit=30, offset=140][0m
+[0m✱ [0mGrep "HVAC Heating Delivered|HVAC Cooling Delivered|heating_delivered|cooling_delivered"[90m 68 matches[0m
+[0m✱ [0mGrep "InvariantViolation""[90m in crates/hares-types · 0 matches[0m
+[0m✱ [0mGrep "is_finite|is_nan|NaN""[90m in crates/hares-io/src/output · 1 match[0m
+[0m✱ [0mGrep "InvariantViolation"[90m in crates/hares-types · 2 matches[0m
+[0m→ [0mRead crates/hares-types/src/error.rs
+[0m→ [0mRead crates/hares-io/src/output/metrics.rs[90m [limit=150, offset=270][0m
+[0m→ [0mRead crates/hares-io/src/output/metrics.rs[90m [limit=100, offset=550][0m
+[0m→ [0mRead crates/hares-core/tests/port_radiant_diag.rs
+[0m✱ [0mGrep "output_verbosity.*verbosity.*diagnostic|diagnostic.*csv|diagnostics_csv|diag_csv""[90m 0 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/core-deep
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/core-deep/coredeep-06-diagnostics-pipeline.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/core-deep/coredeep-06-diagnostics-pipeline.md
+99 /Users/rich/source/HARES/docs/reviews/core-deep/coredeep-06-diagnostics-pipeline.md
+[0m
+Review complete. 8 findings written to `docs/reviews/core-deep/coredeep-06-diagnostics-pipeline.md`:
+
+| Severity | Count | Key concerns |
+|----------|-------|-------------|
+| Critical | 1 | `diagnostics.rs` CSV pipeline is dead code — no invocation path |
+| High | 3 | No NaN detection in diagnostics; no negative energy check; no telemetry consistency (sum eq → total) |
+| Medium | 2 | Invariant errors lack timestep/dwelling/zone context; no intermediate NaN screening at phase boundaries |
+| Low | 2 | NaN passes through invariant guards silently (`NaN >= 1.0` is false); `outdoor_rh` misnamed as humidity ratio |
+
+Performance: zero overhead in production — invariant checks and observer are fully compile-time gated via `#[cfg]`, no runtime toggles, no collected-then-discarded data.

@@ -1,0 +1,49 @@
+# opencode log for config-io-04
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/config.rs
+[0m→ [0mRead crates/hares-io/tests/config_round_trip.rs
+[0m✱ [0mGlob "vendors/OCHRE/**/*.rs"[90m in . · 0 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/**/*.toml"[90m in . · 1 match[0m
+[0m✱ [0mGlob "vendors/OCHRE/**/*.py"[90m in . · 69 matches[0m
+[0m• [0mExplore config types and serde[90m Explore Agent[0m
+[0m• [0mExplore OCHRE config patterns[90m Explore Agent[0m
+[0m✱ [0mGrep "#\[derive\(.*Serialize.*\)\]|#\[derive\(.*Deserialize.*\)\]"[90m in crates/hares-io · 9 matches[0m
+[0m✱ [0mGrep "trait EquipmentTypedConfig"[90m in . · 1 match[0m
+Now let me explore the equipment config types, the shared types, and the OCHRE reference for comparison.
+[0m✓ [0mExplore OCHRE config patterns[90m Explore Agent[0m
+[0m✓ [0mExplore config types and serde[90m Explore Agent[0m
+[0m✱ [0mGrep "impl Default for SimulationConfig"[90m in . · 0 matches[0m
+[0m✱ [0mGrep "toml::to_string|toml::to_writer"[90m in . · 4 matches[0m
+[0m✱ [0mGrep "Serialize"[90m in crates/hares-io · 4 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/config.rs[90m [offset=100, limit=60][0m
+Let me check a few more areas for completeness.
+[0m✱ [0mGrep "#\[derive\(.*Serialize.*\)\]|#\[derive\(.*Deserialize.*\)\]"[90m in crates/hares-types/src · 67 matches[0m
+[0m→ [0mRead crates/hares-core/tests/core_output_regressions.rs[90m [limit=50][0m
+[0m→ [0mRead crates/hares-core/tests/named_control_wiring_regressions.rs[90m [limit=30][0m
+[0m✱ [0mGrep "sim_table.*SimulationConfig|SimulationConfig.*serialize|serialize.*SimulationConfig|toml.*SimulationConfig"[90m in . · 0 matches[0m
+[0m→ [0mRead crates/hares-core/tests/alignment_oracles_regressions.rs[90m [limit=40, offset=1040][0m
+[0m✱ [0mGrep "use serde"[90m in crates/hares-io · 20 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/config-io
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/config-io/config-io-04-config-round-trip.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/config-io/config-io-04-config-round-trip.md`.
+
+**Summary**: 8 findings total — 2 critical, 2 high, 1 medium, 3 low.
+
+- **Critical**: `SimulationConfig` and `OutputFormat` both lack `Serialize`, making TOML round-trip impossible for the top-level config struct
+- **High**: Round-trip tests use JSON not TOML; no `SimulationConfig` round-trip test exists at all
+- **Medium**: 13 config enums rely on implicit PascalCase serialization without explicit `rename_all`
+- **Low**: No `Default` impl on `SimulationConfig`; `EnvironmentState` drops runtime fields on serialize; heat pump configs can't reject unknown fields (serde flatten limitation)

@@ -1,0 +1,56 @@
+# opencode log for config-io-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-io/src/draw_profile.rs
+[0m→ [0mRead crates/hares-io/src/pv_sizing.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/PV.py
+[0m✱ [0mGrep "electrical.*load|draw.*profile|misc.*load|MEL|coincidence|clothes.*washer|clothes.*dryer|dishwasher|range.*oven|microwave|refrigerator|lighting"[90m in crates/hares-io/src · 80 matches[0m
+[0m✱ [0mGrep "inverter.*clip|dc.ac.ratio|system_loss|soiling|mismatch|nameplate.*tolerance|dc_ac_ratio"[90m in . · 250 matches[0m
+[0m✱ [0mGrep "pv_sizing|RoofInfo|RoofPlane"[90m in . · 59 matches[0m
+[0m→ [0mRead crates/hares-io/src/schedule_resolve.rs
+[0m→ [0mRead crates/hares-physics/src/pv_sizing.rs
+[0m→ [0mRead crates/hares-equipment/src/pv
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [limit=150][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/config.rs
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_loads.rs[90m [limit=100][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [offset=151, limit=300][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_loads.rs[90m [limit=200, offset=400][0m
+[0m✱ [0mGrep "coincidence|coincident|diversity|aggregate.*load|total.*load|sum.*power"[90m in crates/hares-io/src · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [limit=200, offset=1390][0m
+[0m✱ [0mGrep "clipping|inverter_clipping_kw|dc_ac_ratio|inverter.*clip"[90m in crates/hares-equipment/src/pv · 18 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_loads.rs[90m [limit=120, offset=100][0m
+[0m→ [0mRead crates/hares-equipment/src/pv/mod.rs[90m [limit=200, offset=451][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_loads.rs[90m [limit=200, offset=220][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_loads.rs[90m [limit=150, offset=600][0m
+[0m✱ [0mGrep "convective_gain|sensible_gain_fraction|zone_gain_fraction|heat_gain_fraction"[90m in crates/hares-io/src/hpxml · 11 matches[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_loads.rs[90m [limit=120, offset=750][0m
+Now let me check the heat gain fractions and the remaining loads (pools, spas), and also look at the OCHRE PV.py more carefully for the inverter clipping behavior.
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_loads.rs[90m [limit=120, offset=870][0m
+[0m✱ [0mGrep "microwave"[90m in . · 0 matches[0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/config-io/ 2>/dev/null || echo "directory does not exist"
+config-io-01-config-parsing.md
+config-io-02-defaults-csv-loading.md
+config-io-03-equipment-registry.md
+config-io-04-config-round-trip.md
+[0m
+[0m← [0mWrite docs/reviews/config-io/config-io-06-draw-profile-pv-sizing.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/config-io/config-io-06-draw-profile-pv-sizing.md`.
+
+Summary of findings:
+- **7 findings total** (0 critical, 1 high, 2 medium, 4 low)
+- **High**: No coincidence/diversity factors applied when aggregating multiple electrical end-use loads — peak dwelling load can be overestimated by 30–60%
+- **Medium**: Microwave load type missing from schedule mappings; secondary refrigerator schedule column explicitly ignored
+- **Low**: PV sizing doesn't compute inverter capacity or DC/AC ratio; system losses double-count soiling when both are active; holiday lighting ignored; minor clipping computation order difference vs OCHRE
+
+PV sizing cross-reference table confirms functional parity with OCHRE across all major categories (inverter efficiency, system losses, temperature derating, curtailment). HARES adds capabilities OCHRE lacks (automated roof geometry sizing, soiling model, shading model, flat-roof GCR).

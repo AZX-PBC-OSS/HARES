@@ -1,0 +1,77 @@
+# opencode log for coredeep-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/rng.rs
+[0m✱ [0mGlob "crates/hares-core/src/**/*.rs"[90m 37 matches[0m
+[0m→ [0mRead crates/hares-core/src/actor.rs
+[0m→ [0mRead crates/hares-core/src/checkpoint.rs
+[0m→ [0mRead crates/hares-core/src/engine.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs
+[0m→ [0mRead crates/hares-core/src/lib.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1229][0m
+[0m→ [0mRead crates/hares-core/src/actors/mod.rs
+[0m✱ [0mGrep "rng|derive_dwelling_rng|ActorSeed|ChaCha8Rng|seed|random"[90m in crates/hares-core/src/dwelling · 64 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2477][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3200][0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=100][0m
+[0m✱ [0mGrep "self\.rng\b"[90m in crates/hares-core/src · 5 matches[0m
+[0m✱ [0mGrep "rng_stochastic|initial_rng|ChaCha8Rng"[90m in crates/hares-core/src/environment.rs · 11 matches[0m
+[0m✱ [0mGrep "seed_val|seed|rng|ChaCha"[90m in crates/hares-core/src/actors/ev_driver · 18 matches[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=850, limit=200][0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/mod.rs[90m [offset=220, limit=200][0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/efficiency.rs
+[0m✱ [0mGrep "fn test.*reproduc|deterministic.*same|same.*seed.*same|identical.*output"[90m in crates/hares-core · 1 match[0m
+[0m✱ [0mGrep "initial_rng"[90m in crates/hares-core/src · 10 matches[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [offset=240, limit=40][0m
+[0m✱ [0mGrep "ChaCha8Rng|rng_stochastic|rng\.random|rng_stochastic"[90m in crates · 61 matches[0m
+[0m✱ [0mGrep "master_seed"[90m in crates · 62 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/event_load.rs[90m [offset=1415, limit=50][0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/mod.rs[90m [offset=1000, limit=80][0m
+[0m✱ [0mGrep "derive_dwelling_rng|master_seed.*bldg"[90m in crates/hares-fleet · 0 matches[0m
+[0m→ [0mRead crates/hares-fleet/src/fleet.rs[90m [limit=100, offset=530][0m
+[0m✱ [0mGrep "DwellingConfig|bldg_id|from_preparsed|from_config"[90m in crates/hares-fleet/src · 42 matches[0m
+[0m→ [0mRead crates/hares-fleet/src/fleet.rs[90m [offset=100, limit=100][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/core-deep/ 2>/dev/null || echo "directory does not exist"
+(no output)
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/ 2>/dev/null || echo "dir not found"
+_logs
+_test
+agents
+air-properties
+architecture
+ashrae152-deep
+build
+config-io
+control-deep
+core-deep
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/core-deep/
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/core-deep/coredeep-02-rng-seed-propagation.md
+Wrote file successfully.
+[0m
+Now let me write the review file:
+The review has been written to `/Users/rich/source/HARES/docs/reviews/core-deep/coredeep-02-rng-seed-propagation.md`.
+
+**Summary of findings:**
+
+| Severity | # | Description |
+|----------|---|-------------|
+| **Critical** | 1 | Dwelling RNG is dead state — stored but never consumed during simulation. `self.rng` is only used for checkpoint I/O, never sampled in `run_timestep`. |
+| **High** | 2 | No hierarchical RNG chain from dwelling to actors/equipment. EV driver and event loads independently derive seeds from names/config rather than from the dwelling RNG. |
+| **High** | 3 | No end-to-end reproducibility test for the full simulation with same config seed. |
+| **Medium** | 4 | `rng.rs` seed construction uses raw byte-copy instead of a cryptographic KDF. |
+| **Medium** | 5 | EV driver seed hash uses a weak polynomial fold (non-cryptographic, poor distribution). |
+| **Low** | 6 | Checkpoint RNG serialization is structurally correct (just needs the RNG to actually be used). |
+| **Low** | 7 | Fleet mode correctly avoids cloning RNGs via per-dwelling `bldg_id`, but relies on `bldg_id` uniqueness without a defensive assertion. |

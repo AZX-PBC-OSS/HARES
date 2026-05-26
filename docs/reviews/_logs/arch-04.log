@@ -48,3 +48,22 @@ Now let me check the ZoneId definition and how it's used for indexing, and look 
 [0m→ [0mRead crates/hares-equipment/src/water_heater/tankless.rs[90m [offset=505, limit=50][0m
 [0m→ [0mRead crates/hares-equipment/src/water_heater/gas.rs[90m [offset=510, limit=30][0m
 Now I have enough data to write the review. Let me check one more thing about the water heater tankless and verify a few final details.
+[0m
+[0m← [0mWrite docs/reviews/architecture/arch-04-port-slot-accumulation.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/architecture/arch-04-port-slot-accumulation.md`.
+
+**Summary of findings:**
+
+- **6 findings total**: 0 High, 3 Medium, 3 Low
+- **Key issues**:
+  - The declarative wiring model is weakened because `from_declarations()` unconditionally creates thermal accumulators for every env zone, so misconfigured equipment targeting a wrong (but valid) zone won't error
+  - `apply_occupancy_gains()` bypasses the `accumulate()` API and silently drops gains if no accumulator matches
+  - `refresh_equipment_caches()` doesn't rebuild `PortSlots`, so dynamically added equipment may crash on undeclared targets
+  - HPWH compressor waste heat is conflated with `JacketLoss` (diagnostic-only impact)
+- **Verified correct**:
+  - `PortSlots::accumulate()` properly rejects truly undeclared zones/loops/domains (tested)
+  - All 19 equipment types have correct `ThermalCategory` tags
+  - Multi-equipment accumulation to same zone works correctly
+  - Zone ID indexing uses opaque `u16` with equality comparison, not slice indexing — no off-by-one risk

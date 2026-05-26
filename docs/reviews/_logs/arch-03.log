@@ -39,3 +39,25 @@ Now let me read the full `ControlSignal` definition, bitflags, and the vendor re
 [0m✱ [0mGrep "control_capabilities|ControlCapabilities::"[90m in crates/hares-equipment/src/hvac/ideal_hvac.rs · 10 matches[0m
 [0m✱ [0mGrep "control_capabilities|ControlCapabilities::"[90m in crates/hares-equipment/src/event_load.rs · 7 matches[0m
 [0m✱ [0mGrep "control_capabilities|ControlCapabilities::"[90m in crates/hares-equipment/src/ventilation.rs · 3 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/battery/mod.rs[90m [offset=385, limit=15][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/architecture/ 2>/dev/null || mkdir -p /Users/rich/source/HARES/docs/reviews/architecture/
+arch-01-overall-architecture.md
+arch-02-core-state-structs.md
+arch-04-port-slot-accumulation.md
+[0m
+Now I have all the data needed. Let me verify the directory exists and write the review:
+[0m← [0mWrite docs/reviews/architecture/arch-03-control-capability-matching.md
+Wrote file successfully.
+[0m
+Review written to `/Users/rich/source/HARES/docs/reviews/architecture/arch-03-control-capability-matching.md`.
+
+**7 findings across all equipment types:**
+
+| Severity | Count | Key Issues |
+|---|---|---|
+| High | 1 | `PROTOCOL_NATIVE` has zero equipment declarants — signal is always silently dropped |
+| Medium | 3 | EV missing `DEMAND_RESPONSE`; no `PRICE_SIGNAL` variant in architecture; Baseboard/Boiler/Furnace lack `MODE_OVERRIDE` + `DEMAND_RESPONSE` |
+| Low | 3 | Generator missing `GRID_CONNECT`; no automated coverage test; EventLoad constructor capability inconsistency |
+
+All 25 bitflags use distinct single-bit values (0-24 in a u32) — no aliasing. `THERMAL_SETPOINT`, `POWER_LIMIT`, `MODE_OVERRIDE`, and `DEMAND_RESPONSE` are correctly declared by appropriate equipment types per the review criteria, with the gaps noted above.

@@ -53,6 +53,7 @@ struct SolverBoundary {
     area_m2: f64,
     boundary_category: Option<BoundaryCategory>,
     tilt_deg: f64,
+    azimuth_deg: f64,
     zone_id: ZoneId,
     zone_idx: usize,
     is_exterior: bool,
@@ -216,6 +217,9 @@ fn build_solver_boundaries(
             _ => 90.0,
         });
 
+        // Azimuth: use parsed value from HPXML, fall back to 180° (south).
+        let azimuth_deg = boundary.azimuth_deg.unwrap_or(180.0);
+
         // Keep radiant-barrier properties on the attic-interior side only.
         // Exterior solar/thermal properties remain physical or explicitly set by HPXML.
         let exterior_emissivity = exterior_emissivity(boundary);
@@ -357,6 +361,7 @@ fn build_solver_boundaries(
             area_m2: boundary.area_m2,
             boundary_category,
             tilt_deg,
+            azimuth_deg,
             zone_id,
             zone_idx,
             is_exterior,
@@ -705,6 +710,7 @@ pub(crate) fn build_default_solvers(
                 area_m2: sb.area_m2,
                 emissivity: sb.exterior_emissivity,
                 tilt_deg: sb.tilt_deg,
+                azimuth_deg: sb.azimuth_deg,
                 rad_frac: sb.exterior_rad_frac,
                 rad_res_k_w: sb.exterior_rad_res_k_w,
                 n_iter,
@@ -740,6 +746,8 @@ pub(crate) fn build_default_solvers(
                             ws.u_factor_w_m2_k,
                             ws.base_shgc,
                         ),
+                        tilt_deg: sb.tilt_deg,
+                        azimuth_deg: sb.azimuth_deg,
                     },
                 );
                 thermal_cfg

@@ -817,6 +817,7 @@ mod tests {
                 area_m2: 12.0,
                 emissivity: 0.84,
                 tilt_deg: 90.0,
+                azimuth_deg: 180.0,
                 rad_frac: 0.0,
                 rad_res_k_w: 0.0,
                 n_iter: 1,
