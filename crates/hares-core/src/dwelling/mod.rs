@@ -2,6 +2,7 @@
 
 mod autosize;
 mod conversions;
+mod loop_allocator;
 mod solver_builder;
 mod synthetic;
 
@@ -1008,6 +1009,12 @@ impl Dwelling {
 
         let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
             .map_err(|e| HaresError::Io(e.to_string()))?;
+
+        // Centralized fluid loop ID allocation — must run after wiring
+        // (resolve_loop_wiring, inside resolve_equipment) and before
+        // equipment construction so every instance receives a unique
+        // loop ID above the wired range.
+        loop_allocator::allocate_loop_ids(&mut equipment_specs);
 
         // Register PV surfaces with the environment so Perez irradiance is
         // computed for PV orientations (which may not match any envelope surface).

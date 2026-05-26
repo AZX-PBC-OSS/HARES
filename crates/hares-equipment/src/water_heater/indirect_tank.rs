@@ -106,7 +106,7 @@ impl IndirectTank {
         let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
         let boiler_loop_id =
             crate::hvac::helpers::loop_id_from_config(&config, &["boiler_loop_id", "loop_id"])
-                .unwrap_or(LoopId(1));
+                .unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
             .clamp(1, 12);

@@ -112,8 +112,7 @@ impl ResistanceWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
-        let loop_id =
-            loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or(LoopId(1));
+        let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
             .clamp(1, 12);
@@ -928,7 +927,7 @@ mod tests {
         ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
             zone_id: None,
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             energy_factor: None,

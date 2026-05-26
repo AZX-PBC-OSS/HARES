@@ -128,7 +128,7 @@ impl ElectricBoiler {
     pub fn new(config: EquipmentConfig) -> Self {
         let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
         let loop_id =
-            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or(LoopId(1));
+            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
@@ -357,7 +357,7 @@ impl GasBoiler {
     pub fn new(config: EquipmentConfig) -> Self {
         let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
         let loop_id =
-            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or(LoopId(1));
+            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
