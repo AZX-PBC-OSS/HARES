@@ -142,6 +142,16 @@ pub struct Boundary {
     /// (converted from IP ft²·°F·h/Btu). Used to select the ASHRAE F2 perimeter
     /// heat loss coefficient via [`hares_physics::ground::f2_coefficient`].
     pub perimeter_insulation_r_m2_k_w: Option<f64>,
+    /// Foundation depth below grade [m] for ground temperature calculations.
+    ///
+    /// For foundation walls: the centroid depth of the below-grade portion
+    /// (typically `DepthBelowGrade / 2.0`). For slabs: the depth below grade
+    /// of the adjacent foundation wall (i.e., `DepthBelowGrade`).
+    ///
+    /// This depth is used by the Kusuda-Achenbach ground temperature model
+    /// in the thermal solver for `DrivingTemp::Ground` boundaries.
+    /// `None` for above-grade boundaries. Populated during HPXML post-processing.
+    pub foundation_depth_m: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -580,18 +590,23 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // foundation_name, apply insulation details and area scaling.
     // OCHRE hpxml.py:408-410: boundaries["Foundation Wall"]["Construction Type"] = foundation_name
     let mut foundation_height_m: Option<f64> = None;
+    let mut foundation_depth_m: Option<f64> = None;
     for bd in &mut boundaries {
         if bd.boundary_type == BoundaryType::FoundationWall {
             if let Some(ref fnd_name) = foundation_name {
                 bd.construction_type = Some(fnd_name.clone());
             }
-            let (insulation, area_scale, height_m) =
+            let (insulation, area_scale, height_m, depth_below_grade) =
                 extract_foundation_wall_insulation(details, &bd.id);
             bd.insulation_details = insulation;
             bd.area_m2 *= area_scale;
             if foundation_height_m.is_none() {
                 foundation_height_m = height_m;
             }
+            if foundation_depth_m.is_none() && depth_below_grade > 0.0 {
+                foundation_depth_m = Some(depth_below_grade);
+            }
+            bd.foundation_depth_m = Some(depth_below_grade / 2.0);
         }
     }
 
@@ -604,6 +619,13 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     if let Some(slabs_group) = details.path(&["Enclosure", "Slabs"]) {
         for bd in &mut boundaries {
             if bd.boundary_type == BoundaryType::Slab {
+                // The slab interface is at the base of the foundation wall
+                // (top of slab ≈ bottom of wall). Propagate from the first
+                // foundation wall's `DepthBelowGrade`.
+                if bd.foundation_depth_m.is_none() {
+                    bd.foundation_depth_m = foundation_depth_m;
+                }
+
                 if let Some(slab_node) = slabs_group.children_named("Slab").find(|n| {
                     n.child("SystemIdentifier")
                         .and_then(|si| si.attrs.get("id"))
@@ -689,6 +711,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                     floor_or_ceiling: None,
                     perimeter_m: None,
                     perimeter_insulation_r_m2_k_w: None,
+                    foundation_depth_m: None,
                 });
             }
         }
@@ -743,6 +766,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         floor_or_ceiling: None,
                         perimeter_m: None,
                         perimeter_insulation_r_m2_k_w: None,
+                        foundation_depth_m: None,
                     });
                 }
             }
@@ -1062,6 +1086,7 @@ fn parse_windows(
             floor_or_ceiling: None,
             perimeter_m: None,
             perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
         });
     }
 
@@ -1142,6 +1167,7 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
         }),
         perimeter_m: None,
         perimeter_insulation_r_m2_k_w: None,
+        foundation_depth_m: None,
     })
 }
 
@@ -1330,17 +1356,21 @@ fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
     }
 }
 
-/// Extract foundation wall insulation details, area scale factor, and height.
+/// Extract foundation wall insulation details, area scale factor, height,
+/// and depth below grade [m].
 ///
 /// Mirrors OCHRE `get_fnd_wall_insulation` (envelope.py:434-459):
 /// - Area scaled by `DepthBelowGrade / Height` when they differ.
 /// - Insulation details: "Half R{n}", "R{n}", or "Uninsulated".
 ///
+/// Returns `(insulation_details, area_scale, height_m, depth_below_grade_m)`.
+/// `depth_below_grade_m` defaults to the wall height when absent from HPXML.
+///
 /// `details` is the BuildingDetails node; `wall_id` identifies which FoundationWall.
 fn extract_foundation_wall_insulation(
     details: &XmlNode,
     wall_id: &str,
-) -> (Option<String>, f64, Option<f64>) {
+) -> (Option<String>, f64, Option<f64>, f64) {
     // Find the FoundationWall element matching this boundary's ID.
     let wall_node = details
         .path(&["Enclosure", "FoundationWalls"])
@@ -1353,7 +1383,7 @@ fn extract_foundation_wall_insulation(
             })
         });
     let Some(node) = wall_node else {
-        return (Some("Uninsulated".to_string()), 1.0, None);
+        return (Some("Uninsulated".to_string()), 1.0, None, 0.0);
     };
 
     // Area scaling: depth_below_grade / height.
@@ -1416,7 +1446,12 @@ fn extract_foundation_wall_insulation(
         "Uninsulated".to_string()
     };
 
-    (Some(insulation_details), area_scale, height_m)
+    (
+        Some(insulation_details),
+        area_scale,
+        height_m,
+        depth_below_grade,
+    )
 }
 
 /// Extract slab insulation details for LUT matching.
@@ -3230,6 +3265,17 @@ mod tests {
             Some("Half R10"),
             "half-height R-10 insulation expected"
         );
+
+        // Regression: foundation_depth_m must be populated from DepthBelowGrade.
+        // DepthBelowGrade=4 ft → 1.2192 m; centroid = half the below-grade portion.
+        let expected_foundation_depth_m = 4.0 * 0.3048 / 2.0;
+        assert!(
+            (fnd_wall.foundation_depth_m.unwrap_or(0.0) - expected_foundation_depth_m).abs()
+                < 0.001,
+            "foundation_depth_m should be half of DepthBelowGrade (converted to m): got {:?}, expected {}",
+            fnd_wall.foundation_depth_m,
+            expected_foundation_depth_m
+        );
     }
 
     #[test]
@@ -4172,6 +4218,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }
         }
         let boundaries = vec![
@@ -4221,6 +4268,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }
         }
         let boundaries = vec![
@@ -4263,6 +4311,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }
         }
         let garage_area = 30.0;
@@ -4323,6 +4372,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }
         }
         // 6:12 pitch → tilt = atan(0.5) ≈ 26.565°
@@ -4394,6 +4444,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }
         }
         // Regression guard: verifies compound attic volume formula against
@@ -4519,6 +4570,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }
         }
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
@@ -4620,6 +4672,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }
         }
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
@@ -4701,6 +4754,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }
         }
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
@@ -4766,6 +4820,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }
         }
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();

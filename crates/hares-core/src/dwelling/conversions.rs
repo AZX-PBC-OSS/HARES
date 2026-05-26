@@ -364,7 +364,7 @@ pub fn building_to_boundary_inputs(
                 r_film_exterior_m2_k_w: r_film_ext,
                 framing_factor: bd.framing_factor,
                 interior_emissivity,
-                foundation_depth_m: 0.0,
+                foundation_depth_m: bd.foundation_depth_m.unwrap_or(0.0),
             })
         })
         .collect::<std::result::Result<Vec<_>, HaresError>>()
@@ -855,6 +855,7 @@ mod tests {
             floor_or_ceiling: None,
             perimeter_m: None,
             perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
         }
     }
 
@@ -1249,6 +1250,7 @@ mod tests {
             floor_or_ceiling: None,
             perimeter_m,
             perimeter_insulation_r_m2_k_w: insulation_r,
+            foundation_depth_m: None,
         }
     }
 
@@ -1437,6 +1439,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }],
             ..minimal_building(
                 vec![Zone {
@@ -1495,6 +1498,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             }],
             ..minimal_building(
                 vec![Zone {
@@ -1557,6 +1561,7 @@ mod tests {
                     floor_or_ceiling: None,
                     perimeter_m: None,
                     perimeter_insulation_r_m2_k_w: None,
+                    foundation_depth_m: None,
                 },
                 Boundary {
                     id: "wall-stucco".to_string(),
@@ -1580,6 +1585,7 @@ mod tests {
                     floor_or_ceiling: None,
                     perimeter_m: None,
                     perimeter_insulation_r_m2_k_w: None,
+                    foundation_depth_m: None,
                 },
             ],
             ..minimal_building(

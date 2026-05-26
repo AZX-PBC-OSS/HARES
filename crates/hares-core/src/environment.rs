@@ -1189,6 +1189,7 @@ mod tests {
                     floor_or_ceiling: None,
                     perimeter_m: None,
                     perimeter_insulation_r_m2_k_w: None,
+                    foundation_depth_m: None,
                 },
                 Boundary {
                     id: "north-wall".to_string(),
@@ -1212,6 +1213,7 @@ mod tests {
                     floor_or_ceiling: None,
                     perimeter_m: None,
                     perimeter_insulation_r_m2_k_w: None,
+                    foundation_depth_m: None,
                 },
             ],
             windows: Vec::<Window>::new(),
@@ -2578,6 +2580,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             });
             b
         };
@@ -2653,6 +2656,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             });
             b
         };
@@ -2704,6 +2708,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             });
             b
         };
@@ -2757,6 +2762,7 @@ mod tests {
                 floor_or_ceiling: None,
                 perimeter_m: None,
                 perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
             });
             b
         };

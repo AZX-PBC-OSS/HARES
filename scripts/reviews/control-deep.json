@@ -1,0 +1,38 @@
+{
+  "category": "control-deep",
+  "description": "Control system deep-dive: ControlSignal constructors, enum variant coverage, PriorityTier assignment, and control types module completeness.",
+  "reviews": [
+    {
+      "id": "ctrldp-01",
+      "slug": "control-signal-constructors",
+      "title": "All 12 ControlSignal constructors: field correctness, optional field defaults",
+      "vendor_refs": "vendors/OCHRE/ochre/Dwelling.py",
+      "files": "crates/hares-control/src/signal.rs",
+      "prompt": "Each of the 12 ControlSignal variants has a constructor function that creates the signal with the correct fields. Wrong defaults silently corrupt control behavior—a signal with priority=None might override safety-critical commands, or a signal with duration=0 might be interpreted as infinite. Review every constructor: (a) Required fields: verify that all required fields are accepted as parameters (not hardcoded) and are set correctly on the resulting struct. (b) Optional fields: verify that optional fields (duration, priority_override, zone_restriction, preemptible flag) default to appropriate None/false values. A duration that defaults to Some(0) instead of None has completely different semantics (zero-length command vs. indefinite). A preemptible flag defaulting to true when it should be false allows critical signals to be silently overridden. (c) Field value validation: constructors should reject physically impossible values (negative duration, priority values outside the valid range). If constructors accept any value and validation happens later, verify that the validation actually runs before dispatch. (d) Typestate consistency: some fields may be mutually exclusive or conditionally required (e.g., a temperature setpoint signal must have a target_temperature field; a battery dispatch signal must have a power setpoint). Verify that the constructor enforces these invariants, either at the type level or with runtime assertions. (e) Copy/clone semantics: ControlSignals are dispatched to multiple equipment controllers. Verify whether the signal is cloned or shared by reference, and that mutable state within a signal (e.g., remaining duration) does not cause aliasing bugs when the signal is sent to multiple receivers."
+    },
+    {
+      "id": "ctrldp-02",
+      "slug": "control-signal-variant-coverage",
+      "title": "Every ControlSignal enum variant: constructability, dispatch handling, equipment consumption",
+      "vendor_refs": null,
+      "files": "crates/hares-types/src/control_signal.rs",
+      "prompt": "Each ControlSignal enum variant must be: (a) constructible—there exists at least one code path that creates it, (b) handled by the dispatch system—the dispatcher has a match arm or handler for it, and (c) consumed by at least one equipment controller—a signal that no equipment responds to is dead code. Orphan variants (constructible but not consumed) are dead code that suggests an incomplete implementation. Unhandled variants (not handled by dispatch) cause silent failures where a control action is requested but never executed. Review the full ControlSignal enum: list every variant, then trace each through construction → dispatch → equipment response. Any variant that fails one of these three checks represents a gap. Also review: (d) Is there a catch-all or wildcard arm in the dispatch match that silently ignores unrecognized variants? This would mask the gap. A missing variant should either be a compile error (if exhaustive matching is used) or a logged warning at minimum. (e) Are all variants referenced in the Python bindings? Any variant that exists in Rust but not in the Python API is inaccessible to Python-based controllers. (f) Are the variants documented with their expected equipment behavior? Without documentation, a new equipment developer cannot know which signals their equipment must handle."
+    },
+    {
+      "id": "ctrldp-03",
+      "slug": "priority-tier-assignment",
+      "title": "PriorityTier assignment for every signal type, safety vs. DR conflict prevention",
+      "vendor_refs": null,
+      "files": "crates/hares-control/src/dispatch.rs",
+      "prompt": "The dispatch system assigns a PriorityTier to each control signal to resolve conflicts. Safety-critical signals (emergency shutdown, over-temperature lockout, under-voltage protection) must have the highest priority and never be overridden by demand-response or economic signals. Review the PriorityTier assignment: (a) Every signal variant must have an explicit tier assignment—no silent default tier that groups unrelated signals. (b) The tier ordering must be total (transitive, antisymmetric) so that conflict resolution is deterministic. (c) Safety signals (overheat, overcurrent, leak detection, freeze protection) must be at the highest tier, above all DR, economic, comfort, and user-setpoint tiers. (d) DR signals (utility demand response, frequency regulation, capacity bidding) must not conflict with safety signals—if a DR signal requests heat-pump-disable and the building is at risk of freezing, safety must override DR. (e) When two signals of the same tier conflict (e.g., two DR programs requesting different battery setpoints), verify the resolution strategy: last-write-wins, most-restrictive (min consumption), least-restrictive, or weighted average. The strategy must be documented and justified. (f) Priority inversion scenarios: a lower-tier signal queued before a higher-tier signal should not execute first. Verify the dispatch queue respects priority ordering for same-step signals. (g) Check whether the tier system is extensible—adding a new tier or reordering existing tiers should not require refactoring every equipment handler."
+    },
+    {
+      "id": "ctrldp-04",
+      "slug": "control-types-module-completeness",
+      "title": "Control types module: type definitions used by capabilities, dispatch, and compat layers",
+      "vendor_refs": null,
+      "files": "crates/hares-control/src/types.rs",
+      "prompt": "The control types module defines data structures consumed by the capabilities layer, the dispatch system, and the compatibility/translation layers. Dead types (defined but never referenced) indicate incomplete implementation or abandoned features. Review every public type definition: (a) For each struct/enum, grep for usage across the control crate and sibling crates. Types with zero consumers should be flagged as dead code. Types with exactly one consumer should be evaluated for inlining. (b) Type coherence: verify that types used by capabilities (e.g., SetpointRange, PowerCommand, ModeCommand) match the types emitted by dispatch and the types expected by equipment handlers. A mismatch where dispatch produces TypeA but equipment expects TypeB requires an implicit conversion that may drop fields. (c) Temperature and power types: verify unit consistency. If some types use Celsius and others use Kelvin, or some use Watts and others use Kilowatts, the boundary conversions become error-prone. Check whether a newtype wrapper enforces unit safety. (d) Serialization compatibility: if control types are serialized for checkpointing or IPC, verify that serde derives are present and that field renames (serde(rename)) are documented. (e) Python/Rust FFI types: types that cross the Python boundary must implement PyO3 conversion traits. Verify that every type used in a pyfunction signature is convertible. (f) Missing types: review the capabilities enumeration (all things the control system can command) and verify that every capability has a corresponding command type. A capability without a command type suggests unimplemented functionality parsed as a stub."
+    }
+  ]
+}

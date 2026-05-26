@@ -993,31 +993,31 @@ fn kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
 }
 
 // ===========================================================================
-// DOE-2 surface temp misapplied to below-grade boundaries
+// Pre-fix DOE-2 to Kusuda-Achenbach comparison (historical error magnitude)
 // ===========================================================================
 
-/// The thermal solver applies `env.weather.ground_temp_c`
-/// (the DOE-2 surface model output, which uses depth_factor=10 m and gives a
-/// heavily-damped temperature) to ALL DrivingTemp::Ground boundary nodes,
-/// including slab-on-grade floors and crawlspace floors whose actual depth is
-/// 0.3–1.0 m below grade.
+/// **Historical comparison** — quantifies the pre-fix error magnitude.
 ///
-/// This test demonstrates the magnitude of the discrepancy between:
-///   (a) The DOE-2 output temperature (what HARES currently uses)
-///   (b) Kusuda-Achenbach at a realistic slab depth of 0.5 m (what HARES should use)
+/// Before the depth-correction fix, the thermal solver applied the DOE-2
+/// intermediate temperature (with the original depth_factor=10 m, producing
+/// a heavily-damped output) to ALL `DrivingTemp::Ground` boundary nodes,
+/// including slab-on-grade floors and crawlspace floors whose actual depth
+/// is 0.3–1.0 m below grade.
+///
+/// This test reproduces the *pre-fix* DOE-2 formula (depth_factor=10 m) and
+/// compares it against Kusuda-Achenbach at 0.5 m slab depth. The current
+/// production DOE-2 model in `epw.rs` now uses
+/// `DOE2_GROUND_REFERENCE_DEPTH_M = 0.5` m, and the thermal solver evaluates
+/// Kusuda-Achenbach at per-boundary foundation depth via `DrivingTemp::Ground
+/// { depth_m }`. This test is retained to document the magnitude of the
+/// error that was corrected.
 ///
 /// For a mid-latitude cold-climate site (Minneapolis-like parameters):
 ///   T_mean = 7 °C, amplitude = 14 °C, phase = day 35 (early February)
 ///
-/// At 0.5 m slab depth in January, the physically correct Kusuda-Achenbach
-/// temperature is several degrees colder than the DOE-2 surface output
-/// (which is strongly damped and intermediate in character). The error is ≥ 2 °C
-/// and causes systematic under-prediction of winter slab heat loss.
-///
-/// The test only calls the DOE-2 damping formula and Kusuda directly and
-/// passes today. The solver-wiring bug (hares-envelope passing ground_temp_c
-/// to slab boundaries without depth correction) is separate and is the actual
-/// behaviour that the depth-correction fix requires.
+/// The pre-fix DOE-2 value (depth_factor=10 m) is ≥ 2 °C warmer than the
+/// physically-correct Kusuda-Achenbach slab temperature in January — the
+/// solver was systematically under-predicting winter slab heat loss.
 ///
 /// References:
 /// - HARES `crates/hares-io/src/epw.rs:363-465` (DOE-2 formula)
@@ -1095,11 +1095,17 @@ fn doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_january() {
     );
 }
 
-/// Summer sign check: in summer the DOE-2 surface model is COOLER
-/// than Kusuda at slab depth (the 10 m fixed depth means its seasonal swing
-/// lags and is damped, so it does not warm as fast as the actual 0.5 m depth).
-/// This causes the solver to OVER-predict summer slab cooling (an opposite sign
-/// error to the winter under-prediction above).
+/// **Historical comparison** — quantifies the pre-fix summer error magnitude.
+///
+/// In summer the pre-fix DOE-2 model (depth_factor=10 m) is COOLER than
+/// Kusuda at 0.5 m slab depth (the 10 m fixed depth means the seasonal swing
+/// lags and is damped, so it does not warm as fast as the actual slab depth).
+/// The pre-fix solver OVER-predicted summer slab cooling — an opposite sign
+/// error to the winter under-prediction.
+///
+/// Retained to document the pre-fix error magnitude. Current production uses
+/// `DOE2_GROUND_REFERENCE_DEPTH_M = 0.5` m and per-boundary Kusuda-Achenbach
+/// depth correction via `DrivingTemp::Ground { depth_m }`.
 #[test]
 fn doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
     use hares_physics::ground::{

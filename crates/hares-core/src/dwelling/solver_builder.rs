@@ -1514,6 +1514,7 @@ mod tests {
             framing_factor: None,
             perimeter_m: None,
             perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
         }
     }
 
@@ -1564,6 +1565,7 @@ mod tests {
             framing_factor: None,
             perimeter_m: None,
             perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
         };
         assert_eq!(
             interior_solar_absorptance(&boundary),
@@ -1598,6 +1600,7 @@ mod tests {
             framing_factor: None,
             perimeter_m: None,
             perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
         };
         assert_eq!(
             interior_solar_absorptance(&boundary),
@@ -1651,6 +1654,7 @@ mod tests {
             framing_factor: None,
             perimeter_m: None,
             perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
         };
         assert_eq!(
             exterior_emissivity(&window),
