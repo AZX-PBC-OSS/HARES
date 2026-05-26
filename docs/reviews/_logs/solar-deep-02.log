@@ -1,0 +1,34 @@
+# opencode log for solar-deep-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs
+[0m• [0mFind vendor solar AOI code[90m Explore Agent[0m
+[0m• [0mSearch pvlib AOI reference[90m Explore Agent[0m
+[0m✓ [0mSearch pvlib AOI reference[90m Explore Agent[0m
+[0m✓ [0mFind vendor solar AOI code[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=1428, limit=200][0m
+[0m→ [0mRead .venv/lib/python3.14/site-packages/pvlib/irradiance.py[90m [offset=156, limit=100][0m
+Let me read the remaining tests and also the pvlib cross-validation test to complete the analysis.
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/solar-deep
+(no output)
+[0m
+Now I have all the information needed. Let me write the comprehensive review.
+[0m← [0mWrite docs/reviews/solar-deep/solar-deep-02-angle-of-incidence-tilted.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/solar-deep/solar-deep-02-angle-of-incidence-tilted.md`.
+
+**Summary of findings**:
+
+- **Formula is correct**: `cos(AOI) = sin(alt)·cos(β) + cos(alt)·sin(β)·cos(γ_s − γ)` is mathematically identical to pvlib, EnergyPlus, and the Duffie & Beckman five-term expansion — verified via spherical-to-Cartesian conversion.
+- **No gimbal lock**: At zenith (`alt → 90°`), `cos(alt) → 0` eliminates the ill-conditioned azimuth term, making AOI smooth and well-behaved. `atan2(0,0)` in the azimuth calculation returns a defined but arbitrary value (180°) that does not propagate into AOI.
+- **3 findings**: 1 medium (insufficient test coverage — only 1 test case with `az_delta = 0`, which wouldn't catch sign errors), 2 low (altitude vs zenith API convention, undocumented azimuth singularity at zenith).

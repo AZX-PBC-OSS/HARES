@@ -18,3 +18,18 @@
 [0m• [0mFind OCHRE film resistance code[90m Explore Agent[0m
 [0m• [0mFind OCHRE interior gains handling[90m Explore Agent[0m
 [0m✓ [0mFind OCHRE film resistance code[90m Explore Agent[0m
+[0m✓ [0mFind OCHRE interior gains handling[90m Explore Agent[0m
+[0m• [0mCheck HARES infiltration altitude[90m Explore Agent[0m
+[0m• [0mCheck HARES window SHGC details[90m Explore Agent[0m
+[0m• [0mCheck OCHRE script simulation setup[90m Explore Agent[0m
+[0m✓ [0mCheck OCHRE script simulation setup[90m Explore Agent[0m
+[0m✓ [0mCheck HARES infiltration altitude[90m Explore Agent[0m
+[0m✓ [0mCheck HARES window SHGC details[90m Explore Agent[0m
+[0m
+[0m← [0mWrite docs/reviews/scripts/scr-03-ochre-bestest-600-py.md
+Wrote file successfully.
+[0m
+Now I have all the information needed. Let me compile the review.
+The review has been written to `docs/reviews/scripts/scr-03-ochre-bestest-600-py.md`.
+
+**Key findings**: The file that purports to be the OCHRE-side BESTEST runner does not actually run any OCHRE simulation — it only performs analytical diagnostics with several incorrect inputs (wrong material thicknesses, conflicting SHGC values, and a 60/40 internal gains split that doesn't match OCHRE's actual 0/100 model or HARES's 30/70 configuration). There is no OCHRE-side parity comparison data.

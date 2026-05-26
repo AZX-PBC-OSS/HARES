@@ -24,3 +24,29 @@
 [0m• [0mAnalyze fixture coverage[90m Explore Agent[0m
 [0m• [0mCheck CI and disk space[90m Explore Agent[0m
 [0m✓ [0mAnalyze fixture coverage[90m Explore Agent[0m
+[0m✓ [0mCheck CI and disk space[90m Explore Agent[0m
+[0m→ [0mRead docs/reviews/py-companion/py-companion-03-resstock-data-pipeline.md[90m [limit=60][0m
+[0m
+[0m$ [0mls -la /Users/rich/source/HARES/docs/reviews/scripts/ 2>/dev/null || echo "directory does not exist"
+total 24
+drwxr-xr-x@  3 rich  staff    96 May 26 01:31 .
+drwxr-xr-x@ 35 rich  staff  1120 May 26 01:29 ..
+-rw-r--r--@  1 rich  staff  8751 May 26 01:31 scr-01-gen-ocv-py.md
+[0m
+Now let me check one more piece of context — the existing py-companion review that overlaps with this area, and verify the directory structure for the output:
+[0m← [0mWrite docs/reviews/scripts/scr-04-download-resstock-fixtures-py.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/scripts/scr-04-download-resstock-fixtures-py.md
+157 /Users/rich/source/HARES/docs/reviews/scripts/scr-04-download-resstock-fixtures-py.md
+[0m
+The review is complete at `/Users/rich/source/HARES/docs/reviews/scripts/scr-04-download-resstock-fixtures-py.md` (157 lines, 7 findings).
+
+**Summary of findings:**
+
+| Severity | Count | Key Issues |
+|---|---|---|
+| **Critical** | 2 | No retry/backoff for transient S3 failures; no checksum/integrity verification of downloaded files |
+| **High** | 1 | Sequential ID selection provides no representation of climate zones, building types, equipment, or DER assets (zero PV/EV/battery coverage) |
+| **Medium** | 3 | Default args mismatched with committed fixtures (1,2,3 vs 2,3,4); no failure summary or non-zero exit on all-failures; building 1 silently dropped |
+| **Low** | 1 | No disk space check; no README documenting fixture selection criteria |

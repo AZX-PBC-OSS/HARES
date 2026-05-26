@@ -1165,7 +1165,11 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             config_mixed(
                 class,
                 class,
-                &[("zone_id", 1.0), ("active_power_kw", 1.0)],
+                &[
+                    ("zone_id", 1.0),
+                    ("active_power_kw", 1.0),
+                    ("sensible_gain_fraction", 0.0),
+                ],
                 &[("event_window_source", "constant")],
             )
         }

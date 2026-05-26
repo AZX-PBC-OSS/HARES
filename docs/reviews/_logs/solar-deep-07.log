@@ -1,0 +1,45 @@
+# opencode log for solar-deep-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=480, limit=50][0m
+[0m• [0mExplore EnergyPlus window solar[90m Explore Agent[0m
+[0m• [0mExplore OCHRE window solar[90m Explore Agent[0m
+[0m✓ [0mExplore OCHRE window solar[90m Explore Agent[0m
+[0m✓ [0mExplore EnergyPlus window solar[90m Explore Agent[0m
+[0m✱ [0mGrep "window_transmitted_solar"[90m in . · 17 matches[0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=524, limit=20][0m
+[0m✱ [0mGrep "shgc|SHGC|Shgc"[90m in crates/hares-physics/src · 101 matches[0m
+Let me trace how `window_transmitted_solar` is called and explore whether IAM is handled elsewhere in the HARES codebase.
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=544, limit=300][0m
+[0m✱ [0mGrep "window_transmitted_solar[^_]|window_transmitted_solar\b"[90m in crates · 8 matches[0m
+[0m✱ [0mGrep "window_transmitted_solar_angular"[90m in crates · 6 matches[0m
+[0m✱ [0mGrep "window_transmitted_solar"[90m in crates · 15 matches[0m
+[0m→ [0mRead docs/findings/reviews/03_envelope_radiation_ports.md[90m [offset=200, limit=50][0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=1886, limit=90][0m
+[0m✱ [0mGrep "EvalNominalWindowCond|CalcNominalWindowCond"[90m in vendors/EnergyPlus/src/EnergyPlus/WindowManager.cc · 11 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WindowManager.cc[90m [offset=6309, limit=80][0m
+Now I have all the information needed. Let me write the findings.
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/solar-deep
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/solar-deep/solar-deep-07-window-transmitted-solar-shgc.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/solar-deep/solar-deep-07-window-transmitted-solar-shgc.md`.
+
+**Summary of findings:**
+
+1. **`window_transmitted_solar` is angle-blind** (low severity) — It computes Q = I·SHGC·A with no IAM, but it's only used in tests, not runtime. The production function `window_transmitted_solar_angular` correctly applies separate IAM for beam and diffuse components.
+
+2. **SHGC convention is correct** (low severity) — SHGC is documented and treated as the normal-incidence (rated) value, consistent with EnergyPlus where `EvalNominalWindowCond` computes SHGC from `AbsBeamNorm[i]` + `TSolNorm` at normal incidence. A separate IAM via `window_iam()` is properly applied in the angular function.
+
+3. **Transmittance IAM applied to full SHGC** (low severity) — HARES follows OCHRE in applying the transmittance-only IAM polynomial to the entire SHGC (including the absorbed+re-emitted component), a simplification relative to EnergyPlus's per-layer tracking. Minor overestimation at high incidence angles, consistent with simple-window-model tolerance.

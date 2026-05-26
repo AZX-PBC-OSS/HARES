@@ -1,0 +1,115 @@
+# opencode log for solar-deep-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=1, limit=200][0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*solar*"[90m in . · 0 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/**/*solar*"[90m in . · 0 matches[0m
+[0m✱ [0mGlob "docs/reviews/solar-deep/*.md"[90m in . · 0 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/*"[90m in . · 100 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/**/*.py"[90m in . · 33 matches[0m
+[0m✱ [0mGlob "**/tests/**/solar*"[90m in . · 1 match[0m
+[0m✱ [0mGlob "**/*solar*tests*"[90m in . · 0 matches[0m
+[0m→ [0mRead crates/hares-physics/tests/solar_parity.rs
+[0m✱ [0mGrep "solar|declination|azimuth|altitude|equation.of.time|sun.*position"[90m in vendors/EnergyPlus/src/EnergyPlus · 1398 matches[0m
+[0m✱ [0mGrep "solar|declination|azimuth|altitude|sun.*position"[90m in vendors/OCHRE/ochre · 90 matches[0m
+[0m✱ [0mGrep "SolarPositioning|SUNPosition|solar.*geometry|solar.*azimuth|solar.*altitude|SPENCER|Spencer"[90m in vendors/EnergyPlus/src/EnergyPlus · 32 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/envelope.py
+[0m→ [0mRead crates/hares-physics/src/solar.rs[90m [offset=88, limit=60][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/ | grep -i -E 'sun|solar' 2>/dev/null || echo "no direct matches"
+SolarCollectors.cc
+SolarCollectors.hh
+SolarReflectionManager.cc
+SolarReflectionManager.hh
+SolarShading.cc
+SolarShading.hh
+[0m
+[0m✱ [0mGlob "**/Cargo.toml"[90m in crates/hares-physics · 1 match[0m
+[0m✱ [0mGrep "test"[90m in . · 208 matches[0m
+[0m✱ [0mGlob "Makefile*"[90m in . · 38 matches[0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/ | grep -i -E 'solar|sun|position|sky|shadow' 2>/dev/null
+DataShadowingCombinations.hh
+SolarCollectors.cc
+SolarCollectors.hh
+SolarReflectionManager.cc
+SolarReflectionManager.hh
+SolarShading.cc
+SolarShading.hh
+[0m
+[0m✱ [0mGrep "declin|equation.of.time|azimuth|altitude|solar.*position|hour.*angle"[90m in vendors/EnergyPlus/src/EnergyPlus · 24 matches[0m
+[0m→ [0mRead Makefile
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/SolarShading.cc[90m [offset=9465, limit=80][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/SolarShading.cc[90m [offset=8990, limit=80][0m
+[0m
+[0m$ [0mcd /Users/rich/source/HARES && cargo test -p hares-physics --test solar_parity 2>&1 | tail -50
+Compiling hares-physics v0.1.0 (/Users/rich/source/HARES/crates/hares-physics)
+    Finished `test` profile [unoptimized] target(s) in 0.47s
+     Running tests/solar_parity.rs (target/debug/deps/solar_parity-4106fd2c5c0cf49e)
+
+running 23 tests
+test exterior_film_matches_energyplus_ro_w ... ok
+test extraterrestrial_irradiance_peaks_near_perihelion ... ok
+test perez_diffuse_increases_with_dhi ... ok
+test extraterrestrial_irradiance_within_spencer_bounds ... ok
+test perez_diffuse_returns_zero_when_dhi_below_threshold ... ok
+test poa_total_irradiance_is_physically_plausible_south_facing_30_tilt ... ok
+test perez_diffuse_south_facing_30_tilt_day80_reasonable_range ... ok
+test poa_total_zero_at_night ... ok
+test poa_total_matches_pvlib_reference ... ok
+test solar_altitude_negative_at_midnight_utc ... ok
+test solar_declination_approx_23_4_at_summer_solstice ... ok
+test solar_declination_approx_neg_23_4_at_winter_solstice ... ok
+test solar_declination_near_zero_at_vernal_equinox ... ok
+test solar_position_at_lat40_equinox_noon ... ok
+test window_decomposition_continuity_at_threshold ... ok
+test window_decomposition_high_u_linear_fit ... ok
+test window_decomposition_low_e_double_pane ... ok
+test window_decomposition_single_pane ... ok
+test window_decomposition_triple_pane ... ok
+test window_decomposition_zero_and_negative_u ... ok
+test window_u_0_5_round_trip_to_2_0 ... ok
+test window_u_2_round_trip_to_0_5 ... ok
+test window_u_factor_round_trip ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+[0m
+[0m$ [0mpython3 -c "import pvlib; print(pvlib.__version__)" 2>&1 || echo "pvlib not available"
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import pvlib; print(pvlib.__version__)
+    ^^^^^^^^^^^^
+ModuleNotFoundError: No module named 'pvlib'
+pvlib not available
+[0m
+Now let me run the existing solar tests and check for a test runner configuration:
+[0m$ [0mpython3 -c "import numpy; print('numpy ok')" 2>&1 || echo "no numpy"
+numpy ok
+[0m
+[0m$ [0mpip3 install pvlib 2>&1 | tail -5
+Read more about this behavior here: <https://peps.python.org/pep-0668/>
+
+note: If you believe this is a mistake, please contact your Python installation or OS distribution provider. You can override this, at the risk of breaking your Python installation or OS, by passing --break-system-packages.
+hint: See PEP 668 for the detailed specification.
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/solar-deep
+(no output)
+[0m
+[0m$ [0mpython3 -m venv /tmp/pvlib-env && source /tmp/pvlib-env/bin/activate && pip install pvlib numpy 2>&1 | tail -5
+Downloading urllib3-2.7.0-py3-none-any.whl (131 kB)
+Downloading certifi-2026.5.20-py3-none-any.whl (134 kB)
+Installing collected packages: pytz, urllib3, six, numpy, idna, charset_normalizer, certifi, scipy, requests, python-dateutil, h5py, pandas, pvlib
+
+Successfully installed certifi-2026.5.20 charset_normalizer-3.4.7 h5py-3.16.0 idna-3.16 numpy-2.4.6 pandas-3.0.3 pvlib-0.15.1 python-dateutil-2.9.0.post0 pytz-2026.2 requests-2.34.2 scipy-1.17.1 six-1.17.0 urllib3-2.7.0
+[0m
+[93m[1m! [0mpermission requested: external_directory (/tmp/*); auto-rejecting
+[0m✗ [0mWrite /tmp/validate_solar.py failed
+[91m[1mError: [0mThe user rejected permission to use this specific tool call.

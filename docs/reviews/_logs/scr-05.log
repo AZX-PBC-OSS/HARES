@@ -82,3 +82,26 @@
 /Users/rich/source/HARES/crates/hares-equipment/tests/si_guard.rs:        ("HeatingEfficiencyUnitn", &["hvac/heat_pump_config.rs"]),
 /Users/rich/source/HARES/crates/hares-equipment/tests/si_guard.rs:        ("HeatingEfficiencyUnitn", &["hvac/heat_pump_config.rs"]),
 [0m
+[0m$ [0mrg -rn "si_guard\|SI.guard\|check-si-guard" /Users/rich/source/HARES/.github/ 2>/dev/null
+(no output)
+[0m
+[0m$ [0mrg -rn "check.si.guard\|si.guard" /Users/rich/source/HARES/ --include '*.yml' --include '*.yaml' --include '*.sh' --include 'Makefile' --include '*.toml' 2>/dev/null | grep -v vendors | grep -v docs | grep -v '.log'
+(no output)
+[0m
+[0m$ [0mrg -n "si_guard\|si-guard" /Users/rich/source/HARES/crates/hares-equipment/Cargo.toml 2>/dev/null
+(no output)
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/scripts
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/scripts/scr-05-check-si-guard-sh.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/scripts/scr-05-check-si-guard-sh.md`.
+
+**Summary**: The `check-si-guard.sh` script is a 5-line thin wrapper that delegates to a Rust test using bare `content.contains()` substring matching. 9 findings were identified:
+
+- **3 critical**: substring matching (not regex), markers reference non-existent code, near-zero pattern coverage — real IP units (`ft²`, `°F`, `cfm`, `BTU`) in the codebase are completely unguarded
+- **3 high**: no comment/string-literal exclusion, no inline-annotation allowlist, not integrated into CI
+- **2 medium**: violation messages lack line numbers/filesystem paths, scan scope is limited to one crate
+- **1 low**: `cargo test` runs all tests instead of just `si_guard`

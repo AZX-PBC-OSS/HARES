@@ -469,15 +469,50 @@ impl Equipment for EventBasedLoad {
         self.active_duration_s = parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0);
         self.cooldown_duration_s =
             parse_non_negative(config, KEY_COOLDOWN_DURATION_S)?.unwrap_or(0.0);
-        // "frac_sensible" / "frac_latent" are HPXML-parsed aliases.
+        // "frac_sensible" is the HPXML-parsed alias for sensible_gain_fraction.
+        // Unlike the prior silent 0.0 default, this must be specified explicitly —
+        // a missing gain fraction at an init boundary is a configuration error.
         self.sensible_gain_fraction = config
             .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
             .or_else(|| config.get_f64("frac_sensible"))
-            .unwrap_or(0.0);
+            .ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "sensible_gain_fraction missing for '{}'; must be specified explicitly",
+                    self.descriptor.name
+                ))
+            })?;
+        // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
         self.latent_gain_fraction = config
             .get_f64(KEY_LATENT_GAIN_FRACTION)
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
+
+        if self.sensible_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not be negative",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.sensible_gain_fraction > 1.0 + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not exceed 1.0",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.latent_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "latent_gain_fraction ({}) must not be negative",
+                self.latent_gain_fraction
+            )));
+        }
+        if self.sensible_gain_fraction + self.latent_gain_fraction > 1.0 + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) + latent_gain_fraction ({}) = {} exceeds 1.0",
+                self.sensible_gain_fraction,
+                self.latent_gain_fraction,
+                self.sensible_gain_fraction + self.latent_gain_fraction
+            )));
+        }
 
         self.month_multipliers = parse_month_multipliers(config);
 
@@ -949,15 +984,50 @@ impl Equipment for WetAppliance {
         self.event_probability_source = probability_source;
         self.phases = parse_cycle_phases(config)?;
         self.n_units = parse_non_negative(config, KEY_N_UNITS)?.unwrap_or(1.0);
-        // "frac_sensible" / "frac_latent" are HPXML-parsed aliases.
+        // "frac_sensible" is the HPXML-parsed alias for sensible_gain_fraction.
+        // Unlike the prior silent 0.0 default, this must be specified explicitly —
+        // a missing gain fraction at an init boundary is a configuration error.
         self.sensible_gain_fraction = config
             .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
             .or_else(|| config.get_f64("frac_sensible"))
-            .unwrap_or(0.0);
+            .ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "sensible_gain_fraction missing for '{}'; must be specified explicitly",
+                    self.descriptor.name
+                ))
+            })?;
+        // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
         self.latent_gain_fraction = config
             .get_f64(KEY_LATENT_GAIN_FRACTION)
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
+
+        if self.sensible_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not be negative",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.sensible_gain_fraction > 1.0 + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not exceed 1.0",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.latent_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "latent_gain_fraction ({}) must not be negative",
+                self.latent_gain_fraction
+            )));
+        }
+        if self.sensible_gain_fraction + self.latent_gain_fraction > 1.0 + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) + latent_gain_fraction ({}) = {} exceeds 1.0",
+                self.sensible_gain_fraction,
+                self.latent_gain_fraction,
+                self.sensible_gain_fraction + self.latent_gain_fraction
+            )));
+        }
 
         self.month_multipliers = parse_month_multipliers(config);
 
@@ -1950,6 +2020,7 @@ mod tests {
         raw.insert("active_power_kw".to_string(), 2.0.into());
         raw.insert("active_duration_s".to_string(), 30.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert("building_id".to_string(), 1.0.into());
         raw.insert("master_seed".to_string(), 42.0.into());
         let config =
@@ -1973,6 +2044,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("active_power_kw".to_string(), 1.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         // No compact event schedule keys
         let config = EquipmentConfig::raw("empty".to_string(), "EventBasedLoad".to_string(), raw);
         let mut eq = EventBasedLoad::new(config.clone());
@@ -2159,6 +2231,7 @@ mod tests {
         raw.insert("active_power_kw".to_string(), 3.0.into());
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert("building_id".to_string(), 1.0.into());
         raw.insert("master_seed".to_string(), 1.0.into());
         let config = EquipmentConfig::raw(
@@ -2914,6 +2987,7 @@ mod tests {
         raw.insert("active_power_kw".to_string(), 3.0.into());
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert("building_id".to_string(), 1.0.into());
         raw.insert("master_seed".to_string(), 1.0.into());
         let config = EquipmentConfig::raw(
@@ -2969,6 +3043,7 @@ mod tests {
         raw.insert("active_power_kw".to_string(), 99.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert("building_id".to_string(), 1.0.into());
         raw.insert("master_seed".to_string(), 42.0.into());
         raw.insert(
@@ -3016,6 +3091,7 @@ mod tests {
         raw.insert("active_power_kw".to_string(), 1.0.into());
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert("building_id".to_string(), 1.0.into());
         raw.insert("master_seed".to_string(), 1.0.into());
         let config =
@@ -3038,6 +3114,190 @@ mod tests {
             mode,
             hares_types::OperatingMode::On,
             "Active phase must return OperatingMode::On, got {mode:?}"
+        );
+    }
+
+    // =======================================================================
+    // sensible_gain_fraction: loud error on missing / out-of-range
+    // =======================================================================
+
+    #[test]
+    fn event_load_missing_sensible_gain_fraction_returns_err_on_init() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
+        let config = EquipmentConfig::raw("no_frac".to_string(), "EventBasedLoad".to_string(), raw);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensible_gain_fraction missing"),
+            "expected 'sensible_gain_fraction missing' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn event_load_sensible_gain_fraction_out_of_range_negative_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        let config =
+            EquipmentConfig::raw("neg_frac".to_string(), "EventBasedLoad".to_string(), raw);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("must not be negative"),
+            "expected 'must not be negative' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn event_load_sensible_gain_fraction_out_of_range_above_one_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        let config =
+            EquipmentConfig::raw("over_frac".to_string(), "EventBasedLoad".to_string(), raw);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("must not exceed 1.0"),
+            "expected 'must not exceed 1.0' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn event_load_sensible_plus_latent_exceeds_one_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.5_f64.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        let config =
+            EquipmentConfig::raw("overflow".to_string(), "EventBasedLoad".to_string(), raw);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds 1.0"),
+            "expected 'exceeds 1.0' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_missing_sensible_gain_fraction_returns_err_on_init() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
+        let config = EquipmentConfig::raw("no_frac".to_string(), "Clothes Washer".to_string(), raw);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensible_gain_fraction missing"),
+            "expected 'sensible_gain_fraction missing' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_sensible_gain_fraction_negative_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        let config =
+            EquipmentConfig::raw("neg_frac".to_string(), "Clothes Washer".to_string(), raw);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("must not be negative"),
+            "expected 'must not be negative' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_sensible_gain_fraction_above_one_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        let config =
+            EquipmentConfig::raw("over_frac".to_string(), "Clothes Washer".to_string(), raw);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("must not exceed 1.0"),
+            "expected 'must not exceed 1.0' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_sensible_plus_latent_exceeds_one_returns_err() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("phase_len".to_string(), 1.0.into());
+        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+        raw.insert("n_units".to_string(), 1.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.5_f64.into());
+        raw.insert("building_id".to_string(), 11.0.into());
+        raw.insert("master_seed".to_string(), 987.0.into());
+        let config =
+            EquipmentConfig::raw("overflow".to_string(), "Clothes Washer".to_string(), raw);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let err = eq.init(&config, &base_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds 1.0"),
+            "expected 'exceeds 1.0' error, got: {err}"
         );
     }
 }

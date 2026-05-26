@@ -1,0 +1,48 @@
+# opencode log for solver-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-envelope/src/electrical_solver.rs
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/ElectricPowerServiceManager.cc
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/ElectricPowerServiceManager.cc[90m [offset=992][0m
+[0m✱ [0mGrep "ZIP|zip_model|constant_impedance|constant_current|constant_power|power_factor|voltage_dependency"[90m in . · 1199 matches[0m
+Let me continue reading the EnergyPlus reference file and explore related types in the HARES codebase.
+[0m✱ [0mGrep "PortSlots|load_power_kw|generation_power_kw|reactive_power_kvar|net_active_kw|accumulate"[90m in crates · 1978 matches[0m
+[0m✱ [0mGrep "struct PortSlots|struct ElectricalPortState|struct PortContribution|Electrical \{|load_power_kw|generation_power_kw|reactive_power_kvar|net_active_kw"[90m in crates/hares-types/src · 45 matches[0m
+Let me examine the PortSlots and PortContribution types to understand sign conventions, and look for voltage validation in the codebase.
+[0m✱ [0mGrep "voltage_pu|VOLTAGE|clamp|voltage.*range|ANSI|0\.9.*1\.1|1\.05"[90m in crates · 1346 matches[0m
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [offset=230, limit=120][0m
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [offset=520, limit=50][0m
+[0m→ [0mRead crates/hares-types/src/ports.rs[90m [offset=55, limit=40][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1930, limit=30][0m
+[0m✱ [0mGrep "struct GridState"[90m in crates/hares-types/src · 1 match[0m
+[0m→ [0mRead crates/hares-types/src/environment.rs[90m [offset=300, limit=40][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/mod.rs[90m [offset=300, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/water_heater/mod.rs[90m [offset=225, limit=85][0m
+Now let me check for S (apparent power) and PF computations, and see the water heater ZIP apply for reactive power handling:
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/solver
+(no output)
+[0m
+Now I have enough information to write the review. Let me compile the findings and write them to the output file.
+[0m← [0mWrite docs/reviews/solver/solver-01-electrical-solver-standalone.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/solver/solver-01-electrical-solver-standalone.md`.
+
+**Summary**: 1 High, 2 Medium, 2 Low findings:
+
+| # | Severity | Issue |
+|---|----------|-------|
+| 1 | High | No voltage range clamping — out-of-range `voltage_pu` values are used silently in the ZIP polynomial |
+| 2 | Medium | No apparent power (S) or power factor (PF) computation in solver output |
+| 3 | Medium | Reactive power ZIP not modeled at the domain level (real-power only) |
+| 4 | Low | Non-negativity constraint rejects valid negative ZIP coefficients from IEEE literature |
+| 5 | Low | Sign convention for `net_active_kw` is correct but undocumented in the solver |
