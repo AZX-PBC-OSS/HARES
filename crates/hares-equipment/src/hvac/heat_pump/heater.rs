@@ -652,6 +652,59 @@ impl HeatPumpHeaterCore {
         let cfg = config.require_typed::<HeatPumpHeaterConfig>("Heat Pump Heater")?;
         cfg.validate()?;
 
+        // Build BoreholeConfig from typed config for GSHP variants, falling back
+        // to documented defaults for any fields left at None.
+        if matches!(self.variant, HeaterVariant::Gshp) {
+            let bh_dfl = hares_physics::borehole::BoreholeConfig::default();
+            let bh_cfg = hares_physics::borehole::BoreholeConfig {
+                borehole_depth_m: cfg
+                    .common
+                    .borehole_depth_m
+                    .unwrap_or(bh_dfl.borehole_depth_m),
+                borehole_radius_m: cfg
+                    .common
+                    .borehole_radius_m
+                    .unwrap_or(bh_dfl.borehole_radius_m),
+                shank_spacing_m: cfg
+                    .common
+                    .borehole_shank_spacing_m
+                    .unwrap_or(bh_dfl.shank_spacing_m),
+                number_of_boreholes: cfg
+                    .common
+                    .number_of_boreholes
+                    .unwrap_or(bh_dfl.number_of_boreholes),
+                soil_conductivity_w_per_m_k: cfg
+                    .common
+                    .borehole_soil_conductivity_w_per_m_k
+                    .unwrap_or(bh_dfl.soil_conductivity_w_per_m_k),
+                soil_diffusivity_m2_per_day: cfg
+                    .common
+                    .borehole_soil_diffusivity_m2_per_day
+                    .unwrap_or(bh_dfl.soil_diffusivity_m2_per_day),
+                grout_conductivity_w_per_m_k: cfg
+                    .common
+                    .borehole_grout_conductivity_w_per_m_k
+                    .unwrap_or(bh_dfl.grout_conductivity_w_per_m_k),
+                pipe_outer_radius_m: cfg
+                    .common
+                    .borehole_pipe_outer_radius_m
+                    .unwrap_or(bh_dfl.pipe_outer_radius_m),
+                pipe_inner_radius_m: cfg
+                    .common
+                    .borehole_pipe_inner_radius_m
+                    .unwrap_or(bh_dfl.pipe_inner_radius_m),
+                pipe_conductivity_w_per_m_k: cfg
+                    .common
+                    .borehole_pipe_conductivity_w_per_m_k
+                    .unwrap_or(bh_dfl.pipe_conductivity_w_per_m_k),
+            };
+            self.source_temp = SourceTemperature::BoreholeGFunction {
+                model: std::sync::Arc::new(hares_physics::borehole::BoreholeGFunctionModel::new(
+                    bh_cfg,
+                )),
+            };
+        }
+
         self.hvac.config.heating_capacities_w =
             if let Some(stages) = &cfg.common.stage_heating_capacities_w {
                 stages.clone()
@@ -6152,6 +6205,63 @@ mod tests {
         .unwrap();
         assert_eq!(eq.core.defrost_config.control, DefrostControl::Disabled);
         assert!(!eq.core.defrost_active);
+    }
+
+    /// Borehole parameters wired through `HeatPumpCommonConfig` must reach
+    /// `BoreholeGFunctionModel` and influence `compute_entering_water_temp`.
+    /// Deeper boreholes (120 m vs default 60 m) halve the per-unit-length
+    /// heat extraction rate, yielding a higher entering water temperature in
+    /// heating mode. This test covers the full wiring chain:
+    /// `HeatPumpCommonConfig` → `init_from_typed` → `BoreholeConfig` →
+    /// `BoreholeGFunctionModel`.
+    #[test]
+    fn gshp_heater_borehole_depth_reaches_ewt() {
+        let e = env(18.0, -5.0, 0.002);
+
+        // Default borehole depth (60 m from BoreholeConfig::default()).
+        let typed_default = gshp_typed_config();
+        let cfg_default = EquipmentConfig::from_typed(
+            "gshp_default".to_string(),
+            "GSHP Heater".to_string(),
+            typed_default,
+        );
+        let mut eq_default = GshpHeater::new(cfg_default.clone());
+        eq_default.init(&cfg_default, &e).unwrap();
+
+        // Custom borehole depth (120 m).
+        let mut typed_deep = gshp_typed_config();
+        typed_deep.common.borehole_depth_m = Some(120.0);
+        let cfg_deep = EquipmentConfig::from_typed(
+            "gshp_deep".to_string(),
+            "GSHP Heater".to_string(),
+            typed_deep,
+        );
+        let mut eq_deep = GshpHeater::new(cfg_deep.clone());
+        eq_deep.init(&cfg_deep, &e).unwrap();
+
+        // Record identical heat extraction (5 kW for 1 h) in both models.
+        // Heating mode extracts heat FROM the ground: negative Q per Eskilson.
+        let heat_rate_w = -5_000.0;
+        let dt_s = 3600.0;
+        eq_default
+            .core
+            .source_temp
+            .record_source_heat_rate(heat_rate_w, dt_s);
+        eq_deep
+            .core
+            .source_temp
+            .record_source_heat_rate(heat_rate_w, dt_s);
+
+        // q_per_unit = Q / H / N — deeper borehole has half the per-unit-
+        // length heat rate, so the resistive temperature drop is smaller and
+        // the entering water temperature is higher.
+        let ewt_default = eq_default.core.source_temp.compute(&e);
+        let ewt_deep = eq_deep.core.source_temp.compute(&e);
+        assert!(
+            ewt_deep > ewt_default,
+            "deeper borehole (120 m) should yield higher entering water temperature \
+             in heating mode than default (60 m); got deep={ewt_deep:.3}, default={ewt_default:.3}"
+        );
     }
 }
 

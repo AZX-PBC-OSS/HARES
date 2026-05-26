@@ -156,6 +156,39 @@ pub struct HeatPumpCommonConfig {
     /// For water-loop applications (boiler/condenser loop), 20–30°C is typical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enter_water_temp_c: Option<f64>,
+
+    // ── Borehole heat exchanger (GSHP) ───
+    /// Vertical borehole depth [m]. Default 60 m.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borehole_depth_m: Option<f64>,
+    /// Borehole radius [m]. Default 0.0762 m (3″ radius, 6″ borehole).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borehole_radius_m: Option<f64>,
+    /// Center-to-center U-tube shank spacing [m]. Default 0.062 m.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borehole_shank_spacing_m: Option<f64>,
+    /// Number of boreholes in the field. Default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_of_boreholes: Option<u32>,
+    /// Soil thermal conductivity [W/(m·K)]. Default 2.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borehole_soil_conductivity_w_per_m_k: Option<f64>,
+    /// Soil thermal diffusivity [m²/day]. Default 0.05 m²/day
+    /// (DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY in hares-physics::ground).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borehole_soil_diffusivity_m2_per_day: Option<f64>,
+    /// Grout (backfill) thermal conductivity [W/(m·K)]. Default 0.73.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borehole_grout_conductivity_w_per_m_k: Option<f64>,
+    /// HDPE U-tube pipe outer radius [m]. Default 0.01335 m.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borehole_pipe_outer_radius_m: Option<f64>,
+    /// HDPE U-tube pipe inner radius [m]. Default 0.01085 m.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borehole_pipe_inner_radius_m: Option<f64>,
+    /// HDPE pipe thermal conductivity [W/(m·K)]. Default 0.40.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borehole_pipe_conductivity_w_per_m_k: Option<f64>,
 }
 
 impl Default for HeatPumpCommonConfig {
@@ -207,6 +240,16 @@ impl Default for HeatPumpCommonConfig {
             pump_motor_efficiency: None,
             pump_system_head_loss_m: None,
             enter_water_temp_c: None,
+            borehole_depth_m: None,
+            borehole_radius_m: None,
+            borehole_shank_spacing_m: None,
+            number_of_boreholes: None,
+            borehole_soil_conductivity_w_per_m_k: None,
+            borehole_soil_diffusivity_m2_per_day: None,
+            borehole_grout_conductivity_w_per_m_k: None,
+            borehole_pipe_outer_radius_m: None,
+            borehole_pipe_inner_radius_m: None,
+            borehole_pipe_conductivity_w_per_m_k: None,
         }
     }
 }

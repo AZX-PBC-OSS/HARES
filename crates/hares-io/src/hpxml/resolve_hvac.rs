@@ -1275,6 +1275,33 @@ fn try_build_heat_pump_heater_config(
                 .get("pump_system_head_loss_m")
                 .and_then(Value::as_f64),
             enter_water_temp_c: params.get("enter_water_temp_c").and_then(Value::as_f64),
+            borehole_depth_m: params.get("borehole_depth_m").and_then(Value::as_f64),
+            borehole_radius_m: params.get("borehole_radius_m").and_then(Value::as_f64),
+            borehole_shank_spacing_m: params
+                .get("borehole_shank_spacing_m")
+                .and_then(Value::as_f64),
+            number_of_boreholes: params
+                .get("number_of_boreholes")
+                .and_then(Value::as_u64)
+                .map(|v| v as u32),
+            borehole_soil_conductivity_w_per_m_k: params
+                .get("borehole_soil_conductivity_w_per_m_k")
+                .and_then(Value::as_f64),
+            borehole_soil_diffusivity_m2_per_day: params
+                .get("borehole_soil_diffusivity_m2_per_day")
+                .and_then(Value::as_f64),
+            borehole_grout_conductivity_w_per_m_k: params
+                .get("borehole_grout_conductivity_w_per_m_k")
+                .and_then(Value::as_f64),
+            borehole_pipe_outer_radius_m: params
+                .get("borehole_pipe_outer_radius_m")
+                .and_then(Value::as_f64),
+            borehole_pipe_inner_radius_m: params
+                .get("borehole_pipe_inner_radius_m")
+                .and_then(Value::as_f64),
+            borehole_pipe_conductivity_w_per_m_k: params
+                .get("borehole_pipe_conductivity_w_per_m_k")
+                .and_then(Value::as_f64),
         },
         hp_lockout_temp_c: params.get("hp_lockout_temp_c").and_then(Value::as_f64),
         er_lockout_temp_c: params.get("er_lockout_temp_c").and_then(Value::as_f64),
@@ -1453,6 +1480,33 @@ fn try_build_heat_pump_cooler_config(
                 .get("pump_system_head_loss_m")
                 .and_then(Value::as_f64),
             enter_water_temp_c: params.get("enter_water_temp_c").and_then(Value::as_f64),
+            borehole_depth_m: params.get("borehole_depth_m").and_then(Value::as_f64),
+            borehole_radius_m: params.get("borehole_radius_m").and_then(Value::as_f64),
+            borehole_shank_spacing_m: params
+                .get("borehole_shank_spacing_m")
+                .and_then(Value::as_f64),
+            number_of_boreholes: params
+                .get("number_of_boreholes")
+                .and_then(Value::as_u64)
+                .map(|v| v as u32),
+            borehole_soil_conductivity_w_per_m_k: params
+                .get("borehole_soil_conductivity_w_per_m_k")
+                .and_then(Value::as_f64),
+            borehole_soil_diffusivity_m2_per_day: params
+                .get("borehole_soil_diffusivity_m2_per_day")
+                .and_then(Value::as_f64),
+            borehole_grout_conductivity_w_per_m_k: params
+                .get("borehole_grout_conductivity_w_per_m_k")
+                .and_then(Value::as_f64),
+            borehole_pipe_outer_radius_m: params
+                .get("borehole_pipe_outer_radius_m")
+                .and_then(Value::as_f64),
+            borehole_pipe_inner_radius_m: params
+                .get("borehole_pipe_inner_radius_m")
+                .and_then(Value::as_f64),
+            borehole_pipe_conductivity_w_per_m_k: params
+                .get("borehole_pipe_conductivity_w_per_m_k")
+                .and_then(Value::as_f64),
         },
         stage_shrs: extract_stage_values(params, "shr"),
         // Crankcase heater: power (W) from HPXML extension → kW.

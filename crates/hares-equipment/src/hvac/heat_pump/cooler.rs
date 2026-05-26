@@ -470,6 +470,58 @@ impl Equipment for GshpCooler {
             .pump_system_head_loss_m
             .unwrap_or(self.pump_system_head_loss_m);
 
+        // Build BoreholeConfig from typed config, falling back to documented
+        // defaults for any fields left at None. This replaces the default
+        // BoreholeGFunctionModel constructed in new().
+        let bh_dfl = hares_physics::borehole::BoreholeConfig::default();
+        let bh_cfg = hares_physics::borehole::BoreholeConfig {
+            borehole_depth_m: typed_hp_cfg
+                .common
+                .borehole_depth_m
+                .unwrap_or(bh_dfl.borehole_depth_m),
+            borehole_radius_m: typed_hp_cfg
+                .common
+                .borehole_radius_m
+                .unwrap_or(bh_dfl.borehole_radius_m),
+            shank_spacing_m: typed_hp_cfg
+                .common
+                .borehole_shank_spacing_m
+                .unwrap_or(bh_dfl.shank_spacing_m),
+            number_of_boreholes: typed_hp_cfg
+                .common
+                .number_of_boreholes
+                .unwrap_or(bh_dfl.number_of_boreholes),
+            soil_conductivity_w_per_m_k: typed_hp_cfg
+                .common
+                .borehole_soil_conductivity_w_per_m_k
+                .unwrap_or(bh_dfl.soil_conductivity_w_per_m_k),
+            soil_diffusivity_m2_per_day: typed_hp_cfg
+                .common
+                .borehole_soil_diffusivity_m2_per_day
+                .unwrap_or(bh_dfl.soil_diffusivity_m2_per_day),
+            grout_conductivity_w_per_m_k: typed_hp_cfg
+                .common
+                .borehole_grout_conductivity_w_per_m_k
+                .unwrap_or(bh_dfl.grout_conductivity_w_per_m_k),
+            pipe_outer_radius_m: typed_hp_cfg
+                .common
+                .borehole_pipe_outer_radius_m
+                .unwrap_or(bh_dfl.pipe_outer_radius_m),
+            pipe_inner_radius_m: typed_hp_cfg
+                .common
+                .borehole_pipe_inner_radius_m
+                .unwrap_or(bh_dfl.pipe_inner_radius_m),
+            pipe_conductivity_w_per_m_k: typed_hp_cfg
+                .common
+                .borehole_pipe_conductivity_w_per_m_k
+                .unwrap_or(bh_dfl.pipe_conductivity_w_per_m_k),
+        };
+        self.inner.core.source_temp = SourceTemperature::BoreholeGFunction {
+            model: std::sync::Arc::new(hares_physics::borehole::BoreholeGFunctionModel::new(
+                bh_cfg,
+            )),
+        };
+
         Ok(())
     }
 
@@ -1320,6 +1372,79 @@ mod tests {
             "GSHP crankcase must be inactive at 5 °C OAT (threshold NEG_INFINITY); \
              central-AC default (12.8 °C) would produce 0.05 kW — got {}",
             ports.electrical.net_active_kw()
+        );
+    }
+
+    /// Borehole parameters wired through `HeatPumpCommonConfig` must reach
+    /// `BoreholeGFunctionModel` and influence `compute_entering_water_temp`.
+    /// Deeper boreholes (120 m vs default 60 m) halve the per-unit-length
+    /// heat injection rate, yielding a lower entering water temperature in
+    /// cooling mode. This test covers the full wiring chain:
+    /// `HeatPumpCommonConfig` → `init` → `BoreholeConfig` →
+    /// `BoreholeGFunctionModel`.
+    #[test]
+    fn gshp_cooler_borehole_depth_reaches_ewt() {
+        let env = cooling_env(26.0, 10.0);
+
+        // Default borehole depth (60 m from BoreholeConfig::default()).
+        let cfg_default = EquipmentConfig::from_typed(
+            "gshp_default".to_string(),
+            "GSHP Cooler".to_string(),
+            crate::HeatPumpCoolerConfig {
+                common: crate::HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(8_000.0),
+                    cooling_eir: Some(0.33),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut eq_default = GshpCooler::new(cfg_default.clone());
+        eq_default.init(&cfg_default, &env).unwrap();
+
+        // Custom borehole depth (120 m).
+        let cfg_deep = EquipmentConfig::from_typed(
+            "gshp_deep".to_string(),
+            "GSHP Cooler".to_string(),
+            crate::HeatPumpCoolerConfig {
+                common: crate::HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(8_000.0),
+                    cooling_eir: Some(0.33),
+                    borehole_depth_m: Some(120.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut eq_deep = GshpCooler::new(cfg_deep.clone());
+        eq_deep.init(&cfg_deep, &env).unwrap();
+
+        // Record identical heat injection (5 kW for 1 h) in both models.
+        // Cooling mode injects heat INTO the ground: positive Q per Eskilson.
+        let heat_rate_w = 5_000.0;
+        let dt_s = 3600.0;
+        eq_default
+            .inner
+            .core
+            .source_temp
+            .record_source_heat_rate(heat_rate_w, dt_s);
+        eq_deep
+            .inner
+            .core
+            .source_temp
+            .record_source_heat_rate(heat_rate_w, dt_s);
+
+        // q_per_unit = Q / H / N — deeper borehole has half the per-unit-
+        // length heat rate, so the resistive temperature rise is smaller and
+        // the entering water temperature is lower.
+        let ewt_default = eq_default.inner.core.source_temp.compute(&env);
+        let ewt_deep = eq_deep.inner.core.source_temp.compute(&env);
+        assert!(
+            ewt_deep < ewt_default,
+            "deeper borehole (120 m) should yield lower entering water temperature \
+             in cooling mode than default (60 m); got deep={ewt_deep:.3}, default={ewt_default:.3}"
         );
     }
 }
