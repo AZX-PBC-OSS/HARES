@@ -22,7 +22,8 @@ use hares_equipment::{
     ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, Equipment,
     EquipmentConfig, EquipmentRegistry, EquipmentTypedConfig, EvConfig, GasBoilerConfig,
     GasFurnaceConfig, GeneratorConfig, HeatPumpCommonConfig, HeatPumpCoolerConfig,
-    HeatPumpHeaterConfig, IdealHvacConfig, PvConfig, RoomAcConfig, VentilationConfig,
+    HeatPumpHeaterConfig, IdealHvacConfig, IndirectTankConfig, PvConfig, RoomAcConfig,
+    VentilationConfig,
     config::ConfigValue,
     water_heater::wh_config::{
         ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
@@ -986,6 +987,34 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 fixture_delivery_temp_c: None,
             },
         ),
+        "Indirect Tank" => typed_alias_config(
+            class,
+            IndirectTankConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                boiler_loop_id: None,
+                tank_volume_m3: None,
+                tank_height_m: None,
+                ua_w_per_k: None,
+                hx_ua_w_per_k: Some(150.0),
+                setpoint_c: Some(52.0),
+                deadband_c: None,
+                max_tank_temp_c: None,
+                initial_tank_temp_c: None,
+                tank_nodes: None,
+                draw_flow_rate_kg_s: None,
+                avg_water_draw_l_per_day: None,
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
+                jacket_r_value_m2_k_w: None,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
+                boiler_loop_flow_rate_kg_s: None,
+            },
+        ),
         "Battery" => typed_alias_config(
             class,
             BatteryConfig {
@@ -1323,6 +1352,30 @@ fn lifecycle_gas_tankless_water_heater() {
         &env,
         ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(50.0),
+            cooling_setpoint_c: None,
+            deadband_c: Some(2.0),
+        },
+        ControlSignal::PowerSetpoint {
+            active_power_kw: 1.0,
+            reactive_power_kvar: None,
+        },
+    );
+}
+
+#[test]
+fn lifecycle_indirect_tank() {
+    let registry = EquipmentRegistry::new();
+    let cfg = config_for_class("Indirect Tank");
+    let mut eq = registry
+        .create("Indirect Tank", cfg.clone())
+        .expect("create indirect tank");
+    let env = env_for_class("Indirect Tank");
+    eq.init(&cfg, &env).expect("init indirect tank");
+    assert_equipment_lifecycle(
+        eq.as_mut(),
+        &env,
+        ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(52.0),
             cooling_setpoint_c: None,
             deadband_c: Some(2.0),
         },

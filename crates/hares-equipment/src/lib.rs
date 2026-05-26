@@ -73,7 +73,7 @@ pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
 pub use water_heater::wh_config::{
     ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
-    TanklessWaterHeaterConfig,
+    IndirectTankConfig, TanklessWaterHeaterConfig,
 };
 
 /// Equipment-layer result type.

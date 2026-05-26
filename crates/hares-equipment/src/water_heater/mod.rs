@@ -3,6 +3,7 @@
 pub mod gas;
 pub mod heat_pump_wh;
 pub(crate) mod hpwh_compressor;
+pub mod indirect_tank;
 pub mod resistance;
 pub mod tank;
 pub mod tankless;
@@ -46,6 +47,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     gas::register_with_registry(registry);
     heat_pump_wh::register_with_registry(registry);
     tankless::register_with_registry(registry);
+    indirect_tank::register_with_registry(registry);
 
     // "Water Heating" is ambiguous -- the resolver must specify the fuel type.
     registry.register_error(

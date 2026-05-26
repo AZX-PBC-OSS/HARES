@@ -422,6 +422,139 @@ impl TanklessWaterHeaterConfig {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct IndirectTankConfig {
+    pub equipment_id: Option<u32>,
+    pub zone_id: Option<u16>,
+    pub boiler_loop_id: Option<u16>,
+    pub tank_volume_m3: Option<f64>,
+    pub tank_height_m: Option<f64>,
+    pub ua_w_per_k: Option<f64>,
+    pub hx_ua_w_per_k: Option<f64>,
+    pub setpoint_c: Option<f64>,
+    pub deadband_c: Option<f64>,
+    pub max_tank_temp_c: Option<f64>,
+    pub initial_tank_temp_c: Option<f64>,
+    pub tank_nodes: Option<u8>,
+    pub draw_flow_rate_kg_s: Option<f64>,
+    pub avg_water_draw_l_per_day: Option<f64>,
+    pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
+    pub mains_temp_c_source: Option<ScheduleSourceConfig>,
+    pub performance_adjustment: Option<f64>,
+    pub zone_type: Option<String>,
+    pub first_hour_rating_m3: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jacket_r_value_m2_k_w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture_delivery_temp_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_draw_temp_c: Option<f64>,
+    /// Boiler loop assumed flow rate [kg/s] for computing return temperature.
+    /// When `None`, defaults to 0.1 kg/s — a typical residential hydronic
+    /// loop with a Grundfos UPS15-58 on speed 1 (~6 GPM for a 10 ft head).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boiler_loop_flow_rate_kg_s: Option<f64>,
+}
+
+impl EquipmentTypedConfig for IndirectTankConfig {
+    fn equipment_type_name() -> &'static str {
+        "Indirect Tank"
+    }
+}
+
+impl IndirectTankConfig {
+    pub fn validate(&self) -> crate::Result<()> {
+        check_finite(
+            "indirect_tank: tank_volume_m3",
+            self.tank_volume_m3,
+            0.0,
+            true,
+        )?;
+        check_finite(
+            "indirect_tank: tank_height_m",
+            self.tank_height_m,
+            0.0,
+            true,
+        )?;
+        check_finite("indirect_tank: ua_w_per_k", self.ua_w_per_k, 0.0, false)?;
+        check_finite(
+            "indirect_tank: hx_ua_w_per_k",
+            self.hx_ua_w_per_k,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "indirect_tank: setpoint_c",
+            self.setpoint_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
+        check_finite("indirect_tank: deadband_c", self.deadband_c, 0.0, false)?;
+        check_finite(
+            "indirect_tank: max_tank_temp_c",
+            self.max_tank_temp_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
+        check_finite(
+            "indirect_tank: initial_tank_temp_c",
+            self.initial_tank_temp_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
+        check_finite(
+            "indirect_tank: draw_flow_rate_kg_s",
+            self.draw_flow_rate_kg_s,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "indirect_tank: avg_water_draw_l_per_day",
+            self.avg_water_draw_l_per_day,
+            0.0,
+            false,
+        )?;
+        check_range(
+            "indirect_tank: performance_adjustment",
+            self.performance_adjustment,
+            0.0,
+            1.0,
+        )?;
+        check_finite(
+            "indirect_tank: first_hour_rating_m3",
+            self.first_hour_rating_m3,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "indirect_tank: jacket_r_value_m2_k_w",
+            self.jacket_r_value_m2_k_w,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "indirect_tank: fixture_delivery_temp_c",
+            self.fixture_delivery_temp_c,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "indirect_tank: hot_draw_temp_c",
+            self.hot_draw_temp_c,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "indirect_tank: boiler_loop_flow_rate_kg_s",
+            self.boiler_loop_flow_rate_kg_s,
+            0.0,
+            true,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HeatPumpWaterHeaterConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
@@ -806,6 +939,57 @@ mod tests {
             },
         );
         let result: crate::Result<HeatPumpWaterHeaterConfig> = ec.typed();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn indirect_tank_round_trips_and_rejects_unknown_fields() {
+        let cfg = IndirectTankConfig {
+            equipment_id: Some(7),
+            zone_id: Some(2),
+            boiler_loop_id: Some(3),
+            tank_volume_m3: Some(0.189),
+            tank_height_m: Some(1.2),
+            ua_w_per_k: Some(2.0),
+            hx_ua_w_per_k: Some(150.0),
+            setpoint_c: Some(51.67),
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            draw_flow_rate_kg_s: None,
+            avg_water_draw_l_per_day: Some(227.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: Some(0.92),
+            zone_type: Some("conditioned".to_string()),
+            first_hour_rating_m3: Some(0.2),
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            boiler_loop_flow_rate_kg_s: Some(0.3),
+        };
+        let ec = EquipmentConfig::from_typed(
+            "indirect".to_string(),
+            "Indirect Tank".to_string(),
+            cfg.clone(),
+        );
+        assert!(ec.is_typed());
+        let recovered: IndirectTankConfig = ec.typed().expect("typed decode");
+        assert_eq!(recovered, cfg);
+        assert!(cfg.validate().is_ok());
+
+        let ec = EquipmentConfig::with_payload(
+            "indirect".to_string(),
+            "Indirect Tank".to_string(),
+            ConfigPayload::Typed {
+                type_name: "Indirect Tank".to_string(),
+                version: 1,
+                data: serde_json::json!({"tank_volume_m3": 0.189, "unknown_field": 1}),
+            },
+        );
+        let result: crate::Result<IndirectTankConfig> = ec.typed();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown field"));
     }

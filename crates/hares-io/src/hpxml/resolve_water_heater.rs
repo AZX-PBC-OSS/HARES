@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
-    HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
+    HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
 use hares_types::{FuelType, normalize_ascii};
 
@@ -64,6 +64,11 @@ pub(super) fn resolve_water_heaters(
             .path(&["WaterHeaterInsulation", "Jacket"])
             .and_then(|j| child_f64(j, "JacketRValue"))
             .map(conv::r_value_ip_to_si);
+
+        // RelatedHVACSystem cross-reference for combi boiler / indirect tank.
+        let _related_hvac_idref = wh
+            .child("RelatedHVACSystem")
+            .and_then(|n| n.attrs.get("idref").cloned());
 
         let category = wh_category(&wh_type, fuel);
         let ua_inputs = UaInputs {
@@ -258,8 +263,36 @@ pub(super) fn resolve_water_heaters(
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
+            "Indirect Tank" => {
+                let cfg = IndirectTankConfig {
+                    equipment_id: None,
+                    zone_id: None,
+                    boiler_loop_id: None,
+                    tank_volume_m3,
+                    tank_height_m,
+                    ua_w_per_k,
+                    hx_ua_w_per_k: None,
+                    setpoint_c,
+                    deadband_c: None,
+                    max_tank_temp_c: None,
+                    initial_tank_temp_c: None,
+                    tank_nodes: None,
+                    draw_flow_rate_kg_s: None,
+                    avg_water_draw_l_per_day,
+                    draw_flow_rate_source: None,
+                    mains_temp_c_source: None,
+                    performance_adjustment,
+                    zone_type: zone_name.clone(),
+                    first_hour_rating_m3,
+                    jacket_r_value_m2_k_w,
+                    fixture_delivery_temp_c: None,
+                    hot_draw_temp_c: None,
+                    boiler_loop_flow_rate_kg_s: None,
+                };
+                typed_spec(name.clone(), fuel, cfg, defaults)
+            }
             // Unreachable: canonical_water_heater_name (called at the top of
-            // this loop) generates exactly the five names matched above and
+            // this loop) generates exactly the six names matched above and
             // rejects all others with Err, so execution never reaches this arm.
             _ => unreachable!(
                 "canonical_water_heater_name validated '{}' but match did not cover it",
@@ -538,22 +571,8 @@ fn canonical_water_heater_name(
             | FuelType::Coal
             | FuelType::WoodPellet,
         ) => "Gas Tankless Water Heater",
-        ("space-heating boiler with storage tank", _) => {
-            return Err(super::HpxmlError::Parse(
-                "space-heating boiler with storage tank (combi boiler with indirect tank) \
-                 is not yet implemented. Workaround: configure a separate boiler and \
-                 storage water heater as independent equipment in the HPXML input."
-                    .to_string(),
-            ));
-        }
-        ("space-heating boiler with tankless coil", _) => {
-            return Err(super::HpxmlError::Parse(
-                "space-heating boiler with tankless coil is not yet implemented. \
-                 Workaround: configure a separate boiler and storage water heater as \
-                 independent equipment in the HPXML input."
-                    .to_string(),
-            ));
-        }
+        ("space-heating boiler with storage tank", _) => "Indirect Tank",
+        ("space-heating boiler with tankless coil", _) => "Indirect Tank",
         _ => {
             return Err(super::HpxmlError::Parse(format!(
                 "unsupported HPXML water heater type/fuel combination: \
@@ -1259,46 +1278,28 @@ mod tests {
         );
     }
 
-    // Combi boiler types (HPXML v4 §8.5) are valid HPXML enumerations that
-    // HARES does not yet model. canonical_water_heater_name() returns a clear
-    // error with a workaround rather than a generic "unsupported type" message,
-    // so users can configure separate boiler + tank equipment in the HPXML input
-    // as a stopgap. Full IndirectTank equipment model is tracked in T-0134.
+    // Combi boiler types (HPXML v4 §8.5) resolve to the Indirect Tank
+    // equipment model for combined boiler + indirect-tank DHW configurations.
+    // Full IndirectTank equipment model is implemented in T-0134.
 
     #[test]
-    fn combi_boiler_with_storage_tank_type_rejected_with_clear_error() {
-        let err =
+    fn combi_boiler_with_storage_tank_type_resolves_to_indirect_tank() {
+        let name =
             canonical_water_heater_name("space-heating boiler with storage tank", FuelType::Gas)
-                .expect_err("combi boiler with storage tank must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("is not yet implemented"),
-            "error must identify the type as unimplemented, got: {err}"
-        );
-        assert!(
-            msg.contains("Workaround"),
-            "error must provide a workaround, got: {err}"
-        );
+                .expect("combi boiler with storage tank must resolve to Indirect Tank");
+        assert_eq!(name, "Indirect Tank");
     }
 
     #[test]
-    fn combi_boiler_with_tankless_coil_type_rejected_with_clear_error() {
-        let err =
+    fn combi_boiler_with_tankless_coil_type_resolves_to_indirect_tank() {
+        let name =
             canonical_water_heater_name("space-heating boiler with tankless coil", FuelType::Gas)
-                .expect_err("combi boiler with tankless coil must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("is not yet implemented"),
-            "error must identify the type as unimplemented, got: {err}"
-        );
-        assert!(
-            msg.contains("Workaround"),
-            "error must provide a workaround, got: {err}"
-        );
+                .expect("combi boiler with tankless coil must resolve to Indirect Tank");
+        assert_eq!(name, "Indirect Tank");
     }
 
     #[test]
-    fn combi_boiler_full_xml_round_trip_rejected_with_clear_error() {
+    fn combi_boiler_full_xml_round_trip_resolves_to_indirect_tank() {
         let xml = r#"
             <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
               <Building>
@@ -1328,20 +1329,28 @@ mod tests {
             .expect("building details must exist");
 
         let mut specs = Vec::new();
-        let result = resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs);
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+            .expect("combi boiler with storage tank must resolve successfully");
+
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Indirect Tank")
+            .expect("Indirect Tank spec must be emitted");
+        let cfg: IndirectTankConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed IndirectTankConfig");
+        assert_eq!(cfg.setpoint_c, Some(conv::temperature_f_to_c(120.0)));
+        let expected_vol_m3 = conv::volume_gal_to_m3(40.0 * 0.95);
         assert!(
-            result.is_err(),
-            "resolve_water_heaters must return Err for unsupported combi boiler type"
+            (cfg.tank_volume_m3.expect("tank volume must be set") - expected_vol_m3).abs() < 1e-6
         );
-        let err = result.unwrap_err();
-        let msg = err.to_string();
         assert!(
-            msg.contains("is not yet implemented"),
-            "the error must identify the type as unimplemented, got: {err}"
-        );
-        assert!(
-            msg.contains("Workaround"),
-            "the error must provide a workaround, got: {err}"
+            cfg.avg_water_draw_l_per_day
+                .expect("avg draw should be derived")
+                > 0.0
         );
     }
 }

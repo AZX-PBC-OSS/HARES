@@ -43,6 +43,7 @@ pub const CANONICAL_EQUIPMENT_NAMES: &[&str] = &[
     "Gas Tankless Water Heater",
     "Heat Pump Water Heater",
     "HPWH",
+    "Indirect Tank",
     // Storage
     "Battery",
     // PV
