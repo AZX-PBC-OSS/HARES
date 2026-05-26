@@ -19,140 +19,40 @@ QUICK START
     # See everything that would run (safe, no changes)
     python scripts/review-all.py --dry-run
 
-    # Run ALL 287 pending reviews (4 at a time by default)
+    # Run ALL pending reviews (4 at a time by default)
     python scripts/review-all.py
 
-    # Run just the wiring/port consistency reviews (8 reviews)
+    # Run just the wiring/port consistency reviews
     python scripts/review-all.py --category wiring
 
     # Run a single review by its ID
     python scripts/review-all.py hpxml-01
 
-    # Run with 8 parallel workers (faster on multi-core)
+    # Run with 8 parallel workers
     python scripts/review-all.py --workers 8
 
-    # Run sequentially (useful for debugging one-at-a-time)
+    # Run sequentially (debug)
     python scripts/review-all.py --sequential
-
-----------------------------------------------------------------------
-COMMON WORKFLOWS
-----------------------------------------------------------------------
-
-1. FIRST USE — see what's available:
-       python scripts/review-all.py --list
-   Shows all 40 categories with their review counts.
-
-2. PREVIEW a category before running:
-       python scripts/review-all.py --category hpxml --dry-run
-   Lists the 12 HPXML reviews and shows which are already done.
-
-3. RESUME after interruption:
-   Just re-run the same command. Already-completed reviews are skipped.
-       python scripts/review-all.py
-   or
-       python scripts/review-all.py --category core
-
-4. TARGETED — run a specific review:
-       python scripts/review-all.py <review-id>
-   Example IDs: hpxml-01, envelope-03, core-07, wiring-01
-
-5. BATCH BY PRIORITY — run critical categories first:
-       python scripts/review-all.py --category wiring --workers 4
-       python scripts/review-all.py --category envelope --workers 4
-       python scripts/review-all.py --category core --workers 4
-
-6. KICK OFF EVERYTHING overnight:
-       python scripts/review-all.py --workers 8
-   (~287 reviews; at ~2 min/review with 4 workers ≈ 2.5 hours)
-
-----------------------------------------------------------------------
-FLAGS
-----------------------------------------------------------------------
-
-    <review-id>           Run a single review (positional, optional)
-    -c, --category NAME   Run all reviews in one manifest category
-    -n, --dry-run         Preview what would run (no execution)
-    -l, --list            List categories with counts; with --category
-                           or a review ID, lists individual review titles
-    -w, --workers N       Number of concurrent workers (default: 4)
-    -s, --sequential      Run one-at-a-time instead of parallel
 
 ----------------------------------------------------------------------
 ENVIRONMENT VARIABLES
 ----------------------------------------------------------------------
 
-    OPENCODE_BIN          Path to the opencode CLI (default: opencode)
-    OPENCODE_FLAGS        Extra flags passed to opencode, e.g. --verbose
+    OPENCODE_BIN          Path to opencode CLI (default: opencode)
+    OPENCODE_MODEL        Model to use, e.g. deepseek/deepseek-v4-pro
+    OPENCODE_FLAGS        Extra flags passed to opencode
     REVIEW_WORKERS        Default worker count (overridden by --workers)
-
+    REVIEW_TIMEOUT        Seconds per review (default: 1800 = 30 min)
 ----------------------------------------------------------------------
-OUTPUT FORMAT
-----------------------------------------------------------------------
-
-Each review writes a severity-tagged markdown file:
-
-    # <title>
-    **Review ID**: <id>
-    **Category**: <category>
-    **Date**: YYYY-MM-DD
-
-    ## Files Reviewed
-    ## Vendor/Reference Files Consulted
-
-    ## Findings
-    ### Finding 1: [Severity: critical|high|medium|low]
-    **Description**: ...
-    **Code Location**: ...
-    **Root Cause**: ...
-    **Impact**: ...
-
-    ## Summary
-    - Total / Critical / High / Medium / Low counts
-
-    ## Recommendations
-    ## References / Citations
-
-----------------------------------------------------------------------
-MANIFEST FORMAT (scripts/reviews/*.json)
-----------------------------------------------------------------------
-
-Each manifest is a JSON file describing reviews for one category:
-
-    {
-        "category": "hpxml",
-        "description": "HPXML input parsing, validation, defaults",
-        "reviews": [
-            {
-                "id": "hpxml-01",
-                "slug": "duct-leakage-cfm25-silent-skip",
-                "title": "HPXML duct leakage CFM25 units silently skipped",
-                "vendor_refs": "vendors/OCHRE/ochre/utils/hpxml.py",
-                "files": "crates/hares-io/src/hpxml/building.rs ...",
-                "prompt": "When HPXML DuctLeakage... Review the code..."
-            }
-        ]
-    }
-
-To add a new review area, add an entry to the appropriate JSON file.
-To add a new category, create a new JSON file with the same schema.
-
-----------------------------------------------------------------------
-CONCURRENCY NOTES
-----------------------------------------------------------------------
-
-Reviews are READ-ONLY. Each worker:
-  - Reads HARES source files (no writes to source)
-  - Writes findings to a unique output .md file
-  - Runs in an isolated subprocess (ProcessPoolExecutor)
-No two reviews write to the same output file, so parallel execution is safe.
 """
 import argparse
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -160,8 +60,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_DIR = REPO_ROOT / "scripts" / "reviews"
 REVIEWS_DIR = REPO_ROOT / "docs" / "reviews"
 OPENCODE_BIN = os.environ.get("OPENCODE_BIN", "opencode")
-OPENCODE_FLAGS = os.environ.get("OPENCODE_FLAGS", "").split()
+OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", "")
+_extra_flags = os.environ.get("OPENCODE_FLAGS", "")
+OPENCODE_FLAGS = _extra_flags.split() if _extra_flags else []
 DEFAULT_WORKERS = int(os.environ.get("REVIEW_WORKERS", "4"))
+REVIEW_TIMEOUT = int(os.environ.get("REVIEW_TIMEOUT", "1800"))  # 30 min
 
 
 def load_all_manifests() -> list[dict]:
@@ -243,33 +146,87 @@ Cite specific line numbers. Compare against vendor reference implementations whe
 """
 
 
-def run_one_review(review: dict) -> tuple[str, bool, str]:
-    """Run a single review via opencode. Returns (id, success, message)."""
+def run_one_review(review: dict) -> tuple[str, bool, str, float]:
+    """Run a single review via opencode. Polls for output file; terminates opencode once file is written. Returns (id, success, message, elapsed_secs)."""
     rid = review["id"]
     out_path = review["_output_path"]
     prompt = build_prompt(review)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    cmd = [OPENCODE_BIN] + OPENCODE_FLAGS
+    cmd = [OPENCODE_BIN, "run"]
+    if OPENCODE_MODEL:
+        cmd += ["--model", OPENCODE_MODEL]
+    cmd += OPENCODE_FLAGS
+    cmd.append(prompt)
+
+    print(f"  ▸ START {rid:22s}  {review['title'][:60]}", flush=True)
+
+    log_path = os.path.join(str(REPO_ROOT), "docs", "reviews", "_logs", f"{rid}.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    log = open(log_path, "w")
+    log.write(f"# opencode log for {rid}\n# cmd: {cmd[0]} {cmd[1]} ...\n\n")
+    log.flush()
+
+    t0 = time.time()
+    proc = None
     try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=600,  # 10-minute timeout per review
-            cwd=str(REPO_ROOT),
+        proc = subprocess.Popen(
+            cmd, stdout=log, stderr=subprocess.STDOUT, cwd=str(REPO_ROOT)
         )
-        if result.returncode == 0:
-            return (rid, True, f"OK (output: {out_path})")
-        else:
-            return (rid, False, f"exit={result.returncode} stderr={result.stderr[:200]}")
-    except subprocess.TimeoutExpired:
-        return (rid, False, "TIMEOUT (>600s)")
+        # Poll until output file appears and has content, or timeout, or process dies
+        deadline = t0 + REVIEW_TIMEOUT
+        file_ready = False
+        while time.time() < deadline:
+            ret = proc.poll()
+            if ret is not None:
+                # Process exited — check result
+                elapsed = time.time() - t0
+                log.close()
+                if ret == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                    return (rid, True, f"-> {out_path}", elapsed)
+                else:
+                    msg = f"exit={ret}"
+                    if not os.path.exists(out_path):
+                        msg = "output file not created"
+                    elif os.path.getsize(out_path) == 0:
+                        msg = "output file empty"
+                    return (rid, False, f"{msg}  log: {log_path}", elapsed)
+            if not file_ready and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                # Output written — give opencode 15s to exit gracefully, then kill
+                file_ready = True
+                grace = time.time() + 15
+            if file_ready and time.time() > grace:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                elapsed = time.time() - t0
+                log.close()
+                return (rid, True, f"-> {out_path}", elapsed)
+            time.sleep(2)
+
+        # Timeout
+        elapsed = time.time() - t0
+        log.close()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return (rid, True, f"-> {out_path} (timeout)", elapsed)
+        return (rid, False, f"TIMEOUT (>{REVIEW_TIMEOUT}s)  log: {log_path}", elapsed)
     except FileNotFoundError:
-        return (rid, False, f"opencode binary not found: {OPENCODE_BIN}")
+        elapsed = time.time() - t0
+        log.close()
+        return (rid, False, f"binary not found: {OPENCODE_BIN}", elapsed)
     except Exception as exc:
-        return (rid, False, str(exc))
+        elapsed = time.time() - t0
+        log.close()
+        if proc and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        return (rid, False, f"{exc}  log: {log_path}", elapsed)
 
 
 def dry_run(reviews: list[dict]) -> int:
@@ -291,47 +248,117 @@ def run_sequential(reviews: list[dict]) -> tuple[int, int, int]:
     for r in reviews:
         out = r["_output_path"]
         if os.path.exists(out):
-            print(f"SKIP {r['id']}  —  {out} already exists")
+            print(f"SKIP  {r['id']}  ({out} exists)")
             skipped += 1
             continue
-        print(f"START {r['id']}: {r['title']}")
-        rid, ok, msg = run_one_review(r)
+        try:
+            rid, ok, msg, elapsed = run_one_review(r)
+        except KeyboardInterrupt:
+            print("\nInterrupted — stopping.")
+            break
+        marker = "\033[32mPASS\033[0m" if ok else "\033[31mFAIL\033[0m"
+        print(f"  {marker}  {rid:22s}  {elapsed:5.0f}s  {msg[:100]}")
         if ok:
-            print(f"PASS  {rid}")
             ran += 1
         else:
-            print(f"FAIL  {rid}: {msg}")
             errors += 1
     return ran, skipped, errors
 
 
 def run_parallel(reviews: list[dict], workers: int) -> tuple[int, int, int]:
-    """Run reviews with multiprocessing. Returns (ran, skipped, errors)."""
+    """Run reviews with a thread pool. Ctrl-C stops picking up new reviews, waits for in-flight. Returns (ran, skipped, errors)."""
     pending = [r for r in reviews if not os.path.exists(r["_output_path"])]
     skipped = len(reviews) - len(pending)
     for r in reviews:
         if os.path.exists(r["_output_path"]):
-            print(f"SKIP {r['id']}  —  {r['_output_path']} already exists")
+            print(f"SKIP  {r['id']}  ({r['_output_path']} exists)")
+
     if not pending:
         return 0, skipped, 0
 
-    print(f"\nDispatching {len(pending)} reviews with {workers} workers...\n")
-    ran = errors = 0
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(run_one_review, r): r for r in pending}
-        for future in as_completed(futures):
-            review = futures[future]
+    total = len(pending)
+    print(f"\n{'='*60}")
+    print(f"Dispatching {total} reviews across {workers} workers")
+    print(f"Timeout: {REVIEW_TIMEOUT}s/review  |  Output: docs/reviews/")
+    print(f"Logs: docs/reviews/_logs/<id>.log")
+    print(f"{'='*60}\n")
+
+    completed = 0
+    errors = 0
+    review_times: list[float] = []
+    stop = threading.Event()  # set on Ctrl+C
+    t0 = time.time()
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        submitted = 0
+        futures: dict = {}
+
+        def _fill():
+            nonlocal submitted
+            while submitted < len(pending) and len(futures) < workers and not stop.is_set():
+                r = pending[submitted]
+                submitted += 1
+                futures[executor.submit(run_one_review, r)] = r
+
+        _fill()
+
+        while futures:
             try:
-                rid, ok, msg = future.result()
-                if ok:
-                    print(f"PASS  {rid}")
-                    ran += 1
-                else:
-                    print(f"FAIL  {rid}: {msg}")
+                done = set(as_completed(futures, timeout=5))
+            except KeyboardInterrupt:
+                stop.set()
+                print("\nCtrl+C — no new reviews. Waiting for in-flight to finish...", flush=True)
+                cancelled = sum(1 for f in list(futures) if f.cancel())
+                if cancelled:
+                    print(f"  Cancelled {cancelled} queued", flush=True)
+                futures = {f: r for f, r in futures.items() if not f.cancelled()}
+                if not futures:
+                    break
+                try:
+                    done = set(as_completed(futures))
+                except KeyboardInterrupt:
+                    print("Second Ctrl+C — forcing exit.", flush=True)
+                    break
+                except Exception:
+                    break
+                continue
+
+            if not done:
+                continue
+
+            for future in done:
+                review = futures.pop(future)
+                try:
+                    rid, ok, msg, elapsed = future.result()
+                except Exception as exc:
+                    rid = review["id"]
+                    ok = False
+                    msg = str(exc)
+                    elapsed = 0
+
+                completed += 1
+                if elapsed > 0:
+                    review_times.append(elapsed)
+                avg = sum(review_times) / len(review_times) if review_times else 300
+                remaining = total - completed
+                eta = (remaining / workers) * avg
+
+                marker = "\033[32m\033[1mPASS\033[0m" if ok else "\033[31mFAIL\033[0m"
+                print(
+                    f"  {marker}  {rid:22s}  [{completed:3d}/{total}]  "
+                    f"{time.time()-t0:5.0f}s elapsed  ~{eta:5.0f}s left  "
+                    f"({elapsed:.0f}s)  {review['title'][:50]}",
+                    flush=True,
+                )
+                if not ok and msg:
+                    print(f"        {msg[:150]}", flush=True)
+                if not ok:
                     errors += 1
-            except Exception as exc:
-                print(f"FAIL  {review['id']}: {exc}")
-                errors += 1
+
+            _fill()
+
+    elapsed = time.time() - t0
+    ran = completed - errors
     return ran, skipped, errors
 
 
@@ -353,7 +380,7 @@ def main():
     )
     parser.add_argument(
         "--category", "-c", default=None,
-        help="Run all reviews in a category"
+        help="Run all reviews in a manifest category"
     )
     parser.add_argument(
         "--dry-run", "-n", action="store_true",
@@ -361,15 +388,15 @@ def main():
     )
     parser.add_argument(
         "--list", "-l", action="store_true",
-        help="List categories with review counts; with --category or review ID, lists individual review titles with completion status"
+        help="List categories with counts; with --category or ID, lists individual reviews"
     )
     parser.add_argument(
         "--workers", "-w", type=int, default=DEFAULT_WORKERS,
-        help=f"Number of concurrent review workers (default: {DEFAULT_WORKERS})"
+        help=f"Number of concurrent workers (default: {DEFAULT_WORKERS})"
     )
     parser.add_argument(
         "--sequential", "-s", action="store_true",
-        help="Run reviews sequentially (no multiprocessing)"
+        help="Run reviews sequentially (no concurrency)"
     )
     args = parser.parse_args()
 
@@ -391,9 +418,8 @@ def main():
 
     if args.list:
         if args.filter_id or args.category:
-            # List individual review titles
             for r in reviews:
-                done = "✓" if os.path.exists(r["_output_path"]) else "○"
+                done = "\033[32m✓\033[0m" if os.path.exists(r["_output_path"]) else "○"
                 print(f"  {done} {r['id']:22s} {r['title']}")
         else:
             list_categories(all_reviews)
@@ -403,7 +429,7 @@ def main():
         pending = dry_run(reviews)
         total = len(reviews)
         done_count = total - pending
-        print(f"\n=== {pending} pending, {done_count} already done, {total} total ===")
+        print(f"\n=== {pending} pending, {done_count} done, {total} total ===")
         return
 
     # Execute
@@ -417,6 +443,9 @@ def main():
     print(f"\n{'='*60}")
     print(f"SUMMARY: {ran} ran, {skipped} skipped, {errors} errors  ({elapsed:.0f}s)")
     print(f"{'='*60}")
+
+    if errors:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

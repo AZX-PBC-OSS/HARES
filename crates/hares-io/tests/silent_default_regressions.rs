@@ -739,6 +739,239 @@ fn ashp_with_heating_capacity_resolves() {
     );
 }
 
+// --- T-0118: AutosizingFactor / AutosizingLimits from HPXML ------------------
+
+/// Gas furnace with <HeatingAutosizingFactor> in extension must store the
+/// factor in params as `autosize_heating_factor`.
+#[test]
+fn gas_furnace_extension_autosizing_factor_stored_in_params() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="fur1"/>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <AnnualHeatingEfficiency><Units>AFUE</Units><Value>0.92</Value></AnnualHeatingEfficiency>
+              <extension>
+                <HeatingAutosizingFactor>1.2</HeatingAutosizingFactor>
+              </extension>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    let specs = resolve(&xml).expect("furnace with autosizing factor must resolve");
+    let furnace = specs
+        .iter()
+        .find(|s| s.name == "Gas Furnace")
+        .expect("Gas Furnace spec must exist");
+    let factor = furnace
+        .parameters
+        .get("autosize_heating_factor")
+        .and_then(|v| v.as_f64())
+        .expect("autosize_heating_factor must be set from HPXML");
+    assert!(
+        (factor - 1.2).abs() < f64::EPSILON,
+        "autosize_heating_factor must be 1.2, got {factor}"
+    );
+}
+
+/// ASHP heat pump with both <HeatingAutosizingFactor> and
+/// <CoolingAutosizingFactor> in extension must store both in params.
+#[test]
+fn ashp_extension_autosizing_factors_stored_in_params() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatPump>
+              <SystemIdentifier id="hp1"/>
+              <HeatPumpType>air-to-air</HeatPumpType>
+              <HeatPumpFuel>electricity</HeatPumpFuel>
+              <CoolingCapacity>24000</CoolingCapacity>
+              <AnnualCoolingEfficiency><Units>SEER2</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+              <AnnualHeatingEfficiency><Units>HSPF2</Units><Value>7.5</Value></AnnualHeatingEfficiency>
+              <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+              <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+              <extension>
+                <HeatingAutosizingFactor>1.3</HeatingAutosizingFactor>
+                <CoolingAutosizingFactor>1.1</CoolingAutosizingFactor>
+              </extension>
+            </HeatPump>
+          </HVAC>
+        </Systems>"#,
+    );
+    let specs = resolve(&xml).expect("ASHP with autosizing factors must resolve");
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "ASHP Heater")
+        .expect("ASHP Heater spec must exist");
+
+    let heat_factor = heater
+        .parameters
+        .get("autosize_heating_factor")
+        .and_then(|v| v.as_f64())
+        .expect("autosize_heating_factor must be set from HPXML");
+    assert!(
+        (heat_factor - 1.3).abs() < f64::EPSILON,
+        "autosize_heating_factor must be 1.3, got {heat_factor}"
+    );
+
+    let cool_factor = heater
+        .parameters
+        .get("autosize_cooling_factor")
+        .and_then(|v| v.as_f64())
+        .expect("autosize_cooling_factor must be set from HPXML");
+    assert!(
+        (cool_factor - 1.1).abs() < f64::EPSILON,
+        "autosize_cooling_factor must be 1.1, got {cool_factor}"
+    );
+
+    // Cooler spec also receives the same factor params (cloned before split).
+    let cooler = specs
+        .iter()
+        .find(|s| s.name == "ASHP Cooler")
+        .expect("ASHP Cooler spec must exist");
+    assert!(
+        cooler
+            .parameters
+            .get("autosize_cooling_factor")
+            .and_then(|v| v.as_f64())
+            .is_some(),
+        "ASHP Cooler must also have autosize_cooling_factor"
+    );
+}
+
+/// ASHP heat pump with <BackupHeatingAutosizingFactor> must store it in params.
+#[test]
+fn ashp_extension_backup_autosizing_factor_stored_in_params() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatPump>
+              <SystemIdentifier id="hp1"/>
+              <HeatPumpType>air-to-air</HeatPumpType>
+              <HeatPumpFuel>electricity</HeatPumpFuel>
+              <HeatingCapacity>24000</HeatingCapacity>
+              <AnnualCoolingEfficiency><Units>SEER2</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+              <AnnualHeatingEfficiency><Units>HSPF2</Units><Value>7.5</Value></AnnualHeatingEfficiency>
+              <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+              <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+              <extension>
+                <BackupHeatingAutosizingFactor>1.5</BackupHeatingAutosizingFactor>
+              </extension>
+            </HeatPump>
+          </HVAC>
+        </Systems>"#,
+    );
+    let specs = resolve(&xml).expect("ASHP with backup autosizing factor must resolve");
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "ASHP Heater")
+        .expect("ASHP Heater spec must exist");
+    let factor = heater
+        .parameters
+        .get("autosize_backup_factor")
+        .and_then(|v| v.as_f64())
+        .expect("autosize_backup_factor must be set from HPXML");
+    assert!(
+        (factor - 1.5).abs() < f64::EPSILON,
+        "autosize_backup_factor must be 1.5, got {factor}"
+    );
+}
+
+/// Gas furnace with <AutosizingLimits> in extension must store min/max capacity
+/// bounds in params.
+#[test]
+fn gas_furnace_extension_autosizing_limits_stored_in_params() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="fur1"/>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <AnnualHeatingEfficiency><Units>AFUE</Units><Value>0.92</Value></AnnualHeatingEfficiency>
+              <extension>
+                <AutosizingLimits>
+                  <MinCapacity>20000</MinCapacity>
+                  <MaxCapacity>80000</MaxCapacity>
+                </AutosizingLimits>
+              </extension>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    let specs = resolve(&xml).expect("furnace with autosizing limits must resolve");
+    let furnace = specs
+        .iter()
+        .find(|s| s.name == "Gas Furnace")
+        .expect("Gas Furnace spec must exist");
+    let min_w = furnace
+        .parameters
+        .get("autosize_heating_min_w")
+        .and_then(|v| v.as_f64())
+        .expect("autosize_heating_min_w must be set from HPXML");
+    let max_w = furnace
+        .parameters
+        .get("autosize_heating_max_w")
+        .and_then(|v| v.as_f64())
+        .expect("autosize_heating_max_w must be set from HPXML");
+    // 20,000 Btu/h ≈ 5,861 W
+    assert!(
+        (min_w - 5861.0).abs() < 100.0,
+        "autosize_heating_min_w ≈ 5861 W (20000 Btu/h), got {min_w}"
+    );
+    assert!(
+        min_w > 0.0,
+        "autosize_heating_min_w must be > 0, got {min_w}"
+    );
+    // 80,000 Btu/h ≈ 23,446 W
+    assert!(
+        (max_w - 23446.0).abs() < 200.0,
+        "autosize_heating_max_w ≈ 23446 W (80000 Btu/h), got {max_w}"
+    );
+    assert!(
+        max_w > min_w,
+        "autosize_heating_max_w ({max_w}) must be > min_w ({min_w})"
+    );
+}
+
+/// AutosizingFactor is absent by default — params should NOT contain the factor
+/// key when HPXML provides no override (Manual S defaults are used in
+/// autosize.rs, not stored in params).
+#[test]
+fn autosizing_factor_absent_when_not_in_hpxml() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="fur1"/>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <AnnualHeatingEfficiency><Units>AFUE</Units><Value>0.92</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    let specs = resolve(&xml).expect("furnace without autosizing factor must resolve");
+    let furnace = specs
+        .iter()
+        .find(|s| s.name == "Gas Furnace")
+        .expect("Gas Furnace spec must exist");
+    assert!(
+        !furnace.parameters.contains_key("autosize_heating_factor"),
+        "autosize_heating_factor must NOT be set when factor is absent from HPXML"
+    );
+    assert!(
+        !furnace.parameters.contains_key("autosize_cooling_factor"),
+        "autosize_cooling_factor must NOT be set when factor is absent from HPXML"
+    );
+    assert!(
+        !furnace.parameters.contains_key("autosize_heating_min_w"),
+        "autosize_heating_min_w must NOT be set when limits are absent from HPXML"
+    );
+}
+
 // --- Ticket 111: resistance_efficiency_from_params silent 1.0 default --------
 //
 // When AnnualHeatingEfficiency is absent from an electric resistance heating

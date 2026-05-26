@@ -1,0 +1,440 @@
+# opencode log for arch-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Explore HARES crate structure and read all Cargo.toml files
+[ ] Read all crate lib.rs files to understand exports and types
+[ ] Analyze dependency graph for circular deps and layering violations
+[ ] Examine vendor reference architectures (OCHRE, EnergyPlus)
+[ ] Assess data flow, coupling, module sizes, god objects
+[ ] Write findings to arch-01-overall-architecture.md
+[0m
+[0m✱ [0mGlob "crates/*/Cargo.toml"[90m 10 matches[0m
+[0m✱ [0mGlob "crates/*/src/lib.rs"[90m 10 matches[0m
+[0m✱ [0mGlob "crates/*/src/**/*.rs"[90m 100 matches[0m
+[0m→ [0mRead Cargo.toml
+[0m→ [0mRead crates/hares-types/Cargo.toml
+[0m→ [0mRead crates/hares-physics/Cargo.toml
+[0m→ [0mRead crates/hares-envelope/Cargo.toml
+[0m→ [0mRead crates/hares-control/Cargo.toml
+[0m→ [0mRead crates/hares-equipment/Cargo.toml
+[0m→ [0mRead crates/hares-io/Cargo.toml
+[0m→ [0mRead crates/hares-core/Cargo.toml
+[0m→ [0mRead crates/hares-fleet/Cargo.toml
+[0m→ [0mRead crates/hares-tariff/Cargo.toml
+[0m→ [0mRead crates/hares-python/Cargo.toml
+Now let me read all crate manifests and lib.rs files in parallel:
+[0m→ [0mRead crates/hares-types/src/lib.rs
+[0m→ [0mRead crates/hares-physics/src/lib.rs
+[0m→ [0mRead crates/hares-envelope/src/lib.rs
+[0m→ [0mRead crates/hares-control/src/lib.rs
+[0m→ [0mRead crates/hares-equipment/src/lib.rs
+[0m→ [0mRead crates/hares-io/src/lib.rs
+[0m→ [0mRead crates/hares-core/src/lib.rs
+[0m→ [0mRead crates/hares-fleet/src/lib.rs
+[0m→ [0mRead crates/hares-tariff/src/lib.rs
+[0m→ [0mRead crates/hares-python/src/lib.rs
+Now let me read all the lib.rs files:
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/crates/hares-core/src/dwelling.rs /Users/rich/source/HARES/crates/hares-equipment/src/hvac/*.rs /Users/rich/source/HARES/crates/hares-equipment/src/battery/*.rs /Users/rich/source/HARES/crates/hares-core/src/engine.rs /Users/rich/source/HARES/crates/hares-types/src/equipment.rs /Users/rich/source/HARES/crates/hares-types/src/environment.rs /Users/rich/source/HARES/crates/hares-types/src/ports.rs /Users/rich/source/HARES/crates/hares-core/src/environment.rs 2>/dev/null | sort -rn | head -40
+38130 total
+    4753 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/air_conditioner.rs
+    4064 /Users/rich/source/HARES/crates/hares-equipment/src/battery/mod.rs
+    3354 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/hvac_core.rs
+    2800 /Users/rich/source/HARES/crates/hares-core/src/environment.rs
+    2780 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/ideal_hvac.rs
+    2527 /Users/rich/source/HARES/crates/hares-types/src/equipment.rs
+    1723 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/furnace.rs
+    1406 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/boiler.rs
+    1260 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/coil_physics.rs
+    1216 /Users/rich/source/HARES/crates/hares-types/src/ports.rs
+    1099 /Users/rich/source/HARES/crates/hares-equipment/src/battery/degradation.rs
+    1084 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/dehumidifier.rs
+    1018 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/cooling_config.rs
+     978 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/heat_pump_config.rs
+     883 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/staging.rs
+     775 /Users/rich/source/HARES/crates/hares-types/src/environment.rs
+     710 /Users/rich/source/HARES/crates/hares-equipment/src/battery/catalog.rs
+     621 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/duct_distribution.rs
+     564 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/thermostat.rs
+     528 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/heating_config.rs
+     477 /Users/rich/source/HARES/crates/hares-core/src/engine.rs
+     473 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/speed_control.rs
+     460 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/helpers.rs
+     457 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/baseboard.rs
+     397 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/core_config.rs
+     396 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/ac_config.rs
+     384 /Users/rich/source/HARES/crates/hares-equipment/src/battery/ocv.rs
+     286 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/default_curves.rs
+     255 /Users/rich/source/HARES/crates/hares-equipment/src/battery/config.rs
+     140 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/dehumidifier_defaults.rs
+      85 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/equivalent_battery.rs
+      78 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/heat_pump.rs
+      54 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/latent_degradation.rs
+      45 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/mod.rs
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/crates/hares-core/src/*.rs /Users/rich/source/HARES/crates/hares-core/src/actor*.rs /Users/rich/source/HARES/crates/hares-core/src/actors/*.rs /Users/rich/source/HARES/crates/hares-equipment/src/pv/*.rs /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/*.rs /Users/rich/source/HARES/crates/hares-equipment/src/battery/*.rs 2>/dev/null | sort -t/ -k4,4 -k5,5
+33795 total
+       1 /Users/rich/source/HARES/crates/hares-core/src/scheduler.rs
+      17 /Users/rich/source/HARES/crates/hares-core/src/actors/mod.rs
+      32 /Users/rich/source/HARES/crates/hares-core/src/lib.rs
+      58 /Users/rich/source/HARES/crates/hares-core/src/rng.rs
+     106 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/hpwh_compressor.rs
+     126 /Users/rich/source/HARES/crates/hares-core/src/clock.rs
+     131 /Users/rich/source/HARES/crates/hares-equipment/src/pv/array_config.rs
+     150 /Users/rich/source/HARES/crates/hares-core/src/diagnostics.rs
+     173 /Users/rich/source/HARES/crates/hares-equipment/src/pv/config.rs
+     186 /Users/rich/source/HARES/crates/hares-core/src/checkpoint.rs
+     187 /Users/rich/source/HARES/crates/hares-core/src/actors/solver_feedback.rs
+     196 /Users/rich/source/HARES/crates/hares-core/src/telemetry.rs
+     212 /Users/rich/source/HARES/crates/hares-core/src/observer.rs
+     255 /Users/rich/source/HARES/crates/hares-equipment/src/battery/config.rs
+     374 /Users/rich/source/HARES/crates/hares-core/src/invariants.rs
+     380 /Users/rich/source/HARES/crates/hares-core/src/observer_capture.rs
+     384 /Users/rich/source/HARES/crates/hares-equipment/src/battery/ocv.rs
+     385 /Users/rich/source/HARES/crates/hares-equipment/src/pv/soiling.rs
+     430 /Users/rich/source/HARES/crates/hares-core/src/actor_registry.rs
+     430 /Users/rich/source/HARES/crates/hares-core/src/actor_registry.rs
+     437 /Users/rich/source/HARES/crates/hares-core/src/actor.rs
+     437 /Users/rich/source/HARES/crates/hares-core/src/actor.rs
+     459 /Users/rich/source/HARES/crates/hares-equipment/src/pv/shading.rs
+     477 /Users/rich/source/HARES/crates/hares-core/src/engine.rs
+     505 /Users/rich/source/HARES/crates/hares-core/src/actors/ideal_thermostat.rs
+     526 /Users/rich/source/HARES/crates/hares-equipment/src/pv/lut.rs
+     710 /Users/rich/source/HARES/crates/hares-equipment/src/battery/catalog.rs
+     757 /Users/rich/source/HARES/crates/hares-core/src/actors/dr_compliance.rs
+     812 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/wh_config.rs
+     865 /Users/rich/source/HARES/crates/hares-core/src/actors/occupant.rs
+    1014 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/mod.rs
+    1099 /Users/rich/source/HARES/crates/hares-equipment/src/battery/degradation.rs
+    1614 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/gas.rs
+    1632 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/tankless.rs
+    1958 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/resistance.rs
+    1971 /Users/rich/source/HARES/crates/hares-core/src/actors/bms.rs
+    2001 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/tank.rs
+    2138 /Users/rich/source/HARES/crates/hares-equipment/src/pv/mod.rs
+    2800 /Users/rich/source/HARES/crates/hares-core/src/environment.rs
+    3306 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/heat_pump_wh.rs
+    4064 /Users/rich/source/HARES/crates/hares-equipment/src/battery/mod.rs
+[0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/*.py"[90m 7 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/*.hh"[90m 100 matches[0m
+Now let me check module sizes and the core dwelling module, plus examine vendor references:
+[0m✗ [0mRead crates/hares-core/src/dwelling.rs failed[90m [limit=150][0m
+[91m[1mError: [0mFile not found: /Users/rich/source/HARES/crates/hares-core/src/dwelling.rs
+
+Did you mean one of these?
+/Users/rich/source/HARES/crates/hares-core/src/dwelling
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/crates/hares-core/src/dwelling.rs
+wc: /Users/rich/source/HARES/crates/hares-core/src/dwelling.rs: open: No such file or directory
+[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/Data*.hh"[90m 50 matches[0m
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/Data*.hh 2>/dev/null | sort -rn | head -10
+17726 total
+    2059 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataHeatBalance.hh
+    1850 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataSurfaces.hh
+    1437 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataSizing.hh
+     883 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataRuntimeLanguage.hh
+     797 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataRoomAirModel.hh
+     668 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataZoneEquipment.hh
+     628 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataGlobalConstants.hh
+     626 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataVectorTypes.hh
+     561 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataLoopNode.hh
+[0m
+[0m→ [0mRead crates/hares-core/src/dwelling
+[0m
+[0m$ [0mfind /Users/rich/source/HARES/vendors/EnergyPlus -name "EnergyPlusData.hh" -o -name "DataGlobals.hh" 2>/dev/null | head -5
+/Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/Data/EnergyPlusData.hh
+/Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/DataGlobals.hh
+[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Simulator.py[90m [limit=80][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Dwelling.py[90m [limit=80][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Data/EnergyPlusData.hh[90m [limit=100][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=150][0m
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/crates/hares-core/src/dwelling/mod.rs /Users/rich/source/HARES/crates/hares-core/src/dwelling/*.rs /Users/rich/source/HARES/crates/hares-core/src/engine.rs /Users/rich/source/HARES/crates/hares-core/src/environment.rs 2>/dev/null | sort -rn
+20997 total
+    6041 /Users/rich/source/HARES/crates/hares-core/src/dwelling/mod.rs
+    6041 /Users/rich/source/HARES/crates/hares-core/src/dwelling/mod.rs
+    2800 /Users/rich/source/HARES/crates/hares-core/src/environment.rs
+    2039 /Users/rich/source/HARES/crates/hares-core/src/dwelling/solver_builder.rs
+    1625 /Users/rich/source/HARES/crates/hares-core/src/dwelling/conversions.rs
+    1227 /Users/rich/source/HARES/crates/hares-core/src/dwelling/synthetic.rs
+     747 /Users/rich/source/HARES/crates/hares-core/src/dwelling/autosize.rs
+     477 /Users/rich/source/HARES/crates/hares-core/src/engine.rs
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/Data/EnergyPlusData.hh
+617 /Users/rich/source/HARES/vendors/EnergyPlus/src/EnergyPlus/Data/EnergyPlusData.hh
+[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Data/EnergyPlusData.hh[90m [offset=100, limit=200][0m
+[0m✱ [0mGrep "^use hares"[90m in crates/hares-core/src/dwelling/mod.rs · 9 matches[0m
+[0m✱ [0mGrep "use hares_"[90m in crates/hares-io/src · 88 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Data/EnergyPlusData.hh[90m [offset=300, limit=200][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=140, limit=200][0m
+[0m
+[0m$ [0mfor crate in types physics envelope control equipment io core fleet tariff; do echo "=== hares-$crate -> depends on: ==="; grep -h "hares-" crates/hares-$crate/Cargo.toml 2>/dev/null | grep -v "^#" | grep -o 'hares-[a-z]*' | sort -u; done
+=== hares-types -> depends on: ===
+hares-types
+=== hares-physics -> depends on: ===
+hares-physics
+hares-types
+=== hares-envelope -> depends on: ===
+hares-envelope
+hares-physics
+hares-types
+=== hares-control -> depends on: ===
+hares-control
+hares-types
+=== hares-equipment -> depends on: ===
+hares-control
+hares-equipment
+hares-physics
+hares-types
+=== hares-io -> depends on: ===
+hares-control
+hares-envelope
+hares-equipment
+hares-io
+hares-physics
+hares-types
+=== hares-core -> depends on: ===
+hares-control
+hares-core
+hares-envelope
+hares-equipment
+hares-fleet
+hares-io
+hares-physics
+hares-tariff
+hares-types
+=== hares-fleet -> depends on: ===
+hares-core
+hares-fleet
+hares-io
+hares-types
+=== hares-tariff -> depends on: ===
+hares-tariff
+hares-types
+[0m
+[0m$ [0mecho "=== io imports from equipment (violation of strict layering) ===" && grep -rn "use hares_equipment" crates/hares-io/src/ 2>/dev/null | head -20 && echo "=== equipment imports from io (should not happen) ===" && grep -rn "use hares_io" crates/hares-equipment/src/ 2>/dev/null && echo "=== envelope imports from core ===" && grep -rn "use hares_core" crates/hares-envelope/src/ 2>/dev/null && echo "=== equipment imports from core ===" && grep -rn "use hares_core" crates/hares-equipment/src/ 2>/dev/null && echo "=== io imports from core ===" && grep -rn "use hares_core" crates/hares-io/src/ 2>/dev/null
+=== io imports from equipment (violation of strict layering) ===
+crates/hares-io/src/schedule_resolve.rs:10:use hares_equipment::{
+crates/hares-io/src/schedule_resolve.rs:971:    use hares_equipment::{
+crates/hares-io/src/schedule_resolve.rs:1462:        use hares_equipment::hvac::heat_pump_config::{
+crates/hares-io/src/hpxml/resolve_der.rs:5:use hares_equipment::{BatteryConfig, EvConfig, GeneratorConfig, PvConfig};
+crates/hares-io/src/hpxml/resolve_der.rs:312:    use hares_equipment::BatteryConfig;
+crates/hares-io/src/hpxml/equipment.rs:5:use hares_equipment::{EquipmentConfig, EquipmentTypedConfig};
+crates/hares-io/src/hpxml/resolve_hvac.rs:8:use hares_equipment::EquipmentConfig;
+crates/hares-io/src/hpxml/resolve_hvac.rs:9:use hares_equipment::hvac::cooling_config::{
+crates/hares-io/src/hpxml/resolve_hvac.rs:12:use hares_equipment::hvac::heat_pump::defrost::{DefrostConfig, DefrostControl, DefrostStrategy};
+crates/hares-io/src/hpxml/resolve_hvac.rs:13:use hares_equipment::hvac::heat_pump_config::{
+crates/hares-io/src/hpxml/resolve_hvac.rs:16:use hares_equipment::hvac::heating_config::{
+crates/hares-io/src/hpxml/resolve_hvac.rs:3837:        use hares_equipment::hvac::heating_config::GasFurnaceConfig;
+crates/hares-io/src/hpxml/resolve_hvac.rs:3869:        use hares_equipment::hvac::heating_config::GasFurnaceConfig;
+crates/hares-io/src/hpxml/resolve_hvac.rs:3893:        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+crates/hares-io/src/hpxml/resolve_hvac.rs:3919:        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+crates/hares-io/src/hpxml/resolve_hvac.rs:3939:        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+crates/hares-io/src/hpxml/resolve_hvac.rs:3963:        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+crates/hares-io/src/hpxml/resolve_hvac.rs:4286:        use hares_equipment::hvac::cooling_config::RoomAcConfig;
+crates/hares-io/src/hpxml/resolve_hvac.rs:4300:        use hares_equipment::hvac::cooling_config::RoomAcConfig;
+crates/hares-io/src/hpxml/resolve_hvac.rs:4318:        use hares_equipment::hvac::cooling_config::RoomAcConfig;
+=== equipment imports from io (should not happen) ===
+[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=340, limit=100][0m
+[0m
+[0m$ [0mgrep -rn "use hares_fleet" crates/hares-core/src/ 2>/dev/null
+(no output)
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/crates/hares-types/src/environment.rs
+775 /Users/rich/source/HARES/crates/hares-types/src/environment.rs
+[0m
+[0m→ [0mRead crates/hares-types/src/environment.rs[90m [limit=100][0m
+[0m
+[0m$ [0mls /Users/rich/source/HARES/vendors/OCHRE/ochre/Equipment/ 2>/dev/null | head -20
+__init__.py
+Battery.py
+Equipment.py
+EV.py
+EventBasedLoad.py
+Generator.py
+HVAC.py
+PV.py
+ScheduledLoad.py
+WaterHeater.py
+WetAppliance.py
+[0m
+[0m→ [0mRead crates/hares-types/src/environment.rs[90m [offset=300, limit=100][0m
+[0m
+[0m$ [0mfind /Users/rich/source/HARES/crates -name '*.rs' -exec wc -l {} \; 2>/dev/null | awk '$1 > 500 {print $0}' | sort -rn
+6683 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/heat_pump/heater.rs
+    6041 /Users/rich/source/HARES/crates/hares-core/src/dwelling/mod.rs
+    5818 /Users/rich/source/HARES/crates/hares-io/src/hpxml/resolve_hvac.rs
+    5592 /Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/mod.rs
+    5542 /Users/rich/source/HARES/crates/hares-io/src/hpxml/building.rs
+    4753 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/air_conditioner.rs
+    4514 /Users/rich/source/HARES/crates/hares-equipment/tests/hvac_tests.rs
+    4064 /Users/rich/source/HARES/crates/hares-equipment/src/battery/mod.rs
+    3354 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/hvac_core.rs
+    3326 /Users/rich/source/HARES/crates/hares-envelope/src/boundary_rc.rs
+    3306 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/heat_pump_wh.rs
+    3043 /Users/rich/source/HARES/crates/hares-equipment/src/event_load.rs
+    2800 /Users/rich/source/HARES/crates/hares-core/src/environment.rs
+    2797 /Users/rich/source/HARES/crates/hares-core/src/actors/ev_driver/mod.rs
+    2780 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/ideal_hvac.rs
+    2750 /Users/rich/source/HARES/crates/hares-io/src/weather.rs
+    2721 /Users/rich/source/HARES/crates/hares-types/src/schedule.rs
+    2714 /Users/rich/source/HARES/crates/hares-equipment/src/ev/tests.rs
+    2675 /Users/rich/source/HARES/crates/hares-equipment/src/generator.rs
+    2638 /Users/rich/source/HARES/crates/hares-python/src/py_enums.rs
+    2595 /Users/rich/source/HARES/crates/hares-physics/src/solar.rs
+    2527 /Users/rich/source/HARES/crates/hares-types/src/equipment.rs
+    2307 /Users/rich/source/HARES/crates/hares-equipment/src/scheduled_load.rs
+    2209 /Users/rich/source/HARES/crates/hares-python/src/py_dwelling.rs
+    2138 /Users/rich/source/HARES/crates/hares-equipment/src/pv/mod.rs
+    2039 /Users/rich/source/HARES/crates/hares-core/src/dwelling/solver_builder.rs
+    2001 /Users/rich/source/HARES/crates/hares-io/src/epw.rs
+    2001 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/tank.rs
+    1971 /Users/rich/source/HARES/crates/hares-core/src/actors/bms.rs
+    1958 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/resistance.rs
+    1928 /Users/rich/source/HARES/crates/hares-equipment/tests/hvac_parity.rs
+    1927 /Users/rich/source/HARES/crates/hares-io/src/schedule_resolve.rs
+    1758 /Users/rich/source/HARES/crates/hares-envelope/src/state_space.rs
+    1728 /Users/rich/source/HARES/crates/hares-physics/src/infiltration.rs
+    1723 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/furnace.rs
+    1719 /Users/rich/source/HARES/crates/hares-envelope/src/humidity_solver.rs
+    1705 /Users/rich/source/HARES/crates/hares-io/src/hpxml/equipment.rs
+    1679 /Users/rich/source/HARES/crates/hares-tariff/src/evaluator.rs
+    1632 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/tankless.rs
+    1625 /Users/rich/source/HARES/crates/hares-core/src/dwelling/conversions.rs
+    1614 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/gas.rs
+    1609 /Users/rich/source/HARES/crates/hares-physics/tests/physics_validation_tests.rs
+    1445 /Users/rich/source/HARES/crates/hares-io/src/output/metrics.rs
+    1436 /Users/rich/source/HARES/crates/hares-equipment/tests/lifecycle.rs
+    1431 /Users/rich/source/HARES/crates/hares-io/tests/silent_default_regressions.rs
+    1419 /Users/rich/source/HARES/crates/hares-envelope/src/longwave_radiation.rs
+    1406 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/boiler.rs
+    1404 /Users/rich/source/HARES/crates/hares-io/tests/hpxml_parity.rs
+    1337 /Users/rich/source/HARES/crates/hares-io/src/hpxml/resolve_water_heater.rs
+    1318 /Users/rich/source/HARES/crates/hares-core/tests/alignment_oracles_regressions.rs
+    1315 /Users/rich/source/HARES/crates/hares-io/tests/hpxml_parsing_tests.rs
+    1260 /Users/rich/source/HARES/crates/hares-equipment/tests/water_heater_tests.rs
+    1260 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/coil_physics.rs
+    1251 /Users/rich/source/HARES/crates/hares-equipment/src/ventilation.rs
+    1227 /Users/rich/source/HARES/crates/hares-core/src/dwelling/synthetic.rs
+    1216 /Users/rich/source/HARES/crates/hares-types/src/ports.rs
+    1162 /Users/rich/source/HARES/crates/hares-equipment/tests/water_heater_parity.rs
+    1151 /Users/rich/source/HARES/crates/hares-io/tests/weather_parity.rs
+    1144 /Users/rich/source/HARES/crates/hares-python/src/py_equipment.rs
+    1132 /Users/rich/source/HARES/crates/hares-core/tests/weather_integration.rs
+    1106 /Users/rich/source/HARES/crates/hares-envelope/tests/interior_lwr.rs
+    1099 /Users/rich/source/HARES/crates/hares-equipment/src/battery/degradation.rs
+    1084 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/dehumidifier.rs
+    1076 /Users/rich/source/HARES/crates/hares-equipment/src/ev/mod.rs
+    1072 /Users/rich/source/HARES/crates/hares-io/src/hpxml/resolve_loads.rs
+    1041 /Users/rich/source/HARES/crates/hares-equipment/src/ev/catalog.rs
+    1018 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/cooling_config.rs
+    1014 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/mod.rs
+    1013 /Users/rich/source/HARES/crates/hares-io/src/defaults.rs
+    1012 /Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/infiltration.rs
+    1003 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/heat_pump/defrost.rs
+     992 /Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/longwave.rs
+     982 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/heat_pump/cooler.rs
+     978 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/heat_pump_config.rs
+     970 /Users/rich/source/HARES/crates/hares-io/src/schedule.rs
+     960 /Users/rich/source/HARES/crates/hares-fleet/src/fleet.rs
+     955 /Users/rich/source/HARES/crates/hares-python/src/py_actor.rs
+     933 /Users/rich/source/HARES/crates/hares-tariff/src/urdb.rs
+     916 /Users/rich/source/HARES/crates/hares-equipment/tests/der_parity.rs
+     910 /Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/solar.rs
+     909 /Users/rich/source/HARES/crates/hares-core/tests/orchestration_parity.rs
+     907 /Users/rich/source/HARES/crates/hares-envelope/src/rc_network.rs
+     883 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/staging.rs
+     881 /Users/rich/source/HARES/crates/hares-tariff/src/types.rs
+     881 /Users/rich/source/HARES/crates/hares-io/src/resstock_csv.rs
+     865 /Users/rich/source/HARES/crates/hares-core/src/actors/occupant.rs
+     852 /Users/rich/source/HARES/crates/hares-io/src/psm3.rs
+     849 /Users/rich/source/HARES/crates/hares-io/tests/config_round_trip.rs
+     818 /Users/rich/source/HARES/crates/hares-tariff/src/billing.rs
+     812 /Users/rich/source/HARES/crates/hares-equipment/src/water_heater/wh_config.rs
+     798 /Users/rich/source/HARES/crates/hares-io/tests/comprehensive_tests.rs
+     775 /Users/rich/source/HARES/crates/hares-types/src/environment.rs
+     765 /Users/rich/source/HARES/crates/hares-physics/src/ashrae152.rs
+     760 /Users/rich/source/HARES/crates/hares-io/src/output/columns.rs
+     757 /Users/rich/source/HARES/crates/hares-core/src/actors/dr_compliance.rs
+     756 /Users/rich/source/HARES/crates/hares-envelope/src/thermal_solver/config.rs
+     752 /Users/rich/source/HARES/crates/hares-python/src/py_control.rs
+     747 /Users/rich/source/HARES/crates/hares-core/src/dwelling/autosize.rs
+     746 /Users/rich/source/HARES/crates/hares-physics/src/pv_sizing.rs
+     740 /Users/rich/source/HARES/crates/hares-python/src/py_tariff.rs
+     736 /Users/rich/source/HARES/crates/hares-envelope/tests/thermal_pathway_physics.rs
+     730 /Users/rich/source/HARES/crates/hares-fleet/src/aggregation.rs
+     710 /Users/rich/source/HARES/crates/hares-io/src/hpxml/validation.rs
+     710 /Users/rich/source/HARES/crates/hares-equipment/src/battery/catalog.rs
+     682 /Users/rich/source/HARES/crates/hares-equipment/src/lib.rs
+     663 /Users/rich/source/HARES/crates/hares-physics/src/psychrometrics.rs
+     662 /Users/rich/source/HARES/crates/hares-io/src/resstock.rs
+     652 /Users/rich/source/HARES/crates/hares-equipment/tests/oracle_24h.rs
+     651 /Users/rich/source/HARES/crates/hares-physics/src/film_coefficients.rs
+     622 /Users/rich/source/HARES/crates/hares-python/src/py_config.rs
+     621 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/duct_distribution.rs
+     604 /Users/rich/source/HARES/crates/hares-io/src/tmy3.rs
+     593 /Users/rich/source/HARES/crates/hares-envelope/tests/synthetic_box.rs
+     588 /Users/rich/source/HARES/crates/hares-envelope/tests/multi_zone_coupling.rs
+     574 /Users/rich/source/HARES/crates/hares-physics/tests/solar_parity.rs
+     568 /Users/rich/source/HARES/crates/hares-python/src/py_fleet.rs
+     564 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/thermostat.rs
+     557 /Users/rich/source/HARES/crates/hares-equipment/tests/battery_tests.rs
+     539 /Users/rich/source/HARES/crates/hares-io/src/draw_profile.rs
+     534 /Users/rich/source/HARES/crates/hares-core/tests/dispatch_ordering_regressions.rs
+     529 /Users/rich/source/HARES/crates/hares-types/tests/type_interop.rs
+     528 /Users/rich/source/HARES/crates/hares-equipment/src/hvac/heating_config.rs
+     526 /Users/rich/source/HARES/crates/hares-equipment/src/pv/lut.rs
+     517 /Users/rich/source/HARES/crates/hares-core/tests/ct_boiler_diag.rs
+     505 /Users/rich/source/HARES/crates/hares-core/src/actors/ideal_thermostat.rs
+[0m
+[0m→ [0mRead crates/hares-core/src/environment.rs[90m [limit=60][0m
+[0m→ [0mRead crates/hares-types/src/telemetry_keys.rs[90m [limit=80][0m
+[0m
+[0m$ [0mgrep -rn "use hares_core::dwelling" crates/ --include='*.rs' 2>/dev/null | head -20
+crates/hares-core/tests/equipment_ordering_tests.rs:10:use hares_core::dwelling::stage_rank;
+[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/Equipment.py[90m [limit=60][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/architecture
+(no output)
+[0m
+Now let me verify the output directory exists and then write the report:
+[0m← [0mWrite docs/reviews/architecture/arch-01-overall-architecture.md
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Explore HARES crate structure and read all Cargo.toml files
+[✓] Read all crate lib.rs files to understand exports and types
+[✓] Analyze dependency graph for circular deps and layering violations
+[✓] Examine vendor reference architectures (OCHRE, EnergyPlus)
+[✓] Assess data flow, coupling, module sizes, god objects
+[✓] Write findings to arch-01-overall-architecture.md
+[0m
+Report written to `docs/reviews/architecture/arch-01-overall-architecture.md`.
+
+**Summary of findings**: 7 total (0 critical, 2 high, 2 medium, 0 low, 3 positive)
+
+**High-severity issues**:
+- `hares-io` depends on `hares-equipment`, inverting the intended `types < io < equipment` layering
+- `dwelling/mod.rs` at 6041 lines is a god object — the Dwelling struct orchestrates too many concerns directly
+
+**Medium-severity issues**:
+- 65+ modules exceed 500 lines, with the worst offenders at 4000-6700 lines
+- `EnvironmentState` is drifting toward an EnergyPlus-style "pass everything" context object
+
+**Positive**: No circular dependencies (clean acyclic DAG), telemetry keys properly centralized in `hares-types`, and `hares-control` is well-isolated with minimal dependencies.

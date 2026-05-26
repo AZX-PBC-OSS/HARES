@@ -1671,6 +1671,7 @@ pub(super) fn resolve_hvac(
                 params.insert("heating_airflow_cfm".to_string(), json!(v));
             }
         }
+        insert_autosizing_params(&mut params, heating, true, false, false);
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
@@ -1804,6 +1805,7 @@ pub(super) fn resolve_hvac(
         if let Some(w) = crankcase_w {
             params.insert("crankcase_heater_w".to_string(), json!(w));
         }
+        insert_autosizing_params(&mut params, cooling, false, true, false);
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
@@ -2047,6 +2049,7 @@ pub(super) fn resolve_hvac(
                 params.insert("crankcase_heater_w".to_string(), json!(v));
             }
         }
+        insert_autosizing_params(&mut params, heat_pump, true, true, true);
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
@@ -2250,6 +2253,77 @@ fn insert_capacity_w(params: &mut Map<String, Value>, node: &XmlNode, tag: &str,
             "autosize_cooling"
         };
         params.insert(autosize_key.to_string(), json!(true));
+    }
+}
+
+/// Parse HPXML `<HeatingAutosizingFactor>`, `<CoolingAutosizingFactor>`,
+/// `<BackupHeatingAutosizingFactor>`, and `<AutosizingLimits>` from a system
+/// element. Supports both direct children and `<extension>` children (the
+/// convention used by OpenStudio-HPXML / ResStock).
+///
+/// # Arguments
+/// * `has_heating` — `true` for `HeatingSystem` and `HeatPump`.
+/// * `has_cooling` — `true` for `CoolingSystem` and `HeatPump`.
+/// * `has_backup` — `true` only for `HeatPump`.
+fn insert_autosizing_params(
+    params: &mut Map<String, Value>,
+    node: &XmlNode,
+    has_heating: bool,
+    has_cooling: bool,
+    has_backup: bool,
+) {
+    // Helper: read a factor from direct child, then extension child.
+    // Direct children take precedence (HPXML 4.x schema native location).
+    let read_factor = |params: &mut Map<String, Value>, tag: &str, key: &str| {
+        if let Some(factor) = child_f64(node, tag) {
+            params.insert(key.to_string(), json!(factor));
+            return;
+        }
+        if let Some(ext) = node.child("extension") {
+            if let Some(factor) = child_f64(ext, tag) {
+                params.insert(key.to_string(), json!(factor));
+            }
+        }
+    };
+
+    if has_heating {
+        read_factor(params, "HeatingAutosizingFactor", "autosize_heating_factor");
+    }
+    if has_cooling {
+        read_factor(params, "CoolingAutosizingFactor", "autosize_cooling_factor");
+    }
+    if has_backup {
+        read_factor(
+            params,
+            "BackupHeatingAutosizingFactor",
+            "autosize_backup_factor",
+        );
+    }
+
+    // Parse `<AutosizingLimits>` specifying min/max capacity bounds.
+    // Supports direct child and extension child.
+    // Child element names match the OpenStudio-HPXML convention:
+    // `<MinCapacity>` and `<MaxCapacity>` (value in Btu/h).
+    let limits_node = node.child("AutosizingLimits").or_else(|| {
+        node.child("extension")
+            .and_then(|ext| ext.child("AutosizingLimits"))
+    });
+
+    if let Some(limits) = limits_node {
+        let insert_limit = |params: &mut Map<String, Value>, child: &str, key: &str| {
+            if let Some(val_btu_h) = child_f64(limits, child) {
+                params.insert(key.to_string(), json!(conv::power_btu_h_to_w(val_btu_h)));
+            }
+        };
+
+        if has_heating {
+            insert_limit(params, "MinCapacity", "autosize_heating_min_w");
+            insert_limit(params, "MaxCapacity", "autosize_heating_max_w");
+        }
+        if has_cooling {
+            insert_limit(params, "MinCapacity", "autosize_cooling_min_w");
+            insert_limit(params, "MaxCapacity", "autosize_cooling_max_w");
+        }
     }
 }
 

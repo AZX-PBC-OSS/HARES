@@ -1,0 +1,38 @@
+# opencode log for agents-04
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/actors/solver_feedback.rs
+[0m→ [0mRead crates/hares-envelope/src/thermal_solver/stepping.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Dwelling.py
+[0m• [0mExplore dwelling step ordering[90m Explore Agent[0m
+[0m• [0mExplore equipment ideal_target trait[90m Explore Agent[0m
+[0m• [0mExplore multi-zone solver wiring[90m Explore Agent[0m
+Now let me look at the dwelling's step logic to understand the calling order, and the equipment trait for `ideal_target()`:
+[0m✓ [0mExplore equipment ideal_target trait[90m Explore Agent[0m
+[0m✓ [0mExplore multi-zone solver wiring[90m Explore Agent[0m
+[0m✓ [0mExplore dwelling step ordering[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-envelope/src/state_space.rs[90m [offset=488, limit=120][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2290, limit=120][0m
+[0m✱ [0mGrep "fn solve_for_output_input\b"[90m in crates/hares-envelope/src · 1 match[0m
+[0m✱ [0mGrep "ZERO_GAIN_EPSILON"[90m in crates/hares-envelope/src · 6 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/state_space.rs[90m [offset=379, limit=30][0m
+[0m✱ [0mGrep "set_dispatch_targets"[90m in crates/hares-core/src · 15 matches[0m
+Now let me check one more thing - how `set_dispatch_targets` is actually called in the dwelling:
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=30, offset=1200][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=30, offset=1680][0m
+[0m
+[0m← [0mWrite docs/reviews/agents/agents-04-solver-feedback-actor.md
+Wrote file successfully.
+[0m
+Now I have a thorough understanding of the full system. Let me write the review.
+The review has been written to `docs/reviews/agents/agents-04-solver-feedback-actor.md`.
+
+**Summary**: 4 findings — 1 medium (multi-equipment-per-zone double-counting), 3 low (NaN propagation, silent signal drop, log throttling). The core collect-and-solve ordering, multi-zone handling, free-floating fallback, and feedback-loop prevention are all verified correct.

@@ -1,0 +1,68 @@
+# opencode log for agents-05
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead docs/reviews/agents
+[0m→ [0mRead crates/hares-core/src/actors/dr_compliance.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Dwelling.py
+[0m✱ [0mGrep "DR|demand.response|PowerLimit|LoadFraction"[90m in vendors/OCHRE/ochre · 3 matches[0m
+[0m✱ [0mGrep "pub enum ControlSignal|pub struct DispatchRequest|pub enum PriorityTier|pub struct DispatchTarget|pub enum DRLevel"[90m in crates · 4 matches[0m
+[0m✱ [0mGrep "impl Actor|trait Actor"[90m in crates/hares-core/src/actors · 6 matches[0m
+Let me explore the surrounding types and vendor DR patterns to ground the review.
+[0m→ [0mRead crates/hares-types/src/control_signal.rs
+[0m→ [0mRead crates/hares-control/src/dispatch.rs
+[0m→ [0mRead crates/hares-core/src/actors/bms.rs
+[0m✱ [0mGrep "conflict|resolve|priority|dispatch|dr_compliance|DrCompliance"[90m in crates/hares-core/src · 479 matches[0m
+[0m✱ [0mGrep "OperatingMode|min_runtime|min_off_time|min_compressor|safety"[90m in crates/hares-types/src · 41 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=370, limit=150][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2280, limit=120][0m
+[0m✱ [0mGrep "apply_control|PowerLimit|LoadFraction|ModeOverride"[90m in crates/hares-equipment/src · 455 matches[0m
+[0m✱ [0mGrep "DrCompliance|dr_compliance|set_dr_level|queue_dr"[90m in crates/hares-core/src · 53 matches[0m
+[0m→ [0mRead crates/hares-core/src/actor_registry.rs[90m [offset=190, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=2095, limit=80][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [offset=1417, limit=60][0m
+[0m✱ [0mGrep "ctrl_load_fraction|ctrl_power_limit|ctrl_mode_override"[90m in crates/hares-equipment/src · 99 matches[0m
+[0m✱ [0mGrep "LoadFraction|PowerLimit|ModeOverride|DemandResponse"[90m in crates/hares-equipment/src/water_heater · 70 matches[0m
+[0m→ [0mRead crates/hares-core/src/actor_registry.rs[90m [offset=395, limit=40][0m
+[0m✱ [0mGrep "dr_load_fraction|apply_dr_level"[90m in crates/hares-equipment/src · 150 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [limit=60, offset=880][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [limit=40, offset=970][0m
+[0m✱ [0mGrep "ctrl_power_limit_kw.*=.*INFINITY|ctrl_power_limit_kw.*reset"[90m in crates/hares-equipment/src · 3 matches[0m
+Now I have a thorough understanding of the codebase. Let me also check one more detail about sticky vs transient behavior for PowerLimit on HPWH and EVs.
+[0m✱ [0mGrep "set_dr_level|dr_compliance.*decide|DrCompliance.*level"[90m in crates · 15 matches[0m
+[0m✱ [0mGrep "dr_level|DRLevel|demand.response"[90m in crates/hares-core/src/dwelling/mod.rs · 0 matches[0m
+[0m→ [0mRead crates/hares-core/tests/actor_telemetry_regressions.rs[90m [limit=60, offset=155][0m
+[0m✱ [0mGrep "dr_compliance|DrCompliance|DR_COMPLIANCE"[90m in crates/hares-core/src/dwelling · 0 matches[0m
+[0m✱ [0mGrep "\.actors\.push|actors\.push|DrCompliance|add_actor"[90m in crates/hares-core/src/dwelling · 6 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/agents
+(no output)
+[0m
+Now I have all the information I need. Let me write the review file.
+[0m← [0mWrite docs/reviews/agents/agents-05-dr-compliance-actor.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/agents/agents-05-dr-compliance-actor.md
+103 /Users/rich/source/HARES/docs/reviews/agents/agents-05-dr-compliance-actor.md
+[0m
+Review written to `docs/reviews/agents/agents-05-dr-compliance-actor.md`.
+
+**Summary**: 8 findings (3 critical, 2 high, 2 medium, 1 low):
+
+| # | Severity | Issue |
+|---|----------|-------|
+| 1 | critical | `set_dr_level()` never called in production — actor always idle |
+| 2 | critical | No multi-DR event overlap resolution (scalar level, no `max()` across events) |
+| 3 | critical | Sticky `PowerLimit`/`ModeOverride` never cleared after DR event ends |
+| 4 | high | Registry factory doesn't configure targets/actions from config |
+| 5 | high | `Probabilistic` compliance rate ignores DR severity |
+| 6 | medium | No equipment constraint validation before dispatch |
+| 7 | medium | `DemandResponse` control variant (with auto-revert) unused by actor |
+| 8 | low | `conflicts_with` returns false for mixed `ByName`/`ByEndUse` variants |

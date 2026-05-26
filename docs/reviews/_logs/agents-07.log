@@ -1,0 +1,46 @@
+# opencode log for agents-07
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/departure.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/soc_target.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/time_window.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/price.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/solar.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/soc_gate.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/efficiency.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/preference.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/EV.py
+[0m✱ [0mGrep "fn contains"[90m 4 matches[0m
+[0m✱ [0mGrep "pub fn resolve_power|fn combine|preference_weights|weighted_score|vote"[90m 159 matches[0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/mod.rs
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=620, limit=50][0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/composer.rs
+[0m→ [0mRead crates/hares-types/src/schedule.rs[90m [offset=120, limit=60][0m
+[0m✱ [0mGrep "log.normal|lognormal|log_normal|LogNormal|LOG_NORMAL"[90m 19 matches[0m
+[0m✱ [0mGrep "DistributionKind"[90m 75 matches[0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/agents
+(no output)
+[0m
+[0m→ [0mRead crates/hares-types/src/schedule.rs[90m [offset=175, limit=100][0m
+Now let me check the output directory exists and look at one more detail about how the `SocGate` constraint interacts with `target_soc`, and the `TimeWindow` constructor validation:
+[0m
+[0m← [0mWrite docs/reviews/agents/agents-07-ev-driver-sub-strategies.md
+Wrote file successfully.
+[0m
+Now I have a thorough understanding of all the code. Let me write the review findings.
+The review has been written to `/Users/rich/source/HARES/docs/reviews/agents/agents-07-ev-driver-sub-strategies.md`.
+
+**Key findings summary**:
+
+- **1 high**: `SocGate` has no hysteresis (single threshold), risking rapid on/off cycling at the threshold boundary
+- **2 medium**: Solar tracking doesn't distinguish forecast vs. actual PV; temperature-dependent efficiency is not applied to charge-time estimates (only to driving consumption)
+- **6 low**: Time window implicit ≤24h span constraint, log-normal used at actor layer not preference layer, `SocTarget` naming vs. actual ready-by responsibility, percentile rounding granularity, composer target_soc provenance decoupling, and an OCHRE comparison note

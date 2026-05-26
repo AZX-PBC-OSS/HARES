@@ -1,0 +1,58 @@
+# opencode log for agents-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/actors/ideal_thermostat.rs
+[0m→ [0mRead crates/hares-equipment/src/hvac/thermostat.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/HVAC.py
+[0m✱ [0mGrep "ThermalSetpoint|ThermalSetpointDelta"[90m in crates/hares-types/src · 6 matches[0m
+[0m✱ [0mGrep "PriorityTier|priority.*override|priority.*schedule"[90m in crates/hares-control/src · 17 matches[0m
+[0m✱ [0mGrep "no_space_heating|no_space_cooling|HEATING_DISABLED|COOLING_DISABLED"[90m 17 matches[0m
+Now let me check how the control signal is received and processed by the equipment, and look at the priority tier definitions and the no-space-conditioning sentinels.
+[0m✱ [0mGrep "apply_thermal_setpoint_signal|ThermalSetpoint|ThermalSetpointDelta"[90m in crates/hares-equipment/src/hvac · 66 matches[0m
+[0m→ [0mRead crates/hares-control/src/dispatch.rs[90m [limit=140][0m
+[0m→ [0mRead crates/hares-types/src/control_signal.rs[90m [limit=130][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=650, limit=60][0m
+[0m✱ [0mGrep "conflicts_with|conflict"[90m in crates/hares-core/src · 6 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/hvac_core.rs[90m [offset=380, limit=30][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ideal_hvac.rs[90m [offset=700, limit=60][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=330, limit=110][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ideal_hvac.rs[90m [offset=225, limit=20][0m
+[0m✱ [0mGrep "fn apply_control\b"[90m in crates/hares-equipment/src · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=440, limit=50][0m
+Now let me check a few more details on deadband handling and the `apply_control` dispatch path:
+[0m→ [0mRead crates/hares-equipment/src/lib.rs[90m [offset=120, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/ideal_hvac.rs[90m [offset=1070, limit=60][0m
+[0m✗ [0mRead crates/hares-equipment/src/hvac/heat_pump/cooler.rs failed[90m [offset=1410, limit=80][0m
+[91m[1mError: [0mOffset 1410 is out of range for this file (982 lines)
+[0m→ [0mRead crates/hares-equipment/src/hvac/heat_pump/heater.rs[90m [offset=2090, limit=50][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/air_conditioner.rs[90m [offset=1410, limit=80][0m
+[0m✱ [0mGrep "fn apply_control_unchecked"[90m in crates/hares-equipment/src/hvac · 14 matches[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/furnace.rs[90m [offset=350, limit=70][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/baseboard.rs[90m [offset=226, limit=60][0m
+[0m✱ [0mGrep "fn apply_heating_control_unchecked"[90m in crates/hares-equipment/src/hvac · 1 match[0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/helpers.rs[90m [offset=177, limit=40][0m
+[0m→ [0mRead crates/hares-equipment/src/hvac/boiler.rs[90m [offset=340, limit=60][0m
+[0m
+[0m← [0mWrite docs/reviews/agents/agents-03-ideal-thermostat-actor.md
+Wrote file successfully.
+[0m
+Now I have a thorough understanding of the codebase. Let me write the review.
+The review has been written to `docs/reviews/agents/agents-03-ideal-thermostat-actor.md`. Here's a summary of what I found:
+
+**6 findings total: 2 High, 2 Medium, 2 Low**
+
+The two high-severity issues are:
+
+1. **No setpoint cross-validation in the actor or non-ideal equipment path** — The `IdealThermostat` emits `ThermalSetpoint` signals without checking `heating_c < cooling_c` or the deadband constraint. Only `IdealHvac` validates; furnace/boiler/baseboard paths (`apply_heating_control_unchecked`) accept any values, allowing inverted setpoints to reach the FSM.
+
+2. **`debug_assert!` stripped in release builds** — The `dual()` and `with_setpoints()` builders use `debug_assert!` for a critical logic invariant, and `set_override()` (the primary runtime mutation API) has zero validation.
+
+The priority chain (`static → schedule → control_override`) is correctly implemented. The sentinel values `-999.0`/`999.0` for no-space-conditioning are unambiguous and propagate correctly through the schedule layer, but the `IdealThermostat` cannot explicitly emit a "disable heating" signal. The deadband logic in the FSM is well-structured but lacks a safety check when thresholds overlap due to upstream validation gaps.

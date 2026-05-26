@@ -1,0 +1,74 @@
+# opencode log for agents-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/actor.rs
+[0m→ [0mRead crates/hares-core/src/actor_registry.rs
+[0m→ [0mRead crates/hares-core/src/engine.rs
+[0m→ [0mRead vendors/OCHRE/ochre/Dwelling.py
+[0m✱ [0mGlob "crates/hares-core/src/dwelling*.rs"[90m 0 matches[0m
+[0m✱ [0mGlob "crates/hares-control/src/**/*.rs"[90m 6 matches[0m
+[0m✱ [0mGrep "actor.*order|dispatch.*order|step_actors|run_actors|actor_execution"[90m in crates · 7 matches[0m
+Now let me find where actors are actually dispatched and executed during simulation — the dwelling module and control dispatcher.
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2300, limit=200][0m
+[0m→ [0mRead crates/hares-core/tests/dispatch_ordering_regressions.rs
+[0m→ [0mRead crates/hares-control/src/dispatch.rs
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [limit=200, offset=2200][0m
+[0m✱ [0mGrep "fn add_actor|fn queue_dispatch|fn simulate|fn step\b|control_dispatcher|ControlDispatcher"[90m in crates/hares-core/src/dwelling · 56 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=339, limit=200][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=620, limit=100][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1430, limit=100][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=720, limit=100][0m
+[0m✱ [0mGrep "ExecutionStage"[90m in crates/hares-types/src · 13 matches[0m
+[0m✱ [0mGrep "solver_feedback_actor|SolverFeedbackActor"[90m in crates/hares-core/src · 35 matches[0m
+Now let me look at the solver feedback actor and how equipment execution order stages are defined:
+[0m→ [0mRead crates/hares-types/src/equipment.rs[90m [offset=160, limit=30][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=497, limit=15][0m
+[0m→ [0mRead crates/hares-core/src/actors/solver_feedback.rs[90m [offset=1, limit=200][0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/Simulator.py"[90m 1 match[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Simulator.py
+[0m✱ [0mGrep "fn stage_rank"[90m in crates/hares-core/src/dwelling · 2 matches[0m
+[0m✱ [0mGrep "Actor.*interest|interest.*filter|skip.*actor"[90m in crates/hares-core/src/dwelling · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/conversions.rs[90m [offset=455, limit=25][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=4155, limit=30][0m
+[0m✱ [0mGrep "build_actors_from_seeds"[90m in crates/hares-core/src · 13 matches[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=3291, limit=100][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=5485, limit=150][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1900, limit=60][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1350, limit=85][0m
+Now let me verify the environment snapshot update after equipment steps and understand the ActorInterest filtering:
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2500, limit=120][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=2620, limit=120][0m
+[0m✱ [0mGrep "interests\(\)|actor.*interest|ActorInterest|every_step|interest_based|skip.*actor"[90m in crates/hares-core/src/dwelling · 1 match[0m
+[0m✱ [0mGrep "interests\(\)|interest_based|interest.*filter"[90m in crates · 2 matches[0m
+[0m✱ [0mGrep "fn latest_env"[90m in crates/hares-core/src/dwelling/mod.rs · 1 match[0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=1680, limit=30][0m
+[0m→ [0mRead crates/hares-core/src/dwelling/mod.rs[90m [offset=4369, limit=60][0m
+Now I'll read the test for dispatch ordering and check some last details:
+Now I have a comprehensive understanding of the codebase. Let me write the review.
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/agents
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/agents/agents-01-actor-trait-registry-dispatch.md
+Wrote file successfully.
+[0m
+The review has been written to `/Users/rich/source/HARES/docs/reviews/agents/agents-01-actor-trait-registry-dispatch.md`.
+
+**Summary of findings:**
+
+| Severity | Count | Key Concern |
+|----------|-------|-------------|
+| Critical | 0 | — |
+| High | 1 | `ActorInterest` filtering declared but never enforced — all actors called every step, defeating documented ~60x optimization |
+| Medium | 2 | Execution order is insertion-order convention only (no compile-time/declarative guarantee); `SolverFeedbackActor` is structurally special-cased outside the actors Vec |
+| Low | 2 | Trait docs don't explain that `equipment_telemetry`/`equipment_core` in `EnvironmentState` are one-step-lagged snapshots; no debug assertion that actor Vec ordering is correct |
+
+The main architectural strength is the cross-pass priority ledger in `ControlDispatcher` (Safety > Grid > UserOverride > Schedule persists across both dispatch passes within a timestep), which is well-tested in `dispatch_ordering_regressions.rs`. The main risk is that actor execution ordering relies entirely on insertion-order convention — the `ActorRegistry` provides no ordering guarantees at all, and `SolverFeedbackActor` runs first only because it's stored as a named field with explicit call sites.

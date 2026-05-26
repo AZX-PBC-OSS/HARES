@@ -1,0 +1,44 @@
+# opencode log for agents-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/composer.rs
+[0m✱ [0mGlob "crates/hares-core/src/actors/ev_driver/*.rs"[90m 12 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/EV.py
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/preference.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/soc_gate.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/departure.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/price.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/v2g.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/v2h.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/soc_target.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/time_window.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/solar.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/efficiency.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/mod.rs
+[0m✱ [0mGrep "pub struct DispatchRequest|pub enum ControlSignal|pub enum PriorityTier"[90m 3 matches[0m
+Now let me check the mod.rs and DispatchRequest types for the full integration picture:
+[0m→ [0mRead crates/hares-control/src/dispatch.rs
+[0m→ [0mRead crates/hares-core/src/actors/ev_driver/mod.rs[90m [offset=1517][0m
+[0m→ [0mRead crates/hares-types/src/control_signal.rs[90m [offset=1, limit=100][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/agents
+(no output)
+[0m
+Now I have all the information needed. Let me create the output directory and write the review.
+[0m← [0mWrite docs/reviews/agents/agents-06-ev-driver-composer.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/agents/agents-06-ev-driver-composer.md`. Key findings:
+
+- **1 critical**: V2G/V2H `min_soc` is silently discarded when `emit_vote` takes the `PowerSetpoint` path (path 2), since `PowerSetpoint` has no SOC fields. The equipment never receives the floor constraint.
+- **2 high**: (a) No output power clamping against vehicle limits in the composer; individual strategies self-clamp but there's no defense-in-depth. (b) Constraint priority is strictly insertion-order dependent with no explicit priority tier.
+- **3 medium**: All dispatches use `Schedule` tier (no Safety elevation), all-idle behavior is undocumented, and SocGate doesn't set `max_soc` in its scoring output.
+- **2 low**: Aggregated min/max SOC bounds lost on PowerSetpoint path, and no energy-rate SOC clamp equivalent to OCHRE's `soc_max_power`.
