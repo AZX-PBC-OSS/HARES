@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use hares_physics::ground::SourceTemperature;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
@@ -267,6 +268,206 @@ impl Equipment for HpCooler {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ground-source heat pump cooler
+// ---------------------------------------------------------------------------
+
+pub struct GshpCooler {
+    inner: AirConditioner,
+    descriptor: EquipmentDescriptor,
+    ports: Vec<PortDeclaration>,
+}
+
+impl GshpCooler {
+    #[must_use]
+    pub fn new(config: EquipmentConfig) -> Self {
+        let mut inner = AirConditioner::new(config.clone());
+        let gshp_type = crate::hvac::hvac_core::HvacEquipmentType::GshpHeatPumpCooling;
+        inner.core.hvac.config.equipment_type = gshp_type;
+        inner.core.hvac.config.airflow_m3_s_per_w = gshp_type.default_airflow_m3_s_per_w();
+        // GSHP: compressor is indoors; no crankcase heater needed.
+        inner.set_crankcase_defaults_if_unconfigured(&config, 0.0, f64::NEG_INFINITY);
+        // Source temperature: use Kusuda-Achenbach ground model.
+        // Default borehole depth 60 m, typical for residential vertical boreholes.
+        inner.core.source_temp = SourceTemperature::KusudaAchenbach {
+            borehole_depth_m: 60.0,
+            soil_diffusivity_m2_per_day: 0.05,
+        };
+        let zone = zone_id_from_config(&config).unwrap_or(hares_types::ZoneId(DEFAULT_ZONE_ID));
+        Self {
+            descriptor: EquipmentDescriptor {
+                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
+                name: config.name,
+                end_use: EndUse::HVAC_COOLING,
+                equipment_type: Cow::Borrowed("GSHP Cooler"),
+                zone: Some(zone),
+                fuel: FuelType::Electric,
+                stage: ExecutionStage::Thermal,
+                control_capabilities: ControlCapabilities::THERMAL_SETPOINT
+                    | ControlCapabilities::THERMAL_SETPOINT_DELTA
+                    | ControlCapabilities::DUTY_CYCLE
+                    | ControlCapabilities::LOAD_FRACTION
+                    | ControlCapabilities::POWER_LIMIT
+                    | ControlCapabilities::MODE_OVERRIDE
+                    | ControlCapabilities::DEMAND_RESPONSE
+                    | ControlCapabilities::IDEAL_CAPACITY,
+                core_capabilities: CoreCapabilities::ELECTRIC
+                    | CoreCapabilities::HAS_MODE
+                    | CoreCapabilities::THERMAL
+                    | CoreCapabilities::HAS_SPEED
+                    | CoreCapabilities::HAS_SETPOINT
+                    | CoreCapabilities::HAS_COP,
+                telemetry_fields: inner.descriptor().telemetry_fields.clone(),
+            },
+            ports: inner.ports().to_vec(),
+            inner,
+        }
+    }
+
+    fn typed_gshp_to_central_ac_config(
+        source: &EquipmentConfig,
+        hp_cfg: &HeatPumpCoolerConfig,
+    ) -> crate::Result<EquipmentConfig> {
+        let eir = hp_cfg
+            .common
+            .cooling_eir
+            .or_else(|| {
+                hp_cfg
+                    .common
+                    .stage_cooling_eirs
+                    .as_ref()
+                    .and_then(|eirs| eirs.first().copied())
+            })
+            .ok_or_else(|| {
+                HaresError::Equipment(
+                    "GSHP Cooler requires cooling_eir or stage_cooling_eirs".to_string(),
+                )
+            })?;
+
+        let capacity_w = hp_cfg
+            .common
+            .cooling_capacity_w
+            .or_else(|| {
+                hp_cfg
+                    .common
+                    .stage_cooling_capacities_w
+                    .as_ref()
+                    .and_then(|caps| caps.last().copied())
+            })
+            .unwrap_or(8_000.0);
+
+        let mapped = CentralAirConditionerConfig {
+            equipment_id: hp_cfg.common.equipment_id,
+            zone_id: hp_cfg.common.zone_id,
+            capacity_w,
+            eir,
+            shr: hp_cfg.common.shr,
+            number_of_speeds: hp_cfg.effective_number_of_speeds(),
+            stage_capacities_w: hp_cfg.common.stage_cooling_capacities_w.clone(),
+            stage_eirs: hp_cfg.common.stage_cooling_eirs.clone(),
+            stage_shrs: hp_cfg.stage_shrs.clone(),
+            fan_power_w: hp_cfg.common.fan_power_w,
+            fan_power_w_per_cfm: hp_cfg.common.fan_power_w_per_cfm,
+            cooling_setpoint_c: hp_cfg.common.cooling_setpoint_c,
+            heating_setpoint_c: hp_cfg.common.heating_setpoint_c,
+            hysteresis_c: hp_cfg.common.hysteresis_c,
+            heating_setpoint_source: hp_cfg.common.heating_setpoint_source.clone(),
+            cooling_setpoint_source: hp_cfg.common.cooling_setpoint_source.clone(),
+            airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
+            fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
+            // Crankcase values are overridden post-init (compressor indoors,
+            // no crankcase heater needed). Not set here to avoid redundancy.
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: hp_cfg.common.duct.clone(),
+            system_type: None,
+            startup_cd: hp_cfg.derived_cooling_startup_cd(),
+            biquadratic_x1_min: hp_cfg.common.biquadratic_x1_min,
+            biquadratic_x1_max: hp_cfg.common.biquadratic_x1_max,
+            biquadratic_x2_min: hp_cfg.common.biquadratic_x2_min,
+            biquadratic_x2_max: hp_cfg.common.biquadratic_x2_max,
+            ff_min: hp_cfg.common.ff_min,
+            ff_max: hp_cfg.common.ff_max,
+            plf_min: hp_cfg.common.plf_min,
+            plf_max: hp_cfg.common.plf_max,
+            charge_defect_ratio: hp_cfg.common.charge_defect_ratio,
+        };
+
+        Ok(EquipmentConfig::from_typed(
+            source.name.clone(),
+            "Air Conditioner".to_string(),
+            mapped,
+        ))
+    }
+
+    /// Return the cooling coil's runtime fraction from the most recent step.
+    pub fn last_cooling_rtf(&self) -> f64 {
+        self.inner.core.last_cooling_rtf
+    }
+}
+
+impl Equipment for GshpCooler {
+    fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let typed_hp_cfg = config.require_typed::<HeatPumpCoolerConfig>("GSHP Cooler")?;
+        typed_hp_cfg.validate()?;
+        let mapped = Self::typed_gshp_to_central_ac_config(config, &typed_hp_cfg)?;
+        self.inner.init(&mapped, env)?;
+        // GSHP: compressor is indoors; no crankcase heater needed.
+        // Override post-init because AirConditioner::init_from_typed unconditionally
+        // writes the central-AC default (0.05 kW / 12.8°C) when crankcase_heater_kw
+        // is None in the mapped config.
+        self.inner.core.crankcase_rated_kw = 0.0;
+        self.inner.core.crankcase_threshold_c = f64::NEG_INFINITY;
+        Ok(())
+    }
+
+    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        self.inner.update_control(env)
+    }
+
+    fn step(
+        &mut self,
+        env: &EnvironmentState,
+        dt: Duration,
+        ports: &mut PortSlots,
+    ) -> std::result::Result<(), HaresError> {
+        self.inner.step(env, dt, ports)
+    }
+
+    fn telemetry(&self) -> &Telemetry {
+        self.inner.telemetry()
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        self.inner.core_output()
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        self.inner.save_state()
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
+        self.inner.load_state(state)
+    }
+
+    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        self.inner.apply_control_unchecked(signal)
+    }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        self.inner.ideal_target()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -277,7 +478,9 @@ mod tests {
         GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
-    use super::{super::super::super::Equipment, super::super::super::EquipmentConfig, HpCooler};
+    use super::{
+        super::super::super::Equipment, super::super::super::EquipmentConfig, GshpCooler, HpCooler,
+    };
     use crate::config::ConfigPayload;
     use crate::hvac::SpeedControlMode;
 
@@ -692,6 +895,88 @@ mod tests {
         assert!(
             duty > 0.0 && duty < 1.0,
             "mini-split variable-speed cooling should preserve fractional runtime near setpoint, got duty={duty}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // GSHP cooler regression tests
+    // -------------------------------------------------------------------
+
+    /// After `init()`, GSHP cooler must have crankcase heater disabled:
+    /// crankcase_rated_kw == 0.0, crankcase_threshold_c == NEG_INFINITY.
+    /// The compressor is indoors; no crankcase heater is needed.
+    /// Regression test for the finding where crankcase overrides were placed
+    /// before `inner.init()` and overwritten by `AirConditioner::init_from_typed`.
+    #[test]
+    fn gshp_cooler_crankcase_disabled_after_init() {
+        let cfg = EquipmentConfig::from_typed(
+            "gshp_cooler".to_string(),
+            "GSHP Cooler".to_string(),
+            crate::HeatPumpCoolerConfig {
+                common: crate::HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(8_000.0),
+                    cooling_eir: Some(0.33),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut eq = GshpCooler::new(cfg.clone());
+        let env = cooling_env(21.0, 10.0);
+        eq.init(&cfg, &env).unwrap();
+
+        assert_eq!(
+            eq.inner.core.crankcase_rated_kw, 0.0,
+            "GSHP crankcase rated kW must be 0.0 after init (compressor indoors), \
+             got {} kW",
+            eq.inner.core.crankcase_rated_kw
+        );
+        assert_eq!(
+            eq.inner.core.crankcase_threshold_c,
+            f64::NEG_INFINITY,
+            "GSHP crankcase threshold must be NEG_INFINITY after init (never active), \
+             got {} °C",
+            eq.inner.core.crankcase_threshold_c
+        );
+    }
+
+    /// GSHP cooler in deadband with OAT below central-AC crankcase threshold
+    /// (12.8 °C) must draw zero electrical power — the crankcase heater
+    /// should never fire for indoor-compressor equipment.
+    #[test]
+    fn gshp_cooler_no_crankcase_power_at_cold_ambient() {
+        let cfg = EquipmentConfig::from_typed(
+            "gshp_cooler".to_string(),
+            "GSHP Cooler".to_string(),
+            crate::HeatPumpCoolerConfig {
+                common: crate::HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(8_000.0),
+                    cooling_eir: Some(0.33),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut eq = GshpCooler::new(cfg.clone());
+        // Zone in deadband (21 °C, between default heating=20 °C / cooling=24 °C),
+        // outdoor at 5 °C — below central-AC crankcase threshold of 12.8 °C.
+        let env = cooling_env(21.0, 5.0);
+        eq.init(&cfg, &env).unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert_eq!(
+            ports.electrical.net_active_kw(),
+            0.0,
+            "GSHP crankcase must be inactive at 5 °C OAT (threshold NEG_INFINITY); \
+             central-AC default (12.8 °C) would produce 0.05 kW — got {}",
+            ports.electrical.net_active_kw()
         );
     }
 }

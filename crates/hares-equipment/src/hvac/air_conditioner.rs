@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
+use hares_physics::ground::SourceTemperature;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -49,15 +50,17 @@ pub(super) struct CoolingCore {
     core_output: CoreOutput,
     pub(super) hvac: HvacEquipment,
     operating_mode: OperatingMode,
+    /// How the equipment determines its source-side temperature for curve evaluation.
+    pub(super) source_temp: SourceTemperature,
     run_time_s: f64,
     cycle_on_steps: u64,
     cycle_off_steps: u64,
     crankcase_heater_on: bool,
     crankcase_heater_kw: f64,
     /// Rated crankcase heater power [kW]; loaded from config, variant-dependent default.
-    crankcase_rated_kw: f64,
+    pub(super) crankcase_rated_kw: f64,
     /// Outdoor temperature threshold [°C] below which crankcase heater activates.
-    crankcase_threshold_c: f64,
+    pub(super) crankcase_threshold_c: f64,
     /// Optional polynomial coefficients [c0, c1, c2] for temperature-dependent
     /// crankcase heater capacity: effective_kw = rated_kw * (c0 + c1*T + c2*T^2).
     crankcase_capacity_curve: Option<[f64; 3]>,
@@ -453,6 +456,7 @@ impl CoolingCore {
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::AcCooler, zone),
             operating_mode: OperatingMode::Off,
+            source_temp: SourceTemperature::OutdoorAir,
             run_time_s: 0.0,
             cycle_on_steps: 0,
             cycle_off_steps: 0,
@@ -1061,7 +1065,7 @@ impl CoolingCore {
                 ),
             };
 
-        let outdoor_c = env.weather.outdoor_temp_c;
+        let source_temp_c = self.source_temp.compute(env);
 
         fn curve_inputs(
             stage_capacity_w: f64,
@@ -1069,7 +1073,7 @@ impl CoolingCore {
             hvac: &HvacEquipment,
             zone: &hares_types::ZoneState,
             env: &EnvironmentState,
-            outdoor_c: f64,
+            source_temp_c: f64,
             flow_fraction_correction: f64,
         ) -> (f64, f64, f64, f64, f64) {
             let flow_m3_s_for_fan = stage_capacity_w.max(0.0) * hvac.config.airflow_m3_s_per_w;
@@ -1106,13 +1110,13 @@ impl CoolingCore {
             let (_, cap_ratio) = hvac.evaluate_biquadratic_with_flow(
                 speed_index * 2,
                 coil_entering_wb_c,
-                outdoor_c,
+                source_temp_c,
                 flow_fraction_correction,
             );
             let (_, eir_ratio_base) = hvac.evaluate_biquadratic_with_flow(
                 speed_index * 2 + 1,
                 coil_entering_wb_c,
-                outdoor_c,
+                source_temp_c,
                 flow_fraction_correction,
             );
             (
@@ -1136,7 +1140,7 @@ impl CoolingCore {
             &self.hvac,
             zone,
             env,
-            outdoor_c,
+            source_temp_c,
             self.flow_fraction_correction,
         );
 
@@ -1150,7 +1154,7 @@ impl CoolingCore {
                 &self.hvac,
                 zone,
                 env,
-                outdoor_c,
+                source_temp_c,
                 self.flow_fraction_correction,
             );
             cap_ratio = cap_ratio * (1.0 - speed_frac) + cap_ratio_high * speed_frac;
@@ -1183,7 +1187,7 @@ impl CoolingCore {
                 &self.hvac,
                 zone,
                 env,
-                outdoor_c,
+                source_temp_c,
                 self.flow_fraction_correction,
             );
         }

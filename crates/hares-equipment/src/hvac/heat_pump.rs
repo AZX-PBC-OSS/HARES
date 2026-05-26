@@ -6,8 +6,8 @@ pub mod defrost;
 mod heater;
 mod heater_config;
 
-pub use cooler::HpCooler;
-pub use heater::{ASHPHeater, MinisplitHeater};
+pub use cooler::{GshpCooler, HpCooler};
+pub use heater::{ASHPHeater, GshpHeater, MinisplitHeater};
 
 use crate::EquipmentRegistry;
 
@@ -25,12 +25,20 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         Box::new(|config| Box::new(MinisplitHeater::new(config))),
     );
     registry.register(
+        "GSHP Heater",
+        Box::new(|config| Box::new(GshpHeater::new(config))),
+    );
+    registry.register(
         "ASHP Cooler",
         Box::new(|config| Box::new(HpCooler::ashp_cooler(config))),
     );
     registry.register(
         "MSHP Cooler",
         Box::new(|config| Box::new(HpCooler::mshp_cooler(config))),
+    );
+    registry.register(
+        "GSHP Cooler",
+        Box::new(|config| Box::new(GshpCooler::new(config))),
     );
 }
 
@@ -58,8 +66,10 @@ mod tests {
             "Heat Pump Heater",
             "ASHP Heater",
             "MSHP Heater",
+            "GSHP Heater",
             "ASHP Cooler",
             "MSHP Cooler",
+            "GSHP Cooler",
         ] {
             let eq = registry.create(class, config(class, class)).unwrap();
             assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);

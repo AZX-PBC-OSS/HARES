@@ -1831,10 +1831,11 @@ pub(super) fn resolve_hvac(
         let (heater_name, cooler_name) = match heat_pump_type.as_str() {
             "air-to-air" => ("ASHP Heater", "ASHP Cooler"),
             "mini-split" => ("MSHP Heater", "MSHP Cooler"),
+            "ground-to-air" => ("GSHP Heater", "GSHP Cooler"),
             other => {
                 return Err(HpxmlError::Parse(format!(
                     "HeatPump: unsupported HeatPumpType '{other}'; \
-                     supported types are: air-to-air, mini-split"
+                     supported types are: air-to-air, mini-split, ground-to-air"
                 )));
             }
         };

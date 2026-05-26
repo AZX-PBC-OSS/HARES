@@ -31,10 +31,13 @@ use super::constants::{
     DEFAULT_ZONE_ID, DEFROST_CAPACITY_UNIT_FACTOR, DEFROST_EIR_CURVE_TEMP_MIN_C,
     MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_KW, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
 };
-use super::defrost::{DefrostConfig, DefrostCycleTracker, DefrostStrategy, evaluate_defrost};
+use super::defrost::{
+    DefrostConfig, DefrostControl, DefrostCycleTracker, DefrostStrategy, evaluate_defrost,
+};
 use super::heater_config::{
     default_heater_telemetry, heater_telemetry_fields, operating_mode_code,
 };
+use hares_physics::ground::SourceTemperature;
 
 fn eir_from_backup_fuel(fuel: Option<FuelType>) -> f64 {
     match fuel {
@@ -68,6 +71,7 @@ fn fuel_type_from_backup_fuel(fuel: Option<FuelType>) -> Option<FuelType> {
 enum HeaterVariant {
     Ashp,
     Minisplit,
+    Gshp,
 }
 
 pub struct ASHPHeater {
@@ -85,6 +89,7 @@ struct HeatPumpHeaterCore {
     core_output: CoreOutput,
     hvac: HvacEquipment,
     operating_mode: OperatingMode,
+    source_temp: SourceTemperature,
     defrost_config: DefrostConfig,
     hp_lockout_temp_c: f64,
     hp_lockout_hysteresis_c: f64,
@@ -303,6 +308,24 @@ impl MinisplitHeater {
     }
 }
 
+pub struct GshpHeater {
+    core: HeatPumpHeaterCore,
+}
+
+impl GshpHeater {
+    #[must_use]
+    pub fn new(config: EquipmentConfig) -> Self {
+        Self {
+            core: HeatPumpHeaterCore::new(config, HeaterVariant::Gshp),
+        }
+    }
+
+    /// Return the heating coil's runtime fraction from the most recent step.
+    pub fn last_heating_rtf(&self) -> f64 {
+        self.core.last_heating_rtf
+    }
+}
+
 impl Equipment for HeatPumpHeaterCore {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
@@ -352,6 +375,7 @@ impl Equipment for HeatPumpHeaterCore {
 
 delegate_equipment!(ASHPHeater, core);
 delegate_equipment!(MinisplitHeater, core);
+delegate_equipment!(GshpHeater, core);
 
 impl HeatPumpHeaterCore {
     fn new(config: EquipmentConfig, variant: HeaterVariant) -> Self {
@@ -359,10 +383,12 @@ impl HeatPumpHeaterCore {
         let equipment_type = match variant {
             HeaterVariant::Ashp => "ASHP Heater",
             HeaterVariant::Minisplit => "MSHP Heater",
+            HeaterVariant::Gshp => "GSHP Heater",
         };
         let default_backup = match variant {
             HeaterVariant::Ashp => DEFAULT_BACKUP_CAPACITY_W,
             HeaterVariant::Minisplit => 0.0,
+            HeaterVariant::Gshp => 0.0,
         };
         let backup_capacity_w = config
             .typed::<HeatPumpHeaterConfig>()
@@ -387,6 +413,7 @@ impl HeatPumpHeaterCore {
                 }
             }
             HeaterVariant::Minisplit => HvacEquipmentType::MiniSplitHeat,
+            HeaterVariant::Gshp => HvacEquipmentType::GshpHeatPumpHeating,
         };
 
         Self {
@@ -423,12 +450,42 @@ impl HeatPumpHeaterCore {
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(hvac_type, zone),
             operating_mode: OperatingMode::Off,
-            defrost_config: DefrostConfig::on_demand(1.0, 0.0),
-            hp_lockout_temp_c: DEFAULT_HP_LOCKOUT_TEMP_C,
-            hp_lockout_hysteresis_c: DEFAULT_HP_LOCKOUT_HYSTERESIS_C,
+            source_temp: match variant {
+                HeaterVariant::Gshp => SourceTemperature::KusudaAchenbach {
+                    borehole_depth_m: 60.0,
+                    soil_diffusivity_m2_per_day: 0.05,
+                },
+                _ => SourceTemperature::OutdoorAir,
+            },
+            defrost_config: if matches!(variant, HeaterVariant::Gshp) {
+                DefrostConfig {
+                    control: DefrostControl::Disabled,
+                    ..DefrostConfig::on_demand(1.0, 0.0)
+                }
+            } else {
+                DefrostConfig::on_demand(1.0, 0.0)
+            },
+            hp_lockout_temp_c: if matches!(variant, HeaterVariant::Gshp) {
+                f64::NEG_INFINITY
+            } else {
+                DEFAULT_HP_LOCKOUT_TEMP_C
+            },
+            hp_lockout_hysteresis_c: if matches!(variant, HeaterVariant::Gshp) {
+                0.0
+            } else {
+                DEFAULT_HP_LOCKOUT_HYSTERESIS_C
+            },
             hp_available: false,
-            er_lockout_temp_c: DEFAULT_ER_LOCKOUT_TEMP_C,
-            max_oat_supplemental_c: MAX_OAT_SUPPLEMENTAL_C,
+            er_lockout_temp_c: if matches!(variant, HeaterVariant::Gshp) {
+                f64::INFINITY
+            } else {
+                DEFAULT_ER_LOCKOUT_TEMP_C
+            },
+            max_oat_supplemental_c: if matches!(variant, HeaterVariant::Gshp) {
+                f64::INFINITY
+            } else {
+                MAX_OAT_SUPPLEMENTAL_C
+            },
             er_setpoint_offset_c: 0.0,
             min_er_cycle_time_s: DEFAULT_MIN_ER_CYCLE_TIME_S,
             backup_capacity_w,
@@ -676,6 +733,7 @@ impl HeatPumpHeaterCore {
         let default_backup = match self.variant {
             HeaterVariant::Ashp => DEFAULT_BACKUP_CAPACITY_W,
             HeaterVariant::Minisplit => 0.0,
+            HeaterVariant::Gshp => 0.0,
         };
         self.backup_capacity_w = cfg
             .common
@@ -702,13 +760,26 @@ impl HeatPumpHeaterCore {
         } else {
             0.0
         };
-        self.hp_lockout_temp_c = cfg.hp_lockout_temp_c.unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
-        self.hp_lockout_hysteresis_c = DEFAULT_HP_LOCKOUT_HYSTERESIS_C;
-        self.er_lockout_temp_c = cfg.er_lockout_temp_c.unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
-        self.max_oat_supplemental_c = cfg
-            .max_oat_supplemental_c
-            .unwrap_or(MAX_OAT_SUPPLEMENTAL_C)
-            .min(MAX_OAT_SUPPLEMENTAL_C);
+        if !matches!(self.variant, HeaterVariant::Gshp) {
+            self.hp_lockout_temp_c = cfg.hp_lockout_temp_c.unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
+            self.hp_lockout_hysteresis_c = DEFAULT_HP_LOCKOUT_HYSTERESIS_C;
+            self.er_lockout_temp_c = cfg.er_lockout_temp_c.unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
+            self.max_oat_supplemental_c = cfg
+                .max_oat_supplemental_c
+                .unwrap_or(MAX_OAT_SUPPLEMENTAL_C)
+                .min(MAX_OAT_SUPPLEMENTAL_C);
+        } else {
+            if let Some(v) = cfg.hp_lockout_temp_c {
+                self.hp_lockout_temp_c = v;
+            }
+            self.hp_lockout_hysteresis_c = 0.0;
+            if let Some(v) = cfg.er_lockout_temp_c {
+                self.er_lockout_temp_c = v;
+            }
+            if let Some(v) = cfg.max_oat_supplemental_c {
+                self.max_oat_supplemental_c = v.min(MAX_OAT_SUPPLEMENTAL_C);
+            }
+        }
         self.er_setpoint_offset_c = cfg.er_setpoint_offset_c.unwrap_or(
             self.hvac.thermostat_fsm.thermostat.hysteresis_c
                 * (DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER - DEFAULT_ER_SETPOINT_DEADBAND_OFFSET),
@@ -748,7 +819,11 @@ impl HeatPumpHeaterCore {
 
         self.heating_shr = cfg.heating_shr.unwrap_or(1.0);
 
-        self.defrost_config = cfg.defrost;
+        if !matches!(self.variant, HeaterVariant::Gshp)
+            || cfg.defrost.control != DefrostControl::OnDemand
+        {
+            self.defrost_config = cfg.defrost;
+        }
 
         // Anchor capacity biquadratic to manufacturer-specified capacity at the
         // AHRI 210/240 H3 low-ambient rating point (17°F / -8.33°C).
@@ -1209,7 +1284,7 @@ impl HeatPumpHeaterCore {
         let (_, mut cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
             speed_index * 2,
             zone.temperature_c,
-            env.weather.outdoor_temp_c,
+            self.source_temp.compute(env),
             1.0,
         );
         // OCHRE HVAC.py:1044-1050 -- interpolate biquadratic between bracket stages.
@@ -1219,7 +1294,7 @@ impl HeatPumpHeaterCore {
             let (_, cap_ratio_high) = self.hvac.evaluate_biquadratic_with_flow(
                 (speed_index + 1) * 2,
                 zone.temperature_c,
-                env.weather.outdoor_temp_c,
+                self.source_temp.compute(env),
                 1.0,
             );
             cap_ratio = cap_ratio * (1.0 - speed_frac) + cap_ratio_high * speed_frac;
@@ -1260,7 +1335,7 @@ impl HeatPumpHeaterCore {
         let (_, mut eir_ratio_base) = self.hvac.evaluate_biquadratic_with_flow(
             speed_index * 2 + 1,
             zone.temperature_c,
-            env.weather.outdoor_temp_c,
+            self.source_temp.compute(env),
             1.0,
         );
         // OCHRE HVAC.py:1044-1050 -- interpolate EIR biquadratic between bracket stages.
@@ -1270,7 +1345,7 @@ impl HeatPumpHeaterCore {
             let (_, eir_ratio_high) = self.hvac.evaluate_biquadratic_with_flow(
                 (speed_index + 1) * 2 + 1,
                 zone.temperature_c,
-                env.weather.outdoor_temp_c,
+                self.source_temp.compute(env),
                 1.0,
             );
             eir_ratio_base = eir_ratio_base * (1.0 - speed_frac) + eir_ratio_high * speed_frac;
@@ -1774,7 +1849,7 @@ impl HeatPumpHeaterCore {
                 let (_, cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
                     speed.speed_index * 2,
                     zone.temperature_c,
-                    env.weather.outdoor_temp_c,
+                    self.source_temp.compute(env),
                     1.0,
                 );
                 let hp_available_capacity_w = (stage_cap * cap_ratio).max(0.0);
@@ -2112,9 +2187,10 @@ mod tests {
         telemetry_keys as tk,
     };
 
-    use super::{ASHPHeater, MinisplitHeater, SpeedControlMode};
+    use super::{ASHPHeater, GshpHeater, MinisplitHeater, SpeedControlMode};
     use crate::{
-        DefrostConfig, Equipment, EquipmentConfig, HeatPumpCommonConfig, HeatPumpHeaterConfig,
+        DefrostConfig, DefrostControl, Equipment, EquipmentConfig, HeatPumpCommonConfig,
+        HeatPumpHeaterConfig,
     };
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
@@ -5861,6 +5937,78 @@ mod tests {
             (eir - expected_eir).abs() / expected_eir < 1e-3,
             "charge_defect_ratio=-0.10 must raise heating EIR by 9% (efficiency degrades); expected {expected_eir} got {eir}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // GSHP regression tests — verify init() preserves constructor defaults
+    // (lockout temps, defrost) against the ASHP default overwrite bug.
+    // -----------------------------------------------------------------------
+
+    fn gshp_typed_config() -> HeatPumpHeaterConfig {
+        let mut cfg = heater_typed_config();
+        cfg.common.heating_capacity_w = Some(10_000.0);
+        cfg.common.heating_eir = Some(0.25);
+        cfg.common.backup_capacity_w = Some(0.0);
+        cfg
+    }
+
+    #[test]
+    fn gshp_init_preserves_infinite_lockout_and_disabled_defrost() {
+        let typed = gshp_typed_config();
+        let cfg = EquipmentConfig::from_typed(
+            "gshp_heater".to_string(),
+            "GSHP Heater".to_string(),
+            typed,
+        );
+        let mut eq = GshpHeater::new(cfg.clone());
+        let e = env(18.0, -5.0, 0.002);
+        eq.init(&cfg, &e).unwrap();
+
+        assert_eq!(eq.core.hp_lockout_temp_c, f64::NEG_INFINITY);
+        assert_eq!(eq.core.er_lockout_temp_c, f64::INFINITY);
+        assert_eq!(eq.core.max_oat_supplemental_c, f64::INFINITY);
+        assert_eq!(eq.core.hp_lockout_hysteresis_c, 0.0);
+        assert_eq!(eq.core.defrost_config.control, DefrostControl::Disabled);
+    }
+
+    #[test]
+    fn gshp_not_locked_out_at_cold_ambient() {
+        let typed = gshp_typed_config();
+        let cfg =
+            EquipmentConfig::from_typed("gshp_cold".to_string(), "GSHP Heater".to_string(), typed);
+        let mut eq = GshpHeater::new(cfg.clone());
+        let e = env(18.0, -30.0, 0.001);
+        eq.init(&cfg, &e).unwrap();
+        assert!(eq.core.hp_available);
+    }
+
+    #[test]
+    fn gshp_defrost_never_active_regardless_of_ambient() {
+        let typed = gshp_typed_config();
+        let cfg = EquipmentConfig::from_typed(
+            "gshp_defrost".to_string(),
+            "GSHP Heater".to_string(),
+            typed,
+        );
+        let mut eq = GshpHeater::new(cfg.clone());
+        let e = env(18.0, -5.0, 0.006);
+        eq.init(&cfg, &e).unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 8_000.0,
+        })
+        .unwrap();
+        eq.update_control(&e);
+        eq.step(
+            &e,
+            Duration::from_secs(900),
+            &mut PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(eq.core.defrost_config.control, DefrostControl::Disabled);
+        assert!(!eq.core.defrost_active);
     }
 }
 

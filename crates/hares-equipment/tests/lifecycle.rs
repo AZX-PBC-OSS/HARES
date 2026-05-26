@@ -726,7 +726,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 target_rh: Some(0.5),
             },
         ),
-        "Heat Pump Heater" | "ASHP Heater" | "MSHP Heater" => typed_alias_config(
+        "Heat Pump Heater" | "ASHP Heater" | "MSHP Heater" | "GSHP Heater" => typed_alias_config(
             class,
             HeatPumpHeaterConfig {
                 common: HeatPumpCommonConfig {
@@ -780,7 +780,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 defrost: DefrostConfig::default(),
             },
         ),
-        "ASHP Cooler" | "MSHP Cooler" => typed_alias_config(
+        "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler" => typed_alias_config(
             class,
             HeatPumpCoolerConfig {
                 common: HeatPumpCommonConfig {

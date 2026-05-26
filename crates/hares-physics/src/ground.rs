@@ -1,8 +1,10 @@
 //! Ground heat transfer models.
 //!
 //! Implements the Kusuda-Achenbach undisturbed ground temperature model
-//! (EnergyPlus Engineering Reference Ch. 3.17) and the ASHRAE 90.1-2022
-//! perimeter conduction factor (F2) method for slab-on-grade heat loss.
+//! (EnergyPlus Engineering Reference Ch. 3.17), the ASHRAE 90.1-2022
+//! perimeter conduction factor (F2) method for slab-on-grade heat loss,
+//! and the `SourceTemperature` enum for heat pump source-side temperature
+//! selection (air-source, ground-source, water-source).
 //!
 //! Reference:
 //! - Kusuda, T. and Achenbach, P.R. (1965), "Earth Temperatures and Thermal
@@ -16,6 +18,7 @@
 //! - EnergyPlus Engineering Reference: Ground Heat Transfer, "Undisturbed Ground
 //!   Temperature Model: Kusuda-Achenbach".
 
+use hares_types::EnvironmentState;
 use std::f64::consts::PI;
 
 /// Default soil thermal diffusivity [m²/day].
@@ -162,6 +165,61 @@ pub fn f2_coefficient(insulation_r_m2_k_w: f64, heated: bool) -> f64 {
     } else {
         // Uninsulated slab
         if heated { 2.336 } else { 1.263 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Source temperature model for heat pump equipment
+// ---------------------------------------------------------------------------
+
+/// How equipment determines its source-side heat exchange temperature.
+///
+/// For air-source equipment (ASHP, MSHP), this is outdoor air dry-bulb temperature.
+/// For ground-source equipment (GSHP), this is entering water/ground temperature
+/// computed from the Kusuda-Achenbach model or a constant.
+///
+/// EnergyPlus supports `Coil:Cooling:WaterToAirHeatPump:EquationFit` and
+/// `Coil:Heating:WaterToAirHeatPump:EquationFit` objects that use entering water
+/// temperature as the source-side variable in place of outdoor air temperature.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SourceTemperature {
+    /// Use outdoor air dry-bulb temperature (standard air-source behavior).
+    OutdoorAir,
+    /// Use a constant entering water/ground temperature [°C].
+    Constant(f64),
+    /// Use ground temperature at specified depth via the Kusuda-Achenbach model.
+    ///
+    /// # References
+    /// - EnergyPlus Engineering Reference Ch. 3.17: Undisturbed Ground Temperature Model
+    /// - Kusuda & Achenbach (1965), ASHRAE Trans. 71(1):61-74
+    KusudaAchenbach {
+        /// Borehole depth below ground surface [m].
+        borehole_depth_m: f64,
+        /// Soil thermal diffusivity [m²/day]. Use
+        /// [`DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY`] if unknown.
+        soil_diffusivity_m2_per_day: f64,
+    },
+}
+
+impl SourceTemperature {
+    /// Compute the source-side temperature [°C] from the environment state.
+    #[must_use]
+    pub fn compute(&self, env: &EnvironmentState) -> f64 {
+        match self {
+            Self::OutdoorAir => env.weather.outdoor_temp_c,
+            Self::Constant(t) => *t,
+            Self::KusudaAchenbach {
+                borehole_depth_m,
+                soil_diffusivity_m2_per_day,
+            } => kusuda_achenbach_temp(
+                *borehole_depth_m,
+                env.weather.day_of_year,
+                env.weather.ground_t_mean_c,
+                env.weather.ground_t_amplitude_c,
+                env.weather.ground_phase_day,
+                *soil_diffusivity_m2_per_day,
+            ),
+        }
     }
 }
 

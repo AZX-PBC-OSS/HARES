@@ -24,6 +24,10 @@ pub enum DefrostControl {
     /// Timer-based -- fixed defrost time fraction. Simpler, used by many real
     /// units. Uses different capacity/EIR multiplier equations from DOE-2.
     Timed,
+    /// Defrost is disabled. Used for ground-source and water-source heat pumps
+    /// where the source-side temperature stays above freezing year-round.
+    /// GSHP ground loops are typically at 0–15 °C, well above the frost threshold.
+    Disabled,
 }
 
 /// How defrost heat is delivered.
@@ -410,6 +414,8 @@ pub fn evaluate_defrost(
                 extra_power_w,
             }
         }
+
+        DefrostControl::Disabled => DefrostResult::inactive(),
 
         DefrostControl::Timed => {
             let time_fraction = config.defrost_time_fraction;
