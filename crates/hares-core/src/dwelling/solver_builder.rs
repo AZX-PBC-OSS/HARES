@@ -1375,7 +1375,7 @@ mod tests {
         N_I_DEFAULT, SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
         garage_ela_coefficients,
     };
-    use hares_types::{HaresError, ZoneId};
+    use hares_types::ZoneId;
 
     #[test]
     fn n_iter_matches_ochre_formula() {
