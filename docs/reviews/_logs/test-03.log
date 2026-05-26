@@ -1,0 +1,20 @@
+# opencode log for test-03
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead tests/parity/tolerance.rs
+[0m✱ [0mGlob "tests/parity/**/*.rs"[90m in . · 3 matches[0m
+[0m✱ [0mGlob "docs/reviews/**/*.md"[90m in . · 100 matches[0m
+[0m→ [0mRead tests/parity/mod.rs
+[0m→ [0mRead tests/parity/corpus.rs
+[0m✱ [0mGlob "vendors/OCHRE/**/*"[90m in . · 100 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/**/*"[90m in . · 100 matches[0m
+[0m• [0mExplore parity fixtures and OCHRE[90m Explore Agent[0m
+[0m• [0mExplore tolerance tightening mechanism[90m Explore Agent[0m

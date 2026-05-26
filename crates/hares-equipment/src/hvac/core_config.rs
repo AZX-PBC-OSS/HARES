@@ -314,7 +314,9 @@ pub(super) fn parse_biquadratic_list(raw: &str) -> crate::Result<Vec<[f64; 6]>> 
     }
 
     if numbers.is_empty() {
-        return Ok(vec![DEFAULT_BIQUADRATIC_COEFFS]);
+        return Err(HaresError::Equipment(
+            "biquadratic coefficient list contained zero parseable coefficients".to_string(),
+        ));
     }
     if !numbers.len().is_multiple_of(6) {
         return Err(HaresError::Equipment(format!(

@@ -1964,6 +1964,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_biquadratic_list_empty_input_is_error() {
+        let result = super::super::core_config::parse_biquadratic_list("");
+        assert!(result.is_err(), "empty string must be an error");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("zero parseable coefficients"),
+            "error message must mention zero coefficients, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_biquadratic_list_no_parseable_numbers_is_error() {
+        let result = super::super::core_config::parse_biquadratic_list("abc, xyz, !@#");
+        assert!(
+            result.is_err(),
+            "input with no parseable numbers must be an error, not silently return identity"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("zero parseable coefficients"),
+            "error message must mention zero coefficients, got: {msg}"
+        );
+    }
+
     // --- Feature: DSE routing via zone_heat_fractions ---
 
     #[test]

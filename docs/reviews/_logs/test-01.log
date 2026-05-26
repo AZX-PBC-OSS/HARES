@@ -1,0 +1,143 @@
+# opencode log for test-01
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m• [0mExplore test oracle infrastructure[90m Explore Agent[0m
+[0m✓ [0mExplore test oracle infrastructure[90m Explore Agent[0m
+[0m→ [0mRead tests/bestest/mod.rs
+[0m→ [0mRead tests/bestest/cases.rs
+[0m→ [0mRead tests/bestest/reference_bands.rs
+[0m→ [0mRead tests/bestest/bestest_diagnostic.rs
+[0m→ [0mRead tests/parity/mod.rs
+[0m→ [0mRead tests/parity/corpus.rs
+[0m→ [0mRead tests/parity/tolerance.rs
+[0m→ [0mRead tests/conditioned_oracle.rs
+[0m→ [0mRead tests/freefloat_oracle.rs
+[0m→ [0mRead tests/python/generate_conditioned_oracle.py
+[0m→ [0mRead tests/python/generate_freefloat_oracle.py
+[0m→ [0mRead tests/python/generate_parity_reference.py
+[0m→ [0mRead crates/hares-core/tests/bestest.rs
+[0m→ [0mRead crates/hares-core/tests/conditioned_oracle.rs
+[0m→ [0mRead crates/hares-core/tests/freefloat_oracle.rs
+[0m→ [0mRead crates/hares-core/tests/parity.rs
+[0m→ [0mRead tests/fixtures/parity/README.md
+[0m→ [0mRead tests/fixtures/parity/extract_ochre_rc.py
+[0m→ [0mRead tests/fixtures/parity/ashrae_rc_reference.json
+[0m→ [0mRead tests/fixtures/bestest/600.toml
+[0m→ [0mRead tests/fixtures/bestest/600ff.toml
+[0m→ [0mRead tests/fixtures/bestest/900ff.toml
+[0m→ [0mRead tests/fixtures/bestest/900.toml
+Now let me check the parity fixture README, some BESTEST fixture configs, the extract_ochre_rc script, and observe what the parity corpus climate zone coverage looks like:
+[0m
+[0m$ [0mls -la tests/fixtures/parity/*/building.xml tests/fixtures/parity/*/schedule.csv tests/fixtures/parity/*/weather.epw tests/fixtures/parity/*/reference_output.parquet tests/fixtures/parity/*/config.toml 2>&1
+zsh:1: no matches found: tests/fixtures/parity/*/reference_output.parquet
+[0m
+[0m→ [0mRead tests/python/test_ochre_parity.py
+[0m→ [0mRead tests/envelope_oracle.rs[90m [limit=100][0m
+[0m→ [0mRead tests/structural_envelope_oracle.rs[90m [limit=100][0m
+[0m
+[0m$ [0mls tests/fixtures/parity/
+ashrae_rc_reference.json
+beopt_smoke_1h
+cz2a_gas_furnace_ac_res_wh
+cz2a_pv_ev
+cz4a_ashp_hpwh
+cz4a_battery_only
+cz4a_pv_battery
+cz4a_pv_only
+cz5a_ev_only
+cz5a_minisplit_gas_wh
+cz6b_pv_battery_ev
+cz6b_resistance_res_wh
+extract_ochre_rc.py
+ochre_rc_reference.json
+README.md
+resstock_bldg0112631_24h
+[0m
+[0m$ [0mfor d in tests/fixtures/parity/*/; do echo "--- $d ---"; ls "$d"; echo; done
+--- tests/fixtures/parity/beopt_smoke_1h/ ---
+ochre_reference.csv
+
+--- tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/cz2a_pv_ev/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/cz4a_ashp_hpwh/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/cz4a_battery_only/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/cz4a_pv_battery/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/cz4a_pv_only/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/cz5a_ev_only/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/cz5a_minisplit_gas_wh/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/cz6b_pv_battery_ev/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/cz6b_resistance_res_wh/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+
+--- tests/fixtures/parity/resstock_bldg0112631_24h/ ---
+building.xml
+config.toml
+schedule.csv
+weather.epw
+[0m
+[0m✱ [0mGrep "ochre_next|ochre"[90m 13 matches[0m
+Let me check the pyproject.toml for dependency versions and look at the remaining parity fixture configurations:
+[0m→ [0mRead pyproject.toml[90m [limit=80][0m
+[0m→ [0mRead docs/reviews/scripts/scr-03-ochre-bestest-600-py.md[90m [limit=50][0m
+[0m→ [0mRead tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/config.toml
+[0m
+[0m$ [0mmkdir -p docs/reviews/tests
+(no output)
+[0m
+Now I have all the information to write the comprehensive review. Let me compile everything:

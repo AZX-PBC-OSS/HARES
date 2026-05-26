@@ -22,3 +22,41 @@
 [0m→ [0mRead defaults/envelope/Envelope Boundary Types.csv[90m [limit=30][0m
 [0m→ [0mRead defaults/envelope/Envelope Materials.csv[90m [limit=30][0m
 [0m✱ [0mGrep "INTERIOR_MASS_MULTIPLIER|AIR_DENSITY_KG_M3|DEFAULT_HEIGHT_M|DEFAULT_VOLUME_M3|MIN_CAPACITANCE_J_K"[90m 77 matches[0m
+[0m→ [0mRead crates/hares-envelope/src/boundary_rc.rs[90m [offset=1358, limit=60][0m
+[0m→ [0mRead vendors/OCHRE/ochre/utils/envelope.py[90m [offset=294, limit=50][0m
+[0m✱ [0mGrep "same_zone|same_zones"[90m in crates/hares-envelope/src/boundary_rc.rs · 27 matches[0m
+Now let me check the specific same-zone behavior more carefully and verify the resistor removal bug:
+[0m✱ [0mGrep "create_rc_data"[90m 22 matches[0m
+[0m✱ [0mGrep "same_zone.*precomputed|precomputed.*same_zone"[90m 0 matches[0m
+[0m✱ [0mGrep "cap_values.*res_values|create_rc_data|same_zones"[90m in vendors/OCHRE/ochre/Models/Envelope.py · 4 matches[0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=350, limit=100][0m
+[0m→ [0mRead vendors/OCHRE/ochre/Models/Envelope.py[90m [offset=393, limit=25][0m
+[0m✱ [0mGrep "r_values_m2_k_w|assembly_r_value|DEFAULT_R_M2_K_W"[90m in crates/hares-io · 27 matches[0m
+Now let me look at the OCHRE boundary constructor to understand the same-zone chain reversal:
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/solver
+(no output)
+[0m
+Now I have all the information needed to write the review. Let me compose it.
+[0m← [0mWrite docs/reviews/solver/solver-03-envelope-lut-precomputed.md
+Wrote file successfully.
+[0m
+[0m$ [0mwc -l /Users/rich/source/HARES/docs/reviews/solver/solver-03-envelope-lut-precomputed.md
+110 /Users/rich/source/HARES/docs/reviews/solver/solver-03-envelope-lut-precomputed.md
+[0m
+The review is complete. Here's a summary of the key findings:
+
+**6 findings identified** across `crates/hares-io/src/envelope_lut.rs` and `crates/hares-envelope/src/boundary_rc.rs`:
+
+**HIGH** (1): Same-zone precomputed path has an inverted resistor removal + layer orientation vs both OCHRE reference and HARES's own material-layer path. `res_list.remove(0)` at `boundary_rc.rs:1411` removes the wrong end of the chain compared to OCHRE's `res_list[:-1]` at `envelope.py:337`, and the half-selection direction also differs. No test coverage exists for `same_zone=true` in the precomputed path.
+
+**MEDIUM** (2):
+- Nearest-neighbor LUT matching produces step discontinuities at R-value grid boundaries; no interpolation is performed.
+- `debug_assert!` for R/C validation is elided in release builds, leaving no runtime guard against corrupted LUT data.
+
+**LOW** (3):
+- Fixed OCHRE film R-values used in LUT matching differ from TARP-computed film R-values in the actual RC network.
+- No numerical equivalence verification between LUT and full computation paths.
+- R-value ≥ 17.6 m²·K/W clamping bypasses construction-type filtering.
+
+The review is written to `/Users/rich/source/HARES/docs/reviews/solver/solver-03-envelope-lut-precomputed.md`.
