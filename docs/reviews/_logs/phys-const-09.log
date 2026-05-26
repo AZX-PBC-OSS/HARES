@@ -1,0 +1,104 @@
+# opencode log for phys-const-09
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs[90m [offset=100, limit=30][0m
+[0m✱ [0mGrep "5\.2559|5\.2558761|isa.*exponent|pressure.*exponent|ISA_P|atm.*exp"[90m in crates/hares-physics/src · 14 matches[0m
+[0m✱ [0mGrep "5\.2559|ISA|pressure.*exp|atm.*exp"[90m in vendors/EnergyPlus/src/EnergyPlus · 22 matches[0m
+[0m✱ [0mGrep "5\.2559|ISA|pressure.*exp|atm.*exp"[90m in vendors/OCHRE/ochre · 0 matches[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs[90m [limit=25, offset=85][0m
+[0m→ [0mRead crates/hares-physics/src/air_properties.rs[90m [limit=30, offset=1][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/WeatherManager.cc[90m [limit=10, offset=4460][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Autosizing/Base.cc[90m [limit=10, offset=170][0m
+[0m✱ [0mGrep "barometric|baro.*press|StdBaro|elevation.*press|101325|101\.325"[90m in vendors/OCHRE/ochre · 6 matches[0m
+[0m
+[0m$ [0mpython3 -c "
+import math
+
+P0 = 101325.0
+L = 2.25577e-5  # /m
+E_hares = 5.2558761
+E_ep = 5.2559
+
+for h in [0, 500, 1000, 2000, 3000]:
+    factor = 1.0 - L * h
+    p_hares = P0 * factor**E_hares
+    p_ep = P0 * factor**E_ep
+    diff = p_hares - p_ep
+    print(f'h={h:5d}m  p_hares={p_hares:12.6f} Pa  p_ep={p_ep:12.6f} Pa  diff={diff:+.6f} Pa  rel={abs(diff)/p_ep*100:.2e}%')
+"
+
+h=    0m  p_hares=101325.000000 Pa  p_ep=101325.000000 Pa  diff=+0.000000 Pa  rel=0.00e+00%
+h=  500m  p_hares=95460.838252 Pa  p_ep=95460.812373 Pa  diff=+0.025879 Pa  rel=2.71e-05%
+h= 1000m  p_hares=89874.568425 Pa  p_ep=89874.519416 Pa  diff=+0.049009 Pa  rel=5.45e-05%
+h= 2000m  p_hares=79495.211748 Pa  p_ep=79495.124038 Pa  diff=+0.087710 Pa  rel=1.10e-04%
+h= 3000m  p_hares=70108.539571 Pa  p_ep=70108.422159 Pa  diff=+0.117412 Pa  rel=1.67e-04%
+[0m
+[0m$ [0mpython3 -c "
+import math
+P0 = 101325.0
+L = 2.25577e-5
+# Full derivation value from comment
+E_full = 9.80665 * 0.0289644 / (8.31432 * 0.0065)
+print(f'E_full = {E_full:.10f}')
+print(f'E_hares = 5.2558761 (stored)')
+print(f'E_ep = 5.2559    (EnergyPlus)')
+print(f'diff_hares_vs_full = {5.2558761 - E_full:.2e}')
+print(f'diff_ep_vs_full = {5.2559 - E_full:.2e}')
+print(f'Sig figs HAERS: 8, EP: 5')
+print()
+for h in [0, 500, 1000, 2000, 3000]:
+    factor = 1.0 - L * h
+    p_full = P0 * factor**E_full
+    p_hares = P0 * factor**5.2558761
+    p_ep = P0 * factor**5.2559
+    print(f'h={h:5d}m: full={p_full:.6f}  hares={p_hares:.6f}  ep={p_ep:.6f}')
+    print(f'         diff_hares={p_hares-p_full:+.6f} Pa  diff_ep={p_ep-p_full:+.6f} Pa')
+"
+
+E_full = 5.2558761133
+E_hares = 5.2558761 (stored)
+E_ep = 5.2559    (EnergyPlus)
+diff_hares_vs_full = -1.33e-08
+diff_ep_vs_full = 2.39e-05
+Sig figs HAERS: 8, EP: 5
+
+h=    0m: full=101325.000000  hares=101325.000000  ep=101325.000000
+         diff_hares=+0.000000 Pa  diff_ep=+0.000000 Pa
+h=  500m: full=95460.838237  hares=95460.838252  ep=95460.812373
+         diff_hares=+0.000014 Pa  diff_ep=-0.025865 Pa
+h= 1000m: full=89874.568397  hares=89874.568425  ep=89874.519416
+         diff_hares=+0.000027 Pa  diff_ep=-0.048982 Pa
+h= 2000m: full=79495.211699  hares=79495.211748  ep=79495.124038
+         diff_hares=+0.000049 Pa  diff_ep=-0.087661 Pa
+h= 3000m: full=70108.539506  hares=70108.539571  ep=70108.422159
+         diff_hares=+0.000065 Pa  diff_ep=-0.117347 Pa
+[0m
+[0m$ [0mls /Users/rich/source/HARES/docs/reviews/physics-constants/ 2>/dev/null || echo "directory does not exist"
+phys-const-01-psychrometric-saturation-pressure-coefficients.md
+phys-const-02-wet-bulb-specific-heat-constants.md
+phys-const-03-ice-specific-heat-constant.md
+phys-const-04-kell-water-density-polynomial.md
+phys-const-05-gas-therm-hour-to-watt.md
+phys-const-08-cp-liquid-water-constant.md
+[0m
+[0m✱ [0mGrep "5\.2559|5\.2558|ISA|pressure.*exp"[90m in crates · 105 matches[0m
+[0m→ [0mRead crates/hares-physics/tests/physics_validation_tests.rs[90m [limit=45, offset=1158][0m
+[0m→ [0mRead docs/reviews/physics-constants/phys-const-08-cp-liquid-water-constant.md[90m [limit=30, offset=1][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/physics-constants
+(no output)
+[0m
+[0m← [0mWrite docs/reviews/physics-constants/phys-const-09-isa-pressure-exponent-precision.md
+Wrote file successfully.
+[0m
+The review has been written to `docs/reviews/physics-constants/phys-const-09-isa-pressure-exponent-precision.md`.
+
+**Summary**: 4 low-severity findings, no action required. HARES' 5.2558761 is correct and traceable to USSA 1976 derivation (deviation ~1.3×10⁻⁸ vs EnergyPlus' 2.4×10⁻⁵). The practical pressure difference peaks at **0.12 Pa** at 3000 m — 400–500× smaller than typical HVAC pressure sensor accuracy. The extra digits are justified by the derivation and do no harm.

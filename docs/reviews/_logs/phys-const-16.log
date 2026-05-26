@@ -1,0 +1,83 @@
+# opencode log for phys-const-16
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs[90m [offset=200, limit=40][0m
+[0m• [0mSearch EnergyPlus radiative h[90m Explore Agent[0m
+[0m• [0mSearch OCHRE radiative h[90m Explore Agent[0m
+[0m✓ [0mSearch OCHRE radiative h[90m Explore Agent[0m
+[0m✓ [0mSearch EnergyPlus radiative h[90m Explore Agent[0m
+[0m
+[0m$ [0mpython3 -c "
+import math
+eps = 0.9
+sigma = 5.670374419e-8
+T = 293.15  # 20°C in Kelvin
+h_rad = 4.0 * eps * sigma * (T**3)
+print(f'h_rad = {h_rad:.6f} W/(m²·K)')
+print(f'T³ = {T**3:.6f}')
+print(f'4*eps*sigma = {4*eps*sigma:.12e}')
+
+# Compare with vendor values
+sigma_ep = 5.6697e-8
+h_rad_ep = 4.0 * eps * sigma_ep * (T**3)
+print(f'h_rad (E+ sigma=5.6697e-8) = {h_rad_ep:.6f} W/(m²·K)')
+
+sigma_ochre = 5.6704e-8
+h_rad_ochre = 4.0 * eps * sigma_ochre * (T**3)
+print(f'h_rad (OCHRE sigma=5.6704e-8) = {h_rad_ochre:.6f} W/(m²·K)')
+
+# Verify the derivation: h_rad = d/dT [eps*sigma*(T_s^4 - T_amb^4)] for small deltaT
+# q = eps * sigma * (T_s^4 - T_amb^4)
+# Let T_s = T + dT/2, T_amb = T - dT/2
+# q = eps * sigma * [(T+dt/2)^4 - (T-dt/2)^4]
+# Taylor: = eps * sigma * 4 * T^3 * dT + O(dT^3)
+# h_rad = q / dT = eps * sigma * 4 * T^3 + O(dT^2)
+# This confirms correctness.
+
+# Alternate form: sigma * eps * (T1^2 + T2^2)(T1 + T2)
+# At T1=T2=T: sigma * eps * (2*T^2) * (2*T) = 4 * sigma * eps * T^3 ✓
+print()
+print('Derivation check:')
+print('T1=T2=T => sigma*eps*(T^2+T^2)*(T+T) =', sigma * eps * (T**2 + T**2) * (T + T))
+print('4*sigma*eps*T^3 =', 4 * sigma * eps * T**3)
+"
+
+h_rad = 5.142614 W/(m²·K)
+T³ = 25192408.830875
+4*eps*sigma = 2.041334790840e-07
+h_rad (E+ sigma=5.6697e-8) = 5.142002 W/(m²·K)
+h_rad (OCHRE sigma=5.6704e-8) = 5.142637 W/(m²·K)
+
+Derivation check:
+T1=T2=T => sigma*eps*(T^2+T^2)*(T+T) = 5.142614061152998
+4*sigma*eps*T^3 = 5.142614061152997
+[0m
+Now let me compute the exact expected value:
+Let me also check how `linearised_h_rad` is used across the codebase:
+[0m✱ [0mGrep "linearised_h_rad"[90m 33 matches[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs[90m [offset=255, limit=55][0m
+[0m→ [0mRead crates/hares-envelope/src/longwave_radiation.rs[90m [offset=230, limit=20][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/physics-constants
+(no output)
+[0m
+Now I have comprehensive data. Let me write the review file:
+[0m← [0mWrite docs/reviews/physics-constants/phys-const-16-linearised-radiative-h.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/physics-constants/phys-const-16-linearised-radiative-h.md`.
+
+**Results summary:**
+
+- **Formula is correct**: `h_rad = 4·ε·σ·T³` at 20°C (293.15 K) with ε=0.9 yields **5.142614 W/(m²·K)** ≈ **5.14 W/(m²·K)** — matches the expected value.
+- **Derivation confirmed**: first-order Taylor expansion of Stefan-Boltzmann, validated algebraically against the equivalent `σ·ε·(T₁²+T₂²)(T₁+T₂)` form used in EnergyPlus and OCHRE.
+- **2 low-severity findings**: (1) an overly loose test assertion range (4.0..7.0) that could mask regressions; (2) the NIST CODATA 2018 σ value diverges ~0.01% from the legacy constants in both vendor codebases.
+- **Industry alignment**: Both EnergyPlus and OCHRE use mathematically identical linearisation forms, confirming the approach.

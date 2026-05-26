@@ -1958,3 +1958,16 @@ infra-06-docs-handoff-items-remaining.md
 infra-07-docs-citation-verification.md
 [0m
 Now I have all the data needed. Let me write the final report.
+[0m← [0mWrite docs/reviews/infrastructure/infra-08-error-handling-review.md
+Wrote file successfully.
+[0m
+The report has been written to `/Users/rich/source/HARES/docs/reviews/infrastructure/infra-08-error-handling-review.md`.
+
+**Key findings:**
+
+- **~6,100 of ~6,130 total** `.unwrap()`/`.expect()`/`panic!()` occurrences are in test code — the production codebase is remarkably clean.
+- **2 Critical** findings: 14 panics in water heater draw normalization (`schedule_resolve.rs`) trivially triggerable by malformed TOML configs; ~15 `.unwrap()` calls in `py_dwelling.rs` that panic on missing Python dict keys.
+- **3 High** findings: `Telemetry::set()` hot-path panic (called every timestep), `from_typed()` serialization panic during dwelling init, and 3 panics in RC network assembly that bypass the existing `Result` return.
+- **5 panics** could terminate long-running fleet simulations from malformed user input.
+
+The remediation plan prioritizes converting the `schedule_resolve.rs` water heater panics to proper `Result` returns (highest impact, 14 panics eliminated), followed by hardening the Python API surface and de-risking the telemetry hot path.

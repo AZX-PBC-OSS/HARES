@@ -20,3 +20,104 @@
 [0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.hh[90m [offset=1415, limit=80][0m
 [0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.cc[90m [offset=360, limit=150][0m
 [0m→ [0mRead vendors/OCHRE/ochre/utils/psychrolib_jit.py[90m [offset=170, limit=30][0m
+[0m
+[0m$ [0mpython3 -c "
+# Verify: c_s_wb = c_pw - c_pv derivation
+# Above freezing: c_pw = 4.186, c_pv = 1.86 => 4.186 - 1.86 = 2.326
+print(f'Above-freezing (c_pw - c_pv): {4.186 - 1.86}')
+
+# Below freezing: c_p_ice - c_pv = 2.1 - 1.86 = 0.24
+print(f'Below-freezing (c_p_ice - c_pv): {2.1 - 1.86}')
+
+# Check: what would c_pv need to be for c_s_wb = 2.381?
+# 4.186 - c_pv = 2.381 => c_pv = 4.186 - 2.381
+print(f'c_pv implied by 2.381: {4.186 - 2.381}')  # = 1.805
+
+# Check IP unit conversion claim: 0.24 BTU/(lb*F) -> kJ/(kg*K)
+factor = 0.24 * 1055.05585262 / 0.45359237 / 1000 * (9.0/5.0)
+print(f'0.24 BTU/(lb·F) in kJ/(kg·K): {factor:.4f}')
+
+# Check: if 0.24 were IP and should be 2.006 SI, what conversion factor would they be using?
+implied = 2.006 / 0.24
+print(f'Implied conversion factor for 0.24 -> 2.006: {implied:.2f}')
+
+# Numerically compare the two sub-freezing formulations
+# Tdb=-2, Twb=-5, P=101325
+# W_sat(-5C) in pa: 
+import math
+T_K = -5 + 273.15
+# saturation pressure for T <= 0.01
+ln_pws = (-5.6745359e3 / T_K + 6.3925247 - 9.677843e-3 * T_K
+          + 6.2215701e-7 * T_K * T_K
+          + 2.0747825e-9 * T_K * T_K * T_K
+          - 9.484024e-13 * T_K * T_K * T_K * T_K
+          + 4.1635019 * math.log(T_K))
+p_sat = math.exp(ln_pws)
+print(f'\\nP_sat at -5°C: {p_sat:.4f} Pa')
+w_sat = 0.621945 * p_sat / (101325 - p_sat)
+print(f'W_sat at -5°C: {w_sat:.6f}')
+
+# With 0.24
+w_024 = ((2830 - 0.24 * -5) * w_sat - 1.006 * (-2 - (-5))) / (2830 + 1.86 * (-2) - 2.1 * (-5))
+# With 2.006
+w_2006 = ((2830 - 2.006 * -5) * w_sat - 1.006 * (-2 - (-5))) / (2830 + 1.86 * (-2) - 2.1 * (-5))
+print(f'W with 0.24:  {w_024:.8f}')
+print(f'W with 2.006: {w_2006:.8f}')
+print(f'Rel diff: {(w_2006 - w_024)/w_024*100:.3f}%')
+
+# Above-freezing comparison
+# Tdb=30, Twb=25, P=95461
+T_K2 = 25 + 273.15
+ln_pws2 = (-5.8002206e3 / T_K2 + 1.3914993 - 4.8640239e-2 * T_K2 + 4.1764768e-5 * T_K2 * T_K2
+           - 1.4452093e-8 * T_K2 * T_K2 * T_K2 + 6.5459673 * math.log(T_K2))
+p_sat2 = math.exp(ln_pws2)
+w_sat2 = 0.621945 * p_sat2 / (95461 - p_sat2)
+w_2326 = ((2501 - 2.326 * 25) * w_sat2 - 1.006 * (30 - 25)) / (2501 + 1.86 * 30 - 4.186 * 25)
+w_2381 = ((2501 - 2.381 * 25) * w_sat2 - 1.006 * (30 - 25)) / (2501 + 1.86 * 30 - 4.186 * 25)
+print(f'\\nP_sat at 25°C: {p_sat2:.2f} Pa')
+print(f'W with 2.326: {w_2326:.10f}')
+print(f'W with 2.381: {w_2381:.10f}')
+print(f'Rel diff: {(w_2381 - w_2326)/w_2326*100:.4f}%')
+print(f'PsychroLib ref: 0.0192281274241096')
+print(f'HARES vs 2.326: {(w_2381 - w_2326)/0.0192281274241096*100:.4f}%')
+"
+
+Above-freezing (c_pw - c_pv): 2.3259999999999996
+Below-freezing (c_p_ice - c_pv): 0.24
+c_pv implied by 2.381: 1.8050000000000002
+0.24 BTU/(lb·F) in kJ/(kg·K): 1.0048
+Implied conversion factor for 0.24 -> 2.006: 8.36
+
+P_sat at -5°C: 401.7641 Pa
+W_sat at -5°C: 0.002476
+W with 0.24:  0.00140714
+W with 2.006: 0.00141485
+Rel diff: 0.548%
+
+P_sat at 25°C: 3169.22 Pa
+W with 2.326: 0.0192247698
+W with 2.381: 0.0192127943
+Rel diff: -0.0623%
+PsychroLib ref: 0.0192281274241096
+HARES vs 2.326: -0.0623%
+[0m
+[0m✱ [0mGrep "1\.805|2\.381"[90m in vendors/EnergyPlus/src/EnergyPlus · 1 match[0m
+Now let me verify the ASHRAE derivation numerically and check the conversion claim:
+[0m✱ [0mGrep "PsyWFnTdbTwbPb|PsyTwbFnTdbWPb"[90m in vendors/EnergyPlus/src/EnergyPlus · 24 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.hh[90m [offset=1389, limit=30][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Psychrometrics.cc[90m [offset=337, limit=25][0m
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/physics-constants
+(no output)
+[0m
+Now I have all the evidence. Let me write the review:
+[0m← [0mWrite docs/reviews/physics-constants/phys-const-02-wet-bulb-specific-heat-constants.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/physics-constants/phys-const-02-wet-bulb-specific-heat-constants.md`.
+
+**Summary of findings:**
+
+1. **High - Below-freezing coefficient 2.006 is wrong.** The correct ASHRAE sub-freezing psychrometer coefficient is `0.24 kJ/(kg·K)` (derived from `c_p_ice − c_pv = 2.1 − 1.86 = 0.24`). HARES's comment claiming `0.24` was an "IP unit value" is factually incorrect — `0.24` is the standard SI coefficient used by both EnergyPlus (2003 re-engineered) and OCHRE/PsychroLib. The `2.006` value is off by ~8.4×.
+
+2. **Medium - Above-freezing coefficient 2.381 mixes two inconsistent ASHRAE editions.** `2.381` belongs to the ASHRAE 1972 formulation (paired with `c_pv = 1.805` and no explicit `c_pa` multiplier), while HARES pairs it with ASHRAE 2017 companion constants (`c_pv = 1.86`, `c_pa = 1.006`). The standard modern set is `2.326 / 1.86 / 1.006`. EnergyPlus itself confirms the inconsistency: its 1976 forward function uses the 1972 set, while its 2003 re-engineered inverse function uses the 2017 set.

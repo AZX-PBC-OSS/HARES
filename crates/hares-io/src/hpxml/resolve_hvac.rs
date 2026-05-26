@@ -2405,9 +2405,13 @@ fn normalize_efficiency_units(units: &str, value: f64, is_ductless: bool) -> (St
         "HSPF2" if is_ductless => ("HSPF".to_string(), value * HSPF2_TO_HSPF_FACTOR_DUCTLESS),
         "HSPF2" => ("HSPF".to_string(), value * HSPF2_TO_HSPF_FACTOR),
         "EER2" => ("EER".to_string(), value * EER2_TO_EER_FACTOR),
-        "SEER" | "EER" | "HSPF" | "AFUE" | "PERCENT" | "COP" => {
-            (units.trim().to_ascii_uppercase(), value)
-        }
+        // PERCENT values in HPXML are conventionally fractions (0–1), but some
+        // sources supply percent-out-of-100 form. Normalize to fraction 0–1 by
+        // dividing values > 1.0 by 100. Values ≤ 1.0 (including exactly 1.0)
+        // are already in fraction form — 1.0 is unambiguous (100% = 1.0).
+        "PERCENT" if value > 1.0 => ("PERCENT".to_string(), value / 100.0),
+        "PERCENT" => ("PERCENT".to_string(), value),
+        "SEER" | "EER" | "HSPF" | "AFUE" | "COP" => (units.trim().to_ascii_uppercase(), value),
         other => (other.to_string(), value),
     }
 }
@@ -5829,6 +5833,60 @@ mod tests {
         assert!(
             (eir - wrong_eir).abs() > 0.01,
             "ductless EIR must NOT equal wrong (1/0.95) EIR {wrong_eir:.6}"
+        );
+    }
+
+    // PERCENT values > 1.0 are interpreted as percent-out-of-100 form and
+    // divided by 100 to yield a fraction. A HPXML <Value>95</Value> with
+    // <Units>Percent</Units> should normalize to 0.95 (fraction form).
+    #[test]
+    fn percent_value_above_one_divided_by_100() {
+        let (units, value) = normalize_efficiency_units("Percent", 95.0, false);
+        assert_eq!(
+            units, "PERCENT",
+            "unit label must be PERCENT after normalization"
+        );
+        assert!(
+            (value - 0.95).abs() < 1e-9,
+            "95% must normalize to 0.95 fraction, got {value}"
+        );
+    }
+
+    // PERCENT values ≤ 1.0 are already in fraction form (the HPXML convention).
+    // 1.0 means 100% efficient, 0.95 means 95% efficient — value passes through.
+    #[test]
+    fn percent_value_at_one_passes_through() {
+        let (units, value) = normalize_efficiency_units("Percent", 1.0, false);
+        assert_eq!(units, "PERCENT");
+        assert!(
+            (value - 1.0).abs() < 1e-9,
+            "1.0 fraction must pass through unchanged, got {value}"
+        );
+    }
+
+    // PERCENT value already in fraction form (e.g. 0.95) passes through
+    // without modification — no false-positive reinterpretation.
+    #[test]
+    fn percent_value_below_one_passes_through() {
+        let (units, value) = normalize_efficiency_units("Percent", 0.95, false);
+        assert_eq!(units, "PERCENT");
+        assert!(
+            (value - 0.95).abs() < 1e-9,
+            "0.95 fraction must pass through unchanged, got {value}"
+        );
+    }
+
+    // PERCENT values in percent-out-of-100 form that are still ≤ 1.0 after
+    // division by 100 (e.g. 0.99 → 0.0099) pass through as-is. The threshold
+    // check is on the input, not the output — a value of 0.99 is already in
+    // fraction form and represents 99% efficiency.
+    #[test]
+    fn percent_value_near_zero_passes_through() {
+        let (units, value) = normalize_efficiency_units("Percent", 0.01, false);
+        assert_eq!(units, "PERCENT");
+        assert!(
+            (value - 0.01).abs() < 1e-9,
+            "0.01 fraction must pass through unchanged, got {value}"
         );
     }
 }

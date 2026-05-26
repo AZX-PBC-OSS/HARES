@@ -1,0 +1,40 @@
+# opencode log for pvsize-02
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m# [0mTodos
+[•] Read HARES pv_sizing.rs source file
+[ ] Read EnergyPlus vendor reference files for azimuth/derating
+[ ] Read OCHRE PV.py vendor reference for orientation factors
+[ ] Analyze azimuth lookup table against NREL SAM/PVWatts methodology
+[ ] Write findings to docs/reviews/pv-sizing/pvsize-02-azimuth-production-factor-lut.md
+[0m
+[0m→ [0mRead crates/hares-physics/src/pv_sizing.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*.cc"[90m 100 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/Equipment/PV.py"[90m 1 match[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*PV*"[90m 3 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*Solar*"[90m 6 matches[0m
+[0m
+[0m# [0mTodos
+[✓] Read HARES pv_sizing.rs source file
+[•] Read EnergyPlus vendor reference files for azimuth/derating
+[•] Read OCHRE PV.py vendor reference for orientation factors
+[ ] Analyze azimuth lookup table against NREL SAM/PVWatts methodology
+[ ] Write findings to docs/reviews/pv-sizing/pvsize-02-azimuth-production-factor-lut.md
+[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/PVWatts.cc
+[0m→ [0mRead vendors/OCHRE/ochre/Equipment/PV.py
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Photovoltaics.cc[90m [limit=100][0m
+[0m✱ [0mGrep "azimuth|orientation|derating|factor"[90m in vendors/EnergyPlus/src/EnergyPlus · 4 matches[0m
+[0m✱ [0mGlob "vendors/**/ssc/**/lib_pvwatts*"[90m 2 matches[0m
+[0m✱ [0mGlob "vendors/**/ssc/**/lib_irradproc*"[90m 4 matches[0m
+Now let me read the EnergyPlus Photovoltaics.cc for the equivalent-one-diode model's orientation factor treatment and look for SAM source code.
+[0m→ [0mRead vendors/EnergyPlus/third_party/ssc/shared/lib_pvwatts.cpp
+[0m→ [0mRead vendors/EnergyPlus/third_party/ssc/shared/lib_irradproc.cpp[90m [limit=150][0m

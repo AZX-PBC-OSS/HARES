@@ -1,0 +1,62 @@
+# opencode log for phys-const-06
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs[90m [offset=160, limit=20][0m
+[0m• [0mSearch EnergyPlus for boiler aux hours[90m Explore Agent[0m
+[0m• [0mSearch OCHRE for boiler aux hours[90m Explore Agent[0m
+[0m✓ [0mSearch OCHRE for boiler aux hours[90m Explore Agent[0m
+[0m✓ [0mSearch EnergyPlus for boiler aux hours[90m Explore Agent[0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [offset=1640, limit=25][0m
+[0m→ [0mRead crates/hares-io/src/hpxml/resolve_hvac.rs[90m [offset=5155, limit=60][0m
+Let me now check the HARES code that uses this constant and the test verifying the value.
+[0m✱ [0mGrep "BOILER_AUXILIARY_HOURS_PER_YEAR"[90m in . · 7 matches[0m
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"ANSI/RESNET/ICC 301-2019 Equation 4.4-5 boiler auxiliary hours 2080","max_results":10}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"RESNET ANSI 301 2019 \"Eq. 4.4-5\" boiler auxiliary electric energy hours","max_results":10}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"RESNET \"ANSI 301\" boiler auxiliary 2080 hours per year equation 4.4-5","max_results":10}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"ResStock get_default_boiler_eae 2080 hvac.rb boiler auxiliary hours","max_results":10}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"site:github.com ResStock hvac.rb get_default_boiler_eae 2080","max_results":10}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"\"ANSI/RESNET/ICC 301\" \"4.4-5\" boiler auxiliary","max_results":10}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"github NREL ResStock hvac.rb boiler electric auxiliary energy 2080","max_results":10}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"NREL OpenStudio-HPXML \"boiler\" \"auxiliary\" \"2080\" hours per year","max_results":10}
+[0m⚙ [0mddg-mcp_ddg-text-search {"keywords":"ResStock resstock hvac.rb boiler aux electric auxiliary energy annual hours ANSI 301","max_results":10}
+[0m✗ [0mWebFetch https://github.com/NREL/resstock/blob/develop/resources/hvac.rb failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://github.com/NREL/resstock/blob/develop/resources/hvac.rb)
+[0m✗ [0mWebFetch https://raw.githubusercontent.com/NREL/resstock/develop/resources/hvac.rb failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://raw.githubusercontent.com/NREL/resstock/develop/resources/hvac.rb)
+[0m% [0mWebFetch https://github.com/NREL/resstock
+[0m✗ [0mWebFetch https://raw.githubusercontent.com/NatLabRockies/resstock/develop/resources/hvac.rb failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://raw.githubusercontent.com/NatLabRockies/resstock/develop/resources/hvac.rb)
+[0m% [0mWebFetch https://raw.githubusercontent.com/NREL/OpenStudio-HPXML/master/HPXMLtoOpenStudio/resources/hvac.rb
+[0m✱ [0mGrep "get_default_boiler_eae"[90m in /Users/rich/.local/share/opencode/tool-output/tool_e6333ce90001DEnZL82kmnCVut · 0 matches[0m
+[0m• [0mFind get_default_boiler_eae in hvac.rb[90m General Agent[0m
+[0m% [0mWebFetch https://raw.githubusercontent.com/NREL/OpenStudio-HPXML/master/HPXMLtoOpenStudio/resources/hvac.rb
+[0m✓ [0mFind get_default_boiler_eae in hvac.rb[90m General Agent[0m
+[0m⚙ [0mddg-mcp_ddg-text-search {"max_results":10,"keywords":"\"ANSI/RESNET/ICC 301-2019\" \"section 4.4\" boiler auxiliary electric energy hours"}
+[0m⚙ [0mddg-mcp_ddg-text-search {"max_results":10,"keywords":"RESNET 301 \"EAE\" \"* 2080\" boiler auxiliary hours heating season"}
+[0m✗ [0mWebFetch https://raw.githubusercontent.com/NREL/OpenStudio-HPXML/master/HPXMLtoOpenStudio/resources/hpxml_defaults.rb failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://raw.githubusercontent.com/NREL/OpenStudio-HPXML/master/HPXMLtoOpenStudio/resources/hpxml_defaults.rb)
+[0m⚙ [0mddg-mcp_ddg-text-search {"max_results":10,"keywords":"nrel openstudio-hpxml hpxml_defaults boiler electric auxiliary energy 2080 default"}
+[0m% [0mWebFetch https://api.github.com/repos/NREL/OpenStudio-HPXML/git/trees/master?recursive=1
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/physics-constants
+(no output)
+[0m
+Now I have comprehensive data from all sources. Let me write the review document.
+[0m← [0mWrite docs/reviews/physics-constants/phys-const-06-boiler-auxiliary-hours-per-year.md
+Wrote file successfully.
+[0m
+Review complete. Written to `docs/reviews/physics-constants/phys-const-06-boiler-auxiliary-hours-per-year.md`.
+
+**Summary**: The `BOILER_AUXILIARY_HOURS_PER_YEAR = 2_080.0` constant is consistent across HARES and the vendored OCHRE reference, both citing the same ANSI/RESNET/ICC 301-2019 Eq. 4.4-5. 3 findings, all severity **low**:
+
+1. The standard document could not be independently verified (paid publication). Both HARES and OCHRE independently use the same value (2080), and the existing unit test validates correct arithmetic.
+2. EnergyPlus uses a fundamentally different parasitic-electric model (PLR-based, no fixed annual hours), noted for cross-tool comparison awareness.
+3. The doc comment references a stale `hvac.rb:1754` function location that no longer exists in the current OpenStudio-HPXML master — recommend updating the citation.

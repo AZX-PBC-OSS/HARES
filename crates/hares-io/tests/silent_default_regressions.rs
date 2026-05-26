@@ -1191,8 +1191,9 @@ fn electric_resistance_baseboard_with_explicit_efficiency_resolves() {
     );
 }
 
-/// Electric Furnace with out-of-range efficiency value 2.0 must produce
-/// InvalidField, not silently accept an invalid value.
+/// Electric Furnace with out-of-range efficiency value 150% (normalized to
+/// fraction 1.5) must produce InvalidField — PERCENT values >1.0 are divided
+/// by 100, but 150% → 1.5 exceeds the (0.0, 1.0] efficiency range.
 #[test]
 fn electric_furnace_efficiency_greater_than_one_errors() {
     let xml = wrap_systems(
@@ -1203,7 +1204,7 @@ fn electric_furnace_efficiency_greater_than_one_errors() {
               <HeatingSystemFuel>electricity</HeatingSystemFuel>
               <HeatingSystemType><Furnace/></HeatingSystemType>
               <HeatingCapacity>18000</HeatingCapacity>
-              <AnnualHeatingEfficiency><Units>Percent</Units><Value>2.0</Value></AnnualHeatingEfficiency>
+              <AnnualHeatingEfficiency><Units>Percent</Units><Value>150.0</Value></AnnualHeatingEfficiency>
             </HeatingSystem>
           </HVAC>
         </Systems>"#,
@@ -1212,7 +1213,7 @@ fn electric_furnace_efficiency_greater_than_one_errors() {
         resolve(&xml),
         "HeatingSystem/AnnualHeatingEfficiency",
         "Electric Furnace",
-        "2",
+        "1.5",
     );
 }
 
@@ -1240,7 +1241,9 @@ fn electric_furnace_efficiency_zero_errors() {
     );
 }
 
-/// Electric Boiler with out-of-range efficiency value 2.0 must produce InvalidField.
+/// Electric Boiler with out-of-range efficiency value 150% (normalized to
+/// fraction 1.5) must produce InvalidField — PERCENT values >1.0 are divided
+/// by 100, but 150% → 1.5 exceeds the (0.0, 1.0] efficiency range.
 #[test]
 fn electric_boiler_efficiency_greater_than_one_errors() {
     let xml = wrap_systems(
@@ -1251,7 +1254,7 @@ fn electric_boiler_efficiency_greater_than_one_errors() {
               <HeatingSystemFuel>electricity</HeatingSystemFuel>
               <HeatingSystemType><Boiler/></HeatingSystemType>
               <HeatingCapacity>12000</HeatingCapacity>
-              <AnnualHeatingEfficiency><Units>Percent</Units><Value>2.0</Value></AnnualHeatingEfficiency>
+              <AnnualHeatingEfficiency><Units>Percent</Units><Value>150.0</Value></AnnualHeatingEfficiency>
             </HeatingSystem>
           </HVAC>
         </Systems>"#,
@@ -1260,7 +1263,7 @@ fn electric_boiler_efficiency_greater_than_one_errors() {
         resolve(&xml),
         "HeatingSystem/AnnualHeatingEfficiency",
         "Electric Boiler",
-        "2",
+        "1.5",
     );
 }
 
@@ -1288,7 +1291,9 @@ fn electric_boiler_efficiency_zero_errors() {
     );
 }
 
-/// Electric Baseboard with out-of-range efficiency value 2.0 must produce InvalidField.
+/// Electric Baseboard with out-of-range efficiency value 150% (normalized to
+/// fraction 1.5) must produce InvalidField — PERCENT values >1.0 are divided
+/// by 100, but 150% → 1.5 exceeds the (0.0, 1.0] efficiency range.
 #[test]
 fn electric_baseboard_efficiency_greater_than_one_errors() {
     let xml = wrap_systems(
@@ -1299,7 +1304,7 @@ fn electric_baseboard_efficiency_greater_than_one_errors() {
               <HeatingSystemFuel>electricity</HeatingSystemFuel>
               <HeatingSystemType><ElectricResistance/></HeatingSystemType>
               <HeatingCapacity>5000</HeatingCapacity>
-              <AnnualHeatingEfficiency><Units>Percent</Units><Value>2.0</Value></AnnualHeatingEfficiency>
+              <AnnualHeatingEfficiency><Units>Percent</Units><Value>150.0</Value></AnnualHeatingEfficiency>
             </HeatingSystem>
           </HVAC>
         </Systems>"#,
@@ -1308,7 +1313,7 @@ fn electric_baseboard_efficiency_greater_than_one_errors() {
         resolve(&xml),
         "HeatingSystem/AnnualHeatingEfficiency",
         "Electric Baseboard",
-        "2",
+        "1.5",
     );
 }
 

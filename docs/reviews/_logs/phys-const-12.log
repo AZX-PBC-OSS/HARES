@@ -1,0 +1,244 @@
+# opencode log for phys-const-12
+# cmd: opencode run ...
+
+[opencode-lmstudio] LM Studio plugin initialized
+[opencode-lmstudio] LM Studio appears to be offline {
+  baseURL: "http://127.0.0.1:1234",
+}
+[opencode-lmstudio] No models discovered - LM Studio might be offline
+[0m
+> build · deepseek-v4-pro
+[0m
+[0m→ [0mRead crates/hares-physics/src/constants.rs
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*.cc"[90m in . · 100 matches[0m
+[0m✱ [0mGlob "vendors/EnergyPlus/src/EnergyPlus/**/*.hh"[90m in . · 100 matches[0m
+[0m✱ [0mGlob "vendors/OCHRE/ochre/**/*.py"[90m in . · 33 matches[0m
+[0m✱ [0mGrep "12_?000.*BTU|ton.*refrig|W_per_ton|watts.*ton|ton.*watt|Convert.*ton|3516|12000"[90m in vendors/EnergyPlus · 159 matches[0m
+[0m✱ [0mGrep "12_?000.*BTU|ton.*refrig|W_per_ton|watts.*ton|ton.*watt|Convert.*ton|3516|12000"[90m in vendors/EnergyPlus · 2 matches[0m
+[0m✱ [0mGrep "ton|refrig|3516|12000"[90m in vendors/OCHRE · 26 matches[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/DataConversions.hh
+[0m→ [0mRead vendors/OCHRE/ochre/utils/units.py
+Now let me search the vendor reference files for their implementations of tons-to-watts conversion.
+[0m✱ [0mGrep "ton.*12000|12000.*ton|ton.*refrig|refrig.*ton"[90m in vendors/EnergyPlus/src · 1 match[0m
+[0m✱ [0mGrep "refrigeration_ton|RatedTotCap.*3516|W.*ton|ton.*W"[90m in vendors/EnergyPlus/src · 99 matches[0m
+[0m✱ [0mGrep "refrigeration_ton"[90m in vendors/OCHRE · 2 matches[0m
+[0m
+[0m$ [0mpython3 -c "
+# Verifying: 1 ton = 12,000 BTU/h -> Watts
+# BTU_IT = 1055.05585262 J (exact per NIST SP 811)
+btu_per_h = 12000
+btu_to_j = 1055.05585262
+seconds_per_hour = 3600
+
+w_per_ton = btu_per_h * btu_to_j / seconds_per_hour
+print(f'12000 * {btu_to_j} / 3600 = {w_per_ton}')
+print(f'Full precision: {w_per_ton:.50f}')
+
+# The HARES constant
+hares_val = 3516.852842066667
+print(f'')
+print(f'HARES constant: {hares_val:.50f}')
+print(f'Difference: {hares_val - w_per_ton:.2e}')
+print(f'')
+
+# What is the nearest f64 to the true value?
+import struct
+def f64_to_bits(x):
+    return struct.unpack('<Q', struct.pack('<d', x))[0]
+
+# What f64 does Rust get from the literal 3516.852842066667?
+import numpy as np  # Let me try without numpy
+# Rust literal parsing uses round-to-nearest-even
+# Let me see what f64 value 3516.852842066667 maps to
+
+true_val = w_per_ton
+hares_val = 3516.852842066667
+
+print(f'True math value:     {true_val:.30f}')
+print(f'HARES source value:  {hares_val:.30f}')
+print(f'Bits(true):  {f64_to_bits(true_val):#018x}')
+print(f'Bits(hares): {f64_to_bits(hares_val):#018x}')
+
+# Check the rounding
+print(f'')
+# What f64 is closest to the true value?
+struct_true = struct.pack('<d', true_val)
+nearest_f64 = struct.unpack('<d', struct_true)[0]
+print(f'Nearest f64 to true: {nearest_f64:.50f}')
+
+# Is hares_val the nearest f64?
+struct_hares = struct.pack('<d', hares_val)
+hares_f64 = struct.unpack('<d', struct_hares)[0]
+print(f'HARES f64 value:     {hares_f64:.50f}')
+print(f'Same? {nearest_f64 == hares_f64}')
+
+# So the HARES value as written (3516.852842066667) is already the nearest f64
+# but is the source literal equal to the nearest f64?
+print(f'')
+print(f'Source literal: 3516.852842066667')
+print(f'As f64 it becomes: {float(3516.852842066667):.50f}')
+"
+
+12000 * 1055.05585262 / 3600 = 3516.8528420666667
+Full precision: 3516.85284206666665340890176594257354736328125000000000
+
+HARES constant: 3516.85284206666710815625265240669250488281250000000000
+Difference: 4.55e-13
+
+True math value:     3516.852842066666653408901765942574
+HARES source value:  3516.852842066667108156252652406693
+Bits(true):  0x40ab79b4a7b721f9
+Bits(hares): 0x40ab79b4a7b721fa
+
+Nearest f64 to true: 3516.85284206666665340890176594257354736328125000000000
+HARES f64 value:     3516.85284206666710815625265240669250488281250000000000
+Same? False
+
+Source literal: 3516.852842066667
+As f64 it becomes: 3516.85284206666710815625265240669250488281250000000000
+[0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/Coils/CoilCoolingDXAshrae205Performance.cc[90m [offset=185, limit=20][0m
+[0m→ [0mRead vendors/EnergyPlus/src/EnergyPlus/DXCoils.cc[90m [offset=15300, limit=30][0m
+Let me check the actual mathematical conversion and EnergyPlus reference values more closely.
+[0m
+[0m$ [0mpython3 -c "
+import struct
+
+# True mathematical value
+true_w_per_ton = 12000 * 1055.05585262 / 3600
+print('=== True mathematical value ===')
+print(f'  {true_w_per_ton:.30f}')
+true_f64 = struct.unpack('<d', struct.pack('<d', true_w_per_ton))[0]
+true_bits = struct.unpack('<Q', struct.pack('<d', true_w_per_ton))[0]
+print(f'  f64: {true_f64:.50f}')
+print(f'  hex: {true_bits:#018x}')
+
+# HARES literal
+hares_literal = 3516.852842066667
+print()
+print('=== HARES literal 3516.852842066667 ===')
+hares_f64 = struct.unpack('<d', struct.pack('<d', hares_literal))[0]
+hares_bits = struct.unpack('<Q', struct.pack('<d', hares_literal))[0]
+print(f'  f64: {hares_f64:.50f}')
+print(f'  hex: {hares_bits:#018x}')
+
+# Correct literal
+correct_literal = 3516.852842066666
+print()
+print('=== Correct literal 3516.852842066666 ===')
+corr_f64 = struct.unpack('<d', struct.pack('<d', correct_literal))[0]
+corr_bits = struct.unpack('<Q', struct.pack('<d', correct_literal))[0]
+print(f'  f64: {corr_f64:.50f}')
+print(f'  hex: {corr_bits:#018x}')
+print(f'  matches true nearest f64: {corr_bits == true_bits}')
+
+# ULP analysis
+print()
+ulp = (true_f64 * 2.0**-52)
+print(f'  1 ULP ≈ {ulp:.2e} W/ton')
+print(f'  Error: {(hares_f64 - true_f64):.2e} W/ton ({abs(hares_f64 - true_f64)/ulp:.1f} ULP)')
+print(f'  Relative error: {abs(hares_f64 - true_f64)/true_f64:.2e}')
+print(f'  For 3-ton (10.55 kW): {3 * (hares_f64 - true_f64):.2e} W error')
+"
+
+=== True mathematical value ===
+  3516.852842066666653408901765942574
+  f64: 3516.85284206666665340890176594257354736328125000000000
+  hex: 0x40ab79b4a7b721f9
+
+=== HARES literal 3516.852842066667 ===
+  f64: 3516.85284206666710815625265240669250488281250000000000
+  hex: 0x40ab79b4a7b721fa
+
+=== Correct literal 3516.852842066666 ===
+  f64: 3516.85284206666619866155087947845458984375000000000000
+  hex: 0x40ab79b4a7b721f8
+  matches true nearest f64: False
+
+  1 ULP ≈ 7.81e-13 W/ton
+  Error: 4.55e-13 W/ton (0.6 ULP)
+  Relative error: 1.29e-16
+  For 3-ton (10.55 kW): 1.36e-12 W error
+[0m
+[0m$ [0mpython3 -c "
+# Check what Pint (used by OCHRE) defines for refrigeration_ton
+# We can simulate what pint would do
+import math
+
+# Pint's default definitions
+# 1 ton_refrigeration = 12000 BTU_IT / hour
+# 1 BTU_IT = 1055.05585262 J
+
+# This is what pint should give
+print('Pint (OCHRE) implied value:')
+print(f'  12000 * 1055.05585262 / 3600 = {12000 * 1055.05585262 / 3600:.50f}')
+
+# EnergyPlus: two reference values found
+print()
+print('EnergyPlus references:')
+print('  CoilCoolingDXAshrae205Performance.cc:193:')
+print(f'    1 / 0.00028 = {1/0.00028:.6f} W/ton (rough approx, ~1.5% high)')
+print()
+print('  RefrigeratedCase.cc:203:')
+print(f'    15 / 0.004266 = {15/0.004266:.6f} W/ton (close to true)')
+"
+
+Pint (OCHRE) implied value:
+  12000 * 1055.05585262 / 3600 = 3516.85284206666665340890176594257354736328125000000000
+
+EnergyPlus references:
+  CoilCoolingDXAshrae205Performance.cc:193:
+    1 / 0.00028 = 3571.428571 W/ton (rough approx, ~1.5% high)
+
+  RefrigeratedCase.cc:203:
+    15 / 0.004266 = 3516.174402 W/ton (close to true)
+[0m
+[0m$ [0mpython3 -c "
+import struct
+
+def f64_from_decimal(s):
+    '''Convert decimal string to f64 bits'''
+    val = float(s)
+    bits = struct.unpack('<Q', struct.pack('<d', val))[0]
+    return bits
+
+# True f64 nearest
+true_bits = f64_from_decimal(str(12000 * 1055.05585262 / 3600))
+print(f'True nearest f64: {true_bits:#018x}')
+
+# Check various candidate literals
+candidates = [
+    '3516.852842066666',
+    '3516.8528420666665',
+    '3516.8528420666666',
+    '3516.8528420666667',
+    '3516.8528420666668',
+    '3516.8528420666669',
+    '3516.852842066667',
+]
+for c in candidates:
+    bits = f64_from_decimal(c)
+    val = float(c)
+    match = 'CORRECT' if bits == true_bits else 'WRONG'
+    print(f'  literal={c:<26} -> hex={bits:#018x}  val={val:.30f}  {match}')
+"
+
+True nearest f64: 0x40ab79b4a7b721f9
+  literal=3516.852842066666          -> hex=0x40ab79b4a7b721f8  val=3516.852842066666198661550879478455  WRONG
+  literal=3516.8528420666665         -> hex=0x40ab79b4a7b721f9  val=3516.852842066666653408901765942574  CORRECT
+  literal=3516.8528420666666         -> hex=0x40ab79b4a7b721f9  val=3516.852842066666653408901765942574  CORRECT
+  literal=3516.8528420666667         -> hex=0x40ab79b4a7b721f9  val=3516.852842066666653408901765942574  CORRECT
+  literal=3516.8528420666668         -> hex=0x40ab79b4a7b721f9  val=3516.852842066666653408901765942574  CORRECT
+  literal=3516.8528420666669         -> hex=0x40ab79b4a7b721fa  val=3516.852842066667108156252652406693  WRONG
+  literal=3516.852842066667          -> hex=0x40ab79b4a7b721fa  val=3516.852842066667108156252652406693  WRONG
+[0m
+[0m$ [0mmkdir -p /Users/rich/source/HARES/docs/reviews/physics-constants
+(no output)
+[0m
+Now I have all the data I need. Let me write the review.
+[0m← [0mWrite docs/reviews/physics-constants/phys-const-12-watts-per-ton-refrigeration.md
+Wrote file successfully.
+[0m
+Review written to `docs/reviews/physics-constants/phys-const-12-watts-per-ton-refrigeration.md`.
+
+**Summary**: 1 low-severity finding — the `W_PER_TON` constant literal `3_516.852_842_066_667` compiles to an f64 1 ULP above the true nearest value. The ASHRAE derivation (12,000 BTU_IT/h) yields 3516.852842066666…, whose nearest f64 is `0x40ab79b4a7b721f9`. The recommended fix is changing the literal to `3_516.852_842_066_666_7`. OCHRE (via Pint) computes this correctly; EnergyPlus has no authoritative constant.
