@@ -744,17 +744,17 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 };
                 let furniture_area = area * fraction;
                 if furniture_area > 0.0 {
-            let lut_name = match zone_type {
-                ZoneType::Conditioned => "Indoor Furniture",
-                ZoneType::Foundation => "Foundation Furniture",
-                ZoneType::Garage => "Garage Furniture",
-                // Unreachable: the FURNITURE_FRACTIONS loop above iterates
-                // exactly Conditioned, Foundation, and Garage — no other
-                // ZoneType variants can appear here.
-                _ => unreachable!(
-                    "FURNITURE_FRACTIONS iterated {zone_type:?} which has no furniture LUT entry"
-                ),
-            };
+                    let lut_name = match zone_type {
+                        ZoneType::Conditioned => "Indoor Furniture",
+                        ZoneType::Foundation => "Foundation Furniture",
+                        ZoneType::Garage => "Garage Furniture",
+                        // Unreachable: the FURNITURE_FRACTIONS loop above iterates
+                        // exactly Conditioned, Foundation, and Garage — no other
+                        // ZoneType variants can appear here.
+                        _ => unreachable!(
+                            "FURNITURE_FRACTIONS iterated {zone_type:?} which has no furniture LUT entry"
+                        ),
+                    };
                     boundaries.push(Boundary {
                         id: format!("{}_furniture", zone_key(zone_type)),
                         boundary_type: BoundaryType::Wall,
@@ -1148,7 +1148,6 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
             tracing::warn!("Unknown boundary type; no tilt inferred");
             None
         }
-    };
     };
 
     let interior_zone = parse_zone_ref(node.child("InteriorAdjacentTo"));
@@ -1584,6 +1583,7 @@ fn extract_construction_metadata(
                 .map(|child| child.name.clone());
             (construction_type, None)
         }
+        BoundaryType::Window | BoundaryType::Door => (None, None),
         BoundaryType::Other(_) => (None, None),
     }
 }

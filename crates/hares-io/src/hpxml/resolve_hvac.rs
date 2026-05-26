@@ -314,7 +314,14 @@ pub fn rebuild_hvac_typed_config(
             try_build_heat_pump_cooler_config(name, params, duct_params, is_mini_split)
         }
         "Dehumidifier" => try_build_dehumidifier_config(name, params),
-        _ => None,
+        other => {
+            tracing::warn!(
+                canonical_name = other,
+                "rebuild_hvac_typed_config called with unrecognized equipment name; \
+                 returning None"
+            );
+            None
+        }
     }
 }
 
@@ -360,7 +367,13 @@ fn compute_duct_config(
         "basement_ins_ceiling" => Ashrae152ZoneType::BasementInsCeiling,
         "under_slab" => Ashrae152ZoneType::UnderSlab,
         "ext_walls" => Ashrae152ZoneType::ExteriorWalls,
-        _ => return DuctConfig::default(),
+        other => {
+            tracing::warn!(
+                duct_zone_type = other,
+                "Unrecognized duct zone type; skipping DSE calculation"
+            );
+            return DuctConfig::default();
+        }
     };
 
     let lat = duct_params.latitude_deg;
@@ -1736,7 +1749,12 @@ pub(super) fn resolve_hvac(
             "Electric Boiler" => try_build_electric_boiler_config(&name, &params)?,
             "Electric Baseboard" => try_build_electric_baseboard_config(&name, &params)?,
             "Ideal HVAC" => try_build_ideal_hvac_config(&name, &params),
-            _ => None,
+            // Unreachable: canonical_hvac_heating_name generates exactly the
+            // six names matched above and rejects all others with Err.
+            _ => unreachable!(
+                "canonical_hvac_heating_name validated '{}' but typed_config match did not cover it",
+                name,
+            ),
         };
         let mut spec = build_spec(name, fuel, params, defaults);
         spec.typed_config = typed_config;
@@ -1825,7 +1843,12 @@ pub(super) fn resolve_hvac(
         let typed_config = match name.as_str() {
             "Air Conditioner" => try_build_central_ac_config(&name, &params, &duct_params),
             "Room AC" => try_build_room_ac_config(&name, &params),
-            _ => None,
+            // Unreachable: canonical_hvac_cooling_name generates exactly the
+            // two names matched above and rejects all others with Err.
+            _ => unreachable!(
+                "canonical_hvac_cooling_name validated '{}' but typed_config match did not cover it",
+                name,
+            ),
         };
         let mut spec = build_spec(name, fuel, params, defaults);
         spec.typed_config = typed_config;
@@ -2473,17 +2496,35 @@ fn compressor_type_to_mode(ct: HpxmlCompressorType) -> &'static str {
 
 fn number_of_speeds_from_mode(mode: &str) -> usize {
     match mode {
+        "single_speed" => 1,
         "two_speed" => 2,
         "variable_speed" => 4,
-        _ => 1,
+        // Unreachable: mode is produced by compressor_type_to_mode which
+        // receives a validated HpxmlCompressorType — only the three arms
+        // above can appear.
+        _ => unreachable!(
+            "compressor_type_to_mode produced unexpected mode '{}'; \
+             HpxmlCompressorType enum should prevent this",
+            mode,
+        ),
     }
 }
 
 fn mode_from_number_of_speeds(n: usize) -> &'static str {
     match n {
+        1 => "single_speed",
         2 => "two_speed",
         4 => "variable_speed",
-        _ => "single_speed",
+        // Unreachable: n_speeds is always 1, 2, or 4 by construction —
+        // either from number_of_speeds_from_mode (which returns 1, 2, or 4)
+        // or from set_speed_fallback (which only sets 1, 2, or 4 based on
+        // SEER/EER thresholds).  Any other integer would originate from
+        // manual parameter injection and is a caller error.
+        _ => unreachable!(
+            "mode_from_number_of_speeds called with unexpected n_speeds={}; \
+             only 1, 2, or 4 are valid",
+            n,
+        ),
     }
 }
 
@@ -2591,7 +2632,17 @@ fn calc_startup_degradation(
                 }
             }
             2 => 0.11,
-            _ => 0.0,
+            // For variable-speed equipment (n_speeds=4), startup degradation
+            // is 0.0: continuous modulation eliminates cycling losses.
+            4 => 0.0,
+            // Unreachable: n_speeds is always 1, 2, or 4 by construction
+            // (validated via compressor_type_to_mode → number_of_speeds_from_mode
+            // or set_speed_fallback with SEER/EER thresholds).
+            _ => unreachable!(
+                "calc_startup_degradation heating called with unexpected n_speeds={}; \
+                 only 1, 2, or 4 are valid",
+                n_speeds,
+            ),
         }
     } else if equipment_name == "room ac" {
         0.22
@@ -2605,7 +2656,13 @@ fn calc_startup_degradation(
                 }
             }
             2 => 0.11,
-            _ => 0.0,
+            4 => 0.0,
+            // Unreachable: same rationale as heating branch above.
+            _ => unreachable!(
+                "calc_startup_degradation cooling called with unexpected n_speeds={}; \
+                 only 1, 2, or 4 are valid",
+                n_speeds,
+            ),
         }
     }
 }
@@ -2914,7 +2971,13 @@ fn select_variants_for_speed_count(
                 1 => name.starts_with("single_"),
                 2 => name.starts_with("double_") || name.starts_with("two_"),
                 4 => name.starts_with("variable_"),
-                _ => false,
+                // Unreachable: n_speeds is always 1, 2, or 4 by construction
+                // (see mode_from_number_of_speeds justification above).
+                _ => unreachable!(
+                    "select_variants_for_speed_count called with unexpected n_speeds={}; \
+                     only 1, 2, or 4 are valid",
+                    n_speeds,
+                ),
             }
         })
         .collect();
