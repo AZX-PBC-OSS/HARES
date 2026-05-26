@@ -32,7 +32,8 @@ use hares_equipment::{
 };
 use hares_types::{
     ControlSignal, CoreCapabilities, CoreOutput, EnvironmentState, EquipmentDescriptor, FuelType,
-    OperatingMode, PortSlots, SurfaceIrradiance, ZoneId, validate_core_contract,
+    OperatingMode, PortSlots, SurfaceIrradiance, ZoneId, telemetry_keys as tk,
+    validate_core_contract,
 };
 
 use common::{default_env, env_with_zone_temp};
@@ -766,6 +767,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
+                    ..Default::default()
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
@@ -820,6 +822,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
+                    ..Default::default()
                 },
                 stage_shrs: None,
                 crankcase_heater_kw: None,
@@ -1485,5 +1488,152 @@ fn pv_capacitive_reactive_output_is_negative_in_core_output() {
     assert!(
         q < 0.0,
         "capacitive setpoint must produce negative core reactive_power_kvar; got {q}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ground-source heat pump pump-power integration tests
+// ---------------------------------------------------------------------------
+
+/// GSHP Heater pump power appears in telemetry and electrical port when the
+/// compressor is active (heating call with zone temp below setpoint).
+#[test]
+fn gshp_heater_pump_power_in_telemetry_and_ports() {
+    let registry = EquipmentRegistry::new();
+    let typed = HeatPumpHeaterConfig {
+        common: HeatPumpCommonConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(8_000.0),
+            heating_eir: Some(3.412_141_633 / 9.0),
+            cooling_capacity_w: Some(8_000.0),
+            cooling_eir: Some(3.412_141_633 / 14.0),
+            shr: Some(0.75),
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            fraction_heating_load_served: Some(1.0),
+            fraction_cooling_load_served: Some(1.0),
+            pump_loop_depth_m: Some(60.0),
+            pump_pipe_diameter_m: Some(0.025),
+            pump_flow_rate_m3_per_s: Some(0.00019),
+            pump_efficiency: Some(0.35),
+            pump_motor_efficiency: Some(0.40),
+            pump_system_head_loss_m: Some(3.0),
+            ..Default::default()
+        },
+        hp_lockout_temp_c: None,
+        er_lockout_temp_c: None,
+        max_oat_supplemental_c: None,
+        er_setpoint_offset_c: None,
+        er_hard_lockout_time_s: None,
+        heating_shr: None,
+        capacity_ratio_at_17f: None,
+        defrost: DefrostConfig::default(),
+    };
+    let mut cfg = EquipmentConfig::from_typed(
+        "Test GSHP Heater".to_string(),
+        "GSHP Heater".to_string(),
+        typed,
+    );
+    cfg.ochre_class = "GSHP Heater".to_string();
+
+    let mut eq = registry
+        .create("GSHP Heater", cfg.clone())
+        .expect("create GSHP Heater");
+    let env = env_with_zone_temp(18.0);
+    eq.init(&cfg, &env).expect("init GSHP Heater");
+
+    eq.apply_control(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(21.0),
+        cooling_setpoint_c: Some(27.0),
+        deadband_c: Some(1.0),
+    })
+    .expect("apply heating setpoint");
+
+    let mut ports = ports_for(eq.as_ref());
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports)
+        .expect("step GSHP Heater");
+
+    let pump_telemetry = eq
+        .telemetry()
+        .get(tk::PUMP_POWER_KW)
+        .expect("PUMP_POWER_KW must be present in telemetry");
+    assert!(
+        pump_telemetry >= 0.04 && pump_telemetry <= 0.12,
+        "GSHP heater pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
+    );
+    assert!(
+        ports.electrical.load_power_kw >= pump_telemetry,
+        "electrical port load ({:.4} kW) must be at least the pump contribution ({pump_telemetry:.4} kW)",
+        ports.electrical.load_power_kw,
+    );
+}
+
+/// GSHP Cooler pump power appears in telemetry and electrical port when the
+/// compressor is active (cooling call with zone temp above setpoint).
+#[test]
+fn gshp_cooler_pump_power_in_telemetry_and_ports() {
+    let registry = EquipmentRegistry::new();
+    let typed = HeatPumpCoolerConfig {
+        common: HeatPumpCommonConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(8_000.0),
+            heating_eir: Some(3.412_141_633 / 9.0),
+            cooling_capacity_w: Some(8_000.0),
+            cooling_eir: Some(3.412_141_633 / 14.0),
+            shr: Some(0.75),
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            fraction_heating_load_served: Some(1.0),
+            fraction_cooling_load_served: Some(1.0),
+            pump_loop_depth_m: Some(60.0),
+            pump_pipe_diameter_m: Some(0.025),
+            pump_flow_rate_m3_per_s: Some(0.00019),
+            pump_efficiency: Some(0.35),
+            pump_motor_efficiency: Some(0.40),
+            pump_system_head_loss_m: Some(3.0),
+            ..Default::default()
+        },
+        stage_shrs: None,
+        crankcase_heater_kw: None,
+        crankcase_heater_threshold_c: None,
+    };
+    let mut cfg = EquipmentConfig::from_typed(
+        "Test GSHP Cooler".to_string(),
+        "GSHP Cooler".to_string(),
+        typed,
+    );
+    cfg.ochre_class = "GSHP Cooler".to_string();
+
+    let mut eq = registry
+        .create("GSHP Cooler", cfg.clone())
+        .expect("create GSHP Cooler");
+    let env = env_with_zone_temp(30.0);
+    eq.init(&cfg, &env).expect("init GSHP Cooler");
+
+    eq.apply_control(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(21.0),
+        cooling_setpoint_c: Some(24.0),
+        deadband_c: Some(1.0),
+    })
+    .expect("apply cooling setpoint");
+
+    let mut ports = ports_for(eq.as_ref());
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports)
+        .expect("step GSHP Cooler");
+
+    let pump_telemetry = eq
+        .telemetry()
+        .get(tk::PUMP_POWER_KW)
+        .expect("PUMP_POWER_KW must be present in telemetry");
+    assert!(
+        pump_telemetry >= 0.04 && pump_telemetry <= 0.12,
+        "GSHP cooler pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
+    );
+    assert!(
+        ports.electrical.load_power_kw >= pump_telemetry,
+        "electrical port load ({:.4} kW) must be at least the pump contribution ({pump_telemetry:.4} kW)",
+        ports.electrical.load_power_kw,
     );
 }

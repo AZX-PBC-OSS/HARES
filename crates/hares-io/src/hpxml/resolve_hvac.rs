@@ -1264,6 +1264,16 @@ fn try_build_heat_pump_heater_config(
                 .map(|v| v as u8)
                 .unwrap_or(1),
             charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
+            pump_loop_depth_m: params.get("pump_loop_depth_m").and_then(Value::as_f64),
+            pump_pipe_diameter_m: params.get("pump_pipe_diameter_m").and_then(Value::as_f64),
+            pump_flow_rate_m3_per_s: params
+                .get("pump_flow_rate_m3_per_s")
+                .and_then(Value::as_f64),
+            pump_efficiency: params.get("pump_efficiency").and_then(Value::as_f64),
+            pump_motor_efficiency: params.get("pump_motor_efficiency").and_then(Value::as_f64),
+            pump_system_head_loss_m: params
+                .get("pump_system_head_loss_m")
+                .and_then(Value::as_f64),
         },
         hp_lockout_temp_c: params.get("hp_lockout_temp_c").and_then(Value::as_f64),
         er_lockout_temp_c: params.get("er_lockout_temp_c").and_then(Value::as_f64),
@@ -1431,6 +1441,16 @@ fn try_build_heat_pump_cooler_config(
                 .map(|v| v as u8)
                 .unwrap_or(1),
             charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
+            pump_loop_depth_m: params.get("pump_loop_depth_m").and_then(Value::as_f64),
+            pump_pipe_diameter_m: params.get("pump_pipe_diameter_m").and_then(Value::as_f64),
+            pump_flow_rate_m3_per_s: params
+                .get("pump_flow_rate_m3_per_s")
+                .and_then(Value::as_f64),
+            pump_efficiency: params.get("pump_efficiency").and_then(Value::as_f64),
+            pump_motor_efficiency: params.get("pump_motor_efficiency").and_then(Value::as_f64),
+            pump_system_head_loss_m: params
+                .get("pump_system_head_loss_m")
+                .and_then(Value::as_f64),
         },
         stage_shrs: extract_stage_values(params, "shr"),
         // Crankcase heater: power (W) from HPXML extension → kW.

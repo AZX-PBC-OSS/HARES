@@ -252,6 +252,7 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
             eir_part_load_benefit: None,
             er_stages: 1,
             charge_defect_ratio: None,
+            ..Default::default()
         },
         hp_lockout_temp_c: None,
         er_lockout_temp_c: None,

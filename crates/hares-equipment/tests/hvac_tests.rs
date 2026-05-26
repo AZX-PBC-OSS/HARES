@@ -266,6 +266,7 @@ fn discrete_defrost_no_phantom_draw_when_compressor_off() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -474,6 +475,7 @@ fn ashp_heating_cop_above_unity() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1096,6 +1098,7 @@ fn ashp_sub_consumption_telemetry() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1244,6 +1247,7 @@ fn ashp_defaults_match_reference() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1335,6 +1339,7 @@ fn ashp_defaults_match_reference() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1431,6 +1436,7 @@ fn mshp_defaults_match_reference() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1560,6 +1566,7 @@ fn bang_bang_single_speed_cycles_within_deadband() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -1988,6 +1995,7 @@ fn defrost_discrete_cycle_starts_in_accumulating() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2092,6 +2100,7 @@ fn defrost_discrete_cycle_transitions_to_defrosting() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2194,6 +2203,7 @@ fn defrost_discrete_cycle_returns_to_accumulating() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2292,6 +2302,7 @@ fn defrost_discrete_peak_power_exceeds_continuous_average() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2407,6 +2418,7 @@ fn heating_latent_always_zero_during_normal_heating() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2499,6 +2511,7 @@ fn heating_latent_nonzero_during_defrost_with_sub1_shr() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2593,6 +2606,7 @@ fn heating_latent_zero_with_default_shr_during_defrost() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2671,6 +2685,7 @@ fn heating_latent_telemetry_key_present() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2750,6 +2765,7 @@ fn heating_sensible_plus_latent_equals_total_thermal_output() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2858,6 +2874,7 @@ fn defrost_accumulating_applies_continuous_multiplier() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2985,6 +3002,7 @@ fn mshp_load_above_stage1_runs_continuously() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -3167,6 +3185,7 @@ fn defrost_typed_config_propagates_to_heater_init() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -4424,6 +4443,7 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: Some(100.0),

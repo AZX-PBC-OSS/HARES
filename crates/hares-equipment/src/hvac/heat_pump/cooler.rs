@@ -7,10 +7,12 @@ use hares_physics::ground::SourceTemperature;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortDeclaration, PortSlots,
+    PortContribution, PortDeclaration, PortSlots, Telemetry,
 };
 
-use crate::{Equipment, EquipmentConfig, Telemetry};
+use hares_types::telemetry_keys as tk;
+
+use crate::{Equipment, EquipmentConfig};
 
 use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig};
 use super::super::air_conditioner::AirConditioner;
@@ -276,6 +278,12 @@ pub struct GshpCooler {
     inner: AirConditioner,
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
+    pump_loop_depth_m: f64,
+    pump_pipe_diameter_m: f64,
+    pump_flow_rate_m3_per_s: f64,
+    pump_efficiency: f64,
+    pump_motor_efficiency: f64,
+    pump_system_head_loss_m: f64,
 }
 
 impl GshpCooler {
@@ -321,6 +329,12 @@ impl GshpCooler {
             },
             ports: inner.ports().to_vec(),
             inner,
+            pump_loop_depth_m: 60.0,
+            pump_pipe_diameter_m: 0.025,
+            pump_flow_rate_m3_per_s: 0.00019,
+            pump_efficiency: 0.35,
+            pump_motor_efficiency: 0.40,
+            pump_system_head_loss_m: 3.0,
         }
     }
 
@@ -427,6 +441,33 @@ impl Equipment for GshpCooler {
         // is None in the mapped config.
         self.inner.core.crankcase_rated_kw = 0.0;
         self.inner.core.crankcase_threshold_c = f64::NEG_INFINITY;
+
+        // Ground-loop circulation pump parameters from typed config.
+        self.pump_loop_depth_m = typed_hp_cfg
+            .common
+            .pump_loop_depth_m
+            .unwrap_or(self.pump_loop_depth_m);
+        self.pump_pipe_diameter_m = typed_hp_cfg
+            .common
+            .pump_pipe_diameter_m
+            .unwrap_or(self.pump_pipe_diameter_m);
+        self.pump_flow_rate_m3_per_s = typed_hp_cfg
+            .common
+            .pump_flow_rate_m3_per_s
+            .unwrap_or(self.pump_flow_rate_m3_per_s);
+        self.pump_efficiency = typed_hp_cfg
+            .common
+            .pump_efficiency
+            .unwrap_or(self.pump_efficiency);
+        self.pump_motor_efficiency = typed_hp_cfg
+            .common
+            .pump_motor_efficiency
+            .unwrap_or(self.pump_motor_efficiency);
+        self.pump_system_head_loss_m = typed_hp_cfg
+            .common
+            .pump_system_head_loss_m
+            .unwrap_or(self.pump_system_head_loss_m);
+
         Ok(())
     }
 
@@ -440,7 +481,35 @@ impl Equipment for GshpCooler {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        self.inner.step(env, dt, ports)
+        self.inner.step(env, dt, ports)?;
+
+        // Ground-loop circulation pump: runs whenever the GSHP compressor is
+        // active. `last_cooling_rtf > 0` means the compressor was on this step.
+        let compressor_ran = self.inner.core.last_cooling_rtf > 0.0;
+        let pump_kw = if compressor_ran {
+            hares_physics::pump::compute_ground_loop_pump_power_kw(
+                self.pump_loop_depth_m,
+                self.pump_pipe_diameter_m,
+                self.pump_flow_rate_m3_per_s,
+                self.pump_efficiency,
+                self.pump_motor_efficiency,
+                self.pump_system_head_loss_m,
+            )
+        } else {
+            0.0
+        };
+
+        if pump_kw > 0.0 {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_kw: pump_kw,
+                reactive_power_kvar: 0.0,
+            })?;
+        }
+
+        // Publish pump power in telemetry.
+        self.inner.set_telemetry(tk::PUMP_POWER_KW, pump_kw);
+
+        Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
@@ -572,6 +641,7 @@ mod tests {
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
+                    ..Default::default()
                 },
                 stage_shrs: None,
                 crankcase_heater_kw: None,

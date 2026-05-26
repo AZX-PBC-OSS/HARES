@@ -1520,6 +1520,7 @@ mod tests {
                         eir_part_load_benefit: None,
                         er_stages: 1,
                         charge_defect_ratio: None,
+                        ..Default::default()
                     },
                     stage_shrs: None,
                     crankcase_heater_kw: None,

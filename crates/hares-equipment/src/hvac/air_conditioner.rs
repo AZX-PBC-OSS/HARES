@@ -180,6 +180,14 @@ impl AirConditioner {
         )
     }
 
+    /// Set a numeric telemetry key on the inner cooling core.
+    ///
+    /// Used by `GshpCooler` to publish pump power telemetry after the
+    /// inner step has completed.
+    pub(super) fn set_telemetry(&mut self, key: &str, value: f64) {
+        self.core.telemetry.set(key, value);
+    }
+
     /// Override crankcase heater parameters after `init()`.
     /// Used by `HpCooler::mshp_cooler` to apply MSHP-specific defaults
     /// (15 W / 0 °C) when the user did not supply explicit config keys.

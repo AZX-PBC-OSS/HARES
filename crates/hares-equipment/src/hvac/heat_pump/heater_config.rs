@@ -34,6 +34,7 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::BACKUP_ER_KW, 0.0);
     telemetry.insert(tk::PAN_HEATER_KW, 0.0);
+    telemetry.insert(tk::PUMP_POWER_KW, 0.0);
     telemetry.insert(tk::HP_CAPACITY_W, 0.0);
     telemetry.insert(tk::ER_CAPACITY_W, 0.0);
     telemetry.insert(tk::HP_LOCKOUT_TEMP_C, 0.0);
@@ -181,6 +182,13 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::PAN_HEATER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Minisplit pan/crankcase heater power".to_string(),
+        },
+        TelemetryField {
+            name: tk::PUMP_POWER_KW.to_string(),
+            unit: "kW".to_string(),
+            description:
+                "Ground-loop circulation pump electrical power (GSHP only; zero for air-source)"
+                    .to_string(),
         },
         TelemetryField {
             name: tk::HP_CAPACITY_W.to_string(),

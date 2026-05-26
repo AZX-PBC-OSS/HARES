@@ -116,6 +116,39 @@ pub struct HeatPumpCommonConfig {
     /// Correction factors: ANSI/RESNET/ACCA 310-2020.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charge_defect_ratio: Option<f64>,
+
+    // ── Ground-loop circulation pump (GSHP only) ───
+    /// Vertical borehole loop depth [m]. Default 60 m (≈200 ft), typical for
+    /// residential vertical ground loops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pump_loop_depth_m: Option<f64>,
+    /// Inner diameter of the HDPE U-bend pipe [m]. Default 0.025 m (1″ nominal
+    /// SDR11 pipe, ≈ 0.027 m OD, ≈ 0.022 m ID — HARES default rounds to 0.025).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pump_pipe_diameter_m: Option<f64>,
+    /// Design volumetric flow rate through the circulation loop [m³/s].
+    /// Default 0.00019 m³/s (≈3 US GPM per borehole), sized for a single
+    /// borehole at 3 GPM/ton for a 1‑ton system. Scale for multi‑ton or
+    /// multi‑borehole installations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pump_flow_rate_m3_per_s: Option<f64>,
+    /// Hydraulic‑to‑shaft efficiency of the circulator pump [-].
+    /// Default 0.35, typical for small wet‑rotor circulators at design point.
+    /// Combined wire‑to‑water efficiency = `pump_efficiency * pump_motor_efficiency`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pump_efficiency: Option<f64>,
+    /// Electrical‑to‑shaft efficiency of the pump motor [-].
+    /// Default 0.40, typical for PSC fractional‑HP motors. ECM motors reach
+    /// 0.70–0.85; set accordingly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pump_motor_efficiency: Option<f64>,
+    /// Additional head loss beyond the borehole loop [m], covering the
+    /// water‑to‑refrigerant heat exchanger, distribution headers, isolation
+    /// valves, and strainer. Default 3.0 m for a typical residential 4‑ton
+    /// brazed‑plate HX per ASHRAE HVAC Systems & Equipment 2020 Ch.9 Table 7.
+    /// Set to 0.0 for borehole‑loop‑only head loss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pump_system_head_loss_m: Option<f64>,
 }
 
 impl Default for HeatPumpCommonConfig {
@@ -160,6 +193,12 @@ impl Default for HeatPumpCommonConfig {
             eir_part_load_benefit: None,
             er_stages: 1,
             charge_defect_ratio: None,
+            pump_loop_depth_m: None,
+            pump_pipe_diameter_m: None,
+            pump_flow_rate_m3_per_s: None,
+            pump_efficiency: None,
+            pump_motor_efficiency: None,
+            pump_system_head_loss_m: None,
         }
     }
 }
@@ -593,6 +632,7 @@ mod tests {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: Some(-17.8),
             er_lockout_temp_c: Some(4.4),
@@ -796,6 +836,7 @@ mod tests {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: Some(-17.8),
             er_lockout_temp_c: Some(4.4),

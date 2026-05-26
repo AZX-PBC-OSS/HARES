@@ -182,6 +182,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
+                    ..Default::default()
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
@@ -278,6 +279,7 @@ fn hp_cooler_cfg(
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             stage_shrs: None,
             crankcase_heater_kw: None,
@@ -1878,6 +1880,7 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: Some(10.0),
             er_lockout_temp_c: Some(5.0),

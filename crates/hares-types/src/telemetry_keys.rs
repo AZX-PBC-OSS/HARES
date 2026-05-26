@@ -169,6 +169,7 @@ pub const BACKUP_CAPACITY_W: &str = "backup_capacity_w";
 pub const BACKUP_EIR: &str = "backup_eir";
 pub const ER_STAGES_ON: &str = "er_stages_on";
 pub const MIN_COMPRESSOR_FRACTION: &str = "min_compressor_fraction";
+pub const PUMP_POWER_KW: &str = "pump_power_kw";
 
 // ── Water heater ────────────────────────────────────────────────────────────
 pub const ELEMENT_KW: &str = "element_kw";

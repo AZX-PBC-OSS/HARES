@@ -152,6 +152,14 @@ struct HeatPumpHeaterCore {
     /// positive latent gain from indoor-coil surface moisture.
     heating_shr: f64,
 
+    // --- Ground-loop circulation pump (GSHP only) ---
+    pump_loop_depth_m: f64,
+    pump_pipe_diameter_m: f64,
+    pump_flow_rate_m3_per_s: f64,
+    pump_efficiency: f64,
+    pump_motor_efficiency: f64,
+    pump_system_head_loss_m: f64,
+
     // --- Ideal capacity (solver-driven) ---
     use_ideal: bool,
     ideal_capacity_w: f64,
@@ -275,6 +283,9 @@ struct HeaterStep {
     /// Latent gain to zone [W]. Zero during normal heating; positive during
     /// reverse-cycle defrost when heating_shr < 1.0 (indoor-coil surface moisture).
     latent_gain_w: f64,
+    /// Ground-loop circulation pump electrical power [kW]. GSHP only; zero
+    /// for air-source equipment.
+    pump_kw: f64,
 }
 
 impl ASHPHeater {
@@ -514,6 +525,36 @@ impl HeatPumpHeaterCore {
             soft_lockout_elapsed_s: 0.0,
             last_heating_rtf: 0.0,
             heating_shr: 1.0,
+            pump_loop_depth_m: if matches!(variant, HeaterVariant::Gshp) {
+                60.0
+            } else {
+                0.0
+            },
+            pump_pipe_diameter_m: if matches!(variant, HeaterVariant::Gshp) {
+                0.025
+            } else {
+                0.0
+            },
+            pump_flow_rate_m3_per_s: if matches!(variant, HeaterVariant::Gshp) {
+                0.00019
+            } else {
+                0.0
+            },
+            pump_efficiency: if matches!(variant, HeaterVariant::Gshp) {
+                0.35
+            } else {
+                0.0
+            },
+            pump_motor_efficiency: if matches!(variant, HeaterVariant::Gshp) {
+                0.40
+            } else {
+                0.0
+            },
+            pump_system_head_loss_m: if matches!(variant, HeaterVariant::Gshp) {
+                3.0
+            } else {
+                0.0
+            },
             use_ideal: false,
             ideal_capacity_w: 0.0,
             ctrl_duty_cycle: 1.0,
@@ -817,6 +858,30 @@ impl HeatPumpHeaterCore {
         );
 
         self.heating_shr = cfg.heating_shr.unwrap_or(1.0);
+
+        if matches!(self.variant, HeaterVariant::Gshp) {
+            self.pump_loop_depth_m = cfg
+                .common
+                .pump_loop_depth_m
+                .unwrap_or(self.pump_loop_depth_m);
+            self.pump_pipe_diameter_m = cfg
+                .common
+                .pump_pipe_diameter_m
+                .unwrap_or(self.pump_pipe_diameter_m);
+            self.pump_flow_rate_m3_per_s = cfg
+                .common
+                .pump_flow_rate_m3_per_s
+                .unwrap_or(self.pump_flow_rate_m3_per_s);
+            self.pump_efficiency = cfg.common.pump_efficiency.unwrap_or(self.pump_efficiency);
+            self.pump_motor_efficiency = cfg
+                .common
+                .pump_motor_efficiency
+                .unwrap_or(self.pump_motor_efficiency);
+            self.pump_system_head_loss_m = cfg
+                .common
+                .pump_system_head_loss_m
+                .unwrap_or(self.pump_system_head_loss_m);
+        }
 
         if !matches!(self.variant, HeaterVariant::Gshp)
             || cfg.defrost.control != DefrostControl::OnDemand
@@ -1157,6 +1222,10 @@ impl HeatPumpHeaterCore {
         }
         self.telemetry
             .set(tk::FAN_KW, step.fan_kw * self.hvac.config.space_fraction);
+        self.telemetry.set(
+            tk::PUMP_POWER_KW,
+            step.pump_kw * self.hvac.config.space_fraction,
+        );
         self.telemetry.set(
             tk::BACKUP_ER_KW,
             step.backup_er_kw * self.hvac.config.space_fraction,
@@ -1696,6 +1765,30 @@ impl HeatPumpHeaterCore {
             latent_gain_w = step_hp_capacity_w * (1.0 - self.heating_shr) * defrost_time_fraction;
         }
 
+        // Ground-loop circulation pump: runs whenever the GSHP compressor is
+        // active (heating or reverse-cycle defrost). Not scaled by effective_load
+        // (duty cycle / load fraction) or ctrl_power_limit_kw because residential
+        // circulators are switched by the compressor contactor / flow switch and
+        // run at rated power during the call — not modulated by PLR. This models
+        // the pump as binary (on when hp_on, off otherwise). The consequence: at
+        // part-load (effective_load < 1.0, e.g. compressor cycling at 50% PLR),
+        // the compressor kW is scaled but the full pump kW is reported, so the
+        // time-averaged pump energy is not scaled to match compressor PLR.
+        // space_fraction is applied in step() to the combined electric_kw.
+        let pump_kw = if matches!(self.variant, HeaterVariant::Gshp) && hp_on {
+            hares_physics::pump::compute_ground_loop_pump_power_kw(
+                self.pump_loop_depth_m,
+                self.pump_pipe_diameter_m,
+                self.pump_flow_rate_m3_per_s,
+                self.pump_efficiency,
+                self.pump_motor_efficiency,
+                self.pump_system_head_loss_m,
+            )
+        } else {
+            0.0
+        };
+        electric_kw += pump_kw;
+
         Ok(HeaterStep {
             thermal_output_w,
             electric_kw,
@@ -1715,6 +1808,7 @@ impl HeatPumpHeaterCore {
             cap_ratio,
             eir_ratio,
             latent_gain_w,
+            pump_kw: pump_kw.max(0.0),
         })
     }
 
@@ -2277,6 +2371,7 @@ mod tests {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -2337,6 +2432,7 @@ mod tests {
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
+                ..Default::default()
             },
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
@@ -5898,6 +5994,7 @@ mod tests {
                     min_compressor_fraction: 0.25,
                     eir_part_load_benefit: None,
                     er_stages: 1,
+                    ..Default::default()
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
@@ -6117,6 +6214,7 @@ mod ideal_capacity_tests {
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
+                    ..Default::default()
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: None,
@@ -6319,6 +6417,7 @@ mod ideal_capacity_tests {
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
+                    ..Default::default()
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: Some(10.0),
@@ -6479,6 +6578,7 @@ mod ideal_capacity_tests {
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
+                    ..Default::default()
                 },
                 hp_lockout_temp_c: Some(10.0),
                 er_lockout_temp_c: Some(5.0),
@@ -6582,6 +6682,7 @@ mod ideal_capacity_tests {
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
+                    ..Default::default()
                 },
                 hp_lockout_temp_c: None,
                 er_lockout_temp_c: Some(5.0),

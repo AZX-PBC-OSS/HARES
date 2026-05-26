@@ -8,6 +8,7 @@ pub mod film_coefficients;
 pub mod ground;
 pub mod infiltration;
 pub mod psychrometrics;
+pub mod pump;
 pub mod pv_sizing;
 pub mod solar;
 pub mod units;
