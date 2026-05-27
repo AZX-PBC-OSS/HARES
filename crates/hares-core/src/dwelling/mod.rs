@@ -53,6 +53,7 @@ use crate::checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
 use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 use crate::invariants::InvariantChecker;
+use crate::scheduler::{ActorSlot, ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
 use crate::{Actor, EnvironmentManager, SimClock, derive_dwelling_rng};
 
@@ -739,8 +740,14 @@ pub struct Dwelling {
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     prev_humidity_ratios: Vec<(ZoneId, f64)>,
     /// Actor decision-makers that emit control signals each timestep.
-    /// Actors execute in registration order. Signals are dispatched by PriorityTier.
+    /// Actors execute in the order determined by the scheduler plan
+    /// (phase ordinal, then within-phase priority, then registration order).
+    /// Signals are dispatched by PriorityTier.
     actors: Vec<Box<dyn Actor>>,
+    /// Per-timestep actor execution plan. Actors register for phases and
+    /// the scheduler builds a deterministic execution order. The plan is
+    /// rebuilt when actors are added or removed.
+    scheduler: StepScheduler,
     /// Names of actors that were auto-registered from equipment seeds.
     /// Used to evict stale built-in actors when set_tariff() triggers rebuild.
     auto_registered_actor_names: HashSet<String>,
@@ -1330,6 +1337,7 @@ impl Dwelling {
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             prev_humidity_ratios: init_humidity_ratios,
             actors: Vec::new(),
+            scheduler: StepScheduler::default(),
             actor_column_map: Vec::new(),
             auto_registered_actor_names: HashSet::new(),
             actor_dispatch_buf: Vec::with_capacity(16),
@@ -1521,6 +1529,7 @@ impl Dwelling {
         #[cfg(feature = "actor_profiling")]
         self.actor_name_cache.push(actor.name().to_string());
         self.actors.push(actor);
+        self.rebuild_schedule();
         self.refresh_equipment_caches();
     }
 
@@ -1536,6 +1545,7 @@ impl Dwelling {
     ) -> Result<()> {
         let actor = registry.create(config)?;
         self.actors.push(actor);
+        self.rebuild_schedule();
         self.refresh_equipment_caches();
         Ok(())
     }
@@ -1544,6 +1554,33 @@ impl Dwelling {
     #[must_use]
     pub fn actor_count(&self) -> usize {
         self.actors.len()
+    }
+
+    /// Rebuilds the actor execution plan from current actor registrations.
+    ///
+    /// Auto-registered actors (BMS, EV driver) receive priority 0 within
+    /// [`ExecutionPhase::ActorDecide`]; user-added actors receive priority 10.
+    /// The solver feedback actor is registered in
+    /// [`ExecutionPhase::SolverFeedback`] to run before all others.
+    fn rebuild_schedule(&mut self) {
+        self.scheduler.clear();
+        self.scheduler.register_solver_feedback();
+        // Auto-registered actor names (built from equipment seeds) get
+        // priority 0, user-added actors get priority 10. This preserves the
+        // current behaviour where built-in actors run before user actors.
+        for (i, actor) in self.actors.iter().enumerate() {
+            let priority = if self.auto_registered_actor_names.contains(actor.name()) {
+                0
+            } else {
+                10
+            };
+            self.scheduler.register_actor(
+                ActorSlot(i),
+                ExecutionPhase::ActorDecide,
+                priority,
+                actor.name(),
+            );
+        }
     }
 
     /// Auto-register built-in BMS and EV actors based on equipment configuration.
@@ -1599,6 +1636,7 @@ impl Dwelling {
             self.actor_name_cache
                 .extend(self.actors.iter().map(|a| a.name().to_string()));
         }
+        self.rebuild_schedule();
         self.refresh_equipment_caches();
     }
 }
@@ -2444,33 +2482,99 @@ impl Dwelling {
         self.thermal_solver
             .prepare_inputs(&self.ports, &self.latest_env);
 
-        // Step 1e: solver feedback actor collects ideal targets and solves for capacities.
-        self.solver_feedback_actor
-            .collect_and_solve(&self.equipment, &mut self.thermal_solver);
+        // Steps 1e–1f: phase-ordered actor execution driven by the scheduler.
+        // The scheduler plan replaces the previously hard-coded
+        // "solver feedback first, then all actors in registration order"
+        // with explicit phase registration and within-phase priority ordering.
+        #[expect(
+            unused_must_use,
+            reason = "plan is accessed via .plan() below; build() ensures freshness"
+        )]
+        self.scheduler.build();
 
-        // Step 1f: actors decide and queue control signals (registration order, last write wins).
-        self.actor_dispatch_buf.clear();
-        self.solver_feedback_actor
-            .decide(&self.latest_env, &mut self.actor_dispatch_buf);
-        for req in self.actor_dispatch_buf.drain(..) {
-            self.control_dispatcher.queue(req);
-        }
+        #[cfg(feature = "observe")]
+        let mut scheduled_phases: Vec<String> = Vec::new();
+        #[cfg(debug_assertions)]
+        let mut executed_actors: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         #[cfg(feature = "actor_profiling")]
         {
             self.per_actor_timing.clear();
             self.per_actor_timing.reserve(self.actors.len());
-            for (i, actor) in self.actors.iter_mut().enumerate() {
-                let start = Instant::now();
-                actor.decide(&self.latest_env, &mut self.actor_dispatch_buf);
-                self.per_actor_timing.push((i, start.elapsed()));
+        }
+
+        self.actor_dispatch_buf.clear();
+        for entry in self.scheduler.plan() {
+            match entry.phase {
+                ExecutionPhase::SolverFeedback => {
+                    #[cfg(feature = "observe")]
+                    scheduled_phases.push("SolverFeedback".to_string());
+
+                    // Step 1e: collect ideal targets and solve capacities.
+                    self.solver_feedback_actor
+                        .collect_and_solve(&self.equipment, &mut self.thermal_solver);
+                    // Step 1f: decide and queue solver feedback signals.
+                    self.solver_feedback_actor
+                        .decide(&self.latest_env, &mut self.actor_dispatch_buf);
+                    for req in self.actor_dispatch_buf.drain(..) {
+                        self.control_dispatcher.queue(req);
+                    }
+                }
+                ExecutionPhase::ActorDecide => {
+                    let idx = entry
+                        .slot
+                        .expect("ActorDecide plan entries must carry a slot")
+                        .0;
+
+                    #[cfg(feature = "observe")]
+                    scheduled_phases.push(format!("ActorDecide({})", entry.name));
+                    #[cfg(debug_assertions)]
+                    {
+                        executed_actors.insert(idx);
+                    }
+
+                    #[cfg(feature = "actor_profiling")]
+                    let start = Instant::now();
+
+                    self.actors[idx].decide(&self.latest_env, &mut self.actor_dispatch_buf);
+
+                    #[cfg(feature = "actor_profiling")]
+                    self.per_actor_timing.push((idx, start.elapsed()));
+                }
             }
         }
-        #[cfg(not(feature = "actor_profiling"))]
-        for actor in &mut self.actors {
-            actor.decide(&self.latest_env, &mut self.actor_dispatch_buf);
-        }
+        // Drain dispatch from all ActorDecide entries.
         for req in self.actor_dispatch_buf.drain(..) {
             self.control_dispatcher.queue(req);
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            // Invariant: every actor in the vector that registered for a phase
+            // must have executed during the plan iteration.
+            for (i, actor) in self.actors.iter().enumerate() {
+                let registered = self
+                    .scheduler
+                    .plan()
+                    .iter()
+                    .any(|e| e.slot == Some(ActorSlot(i)));
+                if registered && !executed_actors.contains(&i) {
+                    tracing::warn!(
+                        actor_name = actor.name(),
+                        actor_index = i,
+                        "actor registered for execution but did not execute in this timestep"
+                    );
+                }
+            }
+        }
+
+        #[cfg(feature = "observe")]
+        if self.observer_buf.is_some() {
+            tracing::debug!(
+                phase_count = scheduled_phases.len(),
+                phases = ?scheduled_phases,
+                "scheduler phases executed"
+            );
         }
 
         // Step 2: dispatch all actor-generated control signals. The priority
