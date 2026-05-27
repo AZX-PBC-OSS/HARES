@@ -505,6 +505,13 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .map(|n| n.text.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    if let Some(ref facility_type) = residential_facility_type {
+        tracing::info!(
+            facility_type = %facility_type,
+            "parsed residential facility type from HPXML BuildingConstruction"
+        );
+    }
+
     // InfiltrationHeight lives under AirInfiltrationMeasurement -- HPXML stores it in feet.
     let infiltration_height_m = details
         .first_descendant("InfiltrationHeight")
@@ -922,6 +929,34 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 "boundary '{}' exterior_zone is Adjacent after rewrite stage",
                 bd.id
             );
+        }
+
+        // Detect multifamily building types where the zone adjacency logic
+        // produces only a single conditioned zone. HARES models each HPXML
+        // file as a single dwelling unit — the correct interpretation of the
+        // HPXML spec, which represents one unit per file. Multi-unit fleet
+        // simulation composes multiple files at the orchestration layer, not
+        // within a single building parse.
+        if let Some(ref facility_type) = residential_facility_type {
+            let is_multifamily = {
+                let lower = facility_type.to_ascii_lowercase();
+                lower.contains("apartment") || lower.contains("multifamily")
+            };
+            if is_multifamily {
+                let conditioned_zone_count = zones_vec
+                    .iter()
+                    .filter(|z| z.zone_type == ZoneType::Conditioned)
+                    .count();
+                if conditioned_zone_count <= 1 {
+                    tracing::warn!(
+                        facility_type = %facility_type,
+                        conditioned_zone_count = conditioned_zone_count,
+                        "multifamily building parsed as single conditioned zone; \
+                         HPXML represents one dwelling per file — multi-unit fleet \
+                         simulation composes multiple files at the orchestration layer"
+                    );
+                }
+            }
         }
     }
 

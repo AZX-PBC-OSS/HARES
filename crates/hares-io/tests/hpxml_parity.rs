@@ -22,7 +22,7 @@ use hares_equipment::{
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
 use hares_io::defaults::DefaultsStore;
-use hares_io::hpxml::building::parse_building;
+use hares_io::hpxml::building::{ZoneType, parse_building};
 use hares_io::hpxml::equipment::resolve_equipment;
 use hares_types::telemetry_keys as tk;
 use hares_types::{
@@ -1986,5 +1986,157 @@ fn multi_wh_fixture_parses_reasonably_overall() {
     assert!(
         !water_heating_err,
         "error spec 'Water Heating' should not be emitted for this fixture"
+    );
+}
+
+// ===========================================================================
+// Multifamily building type tests (T-0020)
+// ===========================================================================
+
+/// The simplest multifamily fixture must report `residential_facility_type`
+/// as "apartment unit", not "single-family detached".
+#[test]
+fn multifamily_fixture_identifies_as_apartment_unit_not_single_family() {
+    let xml = ochre_fixture_xml("base-bldgtype-multifamily.xml");
+    let building = parse_building(&xml).expect("multifamily fixture should parse");
+
+    assert_eq!(
+        building.residential_facility_type.as_deref(),
+        Some("apartment unit"),
+        "multifamily fixture must have residential_facility_type = 'apartment unit'"
+    );
+
+    let not_single_family = building
+        .residential_facility_type
+        .as_deref()
+        .map_or(true, |t| t != "single-family detached");
+    assert!(
+        not_single_family,
+        "multifamily fixture must not identify as single-family detached"
+    );
+}
+
+/// The shared boiler multifamily fixture must parse and resolve equipment
+/// without error. The boiler system has `IsSharedSystem=true`.
+#[test]
+fn multifamily_shared_boiler_fixture_resolves_equipment() {
+    let xml = ochre_fixture_xml("base-bldgtype-multifamily-shared-boiler-only-baseboard.xml");
+    let building = parse_building(&xml).expect("shared boiler fixture should parse");
+
+    assert_eq!(
+        building.residential_facility_type.as_deref(),
+        Some("apartment unit"),
+        "shared boiler fixture must have residential_facility_type = 'apartment unit'"
+    );
+
+    let defaults = repo_defaults();
+    let specs = resolve_equipment(&building, &defaults, &json!({}))
+        .expect("shared boiler fixture should resolve equipment");
+
+    let gas_boiler = specs
+        .iter()
+        .find(|s| s.name == "Gas Boiler")
+        .expect("shared boiler fixture should emit a Gas Boiler");
+    assert_eq!(
+        gas_boiler.fuel_type,
+        FuelType::Gas,
+        "shared boiler should have natural gas fuel"
+    );
+
+    // The shared boiler fixture omits HeatingCapacity, so typed_config
+    // is None (autosize_heating is set). The resolver succeeds without error.
+    if let Some(typed_cfg) = gas_boiler.typed_config.as_ref() {
+        let cfg: GasBoilerConfig = typed_cfg.typed().expect("GasBoilerConfig");
+        assert!(
+            (cfg.afue - 0.92).abs() < 1e-12,
+            "shared boiler AFUE should be 0.92, got {:.4}",
+            cfg.afue
+        );
+    } else {
+        // No HeatingCapacity → autosize_heating flag is set → typed_config deferred.
+        // This is expected for the shared boiler fixture.
+    }
+
+    let electric_wh = specs
+        .iter()
+        .find(|s| s.name == "Electric Resistance Water Heater")
+        .expect("shared boiler fixture should also have a water heater");
+    assert_eq!(
+        electric_wh.fuel_type,
+        FuelType::Electric,
+        "shared boiler fixture water heater should be electric"
+    );
+}
+
+/// Multifamily fixtures with "other housing unit" walls must not produce
+/// false exterior adjacency. The `ExteriorAdjacentTo="other housing unit"`
+/// label is rewritten to `ZoneType::Adjacent`, which is then rewritten to
+/// same-zone adiabatic boundaries (Conditioned→Conditioned).
+#[test]
+fn multifamily_fixture_zone_adjacent_to_other_housing_unit_is_adiabatic() {
+    let xml = ochre_fixture_xml("base-bldgtype-multifamily.xml");
+    let building = parse_building(&xml).expect("multifamily fixture should parse");
+
+    // The fixture has Wall2 with ExteriorAdjacentTo="other housing unit".
+    // This boundary must be present and must NOT have an exterior zone.
+    let wall2 = building
+        .boundaries
+        .iter()
+        .find(|bd| bd.id.contains("Wall2"))
+        .expect("Wall2 (other housing unit wall) should be present");
+
+    // After rewriting, the "other housing unit" adjacency becomes a
+    // Conditioned→Conditioned internal boundary (adiabatic).
+    assert_eq!(
+        wall2.interior_zone,
+        Some(ZoneType::Conditioned),
+        "Wall2 interior must be Conditioned"
+    );
+    assert_eq!(
+        wall2.exterior_zone,
+        Some(ZoneType::Conditioned),
+        "Wall2 exterior must be Conditioned (adiabatic to adjacent unit)"
+    );
+
+    // No boundary should have ZoneType::Adjacent surviving the rewrite.
+    for bd in &building.boundaries {
+        assert!(
+            !matches!(bd.interior_zone, Some(ZoneType::Adjacent)),
+            "boundary '{}' has unresolved Adjacent interior_zone",
+            bd.id
+        );
+        assert!(
+            !matches!(bd.exterior_zone, Some(ZoneType::Adjacent)),
+            "boundary '{}' has unresolved Adjacent exterior_zone",
+            bd.id
+        );
+    }
+}
+
+/// The multifamily fixture with "other housing unit" walls must produce
+/// exactly one conditioned zone — HARES currently models the entire unit
+/// as a single thermal zone.
+#[test]
+fn multifamily_fixture_produces_single_conditioned_zone() {
+    let xml = ochre_fixture_xml("base-bldgtype-multifamily.xml");
+    let building = parse_building(&xml).expect("multifamily fixture should parse");
+
+    let conditioned_zones: Vec<_> = building
+        .zones
+        .iter()
+        .filter(|z| z.zone_type == ZoneType::Conditioned)
+        .collect();
+
+    assert_eq!(
+        conditioned_zones.len(),
+        1,
+        "multifamily fixture should produce exactly 1 conditioned zone, got {}",
+        conditioned_zones.len()
+    );
+
+    let zone = &conditioned_zones[0];
+    assert!(
+        zone.floor_area_m2.is_some(),
+        "conditioned zone should have floor area"
     );
 }

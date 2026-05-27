@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use hares_io::hpxml::building::parse_xml_document;
+use hares_io::hpxml::building::{parse_building, parse_xml_document};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/hpxml/ochre_samples")
@@ -23,6 +23,8 @@ fn curated_fixture_files_exist() {
         "base-misc-loads-large-uncommon.xml",
         "base-hvac-multiple.xml",
         "base-dhw-multiple.xml",
+        "base-bldgtype-multifamily.xml",
+        "base-bldgtype-multifamily-shared-boiler-only-baseboard.xml",
     ];
 
     for file in expected {
@@ -46,6 +48,8 @@ fn curated_fixtures_are_well_formed_hpxml_v4() {
         "base-misc-loads-large-uncommon.xml",
         "base-hvac-multiple.xml",
         "base-dhw-multiple.xml",
+        "base-bldgtype-multifamily.xml",
+        "base-bldgtype-multifamily-shared-boiler-only-baseboard.xml",
     ];
 
     for file in files {
@@ -122,5 +126,42 @@ fn curated_set_contains_der_and_end_use_coverage() {
     assert_eq!(
         wh_count, 6,
         "base-dhw-multiple.xml must contain exactly 6 WaterHeatingSystem entries, found {wh_count}"
+    );
+}
+
+#[test]
+fn multifamily_fixtures_identify_as_apartment_unit() {
+    let root = fixture_root();
+
+    let fixture = "base-bldgtype-multifamily.xml";
+    let xml = fs::read_to_string(root.join(fixture)).expect("multifamily fixture should load");
+    let building = parse_building(&xml).expect("multifamily fixture should parse");
+    assert_eq!(
+        building.residential_facility_type.as_deref(),
+        Some("apartment unit"),
+        "multifamily fixture must have residential_facility_type = 'apartment unit'"
+    );
+}
+
+#[test]
+fn multifamily_shared_boiler_fixture_parses_without_error() {
+    let root = fixture_root();
+
+    let fixture = "base-bldgtype-multifamily-shared-boiler-only-baseboard.xml";
+    let xml = fs::read_to_string(root.join(fixture))
+        .expect("multifamily shared boiler fixture should load");
+    let building =
+        parse_building(&xml).expect("multifamily shared boiler fixture should parse without error");
+
+    assert_eq!(
+        building.residential_facility_type.as_deref(),
+        Some("apartment unit"),
+        "multifamily shared boiler fixture must have residential_facility_type = 'apartment unit'"
+    );
+
+    let has_shared_boiler = xml.contains("<IsSharedSystem>true</IsSharedSystem>");
+    assert!(
+        has_shared_boiler,
+        "shared boiler fixture must contain <IsSharedSystem>true</IsSharedSystem>"
     );
 }
