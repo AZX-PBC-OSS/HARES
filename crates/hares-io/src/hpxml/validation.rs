@@ -67,6 +67,16 @@ impl ValidationReport {
     }
 }
 
+/// Returns true when `value` looks like a namespace URI (starts with `http://` or
+/// `https://`) and does *not* belong to HPXML (`hpxmlonline.com`) or well-known
+/// XML infrastructure namespaces (`w3.org`).
+fn looks_like_namespace_uri(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    (lower.starts_with("http://") || lower.starts_with("https://"))
+        && !lower.contains("hpxmlonline.com")
+        && !lower.contains("w3.org")
+}
+
 /// Structural completeness check for HPXML documents (string input).
 ///
 /// Accepts HPXML 3.x (with warning) and 4.x (silently). Rejects major
@@ -158,6 +168,72 @@ pub fn validate_hpxml_schema_node(
             "xmlns",
             format!("unexpected HPXML namespace `{xmlns}`"),
         ));
+    }
+
+    // Detect non-HPXML namespace URIs declared on the root element.
+    //
+    // The XML parser normalizes attribute keys by stripping the namespace prefix
+    // (e.g. `xmlns:bsync` → `bsync`).  To detect foreign namespace declarations
+    // reliably, we scan all attribute *values* for URI-looking values that do not
+    // belong to HPXML, XML Schema, or XSI — the canonical small set of root-level
+    // namespace attributes.
+    let non_hpxml_namespaces: Vec<String> = root
+        .attrs
+        .iter()
+        .filter(|(k, v)| {
+            // The default `xmlns` key is never stripped; all other namespace
+            // declarations have their prefix-stripped key.  We exclude the
+            // HPXML namespace URI and well-known XML infrastructure URIs.
+            *k != "xmlns" && looks_like_namespace_uri(v)
+        })
+        .map(|(_, v)| v.clone())
+        .collect();
+
+    #[cfg(feature = "observe")]
+    {
+        if !non_hpxml_namespaces.is_empty() {
+            tracing::info!(
+                target: "observe",
+                column = "hpxml_foreign_namespaces",
+                foreign_namespace_count = non_hpxml_namespaces.len(),
+                foreign_namespaces = ?non_hpxml_namespaces,
+                "non-HPXML namespaces detected on root element; tolerated during schema validation"
+            );
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        if !non_hpxml_namespaces.is_empty() {
+            // HPXML §2.4 / BuildingSync audit data: a document that declares
+            // non-HPXML namespaces MUST still carry the core HPXML structure.
+            let has_building = root.path(&["Building"]).is_some()
+                || root.path(&["Building", "BuildingDetails"]).is_some();
+            let has_systems = root
+                .path(&["Building", "BuildingDetails", "Systems"])
+                .is_some()
+                || root.path(&["Building", "Systems"]).is_some();
+            if !has_building || !has_systems {
+                let missing: Vec<&str> = {
+                    let mut parts = Vec::new();
+                    if !has_building {
+                        parts.push("Building/BuildingDetails");
+                    }
+                    if !has_systems {
+                        parts.push("Building/BuildingDetails/Systems");
+                    }
+                    parts
+                };
+                return Err(ValidationError::new(
+                    "schema",
+                    format!(
+                        "non-HPXML namespaces {} present but HPXML core structure missing: {}",
+                        non_hpxml_namespaces.join(", "),
+                        missing.join(", "),
+                    ),
+                ));
+            }
+        }
     }
 
     let schema_location = root
@@ -752,6 +828,124 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| matches!(w, ValidationWarning { field, .. } if field == "PVTilt"))
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // BuildingSync namespace handling
+    // ---------------------------------------------------------------------------
+
+    /// An HPXML 4.0 document with a co-existing BuildingSync namespace
+    /// (xmlns:bsync) alongside the HPXML default namespace.
+    const BUILDINGSYNC_XML: &str = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:bsync="http://buildingsync.net/schemas/bedes-audit/2019/9"
+       xsi:schemaLocation="http://hpxmlonline.com/2019/10 http://hpxmlonline.com/2019/10/HPXML.xsd"
+       schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id="Wall1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+          </Wall>
+        </Walls>
+        <Windows>
+          <Window>
+            <SystemIdentifier id="Window1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">35</Area>
+            <UFactor>0.3</UFactor>
+            <SHGC>0.25</SHGC>
+          </Window>
+        </Windows>
+      </Enclosure>
+      <AirInfiltration>
+        <AirInfiltrationMeasurement><AirLeakage>35</AirLeakage></AirInfiltrationMeasurement>
+      </AirInfiltration>
+      <Systems>
+        <HVAC>
+          <HeatingSystem><HeatingCapacity>250</HeatingCapacity></HeatingSystem>
+          <HeatPump><SEER2>9</SEER2><HSPF2>5</HSPF2></HeatPump>
+        </HVAC>
+        <WaterHeating><WaterHeatingSystem><HotWaterTemperature units="F">110</HotWaterTemperature></WaterHeatingSystem></WaterHeating>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+
+    #[test]
+    fn building_sync_namespace_passes_schema_validation() {
+        let warnings = validate_hpxml_schema(BUILDINGSYNC_XML)
+            .expect("HPXML 4.0 + BuildingSync should validate");
+        assert!(
+            warnings.iter().all(|w| w.field != "xmlns"),
+            "no xmlns warnings expected, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn building_sync_namespace_passes_schema_node_validation() {
+        let root = super::super::building::parse_xml_document(BUILDINGSYNC_XML)
+            .expect("parse should succeed");
+        let warnings = super::super::validation::validate_hpxml_schema_node(&root)
+            .expect("4.0 + BuildingSync should pass schema node check");
+        assert!(
+            warnings.iter().all(|w| w.field != "xmlns"),
+            "no xmlns warnings expected, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn clean_hpxml_40_no_extra_namespaces_validates_without_false_positive() {
+        // Regression guard: a clean HPXML 4.0 document (no BuildingSync)
+        // must continue to validate without false positives.
+        let warnings =
+            validate_hpxml_schema(BASE_XML).expect("clean HPXML 4.0 should continue to validate");
+        assert!(
+            warnings.is_empty()
+                || warnings
+                    .iter()
+                    .all(|w| w.field == "schemaVersion" && w.message.contains("3.x")),
+            "clean HPXML 4.0 should produce no warnings (or only a 3.x deprecation warning), got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn building_sync_fixture_resolves_building_properties() {
+        let building = parse_building(BUILDINGSYNC_XML).expect("parse should succeed");
+        let conditioned = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, crate::hpxml::building::ZoneType::Conditioned))
+            .expect("should have conditioned zone");
+        // 1800 ft² → 167.225 m²
+        let area_m2 = conditioned.floor_area_m2.expect("should have area");
+        assert!(
+            (area_m2 - 167.225).abs() < 0.05,
+            "conditioned floor area should be ~167.2 m² from 1800 ft², got {area_m2:.3}"
+        );
+        // HVAC capacity: 250 BTU/h → 250 * 0.293_071_07 ≈ 73.27 W
+        // (HPXML <HeatingCapacity> defaults to BTU/h when no units attribute is present)
+        let cap_w = building.hvac_capacity_w.expect("should have capacity");
+        assert!(
+            (cap_w - 73.27).abs() < 0.1,
+            "250 BTU/h should be ~73.27 W, got {cap_w:.2}"
         );
     }
 }

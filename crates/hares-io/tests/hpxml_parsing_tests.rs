@@ -1705,3 +1705,102 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
         Some(1300.0)
     );
 }
+
+// ===========================================================================
+// HPXML 4.0 + BuildingSync integration test
+// ===========================================================================
+
+/// Parse an HPXML 4.0 document that declares a co-existing BuildingSync
+/// namespace through the full parse → validate → resolve pipeline.
+/// BuildingSync namespaces must not cause rejection at any layer.
+#[test]
+fn hpxml_v4_building_sync_parses_resolves_without_rejection() {
+    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/hpxml-v4-buildingsync.xml");
+    let xml =
+        std::fs::read_to_string(&fixture_path).expect("BuildingSync fixture should be readable");
+
+    // Schema validation: must accept 4.0 + BuildingSync namespace without error.
+    let warnings = validate_hpxml_schema(&xml)
+        .expect("HPXML 4.0 with BuildingSync namespace must pass schema validation");
+    assert!(
+        warnings.is_empty() || warnings.iter().all(|w| w.field != "xmlns"),
+        "BuildingSync namespace must not produce xmlns errors, got: {warnings:?}"
+    );
+
+    // Parse → building.
+    let building = parse_building(&xml).expect("HPXML 4.0 + BuildingSync fixture should parse");
+
+    // Verify basic building properties from the fixture.
+    let conditioned = building
+        .zones
+        .iter()
+        .find(|z| {
+            matches!(
+                z.zone_type,
+                hares_io::hpxml::building::ZoneType::Conditioned
+            )
+        })
+        .expect("should have a conditioned zone");
+    assert!(
+        conditioned.floor_area_m2.is_some(),
+        "conditioned zone should have floor area"
+    );
+    // 200 m² (explicit units="m2" in the fixture)
+    assert!(
+        (conditioned.floor_area_m2.unwrap() - 200.0).abs() < 0.05,
+        "floor area should be ~200 m², got {:.3}",
+        conditioned.floor_area_m2.unwrap()
+    );
+    assert!(
+        building.conditioned_volume_m3.is_some(),
+        "conditioned volume should be parsed"
+    );
+    assert!(
+        matches!(
+            building.site.site_type,
+            Some(hares_io::hpxml::SiteType::Suburban)
+        ),
+        "site type should be Suburban"
+    );
+
+    // HVAC capacity from <HeatingCapacity>36000.0 (BTU/h) → ~10550 W.
+    assert!(
+        building.hvac_capacity_w.is_some(),
+        "HVAC capacity should be parsed"
+    );
+    let cap = building.hvac_capacity_w.unwrap();
+    assert!(
+        (cap - 10_550.56).abs() < 1.0,
+        "36000 BTU/h → ~10550 W, got {cap:.2}"
+    );
+
+    // Water heater setpoint: 125 °F → ~51.67 °C.
+    assert!(
+        building.water_heater_setpoint_c.is_some(),
+        "water heater setpoint should be parsed"
+    );
+    let sp = building.water_heater_setpoint_c.unwrap();
+    assert!(
+        (sp - 51.667).abs() < 0.01,
+        "125 °F → ~51.67 °C, got {sp:.3}"
+    );
+
+    // Resolve equipment — the full pipeline must succeed.
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment should succeed for BuildingSync fixture");
+
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names.contains(&"Gas Furnace"),
+        "BuildingSync fixture should resolve a heating system, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"Air Conditioner"),
+        "BuildingSync fixture should resolve a cooling system, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"Electric Resistance Water Heater"),
+        "BuildingSync fixture should resolve a water heater, got: {names:?}"
+    );
+}
