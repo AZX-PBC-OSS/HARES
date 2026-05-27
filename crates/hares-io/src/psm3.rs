@@ -304,6 +304,7 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         longitude,
         timezone_offset_h,
         elevation_m,
+        wf_allows_leap_years: true,
         source_step_secs: step_secs,
         midpoint_offset_secs: 0,
     };

@@ -129,6 +129,7 @@ fn sequential_weather(start_temp_c: f64, rows: usize, timezone_offset_h: f64) ->
             longitude: -74.0060,
             timezone_offset_h,
             elevation_m: 10.0,
+            wf_allows_leap_years: true,
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
         },

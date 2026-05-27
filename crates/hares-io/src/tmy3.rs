@@ -243,6 +243,7 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         longitude,
         timezone_offset_h,
         elevation_m,
+        wf_allows_leap_years: true,
         source_step_secs: 3600,
         // TMY3 uses hour-ending convention: timestamp marks the end of each
         // measurement interval (e.g., hour 1 = 00:01–01:00). The midpoint of

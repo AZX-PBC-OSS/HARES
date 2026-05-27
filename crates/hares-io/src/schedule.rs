@@ -711,6 +711,7 @@ mod tests {
             longitude: -105.0,
             timezone_offset_h: -7.0,
             elevation_m: 1600.0,
+            wf_allows_leap_years: true,
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
         }

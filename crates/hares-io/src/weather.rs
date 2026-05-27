@@ -283,6 +283,15 @@ pub struct WeatherMeta {
     pub longitude: f64,
     pub timezone_offset_h: f64,
     pub elevation_m: f64,
+    /// Whether the EPW HOLIDAYS/DAYLIGHT SAVINGS header field A1 declares
+    /// "Yes" for leap year observation. When `false`, Feb 29 data rows are
+    /// discarded even if the file contains 8784 records. Non-EPW weather
+    /// sources (TMY3, PSM3, ResStock CSV) default to `true` since they lack
+    /// an equivalent header and their record counts determine leap behaviour.
+    ///
+    /// EnergyPlus: `WFAllowsLeapYears` (WeatherManager.cc:7889).
+    /// Field A1 values as per EPW Data Dictionary: "Yes" or "No".
+    pub wf_allows_leap_years: bool,
     /// Native timestep of the source file in seconds (e.g. 3600 for EPW, 300 for 5-min PSM3).
     pub source_step_secs: u32,
     /// Seconds to subtract from simulation time when indexing into the
@@ -1272,6 +1281,7 @@ mod tests {
                 longitude: -104.99,
                 timezone_offset_h: -7.0,
                 elevation_m: 1600.0,
+                wf_allows_leap_years: true,
                 source_step_secs: 3600,
                 midpoint_offset_secs: 0,
             },
@@ -1303,6 +1313,7 @@ mod tests {
                 longitude: -104.99,
                 timezone_offset_h: -7.0,
                 elevation_m: 1600.0,
+                wf_allows_leap_years: true,
                 source_step_secs: 3600,
                 midpoint_offset_secs: 0,
             },

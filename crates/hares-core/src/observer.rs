@@ -50,6 +50,10 @@ pub struct EnvironmentCapture {
     pub zone_temps_c: Vec<(ZoneId, f64)>,
     pub zone_humidity_ratios: Vec<(ZoneId, f64)>,
     pub solar_irradiance: Vec<hares_types::SurfaceIrradiance>,
+    /// Whether the EPW HOLIDAYS/DAYLIGHT SAVINGS header permits leap year
+    /// observation. Downstream tooling can use this to flag mismatches between
+    /// file content and explicit header declarations.
+    pub wf_allows_leap_years: bool,
 }
 
 /// Equipment telemetry + accumulated port state after an equipment phase.

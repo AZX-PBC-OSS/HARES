@@ -810,6 +810,7 @@ pub(crate) fn build_synthetic_weather(
         longitude: -104.86,
         timezone_offset_h: 0.0,
         elevation_m: 0.0,
+        wf_allows_leap_years: true,
         source_step_secs: 3600,
         midpoint_offset_secs: 0,
     };

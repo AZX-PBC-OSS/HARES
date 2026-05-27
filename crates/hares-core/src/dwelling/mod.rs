@@ -2427,8 +2427,10 @@ impl Dwelling {
 
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
-            obs_phases.post_environment =
-                Some(observer_capture::capture_environment(&self.latest_env));
+            obs_phases.post_environment = Some(observer_capture::capture_environment(
+                &self.latest_env,
+                self.environment.weather_meta.wf_allows_leap_years,
+            ));
         }
 
         #[cfg(feature = "observe")]

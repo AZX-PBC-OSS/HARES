@@ -108,6 +108,42 @@ A ticket that does work but stops before the line of code that makes the simulat
 
 ---
 
+## Trust, but verify — do not make HARES worse
+
+Every change to HARES must leave the codebase strictly better than it found it. Not neutral — better. This applies to physics correctness, numerical accuracy, code maintainability, and citation quality. A change that degrades any of these dimensions is not acceptable, regardless of what the ticket asks for.
+
+### The quality gate
+
+Before accepting any implementation — your own or one you are reviewing — apply this test:
+
+1. **Does this change improve or preserve physical correctness?** Any modification to a formula, coefficient, default, algorithm, or numerical method must be verified against the authoritative sources (ASHRAE, EnergyPlus Engineering Reference, EnergyPlus source, HPXML specification). If you cannot confirm that the change is physically correct from a primary source, do not merge it. A change that moves HARES away from EnergyPlus fidelity — even incrementally — is a regression.
+
+2. **Does this change meet or exceed OCHRE in the affected sub-model?** OCHRE is the minimum feature and accuracy floor. A change that results in HARES being less complete, less accurate, or less standard-compliant than OCHRE in a residential sub-model is a step backwards. Fix the sub-model to be better than OCHRE, not worse.
+
+3. **Does this change improve or preserve code maintainability?** Physics correctness lives or dies on whether future engineers can read, understand, and extend the code. A change that makes the code harder to follow — adds unexplained magic numbers, removes citations, splits a coherent algorithm across unrelated modules, or introduces opaque abstraction — degrades maintainability even if the numbers happen to be right today. Reject it.
+
+4. **Are all claims and values cited?** Every constant, coefficient, equation, and default introduced or modified by the change must have a source citation naming the document, edition, section, and equation or table number (ASHRAE HoF 2021 Ch.1 Eq.30; EnergyPlus ERM 24.1 §5.3.2; HPXML 4.2 §3.8.2; IEEE 519-2022 §5.1). A change that introduces uncited values is not done — it is a placeholder that will be wrong until someone eventually checks.
+
+### What to do when a ticket is wrong
+
+Tickets, audit findings, and implementation suggestions are written by humans and may contain errors: wrong formula, wrong constant, wrong section citation, wrong unit assumption, misdiagnosed root cause. **Trust the ticket enough to investigate. Verify before implementing.**
+
+If investigation reveals the ticket is wrong — the cited formula is incorrect, the proposed fix would degrade physics, the constant is not what the standard says — do not implement the change as written. Document what you found, what the correct answer is, and why they differ. Update the ticket. Implement the correct fix, not the described one.
+
+This is not insubordination. It is the job. A codebase that blindly executes tickets accumulates errors; one where implementers verify and push back on wrong inputs gets better over time.
+
+### The fidelity target
+
+The target for every residential sub-model in HARES is **EnergyPlus fidelity grounded in ASHRAE and IEEE standards**:
+- Governing equations from ASHRAE HoF, 90.1, 152, or 140 — cited by chapter and equation number.
+- Coefficients and defaults from the same standards or from the EnergyPlus Engineering Reference — cited by section.
+- Psychrometric basis, reference temperatures, and unit conventions matching EnergyPlus's residential implementations.
+- Numerical behaviour (tolerance, convergence criteria, iteration bounds) justified against the standard or the EnergyPlus source, not chosen arbitrarily.
+
+OCHRE is the floor. EnergyPlus fidelity, grounded in the standards, is the target. Anything between them is a known gap to be closed — not a design decision to defend.
+
+---
+
 ## Trust nothing, verify everything
 
 Tickets, audit sections, and cited line numbers are starting points — not ground truth. Before implementing anything:

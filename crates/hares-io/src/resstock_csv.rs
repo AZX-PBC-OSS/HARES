@@ -351,6 +351,7 @@ pub fn parse_resstock_csv_str(
         longitude,
         timezone_offset_h,
         elevation_m,
+        wf_allows_leap_years: true,
         source_step_secs,
         // ResStock AMY simplified CSV uses end-of-interval timestamps (first row =
         // 01:00:00, representing 00:00–01:00), matching the TMY3/EPW hour-ending

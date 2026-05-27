@@ -13,7 +13,10 @@ use crate::observer::{
 };
 
 /// Captures weather + zone state from the environment.
-pub(crate) fn capture_environment(env: &EnvironmentState) -> EnvironmentCapture {
+pub(crate) fn capture_environment(
+    env: &EnvironmentState,
+    wf_allows_leap_years: bool,
+) -> EnvironmentCapture {
     EnvironmentCapture {
         outdoor_temp_c: env.weather.outdoor_temp_c,
         ghi_w_m2: env.weather.ghi_w_m2,
@@ -28,6 +31,7 @@ pub(crate) fn capture_environment(env: &EnvironmentState) -> EnvironmentCapture 
         zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
         zone_humidity_ratios: env.zones.iter().map(|z| (z.id, z.humidity_ratio)).collect(),
         solar_irradiance: env.weather.solar_irradiance.clone(),
+        wf_allows_leap_years,
     }
 }
 

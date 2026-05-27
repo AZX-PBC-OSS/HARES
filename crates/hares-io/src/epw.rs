@@ -117,11 +117,15 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
 
     let design_conditions = parse_design_conditions(design_conditions_line);
     let _ = typical_extreme_line;
-    let _ = holidays_daylight_line;
+
+    // Parse the HOLIDAYS/DAYLIGHT SAVINGS header to extract field A1
+    // (Leap Year Observed) in order to gate Feb 29 data processing.
+    // EnergyPlus stores this in `WFAllowsLeapYears` (WeatherManager.cc:7889).
+    let wf_allows_leap_years = parse_holidays_daylight_header(holidays_daylight_line)?;
     let _ = comments_1_line;
     let _ = comments_2_line;
 
-    let meta = parse_location_header(location_line)?;
+    let mut meta = parse_location_header(location_line)?;
     ensure_hourly_data_period(data_period_line)?;
     let epw_ground_temps = parse_ground_temperatures(ground_temp_line);
 
@@ -279,6 +283,55 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
 
     let is_leap_year = records.len() == EXPECTED_RECORDS_LEAP;
 
+    // EnergyPlus WeatherManager.cc:2816-2827: if WFAllowsLeapYears is false,
+    // Feb 29 data is discarded and February is treated as a 28-day month.
+    if is_leap_year && !wf_allows_leap_years {
+        warn!(
+            "EPW header declares Leap Year Observed = No, but file contains 8784 rows. Discarding Feb 29 data."
+        );
+        // Retain only records that are NOT Feb 29.
+        let mut retained = Vec::with_capacity(EXPECTED_RECORDS_STANDARD);
+        let mut retained_dt = Vec::with_capacity(EXPECTED_RECORDS_STANDARD);
+        for (rec, dt) in records.into_iter().zip(record_datetimes) {
+            if !(dt.0.month() == 2 && dt.0.day() == 29) {
+                retained.push(rec);
+                retained_dt.push(dt);
+            }
+        }
+        records = retained;
+        record_datetimes = retained_dt;
+    }
+
+    let is_leap_year = records.len() == EXPECTED_RECORDS_LEAP;
+
+    // Invariant: if the file has 8784 records but the header says "No" for
+    // leap year observation, Feb 29 must have been stripped.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        if records.len() == EXPECTED_RECORDS_LEAP && !wf_allows_leap_years {
+            panic!(
+                "EPW invariant violation: 8784 records present but wf_allows_leap_years is false. \
+                 Feb 29 data should have been stripped."
+            );
+        }
+        // Also assert: if records.len() == 8784 and wf_allows_leap_years is true,
+        // there must be at least one Feb 29 record (the file is a leap year).
+        if records.len() == EXPECTED_RECORDS_LEAP && wf_allows_leap_years {
+            let has_feb29 = record_datetimes
+                .iter()
+                .any(|(date, _)| date.month() == 2 && date.day() == 29);
+            assert!(
+                has_feb29,
+                "EPW invariant violation: 8784 records with wf_allows_leap_years=true \
+                 but no Feb 29 record found."
+            );
+        }
+    }
+
+    // Apply the parsed flag to the weather meta so downstream consumers
+    // (observer, validation tooling) can flag mismatches.
+    meta.wf_allows_leap_years = wf_allows_leap_years;
+
     // Resolve monthly ground temperatures: prefer EPW header data, fall back to DOE-2 model.
     let monthly_ground_temps = match epw_ground_temps {
         Some(gt) => gt,
@@ -326,11 +379,46 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         longitude,
         timezone_offset_h,
         elevation_m,
+        wf_allows_leap_years: true,
         source_step_secs: 3600,
         // EPW uses hour-ending convention: row "12" covers 11:00–12:00.
         // Subtract half-period (30 min) from sim time to read the correct period.
         midpoint_offset_secs: 1800,
     })
+}
+
+/// Parse the EPW HOLIDAYS/DAYLIGHT SAVINGS header (line 5).
+///
+/// Extracts field A1 (`Leap Year Observed`) which controls whether Feb 29
+/// weather data should be honoured. EnergyPlus stores this in
+/// `WFAllowsLeapYears` (WeatherManager.cc:7889) and uses it to gate
+/// Feb 29 processing at WeatherManager.cc:2816-2827.
+///
+/// EPW Data Dictionary values for field A1 are "Yes" or "No".
+/// Returns `Ok(true)` for "Yes", `Ok(false)` for "No".
+/// Returns an error if the header is malformed or the value is unrecognised.
+fn parse_holidays_daylight_header(line: &str) -> Result<bool, WeatherError> {
+    let mut fields = line.split(',');
+    let header_name = fields
+        .next()
+        .ok_or_else(|| WeatherError::Parse("empty HOLIDAYS/DAYLIGHT SAVINGS header".to_string()))?;
+    if header_name.trim() != "HOLIDAYS/DAYLIGHT SAVINGS" {
+        return Err(WeatherError::Parse(format!(
+            "expected HOLIDAYS/DAYLIGHT SAVINGS header, got `{header_name}`"
+        )));
+    }
+    let a1 = fields.next().ok_or_else(|| {
+        WeatherError::Parse(
+            "HOLIDAYS/DAYLIGHT SAVINGS header missing field A1 (Leap Year Observed)".to_string(),
+        )
+    })?;
+    match a1.trim() {
+        "Yes" => Ok(true),
+        "No" => Ok(false),
+        unrecognised => Err(WeatherError::Parse(format!(
+            "HOLIDAYS/DAYLIGHT SAVINGS field A1 must be 'Yes' or 'No', got `{unrecognised}`"
+        ))),
+    }
 }
 
 fn ensure_hourly_data_period(line: &str) -> Result<(), WeatherError> {
@@ -1083,7 +1171,7 @@ mod tests {
             "DESIGN CONDITIONS,0".to_string(),
             "GROUND TEMPERATURES,0".to_string(),
             "TYPICAL/EXTREME PERIODS,0".to_string(),
-            "HOLIDAYS/DAYLIGHT SAVINGS,No,0,0,0".to_string(),
+            "HOLIDAYS/DAYLIGHT SAVINGS,Yes,0,0,0".to_string(),
             "COMMENTS 1,synthetic".to_string(),
             "COMMENTS 2,synthetic".to_string(),
             "DATA PERIODS,1,1,Data,Sunday, 1/ 1,12/31".to_string(),
@@ -2169,5 +2257,155 @@ mod tests {
             override_tz,
             weather.meta.timezone_offset_h
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // HOLIDAYS/DAYLIGHT SAVINGS header parsing (T-0030)
+    // -----------------------------------------------------------------------
+
+    /// Build a synthetic EPW header block with a custom HOLIDAYS/DAYLIGHT SAVINGS
+    /// line. This lets test code vary the `Leap Year Observed` field (A1) without
+    /// replicating the entire header template.
+    fn build_synthetic_epw_with_holidays(
+        rows: usize,
+        holidays_header: &str,
+        mutator: impl FnMut(usize, &mut [String; 35]),
+    ) -> String {
+        let mut epw = build_synthetic_epw(rows, mutator);
+        // Replace the default holidays line with the caller's version.
+        epw.replacen("HOLIDAYS/DAYLIGHT SAVINGS,Yes,0,0,0", holidays_header, 1)
+    }
+
+    #[test]
+    fn parse_holidays_daylight_header_yes() {
+        let epw = build_synthetic_epw_with_holidays(
+            8760,
+            "HOLIDAYS/DAYLIGHT SAVINGS,Yes,0,0,0",
+            |_, _| {},
+        );
+        let parsed = parse_epw_str(&epw).expect("valid header should parse");
+        assert!(parsed.meta.wf_allows_leap_years);
+    }
+
+    #[test]
+    fn parse_holidays_daylight_header_no() {
+        let epw = build_synthetic_epw_with_holidays(
+            8760,
+            "HOLIDAYS/DAYLIGHT SAVINGS,No,0,0,0",
+            |_, _| {},
+        );
+        let parsed = parse_epw_str(&epw).expect("valid header should parse");
+        assert!(!parsed.meta.wf_allows_leap_years);
+    }
+
+    #[test]
+    fn parse_holidays_daylight_header_yes_with_dst_dates() {
+        // Real EPW files may include DST fields after A1; the parser should
+        // correctly extract just the first value field (A1).
+        let epw = build_synthetic_epw_with_holidays(
+            8760,
+            "HOLIDAYS/DAYLIGHT SAVINGS,Yes,3/8,11/1",
+            |_, _| {},
+        );
+        let parsed = parse_epw_str(&epw).expect("header with DST dates should parse");
+        assert!(parsed.meta.wf_allows_leap_years);
+    }
+
+    #[test]
+    fn parse_holidays_daylight_header_unrecognised_value_rejected() {
+        let epw = build_synthetic_epw_with_holidays(
+            8760,
+            "HOLIDAYS/DAYLIGHT SAVINGS,Maybe,0,0,0",
+            |_, _| {},
+        );
+        let err = parse_epw_str(&epw).expect_err("unrecognised A1 value should fail");
+        assert!(
+            err.to_string().contains("Maybe"),
+            "error should mention the unrecognised value: {err}"
+        );
+        assert!(
+            err.to_string().contains("Yes") || err.to_string().contains("No"),
+            "error should mention expected values: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_holidays_daylight_header_missing_a1_rejected() {
+        let epw = build_synthetic_epw_with_holidays(8760, "HOLIDAYS/DAYLIGHT SAVINGS", |_, _| {});
+        let err = parse_epw_str(&epw).expect_err("missing A1 field should fail");
+        assert!(
+            err.to_string().contains("A1") || err.to_string().contains("Leap Year"),
+            "error should mention the missing field: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_epw_strips_feb29_when_header_says_no_and_8784_rows() {
+        // 8784 rows + "No" header → Feb 29 data discarded, resulting in 8760 rows.
+        let epw = build_synthetic_epw_with_holidays(
+            8784,
+            "HOLIDAYS/DAYLIGHT SAVINGS,No,0,0,0",
+            |_, _| {},
+        );
+        let parsed = parse_epw_str(&epw).expect("8784+No EPW should parse");
+        assert_eq!(
+            parsed.len(),
+            8760,
+            "Feb 29 stripped: expected 8760 rows, got {}",
+            parsed.len()
+        );
+        assert!(
+            !parsed.meta.wf_allows_leap_years,
+            "meta should report leap years not allowed"
+        );
+        // monthly_day_counts(false) should report 28 days for February.
+        let day_counts = monthly_day_counts(false);
+        assert_eq!(day_counts[1], 28);
+    }
+
+    #[test]
+    fn parse_epw_honours_feb29_when_header_says_yes_and_8784_rows() {
+        // 8784 rows + "Yes" header → Feb 29 data honoured.
+        let epw = build_synthetic_epw_with_holidays(
+            8784,
+            "HOLIDAYS/DAYLIGHT SAVINGS,Yes,0,0,0",
+            |_, _| {},
+        );
+        let parsed = parse_epw_str(&epw).expect("8784+Yes EPW should parse");
+        assert_eq!(
+            parsed.len(),
+            8784,
+            "Feb 29 honoured: expected 8784 rows, got {}",
+            parsed.len()
+        );
+        assert!(parsed.meta.wf_allows_leap_years);
+        let day_counts = monthly_day_counts(true);
+        assert_eq!(day_counts[1], 29);
+    }
+
+    #[test]
+    fn epw_8760_yes_no_change() {
+        // 8760 rows + "Yes" header → normal year, no Feb 29 to strip.
+        let epw = build_synthetic_epw_with_holidays(
+            8760,
+            "HOLIDAYS/DAYLIGHT SAVINGS,Yes,0,0,0",
+            |_, _| {},
+        );
+        let parsed = parse_epw_str(&epw).expect("8760+Yes EPW should parse");
+        assert_eq!(parsed.len(), 8760);
+        assert!(parsed.meta.wf_allows_leap_years);
+    }
+
+    #[test]
+    fn epw_8760_no_no_change() {
+        // 8760 rows + "No" header → normal year, no stripping needed.
+        let epw = build_synthetic_epw_with_holidays(
+            8760,
+            "HOLIDAYS/DAYLIGHT SAVINGS,No,0,0,0",
+            |_, _| {},
+        );
+        let parsed = parse_epw_str(&epw).expect("8760+No EPW should parse");
+        assert_eq!(parsed.len(), 8760);
+        assert!(!parsed.meta.wf_allows_leap_years);
     }
 }
