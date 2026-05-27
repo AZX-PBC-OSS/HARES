@@ -2073,12 +2073,36 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
                 {
                     match units.as_str() {
                         "percent" => {
+                            if let Some(existing) = leakage_by_type.get(&dtype) {
+                                tracing::warn!(
+                                    duct_type = %dtype,
+                                    existing_value = %existing,
+                                    new_value = value / 100.0,
+                                    "Duplicate DuctLeakageMeasurement for duct type; overwriting previous value"
+                                );
+                            }
                             leakage_by_type.insert(dtype, value / 100.0);
                         }
                         "fraction" => {
+                            if let Some(existing) = leakage_by_type.get(&dtype) {
+                                tracing::warn!(
+                                    duct_type = %dtype,
+                                    existing_value = %existing,
+                                    new_value = %value,
+                                    "Duplicate DuctLeakageMeasurement for duct type; overwriting previous value"
+                                );
+                            }
                             leakage_by_type.insert(dtype, value);
                         }
                         "cfm25" => {
+                            if let Some(existing) = leakage_cfm25_by_type.get(&dtype) {
+                                tracing::warn!(
+                                    duct_type = %dtype,
+                                    existing_cfm25 = %existing,
+                                    new_cfm25 = %value,
+                                    "Duplicate DuctLeakageMeasurement for duct type; overwriting previous value"
+                                );
+                            }
                             leakage_cfm25_by_type.insert(dtype, value);
                         }
                         _ => {
@@ -6123,6 +6147,73 @@ mod tests {
         assert!(
             msg.contains("near element <"),
             "error should include nearest element name, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn duplicate_duct_leakage_measurement_last_value_wins() {
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+      </Enclosure>
+      <Systems>
+        <HVAC>
+          <HVACDistribution>
+            <DistributionSystemType>
+              <AirDistribution>
+                <DuctLeakageMeasurement>
+                  <SystemIdentifier id="Leak1"/>
+                  <DuctType>supply</DuctType>
+                  <DuctLeakage>
+                    <Value>12</Value>
+                    <Units>Percent</Units>
+                  </DuctLeakage>
+                </DuctLeakageMeasurement>
+                <DuctLeakageMeasurement>
+                  <SystemIdentifier id="Leak2"/>
+                  <DuctType>supply</DuctType>
+                  <DuctLeakage>
+                    <Value>8</Value>
+                    <Units>Percent</Units>
+                  </DuctLeakage>
+                </DuctLeakageMeasurement>
+                <Ducts>
+                  <SystemIdentifier id="SupplyDuct"/>
+                  <DuctType>supply</DuctType>
+                  <DuctInsulationRValue>8</DuctInsulationRValue>
+                  <DuctSurfaceArea>50</DuctSurfaceArea>
+                  <DuctLocation>conditioned space</DuctLocation>
+                </Ducts>
+              </AirDistribution>
+            </DistributionSystemType>
+          </HVACDistribution>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let building = parse_building(xml).expect("parse should succeed");
+        let supply = building
+            .zones
+            .iter()
+            .flat_map(|z| &z.duct_systems)
+            .find(|d| d.duct_type == DuctType::Supply)
+            .expect("supply duct expected");
+
+        assert_eq!(
+            supply.leakage_fraction,
+            Some(0.08),
+            "duplicate supply DuctLeakageMeasurement: second value (8%% -> 0.08) must win"
         );
     }
 }
