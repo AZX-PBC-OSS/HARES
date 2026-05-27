@@ -42,6 +42,7 @@ fn hpxml_with_window_missing_u_and_shgc() -> String {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -84,6 +85,7 @@ fn hpxml_with_window_explicit_u_and_shgc() -> String {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>

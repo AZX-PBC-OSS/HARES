@@ -38,6 +38,7 @@ fn minimal_xml_with_systems(systems_xml: &str) -> String {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -599,6 +600,7 @@ fn missing_enclosure_returns_error() {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
+          <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
     </BuildingDetails>
@@ -621,6 +623,7 @@ fn missing_site_returns_error() {
       <BuildingSummary>
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
+          <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -656,6 +659,7 @@ fn complete_minimal_xml_passes_schema_check() {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
+          <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -681,6 +685,7 @@ fn area_above_1000_without_units_is_converted_as_ft2() {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea>2000</ConditionedFloorArea>
+          <ConditionedBuildingVolume>16000</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -712,6 +717,7 @@ fn area_without_units_is_treated_as_ft2() {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea>200</ConditionedFloorArea>
+          <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -953,6 +959,7 @@ fn wall_xml_with_stud_geometry(spacing_in: f64, width_in: f64) -> String {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -1054,6 +1061,7 @@ fn wall_xml_with_construction_type(construction_type_element: &str) -> String {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>

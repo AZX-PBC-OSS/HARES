@@ -467,8 +467,27 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .and_then(|node| parse_value_with_units(Some(node), ValueKind::Volume));
 
     let ceiling_height_m = match (conditioned_volume_m3, conditioned_floor_area_m2) {
-        (Some(vol), Some(area)) if area > 0.0 => Some(vol / area),
-        _ => None,
+        (Some(vol), Some(area)) if area > 0.0 => vol / area,
+        (Some(_), Some(_)) => {
+            return Err(HpxmlError::Parse(
+                "ConditionedFloorArea must be positive to derive ceiling height".to_string(),
+            ));
+        }
+        (None, None) => {
+            return Err(HpxmlError::Parse(
+                "missing both ConditionedBuildingVolume and ConditionedFloorArea; cannot derive ceiling height".to_string(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(HpxmlError::Parse(
+                "missing ConditionedBuildingVolume; cannot derive ceiling height".to_string(),
+            ));
+        }
+        (Some(_), None) => {
+            return Err(HpxmlError::Parse(
+                "missing ConditionedFloorArea; cannot derive ceiling height".to_string(),
+            ));
+        }
     };
 
     let total_conditioned_floors = summary
@@ -801,17 +820,6 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .collect();
     zones_vec.sort_by_key(|zone| zone_sort_key(&zone.zone_type));
 
-    // Compute ceiling height, warning on fallback.
-    let default_height_m = match ceiling_height_m {
-        Some(h) => h,
-        None => {
-            tracing::warn!(
-                "ceiling height not derivable from conditioned volume/area; falling back to 2.5 m"
-            );
-            2.5
-        }
-    };
-
     // Compute garage geometry (protruded area) from wall boundaries.
     // Ref: OCHRE hpxml.py:439-494.
     let garage_floor_area_m2 = zones_vec
@@ -880,11 +888,11 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // Assign volumes to all zones from available geometry.
     for zone in &mut zones_vec {
         zone.volume_m3 = match zone.zone_type {
-            ZoneType::Conditioned => zone.floor_area_m2.map(|a| a * default_height_m),
+            ZoneType::Conditioned => zone.floor_area_m2.map(|a| a * ceiling_height_m),
             ZoneType::Attic => {
                 compute_attic_volume(&boundaries, zone.floor_area_m2, garage_geometry.as_ref())
             }
-            ZoneType::Garage => zone.floor_area_m2.map(|a| a * default_height_m),
+            ZoneType::Garage => zone.floor_area_m2.map(|a| a * ceiling_height_m),
             ZoneType::Foundation => zone
                 .floor_area_m2
                 .zip(foundation_height_m)
@@ -933,7 +941,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         ),
         pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw),
         conditioned_volume_m3,
-        ceiling_height_m,
+        ceiling_height_m: Some(ceiling_height_m),
         infiltration_height_m,
         floors_above_grade,
         has_flue_or_chimney,
@@ -3081,6 +3089,53 @@ mod tests {
         assert!(msg.contains("wall 'Wall1' is missing required Area element"));
     }
 
+    #[test]
+    fn missing_both_floor_area_and_volume_returns_error() {
+        let xml = SAMPLE_XML
+            .replace(
+                "<ConditionedFloorArea units=\"ft2\">2152</ConditionedFloorArea>",
+                "",
+            )
+            .replace(
+                "<ConditionedBuildingVolume units=\"ft3\">17216</ConditionedBuildingVolume>",
+                "",
+            );
+        let err = parse_building(&xml).expect_err("expected missing field failure");
+        assert!(matches!(err, HpxmlError::Parse(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing both ConditionedBuildingVolume and ConditionedFloorArea"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_volume_only_returns_error() {
+        let xml = SAMPLE_XML.replace(
+            "<ConditionedBuildingVolume units=\"ft3\">17216</ConditionedBuildingVolume>",
+            "",
+        );
+        let err = parse_building(&xml).expect_err("expected missing volume failure");
+        assert!(matches!(err, HpxmlError::Parse(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing ConditionedBuildingVolume"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_floor_area_only_returns_error() {
+        let xml = SAMPLE_XML.replace(
+            "<ConditionedFloorArea units=\"ft2\">2152</ConditionedFloorArea>",
+            "",
+        );
+        let err = parse_building(&xml).expect_err("expected missing floor area failure");
+        assert!(matches!(err, HpxmlError::Parse(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("missing ConditionedFloorArea"), "got: {msg}");
+    }
+
     /// FrameFloor elements (pier-and-beam / raised-floor homes) must parse as
     /// `BoundaryType::Floor`, matching OCHRE's treatment of FrameFloors.
     #[test]
@@ -3165,6 +3220,7 @@ mod tests {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -5441,6 +5497,7 @@ mod tests {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -5502,6 +5559,7 @@ mod tests {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -5560,6 +5618,7 @@ mod tests {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>

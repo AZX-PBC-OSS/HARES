@@ -565,6 +565,7 @@ mod tests {
         </Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>

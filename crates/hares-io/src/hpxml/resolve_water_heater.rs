@@ -729,6 +729,7 @@ mod tests {
                     <BuildingConstruction>
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>
@@ -1313,6 +1314,7 @@ mod tests {
                     <BuildingConstruction>
                       <NumberofBedrooms>3</NumberofBedrooms>
                       <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
                     </BuildingConstruction>
                   </BuildingSummary>
                   <WaterHeating>

@@ -368,6 +368,7 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="m2">150</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">375</ConditionedBuildingVolume>
           <NumberofBedrooms>3</NumberofBedrooms>
         </BuildingConstruction>
       </BuildingSummary>

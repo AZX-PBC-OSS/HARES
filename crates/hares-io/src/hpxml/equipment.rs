@@ -328,7 +328,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>
@@ -361,7 +361,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>
@@ -403,7 +403,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems><HVAC>{hvac_inner}</HVAC></Systems>
@@ -584,7 +584,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>{systems_inner}</Systems>
@@ -1159,7 +1159,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Appliances>{appliance_inner}</Appliances>
@@ -1638,6 +1638,7 @@ mod tests {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea>1500</ConditionedFloorArea>
+          <ConditionedBuildingVolume>12000</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -1703,6 +1704,7 @@ mod tests {
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
           <ConditionedFloorArea>1500</ConditionedFloorArea>
+          <ConditionedBuildingVolume>12000</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -1847,7 +1849,7 @@ mod tests {
     <BuildingDetails>
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
-        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea></BuildingConstruction>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea><ConditionedBuildingVolume>8000</ConditionedBuildingVolume></BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
       <Systems>{systems_inner}</Systems>
