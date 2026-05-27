@@ -21,10 +21,9 @@ use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
     parse_usize, parse_zone_id, restore_schedule_source_state,
 };
-use crate::scheduled_load::{
-    ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE, ZipCoefficients, parse_zip_coefficients,
-    zip_coefficients_from_class,
-};
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use crate::scheduled_load::{ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE};
+use crate::scheduled_load::{ZipCoefficients, parse_zip_coefficients, zip_coefficients_from_class};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use crate::config::KEY_EQUIPMENT_ID;

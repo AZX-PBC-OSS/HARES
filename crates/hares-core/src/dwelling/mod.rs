@@ -52,6 +52,7 @@ use crate::actors::{BatteryManagementActor, EvDriverActor, SolverFeedbackActor};
 use crate::checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
 use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use crate::invariants::InvariantChecker;
 use crate::scheduler::{ActorSlot, ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
@@ -116,6 +117,7 @@ pub struct DwellingConfig {
 }
 
 /// Snapshot of accumulated port totals at a stage boundary.
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone)]
 struct StageSnapshot {
     // Why: field is written in debug_assertions builds to snapshot port
@@ -693,6 +695,7 @@ pub struct Dwelling {
     fluid_update_buf: hares_types::DomainUpdate,
     /// Pre-allocated DomainUpdate buffers for custom domain solvers, one per solver.
     custom_update_bufs: Vec<hares_types::DomainUpdate>,
+    #[cfg(debug_assertions)]
     stage_snapshot: Option<StageSnapshot>,
     output_column_index: HashMap<String, usize>,
     /// Pre-resolved output column indices for each equipment piece, avoiding
@@ -760,19 +763,27 @@ pub struct Dwelling {
     /// Computed once at init time, reused each timestep.
     equipment_execution_order: Vec<usize>,
     /// Numerical invariant checker, allocated once and reused each step.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     invariant_checker: InvariantChecker,
     /// Pre-allocated scratch buffer for conditioned zone temps in check_invariants.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     invariant_conditioned_temps: Vec<f64>,
     /// Pre-allocated scratch buffer for unconditioned zone temps in check_invariants.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     invariant_unconditioned_temps: Vec<f64>,
     /// Pre-allocated scratch buffer for tank node temps in check_invariants.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     invariant_tank_temps: Vec<f64>,
     /// Pre-computed tank node telemetry keys, avoiding format!() per step.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     tank_node_keys: Vec<String>,
     /// Pre-allocated scratch buffer for infiltration latent by zone in check_invariants.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     invariant_infiltration_latent: Vec<(ZoneId, f64)>,
     /// Pre-allocated scratch maps for semi-implicit infiltration coupling data.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     invariant_infiltration_m_dot: HashMap<ZoneId, f64>,
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     invariant_infiltration_w_outdoor: HashMap<ZoneId, f64>,
     /// Per-zone conditioning status, aligned with `latest_env.zones` order.
     /// `true` = conditioned (HVAC-served), `false` = unconditioned (attic, garage, etc.).
@@ -1313,6 +1324,7 @@ impl Dwelling {
             electrical_update_buf: hares_types::DomainUpdate::empty(hares_types::ELECTRICAL),
             fluid_update_buf: hares_types::DomainUpdate::empty(hares_types::FLUID),
             custom_update_bufs: Vec::new(),
+            #[cfg(debug_assertions)]
             stage_snapshot: None,
             equipment_column_map,
             output_column_index,
@@ -1343,13 +1355,21 @@ impl Dwelling {
             actor_dispatch_buf: Vec::with_capacity(16),
             solver_feedback_actor,
             equipment_execution_order,
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             invariant_checker: InvariantChecker::new(),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             invariant_conditioned_temps: Vec::with_capacity(building.zones.len()),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             invariant_unconditioned_temps: Vec::with_capacity(building.zones.len()),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             invariant_tank_temps: Vec::new(),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             tank_node_keys: (0..24).map(tk::tank_node_key).collect(),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             invariant_infiltration_latent: Vec::new(),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             invariant_infiltration_m_dot: HashMap::new(),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             invariant_infiltration_w_outdoor: HashMap::new(),
             zone_is_conditioned: if building.zones.is_empty() {
                 vec![true]
@@ -2913,6 +2933,7 @@ impl Dwelling {
                 .max(current_process_hwm_kb());
         }
 
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         self.check_invariants(dt)?;
         // Snapshot end-of-timestep equipment state into latest_env so that the
         // NEXT step's actors see the freshest committed state for every
@@ -3324,10 +3345,9 @@ impl Dwelling {
     /// Active when `cfg(any(debug_assertions, feature = "check_invariants"))`.
     /// Returns `Err(HaresError::InvariantViolation { .. })` on the first violation;
     /// the engine then quarantines this dwelling rather than propagating a panic.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn check_invariants(&mut self, dt: StdDuration) -> Result<()> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let checker = &self.invariant_checker;
+        let checker = &self.invariant_checker;
 
             let dt_s = dt.as_secs_f64();
             if !dt_s.is_finite() || dt_s <= 0.0 {
@@ -3538,8 +3558,6 @@ impl Dwelling {
                     checker.check_moisture(delta_m, &[(total_latent, dt_s)])?;
                 }
             }
-        }
-
         Ok(())
     }
 }

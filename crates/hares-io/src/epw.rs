@@ -2271,7 +2271,7 @@ mod tests {
         holidays_header: &str,
         mutator: impl FnMut(usize, &mut [String; 35]),
     ) -> String {
-        let mut epw = build_synthetic_epw(rows, mutator);
+        let epw = build_synthetic_epw(rows, mutator);
         // Replace the default holidays line with the caller's version.
         epw.replacen("HOLIDAYS/DAYLIGHT SAVINGS,Yes,0,0,0", holidays_header, 1)
     }

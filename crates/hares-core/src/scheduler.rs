@@ -338,7 +338,7 @@ mod tests {
         let mut s = StepScheduler::default();
         s.register_solver_feedback();
         s.register_actor(ActorSlot(0), ExecutionPhase::ActorDecide, 0, "actor");
-        s.build();
+        let _ = s.build();
 
         s.clear();
         assert!(s.plan().is_empty());
@@ -374,7 +374,7 @@ mod tests {
         let mut s = StepScheduler::default();
         s.register_solver_feedback();
         s.register_actor(ActorSlot(0), ExecutionPhase::ActorDecide, 0, "actor");
-        s.build();
+        let _ = s.build();
 
         let sf: Vec<_> = s.iter_phase(ExecutionPhase::SolverFeedback).collect();
         assert_eq!(sf.len(), 1);

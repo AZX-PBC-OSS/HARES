@@ -21,7 +21,16 @@ impl InvariantChecker {
     pub fn new() -> Self {
         Self
     }
+}
 
+impl Default for InvariantChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+impl InvariantChecker {
     /// Verifies energy conservation across the thermal domain for one zone.
     ///
     /// The check asserts:
@@ -34,22 +43,19 @@ impl InvariantChecker {
         delta_e_storage: f64,
         q_loss: f64,
     ) -> Result<(), HaresError> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let q_sum: f64 = q_gains.iter().sum();
-            let residual = (q_sum - delta_e_storage - q_loss).abs();
-            // Use gross flux (sum of absolute values) for relative tolerance,
-            // not net sum -- a balanced system with large opposed fluxes still has
-            // floating-point accumulation error proportional to gross magnitude.
-            let gross_flux: f64 = q_gains.iter().map(|q| q.abs()).sum();
-            let tolerance = f64::max(1.0, 1e-6 * gross_flux);
-            if residual >= tolerance {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "thermal_balance".to_string(),
-                    value: residual,
-                    tolerance,
-                });
-            }
+        let q_sum: f64 = q_gains.iter().sum();
+        let residual = (q_sum - delta_e_storage - q_loss).abs();
+        // Use gross flux (sum of absolute values) for relative tolerance,
+        // not net sum -- a balanced system with large opposed fluxes still has
+        // floating-point accumulation error proportional to gross magnitude.
+        let gross_flux: f64 = q_gains.iter().map(|q| q.abs()).sum();
+        let tolerance = f64::max(1.0, 1e-6 * gross_flux);
+        if residual >= tolerance {
+            return Err(HaresError::InvariantViolation {
+                check_name: "thermal_balance".to_string(),
+                value: residual,
+                tolerance,
+            });
         }
         Ok(())
     }
@@ -63,18 +69,15 @@ impl InvariantChecker {
         p_grid: f64,
         p_equipment_ports: &[f64],
     ) -> Result<(), HaresError> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let p_sum: f64 = p_equipment_ports.iter().sum();
-            let residual = (p_grid + p_sum).abs();
-            const TOLERANCE: f64 = 0.001;
-            if residual >= TOLERANCE {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "electrical_balance".to_string(),
-                    value: residual,
-                    tolerance: TOLERANCE,
-                });
-            }
+        let p_sum: f64 = p_equipment_ports.iter().sum();
+        let residual = (p_grid + p_sum).abs();
+        const TOLERANCE: f64 = 0.001;
+        if residual >= TOLERANCE {
+            return Err(HaresError::InvariantViolation {
+                check_name: "electrical_balance".to_string(),
+                value: residual,
+                tolerance: TOLERANCE,
+            });
         }
         Ok(())
     }
@@ -91,22 +94,19 @@ impl InvariantChecker {
         delta_m_water: f64,
         q_latent_terms: &[(f64, f64)],
     ) -> Result<(), HaresError> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            const H_FG_J_KG: f64 = 2_501_000.0;
-            const TOLERANCE: f64 = 1e-6;
-            let m_from_latent: f64 = q_latent_terms
-                .iter()
-                .map(|&(q_w, dt_s)| q_w * dt_s / H_FG_J_KG)
-                .sum();
-            let residual = (delta_m_water - m_from_latent).abs();
-            if residual >= TOLERANCE {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "moisture_balance".to_string(),
-                    value: residual,
-                    tolerance: TOLERANCE,
-                });
-            }
+        const H_FG_J_KG: f64 = 2_501_000.0;
+        const TOLERANCE: f64 = 1e-6;
+        let m_from_latent: f64 = q_latent_terms
+            .iter()
+            .map(|&(q_w, dt_s)| q_w * dt_s / H_FG_J_KG)
+            .sum();
+        let residual = (delta_m_water - m_from_latent).abs();
+        if residual >= TOLERANCE {
+            return Err(HaresError::InvariantViolation {
+                check_name: "moisture_balance".to_string(),
+                value: residual,
+                tolerance: TOLERANCE,
+            });
         }
         Ok(())
     }
@@ -117,22 +117,19 @@ impl InvariantChecker {
     /// Returns `Ok(())` always -- SoC out-of-bounds is clamped (not a fatal error).
     /// Emits `tracing::warn!` when `accumulated_error.abs() > 0.001`.
     pub fn check_soc(&self, soc: f64, accumulated_error: f64) -> Result<(), HaresError> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            let clamped = soc.clamp(0.0, 1.0);
-            if (clamped - soc).abs() > f64::EPSILON {
-                tracing::warn!(
-                    soc = soc,
-                    clamped = clamped,
-                    "SoC out of [0, 1] range; clamped"
-                );
-            }
-            if accumulated_error.abs() > 0.001 {
-                tracing::warn!(
-                    accumulated_error = accumulated_error,
-                    "SoC accumulated integration error exceeds 0.001"
-                );
-            }
+        let clamped = soc.clamp(0.0, 1.0);
+        if (clamped - soc).abs() > f64::EPSILON {
+            tracing::warn!(
+                soc = soc,
+                clamped = clamped,
+                "SoC out of [0, 1] range; clamped"
+            );
+        }
+        if accumulated_error.abs() > 0.001 {
+            tracing::warn!(
+                accumulated_error = accumulated_error,
+                "SoC accumulated integration error exceeds 0.001"
+            );
         }
         Ok(())
     }
@@ -151,49 +148,63 @@ impl InvariantChecker {
         unconditioned_zone_temps_c: &[f64],
         tank_temps_c: &[f64],
     ) -> Result<(), HaresError> {
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            const ZONE_MIN_C: f64 = -50.0;
-            const CONDITIONED_MAX_C: f64 = 80.0;
-            const UNCONDITIONED_MAX_C: f64 = 120.0;
-            const TANK_MIN_C: f64 = 0.0;
-            const TANK_MAX_C: f64 = 100.0;
+        const ZONE_MIN_C: f64 = -50.0;
+        const CONDITIONED_MAX_C: f64 = 80.0;
+        const UNCONDITIONED_MAX_C: f64 = 120.0;
+        const TANK_MIN_C: f64 = 0.0;
+        const TANK_MAX_C: f64 = 100.0;
 
-            for &t in conditioned_zone_temps_c {
-                if !t.is_finite() || !(ZONE_MIN_C..=CONDITIONED_MAX_C).contains(&t) {
-                    return Err(HaresError::InvariantViolation {
-                        check_name: "zone_temperature_bounds".to_string(),
-                        value: t,
-                        tolerance: 0.0,
-                    });
-                }
+        for &t in conditioned_zone_temps_c {
+            if !t.is_finite() || !(ZONE_MIN_C..=CONDITIONED_MAX_C).contains(&t) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "zone_temperature_bounds".to_string(),
+                    value: t,
+                    tolerance: 0.0,
+                });
             }
-            for &t in unconditioned_zone_temps_c {
-                if !t.is_finite() || !(ZONE_MIN_C..=UNCONDITIONED_MAX_C).contains(&t) {
-                    return Err(HaresError::InvariantViolation {
-                        check_name: "unconditioned_zone_temperature_bounds".to_string(),
-                        value: t,
-                        tolerance: 0.0,
-                    });
-                }
+        }
+        for &t in unconditioned_zone_temps_c {
+            if !t.is_finite() || !(ZONE_MIN_C..=UNCONDITIONED_MAX_C).contains(&t) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "unconditioned_zone_temperature_bounds".to_string(),
+                    value: t,
+                    tolerance: 0.0,
+                });
             }
-            for &t in tank_temps_c {
-                if !t.is_finite() || !(TANK_MIN_C..=TANK_MAX_C).contains(&t) {
-                    return Err(HaresError::InvariantViolation {
-                        check_name: "tank_temperature_bounds".to_string(),
-                        value: t,
-                        tolerance: 0.0,
-                    });
-                }
+        }
+        for &t in tank_temps_c {
+            if !t.is_finite() || !(TANK_MIN_C..=TANK_MAX_C).contains(&t) {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "tank_temperature_bounds".to_string(),
+                    value: t,
+                    tolerance: 0.0,
+                });
             }
         }
         Ok(())
     }
 }
 
-impl Default for InvariantChecker {
-    fn default() -> Self {
-        Self::new()
+#[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+impl InvariantChecker {
+    pub fn check_thermal(&self, _: &[f64], _: f64, _: f64) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_electrical(&self, _: f64, _: &[f64]) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_moisture(&self, _: f64, _: &[(f64, f64)]) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_soc(&self, _: f64, _: f64) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_temperatures(&self, _: &[f64], _: &[f64], _: &[f64]) -> Result<(), HaresError> {
+        Ok(())
     }
 }
 

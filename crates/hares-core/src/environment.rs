@@ -749,10 +749,7 @@ fn compute_annual_offset(
 /// `ordinal0()`-based computation is adjusted for leap-year start times so that
 /// calendar dates after Feb 29 map to the same schedule rows as in a non-leap
 /// year, preventing the one-day schedule misalignment described in T-0032.
-#[expect(
-    dead_code,
-    reason = "used only from #[cfg(test)] module; the compiler cannot see test-only callers"
-)]
+#[cfg(test)]
 fn compute_schedule_offset(
     schedule: &ScheduleTimeSeries,
     start_time: DateTime<FixedOffset>,

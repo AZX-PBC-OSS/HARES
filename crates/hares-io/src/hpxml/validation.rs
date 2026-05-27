@@ -70,6 +70,7 @@ impl ValidationReport {
 /// Returns true when `value` looks like a namespace URI (starts with `http://` or
 /// `https://`) and does *not* belong to HPXML (`hpxmlonline.com`) or well-known
 /// XML infrastructure namespaces (`w3.org`).
+#[cfg(any(debug_assertions, feature = "check_invariants", feature = "observe"))]
 fn looks_like_namespace_uri(value: &str) -> bool {
     let lower = value.to_lowercase();
     (lower.starts_with("http://") || lower.starts_with("https://"))
@@ -177,6 +178,7 @@ pub fn validate_hpxml_schema_node(
     // reliably, we scan all attribute *values* for URI-looking values that do not
     // belong to HPXML, XML Schema, or XSI — the canonical small set of root-level
     // namespace attributes.
+    #[cfg(any(debug_assertions, feature = "check_invariants", feature = "observe"))]
     let non_hpxml_namespaces: Vec<String> = root
         .attrs
         .iter()

@@ -962,9 +962,8 @@ fn garage_floor_area_m2(building: &Building) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::building::{parse_building, parse_xml_document};
+    use super::super::building::parse_xml_document;
     use super::*;
-    use crate::defaults::DefaultsStore;
 
     #[test]
     fn is_conditioned_location_classifies_hpxml_and_field_strings() {
