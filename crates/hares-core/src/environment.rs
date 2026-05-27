@@ -97,7 +97,6 @@ pub struct EnvironmentManager {
     /// EPW files are annual starting Jan 1; if the simulation starts
     /// mid-year, this shifts the index so step 0 reads the right row.
     weather_start_offset: usize,
-    schedule_start_offset: usize,
     mains_t_annual_avg_c: f64,
     mains_dt_annual_range_c: f64,
     mains_hemisphere: Hemisphere,
@@ -221,7 +220,6 @@ impl EnvironmentManager {
         // Offset into them based on the simulation start time so step 0 reads the correct row.
         let weather_start_offset =
             compute_annual_offset(&weather.meta, start_time, step_secs, weather.len());
-        let schedule_start_offset = compute_schedule_offset(&schedule, start_time, step_secs);
         let (mains_t_annual_avg_c, mains_dt_annual_range_c) =
             compute_mains_inputs(&weather, step_secs);
 
@@ -279,7 +277,6 @@ impl EnvironmentManager {
             grid_override: None,
             zones,
             weather_start_offset,
-            schedule_start_offset,
             mains_t_annual_avg_c,
             mains_dt_annual_range_c,
             mains_hemisphere,
@@ -387,15 +384,24 @@ impl EnvironmentManager {
     /// DST transitions naturally. Weather indexing is **not** affected -- solar
     /// position and meteorological data are physical quantities tied to UTC, not
     /// civil time.
-    #[allow(unused_variables)]
-    fn compute_schedule_idx(&self, clock: &SimClock, step: usize) -> usize {
+    ///
+    /// In the fallback (non-DST) path the index is also derived from calendar
+    /// time, not a step counter. This ensures leap-year schedule alignment
+    /// (T-0032) is correct regardless of DST configuration.
+    fn compute_schedule_idx(&self, clock: &SimClock) -> usize {
         let schedule_len = self.schedule.len();
 
         #[cfg(feature = "dst")]
         if let Some(tz) = self.civil_tz {
             let sim_time = clock.current_time();
             let civil = sim_time.with_timezone(&tz);
-            let doy0 = civil.ordinal0() as u64;
+            let mut doy0 = civil.ordinal0() as u64;
+            // Schedules are always 365-day annual data, so leap-year dates after
+            // Feb 29 must be adjusted to their non-leap ordinal to prevent the
+            // one-day schedule misalignment described in T-0032.
+            if is_leap_year(civil.year()) && doy0 > 59 {
+                doy0 -= 1;
+            }
             let h = civil.hour() as u64;
             let m = civil.minute() as u64;
             let s = civil.second() as u64;
@@ -404,14 +410,28 @@ impl EnvironmentManager {
             if step_secs == 0 {
                 return 0;
             }
-            return (civil_secs / step_secs) as usize % schedule_len;
+            let year_secs = schedule_len as u64 * step_secs;
+            return (civil_secs % year_secs / step_secs) as usize;
         }
 
-        // Fixed-offset fallback: use precomputed start offset.
-        (step + self.schedule_start_offset) % schedule_len
+        // Fallback: derive the schedule row from the current sim time with
+        // the same leap-year doy0 adjustment as the DST path and compute_schedule_offset.
+        let sim_time = clock.current_time();
+        let mut doy0 = sim_time.ordinal0() as u64;
+        if is_leap_year(sim_time.year()) && doy0 > 59 {
+            doy0 -= 1;
+        }
+        let h = sim_time.hour() as u64;
+        let m = sim_time.minute() as u64;
+        let s = sim_time.second() as u64;
+        let civil_secs = doy0 * 86400 + h * 3600 + m * 60 + s;
+        let step_secs = clock.time_res.num_seconds().unsigned_abs();
+        if step_secs == 0 {
+            return 0;
+        }
+        let year_secs = schedule_len as u64 * step_secs;
+        (civil_secs % year_secs / step_secs) as usize
     }
-
-    /// Borrow the parsed schedule time series.
     #[must_use]
     pub fn schedule(&self) -> &ScheduleTimeSeries {
         &self.schedule
@@ -486,7 +506,7 @@ impl EnvironmentManager {
         let schedule_idx = if self.schedule.is_empty() {
             0
         } else {
-            self.compute_schedule_idx(clock, step)
+            self.compute_schedule_idx(clock)
         };
 
         // Step 1: weather lookup and psychrometric derivations
@@ -725,6 +745,14 @@ fn compute_annual_offset(
 
 /// Compute offset into the schedule time series.
 /// Schedules from ResStock/BEopt are annual, indexed from Jan 1 in local time.
+/// ResStock/BEopt schedules are always 365-day non-leap-year data; the
+/// `ordinal0()`-based computation is adjusted for leap-year start times so that
+/// calendar dates after Feb 29 map to the same schedule rows as in a non-leap
+/// year, preventing the one-day schedule misalignment described in T-0032.
+#[expect(
+    dead_code,
+    reason = "used only from #[cfg(test)] module; the compiler cannot see test-only callers"
+)]
 fn compute_schedule_offset(
     schedule: &ScheduleTimeSeries,
     start_time: DateTime<FixedOffset>,
@@ -733,12 +761,29 @@ fn compute_schedule_offset(
     if step_secs == 0 || schedule.is_empty() {
         return 0;
     }
-    let doy0 = start_time.ordinal0() as u64;
+    let mut doy0 = start_time.ordinal0() as u64;
+    // Schedules are always 365-day annual data. In a leap year, ordinal0()
+    // is +1 for dates after Feb 29 relative to their non-leap counterpart.
+    // Subtract 1 to restore the correct schedule row index.
+    let year = start_time.year();
+    if is_leap_year(year) && doy0 > 59 {
+        doy0 -= 1;
+    }
     let h = start_time.hour() as u64;
     let m = start_time.minute() as u64;
     let s = start_time.second() as u64;
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
-    (seconds_into_year / step_secs as u64) as usize
+    // Derive year length from the actual schedule array size so wrapping is
+    // correct regardless of whether the schedule is hourly, sub-hourly, etc.
+    let year_secs = schedule.len() as u64 * step_secs as u64;
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    debug_assert!(year_secs > 0, "schedule has zero length or step");
+    (seconds_into_year % year_secs / step_secs as u64) as usize
+}
+
+/// Return true if `year` is a leap year (29-day February per Gregorian calendar).
+fn is_leap_year(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 fn compute_mains_inputs(weather: &WeatherTimeSeries, step_secs: u32) -> (f64, f64) {
@@ -1127,6 +1172,22 @@ mod tests {
             timestamps: vec![ts(0), ts(1)],
             column_names: vec!["known_schedule".to_string()],
             columns: vec![vec![1.23, 4.56]],
+            column_index: index,
+            source_step_secs: 3600,
+            column_aggregations: vec![],
+        }
+    }
+
+    /// Construct a schedule with `n` rows for offset computation tests.
+    fn hourly_schedule(n: usize) -> ScheduleTimeSeries {
+        let start = utc_offset().with_ymd_and_hms(2007, 1, 1, 0, 0, 0).unwrap();
+        let timestamps: Vec<_> = (0..n).map(|i| start + Duration::hours(i as i64)).collect();
+        let mut index = HashMap::new();
+        index.insert("test".to_string(), 0);
+        ScheduleTimeSeries {
+            timestamps,
+            column_names: vec!["test".to_string()],
+            columns: vec![vec![0.0; n]],
             column_index: index,
             source_step_secs: 3600,
             column_aggregations: vec![],
@@ -1767,6 +1828,191 @@ mod tests {
         assert_eq!(compute_annual_offset(&meta, start, 900, 35040), 6);
     }
 
+    // ----- compute_schedule_offset leap-year tests (T-0032) -----
+
+    /// Schedule offset for Feb 29 in a leap year.
+    /// Feb 29 ordinal0=59, same as non-leap Mar 1. The schedule has 8760 rows
+    /// (365-day non-leap) so Feb 29 maps to row 59*24=1416 (March 1 data).
+    /// No adjustment needed since ordinal0 <= 59, but year_secs wrapping
+    /// protects against out-of-bounds.
+    #[test]
+    fn compute_schedule_offset_leap_year_feb_29() {
+        let schedule = hourly_schedule(8760);
+        let start = utc_offset().with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap();
+        let offset = compute_schedule_offset(&schedule, start, 3600);
+        assert_eq!(offset, 1416, "Feb 29 should index row 1416 (day 59)");
+    }
+
+    /// Schedule offset for March 1 in a leap year.
+    /// ordinal0=60, adjusted -1 → 59 so the schedule row matches the non-leap
+    /// index for March 1 (59*24=1416).
+    #[test]
+    fn compute_schedule_offset_leap_year_mar_1() {
+        let schedule = hourly_schedule(8760);
+        let start = utc_offset().with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let offset = compute_schedule_offset(&schedule, start, 3600);
+        assert_eq!(offset, 1416, "March 1 leap year should index day 59 (1416)");
+    }
+
+    /// Regression: same calendar date across leap and non-leap years produces
+    /// identical schedule offsets. The one-day shift after Feb 29 is the
+    /// defect T-0032 fixes.
+    #[test]
+    fn compute_schedule_offset_same_date_leap_vs_non_leap() {
+        let schedule = hourly_schedule(8760);
+        let start_leap = utc_offset()
+            .with_ymd_and_hms(2024, 7, 4, 12, 30, 0)
+            .unwrap();
+        let start_non_leap = utc_offset()
+            .with_ymd_and_hms(2023, 7, 4, 12, 30, 0)
+            .unwrap();
+        let leap_offset = compute_schedule_offset(&schedule, start_leap, 3600);
+        let non_leap_offset = compute_schedule_offset(&schedule, start_non_leap, 3600);
+        assert_eq!(
+            leap_offset, non_leap_offset,
+            "same calendar date (Jul 4) must produce identical schedule offset"
+        );
+    }
+
+    /// Leap year Dec 31 wraps correctly. ordinal0=365, adjusted -1 → 364.
+    /// Row = 364*24 = 8736.
+    #[test]
+    fn compute_schedule_offset_leap_year_dec_31() {
+        let schedule = hourly_schedule(8760);
+        let start = utc_offset()
+            .with_ymd_and_hms(2024, 12, 31, 0, 0, 0)
+            .unwrap();
+        let offset = compute_schedule_offset(&schedule, start, 3600);
+        assert_eq!(offset, 8736, "Dec 31 leap year → adjusted ordinal 364");
+    }
+
+    /// Sub-hourly schedule (15-min steps, 35040 rows) in a leap year.
+    /// Mar 1 ordinal0=60, adjusted -1 → 59. seconds = 59*86400=5097600.
+    /// index = 5097600/900 = 5664.
+    #[test]
+    fn compute_schedule_offset_leap_year_15min() {
+        let schedule = hourly_schedule(35040);
+        let start = utc_offset().with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let offset = compute_schedule_offset(&schedule, start, 900);
+        assert_eq!(offset, 5664, "15-min March 1 leap year");
+    }
+
+    /// Regression: non-DST running path produces correct schedule index after Feb 29.
+    ///
+    /// The original non-DST fallback used `(step + schedule_start_offset) % len`,
+    /// which accumulates the step counter linearly. After Feb 29 in a leap year,
+    /// the step counter is +1 relative to the adjusted doy0, permanently shifting
+    /// the schedule by one day for the remainder of the year. T-0032.
+    #[test]
+    fn non_dst_running_path_handles_leap_year_feb_29() {
+        let n = 8760;
+        // Schedule where each row has value == row_index for easy verification.
+        let base = utc_offset().with_ymd_and_hms(2007, 1, 1, 0, 0, 0).unwrap();
+        let timestamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        let row_values: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mut col_idx = HashMap::new();
+        col_idx.insert("hour_idx".to_string(), 0);
+        let schedule = ScheduleTimeSeries {
+            timestamps,
+            column_names: vec!["hour_idx".to_string()],
+            columns: vec![row_values],
+            column_index: col_idx,
+            source_step_secs: 3600,
+            column_aggregations: vec![],
+        };
+        let weather = WeatherTimeSeries {
+            meta: WeatherMeta {
+                location: "Test".to_string(),
+                latitude: 40.0,
+                longitude: -74.0,
+                timezone_offset_h: -5.0,
+                elevation_m: 10.0,
+                wf_allows_leap_years: true,
+                source_step_secs: 3600,
+                midpoint_offset_secs: 0,
+            },
+            design_conditions: None,
+            dry_bulb_c: vec![20.0; n],
+            dew_point_c: vec![10.0; n],
+            rel_humidity_pct: vec![50.0; n],
+            pressure_kpa: vec![101.3; n],
+            ghi_w_m2: vec![0.0; n],
+            dni_w_m2: vec![0.0; n],
+            dhi_w_m2: vec![0.0; n],
+            wind_speed_m_s: vec![3.0; n],
+            wind_dir_deg: vec![180.0; n],
+            opaque_sky_cover: vec![2.0; n],
+            horizontal_infrared_w_m2: vec![300.0; n],
+            sky_temp_c: vec![5.0; n],
+            ground_temp_c: vec![8.0; n],
+            liquid_precip_m: vec![0.0; n],
+            surface_albedo: None,
+        };
+
+        let est = FixedOffset::west_opt(5 * 3600).expect("offset");
+        let start = est.with_ymd_and_hms(2024, 2, 28, 0, 0, 0).unwrap();
+        let mut mgr = EnvironmentManager::new(
+            weather,
+            schedule,
+            &building(Some(21.0)),
+            StdDuration::from_secs(3600),
+            start,
+            None, // no DST
+        )
+        .expect("manager");
+
+        // Simulate 72 hours: Feb 28 00:00 through March 1 23:00.
+        let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(72));
+
+        // Feb 28 00:00 (step 0): doy0=58, no adjustment → 58*24+0 = 1392
+        // Feb 29 00:00 (step 24): doy0=59, not >59, no adjustment → 59*24+0 = 1416
+        // Mar  1 00:00 (step 48): doy0=60, adjusted -1 → 59*24+0 = 1416
+        for step in 0..72u64 {
+            let env = mgr.update(&clock, &[]);
+            let got = env
+                .custom_domains
+                .iter()
+                .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
+                .and_then(|d| d.custom_payload.as_ref())
+                .and_then(|p| p.first())
+                .copied()
+                .expect("schedule domain payload");
+
+            let sim_time = clock.current_time();
+            let mut doy0 = sim_time.ordinal0() as u64;
+            if is_leap_year(sim_time.year()) && doy0 > 59 {
+                doy0 -= 1;
+            }
+            let expected = (doy0 * 24 + sim_time.hour() as u64) as f64;
+
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "step {step}: civil {sim_time}, expected row {expected}, got {got}"
+            );
+
+            // Specific assertions at the key transition points.
+            if step == 24 {
+                assert!(
+                    (got - 1416.0).abs() < 1e-6,
+                    "Feb 29 00:00 should index schedule row 1416 (day 59), got {got}"
+                );
+            }
+            if step == 48 {
+                assert!(
+                    (got - 1416.0).abs() < 1e-6,
+                    "March 1 00:00 leap year should index schedule row 1416 \
+                     (adjusted doy0 59), got {got} — step-counter bug would produce 1440"
+                );
+            }
+
+            if clock.next().is_none() {
+                break;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+
     /// Various climate offsets produce correct temperatures.
     #[test]
     fn weather_offset_winter_vs_summer() {
@@ -2313,6 +2559,7 @@ mod tests {
                     source_step_secs: 3600,
                     midpoint_offset_secs: 0,
                 },
+                design_conditions: None,
                 dry_bulb_c: (0..n).map(|i| i as f64 * 0.01).collect(),
                 dew_point_c: vec![2.0; n],
                 rel_humidity_pct: vec![50.0; n],
@@ -2346,7 +2593,9 @@ mod tests {
         /// pre-DST fixed-offset behavior.
         #[test]
         fn schedule_without_dst_unchanged() {
-            let start = utc_offset().with_ymd_and_hms(2024, 3, 10, 6, 0, 0).unwrap();
+            // Use 2023 (non-leap year) to isolate DST behaviour from leap-year
+            // schedule offset concerns (T-0032).
+            let start = utc_offset().with_ymd_and_hms(2023, 3, 12, 6, 0, 0).unwrap();
             let mut mgr_no_dst = EnvironmentManager::new(
                 annual_hourly_weather(),
                 annual_hourly_schedule(),
@@ -2358,24 +2607,25 @@ mod tests {
             .expect("no-dst manager");
             let clock = SimClock::new(start, Duration::hours(1), Duration::hours(4));
             let env = mgr_no_dst.update(&clock, &[]);
-            // Hour 6 of day 69 (March 10, leap year 2024): schedule row =
-            // 69 * 24 + 6 = 1662.
+            // March 12, 2023 (non-leap): ordinal0 = 70.  Hour 6: row = 70*24 + 6 = 1686.
             let val = schedule_val(&env);
             assert!(
-                (val - 1662.0).abs() < 1e-6,
-                "expected schedule row 1662, got {val}"
+                (val - 1686.0).abs() < 1e-6,
+                "expected schedule row 1686, got {val}"
             );
         }
 
-        /// Spring forward (America/New_York, 2024-03-10 at 2:00 AM EST → 3:00 AM EDT):
+        /// Spring forward (America/New_York, 2023-03-12 at 2:00 AM EST → 3:00 AM EDT):
         /// Civil time jumps from 1:59:59 to 3:00:00. Schedule row for civil
         /// hour 2 AM is never accessed; hour 3 AM is used instead.
+        /// Uses 2023 (non-leap year) to isolate DST behaviour from leap-year
+        /// schedule offset concerns (T-0032).
         #[test]
         fn schedule_spring_forward_skips_civil_hour() {
-            // EST = UTC-5. At 2024-03-10T07:00:00Z the wall clock is 2:00 AM EST,
+            // EST = UTC-5. At 2023-03-12T07:00:00Z the wall clock is 2:00 AM EST,
             // which is the instant of spring-forward → becomes 3:00 AM EDT.
             let est = FixedOffset::west_opt(5 * 3600).expect("offset");
-            let start = est.with_ymd_and_hms(2024, 3, 10, 1, 0, 0).unwrap();
+            let start = est.with_ymd_and_hms(2023, 3, 12, 1, 0, 0).unwrap();
 
             let mut mgr = EnvironmentManager::new(
                 annual_hourly_weather(),
@@ -2391,31 +2641,33 @@ mod tests {
             let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(4));
             let env0 = mgr.update(&clock, &[]);
             let val0 = schedule_val(&env0);
-            // Day 69 (March 10), hour 1: row = 69*24 + 1 = 1657.
+            // March 12 (non-leap): ordinal0 = 70.  Hour 1: row = 70*24 + 1 = 1681.
             assert!(
-                (val0 - 1657.0).abs() < 1e-6,
-                "step 0: expected civil hour 1 (row 1657), got {val0}"
+                (val0 - 1681.0).abs() < 1e-6,
+                "step 0: expected civil hour 1 (row 1681), got {val0}"
             );
 
             let _ = clock.next(); // advance to step 1
             let env1 = mgr.update(&clock, &[]);
             let val1 = schedule_val(&env1);
-            // Civil time is now 3:00 AM EDT (skipped 2 AM). Row = 69*24 + 3 = 1659.
+            // Civil time is now 3:00 AM EDT (skipped 2 AM). Row = 70*24 + 3 = 1683.
             assert!(
-                (val1 - 1659.0).abs() < 1e-6,
-                "step 1: expected civil hour 3 (row 1659, spring-forward skip), got {val1}"
+                (val1 - 1683.0).abs() < 1e-6,
+                "step 1: expected civil hour 3 (row 1683, spring-forward skip), got {val1}"
             );
         }
 
-        /// Fall back (America/New_York, 2024-11-03 at 2:00 AM EDT → 1:00 AM EST):
+        /// Fall back (America/New_York, 2023-11-05 at 2:00 AM EDT → 1:00 AM EST):
         /// Civil time 1:00 AM occurs twice. The schedule row for civil hour 1 AM
         /// is reused for both occurrences.
+        /// Uses 2023 (non-leap year) to isolate DST behaviour from leap-year
+        /// schedule offset concerns (T-0032).
         #[test]
         fn schedule_fall_back_reuses_civil_hour() {
-            // EDT = UTC-4. At 2024-11-03T05:00:00Z the wall clock is 1:00 AM EDT.
+            // EDT = UTC-4. At 2023-11-05T05:00:00Z the wall clock is 1:00 AM EDT.
             // One hour later (06:00Z), clocks fall back: 1:00 AM EST again.
             let edt = FixedOffset::west_opt(4 * 3600).expect("offset");
-            let start = edt.with_ymd_and_hms(2024, 11, 3, 0, 0, 0).unwrap();
+            let start = edt.with_ymd_and_hms(2023, 11, 5, 0, 0, 0).unwrap();
 
             let mut mgr = EnvironmentManager::new(
                 annual_hourly_weather(),
@@ -2432,19 +2684,19 @@ mod tests {
             let _ = clock.next(); // step 1
             let env1 = mgr.update(&clock, &[]);
             let val1 = schedule_val(&env1);
-            // Nov 3, 2024 = day 307 (ordinal0). Hour 1: row = 307*24 + 1 = 7369.
+            // Nov 5, 2023 = day 308 (ordinal0). Hour 1: row = 308*24 + 1 = 7393.
             assert!(
-                (val1 - 7369.0).abs() < 1e-6,
-                "first 1 AM: expected row 7369, got {val1}"
+                (val1 - 7393.0).abs() < 1e-6,
+                "first 1 AM: expected row 7393, got {val1}"
             );
 
             let _ = clock.next(); // step 2 → civil 2:00 AM EDT → falls back to 1:00 AM EST
             let env2 = mgr.update(&clock, &[]);
             let val2 = schedule_val(&env2);
-            // Civil time is 1:00 AM EST (second occurrence). Same row 7369.
+            // Civil time is 1:00 AM EST (second occurrence). Same row 7393.
             assert!(
-                (val2 - 7369.0).abs() < 1e-6,
-                "second 1 AM (fall-back): expected row 7369, got {val2}"
+                (val2 - 7393.0).abs() < 1e-6,
+                "second 1 AM (fall-back): expected row 7393, got {val2}"
             );
         }
 
