@@ -880,6 +880,26 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         );
     }
 
+    // Garage roof tilt for volume augmentation. Prefer direct Garage→Roof
+    // boundaries; fall back to Attic→Roof tilt when none exist.
+    let garage_roof_tilt_rad = boundaries
+        .iter()
+        .filter(|b| {
+            b.boundary_type == BoundaryType::Roof
+                && b.interior_zone.as_ref() == Some(&ZoneType::Garage)
+        })
+        .find_map(|b| b.tilt_deg)
+        .or_else(|| {
+            boundaries
+                .iter()
+                .filter(|b| {
+                    b.boundary_type == BoundaryType::Roof
+                        && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                })
+                .find_map(|b| b.tilt_deg)
+        })
+        .map(|d| d.to_radians());
+
     // Attic floor area: OCHRE defines attic_floor_area as the top-floor
     // boundary area (Attic Floor / Roof / Adjacent Ceiling) plus Garage Ceiling area.
     // Ref: OCHRE hpxml.py:428-437.
@@ -933,7 +953,27 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             ZoneType::Attic => {
                 compute_attic_volume(&boundaries, zone.floor_area_m2, garage_geometry.as_ref())
             }
-            ZoneType::Garage => zone.floor_area_m2.map(|a| a * ceiling_height_m),
+            ZoneType::Garage => zone.floor_area_m2.map(|floor_area| {
+                let volume = compute_garage_volume(
+                    floor_area,
+                    ceiling_height_m,
+                    garage_roof_tilt_rad,
+                    garage_geometry.as_ref(),
+                );
+                #[cfg(feature = "observe")]
+                {
+                    let rectangular = floor_area * ceiling_height_m;
+                    let augmentation = volume - rectangular;
+                    tracing::debug!(
+                        target: "observe",
+                        garage_rectangular_volume_m3 = rectangular,
+                        garage_roof_volume_augmentation_m3 = augmentation,
+                        garage_total_volume_m3 = volume,
+                        garage_tilt_rad = garage_roof_tilt_rad,
+                    );
+                }
+                volume
+            }),
             ZoneType::Foundation => zone
                 .floor_area_m2
                 .zip(foundation_height_m)
@@ -2908,6 +2948,34 @@ fn max_areas_by_azimuth(areas: &[f64], azimuths: &[f64]) -> Option<(f64, f64)> {
     }
     let vals: Vec<f64> = groups.into_values().collect();
     Some((vals[0], vals[1]))
+}
+
+/// Compute garage zone volume with optional roof-space augmentation.
+///
+/// OCHRE hpxml.py:730-734 adds a triangular-prism roof-space term for the
+/// protruded garage portion:
+///
+/// ```text
+/// V_garage = floor_area * wall_height + 0.5 * tan(roof_tilt) * protruded_area
+/// ```
+///
+/// HARES uses `tan()`, correcting the apparent `atan()` mis-use in the OCHRE
+/// reference. Falls back to the rectangular formula when roof tilt or garage
+/// geometry is unavailable.
+fn compute_garage_volume(
+    floor_area_m2: f64,
+    wall_height_m: f64,
+    garage_tilt_rad: Option<f64>,
+    garage_geometry: Option<&GarageGeometry>,
+) -> f64 {
+    let rectangular = floor_area_m2 * wall_height_m;
+    let augmentation = match (garage_tilt_rad, garage_geometry) {
+        (Some(tilt), Some(geom)) if tilt > 0.0 && geom.protruded_area_m2 > 0.0 => {
+            0.5 * tilt.tan() * geom.protruded_area_m2
+        }
+        _ => 0.0,
+    };
+    rectangular + augmentation
 }
 
 /// Compute attic volume from gable wall areas, roof pitch, and garage geometry.
@@ -6396,6 +6464,193 @@ mod tests {
             supply.leakage_fraction,
             Some(0.08),
             "duplicate supply DuctLeakageMeasurement: second value (8%% -> 0.08) must win"
+        );
+    }
+
+    // ── garage volume (roof-space augmentation) ──
+
+    #[test]
+    fn garage_volume_with_pitched_roof() {
+        use super::{GarageGeometry, compute_garage_volume};
+        // 6:12 pitch → tilt = atan(0.5) ≈ 26.565°, tan ≈ 0.5
+        let tilt_rad = (6.0_f64 / 12.0).atan();
+        let floor_area = 30.0; // m²
+        let wall_height = 2.5; // m
+        let protruded = 15.0; // m²
+        let geom = GarageGeometry {
+            floor_area_m2: floor_area,
+            wall_height_m: wall_height,
+            protruded_area_m2: protruded,
+        };
+        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
+        // Expected: floor_area * wall_height + 0.5 * tan(tilt) * protruded
+        //    = 30 * 2.5 + 0.5 * 0.5 * 15 = 75 + 3.75 = 78.75
+        let expected = floor_area * wall_height + 0.5 * tilt_rad.tan() * protruded;
+        assert!(
+            (vol - expected).abs() < 1e-10,
+            "pitched garage: got {vol}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn garage_volume_flat_roof_no_augmentation() {
+        use super::{GarageGeometry, compute_garage_volume};
+        let tilt_rad = 0.0;
+        let floor_area = 30.0;
+        let wall_height = 2.5;
+        let geom = GarageGeometry {
+            floor_area_m2: floor_area,
+            wall_height_m: wall_height,
+            protruded_area_m2: 15.0,
+        };
+        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
+        // Zero tilt → tan(0) = 0 → augmentation = 0
+        assert!(
+            (vol - floor_area * wall_height).abs() < 1e-10,
+            "flat roof: augmentation should be zero, got {vol}"
+        );
+    }
+
+    #[test]
+    fn garage_volume_no_geometry_falls_back_to_rectangular() {
+        use super::compute_garage_volume;
+        let floor_area = 30.0;
+        let wall_height = 2.5;
+        let tilt_rad = (6.0_f64 / 12.0).atan();
+        // No GarageGeometry provided → falls back to floor_area * wall_height
+        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), None);
+        assert!(
+            (vol - floor_area * wall_height).abs() < 1e-10,
+            "missing geometry: should be rectangular, got {vol}"
+        );
+    }
+
+    #[test]
+    fn garage_volume_no_roof_tilt_falls_back_to_rectangular() {
+        use super::{GarageGeometry, compute_garage_volume};
+        let floor_area = 30.0;
+        let wall_height = 2.5;
+        let geom = GarageGeometry {
+            floor_area_m2: floor_area,
+            wall_height_m: wall_height,
+            protruded_area_m2: 15.0,
+        };
+        // No roof tilt → falls back to floor_area * wall_height
+        let vol = compute_garage_volume(floor_area, wall_height, None, Some(&geom));
+        assert!(
+            (vol - floor_area * wall_height).abs() < 1e-10,
+            "missing tilt: should be rectangular, got {vol}"
+        );
+    }
+
+    #[test]
+    fn garage_volume_zero_protruded_no_augmentation() {
+        use super::{GarageGeometry, compute_garage_volume};
+        let tilt_rad = (6.0_f64 / 12.0).atan();
+        let floor_area = 30.0;
+        let wall_height = 2.5;
+        let geom = GarageGeometry {
+            floor_area_m2: floor_area,
+            wall_height_m: wall_height,
+            protruded_area_m2: 0.0,
+        };
+        let vol = compute_garage_volume(floor_area, wall_height, Some(tilt_rad), Some(&geom));
+        assert!(
+            (vol - floor_area * wall_height).abs() < 1e-10,
+            "zero protruded: augmentation should be zero, got {vol}"
+        );
+    }
+
+    #[test]
+    fn garage_volume_inline_hpxml_with_roof_augmentation() {
+        // Integration test: parse a minimal HPXML with explicit garage floor
+        // area and pitched roof; verify the volume includes augmentation.
+        //
+        // Walls are arranged for compute_garage_geometry to produce
+        // protruded_area > 0:
+        //   - 2 perpendicular exterior garage walls → wall height derivable
+        //   - 1 attached wall (Conditioned↔Garage) → garage_area_in_main=0
+        //   → protruded = floor_area.
+        use super::parse_building;
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Attics>
+          <Attic>
+            <SystemIdentifier id="Attic1"/>
+            <AtticType><Attic><Vented>false</Vented></Attic></AtticType>
+            <AttachedToRoof idref="Roof1"/>
+          </Attic>
+        </Attics>
+        <Garages>
+          <Garage>
+            <SystemIdentifier id="Garage1"/>
+            <FloorArea units="ft2">600</FloorArea>
+          </Garage>
+        </Garages>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>attic - unvented</InteriorAdjacentTo>
+            <Area>1500</Area>
+            <Pitch>6.0</Pitch>
+          </Roof>
+        </Roofs>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id="GarageExtWallA"/>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <InteriorAdjacentTo>garage</InteriorAdjacentTo>
+            <Area>240</Area>
+            <Azimuth>0</Azimuth>
+          </Wall>
+          <Wall>
+            <SystemIdentifier id="GarageExtWallB"/>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <InteriorAdjacentTo>garage</InteriorAdjacentTo>
+            <Area>200</Area>
+            <Azimuth>90</Azimuth>
+          </Wall>
+          <Wall>
+            <SystemIdentifier id="AttachedWall"/>
+            <ExteriorAdjacentTo>garage</ExteriorAdjacentTo>
+            <InteriorAdjacentTo>living space</InteriorAdjacentTo>
+            <Area>180</Area>
+            <Azimuth>180</Azimuth>
+          </Wall>
+        </Walls>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let building = parse_building(xml).expect("garage HPXML should parse");
+        let garage_zone = building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == ZoneType::Garage)
+            .expect("must have garage zone");
+
+        let volume = garage_zone
+            .volume_m3
+            .expect("garage zone must have a computed volume");
+
+        let ceiling_height_m = building.ceiling_height_m.expect("must have ceiling height");
+        let floor_area_m2 = garage_zone.floor_area_m2.expect("must have floor area");
+        let rectangular = floor_area_m2 * ceiling_height_m;
+
+        // 1 attached wall → protruded = floor_area → augmentation > 0
+        assert!(
+            volume > rectangular,
+            "garage volume {volume} must exceed rectangular {rectangular} with pitched roof and 1 attached wall (protruded > 0)"
         );
     }
 }
