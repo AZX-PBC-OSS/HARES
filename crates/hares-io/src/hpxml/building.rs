@@ -11,6 +11,7 @@ use hares_physics::infiltration::{NATURAL_TO_50PA_EXPONENT, ach_nat_to_ach50};
 use hares_physics::units as conv;
 
 use super::HpxmlError;
+use super::ParseError;
 use super::xml_helpers::element_id;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,6 +331,14 @@ impl XmlNode {
     }
 }
 
+fn byte_to_line_col(input: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(input.len());
+    let prefix = &input[..offset];
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let col = prefix.rfind('\n').map_or(offset + 1, |i| offset - i);
+    (line, col)
+}
+
 pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -395,7 +404,15 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
             }
             Ok(Event::End(_)) => {
                 let node = stack.pop().ok_or_else(|| {
-                    HpxmlError::Parse("malformed XML: end tag without start tag".to_string())
+                    let pos = reader.buffer_position() as usize;
+                    let (line, col) = byte_to_line_col(xml, pos);
+                    HpxmlError::Parse(ParseError {
+                        message: "malformed XML: end tag without start tag".to_string(),
+                        byte_offset: pos,
+                        line,
+                        column: col,
+                        element_name: None,
+                    })
                 })?;
                 if let Some(parent) = stack.last_mut() {
                     parent.children.push(node);
@@ -406,13 +423,30 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
             Ok(Event::Eof) => break,
             Ok(_) => {}
             Err(err) => {
-                return Err(HpxmlError::Parse(format!("XML parse failure: {err}")));
+                let pos = reader.error_position() as usize;
+                let (line, col) = byte_to_line_col(xml, pos);
+                let element_name = stack.last().map(|n| n.name.clone());
+                return Err(HpxmlError::Parse(ParseError {
+                    message: format!("{err}"),
+                    byte_offset: pos,
+                    line,
+                    column: col,
+                    element_name,
+                }));
             }
         }
         buf.clear();
     }
 
-    root.ok_or_else(|| HpxmlError::Parse("empty XML document".to_string()))
+    root.ok_or_else(|| {
+        HpxmlError::Parse(ParseError {
+            message: "empty XML document".to_string(),
+            byte_offset: 0,
+            line: 0,
+            column: 0,
+            element_name: None,
+        })
+    })
 }
 
 pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
@@ -423,15 +457,15 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
 pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> {
     let details = root
         .path(&["Building", "BuildingDetails"])
-        .ok_or_else(|| HpxmlError::Parse("missing Building/BuildingDetails".to_string()))?;
+        .ok_or_else(|| HpxmlError::Parse("missing Building/BuildingDetails".into()))?;
 
     let summary = details
         .child("BuildingSummary")
-        .ok_or_else(|| HpxmlError::Parse("missing BuildingSummary".to_string()))?;
+        .ok_or_else(|| HpxmlError::Parse("missing BuildingSummary".into()))?;
 
     let site_node = summary
         .child("Site")
-        .ok_or_else(|| HpxmlError::Parse("missing BuildingSummary/Site".to_string()))?;
+        .ok_or_else(|| HpxmlError::Parse("missing BuildingSummary/Site".into()))?;
 
     let elevation_m = parse_value_with_units(site_node.child("Elevation"), ValueKind::Length)
         .or_else(|| {
@@ -470,22 +504,22 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         (Some(vol), Some(area)) if area > 0.0 => vol / area,
         (Some(_), Some(_)) => {
             return Err(HpxmlError::Parse(
-                "ConditionedFloorArea must be positive to derive ceiling height".to_string(),
+                "ConditionedFloorArea must be positive to derive ceiling height".into(),
             ));
         }
         (None, None) => {
             return Err(HpxmlError::Parse(
-                "missing both ConditionedBuildingVolume and ConditionedFloorArea; cannot derive ceiling height".to_string(),
+                "missing both ConditionedBuildingVolume and ConditionedFloorArea; cannot derive ceiling height".into(),
             ));
         }
         (None, Some(_)) => {
             return Err(HpxmlError::Parse(
-                "missing ConditionedBuildingVolume; cannot derive ceiling height".to_string(),
+                "missing ConditionedBuildingVolume; cannot derive ceiling height".into(),
             ));
         }
         (Some(_), None) => {
             return Err(HpxmlError::Parse(
-                "missing ConditionedFloorArea; cannot derive ceiling height".to_string(),
+                "missing ConditionedFloorArea; cannot derive ceiling height".into(),
             ));
         }
     };
@@ -1066,13 +1100,14 @@ fn parse_windows(
         let id = element_id(window).unwrap_or_else(|| "unknown".to_string());
         let area_m2 =
             parse_value_with_units(window.child("Area"), ValueKind::Area).ok_or_else(|| {
-                HpxmlError::Parse(format!("window '{}' is missing required Area element", id))
+                HpxmlError::Parse(
+                    format!("window '{}' is missing required Area element", id).into(),
+                )
             })?;
         if area_m2 <= 0.0 {
-            return Err(HpxmlError::Parse(format!(
-                "window '{}' has non-positive area: {}",
-                id, area_m2
-            )));
+            return Err(HpxmlError::Parse(
+                format!("window '{}' has non-positive area: {}", id, area_m2).into(),
+            ));
         }
         let azimuth_deg = parse_value_with_units(window.child("Azimuth"), ValueKind::Raw);
         let u_factor_w_m2_k = parse_value_with_units(window.child("UFactor"), ValueKind::UValue);
@@ -1437,10 +1472,9 @@ fn parse_boundary_area(
         BoundaryType::FoundationWall => {
             if let Some(a) = area {
                 if a <= 0.0 {
-                    return Err(HpxmlError::Parse(format!(
-                        "foundation wall '{}' has non-positive area: {}",
-                        id, a
-                    )));
+                    return Err(HpxmlError::Parse(
+                        format!("foundation wall '{}' has non-positive area: {}", id, a).into(),
+                    ));
                 }
                 return Ok(a);
             }
@@ -1475,10 +1509,9 @@ fn parse_boundary_area(
         BoundaryType::Slab => {
             if let Some(a) = area {
                 if a <= 0.0 {
-                    return Err(HpxmlError::Parse(format!(
-                        "slab '{}' has non-positive area: {}",
-                        id, a
-                    )));
+                    return Err(HpxmlError::Parse(
+                        format!("slab '{}' has non-positive area: {}", id, a).into(),
+                    ));
                 }
                 return Ok(a);
             }
@@ -1491,19 +1524,25 @@ fn parse_boundary_area(
         }
         _ => {
             let area_m2 = area.ok_or_else(|| {
-                HpxmlError::Parse(format!(
-                    "{} '{}' is missing required Area element",
-                    boundary_type_label(boundary_type),
-                    id
-                ))
+                HpxmlError::Parse(
+                    format!(
+                        "{} '{}' is missing required Area element",
+                        boundary_type_label(boundary_type),
+                        id
+                    )
+                    .into(),
+                )
             })?;
             if area_m2 <= 0.0 {
-                return Err(HpxmlError::Parse(format!(
-                    "{} '{}' has non-positive area: {}",
-                    boundary_type_label(boundary_type),
-                    id,
-                    area_m2
-                )));
+                return Err(HpxmlError::Parse(
+                    format!(
+                        "{} '{}' has non-positive area: {}",
+                        boundary_type_label(boundary_type),
+                        id,
+                        area_m2
+                    )
+                    .into(),
+                ));
             }
             Ok(area_m2)
         }
@@ -2415,10 +2454,13 @@ fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<(Option<f64>, Option<f64
             if unit_str == "ach" || unit_str == "achnatural" {
                 return Ok((None, None));
             }
-            return Err(HpxmlError::Parse(format!(
-                "unrecognised UnitofMeasure '{unit_str}' on BuildingAirLeakage -- \
+            return Err(HpxmlError::Parse(
+                format!(
+                    "unrecognised UnitofMeasure '{unit_str}' on BuildingAirLeakage -- \
                  expected ACH, CFM, ACHnatural, or CFMnatural"
-            )));
+                )
+                .into(),
+            ));
         }
         // Absent UnitofMeasure — not a CFM measurement.
         return Ok((None, None));
@@ -2444,10 +2486,13 @@ fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<(Option<f64>, Option<f64
             if matches!(unit_str, "ach50" | "ach" | "achnatural") {
                 return Ok((None, None));
             }
-            return Err(HpxmlError::Parse(format!(
-                "unrecognised units attribute '{unit_str}' on AirLeakage -- \
+            return Err(HpxmlError::Parse(
+                format!(
+                    "unrecognised units attribute '{unit_str}' on AirLeakage -- \
                  expected ACH, ACH50, CFM, or CFM50"
-            )));
+                )
+                .into(),
+            ));
         }
         // No units attribute — not a CFM50 measurement.
         return Ok((None, None));
@@ -2494,10 +2539,13 @@ fn parse_air_leakage_ach50(details: &XmlNode) -> Result<(Option<f64>, Option<f64
             if unit_str == "cfm" || unit_str == "cfmnatural" {
                 return Ok((None, None));
             }
-            return Err(HpxmlError::Parse(format!(
-                "unrecognised UnitofMeasure '{unit_str}' on BuildingAirLeakage -- \
+            return Err(HpxmlError::Parse(
+                format!(
+                    "unrecognised UnitofMeasure '{unit_str}' on BuildingAirLeakage -- \
                  expected ACH, CFM, ACHnatural, or CFMnatural"
-            )));
+                )
+                .into(),
+            ));
         }
         // Absent UnitofMeasure — HPXML convention: bare BuildingAirLeakage value is ACH.
         let value = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
@@ -2525,10 +2573,13 @@ fn parse_air_leakage_ach50(details: &XmlNode) -> Result<(Option<f64>, Option<f64
             if matches!(unit_str, "cfm50" | "cfm" | "cfmnatural") {
                 return Ok((None, None));
             }
-            return Err(HpxmlError::Parse(format!(
-                "unrecognised units attribute '{unit_str}' on AirLeakage -- \
+            return Err(HpxmlError::Parse(
+                format!(
+                    "unrecognised units attribute '{unit_str}' on AirLeakage -- \
                  expected ACH, ACH50, CFM, or CFM50"
-            )));
+                )
+                .into(),
+            ));
         }
         // No units attribute — bare value (HPXML convention: ACH50 when HousePressure=50).
         return Ok((al.text_as_f64(), None));
@@ -2977,6 +3028,7 @@ fn normalize_name(name: &str) -> String {
 mod tests {
     use super::{
         BoundaryType, DuctType, HpxmlError, ZoneType, assembly_framing_factor, parse_building,
+        parse_xml_document,
     };
 
     const SAMPLE_XML: &str = r#"
@@ -6030,6 +6082,47 @@ mod tests {
                 .iter()
                 .any(|z| matches!(z.zone_type, ZoneType::Attic)),
             "FlatRoof should not create an attic zone"
+        );
+    }
+
+    #[test]
+    fn parse_malformed_xml_includes_position_info() {
+        // Illegal bare `<` in text content.
+        let xml = "<?xml version=\"1.0\"?>\n<root>\n  <child>value < broken</child>\n</root>";
+        let err = parse_xml_document(xml).expect_err("malformed XML should fail to parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("line 4"),
+            "error should include position context, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_truncated_xml_includes_approximate_location() {
+        // Missing closing tag for `<child>`, truncated at `</root>`.
+        let xml = "<?xml version=\"1.0\"?>\n<root>\n  <child>value\n</root>";
+        let err = parse_xml_document(xml).expect_err("truncated XML should fail to parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("line 4"),
+            "truncation error should include approximate location, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_error_includes_element_context() {
+        // Bare `<` inside a nested element — the error should include the nearest
+        // element name from the parse stack.
+        let xml = "<?xml version=\"1.0\"?>\n<HPXML>\n  <Building>\n    <BuildingDetails>\n      <BuildingSummary>\n        <Site><Elevation>100 <broken</Elevation></Site>\n      </BuildingSummary>\n    </BuildingDetails>\n  </Building>\n</HPXML>";
+        let err = parse_xml_document(xml).expect_err("malformed XML with bare < should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("line 6"),
+            "error should include position context, got: {msg}"
+        );
+        assert!(
+            msg.contains("near element <"),
+            "error should include nearest element name, got: {msg}"
         );
     }
 }

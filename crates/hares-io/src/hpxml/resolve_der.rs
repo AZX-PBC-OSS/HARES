@@ -45,7 +45,7 @@ pub(super) fn resolve_pv(
                 return Err(HpxmlError::Parse(format!(
                     "PV system `{pv_id}` uses unsupported tracking mode `{}`; only `fixed` is supported",
                     tracking.trim()
-                )));
+                ).into()));
             }
         }
 

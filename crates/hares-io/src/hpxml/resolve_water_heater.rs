@@ -323,16 +323,19 @@ pub(super) fn resolve_water_heaters(
                 "expected {wh_count} unique system identifiers for {wh_count} WaterHeatingSystem \
                  elements but only {found} have an id attribute",
                 found = ids.len(),
-            )));
+            ).into()));
         }
         let mut sorted = ids.clone();
         sorted.sort();
         sorted.dedup();
         if sorted.len() != ids.len() {
-            return Err(super::HpxmlError::Parse(format!(
-                "duplicate SystemIdentifier/@id found among {wh_count} WaterHeatingSystem \
+            return Err(super::HpxmlError::Parse(
+                format!(
+                    "duplicate SystemIdentifier/@id found among {wh_count} WaterHeatingSystem \
                  elements: {ids:?}"
-            )));
+                )
+                .into(),
+            ));
         }
     }
 
@@ -456,9 +459,9 @@ fn parse_water_heater_fuel_from_str(raw: &str) -> Result<FuelType, super::HpxmlE
         "wood pellets" | "wood_pellets" => Ok(FuelType::WoodPellet),
         "coal" | "anthracite coal" | "anthracite_coal" | "bituminous coal" | "bituminous_coal"
         | "coke" => Ok(FuelType::Coal),
-        other => Err(super::HpxmlError::Parse(format!(
-            "unsupported water-heater FuelType '{other}'"
-        ))),
+        other => Err(super::HpxmlError::Parse(
+            format!("unsupported water-heater FuelType '{other}'").into(),
+        )),
     }
 }
 
@@ -482,9 +485,9 @@ fn parse_water_heater_fuel(
             {
                 Ok(FuelType::Gas)
             } else {
-                Err(super::HpxmlError::Parse(format!(
-                    "WaterHeatingSystem type '{ty}' is missing required FuelType"
-                )))
+                Err(super::HpxmlError::Parse(
+                    format!("WaterHeatingSystem type '{ty}' is missing required FuelType").into(),
+                ))
             }
         }
     }
@@ -640,10 +643,13 @@ fn canonical_water_heater_name(
         ("space-heating boiler with storage tank", _) => "Indirect Tank",
         ("space-heating boiler with tankless coil", _) => "Indirect Tank",
         _ => {
-            return Err(super::HpxmlError::Parse(format!(
-                "unsupported HPXML water heater type/fuel combination: \
+            return Err(super::HpxmlError::Parse(
+                format!(
+                    "unsupported HPXML water heater type/fuel combination: \
                  WaterHeaterType='{ty}', fuel='{fuel:?}'"
-            )));
+                )
+                .into(),
+            ));
         }
     };
     Ok(name.to_string())

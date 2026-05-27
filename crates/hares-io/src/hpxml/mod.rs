@@ -1,5 +1,6 @@
 //! HPXML building description parser.
 
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -26,6 +27,66 @@ pub use building::{
 pub use equipment::{EquipmentSpec, nested_update, resolve_equipment};
 pub use validation::{ValidationReport, ValidationWarning};
 
+/// Structured parse error carrying position and element context.
+///
+/// When the error originates from `quick_xml` (malformed XML), the byte
+/// offset, line, and column columns are populated from
+/// [`Reader::error_position()`](quick_xml::reader::Reader::error_position).
+/// The `element_name` field records the most recent element on the parse
+/// stack when the error occurred, providing context for debugging.
+///
+/// When the error is a semantic structural issue (e.g. missing required
+/// child element), position fields are zero and only `message` is meaningful.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError {
+    pub message: String,
+    pub byte_offset: usize,
+    pub line: usize,
+    pub column: usize,
+    pub element_name: Option<String>,
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)?;
+        if self.byte_offset > 0 {
+            write!(
+                f,
+                " at byte offset {} (line {}, column {})",
+                self.byte_offset, self.line, self.column
+            )?;
+        }
+        if let Some(ref name) = self.element_name {
+            write!(f, " near element <{name}>")?;
+        }
+        Ok(())
+    }
+}
+
+impl From<String> for ParseError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            byte_offset: 0,
+            line: 0,
+            column: 0,
+            element_name: None,
+        }
+    }
+}
+
+impl From<&str> for ParseError {
+    fn from(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            byte_offset: 0,
+            line: 0,
+            column: 0,
+            element_name: None,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum HpxmlError {
     #[error("io error reading `{path}`: {source}")]
@@ -35,7 +96,7 @@ pub enum HpxmlError {
         source: std::io::Error,
     },
     #[error("HPXML parse error: {0}")]
-    Parse(String),
+    Parse(ParseError),
     #[error("HPXML schema validation error: {0}")]
     SchemaValidation(ValidationError),
     #[error("HPXML domain validation failed ({error_count} errors)")]
@@ -98,7 +159,7 @@ pub fn parse_hpxml(path: &Path) -> Result<Building> {
 
 /// Parse HPXML from a string input.
 pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
-    let root = parse_xml_document(xml).map_err(|e| HpxmlError::Parse(e.to_string()))?;
+    let root = parse_xml_document(xml)?;
 
     let schema_warnings =
         validate_hpxml_schema_node(&root).map_err(HpxmlError::SchemaValidation)?;

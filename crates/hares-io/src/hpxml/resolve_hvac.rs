@@ -1721,9 +1721,10 @@ fn zone_type_to_ashrae152_str(zone: &Zone, building: &Building) -> super::Result
         ZoneType::Adjacent => Err(super::HpxmlError::Parse(
             "zone type 'Adjacent' is not supported for ASHRAE 152 duct derating".into(),
         )),
-        ZoneType::Other(ref s) => Err(super::HpxmlError::Parse(format!(
-            "unrecognised zone type '{s}' is not supported for ASHRAE 152 duct derating"
-        ))),
+        ZoneType::Other(ref s) => Err(super::HpxmlError::Parse(
+            format!("unrecognised zone type '{s}' is not supported for ASHRAE 152 duct derating")
+                .into(),
+        )),
     }
 }
 
@@ -2139,11 +2140,14 @@ pub(super) fn resolve_hvac(
             "water-loop-to-air" => ("WSHP Heater", "WSHP Cooler"),
             "water-to-air" => ("WSHP Heater", "WSHP Cooler"),
             other => {
-                return Err(HpxmlError::Parse(format!(
-                    "HeatPump: unsupported HeatPumpType '{other}'; \
+                return Err(HpxmlError::Parse(
+                    format!(
+                        "HeatPump: unsupported HeatPumpType '{other}'; \
                      supported types are: air-to-air, mini-split, ground-to-air, \
                      water-loop-to-air, water-to-air"
-                )));
+                    )
+                    .into(),
+                ));
             }
         };
 
@@ -2234,40 +2238,41 @@ pub(super) fn resolve_hvac(
             if let Some(val) = child_f64(eff_node, "Value") {
                 let units_raw = child_text(eff_node, "Units").unwrap_or_default();
                 let units = units_raw.to_ascii_uppercase();
-                let eir = match units.as_str() {
-                    "PERCENT" if val > 1.0 => {
-                        // Value expressed as percent-out-of-100 (e.g. 95 → 95%).
-                        // Divide by 100 before inverting so 100% efficiency yields EIR = 1.0.
-                        // OpenStudio-HPXML (NREL reference implementation) treats Percent
-                        // values as fractions 0–1, but HARES guards against the
-                        // percent-out-of-100 form to be robust to all valid HPXML inputs.
-                        100.0 / val.max(0.01)
-                    }
-                    "PERCENT" => {
-                        // Value is already a fraction (0–1) — the conventional HPXML form.
-                        1.0 / val.max(0.01)
-                    }
-                    // AFUE is always a fraction (0–1). Absent units default to fraction
-                    // form per HPXML convention.
-                    "AFUE" | "" => 1.0 / val.max(0.01),
-                    // COP is already a COP; EIR = 1/COP.
-                    "COP" => 1.0 / val.max(0.01),
-                    // HSPF and HSPF2 are seasonal metrics valid per the HPXML XSD
-                    // HeatingEfficiencyUnits_simple type, but they do not apply to a
-                    // backup resistance or gas strip. Reject loudly.
-                    "HSPF" | "HSPF2" => {
-                        return Err(HpxmlError::Parse(format!(
+                let eir =
+                    match units.as_str() {
+                        "PERCENT" if val > 1.0 => {
+                            // Value expressed as percent-out-of-100 (e.g. 95 → 95%).
+                            // Divide by 100 before inverting so 100% efficiency yields EIR = 1.0.
+                            // OpenStudio-HPXML (NREL reference implementation) treats Percent
+                            // values as fractions 0–1, but HARES guards against the
+                            // percent-out-of-100 form to be robust to all valid HPXML inputs.
+                            100.0 / val.max(0.01)
+                        }
+                        "PERCENT" => {
+                            // Value is already a fraction (0–1) — the conventional HPXML form.
+                            1.0 / val.max(0.01)
+                        }
+                        // AFUE is always a fraction (0–1). Absent units default to fraction
+                        // form per HPXML convention.
+                        "AFUE" | "" => 1.0 / val.max(0.01),
+                        // COP is already a COP; EIR = 1/COP.
+                        "COP" => 1.0 / val.max(0.01),
+                        // HSPF and HSPF2 are seasonal metrics valid per the HPXML XSD
+                        // HeatingEfficiencyUnits_simple type, but they do not apply to a
+                        // backup resistance or gas strip. Reject loudly.
+                        "HSPF" | "HSPF2" => {
+                            return Err(HpxmlError::Parse(format!(
                             "BackupAnnualHeatingEfficiency: '{units_raw}' is a seasonal metric, \
                              not supported for backup heating"
-                        )));
-                    }
-                    _ => {
-                        return Err(HpxmlError::Parse(format!(
+                        ).into()));
+                        }
+                        _ => {
+                            return Err(HpxmlError::Parse(format!(
                             "BackupAnnualHeatingEfficiency: unrecognized or unsupported units \
                              '{units_raw}'"
-                        )));
-                    }
-                };
+                        ).into()));
+                        }
+                    };
                 params.insert("backup_eir".to_string(), json!(eir));
             }
         }
@@ -2588,10 +2593,13 @@ fn canonical_hvac_heating_name(
             | FuelType::WoodPellet,
         ) => "Gas Boiler",
         _ => {
-            return Err(HpxmlError::Parse(format!(
-                "unsupported HPXML heating system type/fuel combination: \
+            return Err(HpxmlError::Parse(
+                format!(
+                    "unsupported HPXML heating system type/fuel combination: \
                  HeatingSystemType='{ty}', fuel='{fuel:?}'"
-            )));
+                )
+                .into(),
+            ));
         }
     };
     Ok(name.to_string())
@@ -2607,9 +2615,9 @@ fn canonical_hvac_cooling_name(
         "room air conditioner" => "Room AC",
         "packaged terminal air conditioner" => "Room AC",
         _ => {
-            return Err(HpxmlError::Parse(format!(
-                "unsupported HPXML cooling system type: CoolingSystemType='{ty}'"
-            )));
+            return Err(HpxmlError::Parse(
+                format!("unsupported HPXML cooling system type: CoolingSystemType='{ty}'").into(),
+            ));
         }
     };
     Ok(name.to_string())

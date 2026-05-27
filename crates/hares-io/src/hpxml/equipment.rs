@@ -900,7 +900,7 @@ mod tests {
             .expect_err("non-fixed tracking should be rejected");
 
         let msg = match err {
-            HpxmlError::Parse(msg) => msg,
+            HpxmlError::Parse(msg) => msg.to_string(),
             other => panic!("expected parse error, got {other:?}"),
         };
         assert!(

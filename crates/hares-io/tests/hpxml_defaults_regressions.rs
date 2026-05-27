@@ -222,7 +222,7 @@ fn missing_hvac_type_tags_fail_resolution_instead_of_defaulting() {
             .expect_err("resolve_equipment must fail when required HVAC type tags are absent");
         match err {
             HpxmlError::Parse(message) => assert!(
-                message.contains(missing_field),
+                message.to_string().contains(missing_field),
                 "{label} case should mention missing {missing_field}, got: {message}"
             ),
             other => panic!("{label} case should return HpxmlError::Parse, got {other:?}"),
