@@ -1085,6 +1085,12 @@ impl Dwelling {
             environment.schedule_mut(),
             Some(&resolved_defaults_dir),
         );
+
+        // Gated invariant: ensure every HVAC spec has a setpoint source.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            hares_io::check_hvac_setpoint_invariants(&equipment_specs);
+        }
         let override_root = config
             .overrides
             .clone()

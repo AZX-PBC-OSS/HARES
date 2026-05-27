@@ -1,7 +1,12 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, FixedOffset, TimeZone, Timelike};
+use hares_equipment::ConfigPayload;
+use hares_equipment::hvac::heat_pump_config::{
+    HeatPumpCommonConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
+};
 use hares_equipment::{Equipment, EquipmentConfig, config::ConfigValue};
 use hares_equipment::{event_load::EventBasedLoad, scheduled_load::ScheduledLoad};
 use hares_io::defaults::DefaultsStore;
@@ -9,7 +14,7 @@ use hares_io::hpxml::building::parse_building;
 use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs, resolve_equipment};
 use hares_types::{
     DomainUpdate, EndUse, EnvironmentState, FuelType, GridState, PortSlots, SCHEDULE_DOMAIN_ID,
-    WeatherState, ZoneId, ZoneState,
+    ScheduleSourceConfig, WeatherState, ZoneId, ZoneState,
 };
 use serde_json::{Map, Value, json};
 use tempfile::tempdir;
@@ -434,5 +439,140 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         (sensible_w - electric_kw * 1000.0).abs() < 1e-6,
         "Refrigerator total_sensible_gain_w ({sensible_w} W) should equal electric_w ({} W)",
         electric_kw * 1000.0
+    );
+}
+
+fn repo_defaults_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir")
+        .parent()
+        .expect("repo root")
+        .join("defaults")
+}
+
+/// Verify that the simulation starts without panicking when the only source of
+/// HVAC thermostat setpoints is the real defaults CSV (no HPXML-derived setpoints).
+/// This is the integration-test acceptance criterion from the ticket.
+#[test]
+fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
+    let defaults_dir = repo_defaults_dir();
+
+    let mut specs = vec![
+        EquipmentSpec {
+            instance_name: None,
+            name: "ASHP Heater".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: Some(EquipmentConfig::from_typed(
+                "ASHP Heater".to_string(),
+                "ASHP Heater".to_string(),
+                HeatPumpHeaterConfig {
+                    common: HeatPumpCommonConfig {
+                        zone_id: Some(1),
+                        ..HeatPumpCommonConfig::default()
+                    },
+                    ..HeatPumpHeaterConfig::default()
+                },
+            )),
+            system_id: None,
+            related_hvac_idref: None,
+        },
+        EquipmentSpec {
+            instance_name: None,
+            name: "ASHP Cooler".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: Some(EquipmentConfig::from_typed(
+                "ASHP Cooler".to_string(),
+                "ASHP Cooler".to_string(),
+                HeatPumpCoolerConfig {
+                    common: HeatPumpCommonConfig {
+                        zone_id: Some(1),
+                        ..HeatPumpCommonConfig::default()
+                    },
+                    ..HeatPumpCoolerConfig::default()
+                },
+            )),
+            system_id: None,
+            related_hvac_idref: None,
+        },
+    ];
+
+    let mut schedule = make_schedule(&[("occupants", &[1.0, 1.0, 1.0])]);
+    inject_schedule_into_specs(&mut specs, &mut schedule, Some(&defaults_dir));
+
+    // Heater: must receive a heating DailyProfile with max_value = 20°C from HERS defaults.
+    let heater_typed = specs[0]
+        .typed_config
+        .as_ref()
+        .expect("ASHP Heater must have typed config");
+    let ConfigPayload::Typed {
+        data: heater_data, ..
+    } = &heater_typed.payload
+    else {
+        panic!("ASHP Heater config must be Typed");
+    };
+    let heater_obj = heater_data
+        .as_object()
+        .expect("heater typed data must be an object");
+
+    let heater_source: ScheduleSourceConfig = serde_json::from_value(
+        heater_obj
+            .get("heating_setpoint_source")
+            .cloned()
+            .expect("heater must have heating_setpoint_source injected from defaults CSV"),
+    )
+    .expect("heater source must deserialize");
+    assert!(
+        matches!(
+            &heater_source,
+            ScheduleSourceConfig::DailyProfile { weekday, max_value, .. }
+            if (weekday[0] - 20.0).abs() < 1e-12
+            && (max_value - 1.0).abs() < 1e-12
+        ),
+        "expected DailyProfile with weekday[0]=20°C and max_value=1.0, got {heater_source:?}"
+    );
+    assert!(
+        !heater_obj.contains_key("cooling_setpoint_source"),
+        "heater must not get a cooling setpoint source"
+    );
+
+    // Cooler: must receive a cooling DailyProfile with weekday[0] = 24°C, max_value = 1.0.
+    let cooler_typed = specs[1]
+        .typed_config
+        .as_ref()
+        .expect("ASHP Cooler must have typed config");
+    let ConfigPayload::Typed {
+        data: cooler_data, ..
+    } = &cooler_typed.payload
+    else {
+        panic!("ASHP Cooler config must be Typed");
+    };
+    let cooler_obj = cooler_data
+        .as_object()
+        .expect("cooler typed data must be an object");
+
+    let cooler_source: ScheduleSourceConfig = serde_json::from_value(
+        cooler_obj
+            .get("cooling_setpoint_source")
+            .cloned()
+            .expect("cooler must have cooling_setpoint_source injected from defaults CSV"),
+    )
+    .expect("cooler source must deserialize");
+    assert!(
+        matches!(
+            &cooler_source,
+            ScheduleSourceConfig::DailyProfile { weekday, max_value, .. }
+            if (weekday[0] - 24.0).abs() < 1e-12
+            && (max_value - 1.0).abs() < 1e-12
+        ),
+        "expected DailyProfile with weekday[0]=24°C and max_value=1.0, got {cooler_source:?}"
+    );
+    assert!(
+        !cooler_obj.contains_key("heating_setpoint_source"),
+        "cooler must not get a heating setpoint source"
     );
 }

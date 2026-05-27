@@ -10,7 +10,7 @@ profiling = []
 actor_profiling = []
 observe = []
 observe_detailed = ["observe", "hares-envelope/observe_detailed"]
-check_invariants = []
+check_invariants = ["hares-io/check_invariants"]
 dst = []
 
 [dependencies]
