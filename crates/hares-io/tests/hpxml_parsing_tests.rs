@@ -1313,3 +1313,113 @@ fn seer_present_cooling_system_resolves_normally_regression() {
         "SEER=16 should resolve to 2-speed (15 < 16 ≤ 21), got {n_speeds}"
     );
 }
+
+#[test]
+fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
+    // HPXML with CFM25 duct leakage + an electric furnace.
+    // Verifies the full parse → resolve pipeline succeeds with CFM25 input:
+    // CFM25 is stored as raw value at parse time, equipment resolution
+    // completes without error, and the resolved equipment has nonzero capacity.
+    let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+          <Latitude>39.7</Latitude>
+          <Longitude>-105.0</Longitude>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems>
+        <HVAC>
+          <HVACDistribution>
+            <SystemIdentifier id="HVACDist1"/>
+            <DistributionSystemType>
+              <AirDistribution>
+                <DuctLeakageMeasurement>
+                  <SystemIdentifier id="LeakCFM25"/>
+                  <DuctType>supply</DuctType>
+                  <DuctLeakage>
+                    <Value>100</Value>
+                    <Units>CFM25</Units>
+                  </DuctLeakage>
+                </DuctLeakageMeasurement>
+                <Ducts>
+                  <SystemIdentifier id="SupplyDuct"/>
+                  <DuctType>supply</DuctType>
+                  <DuctSurfaceArea units="m2">20</DuctSurfaceArea>
+                  <DuctInsulationRValue units="m2K/W">0.5</DuctInsulationRValue>
+                  <DuctLocation>conditioned space</DuctLocation>
+                </Ducts>
+              </AirDistribution>
+            </DistributionSystemType>
+          </HVACDistribution>
+          <HeatingSystem>
+            <SystemIdentifier id="ElecFurnace"/>
+            <HeatingSystemType>ElectricResistance</HeatingSystemType>
+            <HeatingCapacity units="W">12000</HeatingCapacity>
+            <AnnualHeatingEfficiency>
+              <Units>AFUE</Units>
+              <Value>1.0</Value>
+            </AnnualHeatingEfficiency>
+            <FractionDHWLoadServed>0</FractionDHWLoadServed>
+          </HeatingSystem>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+
+    use hares_io::hpxml::building::DuctType;
+
+    let building = parse_building(xml).expect("should parse HPXML with CFM25 duct leakage");
+
+    // Verify CFM25 is stored in the duct system struct.
+    let supply = building
+        .zones
+        .iter()
+        .flat_map(|z| &z.duct_systems)
+        .find(|d| d.duct_type == DuctType::Supply)
+        .expect("supply duct expected");
+    assert_eq!(
+        supply.leakage_fraction, None,
+        "CFM25 unit must not set leakage_fraction at parse time"
+    );
+    assert_eq!(
+        supply.leakage_cfm25,
+        Some(100.0),
+        "CFM25 raw value must be stored for deferred conversion"
+    );
+
+    // Resolve equipment — exercises the full parse → resolve pipeline.
+    // CFM25 conversion to fraction happens inside compute_duct_config,
+    // but DSE is skipped for ducts in conditioned space. The key
+    // integration assertion is that equipment resolution does not error
+    // when CFM25 duct leakage is present (the old bug caused silent
+    // zeroing, not a crash, but verifying the full pipeline runs is
+    // still a valid integration smoke test).
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("equipment resolution must succeed with CFM25 duct leakage");
+
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    // ElectricResistance without duct distribution resolves to Electric Baseboard.
+    let furnace = specs
+        .iter()
+        .find(|s| s.name == "Electric Baseboard")
+        .unwrap_or_else(|| panic!("no Electric Baseboard in specs: {names:?}"));
+    assert!(
+        furnace
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            > 0.0,
+        "resolved equipment must have nonzero heating capacity"
+    );
+}

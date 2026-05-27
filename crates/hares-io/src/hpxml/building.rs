@@ -197,6 +197,10 @@ pub enum DuctType {
 pub struct DuctSystem {
     pub id: String,
     pub leakage_fraction: Option<f64>,
+    /// Raw leakage in CFM25 units (volumetric flow at 25 Pa).
+    /// Converted to fraction in `resolve_hvac::compute_duct_config` once
+    /// fan airflow is known — the parser cannot convert without fan flow.
+    pub leakage_cfm25: Option<f64>,
     pub insulation_r_value_m2_k_w: Option<f64>,
     pub surface_area_m2: Option<f64>,
     pub location: DuctLocation,
@@ -1858,6 +1862,8 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
     details.descendants("AirDistribution", &mut air_dist_nodes);
     let mut leakage_by_type: std::collections::HashMap<String, f64> =
         std::collections::HashMap::new();
+    let mut leakage_cfm25_by_type: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
     for air_dist in &air_dist_nodes {
         let mut measurements = Vec::new();
         air_dist.descendants("DuctLeakageMeasurement", &mut measurements);
@@ -1875,19 +1881,22 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
                     .first_descendant("Value")
                     .and_then(XmlNode::text_as_f64)
                 {
-                    let fraction = match units.as_str() {
-                        "percent" => Some(value / 100.0),
-                        "fraction" => Some(value),
+                    match units.as_str() {
+                        "percent" => {
+                            leakage_by_type.insert(dtype, value / 100.0);
+                        }
+                        "fraction" => {
+                            leakage_by_type.insert(dtype, value);
+                        }
+                        "cfm25" => {
+                            leakage_cfm25_by_type.insert(dtype, value);
+                        }
                         _ => {
                             tracing::warn!(
                                 units = %units,
                                 "unsupported duct leakage unit (cannot convert to fraction without fan flow); skipping"
                             );
-                            None
                         }
-                    };
-                    if let Some(f) = fraction {
-                        leakage_by_type.insert(dtype, f);
                     }
                 }
             }
@@ -1904,6 +1913,7 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
             .map(|n| normalize_ascii(&n.text))
             .unwrap_or_default();
         let leakage_fraction = leakage_by_type.get(&duct_type_text).copied();
+        let leakage_cfm25 = leakage_cfm25_by_type.get(&duct_type_text).copied();
 
         let insulation_r_value_m2_k_w = duct_node
             .first_descendant("DuctInsulationRValue")
@@ -1965,6 +1975,7 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
             zone.duct_systems.push(DuctSystem {
                 id,
                 leakage_fraction,
+                leakage_cfm25,
                 insulation_r_value_m2_k_w,
                 surface_area_m2,
                 location,
@@ -5089,7 +5100,7 @@ mod tests {
     }
 
     #[test]
-    fn duct_leakage_cfm25_rejected() {
+    fn duct_leakage_cfm25_stored_for_deferred_conversion() {
         let xml = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
   <Building>
@@ -5141,7 +5152,12 @@ mod tests {
             .expect("supply duct expected in conditioned zone");
         assert_eq!(
             supply.leakage_fraction, None,
-            "CFM25 cannot be converted to fraction; must be None"
+            "CFM25 cannot be converted to fraction at parse time; leakage_fraction must be None"
+        );
+        assert_eq!(
+            supply.leakage_cfm25,
+            Some(100.0),
+            "CFM25 raw value must be preserved in leakage_cfm25 for deferred conversion"
         );
     }
 

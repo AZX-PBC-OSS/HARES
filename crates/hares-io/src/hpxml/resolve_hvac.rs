@@ -88,9 +88,16 @@ pub struct DuctDseParams {
     zone_type: Option<String>,
     house_volume_m3: f64,
     supply_leakage_frac: f64,
+    /// Raw supply-side CFM25 leakage (volumetric flow at 25 Pa).
+    /// Converted to fraction in `compute_duct_config` once fan airflow
+    /// is available. Overrides `supply_leakage_frac` when present.
+    supply_leakage_cfm25: f64,
     supply_area_m2: f64,
     supply_r_m2_k_w: f64,
     return_leakage_frac: f64,
+    /// Raw return-side CFM25 leakage (volumetric flow at 25 Pa).
+    /// See `supply_leakage_cfm25` for conversion semantics.
+    return_leakage_cfm25: f64,
     return_area_m2: f64,
     return_r_m2_k_w: f64,
     latitude_deg: f64,
@@ -162,10 +169,12 @@ pub fn compute_duct_dse_params(
 
     // Aggregate supply vs return duct data from unconditioned zones.
     let mut supply_leakage = 0.0_f64;
+    let mut supply_cfm25 = 0.0_f64;
     let mut supply_area_m2 = 0.0_f64;
     let mut supply_r_area_product = 0.0_f64;
     let mut supply_count = 0u32;
     let mut return_leakage = 0.0_f64;
+    let mut return_cfm25 = 0.0_f64;
     let mut return_area_m2 = 0.0_f64;
     let mut return_r_area_product = 0.0_f64;
     let mut return_count = 0u32;
@@ -190,16 +199,19 @@ pub fn compute_duct_dse_params(
             let leak = duct.leakage_fraction.unwrap_or(0.0);
             let area = duct.surface_area_m2.unwrap_or(0.0);
             let r_val = duct.insulation_r_value_m2_k_w.unwrap_or(0.0);
+            let cfm25 = duct.leakage_cfm25.unwrap_or(0.0);
 
             match duct.duct_type {
                 DuctType::Supply => {
                     supply_leakage += leak;
+                    supply_cfm25 += cfm25;
                     supply_area_m2 += area;
                     supply_r_area_product += area * r_val;
                     supply_count += 1;
                 }
                 DuctType::Return => {
                     return_leakage += leak;
+                    return_cfm25 += cfm25;
                     return_area_m2 += area;
                     return_r_area_product += area * r_val;
                     return_count += 1;
@@ -207,10 +219,12 @@ pub fn compute_duct_dse_params(
                 DuctType::Unknown => {
                     // Unknown type: split evenly between supply and return
                     supply_leakage += leak * 0.5;
+                    supply_cfm25 += cfm25 * 0.5;
                     supply_area_m2 += area * 0.5;
                     supply_r_area_product += area * 0.5 * r_val;
                     supply_count += 1;
                     return_leakage += leak * 0.5;
+                    return_cfm25 += cfm25 * 0.5;
                     return_area_m2 += area * 0.5;
                     return_r_area_product += area * 0.5 * r_val;
                     return_count += 1;
@@ -268,9 +282,11 @@ pub fn compute_duct_dse_params(
         zone_type: duct_zone_type_str,
         house_volume_m3,
         supply_leakage_frac: supply_leakage,
+        supply_leakage_cfm25: supply_cfm25,
         supply_area_m2,
         supply_r_m2_k_w,
         return_leakage_frac: return_leakage,
+        return_leakage_cfm25: return_cfm25,
         return_area_m2,
         return_r_m2_k_w,
         latitude_deg,
@@ -379,10 +395,12 @@ fn compute_duct_config(
     let lat = duct_params.latitude_deg;
     let lon = duct_params.longitude_deg;
     let house_vol = duct_params.house_volume_m3;
-    let supply_leak = duct_params.supply_leakage_frac.clamp(0.0, 1.0);
+    // Start with the static per-duct leakage fractions (fractional, dimensionless).
+    // CFM25 values, if present, override these after fan flow becomes available.
+    let mut supply_leak = duct_params.supply_leakage_frac.clamp(0.0, 1.0);
     let supply_area = duct_params.supply_area_m2;
     let supply_r = duct_params.supply_r_m2_k_w;
-    let return_leak = duct_params.return_leakage_frac.clamp(0.0, 1.0);
+    let mut return_leak = duct_params.return_leakage_frac.clamp(0.0, 1.0);
     let return_area = duct_params.return_area_m2;
     let return_r = duct_params.return_r_m2_k_w;
 
@@ -394,6 +412,55 @@ fn compute_duct_config(
     let fan_flow_m3_s = explicit_airflow_m3_s_per_w
         .map(|airflow| capacity_w * airflow)
         .unwrap_or_else(|| capacity_w * (cfm_per_ton * CFM_TO_M3_S / W_PER_TON));
+
+    // Convert CFM25 → fraction when fan flow is known.
+    // CFM25-derived fraction takes precedence over any static fraction
+    // because CFM25 is a direct measurement at 25 Pa; a static percent/fraction
+    // value may be a nominal input not tied to the actual system airflow.
+    if duct_params.supply_leakage_cfm25 > 0.0 && fan_flow_m3_s > 0.0 {
+        let fan_flow_cfm = fan_flow_m3_s / CFM_TO_M3_S;
+        let supply_frac_from_cfm25 = duct_params.supply_leakage_cfm25 / fan_flow_cfm;
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            (0.0..=1.0).contains(&supply_frac_from_cfm25),
+            "supply CFM25 fraction {supply_frac_from_cfm25} outside [0,1] — \
+             CFM25 leakage ({}) exceeds fan flow ({fan_flow_cfm} CFM)",
+            duct_params.supply_leakage_cfm25
+        );
+        supply_leak = supply_frac_from_cfm25.clamp(0.0, 1.0);
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            target: "observe",
+            column = "duct_cfm25_conversion",
+            supply_cfm25_raw = duct_params.supply_leakage_cfm25,
+            fan_flow_m3_s,
+            fan_flow_cfm,
+            supply_frac_from_cfm25,
+            "converted supply CFM25 to leakage fraction"
+        );
+    }
+    if duct_params.return_leakage_cfm25 > 0.0 && fan_flow_m3_s > 0.0 {
+        let fan_flow_cfm = fan_flow_m3_s / CFM_TO_M3_S;
+        let return_frac_from_cfm25 = duct_params.return_leakage_cfm25 / fan_flow_cfm;
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            (0.0..=1.0).contains(&return_frac_from_cfm25),
+            "return CFM25 fraction {return_frac_from_cfm25} outside [0,1] — \
+             CFM25 leakage ({}) exceeds fan flow ({fan_flow_cfm} CFM)",
+            duct_params.return_leakage_cfm25
+        );
+        return_leak = return_frac_from_cfm25.clamp(0.0, 1.0);
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            target: "observe",
+            column = "duct_cfm25_conversion",
+            return_cfm25_raw = duct_params.return_leakage_cfm25,
+            fan_flow_m3_s,
+            fan_flow_cfm,
+            return_frac_from_cfm25,
+            "converted return CFM25 to leakage fraction"
+        );
+    }
 
     let input = DuctDseInput {
         zone_type,
@@ -415,7 +482,15 @@ fn compute_duct_config(
         is_heat_pump,
     };
 
-    let dse = calculate_dse(&input).clamp(0.0, 1.0);
+    let raw_dse = calculate_dse(&input);
+    // Invariant: DSE must be in [0, 1] — a value outside this range
+    // indicates invalid input or an arithmetic error in ASHRAE 152.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    debug_assert!(
+        (0.0..=1.0).contains(&raw_dse),
+        "DSE {raw_dse} outside [0,1] — ASHRAE 152 produced an invalid result; check input parameters"
+    );
+    let dse = raw_dse.clamp(0.0, 1.0);
 
     if is_heating {
         DuctConfig {
@@ -3375,6 +3450,7 @@ mod tests {
         DuctSystem {
             id: String::new(),
             leakage_fraction: Some(0.0),
+            leakage_cfm25: None,
             insulation_r_value_m2_k_w: Some(r_val),
             surface_area_m2: Some(area_m2),
             location: DuctLocation::OutsideConditionedSpace,
@@ -4013,9 +4089,11 @@ mod tests {
             zone_type: Some("attic_unvented".to_string()),
             house_volume_m3: 400.0,
             supply_leakage_frac: 0.08,
+            supply_leakage_cfm25: 0.0,
             supply_area_m2: 20.0,
             supply_r_m2_k_w: 0.5,
             return_leakage_frac: 0.05,
+            return_leakage_cfm25: 0.0,
             return_area_m2: 12.0,
             return_r_m2_k_w: 0.5,
             latitude_deg: 40.0,
@@ -4034,6 +4112,132 @@ mod tests {
         assert!(
             cfg.ducts.dse_heat.is_some(),
             "duct DSE must still be computed"
+        );
+    }
+
+    #[test]
+    fn cfm25_conversion_matches_direct_fraction() {
+        // CFM25 → fraction conversion must produce the same DSE as
+        // supplying the fraction directly. This proves the deferred
+        // conversion is correct — the parse-time CFM25 value yields
+        // identical results to a pre-computed fraction.
+        let capacity_w = 12_000.0;
+        let cfm25 = 100.0;
+        // Use an explicit airflow so the fan flow is predictable.
+        // 400 CFM/ton = 400 / 12000 * CFM_TO_M3_S ≈ 1.573e-5 m³/s/W
+        let airflow_m3_s_per_w = 400.0 * CFM_TO_M3_S / 12_000.0;
+        let fan_flow_m3_s = capacity_w * airflow_m3_s_per_w;
+        let fan_flow_cfm = fan_flow_m3_s / CFM_TO_M3_S;
+        let expected_fraction = cfm25 / fan_flow_cfm;
+
+        // Params with CFM25 and zero static fraction.
+        let params_cfm25 = DuctDseParams {
+            zone_id: Some(1),
+            zone_type: Some("attic_unvented".to_string()),
+            house_volume_m3: 400.0,
+            supply_leakage_frac: 0.0,
+            supply_leakage_cfm25: cfm25,
+            supply_area_m2: 20.0,
+            supply_r_m2_k_w: 0.5,
+            return_leakage_frac: 0.0,
+            return_leakage_cfm25: 0.0,
+            return_area_m2: 12.0,
+            return_r_m2_k_w: 0.5,
+            latitude_deg: 40.0,
+            longitude_deg: -105.0,
+        };
+
+        // Params with the expected fraction directly — zero CFM25.
+        let params_direct = DuctDseParams {
+            zone_id: Some(1),
+            zone_type: Some("attic_unvented".to_string()),
+            house_volume_m3: 400.0,
+            supply_leakage_frac: expected_fraction,
+            supply_leakage_cfm25: 0.0,
+            supply_area_m2: 20.0,
+            supply_r_m2_k_w: 0.5,
+            return_leakage_frac: 0.0,
+            return_leakage_cfm25: 0.0,
+            return_area_m2: 12.0,
+            return_r_m2_k_w: 0.5,
+            latitude_deg: 40.0,
+            longitude_deg: -105.0,
+        };
+
+        let dse_from_cfm25 = compute_duct_config(
+            &params_cfm25,
+            capacity_w,
+            true, // heating
+            1,    // single speed
+            false,
+            Some(airflow_m3_s_per_w),
+        );
+        let dse_from_direct = compute_duct_config(
+            &params_direct,
+            capacity_w,
+            true,
+            1,
+            false,
+            Some(airflow_m3_s_per_w),
+        );
+
+        assert!(
+            dse_from_cfm25.dse_heat.is_some(),
+            "DSE must be computed when CFM25 is present and fan flow is known"
+        );
+        assert!(
+            dse_from_direct.dse_heat.is_some(),
+            "DSE must be computed when direct fraction is provided"
+        );
+
+        let dse_cfm25_val = dse_from_cfm25.dse_heat.unwrap();
+        let dse_direct_val = dse_from_direct.dse_heat.unwrap();
+        assert!(
+            (dse_cfm25_val - dse_direct_val).abs() < 1e-9,
+            "CFM25-derived DSE ({dse_cfm25_val}) must match direct-fraction DSE ({dse_direct_val}); \
+             expected fraction = {expected_fraction}"
+        );
+        assert!(
+            dse_cfm25_val > 0.0 && dse_cfm25_val < 1.0,
+            "DSE from CFM25 must be in (0,1) for realistic input; got {dse_cfm25_val}"
+        );
+    }
+
+    #[test]
+    fn percent_and_fraction_duct_leakage_unaffected_by_cfm25_support() {
+        // Percent and Fraction units must continue to work after adding
+        // CFM25 support — no regression on existing duct leakage paths.
+        let supply_leak = 0.12;
+        let return_leak = 0.06;
+        let params = DuctDseParams {
+            zone_id: Some(1),
+            zone_type: Some("attic_unvented".to_string()),
+            house_volume_m3: 400.0,
+            supply_leakage_frac: supply_leak,
+            supply_leakage_cfm25: 0.0,
+            supply_area_m2: 20.0,
+            supply_r_m2_k_w: 0.5,
+            return_leakage_frac: return_leak,
+            return_leakage_cfm25: 0.0,
+            return_area_m2: 12.0,
+            return_r_m2_k_w: 0.5,
+            latitude_deg: 40.0,
+            longitude_deg: -105.0,
+        };
+        let config = compute_duct_config(
+            &params, 12_000.0, // capacity_w
+            true,     // heating
+            1,        // single speed
+            false, None, // nominal airflow
+        );
+        assert!(
+            config.dse_heat.is_some(),
+            "DSE must be computed when Percent/Fraction leakage is present"
+        );
+        // DSE must be < 1.0 (leakage is > 0, so losses exist).
+        assert!(
+            config.dse_heat.unwrap() < 1.0,
+            "DSE must reflect duct losses for nonzero leakage fraction"
         );
     }
 
