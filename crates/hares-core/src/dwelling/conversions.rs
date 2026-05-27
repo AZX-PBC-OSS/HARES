@@ -419,6 +419,19 @@ pub(crate) fn resolve_exterior(
         Some(hares_io::hpxml::ZoneType::Ground) => ExteriorTarget::Ground,
         Some(zt) => {
             let idx = find_zone_idx(building, Some(zt), n_zones);
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            if matches!(zt, hares_io::hpxml::ZoneType::Adjacent) && idx == 0 {
+                if let Some(interior) = &boundary.interior_zone {
+                    let interior_idx = find_zone_idx(building, Some(interior), n_zones);
+                    assert_eq!(
+                        interior_idx, 0,
+                        "Adjacent zone target reached find_zone_idx with fallback index 0 on boundary \
+                         '{}', but interior zone {:?} resolves to index {interior_idx} (expected 0). \
+                         This indicates the Adjacent rewrite in building.rs was not applied.",
+                        boundary.id, interior,
+                    );
+                }
+            }
             ExteriorTarget::Zone(idx)
         }
         None => ExteriorTarget::Outdoor,

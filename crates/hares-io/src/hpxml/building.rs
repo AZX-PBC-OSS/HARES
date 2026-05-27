@@ -1086,6 +1086,27 @@ fn parse_windows(
             attached_to_wall_id,
         });
 
+        let window_interior = parse_zone_ref(window.child("InteriorAdjacentTo"));
+        let window_exterior = parse_zone_ref(window.child("ExteriorAdjacentTo"))
+            .or_else(|| infer_exterior_zone(&BoundaryType::Window));
+
+        #[cfg(feature = "observe")]
+        if window_interior == Some(ZoneType::Adjacent)
+            || window_exterior == Some(ZoneType::Adjacent)
+        {
+            tracing::info!(
+                target: "observe",
+                column = "adjacent_boundary_rewrite",
+                boundary_id = id,
+                interior_before = ?window_interior,
+                exterior_before = ?window_exterior,
+                "rewriting Adjacent zone reference to match non-Adjacent zone"
+            );
+        }
+
+        let (window_interior, window_exterior) =
+            rewrite_adjacent_zone_pair(window_interior, window_exterior);
+
         boundaries.push(Boundary {
             id,
             boundary_type: BoundaryType::Window,
@@ -1093,9 +1114,8 @@ fn parse_windows(
             azimuth_deg,
             assembly_r_value_m2_k_w: None,
             r_value_layers_m2_k_w: Vec::new(),
-            interior_zone: parse_zone_ref(window.child("InteriorAdjacentTo")),
-            exterior_zone: parse_zone_ref(window.child("ExteriorAdjacentTo"))
-                .or_else(|| infer_exterior_zone(&BoundaryType::Window)),
+            interior_zone: window_interior,
+            exterior_zone: window_exterior,
             material_layers: Vec::new(),
             construction_type: None,
             finish_type: None,
@@ -1165,6 +1185,20 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
     let interior_zone = parse_zone_ref(node.child("InteriorAdjacentTo"));
     let exterior_zone = parse_zone_ref(node.child("ExteriorAdjacentTo"))
         .or_else(|| infer_exterior_zone(&boundary_type));
+
+    #[cfg(feature = "observe")]
+    if interior_zone == Some(ZoneType::Adjacent) || exterior_zone == Some(ZoneType::Adjacent) {
+        tracing::info!(
+            target: "observe",
+            column = "adjacent_boundary_rewrite",
+            boundary_id = id,
+            interior_before = ?interior_zone,
+            exterior_before = ?exterior_zone,
+            "rewriting Adjacent zone reference to match non-Adjacent zone"
+        );
+    }
+
+    let (interior_zone, exterior_zone) = rewrite_adjacent_zone_pair(interior_zone, exterior_zone);
 
     Ok(Boundary {
         id,
@@ -2481,6 +2515,30 @@ pub(crate) fn parse_zone_label(text: &str) -> ZoneType {
         ZoneType::Adjacent
     } else {
         ZoneType::Other(text.trim().to_string())
+    }
+}
+
+/// Rewrite `ZoneType::Adjacent` to match the non-Adjacent zone in the pair.
+///
+/// OCHRE hpxml.py:96-97: when exterior is `"Adjacent"`, rewrite `exterior = interior`.
+/// This makes the adiabatic-same-zone intent explicit and eliminates the fragile
+/// dependency on `find_zone_idx` fallback behavior in the downstream conversions layer.
+///
+/// If both zones are `Adjacent` (two different adjacent dwelling units on each side),
+/// both are left as-is — there is no non-Adjacent reference to rewrite against.
+fn rewrite_adjacent_zone_pair(
+    interior: Option<ZoneType>,
+    exterior: Option<ZoneType>,
+) -> (Option<ZoneType>, Option<ZoneType>) {
+    match (interior, exterior) {
+        (Some(ZoneType::Adjacent), Some(ZoneType::Adjacent)) => {
+            (Some(ZoneType::Adjacent), Some(ZoneType::Adjacent))
+        }
+        (Some(ZoneType::Adjacent), Some(ref ext)) => (Some(ext.clone()), Some(ext.clone())),
+        (Some(ref int), Some(ZoneType::Adjacent)) => (Some(int.clone()), Some(int.clone())),
+        (None, Some(ZoneType::Adjacent)) => (None, None),
+        (Some(ZoneType::Adjacent), None) => (None, None),
+        (int, ext) => (int, ext),
     }
 }
 
@@ -4038,8 +4096,9 @@ mod tests {
 
     #[test]
     fn adjacent_zone_label_parsed() {
-        // "other housing unit" should parse to ZoneType::Adjacent.
-        // Test via a boundary with InteriorAdjacentTo="other housing unit".
+        // "other housing unit" parses to ZoneType::Adjacent, then is rewritten
+        // to match the non-Adjacent zone in the pair (OCHRE hpxml.py:96-97).
+        // (Conditioned, Adjacent) → (Conditioned, Conditioned).
         let xml = SAMPLE_XML.replace(
             "<InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>",
             "<InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>other housing unit</ExteriorAdjacentTo>",
@@ -4050,7 +4109,62 @@ mod tests {
             .iter()
             .find(|b| b.boundary_type == BoundaryType::Wall && b.id == "Wall1")
             .expect("wall expected");
-        assert_eq!(wall.exterior_zone, Some(ZoneType::Adjacent));
+        assert_eq!(wall.interior_zone, Some(ZoneType::Conditioned));
+        assert_eq!(wall.exterior_zone, Some(ZoneType::Conditioned));
+    }
+
+    #[test]
+    fn attic_adjacent_pair_rewritten_to_attic() {
+        // (Attic, Adjacent) → (Attic, Attic) after rewrite.
+        // Uses Roof1 which has interior = "attic vented". Change exterior from
+        // "outside" to "other housing unit" (Adjacent), verify both become Attic.
+        let xml = SAMPLE_XML.replace(
+            "<InteriorAdjacentTo>attic vented</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>",
+            "<InteriorAdjacentTo>attic vented</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>other housing unit</ExteriorAdjacentTo>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof && b.id == "Roof1")
+            .expect("roof expected");
+        assert_eq!(roof.interior_zone, Some(ZoneType::Attic));
+        assert_eq!(roof.exterior_zone, Some(ZoneType::Attic));
+    }
+
+    #[test]
+    fn adjacent_interior_rewritten_to_match_exterior() {
+        // (Adjacent, Attic) → (Attic, Attic) — handles the case where Adjacent is
+        // the interior reference (e.g. party ceiling where Attic is the other side).
+        let xml = SAMPLE_XML.replace(
+            "<InteriorAdjacentTo>attic vented</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>",
+            "<InteriorAdjacentTo>other housing unit</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>attic vented</ExteriorAdjacentTo>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof && b.id == "Roof1")
+            .expect("roof expected");
+        assert_eq!(roof.interior_zone, Some(ZoneType::Attic));
+        assert_eq!(roof.exterior_zone, Some(ZoneType::Attic));
+    }
+
+    #[test]
+    fn adjacent_window_zone_rewritten_to_conditioned() {
+        // Window with (Conditioned, Adjacent) → (Conditioned, Conditioned).
+        let xml = SAMPLE_XML.replace(
+            "<ExteriorAdjacentTo>outside</ExteriorAdjacentTo>\n            <Area units=\"ft2\">15</Area>\n            <Azimuth>180</Azimuth>\n            <UFactor>0.31</UFactor>\n            <SHGC>0.25</SHGC>",
+            "<ExteriorAdjacentTo>other housing unit</ExteriorAdjacentTo>\n            <Area units=\"ft2\">15</Area>\n            <Azimuth>180</Azimuth>\n            <UFactor>0.31</UFactor>\n            <SHGC>0.25</SHGC>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let window = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Window && b.id == "Window1")
+            .expect("window expected");
+        assert_eq!(window.interior_zone, Some(ZoneType::Conditioned));
+        assert_eq!(window.exterior_zone, Some(ZoneType::Conditioned));
     }
 
     // ── Insulation details dispatch tests ───────────────────────────────

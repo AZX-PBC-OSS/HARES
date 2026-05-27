@@ -2044,4 +2044,68 @@ mod tests {
         );
         assert!(wind_coeff > 0.0, "wind coefficient must be positive");
     }
+
+    #[test]
+    fn attic_adjacent_boundary_rewritten_to_same_zone_internal_mass() {
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+          <ShieldingOfHome>normal</ShieldingOfHome>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id="Wall1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+            <Azimuth>180</Azimuth>
+          </Wall>
+        </Walls>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>other housing unit</ExteriorAdjacentTo>
+            <Area units="ft2">120</Area>
+          </Roof>
+        </Roofs>
+        <Attics>
+          <Attic>
+            <FloorArea units="ft2">500</FloorArea>
+          </Attic>
+        </Attics>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+
+        let building =
+            hares_io::hpxml::building::parse_building(xml).expect("parse should succeed");
+
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof && b.id == "Roof1")
+            .expect("roof expected");
+
+        assert_eq!(
+            roof.interior_zone, roof.exterior_zone,
+            "Attic←Adjacent party wall must be rewritten to same-zone (Attic, Attic)"
+        );
+        assert!(
+            roof.interior_zone.is_some(),
+            "rewritten boundary must have a zone reference"
+        );
+        assert_eq!(roof.interior_zone, Some(ZoneType::Attic));
+    }
 }
