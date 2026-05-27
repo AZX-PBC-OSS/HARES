@@ -2022,6 +2022,33 @@ impl Dwelling {
             })
             .collect();
 
+        // Per-zone energy balance residual from the thermal solver's
+        // custom_payload.  The payload carries 5 floats per zone:
+        // [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor, residual_w].
+        let mut energy_balance_residuals = vec![0.0; zone_ids.len()];
+        if let Some(thermal_update) = self
+            .latest_env
+            .custom_domains
+            .iter()
+            .find(|u| u.domain_id == hares_types::THERMAL)
+            && let Some(payload) = &thermal_update.custom_payload
+        {
+            let residual_map: HashMap<ZoneId, f64> = payload
+                .chunks_exact(5)
+                .filter_map(|quint| {
+                    let zone_raw = quint[0];
+                    if zone_raw.is_finite() && zone_raw >= 0.0 {
+                        Some((ZoneId(zone_raw as u16), quint[4]))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (i, zone) in zone_ids.iter().enumerate() {
+                energy_balance_residuals[i] = residual_map.get(zone).copied().unwrap_or(0.0);
+            }
+        }
+
         let mut setpoint_heat_c = zone_temperatures_c.clone();
         let mut setpoint_cool_c = zone_temperatures_c.clone();
         let mut equipment_names = Vec::with_capacity(self.equipment.len());
@@ -2080,6 +2107,7 @@ impl Dwelling {
             equipment_power_kw,
             setpoint_heat_c,
             setpoint_cool_c,
+            energy_balance_residuals,
             total_power_kw: self.electrical_solver.net_active_kw(),
             reactive_power_kvar: self.electrical_solver.net_reactive_kvar(),
             outdoor_temp_c: self.latest_env.weather.outdoor_temp_c,

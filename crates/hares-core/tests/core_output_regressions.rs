@@ -53,6 +53,36 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
     Dwelling::from_config(config).expect("fixture dwelling must load")
 }
 
+#[test]
+fn energy_balance_residual_has_entry_per_zone_and_becomes_nonzero() {
+    let mut dwelling = load_fixture("cz2a_gas_furnace_ac_res_wh");
+    let telemetry = dwelling.telemetry();
+    assert_eq!(
+        telemetry.energy_balance_residuals.len(),
+        telemetry.zone_names.len(),
+        "energy_balance_residuals must have one entry per zone"
+    );
+
+    let mut saw_nonzero = false;
+    for _ in 0..12 {
+        dwelling.step().expect("fixture step must succeed");
+        let tel = dwelling.telemetry();
+        assert_eq!(
+            tel.energy_balance_residuals.len(),
+            tel.zone_names.len(),
+            "energy_balance_residuals length must stay consistent across steps"
+        );
+        if tel.energy_balance_residuals.iter().any(|&r| r > 0.0) {
+            saw_nonzero = true;
+            break;
+        }
+    }
+    assert!(
+        saw_nonzero,
+        "energy balance residual must be nonzero in at least one zone after a few steps"
+    );
+}
+
 fn battery_equipment(dwelling: &Dwelling) -> String {
     let battery = dwelling
         .equipment()

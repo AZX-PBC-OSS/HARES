@@ -19,6 +19,9 @@ pub struct DwellingTelemetry {
     pub equipment_power_kw: Vec<f64>,
     pub setpoint_heat_c: Vec<f64>,
     pub setpoint_cool_c: Vec<f64>,
+    /// Per-zone energy balance residual [W] from the zone-air first-law check.
+    /// One entry per zone in the same order as `zone_names`.
+    pub energy_balance_residuals: Vec<f64>,
     pub total_power_kw: f64,
     pub reactive_power_kvar: f64,
     pub outdoor_temp_c: f64,
@@ -70,6 +73,13 @@ impl DwellingTelemetry {
                     HaresError::Control(format!("unknown zone in field `{field}`"))
                 })?;
                 out.push(self.setpoint_cool_c[idx]);
+                continue;
+            }
+            if let Some(name) = bracket_name(field, "zone_energy_balance") {
+                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
+                    HaresError::Control(format!("unknown zone in field `{field}`"))
+                })?;
+                out.push(self.energy_balance_residuals[idx]);
                 continue;
             }
             if let Some(name) = bracket_name(field, "equipment_soc") {
@@ -158,6 +168,7 @@ mod tests {
             equipment_power_kw: vec![1.2],
             setpoint_heat_c: vec![20.0],
             setpoint_cool_c: vec![24.0],
+            energy_balance_residuals: vec![0.0],
             total_power_kw: 1.2,
             reactive_power_kvar: 0.0,
             outdoor_temp_c: 10.0,
@@ -192,5 +203,15 @@ mod tests {
         let t = sample();
         let err = t.to_observation_vec(&["nope"]).unwrap_err();
         assert!(err.to_string().contains("unknown telemetry field"));
+    }
+
+    #[test]
+    fn zone_energy_balance_bracket_key() {
+        let mut t = sample();
+        t.energy_balance_residuals = vec![150.0];
+        let obs = t
+            .to_observation_vec(&["zone_energy_balance[Indoor]"])
+            .unwrap();
+        assert_eq!(obs, vec![150.0]);
     }
 }
