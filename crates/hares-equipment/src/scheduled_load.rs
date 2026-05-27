@@ -372,10 +372,10 @@ impl ScheduledLoad {
         let zone = if end_use == EndUse::EV {
             // EV charging occurs outside the building envelope.
             None
-        } else if name_lower.contains("exterior") || name_lower.contains("outdoor") {
-            None
         } else if let Some(explicit) = parse_zone_id(&config) {
             Some(explicit)
+        } else if name_lower.contains("exterior") || name_lower.contains("outdoor") {
+            None
         } else if name_lower.contains("garage") {
             Some(GARAGE_ZONE_ID)
         } else if name_lower.contains("basement") {
@@ -2197,7 +2197,7 @@ mod tests {
 
     #[test]
     fn exterior_equipment_has_no_zone_assignment() {
-        let config = config_with_schedule("Exterior Lighting", "Exterior Lighting", &[1.0]);
+        let config = config_no_zone("Exterior Lighting", "Exterior Lighting", &[1.0]);
         let eq = ScheduledLoad::new(
             config.clone(),
             hares_types::EndUse::LIGHTING,
@@ -2205,7 +2205,7 @@ mod tests {
         );
         assert!(
             eq.descriptor().zone.is_none(),
-            "Exterior equipment should have no zone"
+            "Exterior equipment without explicit zone_id should have no zone"
         );
     }
 
@@ -2371,12 +2371,23 @@ mod tests {
     }
 
     #[test]
-    fn outdoor_name_suppresses_auto_routing() {
-        let config = config_no_zone("Outdoor Garage Fan", "Other", &[1.0]);
+    fn explicit_zone_id_overrides_outdoor_name_routing() {
+        let config = config_with_schedule("Outdoor Sauna Heater", "Other", &[1.0]);
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::OTHER, "Other");
+        assert_eq!(
+            eq.descriptor().zone,
+            Some(ZoneId(1)),
+            "Explicit zone_id should override 'outdoor' name-based routing"
+        );
+    }
+
+    #[test]
+    fn outdoor_name_without_explicit_zone_has_no_zone() {
+        let config = config_no_zone("Outdoor Light", "Other", &[1.0]);
         let eq = ScheduledLoad::new(config, hares_types::EndUse::OTHER, "Other");
         assert!(
             eq.descriptor().zone.is_none(),
-            "Outdoor prefix takes precedence and suppresses garage auto-routing"
+            "Outdoor name without explicit zone_id should produce zone=None"
         );
     }
 
