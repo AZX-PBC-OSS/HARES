@@ -1840,6 +1840,7 @@ impl Dwelling {
                         typed_config: None,
                         system_id: None,
                         related_hvac_idref: None,
+                        primary_role: None,
                     }
                 })
                 .collect();
@@ -6156,6 +6157,7 @@ occupancy = 1.0
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         };
 
         let err = match create_equipment_from_spec(&registry, &spec) {

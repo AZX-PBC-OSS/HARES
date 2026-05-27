@@ -32,6 +32,12 @@ pub struct EquipmentSpec {
     pub system_id: Option<String>,
     /// HPXML RelatedHVACSystem/@idref from WaterHeatingSystem elements.
     pub related_hvac_idref: Option<String>,
+    /// HPXML `<PrimarySystems>` designation: `"heating"` or `"cooling"` for the
+    /// equipment designated as primary by `<PrimaryHeatingSystem>` or
+    /// `<PrimaryCoolingSystem>`. `None` for non-primary equipment and for
+    /// equipment types that do not participate in the primary-system mechanism
+    /// (heat pumps, water heaters, PV, etc.).
+    pub primary_role: Option<String>,
 }
 
 pub fn resolve_equipment(
@@ -126,6 +132,7 @@ pub(super) fn build_spec(
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
+        primary_role: None,
     }
 }
 
@@ -152,6 +159,7 @@ where
         typed_config: Some(typed_config),
         system_id: None,
         related_hvac_idref: None,
+        primary_role: None,
     }
 }
 

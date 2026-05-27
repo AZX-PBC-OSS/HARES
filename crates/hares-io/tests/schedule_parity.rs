@@ -59,6 +59,7 @@ fn make_spec_annual_kwh(name: &str, annual_kwh: f64) -> EquipmentSpec {
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
+        primary_role: None,
     }
 }
 
@@ -75,6 +76,7 @@ fn make_spec_with_duty_cycle(name: &str, annual_kwh: f64, duty_cycle: f64) -> Eq
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
+        primary_role: None,
     }
 }
 

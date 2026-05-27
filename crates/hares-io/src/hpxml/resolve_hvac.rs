@@ -515,7 +515,7 @@ fn afue_from_params(params: &Map<String, Value>) -> Option<f64> {
             let units = params
                 .get("heating_efficiency_units")
                 .and_then(Value::as_str)?;
-            if units.eq_ignore_ascii_case("AFUE") {
+            if units.eq_ignore_ascii_case("AFUE") || units.eq_ignore_ascii_case("PERCENT") {
                 params.get("heating_efficiency").and_then(Value::as_f64)
             } else {
                 None
@@ -1758,6 +1758,94 @@ fn conditioned_zone_id(building: &Building) -> Option<u16> {
     Some((idx as u16) + 1)
 }
 
+/// Check that the primary designation for heating/cooling is valid.
+///
+/// When more than one system provides heating (or cooling), HPXML requires
+/// exactly one `<PrimaryHeatingSystem>` (or `<PrimaryCoolingSystem>`) to
+/// designate which system is primary. This function validates the designation
+/// and marks the matching `EquipmentSpec` with `primary_role`.
+///
+/// Errors in `check_invariants` or `debug_assertions` mode when:
+/// - Zero primary designations found but multiple systems are present
+/// - Multiple primary designations are found (not possible per HPXML schema but guarded)
+/// - The designated `idref` does not match any parsed `SystemIdentifier/@id`
+fn check_primary_designation_invariant(
+    mode: &str,
+    parsed_ids: &[String],
+    primary_idref: Option<&str>,
+    specs: &mut [EquipmentSpec],
+    start_idx: usize,
+) {
+    let count = parsed_ids.len();
+    let system_label = if mode == "heating" {
+        "Heating"
+    } else {
+        "Cooling"
+    };
+
+    if count <= 1 {
+        return;
+    }
+
+    let Some(idref) = primary_idref else {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        tracing::error!(
+            mode,
+            system_count = count,
+            "HPXML has {count} systems providing {mode} but no Primary{system_label}System \
+             designation; exactly one system must be designated as primary",
+        );
+        return;
+    };
+
+    let primary_roles: Vec<(usize, &mut EquipmentSpec)> = specs[start_idx..]
+        .iter_mut()
+        .enumerate()
+        .filter(|(_, s)| s.system_id.as_deref().is_some_and(|id| id == idref))
+        .collect();
+
+    if primary_roles.is_empty() {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        tracing::error!(
+            mode,
+            designated_id = %idref,
+            parsed_ids = ?parsed_ids,
+            "Primary{system_label}System designated '{idref}' but no parsed system matches that ID",
+        );
+        return;
+    }
+
+    for (_, spec) in primary_roles {
+        // Only mark heating-type specs for heating primary and cooling-type specs
+        // for cooling primary. Heat pump elements create both a heater and a cooler
+        // spec sharing the same system_id, so when PrimaryHeatingSystem and
+        // PrimaryCoolingSystem both point to the same HeatPump id, the heater gets
+        // "heating" and the cooler gets "cooling" — no cross-contamination.
+        let is_cooling_eq = spec.name.ends_with(" Cooler")
+            || matches!(spec.name.as_str(), "Air Conditioner" | "Room AC");
+        let is_heating_eq = spec.name.ends_with(" Heater")
+            || matches!(
+                spec.name.as_str(),
+                "Gas Furnace"
+                    | "Electric Furnace"
+                    | "Gas Boiler"
+                    | "Electric Boiler"
+                    | "Electric Baseboard"
+                    | "Ideal HVAC"
+            );
+
+        match mode {
+            "heating" if is_heating_eq => {
+                spec.primary_role = Some("heating".to_string());
+            }
+            "cooling" if is_cooling_eq => {
+                spec.primary_role = Some("cooling".to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn resolve_hvac(
     building: &Building,
     defaults: &DefaultsStore,
@@ -1768,9 +1856,26 @@ pub(super) fn resolve_hvac(
         return Ok(());
     };
 
+    // Parse PrimarySystems designations. HPXML allows `<PrimaryHeatingSystem>` and
+    // `<PrimaryCoolingSystem>` children of `<HVACPlant>/<PrimarySystems>`, each with an
+    // `idref` attribute referencing a `SystemIdentifier/@id` on a HeatingSystem,
+    // CoolingSystem, or HeatPump element.
+    let primary_heating_idref = hvac
+        .path(&["HVACPlant", "PrimarySystems", "PrimaryHeatingSystem"])
+        .and_then(|n| n.attrs.get("idref").cloned());
+    let primary_cooling_idref = hvac
+        .path(&["HVACPlant", "PrimarySystems", "PrimaryCoolingSystem"])
+        .and_then(|n| n.attrs.get("idref").cloned());
+
     let setpoint_params = parse_hvac_setpoint_params(details);
     let duct_params = compute_duct_dse_params(building)?;
     let basement_params = compute_basement_params(building);
+
+    // Track parsed system IDs for primary-system invariant checks.
+    let mut heating_sys_ids: Vec<String> = Vec::new();
+    let mut cooling_sys_ids: Vec<String> = Vec::new();
+
+    let starting_spec_count = specs.len();
 
     for heating in descendants_named(hvac, "HeatingSystem") {
         let fuel = super::xml_helpers::parse_fuel(
@@ -1910,8 +2015,14 @@ pub(super) fn resolve_hvac(
         let mut spec = build_spec(name, fuel, params, defaults);
         spec.typed_config = typed_config;
         spec.system_id = element_id(heating);
+        if let Some(ref id) = spec.system_id {
+            heating_sys_ids.push(id.clone());
+        }
         specs.push(spec);
     }
+
+    #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
+    let heating_loop_end = specs.len();
 
     for cooling in descendants_named(hvac, "CoolingSystem") {
         let fuel = super::xml_helpers::parse_fuel(
@@ -2004,8 +2115,15 @@ pub(super) fn resolve_hvac(
         };
         let mut spec = build_spec(name, fuel, params, defaults);
         spec.typed_config = typed_config;
+        let sys_id = element_id(cooling);
+        if let Some(ref id) = sys_id {
+            cooling_sys_ids.push(id.clone());
+        }
+        spec.system_id = sys_id;
         specs.push(spec);
     }
+
+    let cooling_start = specs.len();
 
     for heat_pump in descendants_named(hvac, "HeatPump") {
         let heat_pump_type = child_text(heat_pump, "HeatPumpType")
@@ -2292,6 +2410,11 @@ pub(super) fn resolve_hvac(
             defaults,
         );
         heater_spec.typed_config = heater_typed;
+        let hp_sys_id = element_id(heat_pump);
+        heater_spec.system_id = hp_sys_id.clone();
+        if let Some(ref id) = hp_sys_id {
+            heating_sys_ids.push(id.clone());
+        }
         specs.push(heater_spec);
 
         let mut cooler_spec = build_spec(
@@ -2301,7 +2424,58 @@ pub(super) fn resolve_hvac(
             defaults,
         );
         cooler_spec.typed_config = cooler_typed;
+        cooler_spec.system_id = hp_sys_id;
         specs.push(cooler_spec);
+    }
+
+    // Heat pump coolers extend the cooling system set.
+    for spec in &specs[cooling_start..] {
+        if let Some(ref id) = spec.system_id {
+            // Heat-pump cooler names end with " Cooler" and the HP system_id was
+            // already pushed for the heater side; only add the cooler to
+            // cooling_sys_ids if the system_id is not already present.
+            let name_lower = spec.name.to_ascii_lowercase();
+            if name_lower.ends_with(" cooler") && !cooling_sys_ids.contains(id) {
+                cooling_sys_ids.push(id.clone());
+            }
+        }
+    }
+
+    // --- Invariant: primary heating system designation -----------------------
+    check_primary_designation_invariant(
+        "heating",
+        &heating_sys_ids,
+        primary_heating_idref.as_deref(),
+        specs,
+        starting_spec_count,
+    );
+
+    // --- Invariant: primary cooling system designation -----------------------
+    check_primary_designation_invariant(
+        "cooling",
+        &cooling_sys_ids,
+        primary_cooling_idref.as_deref(),
+        specs,
+        cooling_start,
+    );
+
+    #[cfg(feature = "observe")]
+    {
+        let total_hvac = specs.len() - starting_spec_count;
+        tracing::info!(
+            target: "observe",
+            column = "hvac_equipment_counts",
+            total_hvac_specs = total_hvac,
+            heating_equipment = heating_loop_end - starting_spec_count,
+            // cooling_start is the boundary between CoolingSystem and HeatPump specs:
+            // heating_loop_end..cooling_start → CoolingSystem, cooling_start..specs.len() → HeatPump
+            cooling_equipment = cooling_start - heating_loop_end,
+            // Each HeatPump element produces 2 specs (heater + cooler), so this
+            // counts spec entries, not HPXML HeatPump elements.
+            heat_pumps = specs.len() - cooling_start,
+            "resolved {} total HVAC equipment specs from HPXML",
+            total_hvac,
+        );
     }
 
     for dehumidifier in descendants_named(hvac, "Dehumidifier") {
@@ -2365,11 +2539,13 @@ fn canonical_hvac_heating_name(
         ("ElectricResistance", FuelType::Electric) => "Electric Baseboard",
         ("Furnace", FuelType::Electric)
         | ("WallFurnace", FuelType::Electric)
-        | ("FloorFurnace", FuelType::Electric) => "Electric Furnace",
+        | ("FloorFurnace", FuelType::Electric)
+        | ("Stove", FuelType::Electric) => "Electric Furnace",
         ("Boiler", FuelType::Electric) => "Electric Boiler",
         ("Furnace", FuelType::Gas)
         | ("WallFurnace", FuelType::Gas)
-        | ("FloorFurnace", FuelType::Gas) => "Gas Furnace",
+        | ("FloorFurnace", FuelType::Gas)
+        | ("Stove", FuelType::Gas) => "Gas Furnace",
         ("Boiler", FuelType::Gas) => "Gas Boiler",
         (
             "Furnace",
@@ -2389,6 +2565,14 @@ fn canonical_hvac_heating_name(
         )
         | (
             "FloorFurnace",
+            FuelType::Propane
+            | FuelType::Oil
+            | FuelType::Wood
+            | FuelType::Coal
+            | FuelType::WoodPellet,
+        )
+        | (
+            "Stove",
             FuelType::Propane
             | FuelType::Oil
             | FuelType::Wood
@@ -2421,6 +2605,7 @@ fn canonical_hvac_cooling_name(
     let name = match ty {
         "central air conditioner" => "Air Conditioner",
         "room air conditioner" => "Room AC",
+        "packaged terminal air conditioner" => "Room AC",
         _ => {
             return Err(HpxmlError::Parse(format!(
                 "unsupported HPXML cooling system type: CoolingSystemType='{ty}'"

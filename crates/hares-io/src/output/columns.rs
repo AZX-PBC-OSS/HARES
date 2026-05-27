@@ -479,6 +479,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         }
     }
 

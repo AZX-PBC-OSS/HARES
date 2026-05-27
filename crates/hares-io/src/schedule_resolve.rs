@@ -1253,6 +1253,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         }
     }
 
@@ -1277,6 +1278,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         }
     }
 
@@ -1544,6 +1546,7 @@ mod tests {
             )),
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         }
     }
 
@@ -1797,6 +1800,7 @@ mod tests {
             typed_config: Some(typed_config),
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         }
     }
 
@@ -1832,6 +1836,7 @@ mod tests {
             typed_config: Some(typed_config),
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         }
     }
 
@@ -2007,6 +2012,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         };
 
         let result = determine_max_kw(&spec, mean_fraction);

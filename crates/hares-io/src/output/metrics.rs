@@ -1187,6 +1187,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         }];
         let schema = crate::output::build_schema(&specs, 1, &[]);
         let result = MetricsCalculator::new(&schema, 3600, &test_config(None));

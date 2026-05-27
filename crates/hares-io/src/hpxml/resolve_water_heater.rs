@@ -406,6 +406,7 @@ where
         typed_config: Some(typed_config),
         system_id: None,
         related_hvac_idref: None,
+        primary_role: None,
     }
 }
 

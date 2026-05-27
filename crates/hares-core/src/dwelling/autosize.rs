@@ -616,6 +616,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         };
         let mut specs = vec![spec];
 
@@ -666,6 +667,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         };
         let mut specs = vec![spec];
 
@@ -721,6 +723,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         };
         let mut specs = vec![spec];
 
@@ -777,6 +780,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         };
         let mut specs = vec![spec];
 
@@ -961,6 +965,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         };
         let mut specs = vec![spec];
 
@@ -1017,6 +1022,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         };
         let mut specs = vec![spec];
 
@@ -1077,6 +1083,7 @@ mod tests {
             typed_config: None,
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         };
         let mut specs = vec![spec];
 

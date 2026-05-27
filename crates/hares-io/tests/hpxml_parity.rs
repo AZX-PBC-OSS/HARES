@@ -1408,3 +1408,316 @@ fn absent_charge_defect_ratio_gives_none() {
         .expect("CentralAirConditionerConfig");
     assert!(typed_cfg.charge_defect_ratio.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Multi-HVAC fixture tests (T-0015)
+// ---------------------------------------------------------------------------
+
+/// Load an HPXML fixture from the curated `ochre_samples` directory.
+fn ochre_fixture_xml(fixture_name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests")
+        .join("fixtures")
+        .join("hpxml")
+        .join("ochre_samples")
+        .join(fixture_name);
+    std::fs::read_to_string(path).expect("fixture should be readable")
+}
+
+fn resolve_ochre_fixture(fixture_name: &str) -> Vec<hares_io::EquipmentSpec> {
+    let xml = ochre_fixture_xml(fixture_name);
+    let building = parse_building(&xml).expect("should parse");
+    let defaults = repo_defaults();
+    resolve_equipment(&building, &defaults, &json!({})).expect("resolve_equipment should succeed")
+}
+
+#[test]
+fn multi_hvac_fixture_parses_7_heating_systems() {
+    let specs = resolve_ochre_fixture("base-hvac-multiple.xml");
+
+    let heaters: Vec<_> = specs
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.name.as_str(),
+                "Gas Furnace"
+                    | "Electric Furnace"
+                    | "Gas Boiler"
+                    | "Electric Boiler"
+                    | "Electric Baseboard"
+                    | "Ideal HVAC"
+                    | "ASHP Heater"
+                    | "MSHP Heater"
+                    | "GSHP Heater"
+            )
+        })
+        .collect();
+
+    assert!(
+        heaters.len() >= 7,
+        "expected at least 7 heating equipment specs, got {}: {:?}",
+        heaters.len(),
+        heaters.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+
+    let heater_names: Vec<&str> = heaters.iter().map(|s| s.name.as_str()).collect();
+    for expected in [
+        "Gas Furnace",
+        "Electric Furnace",
+        "Gas Boiler",
+        "Electric Boiler",
+        "Electric Baseboard",
+        "ASHP Heater",
+        "GSHP Heater",
+        "MSHP Heater",
+    ] {
+        assert!(
+            heater_names.contains(&expected),
+            "missing expected heating equipment: {expected}. Found: {heater_names:?}"
+        );
+    }
+}
+
+#[test]
+fn multi_hvac_fixture_parses_3_cooling_systems() {
+    let specs = resolve_ochre_fixture("base-hvac-multiple.xml");
+
+    let coolers: Vec<_> = specs
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.name.as_str(),
+                "Air Conditioner" | "Room AC" | "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler"
+            )
+        })
+        .collect();
+
+    assert!(
+        coolers.len() >= 3,
+        "expected at least 3 cooling equipment specs, got {}: {:?}",
+        coolers.len(),
+        coolers.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+
+    let cooler_names: Vec<&str> = coolers.iter().map(|s| s.name.as_str()).collect();
+    for expected in [
+        "Air Conditioner",
+        "Room AC",
+        "ASHP Cooler",
+        "GSHP Cooler",
+        "MSHP Cooler",
+    ] {
+        assert!(
+            cooler_names.contains(&expected),
+            "missing expected cooling equipment: {expected}. Found: {cooler_names:?}"
+        );
+    }
+}
+
+#[test]
+fn multi_hvac_fixture_parses_3_heat_pumps() {
+    let specs = resolve_ochre_fixture("base-hvac-multiple.xml");
+
+    let hp_heaters: Vec<_> = specs
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.name.as_str(),
+                "ASHP Heater" | "MSHP Heater" | "GSHP Heater"
+            )
+        })
+        .collect();
+    assert_eq!(
+        hp_heaters.len(),
+        3,
+        "expected 3 heat pump heater specs, got {}",
+        hp_heaters.len()
+    );
+
+    let hp_coolers: Vec<_> = specs
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.name.as_str(),
+                "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler"
+            )
+        })
+        .collect();
+    assert_eq!(
+        hp_coolers.len(),
+        3,
+        "expected 3 heat pump cooler specs, got {}",
+        hp_coolers.len()
+    );
+}
+
+#[test]
+fn multi_hvac_primary_heating_designated() {
+    let specs = resolve_ochre_fixture("base-hvac-multiple.xml");
+
+    // PrimaryHeatingSystem idref='HeatPump3' — the mini-split heat pump.
+    let primary_heaters: Vec<_> = specs
+        .iter()
+        .filter(|s| s.primary_role.as_deref() == Some("heating"))
+        .collect();
+
+    assert_eq!(
+        primary_heaters.len(),
+        1,
+        "expected exactly 1 primary heating spec, got {}: {:?}",
+        primary_heaters.len(),
+        primary_heaters.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        primary_heaters[0].name, "MSHP Heater",
+        "expected mini-split heat pump heater as primary"
+    );
+    assert_eq!(
+        primary_heaters[0].system_id.as_deref(),
+        Some("HeatPump3"),
+        "primary heating system_id should be HeatPump3"
+    );
+}
+
+#[test]
+fn multi_hvac_primary_cooling_designated() {
+    let specs = resolve_ochre_fixture("base-hvac-multiple.xml");
+
+    // PrimaryCoolingSystem idref='HeatPump3' — the mini-split heat pump.
+    let primary_coolers: Vec<_> = specs
+        .iter()
+        .filter(|s| s.primary_role.as_deref() == Some("cooling"))
+        .collect();
+
+    assert_eq!(
+        primary_coolers.len(),
+        1,
+        "expected exactly 1 primary cooling spec, got {}: {:?}",
+        primary_coolers.len(),
+        primary_coolers.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        primary_coolers[0].name, "MSHP Cooler",
+        "expected mini-split heat pump cooler as primary"
+    );
+    assert_eq!(
+        primary_coolers[0].system_id.as_deref(),
+        Some("HeatPump3"),
+        "primary cooling system_id should be HeatPump3"
+    );
+}
+
+#[test]
+fn multi_hvac_non_primary_systems_not_designated() {
+    let specs = resolve_ochre_fixture("base-hvac-multiple.xml");
+
+    let non_primary_heaters: Vec<_> = specs
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.name.as_str(),
+                "Gas Furnace"
+                    | "Electric Furnace"
+                    | "Gas Boiler"
+                    | "Electric Boiler"
+                    | "Electric Baseboard"
+                    | "ASHP Heater"
+                    | "GSHP Heater"
+            )
+        })
+        .collect();
+
+    for spec in non_primary_heaters {
+        assert!(
+            spec.primary_role.as_deref() != Some("heating"),
+            "non-primary heater {} should not have primary_role='heating'",
+            spec.name,
+        );
+    }
+}
+
+#[test]
+fn multi_hvac_fuel_types_correct() {
+    let specs = resolve_ochre_fixture("base-hvac-multiple.xml");
+
+    let find = |name: &str| -> &hares_io::EquipmentSpec {
+        specs
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("spec '{name}' not found"))
+    };
+
+    // Electric resistance furnace (HeatingSystem1 — electric furnace)
+    assert_eq!(find("Electric Furnace").fuel_type, FuelType::Electric);
+    // Gas furnace (HeatingSystem2 — natural gas)
+    assert_eq!(find("Gas Furnace").fuel_type, FuelType::Gas);
+    // Electric boiler (HeatingSystem3 — electricity)
+    assert_eq!(find("Electric Boiler").fuel_type, FuelType::Electric);
+    // Gas boiler (HeatingSystem4 — natural gas)
+    assert_eq!(find("Gas Boiler").fuel_type, FuelType::Gas);
+    // Electric baseboard (HeatingSystem5 — ElectricResistance)
+    assert_eq!(find("Electric Baseboard").fuel_type, FuelType::Electric);
+}
+
+#[test]
+fn multi_hvac_capacity_aggregation_not_double_counted() {
+    let specs = resolve_ochre_fixture("base-hvac-multiple.xml");
+
+    // Each HeatingSystem has HeatingCapacity=6400 BTU/h = 1875 W (approx).
+    // Three CoolingSystem with CoolingCapacity varying.
+    // Verify distinct system_ids for each source element — no double-counting.
+    let heater_ids: Vec<_> = specs
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.name.as_str(),
+                "Gas Furnace"
+                    | "Electric Furnace"
+                    | "Gas Boiler"
+                    | "Electric Boiler"
+                    | "Electric Baseboard"
+            )
+        })
+        .filter_map(|s| s.system_id.as_deref())
+        .collect();
+
+    assert_eq!(
+        heater_ids.len(),
+        7,
+        "expected 7 distinct HeatingSystem specs, got {}",
+        heater_ids.len()
+    );
+
+    // Verify no duplicate system IDs among heating systems.
+    let mut deduped = heater_ids.clone();
+    deduped.sort();
+    deduped.dedup();
+    assert_eq!(
+        heater_ids.len(),
+        deduped.len(),
+        "duplicate system IDs found among heating systems: {heater_ids:?}"
+    );
+}
+
+#[test]
+fn multi_hvac_fixture_parses_reasonably_overall() {
+    // Integration: full parse_building → validate → resolve pipeline.
+    let specs = resolve_ochre_fixture("base-hvac-multiple.xml");
+
+    // 7 HeatingSystem + 3 CoolingSystem + 3 HeatPump × 2 = 16 specs minimum
+    // (plus potential auxiliary equipment like dehumidifiers)
+    assert!(
+        specs.len() >= 16,
+        "expected at least 16 HVAC equipment specs, got {}",
+        specs.len()
+    );
+
+    // Verify no errored out — each spec is present and named.
+    for spec in &specs {
+        assert!(!spec.name.is_empty(), "spec has empty name");
+    }
+}

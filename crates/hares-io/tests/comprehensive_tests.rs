@@ -60,6 +60,7 @@ fn make_spec(name: &str, fuel: FuelType) -> hares_io::EquipmentSpec {
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
+        primary_role: None,
     }
 }
 

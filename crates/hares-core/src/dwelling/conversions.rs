@@ -585,6 +585,7 @@ pub(crate) fn merged_equipment_config(
         typed_config: spec.typed_config.clone(),
         system_id: spec.system_id.clone(),
         related_hvac_idref: spec.related_hvac_idref.clone(),
+        primary_role: spec.primary_role.clone(),
     };
     equipment_config_from_spec(&merged_spec)
 }
@@ -1045,6 +1046,7 @@ mod tests {
             )),
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         }
     }
 
@@ -1124,6 +1126,7 @@ mod tests {
             typed_config: Some(eq_cfg),
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         }
     }
 

@@ -21,6 +21,7 @@ fn curated_fixture_files_exist() {
         "base-lighting-mixed.xml",
         "base-appliances-dehumidifier.xml",
         "base-misc-loads-large-uncommon.xml",
+        "base-hvac-multiple.xml",
     ];
 
     for file in expected {
@@ -42,6 +43,7 @@ fn curated_fixtures_are_well_formed_hpxml_v4() {
         "base-lighting-mixed.xml",
         "base-appliances-dehumidifier.xml",
         "base-misc-loads-large-uncommon.xml",
+        "base-hvac-multiple.xml",
     ];
 
     for file in files {
@@ -88,4 +90,27 @@ fn curated_set_contains_der_and_end_use_coverage() {
     ] {
         assert!(loads.contains(tag), "missing expected load tag: {tag}");
     }
+
+    let hvac = fs::read_to_string(root.join("base-hvac-multiple.xml"))
+        .expect("hvac-multiple fixture should load");
+    assert!(
+        hvac.contains("<HeatingSystem>"),
+        "HVAC-multiple fixture missing HeatingSystem tag"
+    );
+    assert!(
+        hvac.contains("<CoolingSystem>"),
+        "HVAC-multiple fixture missing CoolingSystem tag"
+    );
+    assert!(
+        hvac.contains("<HeatPump>"),
+        "HVAC-multiple fixture missing HeatPump tag"
+    );
+    assert!(
+        hvac.contains("<PrimaryHeatingSystem"),
+        "HVAC-multiple fixture missing PrimaryHeatingSystem"
+    );
+    assert!(
+        hvac.contains("<PrimaryCoolingSystem"),
+        "HVAC-multiple fixture missing PrimaryCoolingSystem"
+    );
 }

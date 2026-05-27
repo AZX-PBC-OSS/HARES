@@ -63,6 +63,7 @@ fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
         typed_config: None,
         system_id: None,
         related_hvac_idref: None,
+        primary_role: None,
     }
 }
 
@@ -479,6 +480,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             )),
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         },
         EquipmentSpec {
             instance_name: None,
@@ -499,6 +501,7 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
             )),
             system_id: None,
             related_hvac_idref: None,
+            primary_role: None,
         },
     ];
 
