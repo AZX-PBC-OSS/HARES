@@ -943,6 +943,74 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         };
     }
 
+    // Remove Attic↔Garage wall boundaries consumed by Path A attic volume computation.
+    // Matches OCHRE's del boundaries["Attic Garage Wall"] workaround (hpxml.py:596).
+    // The walls were merged into the gable-area derivation inside compute_attic_volume;
+    // retaining them would double-count thermal coupling between Garage and Attic zones.
+    #[cfg(feature = "observe")]
+    {
+        let removed_count = boundaries
+            .iter()
+            .filter(|b| {
+                b.boundary_type == BoundaryType::Wall
+                    && ((b.interior_zone.as_ref() == Some(&ZoneType::Garage)
+                        && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
+                        || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                            && b.exterior_zone.as_ref() == Some(&ZoneType::Garage)))
+            })
+            .count();
+        let removed_area_m2: f64 = boundaries
+            .iter()
+            .filter(|b| {
+                b.boundary_type == BoundaryType::Wall
+                    && ((b.interior_zone.as_ref() == Some(&ZoneType::Garage)
+                        && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
+                        || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                            && b.exterior_zone.as_ref() == Some(&ZoneType::Garage)))
+            })
+            .map(|b| b.area_m2)
+            .sum();
+        if removed_count > 0 {
+            tracing::debug!(
+                target: "observe",
+                removed_count,
+                removed_area_m2,
+                "removed Attic↔Garage wall boundaries consumed by Path A attic volume computation"
+            );
+        }
+    }
+
+    boundaries.retain(|b| {
+        !(b.boundary_type == BoundaryType::Wall
+            && ((b.interior_zone.as_ref() == Some(&ZoneType::Garage)
+                && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
+                || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                    && b.exterior_zone.as_ref() == Some(&ZoneType::Garage))))
+    });
+
+    // Invariant: after attic volume computation, no Wall boundaries between
+    // Garage and Attic remain. The compound attic volume formula already
+    // geometrically accounts for the shared attic-garage space; keeping the
+    // wall boundary would double-count thermal coupling.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        let has_attic = zones_vec.iter().any(|z| z.zone_type == ZoneType::Attic);
+        let has_garage = zones_vec.iter().any(|z| z.zone_type == ZoneType::Garage);
+        if has_attic && has_garage {
+            for bd in &boundaries {
+                assert!(
+                    !(bd.boundary_type == BoundaryType::Wall
+                        && ((bd.interior_zone.as_ref() == Some(&ZoneType::Garage)
+                            && bd.exterior_zone.as_ref() == Some(&ZoneType::Attic))
+                            || (bd.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                                && bd.exterior_zone.as_ref() == Some(&ZoneType::Garage)))),
+                    "boundary '{}' is an Attic↔Garage wall; should have been removed after Path A attic volume computation",
+                    bd.id
+                );
+            }
+        }
+    }
+
     // <AirLeakage> ACH50 / ACHnatural (HPXML 4.x inline or HPXML 3.x wrapper).
     let (infiltration_ach50, infiltration_ach_natural) = parse_air_leakage_ach50(details)?;
 
@@ -5504,6 +5572,120 @@ mod tests {
             (attic_area - expected_m2).abs() < 0.1,
             "attic floor area should include garage ceiling: got {attic_area}, expected ~{expected_m2}"
         );
+    }
+
+    #[test]
+    fn attic_garage_walls_removed_after_path_a_volume_computation() {
+        // Regression: after Path A attic volume computation, Attic↔Garage
+        // wall boundaries must be removed. Matches OCHRE's
+        // del boundaries["Attic Garage Wall"] (hpxml.py:596).
+        use super::parse_building;
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id="W1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+            <Azimuth>0</Azimuth>
+          </Wall>
+          <Wall>
+            <SystemIdentifier id="GarageAtticWall"/>
+            <InteriorAdjacentTo>garage</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>attic vented</ExteriorAdjacentTo>
+            <Area units="ft2">40</Area>
+            <Azimuth>0</Azimuth>
+          </Wall>
+        </Walls>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="R1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">600</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+        <Floors>
+          <Floor>
+            <SystemIdentifier id="AtticFloor"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>attic vented</ExteriorAdjacentTo>
+            <Area units="ft2">500</Area>
+          </Floor>
+        </Floors>
+        <Attics>
+          <Attic>
+            <AtticType><Attic><Vented>true</Vented></Attic></AtticType>
+          </Attic>
+        </Attics>
+        <Garages>
+          <Garage>
+            <FloorArea units="ft2">200</FloorArea>
+          </Garage>
+        </Garages>
+        <AirInfiltration>
+          <AirInfiltrationMeasurement>
+            <BuildingAirLeakage>
+              <AirLeakage>5.0</AirLeakage>
+            </BuildingAirLeakage>
+          </AirInfiltrationMeasurement>
+        </AirInfiltration>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let building = parse_building(xml).expect("parse should succeed");
+
+        // Verify no Wall boundaries remain between Garage and Attic.
+        let garage_attic_walls: Vec<_> = building
+            .boundaries
+            .iter()
+            .filter(|b| {
+                b.boundary_type == BoundaryType::Wall
+                    && ((b.interior_zone.as_ref() == Some(&ZoneType::Garage)
+                        && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
+                        || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                            && b.exterior_zone.as_ref() == Some(&ZoneType::Garage)))
+            })
+            .collect();
+        assert!(
+            garage_attic_walls.is_empty(),
+            "expected no Attic↔Garage wall boundaries after Path A removal, found {}",
+            garage_attic_walls.len()
+        );
+
+        // The Attic and Garage zones should still exist.
+        assert!(
+            building
+                .zones
+                .iter()
+                .any(|z| z.zone_type == ZoneType::Attic),
+            "attic zone must still exist after wall removal"
+        );
+        assert!(
+            building
+                .zones
+                .iter()
+                .any(|z| z.zone_type == ZoneType::Garage),
+            "garage zone must still exist after wall removal"
+        );
+
+        // Floor boundaries between Garage and Attic (ceiling) must NOT be removed.
+        // Only Wall boundaries are filtered.
     }
 
     // ── Mass multiplier test (via ZoneInput) ────────────────────────────
