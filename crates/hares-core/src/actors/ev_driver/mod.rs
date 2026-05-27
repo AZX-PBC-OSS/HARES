@@ -372,7 +372,17 @@ impl EvDriverActor {
     }
 
     pub fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
-        self.equipment_id = equipment_id_by_name.get(self.target_name()).copied();
+        self.equipment_id = match equipment_id_by_name.get(self.target_name()) {
+            Some(id) => Some(*id),
+            None => {
+                tracing::warn!(
+                    equipment = %self.target_name(),
+                    actor = "EvDriverActor",
+                    "Equipment name not found in registry — actor will operate without SOC feedback"
+                );
+                None
+            }
+        };
     }
 
     /// Roll a daily event for a new day if needed.
@@ -2629,6 +2639,38 @@ mod tests {
             actor.last_action().contains("departure") && actor.last_action().contains("buffer"),
             "last_action should indicate departure buffer override, got: {}",
             actor.last_action()
+        );
+    }
+
+    #[test]
+    fn resolve_equipment_id_missing_name_sets_equipment_id_to_none() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        let id_by_name: HashMap<String, EquipmentId> = HashMap::new();
+        actor.resolve_equipment_id(&id_by_name);
+        assert!(
+            actor.equipment_id.is_none(),
+            "equipment_id must be None when target name ('EV1') is not in the registry"
+        );
+    }
+
+    #[test]
+    fn resolve_equipment_id_found_name_sets_equipment_id() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        let mut id_by_name = HashMap::new();
+        id_by_name.insert("EV1".to_string(), EquipmentId(7));
+        actor.resolve_equipment_id(&id_by_name);
+        assert_eq!(
+            actor.equipment_id,
+            Some(EquipmentId(7)),
+            "equipment_id must match the registry entry"
         );
     }
 

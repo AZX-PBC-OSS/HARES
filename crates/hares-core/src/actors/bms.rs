@@ -102,7 +102,17 @@ impl BatteryManagementActor {
             DispatchTarget::ByName(n) => n.as_ref(),
             DispatchTarget::ByEndUse(_) => return,
         };
-        self.equipment_id = equipment_id_by_name.get(battery_name).copied();
+        self.equipment_id = match equipment_id_by_name.get(battery_name) {
+            Some(id) => Some(*id),
+            None => {
+                tracing::warn!(
+                    equipment = %battery_name,
+                    actor = "BatteryManagementActor",
+                    "Equipment name not found in registry — actor will operate without SOC feedback"
+                );
+                None
+            }
+        };
     }
 
     fn read_soc(&self, env: &EnvironmentState) -> Option<f64> {
@@ -1966,6 +1976,46 @@ mod tests {
             out.is_empty(),
             "wind 18 m/s should NOT trigger at threshold 20 m/s, got {} signals",
             out.len()
+        );
+    }
+
+    #[test]
+    fn resolve_equipment_id_missing_name_sets_equipment_id_to_none() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::Manual,
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let id_by_name: HashMap<String, EquipmentId> = HashMap::new();
+        actor.resolve_equipment_id(&id_by_name);
+        assert!(
+            actor.equipment_id.is_none(),
+            "equipment_id must be None when target name is not in the registry"
+        );
+    }
+
+    #[test]
+    fn resolve_equipment_id_found_name_sets_equipment_id() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::Manual,
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut id_by_name = HashMap::new();
+        id_by_name.insert("bat1".to_string(), EquipmentId(42));
+        actor.resolve_equipment_id(&id_by_name);
+        assert_eq!(
+            actor.equipment_id,
+            Some(EquipmentId(42)),
+            "equipment_id must match the registry entry"
         );
     }
 }
