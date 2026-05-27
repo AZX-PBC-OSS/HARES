@@ -10,8 +10,10 @@ use hares_types::FuelType;
 
 use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec, build_typed_spec};
+use super::resolve_pool::resolve_pool_and_spa_loads;
 use super::xml_helpers::{
     capitalize, child_f64, child_load_kwh, child_load_therms, child_text, parse_fuel,
+    parse_schedule_extension_params,
 };
 use hares_physics::units as conv;
 
@@ -659,63 +661,8 @@ pub(super) fn resolve_scheduled_loads(
         }
     }
 
-    for (container, item, pump_name, heater_name) in [
-        ("Pools", "Pool", "Pool Pump", "Pool Heater"),
-        ("Spas", "Spa", "Spa Pump", "Spa Heater"),
-    ] {
-        if let Some(group) = details.child(container) {
-            for entry in group.children_named(item) {
-                for (pump_container, pump_item, schedule_name) in [
-                    ("PoolPumps", "PoolPump", pump_name),
-                    ("SpaPumps", "SpaPump", pump_name),
-                ] {
-                    if let Some(pumps) = entry.child(pump_container) {
-                        for pump in pumps.children_named(pump_item) {
-                            if let Some(kwh) = child_load_kwh(pump) {
-                                let mut params = Map::new();
-                                params.insert("annual_electric_kwh".to_string(), json!(kwh));
-                                specs.push(build_spec(
-                                    schedule_name.to_string(),
-                                    FuelType::Electric,
-                                    params,
-                                    defaults,
-                                ));
-                            }
-                        }
-                    }
-                }
-
-                for (heater_container, heater_item, schedule_name) in [
-                    ("Heater", "Heater", heater_name),
-                    ("SpaHeater", "SpaHeater", heater_name),
-                ] {
-                    if let Some(heater) = entry
-                        .child(heater_container)
-                        .or_else(|| entry.child(heater_item))
-                    {
-                        let mut params = Map::new();
-                        if let Some(kwh) = child_load_kwh(heater) {
-                            params.insert("annual_electric_kwh".to_string(), json!(kwh));
-                            specs.push(build_spec(
-                                schedule_name.to_string(),
-                                FuelType::Electric,
-                                params,
-                                defaults,
-                            ));
-                        } else if let Some(therms) = child_load_therms(heater) {
-                            params.insert("annual_gas_therms".to_string(), json!(therms));
-                            specs.push(build_spec(
-                                schedule_name.to_string(),
-                                FuelType::Gas,
-                                params,
-                                defaults,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Pools, HotTubs, and Spas — delegated to resolve_pool module.
+    resolve_pool_and_spa_loads(details, defaults, specs);
 }
 
 pub(super) fn resolve_ventilation(
@@ -1013,132 +960,11 @@ fn garage_floor_area_m2(building: &Building) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Parse weekday/weekend schedule fractions and usage multiplier from an extension node.
-fn parse_schedule_extension_params(node: &XmlNode, prefix: &str) -> Vec<(String, Value)> {
-    let mut out = Vec::new();
-    let Some(ext) = node.child("extension") else {
-        return out;
-    };
-
-    let weekday_key = if prefix.is_empty() {
-        "WeekdayScheduleFractions".to_string()
-    } else {
-        format!("{prefix}WeekdayScheduleFractions")
-    };
-    let weekend_key = if prefix.is_empty() {
-        "WeekendScheduleFractions".to_string()
-    } else {
-        format!("{prefix}WeekendScheduleFractions")
-    };
-    let multiplier_key = if prefix.is_empty() {
-        "UsageMultiplier".to_string()
-    } else {
-        format!("{prefix}UsageMultiplier")
-    };
-
-    if let Some(frac_node) = ext.child(&weekday_key) {
-        let vals: Vec<f64> = frac_node
-            .text
-            .trim()
-            .split(',')
-            .filter_map(|s| s.trim().parse::<f64>().ok())
-            .collect();
-        if vals.len() == 24 {
-            out.push(("weekday_schedule_fractions".to_string(), json!(vals)));
-        } else if !vals.is_empty() {
-            tracing::warn!(
-                key = %weekday_key,
-                count = vals.len(),
-                "WeekdayScheduleFractions has unexpected number of values (expected 24); ignoring"
-            );
-        }
-    }
-    if let Some(frac_node) = ext.child(&weekend_key) {
-        let vals: Vec<f64> = frac_node
-            .text
-            .trim()
-            .split(',')
-            .filter_map(|s| s.trim().parse::<f64>().ok())
-            .collect();
-        if vals.len() == 24 {
-            out.push(("weekend_schedule_fractions".to_string(), json!(vals)));
-        } else if !vals.is_empty() {
-            tracing::warn!(
-                key = %weekend_key,
-                count = vals.len(),
-                "WeekendScheduleFractions has unexpected number of values (expected 24); ignoring"
-            );
-        }
-    }
-    if let Some(mult) = child_f64(ext, &multiplier_key) {
-        out.push(("usage_multiplier".to_string(), json!(mult)));
-    }
-
-    // Monthly schedule multipliers (same pattern as lighting)
-    let month_key = if prefix.is_empty() {
-        "MonthlyScheduleMultipliers".to_string()
-    } else {
-        format!("{prefix}MonthlyScheduleMultipliers")
-    };
-    if let Some(node) = ext.child(&month_key) {
-        let vals: Vec<f64> = node
-            .text
-            .trim()
-            .split(',')
-            .filter_map(|s| s.trim().parse::<f64>().ok())
-            .collect();
-        if vals.len() == 12 {
-            out.push(("month_multipliers".to_string(), json!(vals)));
-        } else if !vals.is_empty() {
-            tracing::warn!(
-                key = %month_key,
-                count = vals.len(),
-                "MonthlyScheduleMultipliers has unexpected number of values (expected 12); ignoring"
-            );
-        }
-    }
-
-    // Thermal gain fractions
-    if let Some(frac) = child_f64(ext, "FracSensible") {
-        out.push(("frac_sensible".to_string(), json!(frac)));
-    }
-    if let Some(frac) = child_f64(ext, "FracLatent") {
-        out.push(("frac_latent".to_string(), json!(frac)));
-    }
-    if let Some(frac) = child_f64(ext, "FracRadiant") {
-        out.push(("radiative_gain_fraction".to_string(), json!(frac)));
-    }
-
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::building::parse_xml_document;
+    use super::super::building::{parse_building, parse_xml_document};
     use super::*;
-
-    /// Verify that `parse_schedule_extension_params` emits `month_multipliers` only once.
-    /// Before the fix, a duplicated code block would emit it twice.
-    #[test]
-    fn month_multipliers_emitted_only_once() {
-        let xml = r#"<node>
-          <extension>
-            <MonthlyScheduleMultipliers>1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0</MonthlyScheduleMultipliers>
-            <WeekdayScheduleFractions>0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1</WeekdayScheduleFractions>
-          </extension>
-        </node>"#;
-        let root = parse_xml_document(xml).expect("parse test XML");
-
-        let result = parse_schedule_extension_params(&root, "");
-        let month_count = result
-            .iter()
-            .filter(|(k, _)| k == "month_multipliers")
-            .count();
-        assert_eq!(
-            month_count, 1,
-            "month_multipliers should appear exactly once in output, found {month_count}"
-        );
-    }
+    use crate::defaults::DefaultsStore;
 
     #[test]
     fn is_conditioned_location_classifies_hpxml_and_field_strings() {

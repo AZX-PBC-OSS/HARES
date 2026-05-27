@@ -1576,3 +1576,132 @@ fn hpxml_v3_parses_resolves_equipment_with_schema_warning() {
         "3.x fixture should resolve a water heater, got: {names:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Pools/HotTubs parsing from OCHRE fixtures
+// ---------------------------------------------------------------------------
+
+/// Parse the OCHRE base-misc-usage-multiplier.xml fixture which contains
+/// both a <Pools>/<Pool> element and a <HotTubs>/<HotTub> element. Verify
+/// that pool pump, pool heater, spa pump, and spa heater specs are created
+/// with the correct load values from the HPXML elements.
+#[test]
+fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("vendors/OCHRE/test/OS-HPXML Sample Files/base-misc-usage-multiplier.xml");
+    let mut xml = std::fs::read_to_string(&fixture_path)
+        .expect("base-misc-usage-multiplier fixture should be readable");
+
+    // The fixture lacks <Latitude>/<Longitude> which are required for duct DSE
+    // calculations in the HVAC resolution path. Inject them into the <Site>
+    // element so the full resolve_equipment pipeline can run.
+    xml = xml.replace(
+        "<StateCode>CO</StateCode>",
+        "<StateCode>CO</StateCode><Latitude>39.7</Latitude><Longitude>-105.0</Longitude>",
+    );
+
+    let building = parse_building(&xml).expect("fixture should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment should succeed for fixture");
+
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+
+    // Pool pump: 2700 kWh/year from <PoolPumps>/<PoolPump>/<Load>
+    let pool_pump = specs
+        .iter()
+        .find(|s| s.name == "Pool Pump")
+        .unwrap_or_else(|| {
+            panic!("Pool Pump spec should be created from <Pools>/<Pool>, got: {names:?}")
+        });
+    assert_eq!(pool_pump.fuel_type, hares_types::FuelType::Electric);
+    assert_eq!(
+        pool_pump
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(|v| v.as_f64()),
+        Some(2700.0)
+    );
+    // Schedule extension should be parsed
+    assert_eq!(
+        pool_pump
+            .parameters
+            .get("usage_multiplier")
+            .and_then(|v| v.as_f64()),
+        Some(0.9)
+    );
+    assert!(
+        pool_pump
+            .parameters
+            .contains_key("weekday_schedule_fractions"),
+        "pool pump should have weekday schedule fractions from extension"
+    );
+    assert!(
+        pool_pump.parameters.contains_key("month_multipliers"),
+        "pool pump should have monthly multipliers from extension"
+    );
+
+    // Pool heater: 500 therm/year from <Heater>/<Load>
+    // HPXML fixture has <Type>gas fired</Type> but the parser derives fuel
+    // type from the load units — therm/year → Gas.
+    let pool_heater = specs
+        .iter()
+        .find(|s| s.name == "Pool Heater")
+        .unwrap_or_else(|| {
+            panic!(
+                "Pool Heater spec should be created from <Pools>/<Pool>/<Heater>, got: {names:?}"
+            )
+        });
+    assert_eq!(pool_heater.fuel_type, hares_types::FuelType::Gas);
+    assert_eq!(
+        pool_heater
+            .parameters
+            .get("annual_gas_therms")
+            .and_then(|v| v.as_f64()),
+        Some(500.0)
+    );
+    assert_eq!(
+        pool_heater
+            .parameters
+            .get("usage_multiplier")
+            .and_then(|v| v.as_f64()),
+        Some(0.9)
+    );
+
+    // Spa pump: 1000 kWh/year from <HotTubs>/<HotTub>/<HotTubPumps>/<HotTubPump>/<Load>
+    let spa_pump = specs
+        .iter()
+        .find(|s| s.name == "Spa Pump")
+        .unwrap_or_else(|| {
+            panic!("Spa Pump spec should be created from <HotTubs>/<HotTub>, got: {names:?}")
+        });
+    assert_eq!(spa_pump.fuel_type, hares_types::FuelType::Electric);
+    assert_eq!(
+        spa_pump
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(|v| v.as_f64()),
+        Some(1000.0)
+    );
+
+    // Spa heater: 1300 kWh/year from <HotTubs>/<HotTub>/<Heater>/<Load>
+    let spa_heater = specs
+        .iter()
+        .find(|s| s.name == "Spa Heater")
+        .unwrap_or_else(|| {
+            panic!(
+                "Spa Heater spec should be created from <HotTubs>/<HotTub>/<Heater>, got: {names:?}"
+            )
+        });
+    assert_eq!(spa_heater.fuel_type, hares_types::FuelType::Electric);
+    assert_eq!(
+        spa_heater
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(|v| v.as_f64()),
+        Some(1300.0)
+    );
+}

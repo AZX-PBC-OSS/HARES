@@ -203,6 +203,27 @@ pub fn btu_hr_per_f_to_w_per_k(x: f64) -> f64 {
     x * BTU_PER_HOUR_TO_WATT * 9.0 / 5.0
 }
 
+// --- Power → annual energy (W → kWh/year, Btuh → therms/year) ---
+// Used for HPXML PlugLoadUnits / PoolHeaterUnits parsing where W and Btuh
+// are power units that must be converted to annual energy equivalents.
+// NIST: 1 BTU(IT)/h = 0.293_071_07 W.
+// 1 therm = 100,000 BTU(IT).
+// 1 year = 8760 h (non-leap).
+
+const HOURS_PER_YEAR: f64 = 8760.0;
+
+/// Convert power in watts to annual energy in kWh/year.
+/// W * 8760 h/year / 1000 Wh/kWh = kWh/year.
+pub fn power_watt_to_kwh_per_year(w: f64) -> f64 {
+    w * HOURS_PER_YEAR / 1000.0
+}
+
+/// Convert power in BTU(IT)/h to annual energy in therms/year.
+/// Btuh * 8760 h/year / 100000 BTU(IT)/therm = therms/year.
+pub fn power_btuh_to_therms_per_year(btuh: f64) -> f64 {
+    btuh * HOURS_PER_YEAR / 100_000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +379,21 @@ mod tests {
         // Old constant: 0.293_071_07 * 9.0 / 5.0
         let expected = 0.293_071_07 * 9.0 / 5.0;
         approx_eq(btu_hr_per_f_to_w_per_k(1.0), expected, 1e-12);
+    }
+
+    #[test]
+    fn power_watt_to_kwh_per_year_converts() {
+        // 1000 W = 1 kW * 8760 h = 8760 kWh/year
+        approx_eq(power_watt_to_kwh_per_year(1000.0), 8760.0, 1e-10);
+        // 1 W = 8.76 kWh/year
+        approx_eq(power_watt_to_kwh_per_year(1.0), 8.76, 1e-12);
+    }
+
+    #[test]
+    fn power_btuh_to_therms_per_year_converts() {
+        // 100,000 Btuh * 8760 / 100,000 = 8760 therms/year
+        approx_eq(power_btuh_to_therms_per_year(100_000.0), 8760.0, 1e-10);
+        // 1 Btuh * 8760 / 100000 = 0.08760 therms/year
+        approx_eq(power_btuh_to_therms_per_year(1.0), 0.0876, 1e-12);
     }
 }

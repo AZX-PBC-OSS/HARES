@@ -424,6 +424,44 @@ pub fn inject_schedule_into_specs(
         .map(|m| (m.equipment_name, m))
         .collect();
 
+    // Invariant: if HPXML-derived pool/spa specs have annual energy but the
+    // schedule CSV also has pool/spa columns, the CSV fractions will override
+    // the HPXML extension fractions (while HPXML annual energy is used for
+    // max_kW scaling). This is an intentional precedence, but the combination
+    // may produce unexpected results. Warn when both sources are present.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        let pool_source = ["Pool Pump", "Pool Heater", "Spa Pump", "Spa Heater"];
+        let csv_to_eq: [(&str, &str); 4] = [
+            ("pool_pump", "Pool Pump"),
+            ("pool_heater", "Pool Heater"),
+            ("permanent_spa_pump", "Spa Pump"),
+            ("permanent_spa_heater", "Spa Heater"),
+        ];
+        for spec in specs.iter() {
+            if !pool_source.contains(&spec.name.as_str()) {
+                continue;
+            }
+            for (csv_col, eq_name) in &csv_to_eq {
+                if eq_name != &spec.name.as_str() {
+                    continue;
+                }
+                let csv_key = normalize_schedule_col_name(csv_col);
+                if csv_col_map.contains_key(&csv_key) {
+                    tracing::warn!(
+                        equipment = %spec.name,
+                        csv_column = csv_col,
+                        "HPXML provides '{eq_name}' equipment AND schedule CSV defines \
+                         column '{csv_col}': CSV schedule fractions will override \
+                         HPXML <extension> fractions while HPXML annual energy drives \
+                         max kW. Verify this combination is intentional to avoid \
+                         unexpected load profiles."
+                    );
+                }
+            }
+        }
+    }
+
     for spec in specs.iter_mut() {
         // Ventilation Fan: constant power from equipment properties, not schedule CSV.
         // Mirrors OCHRE: schedule["Ventilation Fan (kW)"] = equipment["Power (W)"] / 1000

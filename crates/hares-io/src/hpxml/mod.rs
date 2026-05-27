@@ -10,6 +10,7 @@ pub mod equipment;
 mod resolve_der;
 pub mod resolve_hvac;
 mod resolve_loads;
+mod resolve_pool;
 mod resolve_water_heater;
 pub mod validation;
 pub mod water_heater_ua;
