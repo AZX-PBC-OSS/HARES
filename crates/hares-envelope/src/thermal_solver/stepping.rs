@@ -13,7 +13,7 @@ use hares_types::{DEFAULT_GROUND_ALBEDO, DomainUpdate, EnvironmentState, PortSlo
 use nalgebra::DVector;
 
 use super::ThermalSolver;
-use super::config::StateSpaceWiring;
+use super::config::{FilmCoefficientModel, StateSpaceWiring};
 
 impl ThermalSolver {
     /// Compute the HVAC capacity (W) required to maintain `target_c` at
@@ -431,6 +431,108 @@ impl ThermalSolver {
         }
     }
 
+    /// Compute per-step interior convection correction using semi-implicit coupling.
+    ///
+    /// For each interior boundary, evaluates `tarp_h_natural(tilt_deg, |T_surface − T_zone|, …)`
+    /// and pushes per-node coupling entries into `self.coupling_buf` for the correction
+    /// Δh = h_tarp − h_static (difference between per-step TARP coefficient and the frozen
+    /// ASHRAE Simple value in the A-matrix).
+    ///
+    /// The correction is only applied when Δh > 0 (h_tarp exceeds the frozen value).
+    /// When Δh < 0 (h_tarp is lower than the frozen value, common for walls/ceilings at
+    /// typical indoor ΔT), the A-matrix already overestimates convection — a conservative
+    /// overestimate that is numerically stable. Applying a negative semi-implicit diagonal
+    /// would make the M matrix ill-conditioned. See Known Limitations.
+    ///
+    /// When applied (Δh > 0), each surface–zone pair produces two coupling entries:
+    /// - Surface node: `d = dt·Δh·A / C_surface` (implicit diagonal, stabilising)
+    ///   `forcing = dt·Δh·A·T_zone / C_surface` (explicit off-diagonal)
+    /// - Zone node:    `d = dt·Δh·A / C_zone` (implicit diagonal, stabilising)
+    ///   `forcing = dt·Δh·A·T_surface / C_zone` (explicit off-diagonal)
+    ///
+    /// Reference: Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, Eqs. 90–92.
+    fn apply_convection_forcing(&mut self) {
+        if self.config.film_coefficient_model != FilmCoefficientModel::PerStepTarp
+            || self.config.interior_convection_injections.is_empty()
+        {
+            return;
+        }
+
+        let dt = self.dt_s;
+
+        for (i, inj) in self
+            .config
+            .interior_convection_injections
+            .iter()
+            .enumerate()
+        {
+            let t_surface = self.x[inj.surface_state_index];
+            let t_zone = self.x[inj.zone_state_index];
+
+            let delta_t_k = (t_surface - t_zone).abs();
+
+            if delta_t_k < 1e-15 {
+                continue;
+            }
+
+            let above_hotter = t_surface > t_zone;
+            let h_tarp = tarp_h_natural(inj.tilt_deg, delta_t_k, above_hotter);
+
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                if !(0.5..=10.0).contains(&h_tarp) {
+                    tracing::warn!(
+                        h_tarp,
+                        delta_t_k,
+                        tilt_deg = inj.tilt_deg,
+                        "interior h_conv outside physically plausible range [0.5, 10.0] W/(m²·K)"
+                    );
+                }
+            }
+
+            let static_r_film = self.per_boundary_static_r_film[i];
+            let h_static = if static_r_film > 1e-12 {
+                1.0 / static_r_film
+            } else {
+                0.0
+            };
+
+            let delta_h = h_tarp - h_static;
+
+            // Correction only applied when TARP exceeds the frozen static
+            // coefficient. When h_tarp < h_static, the A-matrix already
+            // overestimates convection — a conservative overestimate that
+            // is numerically stable (the implicit diagonal would go negative
+            // if we attempted to subtract damping via semi-implicit coupling).
+            //
+            // Known Limitation (T-0034): walls and ceilings at typical indoor
+            // ΔT (1–10 K) have h_tarp < h_static and are not corrected.
+            // Full correction requires partial A-matrix reassembly (approach (a)
+            // in the ticket), which recomputes the affected rows each timestep.
+            if delta_h <= 0.0 {
+                continue;
+            }
+
+            let area = inj.area_m2;
+            let c_surface = inj.c_surface_j_k.max(1e-12);
+            let c_zone = inj.c_zone_j_k.max(1e-12);
+
+            // Semi-implicit diagonal damping: added to M for unconditional stability.
+            // delta_h > 0 guarantees d > 0, so M remains positive definite.
+            let d_surface = dt * delta_h * area / c_surface;
+            let d_zone = dt * delta_h * area / c_zone;
+
+            // Explicit off-diagonal coupling: uses current (bounded) state.
+            let forcing_surface = dt * delta_h * area * t_zone / c_surface;
+            let forcing_zone = dt * delta_h * area * t_surface / c_zone;
+
+            self.coupling_buf
+                .push((inj.surface_state_index, d_surface, forcing_surface));
+            self.coupling_buf
+                .push((inj.zone_state_index, d_zone, forcing_zone));
+        }
+    }
+
     /// Phase 1: build input vector and coupling from current weather/solar/infiltration.
     /// Stores results in `last_u`, `last_coupling`, `last_coupled_lu` so that
     /// `solve_ideal_capacity_for_target` sees current-step data.
@@ -467,6 +569,10 @@ impl ThermalSolver {
         let (u, latent_by_zone) = self.build_input_vector(ports, env);
 
         self.build_coupling();
+
+        // Per-step interior convection correction appends entries to coupling_buf
+        // (semi-implicit: diagonal added to M, off-diagonal as explicit forcing).
+        self.apply_convection_forcing();
 
         if !self.coupling_buf.is_empty() {
             let coupled_lu = self

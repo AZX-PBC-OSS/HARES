@@ -7,9 +7,9 @@ use std::collections::HashMap;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{
-    InteriorLwrZoneConfig, InteriorSurface, InteriorSurfaceInfo, MechanicalVentilationParams,
-    OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
-    interior_longwave_net_w,
+    FilmCoefficientModel, InteriorLwrZoneConfig, InteriorSurface, InteriorSurfaceInfo,
+    MechanicalVentilationParams, OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver,
+    ThermalSolverConfig, interior_longwave_net_w,
 };
 use hares_types::{
     DomainSolver, EnvironmentState, GridState, PortSlots, SurfaceIrradiance, ThermalAccumulator,
@@ -394,6 +394,8 @@ fn lwr_zone_without_scriptf_must_error_at_construction() {
         interior_lwr_method: hares_envelope::InteriorLwrMethod::ScriptF,
         interior_solar_zones: Vec::new(),
         boundary_diagnostics: Vec::new(),
+        film_coefficient_model: FilmCoefficientModel::default(),
+        interior_convection_injections: Vec::new(),
     };
 
     let result = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0);
@@ -594,6 +596,8 @@ fn interior_lwr_converges_by_flux_residual_within_iter_budget() {
         interior_lwr_method: hares_envelope::InteriorLwrMethod::ScriptF,
         interior_solar_zones: Vec::new(),
         boundary_diagnostics: Vec::new(),
+        film_coefficient_model: FilmCoefficientModel::default(),
+        interior_convection_injections: Vec::new(),
     };
 
     let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();

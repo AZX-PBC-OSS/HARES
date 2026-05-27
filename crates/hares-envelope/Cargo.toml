@@ -16,6 +16,7 @@ chrono.workspace = true
 
 [features]
 observe_detailed = []
+check_invariants = []
 
 [dev-dependencies]
 approx = "0.5"

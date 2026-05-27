@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{
-    InteriorLwrZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams, OutputMapping,
-    StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
+    FilmCoefficientModel, InteriorLwrZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
+    OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
 };
 use hares_types::{
     DomainSolver, DomainUpdate, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
@@ -213,6 +213,8 @@ fn make_solver(env: &EnvironmentState) -> ThermalSolver {
         interior_lwr_method: hares_envelope::InteriorLwrMethod::ScriptF,
         interior_solar_zones: Vec::new(),
         boundary_diagnostics: Vec::new(),
+        film_coefficient_model: FilmCoefficientModel::default(),
+        interior_convection_injections: Vec::new(),
     };
 
     ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()

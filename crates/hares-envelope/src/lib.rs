@@ -34,8 +34,8 @@ pub use state_space::{
 };
 pub use thermal_solver::{
     BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
-    ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
-    InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
-    NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
-    ThermalSolverError, WindowSolarProperties, ZoneSensibleBreakdown,
+    ExteriorSurfaceInfo, FilmCoefficientModel, InfiltrationMethod, InteriorConvectionInjection,
+    InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
+    MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSolver,
+    ThermalSolverConfig, ThermalSolverError, WindowSolarProperties, ZoneSensibleBreakdown,
 };

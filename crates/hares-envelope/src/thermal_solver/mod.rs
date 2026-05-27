@@ -39,10 +39,10 @@ mod stepping;
 pub(crate) use config::Result;
 pub use config::{
     BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
-    ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
-    InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
-    NaturalVentilationConfig, StateSpaceWiring, ThermalSolverConfig, ThermalSolverError,
-    WindowSolarProperties,
+    ExteriorSurfaceInfo, FilmCoefficientModel, InfiltrationMethod, InteriorConvectionInjection,
+    InteriorLwrZoneConfig, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
+    MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSolverConfig,
+    ThermalSolverError, WindowSolarProperties,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -118,6 +118,19 @@ pub struct ThermalSolver {
     /// Pre-allocated buffer for previous-iteration interior LWR net flux values.
     /// Used for relative flux-residual convergence checking.
     lwr_net_flux_prev_buf: Vec<f64>,
+    /// Pre-allocated forcing vector for per-step interior convection correction.
+    /// Dimension equals `model.state_dim()`. Cleared before each step, populated
+    /// with ΔQ·dt/C terms for each interior boundary, then passed to
+    /// `step_into_with_forcing`. Empty (zero-length) when film model is AshraeSimple.
+    ///
+    /// Currently unused — PerStepTarp is disabled at solver_builder level pending
+    /// resolution of the Courant-condition constraint (see T-0034 Implementation Notes).
+    #[allow(dead_code)]
+    convection_forcing: DVector<f64>,
+    /// Per-boundary A-matrix film resistance [m²·K/W] paralleling the
+    /// `convection_injection` vec for computing per-step correction.
+    /// Cached at init to avoid repeated HashMap lookups.
+    per_boundary_static_r_film: Vec<f64>,
     /// Prior-step zone-air temperatures [°C] used to emit telemetry about the
     /// LWR zone temperature lag (the last committed value from a completed step).
     prev_zone_temps_c: HashMap<ZoneId, f64>,
@@ -423,6 +436,17 @@ impl ThermalSolver {
         let u_buf = DVector::<f64>::zeros(n_inputs);
         let rhs_buf = DVector::<f64>::zeros(n_states);
         let m_scratch = DMatrix::zeros(n_states, n_states);
+        let convection_forcing =
+            if config.film_coefficient_model == FilmCoefficientModel::PerStepTarp {
+                DVector::<f64>::zeros(n_states)
+            } else {
+                DVector::<f64>::zeros(0)
+            };
+        let per_boundary_static_r_film = config
+            .interior_convection_injections
+            .iter()
+            .map(|inj| inj.static_r_film_int_m2_k_w)
+            .collect();
         let coupling_buf = Vec::with_capacity(env.zones.len());
         let last_coupling = Vec::new();
         let last_coupled_lu = None;
@@ -525,6 +549,8 @@ impl ThermalSolver {
             window_exterior_lwr_w: 0.0,
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_net_flux_prev_buf: Vec::with_capacity(max_interior_surfaces),
+            convection_forcing,
+            per_boundary_static_r_film,
             prev_zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
             radiant_weights_buf: Vec::with_capacity(max_radiant_surfaces),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
@@ -1001,7 +1027,7 @@ mod tests {
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
         BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, ExteriorSurfaceInfo,
-        InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
+        FilmCoefficientModel, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
         InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
         NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
         WindowSolarProperties,
@@ -1106,6 +1132,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
     }
@@ -1192,6 +1220,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
     }
@@ -1326,6 +1356,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();
         let state = solver.state();
@@ -1421,6 +1453,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
         solver.x[0] = 20.0;
@@ -1880,6 +1914,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -1931,6 +1967,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -2105,6 +2143,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2174,6 +2214,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2227,6 +2269,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2284,6 +2328,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2361,6 +2407,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2422,6 +2470,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2493,6 +2543,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2639,6 +2691,8 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                film_coefficient_model: FilmCoefficientModel::default(),
+                interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
@@ -2797,6 +2851,8 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                film_coefficient_model: FilmCoefficientModel::default(),
+                interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
@@ -2966,6 +3022,8 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                film_coefficient_model: FilmCoefficientModel::default(),
+                interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let env = make_env();
@@ -3320,6 +3378,8 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                film_coefficient_model: FilmCoefficientModel::default(),
+                interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
@@ -3438,6 +3498,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver_nv =
             ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
@@ -3523,6 +3585,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver_nv =
             ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
@@ -3621,6 +3685,8 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                film_coefficient_model: FilmCoefficientModel::default(),
+                interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
@@ -3778,6 +3844,8 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                film_coefficient_model: FilmCoefficientModel::default(),
+                interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
@@ -3897,6 +3965,8 @@ mod tests {
                     interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
                     interior_solar_zones: Vec::new(),
                     boundary_diagnostics: Vec::new(),
+                    film_coefficient_model: FilmCoefficientModel::default(),
+                    interior_convection_injections: Vec::new(),
                 };
                 let mut s =
                     ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -4239,6 +4309,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 300.0, &env, 22.0).unwrap();
         solver.x[0] = 30.0;
@@ -4306,6 +4378,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -4494,6 +4568,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver_combined = ThermalSolver::new(
             model,
@@ -4660,6 +4736,8 @@ mod tests {
                 return_duct_leakage_m3_s: 0.0,
                 interior_solar_zones: Vec::new(),
                 boundary_diagnostics: Vec::new(),
+                film_coefficient_model: FilmCoefficientModel::default(),
+                interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             };
             let mut s =
@@ -4977,6 +5055,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
 
@@ -5113,6 +5193,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: Vec::new(),
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, t_zone).unwrap();
         solver.x[0] = t_zone;
@@ -5368,6 +5450,8 @@ mod tests {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             interior_solar_zones: vec![solar_zone],
             boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
 
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
@@ -5502,6 +5586,8 @@ mod tests {
                 radiation_frac: 1.0, // t_surface = t_node (no zone-air mixing)
                 category: BoundaryCategory::Wall,
             }],
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         };
 
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();

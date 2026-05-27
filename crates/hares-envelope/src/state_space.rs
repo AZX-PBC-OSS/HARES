@@ -340,6 +340,32 @@ impl StateSpaceModel {
         self.m_lu.solve_mut(buf);
     }
 
+    /// Zero-allocation step with explicit state-dependent forcing: x[k+1] = M⁻¹·(N·x[k] + B_eff·u[k] + f).
+    ///
+    /// The forcing vector `f` (dimension = state_dim) is added to the RHS before solving.
+    /// This supports explicit treatment of nonlinear effects (e.g., ΔT-dependent
+    /// convective film coefficients) without modifying the static A-matrix.
+    // Retained for the explicit forcing path; unused until the Courant-condition
+    // constraint blocking PerStepTarp activation (T-0034 Known Limitations) is resolved.
+    #[allow(dead_code)]
+    pub fn step_into_with_forcing(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        buf: &mut DVector<f64>,
+        forcing: &DVector<f64>,
+    ) {
+        debug_assert_eq!(
+            forcing.len(),
+            self.state_dim(),
+            "forcing vector dimension mismatch"
+        );
+        buf.gemv(1.0, &self.n_mat, x, 0.0); // buf = N·x
+        buf.gemv(1.0, &self.b_eff, u, 1.0); // buf += B_eff·u
+        *buf += forcing; // buf += f (explicit forcing)
+        self.m_lu.solve_mut(buf);
+    }
+
     /// Convenience step that allocates a new vector (use `step_into` for hot paths).
     pub fn step(&self, x: &DVector<f64>, u: &DVector<f64>) -> DVector<f64> {
         let mut buf = DVector::zeros(x.len());
@@ -439,6 +465,32 @@ impl StateSpaceModel {
         couplings: &[(usize, f64, f64)],
     ) {
         self.build_coupled_rhs(x, u, buf, couplings);
+        coupled_lu.solve_mut(buf);
+    }
+
+    /// Coupled discrete step with per-step diagonal coupling and explicit forcing.
+    ///
+    /// Same as [`step_with_coupled_lu_into`] but adds the forcing vector `f` to
+    /// the RHS before solving. See [`step_into_with_forcing`] for rationale.
+    // Retained for the explicit forcing path; unused until the Courant-condition
+    // constraint blocking PerStepTarp activation (T-0034 Known Limitations) is resolved.
+    #[allow(dead_code)]
+    pub fn step_with_coupled_lu_into_with_forcing(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        buf: &mut DVector<f64>,
+        coupled_lu: &LU<f64, Dyn, Dyn>,
+        couplings: &[(usize, f64, f64)],
+        forcing: &DVector<f64>,
+    ) {
+        debug_assert_eq!(
+            forcing.len(),
+            self.state_dim(),
+            "forcing vector dimension mismatch"
+        );
+        self.build_coupled_rhs(x, u, buf, couplings);
+        *buf += forcing;
         coupled_lu.solve_mut(buf);
     }
 

@@ -6,11 +6,11 @@ use hares_envelope::{
     BoundaryCategory, BoundaryDiagnostic, BoundaryDiagnosticInfo, BoundaryInput, BuildingRC,
     DrivingTemp, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW,
     ElectricalSolver, ElectricalSolverConfig, EnvelopeDiagnostics, ExteriorSurfaceInfo,
-    ExteriorTarget, FluidSolver, FluidSolverConfig, HumiditySolver, HumiditySolverConfig,
-    INTERIOR_SOLAR_ABSORPTANCE_DEFAULT, InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, NodeId,
-    SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring,
-    SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
-    assemble_building_rc, derive_zone_capacitances,
+    ExteriorTarget, FilmCoefficientModel, FluidSolver, FluidSolverConfig, HumiditySolver,
+    HumiditySolverConfig, INTERIOR_SOLAR_ABSORPTANCE_DEFAULT, InteriorConvectionInjection,
+    InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, NodeId, SOLAR_ABSORPTANCE_DEFAULT,
+    SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring, SurfaceLayerInfo, ThermalSolver,
+    ThermalSolverConfig, WindowSolarProperties, assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
@@ -879,6 +879,58 @@ pub(crate) fn build_default_solvers(
                 }
             }
         }
+    }
+
+    // ── Per-step interior convection injection metadata ──────────────────────
+    // Populate when using PerStepTarp model so the stepping loop can inject
+    // ΔQ = (h_tarp − h_static) × A × (T_surface − T_zone) as explicit forcing
+    // into the surface and zone-air state rows each timestep.
+    //
+    // Reference: Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655,
+    // Eqs. 90–92 — EnergyPlus default interior convection model.
+    thermal_cfg.film_coefficient_model = FilmCoefficientModel::AshraeSimple;
+    // T-0034: PerStepTarp infrastructure is wired but disabled by default.
+    // See Known Limitations in T-0034's Implementation Notes and tracking
+    // ticket T-1922 for the Courant-condition constraint that blocks
+    // enabling it at 60 s timestep with typical surface layer capacitances.
+    for sb in &solver_boundaries {
+        // Only interior-facing boundaries with RC interior nodes participate.
+        let surface_state_idx = match &sb.inner_wiring {
+            Some(iw) => iw.state_row,
+            None => continue,
+        };
+        let zone_state_idx = match wiring.zone_state_indices.get(&sb.zone_id) {
+            Some(&idx) => idx,
+            None => continue,
+        };
+        let c_zone = wiring
+            .c_zone_j_k
+            .get(&sb.zone_id)
+            .copied()
+            .unwrap_or(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
+        // Surface node capacitance from the per-node capacitance map
+        // (populated during RC network assembly).
+        let info = match layer_info.get(&sb.surface_idx) {
+            Some(li) => li,
+            None => continue,
+        };
+        let c_surface = wiring
+            .node_capacitances
+            .get(&info.inner_node)
+            .copied()
+            .unwrap_or(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
+
+        thermal_cfg
+            .interior_convection_injections
+            .push(InteriorConvectionInjection {
+                surface_state_index: surface_state_idx,
+                zone_state_index: zone_state_idx,
+                area_m2: sb.area_m2,
+                tilt_deg: sb.tilt_deg,
+                static_r_film_int_m2_k_w: sb.r_film_int_m2_k_w,
+                c_surface_j_k: c_surface,
+                c_zone_j_k: c_zone,
+            });
     }
 
     // Always populate interior_solar_zones so that solar distribution works

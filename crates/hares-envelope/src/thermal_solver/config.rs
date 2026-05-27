@@ -70,6 +70,31 @@ pub enum DrivingTemp {
     },
 }
 
+/// Per-boundary data for per-step interior convection injection.
+///
+/// Used when [`FilmCoefficientModel::PerStepTarp`] to compute the per-step
+/// convective heat transfer correction ΔQ = (h_tarp − h_static) × A × ΔT
+/// and inject it into the explicit forcing vector before each step.
+#[derive(Debug, Clone)]
+pub struct InteriorConvectionInjection {
+    /// Row index of the innermost wall-layer node in the state vector.
+    pub surface_state_index: usize,
+    /// Row index of the zone air node in the state vector.
+    pub zone_state_index: usize,
+    /// Surface area [m²].
+    pub area_m2: f64,
+    /// Surface tilt from horizontal [°]; 0° = horizontal, 90° = vertical.
+    pub tilt_deg: f64,
+    /// Static interior film resistance [m²·K/W] from the A-matrix
+    /// (ASHRAE Simple value, frozen at init). The correction subtracts
+    /// this path's contribution from the forcing.
+    pub static_r_film_int_m2_k_w: f64,
+    /// Thermal capacitance of the surface layer node [J/K].
+    pub c_surface_j_k: f64,
+    /// Thermal capacitance of the zone air node [J/K].
+    pub c_zone_j_k: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InfiltrationMethod {
     AshraeWindStack {
@@ -468,6 +493,26 @@ pub struct StateSpaceWiring {
     pub node_index: HashMap<NodeId, usize>,
 }
 
+/// Interior convective film coefficient model selection.
+///
+/// Controls whether the interior convective coefficient is frozen at init time
+/// (ASHRAE Simple, backward-compatible) or recomputed per timestep from the
+/// TARP natural convection model (default going forward).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilmCoefficientModel {
+    /// Frozen ASHRAE Simple values by surface orientation only (backward compatible).
+    /// h_conv does not depend on surface-to-air ΔT. Same values as EnergyPlus
+    /// `CalcASHRAESimpleIntConvCoeff` and OCHRE's init-time calculation.
+    AshraeSimple,
+    /// Per-step TARP natural convection via [`tarp_h_natural`] (EnergyPlus default).
+    /// h_conv ∝ |ΔT|^(1/3), evaluated each timestep from T_surface and T_zone,
+    /// injected as explicit forcing rather than a static A-matrix conductance.
+    ///
+    /// Reference: Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, Eqs. 90-92.
+    #[default]
+    PerStepTarp,
+}
+
 #[derive(Debug, Clone)]
 pub struct ThermalSolverConfig {
     /// Primary conditioned zone for diagnostics and HVAC port lookups.
@@ -522,6 +567,19 @@ pub struct ThermalSolverConfig {
     /// the A-matrix at construction time. No iterative LWR injection needed.
     /// `ScriptF`: iterative T⁴ radiosity injection each timestep (legacy mode).
     pub interior_lwr_method: crate::boundary_rc::InteriorLwrMethod,
+    /// Interior convective film coefficient model.
+    ///
+    /// `PerStepTarp` (default): recomputes h_conv from actual surface-to-zone
+    /// ΔT each timestep using the TARP natural convection model. The convective
+    /// flux is injected as explicit forcing, keeping the A-matrix static.
+    /// `AshraeSimple`: frozen init-time coefficients by surface orientation
+    /// (backward compatible with prior HARES and OCHRE behavior).
+    pub film_coefficient_model: FilmCoefficientModel,
+    /// Per-boundary interior convection injection metadata.
+    ///
+    /// Populated when `film_coefficient_model == PerStepTarp` and the boundary
+    /// has RC nodes. Empty vec when using `AshraeSimple` (backward compat).
+    pub interior_convection_injections: Vec<InteriorConvectionInjection>,
 }
 
 impl Default for ThermalSolverConfig {
@@ -541,6 +599,8 @@ impl Default for ThermalSolverConfig {
             natural_ventilation: None,
             boundary_diagnostics: Vec::new(),
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
         }
     }
 }
