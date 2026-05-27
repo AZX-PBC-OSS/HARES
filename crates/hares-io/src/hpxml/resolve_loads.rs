@@ -376,9 +376,11 @@ pub(super) fn resolve_scheduled_loads(
                 }
 
                 // OCHRE hpxml.py:1397-1406: refrigerators in non-conditioned space
-                // (garage, basement, etc.) contribute zero zone gain. Primary
-                // refrigerators default to "Indoor" (conditioned); non-primary
-                // default to non-conditioned.
+                // (garage, attic, unconditioned basement, etc.) contribute zero
+                // zone gain. Location classification uses substring-keyword
+                // matching via is_conditioned_location() — same pattern as
+                // parse_zone_label / parse_duct_location. Primary refrigerators
+                // default to "conditioned space"; non-primary default to "".
                 let is_non_primary_fridge = if tag == "Refrigerator" {
                     let is_primary = child_text(node, "PrimaryIndicator")
                         .map(|v| v.eq_ignore_ascii_case("true"))
@@ -803,13 +805,71 @@ pub(super) fn resolve_ventilation(
     }
 }
 
-/// Returns `true` when an HPXML `Location` string maps to the conditioned
-/// (indoor) zone. Mirrors OCHRE `parse_zone_name` returning `"Indoor"`.
+/// Returns `true` when an HPXML `Location` string represents a conditioned space
+/// suitable for internal heat gains. Follows the same substring-keyword matching
+/// pattern as `parse_zone_label` and `parse_duct_location` in `building.rs`.
+///
+/// HPXML 4.2 RefrigeratorLocation enumeration defines the valid location
+/// values. This function handles standard HPXML values plus common non-standard
+/// strings encountered in field data (e.g. "Indoor", "finished basement").
+///
+/// Diverges from OCHRE's `parse_zone_name` (ochre/utils/hpxml.py) which
+/// classifies `"basement - conditioned"` as `Foundation`, silently zeroing
+/// refrigerator gains for conditioned basements. HARES intentionally classifies
+/// it as conditioned using substring-keyword matching with correct priority
+/// ordering.
 fn is_conditioned_location(location: &str) -> bool {
-    matches!(
-        location.to_ascii_lowercase().as_str(),
-        "conditioned space" | "living space" | "indoor"
-    )
+    let s = location.to_ascii_lowercase();
+    let s = s.trim();
+    // Explicitly unconditioned or unvented spaces — never conditioned.
+    if s.contains("uncondition") || s.contains("unvent") {
+        return false;
+    }
+    // Bare garages (but not "garage - conditioned" — "condition" check below
+    // catches those).
+    if s.contains("garage") && !s.contains("condition") {
+        return false;
+    }
+    // Attics are unconditioned buffer zones.
+    if s.contains("attic") {
+        return false;
+    }
+    // Conditioned-space keywords. Handles all HPXML RefrigeratorLocation values
+    // that imply a heated/cooled indoor space plus common non-standard strings.
+    // HPXML 4.2 data dictionary §RefrigeratorLocation_simple:
+    //   "conditioned space", "living space", "kitchen", "other heated space",
+    //   "other housing unit", "other non-freezing space", "basement - conditioned",
+    //   "garage - conditioned".
+    if s.contains("condition")
+        || s == "living space"
+        || s == "kitchen"
+        || s == "indoor"
+        || s.contains("heated")
+        || s.contains("housing unit")
+        || s.contains("non-freezing")
+    {
+        return true;
+    }
+    // Finished basements, foundations, and crawlspaces: "finished" implies
+    // conditioned in residential building practice. Guard against "unfinished"
+    // (which would not reach here because the "uncondition"/"unvent" checks
+    // above cover most forms, but bare "unfinished basement" could slip past).
+    if (s.contains("basement") || s.contains("foundation") || s.contains("crawl"))
+        && s.contains("finished")
+        && !s.contains("unfinished")
+    {
+        return true;
+    }
+    // HPXML 4.2 RefrigeratorLocation_simple enumeration values that are not
+    // conditioned.
+    //
+    // "other multifamily buffer space": per HPXML 4.2, a semi-conditioned
+    // corridor or common area — not a fully conditioned dwelling unit.
+    // Treated as non-conditioned (gains zeroed).
+    if s == "other multifamily buffer space" {
+        return false;
+    }
+    false
 }
 
 /// Default sensible and latent gain fractions per equipment name.
@@ -1081,14 +1141,34 @@ mod tests {
     }
 
     #[test]
-    fn is_conditioned_location_matches_ochre_zone_names() {
+    fn is_conditioned_location_classifies_hpxml_and_field_strings() {
+        // Standard HPXML RefrigeratorLocation conditioned values.
         assert!(is_conditioned_location("conditioned space"));
         assert!(is_conditioned_location("living space"));
+        assert!(is_conditioned_location("kitchen"));
+        assert!(is_conditioned_location("basement - conditioned"));
+        assert!(is_conditioned_location("garage - conditioned"));
+        assert!(is_conditioned_location("other heated space"));
+        assert!(is_conditioned_location("other housing unit"));
+        assert!(is_conditioned_location("other non-freezing space"));
+        // Common non-standard strings encountered in field data.
         assert!(is_conditioned_location("Indoor"));
+        assert!(is_conditioned_location("conditioned basement"));
+        assert!(is_conditioned_location("finished basement"));
+        // Explicitly unconditioned spaces.
         assert!(!is_conditioned_location("garage"));
         assert!(!is_conditioned_location("basement - unconditioned"));
+        assert!(!is_conditioned_location("garage - unconditioned"));
         assert!(!is_conditioned_location("crawlspace - vented"));
+        assert!(!is_conditioned_location("attic - vented"));
+        assert!(!is_conditioned_location("unconditioned space"));
+        assert!(!is_conditioned_location("other multifamily buffer space"));
+        assert!(!is_conditioned_location("other"));
         assert!(!is_conditioned_location(""));
+        // Edge cases: bare "basement" is ambiguous — conservative default is
+        // not conditioned (caller should use "basement - conditioned" when
+        // the space is heated).
+        assert!(!is_conditioned_location("basement"));
     }
 
     #[test]

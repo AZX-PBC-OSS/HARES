@@ -1431,3 +1431,62 @@ fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
         "resolved equipment must have nonzero heating capacity"
     );
 }
+
+#[test]
+fn refrigerator_in_conditioned_basement_retains_gain_fractions() {
+    let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">150</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">375</ConditionedBuildingVolume>
+          <NumberofBedrooms>3</NumberofBedrooms>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Appliances>
+        <Refrigerator>
+          <SystemIdentifier id="Fridge1"/>
+          <Location>basement - conditioned</Location>
+          <RatedAnnualkWh>650.0</RatedAnnualkWh>
+          <PrimaryIndicator>true</PrimaryIndicator>
+        </Refrigerator>
+      </Appliances>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+    let building = parse_building(xml).expect("HPXML should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment should succeed");
+
+    let fridge = specs
+        .iter()
+        .find(|s| s.name == "Refrigerator")
+        .expect("Refrigerator spec must be present");
+
+    // Sensible gain fraction for a refrigerator in a conditioned basement
+    // must not be zeroed. Default for Refrigerator is (1.0, 0.0).
+    let sensible = fridge
+        .parameters
+        .get("sensible_gain_fraction")
+        .and_then(|v| v.as_f64())
+        .expect("sensible_gain_fraction must be present");
+    let latent = fridge
+        .parameters
+        .get("latent_gain_fraction")
+        .and_then(|v| v.as_f64())
+        .expect("latent_gain_fraction must be present");
+
+    assert!(
+        sensible > 0.0,
+        "Refrigerator in conditioned basement must have nonzero sensible_gain_fraction, got {sensible}"
+    );
+    assert!(
+        (sensible - 1.0).abs() < f64::EPSILON,
+        "Refrigerator default sensible_gain_fraction must be 1.0 in conditioned location, got {sensible}"
+    );
+}
