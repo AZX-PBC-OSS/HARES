@@ -18,8 +18,8 @@ use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
 use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
 use hares_equipment::hvac::heating_config::{GasBoilerConfig, GasFurnaceConfig};
 use hares_equipment::{
-    Equipment, EquipmentRegistry, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
-    TanklessWaterHeaterConfig,
+    ElectricResistanceWaterHeaterConfig, Equipment, EquipmentRegistry, GasWaterHeaterConfig,
+    HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
@@ -1720,4 +1720,271 @@ fn multi_hvac_fixture_parses_reasonably_overall() {
     for spec in &specs {
         assert!(!spec.name.is_empty(), "spec has empty name");
     }
+}
+
+// ===========================================================================
+// Multi-WH fixture tests (T-0016)
+// ===========================================================================
+
+#[test]
+fn multi_wh_fixture_parses_6_water_heaters() {
+    let specs = resolve_ochre_fixture("base-dhw-multiple.xml");
+
+    let water_heaters: Vec<_> = specs
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.name.as_str(),
+                "Electric Resistance Water Heater"
+                    | "Gas Water Heater"
+                    | "Heat Pump Water Heater"
+                    | "Tankless Water Heater"
+                    | "Gas Tankless Water Heater"
+                    | "Indirect Tank"
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        water_heaters.len(),
+        6,
+        "expected 6 water heater specs, got {}: {:?}",
+        water_heaters.len(),
+        water_heaters.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+
+    let wh_names: Vec<&str> = water_heaters.iter().map(|s| s.name.as_str()).collect();
+    for expected in [
+        "Electric Resistance Water Heater",
+        "Gas Water Heater",
+        "Heat Pump Water Heater",
+        "Tankless Water Heater",
+        "Gas Tankless Water Heater",
+        "Indirect Tank",
+    ] {
+        assert!(
+            wh_names.contains(&expected),
+            "missing expected water heater: {expected}. Found: {wh_names:?}"
+        );
+    }
+}
+
+#[test]
+fn multi_wh_fuel_types_correct() {
+    let specs = resolve_ochre_fixture("base-dhw-multiple.xml");
+
+    // System 1: electric resistance
+    let er = specs
+        .iter()
+        .find(|s| s.name == "Electric Resistance Water Heater")
+        .expect("Electric Resistance Water Heater not found");
+    assert_eq!(er.fuel_type, FuelType::Electric);
+
+    // System 2: gas storage
+    let gs = specs
+        .iter()
+        .find(|s| s.name == "Gas Water Heater")
+        .expect("Gas Water Heater not found");
+    assert_eq!(gs.fuel_type, FuelType::Gas);
+
+    // System 3: HPWH
+    let hp = specs
+        .iter()
+        .find(|s| s.name == "Heat Pump Water Heater")
+        .expect("Heat Pump Water Heater not found");
+    assert_eq!(hp.fuel_type, FuelType::Electric);
+
+    // System 4: electric tankless
+    let et = specs
+        .iter()
+        .find(|s| s.name == "Tankless Water Heater")
+        .expect("Tankless Water Heater not found");
+    assert_eq!(et.fuel_type, FuelType::Electric);
+
+    // System 5: gas tankless
+    let gt = specs
+        .iter()
+        .find(|s| s.name == "Gas Tankless Water Heater")
+        .expect("Gas Tankless Water Heater not found");
+    assert_eq!(gt.fuel_type, FuelType::Gas);
+
+    // System 6: indirect tank (no FuelType in HPXML — defaulted to Gas)
+    let it = specs
+        .iter()
+        .find(|s| s.name == "Indirect Tank")
+        .expect("Indirect Tank not found");
+    assert_eq!(it.fuel_type, FuelType::Gas);
+}
+
+#[test]
+fn multi_wh_tank_volumes_and_setpoints_independent() {
+    let specs = resolve_ochre_fixture("base-dhw-multiple.xml");
+
+    // System 1: electric resistance, 40 gal, EF=0.95, setpoint 125°F
+    let er: ElectricResistanceWaterHeaterConfig = specs
+        .iter()
+        .find(|s| s.name == "Electric Resistance Water Heater")
+        .expect("ER WH not found")
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("ElectricResistanceWaterHeaterConfig");
+
+    // 40 gal * 0.9 (electric volume correction) → 36 gal → 0.13627 m³
+    let expected_er_vol = 40.0 * 0.9 * 0.003_785_411_784;
+    assert!(
+        (er.tank_volume_m3.unwrap() - expected_er_vol).abs() < 1e-6,
+        "ER WH tank volume mismatch"
+    );
+    assert!((er.energy_factor.unwrap() - 0.95).abs() < 1e-9);
+    assert!((er.setpoint_c.unwrap() - 51.6666667).abs() < 0.01); // 125°F
+
+    // System 2: gas storage, 50 gal, EF=0.59, RE=0.76, setpoint 125°F
+    let gs: GasWaterHeaterConfig = specs
+        .iter()
+        .find(|s| s.name == "Gas Water Heater")
+        .expect("Gas WH not found")
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("GasWaterHeaterConfig");
+
+    let expected_gs_vol = 50.0 * 0.95 * 0.003_785_411_784;
+    assert!(
+        (gs.tank_volume_m3.unwrap() - expected_gs_vol).abs() < 1e-6,
+        "Gas WH tank volume mismatch"
+    );
+    assert!((gs.energy_factor.unwrap() - 0.59).abs() < 1e-9);
+    assert!((gs.setpoint_c.unwrap() - 51.6666667).abs() < 0.01);
+
+    // System 3: HPWH, 80 gal, EF=2.3, setpoint 125°F
+    let hp: HeatPumpWaterHeaterConfig = specs
+        .iter()
+        .find(|s| s.name == "Heat Pump Water Heater")
+        .expect("HPWH not found")
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("HeatPumpWaterHeaterConfig");
+
+    let expected_hp_vol = 80.0 * 0.9 * 0.003_785_411_784;
+    assert!(
+        (hp.tank_volume_m3.unwrap() - expected_hp_vol).abs() < 1e-6,
+        "HPWH tank volume mismatch"
+    );
+    assert!((hp.setpoint_c.unwrap() - 51.6666667).abs() < 0.01);
+
+    // System 4: electric tankless, no tank, EF=0.99
+    let et: TanklessWaterHeaterConfig = specs
+        .iter()
+        .find(|s| s.name == "Tankless Water Heater")
+        .expect("Tankless WH not found")
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("TanklessWaterHeaterConfig");
+
+    assert!((et.energy_factor.unwrap() - 0.99).abs() < 1e-9);
+    assert!((et.setpoint_c.unwrap() - 51.6666667).abs() < 0.01);
+
+    // System 5: gas tankless, no tank, EF=0.82
+    let gt: TanklessWaterHeaterConfig = specs
+        .iter()
+        .find(|s| s.name == "Gas Tankless Water Heater")
+        .expect("Gas Tankless WH not found")
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("TanklessWaterHeaterConfig");
+
+    assert!((gt.energy_factor.unwrap() - 0.82).abs() < 1e-9);
+    assert!((gt.setpoint_c.unwrap() - 51.6666667).abs() < 0.01);
+
+    // System 6: indirect tank, 50 gal
+    let it: IndirectTankConfig = specs
+        .iter()
+        .find(|s| s.name == "Indirect Tank")
+        .expect("Indirect Tank not found")
+        .typed_config
+        .as_ref()
+        .expect("typed config")
+        .typed()
+        .expect("IndirectTankConfig");
+
+    let expected_it_vol = 50.0 * 0.95 * 0.003_785_411_784;
+    assert!(
+        (it.tank_volume_m3.unwrap() - expected_it_vol).abs() < 1e-6,
+        "Indirect tank volume mismatch"
+    );
+    assert!((it.setpoint_c.unwrap() - 51.6666667).abs() < 0.01);
+}
+
+#[test]
+fn multi_wh_no_duplicate_system_ids() {
+    let specs = resolve_ochre_fixture("base-dhw-multiple.xml");
+
+    let wh_system_ids: Vec<_> = specs
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.name.as_str(),
+                "Electric Resistance Water Heater"
+                    | "Gas Water Heater"
+                    | "Heat Pump Water Heater"
+                    | "Tankless Water Heater"
+                    | "Gas Tankless Water Heater"
+                    | "Indirect Tank"
+            )
+        })
+        .filter_map(|s| s.system_id.as_deref())
+        .collect();
+
+    assert_eq!(
+        wh_system_ids.len(),
+        6,
+        "expected 6 distinct WH system IDs, got {}",
+        wh_system_ids.len()
+    );
+
+    let mut deduped = wh_system_ids.clone();
+    deduped.sort();
+    deduped.dedup();
+    assert_eq!(
+        wh_system_ids.len(),
+        deduped.len(),
+        "duplicate WH system IDs found: {wh_system_ids:?}"
+    );
+}
+
+#[test]
+fn multi_wh_fixture_parses_reasonably_overall() {
+    // Integration: full parse_building → validate → resolve pipeline
+    // verifies no water heater is silently dropped.
+    let specs = resolve_ochre_fixture("base-dhw-multiple.xml");
+
+    // base-dhw-multiple.xml has 6 WaterHeatingSystem + 1 HeatingSystem (boiler)
+    // for the indirect tank's RelatedHVACSystem. Plus appliances (clothes washer,
+    // dryer, dishwasher, refrigerator, cooking range, oven) and lighting.
+    // All specs should be non-empty and well-named.
+    assert!(
+        specs.len() >= 6,
+        "expected at least 6 equipment specs, got {}",
+        specs.len()
+    );
+
+    for spec in &specs {
+        assert!(!spec.name.is_empty(), "spec has empty name");
+    }
+
+    // Ensure no error spec was emitted for ambiguous "Water Heating" class.
+    let water_heating_err = specs.iter().any(|s| s.name == "Water Heating");
+    assert!(
+        !water_heating_err,
+        "error spec 'Water Heating' should not be emitted for this fixture"
+    );
 }

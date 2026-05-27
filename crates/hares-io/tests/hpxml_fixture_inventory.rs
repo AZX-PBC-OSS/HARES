@@ -22,6 +22,7 @@ fn curated_fixture_files_exist() {
         "base-appliances-dehumidifier.xml",
         "base-misc-loads-large-uncommon.xml",
         "base-hvac-multiple.xml",
+        "base-dhw-multiple.xml",
     ];
 
     for file in expected {
@@ -44,6 +45,7 @@ fn curated_fixtures_are_well_formed_hpxml_v4() {
         "base-appliances-dehumidifier.xml",
         "base-misc-loads-large-uncommon.xml",
         "base-hvac-multiple.xml",
+        "base-dhw-multiple.xml",
     ];
 
     for file in files {
@@ -112,5 +114,13 @@ fn curated_set_contains_der_and_end_use_coverage() {
     assert!(
         hvac.contains("<PrimaryCoolingSystem"),
         "HVAC-multiple fixture missing PrimaryCoolingSystem"
+    );
+
+    let dhw = fs::read_to_string(root.join("base-dhw-multiple.xml"))
+        .expect("dhw-multiple fixture should load");
+    let wh_count = dhw.match_indices("<WaterHeatingSystem>").count();
+    assert_eq!(
+        wh_count, 6,
+        "base-dhw-multiple.xml must contain exactly 6 WaterHeatingSystem entries, found {wh_count}"
     );
 }

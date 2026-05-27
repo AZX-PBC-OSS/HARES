@@ -11,7 +11,9 @@ use hares_types::{FuelType, normalize_ascii};
 use super::building::XmlNode;
 use super::equipment::EquipmentSpec;
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
-use super::xml_helpers::{child_f64, child_temperature_c, child_text, descendants_named};
+use super::xml_helpers::{
+    child_f64, child_temperature_c, child_text, descendants_named, element_id,
+};
 use hares_physics::units as conv;
 
 use crate::defaults::DefaultsStore;
@@ -26,8 +28,8 @@ pub(super) fn resolve_water_heaters(
     let (avg_water_draw_l_per_day, n_bedrooms) = parse_avg_water_draw_and_bedrooms(details);
 
     for wh in descendants_named(details, "WaterHeatingSystem") {
-        let fuel = parse_water_heater_fuel(wh)?;
         let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();
+        let fuel = parse_water_heater_fuel(wh, &wh_type)?;
         let name = canonical_water_heater_name(&wh_type, fuel)?;
         let setpoint_c = child_temperature_c(wh);
         let performance_adjustment = child_f64(wh, "PerformanceAdjustment");
@@ -303,8 +305,37 @@ pub(super) fn resolve_water_heaters(
         if name == "Indirect Tank" {
             spec.related_hvac_idref = related_hvac_idref;
         }
+        spec.system_id = element_id(wh);
         specs.push(spec);
     }
+    // Invariant: when multiple WaterHeatingSystem elements are present, each
+    // must carry a unique SystemIdentifier/@id so downstream code can
+    // cross-reference individual water heaters without ambiguity.
+    let wh_count = descendants_named(details, "WaterHeatingSystem").len();
+    if wh_count > 1 {
+        let wh_specs_start = specs.len().saturating_sub(wh_count);
+        let ids: Vec<_> = specs[wh_specs_start..]
+            .iter()
+            .filter_map(|s| s.system_id.as_deref())
+            .collect();
+        if ids.len() != wh_count {
+            return Err(super::HpxmlError::Parse(format!(
+                "expected {wh_count} unique system identifiers for {wh_count} WaterHeatingSystem \
+                 elements but only {found} have an id attribute",
+                found = ids.len(),
+            )));
+        }
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        if sorted.len() != ids.len() {
+            return Err(super::HpxmlError::Parse(format!(
+                "duplicate SystemIdentifier/@id found among {wh_count} WaterHeatingSystem \
+                 elements: {ids:?}"
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -410,11 +441,12 @@ where
     }
 }
 
-fn parse_water_heater_fuel(wh: &XmlNode) -> std::result::Result<FuelType, super::HpxmlError> {
-    let raw = child_text(wh, "FuelType").ok_or_else(|| {
-        super::HpxmlError::Parse("WaterHeatingSystem is missing required FuelType".to_string())
-    })?;
-    match normalize_ascii(&raw).as_str() {
+/// Parse a FuelType string value from HPXML into a [`FuelType`].
+///
+/// Accepts the HPXML fuel type vocabulary and maps it to the canonical
+/// [`FuelType`] enum. Returns `Err` for unrecognised fuel type strings.
+fn parse_water_heater_fuel_from_str(raw: &str) -> Result<FuelType, super::HpxmlError> {
+    match normalize_ascii(raw).as_str() {
         "electricity" | "electric" | "none" => Ok(FuelType::Electric),
         "natural gas" | "natural_gas" | "gas" => Ok(FuelType::Gas),
         "propane" => Ok(FuelType::Propane),
@@ -427,6 +459,34 @@ fn parse_water_heater_fuel(wh: &XmlNode) -> std::result::Result<FuelType, super:
         other => Err(super::HpxmlError::Parse(format!(
             "unsupported water-heater FuelType '{other}'"
         ))),
+    }
+}
+
+/// Resolve the fuel type for a `WaterHeatingSystem` element.
+///
+/// For space-heating boiler types (indirect tanks), `FuelType` is optional in
+/// HPXML — the fuel comes from the linked heating system via `RelatedHVACSystem`.
+/// When absent and the type is a boiler-linked system, we default to `Gas` since
+/// the linked boiler's fuel will be resolved independently.
+/// For all other water heater types, `FuelType` is required.
+fn parse_water_heater_fuel(
+    wh: &XmlNode,
+    wh_type: &str,
+) -> std::result::Result<FuelType, super::HpxmlError> {
+    match child_text(wh, "FuelType") {
+        Some(raw) => parse_water_heater_fuel_from_str(&raw),
+        None => {
+            let ty = wh_type.trim();
+            if ty == "space-heating boiler with storage tank"
+                || ty == "space-heating boiler with tankless coil"
+            {
+                Ok(FuelType::Gas)
+            } else {
+                Err(super::HpxmlError::Parse(format!(
+                    "WaterHeatingSystem type '{ty}' is missing required FuelType"
+                )))
+            }
+        }
     }
 }
 
@@ -812,7 +872,8 @@ mod tests {
             ],
         };
 
-        let err = parse_water_heater_fuel(&wh).expect_err("invalid fuel must be rejected");
+        let err = parse_water_heater_fuel(&wh, "storage water heater")
+            .expect_err("invalid fuel must be rejected");
         assert!(
             err.to_string()
                 .contains("unsupported water-heater FuelType")
