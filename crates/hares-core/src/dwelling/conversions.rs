@@ -398,6 +398,16 @@ pub(crate) fn find_zone_idx(
         return 0;
     }
     if let Some(target) = zone_type {
+        // Adjacent zones are rewritten to the non-Adjacent side's type during
+        // HPXML parsing (building.rs:rewrite_adjacent_zone_pair). If an Adjacent
+        // zone reaches this function, it indicates a bug in that rewrite.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                !matches!(target, hares_io::hpxml::ZoneType::Adjacent),
+                "Adjacent zone type reached find_zone_idx — the rewrite in building.rs was not applied"
+            );
+        }
         building
             .zones
             .iter()
@@ -419,19 +429,6 @@ pub(crate) fn resolve_exterior(
         Some(hares_io::hpxml::ZoneType::Ground) => ExteriorTarget::Ground,
         Some(zt) => {
             let idx = find_zone_idx(building, Some(zt), n_zones);
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            if matches!(zt, hares_io::hpxml::ZoneType::Adjacent) && idx == 0 {
-                if let Some(interior) = &boundary.interior_zone {
-                    let interior_idx = find_zone_idx(building, Some(interior), n_zones);
-                    assert_eq!(
-                        interior_idx, 0,
-                        "Adjacent zone target reached find_zone_idx with fallback index 0 on boundary \
-                         '{}', but interior zone {:?} resolves to index {interior_idx} (expected 0). \
-                         This indicates the Adjacent rewrite in building.rs was not applied.",
-                        boundary.id, interior,
-                    );
-                }
-            }
             ExteriorTarget::Zone(idx)
         }
         None => ExteriorTarget::Outdoor,
@@ -773,7 +770,7 @@ mod tests {
     use hares_types::FuelType;
 
     use super::{
-        building_to_zone_inputs, mass_multiplier_for_zone, merged_equipment_config,
+        building_to_zone_inputs, find_zone_idx, mass_multiplier_for_zone, merged_equipment_config,
         zone_has_furniture_boundaries,
     };
 
@@ -1729,6 +1726,32 @@ mod tests {
             "stucco (VeryRough, Rf=2.17) R_ext={r_stucco:.5} must be < vinyl siding (Smooth, Rf=1.11) R_ext={r_vinyl:.5}; \
              hardcoded Rough would give identical values"
         );
+    }
+
+    /// `find_zone_idx` must assert when passed an Adjacent zone type: the rewrite
+    /// in `building.rs` should eliminate all Adjacent references before this
+    /// function is called.
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[should_panic(expected = "Adjacent zone type reached find_zone_idx")]
+    fn find_zone_idx_panics_on_adjacent_input() {
+        let building = minimal_building(
+            vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: Vec::new(),
+                duct_systems: Vec::new(),
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            Vec::new(),
+        );
+        // Adjacent is filtered from the zones vec in building.rs and should
+        // never reach find_zone_idx after the rewrite. This call asserts
+        // that invariant.
+        let _ = find_zone_idx(&building, Some(&ZoneType::Adjacent), 1);
     }
 
     /// Build a minimal DefaultsStore for tests that need one.

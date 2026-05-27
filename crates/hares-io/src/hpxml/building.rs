@@ -905,6 +905,26 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // <AirLeakage> ACH50 / ACHnatural (HPXML 4.x inline or HPXML 3.x wrapper).
     let (infiltration_ach50, infiltration_ach_natural) = parse_air_leakage_ach50(details)?;
 
+    // Invariant: no boundary pair contains ZoneType::Adjacent after the rewrite stage.
+    // OCHRE hpxml.py:96-97 rewrites exterior=interior when exterior is "Adjacent";
+    // HARES applies the same rewrite via rewrite_adjacent_zone_pair during boundary
+    // and window parsing. An Adjacent zone surviving to this point is a bug.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        for bd in &boundaries {
+            assert!(
+                !matches!(bd.interior_zone, Some(ZoneType::Adjacent)),
+                "boundary '{}' interior_zone is Adjacent after rewrite stage",
+                bd.id
+            );
+            assert!(
+                !matches!(bd.exterior_zone, Some(ZoneType::Adjacent)),
+                "boundary '{}' exterior_zone is Adjacent after rewrite stage",
+                bd.id
+            );
+        }
+    }
+
     Ok(Building {
         site: Site {
             elevation_m,
@@ -2525,14 +2545,16 @@ pub(crate) fn parse_zone_label(text: &str) -> ZoneType {
 /// dependency on `find_zone_idx` fallback behavior in the downstream conversions layer.
 ///
 /// If both zones are `Adjacent` (two different adjacent dwelling units on each side),
-/// both are left as-is — there is no non-Adjacent reference to rewrite against.
+/// both are rewritten to `Conditioned` — the most common zone type for party walls
+/// between dwelling units. This produces a same-zone pair that classifies as
+/// InternalMass, consistent with OCHRE's treatment of any same-zone boundary.
 fn rewrite_adjacent_zone_pair(
     interior: Option<ZoneType>,
     exterior: Option<ZoneType>,
 ) -> (Option<ZoneType>, Option<ZoneType>) {
     match (interior, exterior) {
         (Some(ZoneType::Adjacent), Some(ZoneType::Adjacent)) => {
-            (Some(ZoneType::Adjacent), Some(ZoneType::Adjacent))
+            (Some(ZoneType::Conditioned), Some(ZoneType::Conditioned))
         }
         (Some(ZoneType::Adjacent), Some(ref ext)) => (Some(ext.clone()), Some(ext.clone())),
         (Some(ref int), Some(ZoneType::Adjacent)) => (Some(int.clone()), Some(int.clone())),
@@ -4165,6 +4187,28 @@ mod tests {
             .expect("window expected");
         assert_eq!(window.interior_zone, Some(ZoneType::Conditioned));
         assert_eq!(window.exterior_zone, Some(ZoneType::Conditioned));
+    }
+
+    #[test]
+    fn adjacent_adjacent_boundary_rewritten_to_conditioned() {
+        // (Adjacent, Adjacent) → (Conditioned, Conditioned) after rewrite.
+        // Multi-family party wall between two dwelling units where both sides
+        // are "other housing unit" (Adjacent). Since neither side provides a
+        // non-Adjacent zone reference, both are rewritten to Conditioned —
+        // the most common zone type for adjacent-unit boundaries — producing
+        // a same-zone pair that classifies as InternalMass.
+        let xml = SAMPLE_XML.replace(
+            "<InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>",
+            "<InteriorAdjacentTo>other housing unit</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>other housing unit</ExteriorAdjacentTo>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Wall && b.id == "Wall1")
+            .expect("wall expected");
+        assert_eq!(wall.interior_zone, Some(ZoneType::Conditioned));
+        assert_eq!(wall.exterior_zone, Some(ZoneType::Conditioned));
     }
 
     // ── Insulation details dispatch tests ───────────────────────────────
