@@ -216,9 +216,13 @@ pub fn parse_resstock_csv_str(
         }
 
         let ghi_w_m2 = parse_field(fields[col_indices.ghi], row_num, "ghi")?;
-        if ghi_w_m2 < 0.0 {
+        // Upper bound 1500 W/m² — solar constant is 1361 W/m²;
+        // cloud enhancement can briefly boost surface GHI to ~1400–1600 W/m²
+        // at high-elevation sites. 1500 W/m² is the bound shared by EPW, TMY3,
+        // and PSM3 parsers.
+        if !(0.0..=1500.0).contains(&ghi_w_m2) {
             return Err(WeatherError::Validation(format!(
-                "row {row_num}: GHI must be >= 0, got {ghi_w_m2}"
+                "row {row_num}: GHI out of range [0, 1500] W/m^2: {ghi_w_m2}"
             )));
         }
 
@@ -877,5 +881,71 @@ Diffuse Horizontal Radiation [W/m2]
             "midpoint of first ResStock CSV record should be 1800 s (00:30) into year, \
              not {midpoint_secs}"
         );
+    }
+
+    #[test]
+    fn rejects_ghi_above_upper_bound() {
+        let mut csv = build_test_csv(24);
+        // Replace the second data row with GHI = 2000 W/m².
+        let lines: Vec<&str> = csv.lines().collect();
+        let mut new_lines: Vec<String> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if i == 2 {
+                let fields: Vec<&str> = line.split(',').collect();
+                let mut fields: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
+                // Column 5 is GHI (0-indexed: 0=date_time, 1=dry_bulb, 2=rh,
+                // 3=wind_speed, 4=wind_dir, 5=ghi, 6=dni, 7=dhi).
+                fields[5] = "2000.0".to_string();
+                new_lines.push(fields.join(","));
+            } else {
+                new_lines.push(line.to_string());
+            }
+        }
+        csv = new_lines.join("\n");
+
+        let err = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0)
+            .expect_err("should reject GHI above 1500 W/m²");
+        assert!(
+            matches!(err, WeatherError::Validation(_)),
+            "expected Validation error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("GHI"),
+            "error should mention GHI: {err}"
+        );
+    }
+
+    #[test]
+    fn ghi_equals_1500_is_valid() {
+        // Build a 2-row CSV where the first row has GHI = 1500.0 (at upper bound).
+        let csv = "\
+date_time,Dry Bulb Temperature [°C],Relative Humidity [%],\
+Wind Speed [m/s],Wind Direction [Deg],\
+Global Horizontal Radiation [W/m2],\
+Direct Normal Radiation [W/m2],\
+Diffuse Horizontal Radiation [W/m2]
+2005-01-01 01:00:00,10.0,60.0,3.0,180.0,1500.0,600.0,500.0
+2005-01-01 02:00:00,10.0,60.0,3.0,180.0,0.0,0.0,0.0";
+        let result =
+            parse_resstock_csv_str(csv, 0.0, 39.7, -105.0, -7.0)
+                .expect("GHI = 1500.0 should be valid (inclusive upper bound)");
+        assert_eq!(result.ghi_w_m2[0], 1500.0);
+    }
+
+    #[test]
+    fn ghi_equals_zero_is_valid() {
+        // Build a 2-row CSV where the first row has GHI = 0.0 (at lower bound).
+        let csv = "\
+date_time,Dry Bulb Temperature [°C],Relative Humidity [%],\
+Wind Speed [m/s],Wind Direction [Deg],\
+Global Horizontal Radiation [W/m2],\
+Direct Normal Radiation [W/m2],\
+Diffuse Horizontal Radiation [W/m2]
+2005-01-01 01:00:00,10.0,60.0,3.0,180.0,0.0,0.0,0.0
+2005-01-01 02:00:00,10.0,60.0,3.0,180.0,0.0,0.0,0.0";
+        let result =
+            parse_resstock_csv_str(csv, 0.0, 39.7, -105.0, -7.0)
+                .expect("GHI = 0.0 should be valid (inclusive lower bound)");
+        assert_eq!(result.ghi_w_m2[0], 0.0);
     }
 }
