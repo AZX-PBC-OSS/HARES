@@ -61,7 +61,7 @@ mod tests {
     fn standard_pressure_matches_isa_reference() {
         approx_eq(standard_pressure_pa(0.0), 101_325.0, 1.0);
         approx_eq(standard_pressure_pa(1000.0), 89_874.6, 400.0);
-        approx_eq(standard_pressure_pa(1609.0), 83_460.0, 500.0);
+        approx_eq(standard_pressure_pa(1609.0), 83_431.1, 10.0);
     }
 
     #[test]
@@ -131,7 +131,7 @@ mod tests {
             (0.0, 101_325.0, 0.1), // sea level (exact by definition)
             (500.0, 95_461.0, 50.0),
             (1000.0, 89_874.6, 50.0),
-            (1609.0, 83_460.0, 100.0), // Denver
+            (1609.0, 83_431.1, 10.0), // Denver (ISA 1976 geometric)
             (3000.0, 70_108.0, 100.0),
         ];
         for &(alt, expected, tol) in cases {
