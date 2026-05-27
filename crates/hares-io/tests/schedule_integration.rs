@@ -576,3 +576,104 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
         "cooler must not get a heating setpoint source"
     );
 }
+
+/// Verify that a DailyProfile schedule produces different power output on a
+/// weekday vs a weekend day at the same hour (noon). This confirms that the
+/// distinct weekday/weekend fractions in the defaults CSV are exercised at
+/// simulation runtime.
+#[test]
+fn daily_profile_produces_different_weekday_vs_weekend_power_at_noon() {
+    let dir = tempdir().expect("temp defaults dir");
+    write_default_profile_csv_different_weekend(dir.path());
+
+    let mut schedule = make_schedule(&[("occupants", &vec![1.0_f64; 48])]);
+    let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
+    inject_schedule_into_specs(&mut specs, &mut schedule, Some(dir.path()));
+
+    assert_eq!(
+        specs[0]
+            .parameters
+            .get("power_schedule_source")
+            .and_then(Value::as_str),
+        Some("daily_profile")
+    );
+
+    let config = equipment_config_from_spec(&specs[0]);
+
+    let weekday_noon = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    assert_eq!(
+        weekday_noon.weekday().num_days_from_monday(),
+        1,
+        "March 24 2026 is a Tuesday"
+    );
+
+    let weekend_noon = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2026, 3, 28, 12, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    assert_eq!(
+        weekend_noon.weekday().num_days_from_monday(),
+        5,
+        "March 28 2026 is a Saturday"
+    );
+
+    let weekday_env = base_env(payload_for_row(&schedule, 12));
+    let weekend_env = base_env(payload_for_row(&schedule, 12));
+
+    let weekday_env = EnvironmentState {
+        current_time: weekday_noon,
+        ..weekday_env
+    };
+    let weekend_env = EnvironmentState {
+        current_time: weekend_noon,
+        ..weekend_env
+    };
+
+    let mut eq_wd = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
+    eq_wd
+        .init(&config, &weekday_env)
+        .expect("weekday init should pass");
+    let mut ports_wd = PortSlots::from_declarations(eq_wd.ports());
+    eq_wd
+        .step(&weekday_env, Duration::from_secs(3600), &mut ports_wd)
+        .expect("weekday step should pass");
+    let weekday_kw = ports_wd.electrical.net_active_kw();
+
+    let mut eq_we = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
+    eq_we
+        .init(&config, &weekend_env)
+        .expect("weekend init should pass");
+    let mut ports_we = PortSlots::from_declarations(eq_we.ports());
+    eq_we
+        .step(&weekend_env, Duration::from_secs(3600), &mut ports_we)
+        .expect("weekend step should pass");
+    let weekend_kw = ports_we.electrical.net_active_kw();
+
+    assert!(
+        (weekday_kw - weekend_kw).abs() > 1e-12,
+        "weekday and weekend power at noon must differ for occupancy-driven schedules; \
+         weekday={weekday_kw}, weekend={weekend_kw}"
+    );
+}
+
+/// Write a test defaults CSV with dramatically different weekday/weekend noon fractions
+/// so the integration test has a strong, unambiguous signal.
+fn write_default_profile_csv_different_weekend(path: &std::path::Path) {
+    let mut csv = String::from("Category,Name,OCHRE Name,OCHRE Element,Values\n");
+    csv.push_str(
+        "Schedules,Lighting,Indoor Lighting,weekday_fractions,\"0.01,0.01,0.01,0.01,0.01,0.01,0.02,0.03,0.05,0.08,0.10,0.12,0.10,0.08,0.06,0.05,0.08,0.12,0.18,0.20,0.22,0.20,0.10,0.04\"\n",
+    );
+    csv.push_str(
+        "Schedules,Lighting,Indoor Lighting,weekend_fractions,\"0.01,0.01,0.01,0.01,0.01,0.01,0.02,0.03,0.08,0.18,0.25,0.35,0.38,0.30,0.25,0.20,0.18,0.18,0.20,0.22,0.22,0.20,0.10,0.04\"\n",
+    );
+    csv.push_str(
+        "Schedules,Lighting,Indoor Lighting,month_multipliers,\"1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0\"\n",
+    );
+    std::fs::write(path.join("Default Schedule Parameters.csv"), csv)
+        .expect("write default profile csv");
+}

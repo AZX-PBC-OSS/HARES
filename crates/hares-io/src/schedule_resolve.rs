@@ -320,6 +320,35 @@ pub(super) fn load_default_profiles(
         );
     }
 
+    // Observer capture: log weekday and weekend fractions for each schedule type
+    // at simulation startup so users can visually verify distinct patterns.
+    #[cfg(feature = "observe")]
+    for (name, profile) in &profiles {
+        tracing::info!(
+            schedule_type = %name,
+            weekday_fractions = ?profile.weekday_fractions,
+            weekend_fractions = ?profile.weekend_fractions,
+            weekday_eq_weekend = profile.weekday_fractions == profile.weekend_fractions,
+            "default schedule profile loaded",
+        );
+    }
+
+    // Invariant: at least the 'Occupancy' schedule must have non-identical
+    // weekday and weekend fraction arrays. Identical arrays mean the data
+    // was imported verbatim from the ANSI 301 source without weekend derivation.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        if let Some(occ) = profiles.get("Occupancy") {
+            if occ.weekday_fractions == occ.weekend_fractions {
+                tracing::error!(
+                    "Occupancy weekday and weekend schedule fractions are identical; \
+                     the default CSV has not been updated with distinct weekend patterns. \
+                     ASHRAE 90.2/HERS Reference Home requires distinct weekday/weekend occupancy."
+                );
+            }
+        }
+    }
+
     profiles
 }
 
@@ -2338,5 +2367,82 @@ mod tests {
         );
 
         super::check_hvac_setpoint_invariants(&specs);
+    }
+
+    #[test]
+    fn load_default_profiles_occupants_has_distinct_weekend_fractions() {
+        use std::path::Path;
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let profiles = super::load_default_profiles(&defaults_dir);
+
+        let occ = profiles
+            .get("Occupancy")
+            .expect("Occupancy profile must exist in defaults");
+        assert!(
+            occ.weekday_fractions != occ.weekend_fractions,
+            "Occupancy weekday and weekend fractions must differ; \
+             ASHRAE 90.2/HERS Reference Home requires distinct weekend occupancy patterns"
+        );
+    }
+
+    #[test]
+    fn load_default_profiles_all_priority_schedules_have_distinct_weekend_fractions() {
+        use std::path::Path;
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let profiles = super::load_default_profiles(&defaults_dir);
+
+        let priority_schedules = [
+            "Occupancy",
+            "Indoor Lighting",
+            "Exterior Lighting",
+            "Garage Lighting",
+            "Water Heating",
+            "Cooking Range",
+            "Dishwasher",
+            "Clothes Washer",
+            "Clothes Dryer",
+            "MELs",
+            "TV",
+            "Ceiling Fan",
+        ];
+
+        for name in &priority_schedules {
+            let profile = profiles
+                .get(*name)
+                .unwrap_or_else(|| panic!("schedule '{name}' must exist in defaults"));
+            assert!(
+                profile.weekday_fractions != profile.weekend_fractions,
+                "schedule '{name}' must have distinct weekday and weekend fraction arrays"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_operation_schedules_keep_identical_fractions() {
+        use std::path::Path;
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let profiles = super::load_default_profiles(&defaults_dir);
+
+        let fixed_schedules = [
+            "Refrigerator",
+            "Pool Pump",
+            "Spa Pump",
+            "Spa Heater",
+            "Pool Heater",
+            "Well Pump",
+            "Gas Fireplace",
+            "Gas Lighting",
+            "HVAC Heating",
+            "HVAC Cooling",
+        ];
+
+        for name in &fixed_schedules {
+            if let Some(profile) = profiles.get(*name) {
+                assert_eq!(
+                    profile.weekday_fractions, profile.weekend_fractions,
+                    "fixed-operation schedule '{name}' should keep identical fractions"
+                );
+            }
+        }
     }
 }
