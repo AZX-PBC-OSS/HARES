@@ -428,15 +428,20 @@ fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
 const DOE2_GROUND_HOURS_PER_YEAR: f64 = HOURS_PER_YEAR;
 /// Days in a standard year used in the phase-angle formula [days].
 const DOE2_GROUND_DAYS_PER_YEAR: f64 = 365.0;
-/// Soil thermal diffusivity [m²/hour] -- DOE-2 default for average soil.
-const DOE2_GROUND_DIFFUSIVITY: f64 = 0.025;
-/// Reference depth [m] for shallow-foundation ground-temperature boundary.
+/// Soil thermal diffusivity [m²/hr] for the DOE-2 GTEMP correlation.
 ///
-/// Set to 0.5 m matching the EPW GroundTemperatures:Surface reference depth
-/// (EPW Data Dictionary v9.6 §3). The original DOE-2 GTEMP code used 5 ft
-/// (approximately 1.524 m); the choice of 0.5 m here is the physically
-/// motivated depth for slab/crawlspace foundations.
-const DOE2_GROUND_REFERENCE_DEPTH_M: f64 = 0.5;
+/// OEM DOE-2 default for average soil: 0.025 ft²/hr. Converted to SI
+/// via NIST exact factor 1 ft² = 0.09290304 m²: 0.025 × 0.09290304 = 0.002_322_576.
+/// Cross-validated against OCHRE `vendors/OCHRE/ochre/utils/schedule.py:248`
+/// which computes `beta = sqrt(π/(8760×0.025)) × 10` in imperial units (10 ft depth);
+/// HARES β matches OCHRE β via `sqrt(π/(8760×0.002_322_576)) × 3.048` ≈ 1.198.
+const DOE2_GROUND_DIFFUSIVITY: f64 = 0.002_322_576;
+/// Reference depth [m] for the DOE-2 GTEMP ground-temperature correlation.
+///
+/// DOE-2 GTEMP subroutine uses 10 ft (3.048 m) — verified against OCHRE
+/// `vendors/OCHRE/ochre/utils/schedule.py:248` —
+/// `beta = (np.pi / (8760 * 0.025)) ** 0.5 * 10`.
+const DOE2_GROUND_REFERENCE_DEPTH_M: f64 = 3.048;
 /// Phase offset [rad] aligning the ground-temperature sinusoid to peak in late summer.
 const DOE2_GROUND_PHASE_OFFSET_RAD: f64 = 0.6;
 
@@ -536,6 +541,49 @@ pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64
         let argument = 2.0 * std::f64::consts::PI / DOE2_GROUND_DAYS_PER_YEAR * day - phase;
         result[i] = t_avg - dt_monthly * gm * argument.cos();
     }
+
+    // Invariant: the DOE-2 damped ground temperature must have strictly less
+    // seasonal amplitude than the outdoor air temperature. If ground amplitude
+    // equals or exceeds the air amplitude, the depth is too shallow or soil
+    // diffusivity is implausibly low.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        let result_min = result.iter().copied().fold(f64::INFINITY, f64::min);
+        let result_max = result.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let ground_pp = result_max - result_min;
+        let air_pp = t_max - t_min;
+        if ground_pp >= air_pp {
+            tracing::error!(
+                ground_peak_to_peak_c = ground_pp,
+                air_peak_to_peak_c = air_pp,
+                beta = beta,
+                depth_m = DOE2_GROUND_REFERENCE_DEPTH_M,
+                "DOE-2 ground temperature amplitude ({ground_pp_c:.2}°C) is not \
+                 strictly less than outdoor air temperature amplitude ({air_pp_c:.2}°C); \
+                 the DOE-2 fallback depth ({depth_m} m) may be too shallow or soil \
+                 diffusivity is implausibly low",
+                ground_pp_c = ground_pp,
+                air_pp_c = air_pp,
+                depth_m = DOE2_GROUND_REFERENCE_DEPTH_M,
+            );
+        }
+    }
+
+    // Observer capture: record the DOE-2 fallback configuration and resulting
+    // seasonal amplitude for diagnostic analysis.
+    #[cfg(feature = "observe")]
+    {
+        let result_min = result.iter().copied().fold(f64::INFINITY, f64::min);
+        let result_max = result.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let ground_pp = result_max - result_min;
+        tracing::debug!(
+            target: "observe",
+            doe2_fallback_depth_m = DOE2_GROUND_REFERENCE_DEPTH_M,
+            doe2_beta = beta,
+            doe2_ground_peak_to_peak_c = ground_pp,
+        );
+    }
+
     result
 }
 
@@ -1519,26 +1567,25 @@ mod tests {
         }
     }
 
-    // --- Bug 3: DOE2_GROUND_REFERENCE_DEPTH_M = 0.5 m (shallow-foundation reference) ---
+    // --- Bug 3: DOE2_GROUND_REFERENCE_DEPTH_M now 3.048 m (10 ft OEM depth) ---
 
-    /// Verifies that with the corrected reference depth (0.5 m), the DOE-2
-    /// formula preserves the seasonal ground-temperature amplitude rather than
-    /// over-damping it.
+    /// Verifies that with the DOE-2 OEM reference depth (3.048 m = 10 ft)
+    /// and diffusivity in SI (0.002_322_576 m²/hr = 0.025 ft²/hr), the damped
+    /// ground-temperature formula attenuates the seasonal swing to roughly half
+    /// the outdoor air temperature amplitude, matching the OCHRE/DOE-2 GTEMP
+    /// implementation.
     ///
-    /// With `α = 0.025 m²/hr` and `DOE2_GROUND_REFERENCE_DEPTH_M = 0.5 m`:
-    ///   beta = sqrt(pi / (8760 * 0.025)) * 0.5 ≈ 0.0599
-    ///   gm ≈ 0.970 (the theoretical attenuation factor at 0.5 m).
-    /// Because the 12 mid-month sampling days do not coincide exactly with
-    /// the sinusoid peak/trough, the observed amplitude ratio from the
-    /// 12-element output is slightly below gm (≈0.960 in practice).
+    /// With `α = 0.002_322_576 m²/hr` and `depth = 3.048 m`:
+    ///   beta = sqrt(pi / (8760 * 0.002_322_576)) * 3.048 ≈ 1.198
+    ///   gm ≈ 0.55 (the theoretical attenuation factor at 10 ft).
     #[test]
-    fn doe2_ground_ref_depth_0_5m_preserves_seasonal_amplitude() {
+    fn doe2_ground_ref_depth_3_048_m_damps_seasonal_amplitude() {
         use super::doe2_ground_temp_from_monthly_avg;
 
         let monthly_means: [f64; 12] = [
             -8.0, -5.0, 0.0, 6.0, 12.0, 18.0, 22.0, 20.0, 14.0, 7.0, 1.0, -4.0,
         ];
-        let monthly_amplitude = (monthly_means
+        let air_amplitude = (monthly_means
             .iter()
             .copied()
             .fold(f64::NEG_INFINITY, f64::max)
@@ -1550,7 +1597,7 @@ mod tests {
         let g_max = ground.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let ground_amplitude = (g_max - g_min) / 2.0;
 
-        let ratio = ground_amplitude / monthly_amplitude;
+        let ratio = ground_amplitude / air_amplitude;
 
         // Compute the theoretical gm from the DOE-2 beta formula.
         let beta = (std::f64::consts::PI / (DOE2_GROUND_HOURS_PER_YEAR * DOE2_GROUND_DIFFUSIVITY))
@@ -1583,10 +1630,61 @@ mod tests {
              cos range = {cos_min:.4} to {cos_max:.4})"
         );
 
-        // gm at 0.5 m should be significantly above 0.5 (shallow depth preserves signal).
+        // At 3.048 m (10 ft) with α = 0.002_322_576 m²/hr (DOE-2 OEM 0.025 ft²/hr
+        // converted to SI), gm ≈ 0.55 — about 45% amplitude damping, matching the
+        // DOE-2 GTEMP correlation at the OEM 10 ft reference depth.
         assert!(
-            gm > 0.5,
-            "gm = {gm:.4} should be > 0.5 for shallow reference depth"
+            (gm - 0.55).abs() < 0.05,
+            "gm = {gm:.4} should be near 0.55 at 3.048 m depth"
+        );
+    }
+
+    /// Verifies that at `DOE2_GROUND_REFERENCE_DEPTH_M = 3.048` (10 ft) and
+    /// `DOE2_GROUND_DIFFUSIVITY = 0.002_322_576 m²/hr` (DOE-2 default in SI),
+    /// the beta value matches OCHRE's imperial calculation at the same OEM depth.
+    ///
+    /// OCHRE: `beta = sqrt(π / (8760 × 0.025 ft²/hr)) × 10 ft ≈ 1.198`
+    /// HARES: `beta = sqrt(π / (8760 × 0.002_322_576 m²/hr)) × 3.048 m ≈ 1.198`
+    #[test]
+    fn doe2_ground_beta_matches_ochre_10ft() {
+        let beta = (std::f64::consts::PI / (DOE2_GROUND_HOURS_PER_YEAR * DOE2_GROUND_DIFFUSIVITY))
+            .sqrt()
+            * DOE2_GROUND_REFERENCE_DEPTH_M;
+        assert!(
+            (beta - 1.198).abs() < 0.001,
+            "beta = {beta:.4} should be ≈ 1.198 (OCHRE: beta = sqrt(pi/(8760*0.025)) * 10 ft)"
+        );
+    }
+
+    /// With the corrected DOE-2 reference depth (3.048 m), the ground temperature
+    /// seasonal amplitude must be strictly less than the outdoor air temperature
+    /// amplitude. This confirms the amplitude damping is working correctly — if
+    /// the ground amplitude equals or exceeds the air amplitude, the depth is
+    /// too shallow or soil diffusivity is implausibly low.
+    #[test]
+    fn doe2_ground_temp_seasonal_amplitude_less_than_air() {
+        use super::doe2_ground_temp_from_monthly_avg;
+
+        let monthly_means: [f64; 12] = [
+            -10.0, -5.0, 0.0, 8.0, 16.0, 22.0, 26.0, 24.0, 18.0, 10.0, 2.0, -6.0,
+        ];
+        let air_min = monthly_means.iter().copied().fold(f64::INFINITY, f64::min);
+        let air_max = monthly_means
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let air_amplitude = air_max - air_min;
+
+        let ground = doe2_ground_temp_from_monthly_avg(&monthly_means);
+        let ground_min = ground.iter().copied().fold(f64::INFINITY, f64::min);
+        let ground_max = ground.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let ground_amplitude = ground_max - ground_min;
+
+        assert!(
+            ground_amplitude < air_amplitude,
+            "ground amplitude {ground_amplitude:.2}°C must be strictly less than air amplitude \
+             {air_amplitude:.2}°C — DOE-2 damping is not working correctly at depth \
+             {DOE2_GROUND_REFERENCE_DEPTH_M} m"
         );
     }
 

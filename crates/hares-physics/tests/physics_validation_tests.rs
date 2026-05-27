@@ -1007,10 +1007,10 @@ fn kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
 /// This test reproduces the *pre-fix* DOE-2 formula (depth_factor=10 m) and
 /// compares it against Kusuda-Achenbach at 0.5 m slab depth. The current
 /// production DOE-2 model in `epw.rs` now uses
-/// `DOE2_GROUND_REFERENCE_DEPTH_M = 0.5` m, and the thermal solver evaluates
-/// Kusuda-Achenbach at per-boundary foundation depth via `DrivingTemp::Ground
-/// { depth_m }`. This test is retained to document the magnitude of the
-/// error that was corrected.
+/// `DOE2_GROUND_REFERENCE_DEPTH_M = 3.048` m (10 ft OEM depth), and the thermal
+/// solver evaluates Kusuda-Achenbach at per-boundary foundation depth via
+/// `DrivingTemp::Ground { depth_m }`. This test is retained to document the
+/// magnitude of the error that was corrected.
 ///
 /// For a mid-latitude cold-climate site (Minneapolis-like parameters):
 ///   T_mean = 7 °C, amplitude = 14 °C, phase = day 35 (early February)
@@ -1040,7 +1040,7 @@ fn doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_january() {
 
     // ------------------------------------------------------------------
     // Reproduce the DOE-2 surface temperature (epw.rs formula verbatim).
-    // Constants: alpha=0.025 m²/hr, Y=8760 hr, depth_factor=10 m, phase_offset=0.6 rad
+    // Constants: alpha=0.025 ft²/hr, Y=8760 hr, depth_factor=10 ft, phase_offset=0.6 rad
     // ------------------------------------------------------------------
     let alpha_hr = 0.025_f64;
     let y_hr = 8760.0_f64;
@@ -1104,8 +1104,8 @@ fn doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_january() {
 /// error to the winter under-prediction.
 ///
 /// Retained to document the pre-fix error magnitude. Current production uses
-/// `DOE2_GROUND_REFERENCE_DEPTH_M = 0.5` m and per-boundary Kusuda-Achenbach
-/// depth correction via `DrivingTemp::Ground { depth_m }`.
+/// `DOE2_GROUND_REFERENCE_DEPTH_M = 3.048` m (10 ft OEM depth) and per-boundary
+/// Kusuda-Achenbach depth correction via `DrivingTemp::Ground { depth_m }`.
 #[test]
 fn doe2_surface_temp_vs_kusuda_at_slab_depth_cold_climate_summer() {
     use hares_physics::ground::{
