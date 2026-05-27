@@ -4,6 +4,9 @@ use nalgebra::linalg::LU;
 use nalgebra::{Complex, DMatrix, DVector, Dyn};
 use thiserror::Error;
 
+#[cfg(feature = "observe_detailed")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 const RCOND_THRESHOLD: f64 = 1.0e-12;
 pub const ZERO_GAIN_EPSILON: f64 = 1.0e-12;
 
@@ -160,6 +163,19 @@ pub enum StabilityVerdict {
     MarginallyUnstable { max_eigenvalue_magnitude: f64 },
 }
 
+/// Count of Gershgorin false-positive rejections averted by full eigenvalue fallback.
+///
+/// Incremented each time `from_continuous` initially flags a model as unstable via
+/// Gershgorin but the full `eigenvalue_check` confirms stability.
+#[cfg(feature = "observe_detailed")]
+static GERSHGORIN_FALSE_POSITIVE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the number of Gershgorin false-positive rejections averted since startup.
+#[cfg(feature = "observe_detailed")]
+pub fn gershgorin_false_positive_count() -> u64 {
+    GERSHGORIN_FALSE_POSITIVE_COUNT.load(Ordering::Relaxed)
+}
+
 impl StateSpaceModel {
     /// Constructs a fully-discrete model from pre-discretized matrices.
     ///
@@ -293,21 +309,57 @@ impl StateSpaceModel {
         let eye = DMatrix::<f64>::identity(n, n);
 
         // Stability check on discrete A_d.
-        // Use Gershgorin bounds (O(n)) instead of full eigenvalue decomposition.
-        // nalgebra's Schur QR (used by complex_eigenvalues) has unlimited iterations
-        // and can stall indefinitely on stiff heavyweight construction matrices.
+        //
+        // Tiered approach:
+        //   1. Fast Gershgorin pass (O(n²)) for the common stable case.
+        //   2. Singular A_c exemption: ZOH discretization produces pole at |λ|=1,
+        //      but CN implicit path remains well-behaved.
+        //   3. Full eigenvalue fallback: Gershgorin is sufficient but not
+        //      necessary — strong off-diagonal coupling (e.g. multi-zone RC
+        //      networks) can overestimate the spectral radius above 1.0 even
+        //      when all true eigenvalues lie within the unit circle.
         let continuous_stable = gershgorin_continuous_stable(a_c);
         let gershgorin_bound = gershgorin_spectral_radius(&a_d);
         let discrete_stable = gershgorin_bound < 1.0 + 1e-10;
 
         if !continuous_stable || !discrete_stable {
             let a_c_singular = is_singular(a_c);
-            if !(a_c_singular && gershgorin_bound <= 1.0 + 1e-10) {
-                return Err(StateSpaceError::UnstableSystem(StabilityResult {
-                    continuous_stable,
-                    discrete_stable,
-                    near_unity_eigenvalues: Vec::new(),
+            if a_c_singular && gershgorin_bound <= 1.0 + 1e-10 {
+                // Existing exemption: singular A_c within Gershgorin tolerance.
+                // ZOH discretization produces a pole at |λ| = 1, but the CN
+                // implicit path stays well-behaved and stable.
+            } else {
+                // Gershgorin flagged potential instability — attempt full
+                // eigenvalue decomposition before rejecting.
+                let eigen_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    eigenvalue_check(a_c, &a_d)
                 }));
+                match eigen_ok {
+                    Ok(Ok(stable_result)) => {
+                        // False positive: Gershgorin bound exceeded unity but
+                        // all true eigenvalues are within the unit circle.
+                        tracing::warn!(
+                            gershgorin_bound,
+                            continuous_stable = stable_result.continuous_stable,
+                            discrete_stable = stable_result.discrete_stable,
+                            "Gershgorin spectral bound exceeded unity but full eigenvalue check confirms stability; proceeding"
+                        );
+                        #[cfg(feature = "observe_detailed")]
+                        GERSHGORIN_FALSE_POSITIVE_COUNT.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(Err(unstable)) => {
+                        return Err(StateSpaceError::UnstableSystem(unstable));
+                    }
+                    Err(_) => {
+                        // Schur QR panicked; fall back to conservative
+                        // rejection based on Gershgorin bounds.
+                        return Err(StateSpaceError::UnstableSystem(StabilityResult {
+                            continuous_stable,
+                            discrete_stable,
+                            near_unity_eigenvalues: Vec::new(),
+                        }));
+                    }
+                }
             }
         }
 
@@ -317,6 +369,11 @@ impl StateSpaceModel {
                 "Gershgorin discrete spectral bound near unity; convergence may be slow"
             );
         }
+
+        // Invariant check removed: calling eigenvalue_check unconditionally on every
+        // from_continuous call stalls on large RC matrices (nalgebra Schur QR has
+        // unlimited iterations). The fallback path above already runs eigenvalue_check
+        // when Gershgorin flags instability — the common stable path does not need it.
 
         let m_lu = eye.clone().lu();
 
@@ -1805,6 +1862,80 @@ mod tests {
         assert!(
             (y_actual - y_target).abs() < 1.0e-9,
             "output {y_actual} should match target {y_target}",
+        );
+    }
+
+    /// Gershgorin continuous stability check fails for a non-singular A_c whose
+    /// eigenvalues are in fact all strictly negative. The tiered fallback must
+    /// invoke `eigenvalue_check`, confirm stability, and allow construction
+    /// rather than rejecting the model.
+    ///
+    /// The test uses an upper-triangular A_c where row 0 fails the Gershgorin
+    /// disc test (`a_00 + |a_01| = -0.9 + 1.0 = 0.1 > 0`) but the eigenvalues
+    /// (-0.9, -0.5) are all negative real.
+    #[test]
+    fn from_continuous_gershgorin_false_positive_accepted_by_eigenvalue_fallback() {
+        // A_c: row 0 has strong positive off-diagonal coupling relative to its
+        // damping, causing the Gershgorin disc to cross the imaginary axis.
+        let a_c = DMatrix::from_row_slice(2, 2, &[-0.9, 1.0, 0.0, -0.5]);
+        let b_c = DMatrix::from_row_slice(2, 1, &[1.0, 1.0]);
+
+        let mapping = OutputMapping {
+            output_count: 2,
+            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+            input_to_output: vec![],
+        };
+
+        // Verify preconditions outside the constructor.
+        assert!(
+            !gershgorin_continuous_stable(&a_c),
+            "precondition: Gershgorin continuous must flag instability"
+        );
+        assert!(
+            !is_singular(&a_c),
+            "precondition: A_c must be non-singular so the singular exemption does not apply"
+        );
+
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 1.0, &mapping)
+            .expect("from_continuous should accept the model via eigenvalue fallback");
+
+        // The constructed model must work: one step should produce finite output.
+        let x = DVector::from_row_slice(&[20.0, 15.0]);
+        let u = DVector::from_row_slice(&[5.0]);
+        let x_next = model.step(&x, &u);
+        assert!(
+            x_next[0].is_finite() && x_next[1].is_finite(),
+            "step output must be finite"
+        );
+    }
+
+    /// The eigenvalue fallback must not weaken the rejection path:
+    /// when a non-singular A_c has a genuinely unstable eigenvalue
+    /// (positive real part), the fallback must still reject with
+    /// `Err(UnstableSystem)`.
+    #[test]
+    fn from_continuous_genuinely_unstable_rejected_by_eigenvalue_fallback() {
+        // A_c with eigenvalue +0.5 (unstable) and -0.9 (stable).
+        let a_c = DMatrix::from_row_slice(2, 2, &[-0.9, 1.0, 0.0, 0.5]);
+        let b_c = DMatrix::from_row_slice(2, 1, &[1.0, 1.0]);
+
+        let mapping = OutputMapping {
+            output_count: 2,
+            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+            input_to_output: vec![],
+        };
+
+        // Verify preconditions: Gershgorin continuous fails (both rows).
+        assert!(
+            !gershgorin_continuous_stable(&a_c),
+            "precondition: Gershgorin continuous must flag instability"
+        );
+        assert!(!is_singular(&a_c), "precondition: A_c must be non-singular");
+
+        let result = StateSpaceModel::from_continuous(&a_c, &b_c, 1.0, &mapping);
+        assert!(
+            matches!(result, Err(StateSpaceError::UnstableSystem(_))),
+            "genuinely unstable system must be rejected with UnstableSystem"
         );
     }
 }

@@ -27,6 +27,8 @@ pub use longwave_radiation::{
     linearised_h_r, sky_view_factor,
 };
 pub use rc_network::{NodeId, RCNetwork, RCNetworkError, parallel_resistance};
+#[cfg(feature = "observe_detailed")]
+pub use state_space::gershgorin_false_positive_count;
 pub use state_space::{
     CouplingData, OutputMapping, SolveTarget, SolverScratch, StabilityResult, StateSpaceError,
     StateSpaceModel, ZERO_GAIN_EPSILON, discretize_auto, discretize_zoh, eigenvalue_check,
