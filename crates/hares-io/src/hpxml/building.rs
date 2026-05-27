@@ -1102,6 +1102,29 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     }
 
+    // Invariant: no Roof boundary with zero tilt produced from absent <Pitch>.
+    // A Roof without an explicit <Pitch> defaults to 0° (flat roof), which produces
+    // zero attic volume. This is correct for genuine flat roofs but incorrect for
+    // pitched roofs with missing pitch data.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        for bd in &boundaries {
+            if bd.boundary_type == BoundaryType::Roof
+                && bd.tilt_deg == Some(0.0)
+                && bd.area_m2 > 0.0
+            {
+                tracing::warn!(
+                    boundary_id = bd.id,
+                    area_m2 = bd.area_m2,
+                    interior_zone = ?bd.interior_zone,
+                    exterior_zone = ?bd.exterior_zone,
+                    "Roof boundary has tilt=0° (flat); if this is a pitched roof the \
+                     missing <Pitch> element will produce zero attic volume"
+                );
+            }
+        }
+    }
+
     Ok(Building {
         site: Site {
             elevation_m,
@@ -1364,9 +1387,23 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
     // Surface tilt from HPXML <Pitch> (roofs) or implied by boundary type.
     // Pitch is rise:12 run (US roofing convention); tilt = atan(pitch/12).
     // Ref: OCHRE hpxml.py pitch2deg().
+    let interior_zone = parse_zone_ref(node.child("InteriorAdjacentTo"));
+    let exterior_zone = parse_zone_ref(node.child("ExteriorAdjacentTo"))
+        .or_else(|| infer_exterior_zone(&boundary_type));
+
     let tilt_deg = match boundary_type {
         BoundaryType::Roof => {
-            let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw).unwrap_or(0.0);
+            let pitch =
+                parse_value_with_units(node.child("Pitch"), ValueKind::Raw).unwrap_or_else(|| {
+                    tracing::warn!(
+                        area_m2 = area_m2,
+                        interior_zone = ?interior_zone,
+                        exterior_zone = ?exterior_zone,
+                        "Roof boundary missing <Pitch> element; defaulting to 0° (flat roof). \
+                         This will produce zero attic volume if this is a pitched roof."
+                    );
+                    0.0
+                });
             Some((pitch / 12.0).atan().to_degrees())
         }
         BoundaryType::Wall | BoundaryType::FoundationWall | BoundaryType::RimJoist => Some(90.0),
@@ -1379,10 +1416,6 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
             None
         }
     };
-
-    let interior_zone = parse_zone_ref(node.child("InteriorAdjacentTo"));
-    let exterior_zone = parse_zone_ref(node.child("ExteriorAdjacentTo"))
-        .or_else(|| infer_exterior_zone(&boundary_type));
 
     #[cfg(feature = "observe")]
     if interior_zone == Some(ZoneType::Adjacent) || exterior_zone == Some(ZoneType::Adjacent) {
@@ -6651,6 +6684,170 @@ mod tests {
         assert!(
             volume > rectangular,
             "garage volume {volume} must exceed rectangular {rectangular} with pitched roof and 1 attached wall (protruded > 0)"
+        );
+    }
+
+    // ── Roof Pitch tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn roof_missing_pitch_produces_zero_tilt() {
+        // A Roof element without <Pitch> defaults to tilt=0° (flat roof).
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">100</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">800</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="R1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">500</Area>
+          </Roof>
+        </Roofs>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let building = parse_building(xml).expect("HPXML with roof missing Pitch should parse");
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof)
+            .expect("must have a Roof boundary");
+        assert_eq!(
+            roof.tilt_deg,
+            Some(0.0),
+            "Roof without <Pitch> must default to 0° tilt (flat roof)"
+        );
+    }
+
+    #[test]
+    fn roof_with_explicit_pitch_produces_correct_tilt() {
+        // A Roof element with <Pitch>6</Pitch> produces tilt = atan(6/12) ≈ 26.565°.
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">100</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">800</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="R1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">500</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let building = parse_building(xml).expect("HPXML with pitched roof should parse");
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof)
+            .expect("must have a Roof boundary");
+        let expected_tilt = (6.0_f64 / 12.0).atan().to_degrees();
+        assert!(
+            (roof.tilt_deg.unwrap() - expected_tilt).abs() < 1e-6,
+            "Roof with Pitch=6 must produce tilt={expected_tilt}°, got {:?}",
+            roof.tilt_deg
+        );
+    }
+
+    #[test]
+    fn pitched_roof_produces_attic_volume() {
+        // Regression: pitched-roof HPXML with explicit <Pitch> must produce
+        // non-zero attic volume (not zero from absent-pitch default).
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="R1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">600</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id="W1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+            <Azimuth>0</Azimuth>
+          </Wall>
+          <Wall>
+            <SystemIdentifier id="W2"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+            <Azimuth>180</Azimuth>
+          </Wall>
+        </Walls>
+        <Floors>
+          <Floor>
+            <SystemIdentifier id="AtticFloor"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>attic vented</ExteriorAdjacentTo>
+            <Area units="ft2">500</Area>
+          </Floor>
+        </Floors>
+        <Attics>
+          <Attic>
+            <AtticType><Attic><Vented>true</Vented></Attic></AtticType>
+          </Attic>
+        </Attics>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let building = parse_building(xml).expect("HPXML with pitched roof should parse");
+        let attic_zone = building
+            .zones
+            .iter()
+            .find(|z| z.zone_type == ZoneType::Attic)
+            .expect("must have an Attic zone");
+        assert!(
+            attic_zone.volume_m3.is_some(),
+            "Attic zone must have volume when pitched roof is specified"
+        );
+        assert!(
+            attic_zone.volume_m3.unwrap() > 0.0,
+            "Attic volume must be positive for a pitched roof"
         );
     }
 }
