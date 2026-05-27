@@ -26,9 +26,9 @@ use py_enums::{
     PyAggregationResolution, PyBatteryChemistry, PyBatteryProductId, PyBmsAction, PyBmsMode,
     PyBmsScheduleWindow, PyChargingLevel, PyChargingStrategy, PyControlCapabilities,
     PyDepartureConstraint, PyDutyCycleComponent, PyEndUse, PyEvArchetypeId, PyEvConnectionState,
-    PyExecutionStage, PyFluidType, PyFuelType, PyGridExportRule, PyInverterPriority, PyLutType,
-    PyPlugInPolicy, PyResStockVersion, PySimStatus, PyStormWatchTrigger, PyVehicleId,
-    PyVehicleType,
+    PyExecutionStage, PyFluidType, PyFuelType, PyGridExportRule, PyIdealCapacityMode,
+    PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion, PySimStatus,
+    PyStormWatchTrigger, PyVehicleId, PyVehicleType,
 };
 use py_equipment::{
     PyBattery, PyCoreOutput, PyEquipment, PyEquipmentDescriptor, PyEv, PyPv, PyPvSoilingConfig,
@@ -74,6 +74,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExecutionStage>()?;
     m.add_class::<PyFluidType>()?;
     m.add_class::<PyInverterPriority>()?;
+    m.add_class::<PyIdealCapacityMode>()?;
     m.add_class::<PyDutyCycleComponent>()?;
     m.add_class::<PySimStatus>()?;
     m.add_class::<PyAggregationResolution>()?;

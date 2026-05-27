@@ -3,11 +3,16 @@
 import pytest
 from ochre_next import (
     ControlSignal,
+    DispatchRequest,
+    IdealCapacityMode,
     OperatingMode,
+    Signal,
     Mode,
+    Priority,
     DRLevel,
     InverterPriority,
     DutyCycleComponent,
+    EvConnectionState,
 )
 
 
@@ -243,25 +248,25 @@ class TestControlSignalConstructors:
         assert round_trip.to_dict()["protocol"] == 42
 
     def test_ideal_capacity_mode_override_auto(self):
-        sig = ControlSignal.ideal_capacity_mode_override("auto")
+        sig = ControlSignal.ideal_capacity_mode_override(IdealCapacityMode.auto())
         d = sig.to_dict()
         assert d["type"] == "IdealCapacityModeOverride"
         assert d["mode"] == "Auto"
         assert "IdealCapacityModeOverride" in repr(sig)
 
     def test_ideal_capacity_mode_override_on(self):
-        sig = ControlSignal.ideal_capacity_mode_override("on")
+        sig = ControlSignal.ideal_capacity_mode_override(IdealCapacityMode.on())
         d = sig.to_dict()
         assert d["mode"] == "On"
 
     def test_ideal_capacity_mode_override_off(self):
-        sig = ControlSignal.ideal_capacity_mode_override("off")
+        sig = ControlSignal.ideal_capacity_mode_override(IdealCapacityMode.off())
         d = sig.to_dict()
         assert d["mode"] == "Off"
 
     def test_ideal_capacity_mode_override_invalid_raises(self):
         with pytest.raises(ValueError):
-            ControlSignal.ideal_capacity_mode_override("invalid")
+            ControlSignal.ideal_capacity_mode_override_str("invalid")
 
 
 class TestControlSignalFromDict:
@@ -493,7 +498,7 @@ class TestControlSignalRoundTrip:
         assert round_trip.to_dict() == d
 
     def test_ideal_capacity_mode_override_round_trip(self):
-        original = ControlSignal.ideal_capacity_mode_override("auto")
+        original = ControlSignal.ideal_capacity_mode_override(IdealCapacityMode.auto())
         d = original.to_dict()
         round_trip = ControlSignal.from_dict(d)
         assert round_trip.to_dict() == d
@@ -527,7 +532,7 @@ class TestControlSignalRepr:
             ),
             (lambda: ControlSignal.protocol_native(42, b"test"), "ProtocolNative"),
             (
-                lambda: ControlSignal.ideal_capacity_mode_override("auto"),
+                lambda: ControlSignal.ideal_capacity_mode_override(IdealCapacityMode.auto()),
                 "IdealCapacityModeOverride",
             ),
         ],
@@ -555,3 +560,175 @@ class TestTypedEnumArgValidation:
     def test_duty_cycle_rejects_inverter_priority(self):
         with pytest.raises(TypeError):
             ControlSignal.duty_cycle(0.5, component=InverterPriority.Watt)
+
+
+class TestNewSignalConstructors:
+    """Test Signal constructors for the 10 newly-added variants."""
+
+    def test_humidity_setpoint(self):
+        sig = Signal.humidity_setpoint(0.5, min_rh=0.3, max_rh=0.7)
+        assert "HumiditySetpoint" in repr(sig)
+
+    def test_grid_connect(self):
+        sig = Signal.grid_connect(True)
+        assert "GridConnect" in repr(sig)
+
+    def test_self_consumption(self):
+        sig = Signal.self_consumption(True, False)
+        assert "SelfConsumption" in repr(sig)
+
+    def test_protocol_native(self):
+        sig = Signal.protocol_native(42, b"\x01\x02\x03")
+        assert "ProtocolNative" in repr(sig)
+
+    def test_curtailment_percent(self):
+        sig = Signal.curtailment_percent(50.0)
+        assert "CurtailmentPercent" in repr(sig)
+
+    def test_reactive_setpoint(self):
+        sig = Signal.reactive_setpoint(1.0)
+        assert "ReactiveSetpoint" in repr(sig)
+
+    def test_power_factor_setpoint(self):
+        sig = Signal.power_factor_setpoint(0.95)
+        assert "PowerFactorSetpoint" in repr(sig)
+
+    def test_inverter_priority_mode(self):
+        sig = Signal.inverter_priority_mode(InverterPriority.Watt)
+        assert "InverterPriorityMode" in repr(sig)
+
+    def test_ideal_capacity_mode_override(self):
+        sig = Signal.ideal_capacity_mode_override(IdealCapacityMode.auto())
+        assert "IdealCapacityModeOverride" in repr(sig)
+
+    def test_max_capacity_fraction(self):
+        sig = Signal.max_capacity_fraction(0.5)
+        assert "MaxCapacityFraction" in repr(sig)
+
+
+class TestNewDispatchRequestConstructors:
+    """Test DispatchRequest constructors for the 10 newly-added signal types."""
+
+    def test_humidity_setpoint(self):
+        req = DispatchRequest.humidity_setpoint("dehumidifier", target_rh=0.5)
+        assert req.target == "dehumidifier"
+        assert "HumiditySetpoint" in repr(req.signal)
+
+    def test_grid_connect(self):
+        req = DispatchRequest.grid_connect("inverter", True)
+        assert req.target == "inverter"
+        assert "GridConnect" in repr(req.signal)
+
+    def test_self_consumption(self):
+        req = DispatchRequest.self_consumption("pv_inverter", True, True)
+        assert req.target == "pv_inverter"
+        assert "SelfConsumption" in repr(req.signal)
+
+    def test_protocol_native(self):
+        req = DispatchRequest.protocol_native("controller", 17, b"\xaa\xbb")
+        assert req.target == "controller"
+        assert "ProtocolNative" in repr(req.signal)
+
+    def test_curtailment_percent(self):
+        req = DispatchRequest.curtailment_percent("pv", 25.0)
+        assert req.target == "pv"
+        assert "CurtailmentPercent" in repr(req.signal)
+
+    def test_reactive_setpoint(self):
+        req = DispatchRequest.reactive_setpoint("inverter", 2.0)
+        assert req.target == "inverter"
+        assert "ReactiveSetpoint" in repr(req.signal)
+
+    def test_power_factor_setpoint(self):
+        req = DispatchRequest.power_factor_setpoint("inverter", 0.9)
+        assert req.target == "inverter"
+        assert "PowerFactorSetpoint" in repr(req.signal)
+
+    def test_inverter_priority_mode(self):
+        req = DispatchRequest.inverter_priority_mode("inverter", InverterPriority.Var)
+        assert req.target == "inverter"
+        assert "InverterPriorityMode" in repr(req.signal)
+
+    def test_ideal_capacity_mode_override_auto(self):
+        req = DispatchRequest.ideal_capacity_mode_override("hvac", IdealCapacityMode.auto())
+        assert req.target == "hvac"
+        assert "IdealCapacityModeOverride" in repr(req.signal)
+
+    def test_ideal_capacity_mode_override_on(self):
+        req = DispatchRequest.ideal_capacity_mode_override("hvac", IdealCapacityMode.on())
+        assert req.target == "hvac"
+
+    def test_ideal_capacity_mode_override_off(self):
+        req = DispatchRequest.ideal_capacity_mode_override("hvac", IdealCapacityMode.off())
+        assert req.target == "hvac"
+
+    def test_ideal_capacity_mode_override_invalid_raises(self):
+        with pytest.raises(TypeError):
+            DispatchRequest.ideal_capacity_mode_override("hvac", "invalid")
+
+    def test_max_capacity_fraction(self):
+        req = DispatchRequest.max_capacity_fraction("hvac", 0.5)
+        assert req.target == "hvac"
+        assert "MaxCapacityFraction" in repr(req.signal)
+
+    def test_priority_defaults_to_schedule(self):
+        req = DispatchRequest.humidity_setpoint("dehumidifier", target_rh=0.5)
+        assert req.priority == Priority.Schedule
+
+    def test_priority_explicit(self):
+        req = DispatchRequest.grid_connect("inverter", True, priority=Priority.Grid)
+        assert req.priority == Priority.Grid
+
+
+class TestEvSetReadyBy:
+    """Regression test: EvSetReadyBy constructor exists and works."""
+
+    def test_constructs_and_repr(self):
+        req = DispatchRequest.ev_set_ready_by("ev", departure_hour=7.0, target_soc=0.85)
+        assert req.target == "ev"
+        assert "EvSetReadyBy" in repr(req.signal)
+
+    def test_with_priority(self):
+        req = DispatchRequest.ev_set_ready_by(
+            "ev", departure_hour=6.5, target_soc=0.9, priority=Priority.UserOverride
+        )
+        assert req.priority == Priority.UserOverride
+
+
+class TestAllPySignalVariantsRoundtrip:
+    """Verify all 25 ControlSignal variants have a PySignal path."""
+
+    def test_all_25_control_signals_dispatch_construct(self):
+        """Each of the 25 ControlSignal variants is reachable via a DispatchRequest constructor."""
+        requests = [
+            DispatchRequest.thermal_setpoint("hvac", heating_c=20.0),
+            DispatchRequest.thermal_setpoint_delta("hvac", heating_delta_c=1.0),
+            DispatchRequest.mode_override("hvac", Mode.Off),
+            DispatchRequest.load_fraction("hvac", 0.5),
+            DispatchRequest.power_limit("hvac", 5.0),
+            DispatchRequest.power_setpoint("hvac", 3.0),
+            DispatchRequest.soc_target("battery", target_soc=0.8),
+            DispatchRequest.duty_cycle("hvac", 0.5),
+            DispatchRequest.demand_response("hvac", DRLevel.High),
+            DispatchRequest.ideal_capacity("hvac", 5000.0),
+            DispatchRequest.ev_plug_in("ev", EvConnectionState.HomePluggedIn),
+            DispatchRequest.ev_drive("ev", 5.0),
+            DispatchRequest.ev_set_ready_by("ev", departure_hour=7.0, target_soc=0.85),
+            DispatchRequest.ev_away_charge("ev", 11.5),
+            DispatchRequest.event_delay("ev", 300.0),
+            DispatchRequest.humidity_setpoint("dehumidifier", target_rh=0.5),
+            DispatchRequest.grid_connect("inverter", True),
+            DispatchRequest.self_consumption("pv", True, False),
+            DispatchRequest.protocol_native("controller", 1, b"test"),
+            DispatchRequest.curtailment_percent("pv", 50.0),
+            DispatchRequest.reactive_setpoint("inverter", 1.0),
+            DispatchRequest.power_factor_setpoint("inverter", 0.95),
+            DispatchRequest.inverter_priority_mode("inverter", InverterPriority.Watt),
+            DispatchRequest.ideal_capacity_mode_override("hvac", IdealCapacityMode.on()),
+            DispatchRequest.max_capacity_fraction("hvac", 0.5),
+        ]
+        assert len(requests) == 25
+        for req in requests:
+            assert req.target, f"missing target for {repr(req.signal)}"
+            assert req.signal is not None
+            assert req.priority is not None

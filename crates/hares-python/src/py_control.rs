@@ -10,7 +10,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyType};
 
 use crate::py_actor::{PyDRLevel, PyMode};
-use crate::py_enums::{PyDutyCycleComponent, PyEvConnectionState, PyInverterPriority};
+use crate::py_enums::{
+    PyDutyCycleComponent, PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority,
+};
 
 #[pyclass(name = "ControlSignal")]
 #[derive(Debug)]
@@ -224,7 +226,14 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
-    pub fn ideal_capacity_mode_override(mode: &str) -> PyResult<Self> {
+    pub fn ideal_capacity_mode_override(mode: PyIdealCapacityMode) -> Self {
+        Self {
+            signal: ControlSignal::IdealCapacityModeOverride { mode: mode.into() },
+        }
+    }
+
+    #[staticmethod]
+    pub fn ideal_capacity_mode_override_str(mode: &str) -> PyResult<Self> {
         let mode = match mode.to_lowercase().as_str() {
             "auto" => IdealCapacityMode::Auto,
             "on" => IdealCapacityMode::On,
@@ -348,9 +357,9 @@ impl PyControlSignal {
             "IdealCapacityModeOverride" => {
                 let mode_str: String = dict_required(d, "mode")?;
                 let mode = match mode_str.to_lowercase().as_str() {
-                    "auto" => hares_types::IdealCapacityMode::Auto,
-                    "on" => hares_types::IdealCapacityMode::On,
-                    "off" => hares_types::IdealCapacityMode::Off,
+                    "auto" => IdealCapacityMode::Auto,
+                    "on" => IdealCapacityMode::On,
+                    "off" => IdealCapacityMode::Off,
                     _ => {
                         return Err(PyValueError::new_err(format!(
                             "unsupported IdealCapacityMode `{mode_str}`"

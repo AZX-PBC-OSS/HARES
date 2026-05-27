@@ -34,9 +34,9 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::{ControlSignal, EnvironmentState, EvConnectionState, OperatingMode};
+use hares_types::{ControlSignal, EnvironmentState, EvConnectionState, OperatingMode, ProtocolId};
 
-use crate::py_enums::PyEvConnectionState;
+use crate::py_enums::{PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -253,6 +253,40 @@ pub enum PySignal {
     EventDelay {
         delay_s: f64,
     },
+    HumiditySetpoint {
+        target_rh: f64,
+        min_rh: Option<f64>,
+        max_rh: Option<f64>,
+    },
+    GridConnect {
+        connected: bool,
+    },
+    SelfConsumption {
+        enabled: bool,
+        solar_only_charging: bool,
+    },
+    ProtocolNative {
+        protocol_id: u16,
+        payload: Vec<u8>,
+    },
+    CurtailmentPercent {
+        percent: f64,
+    },
+    ReactiveSetpoint {
+        kvar: f64,
+    },
+    PowerFactorSetpoint {
+        power_factor: f64,
+    },
+    InverterPriorityMode {
+        priority: PyInverterPriority,
+    },
+    IdealCapacityModeOverride {
+        mode: PyIdealCapacityMode,
+    },
+    MaxCapacityFraction {
+        fraction: f64,
+    },
 }
 
 /// Strongly typed DR levels.
@@ -306,7 +340,7 @@ impl PyDispatchRequest {
 
 impl PySignal {
     pub fn into_control_signal(self) -> ControlSignal {
-        match self {
+        let result = match self {
             PySignal::ThermalSetpoint {
                 heating_c,
                 cooling_c,
@@ -373,6 +407,103 @@ impl PySignal {
             },
             PySignal::EvAwayCharge { power_kw } => ControlSignal::EvAwayCharge { power_kw },
             PySignal::EventDelay { delay_s } => ControlSignal::EventDelay { delay_s },
+            PySignal::HumiditySetpoint {
+                target_rh,
+                min_rh,
+                max_rh,
+            } => ControlSignal::HumiditySetpoint {
+                target_rh,
+                min_rh,
+                max_rh,
+            },
+            PySignal::GridConnect { connected } => ControlSignal::GridConnect { connected },
+            PySignal::SelfConsumption {
+                enabled,
+                solar_only_charging,
+            } => ControlSignal::SelfConsumption {
+                enabled,
+                solar_only_charging,
+            },
+            PySignal::ProtocolNative {
+                protocol_id,
+                payload,
+            } => ControlSignal::ProtocolNative {
+                protocol: ProtocolId(protocol_id),
+                payload,
+            },
+            PySignal::CurtailmentPercent { percent } => {
+                ControlSignal::CurtailmentPercent { percent }
+            }
+            PySignal::ReactiveSetpoint { kvar } => ControlSignal::ReactiveSetpoint { kvar },
+            PySignal::PowerFactorSetpoint { power_factor } => {
+                ControlSignal::PowerFactorSetpoint { power_factor }
+            }
+            PySignal::InverterPriorityMode { priority } => ControlSignal::InverterPriorityMode {
+                priority: priority.into(),
+            },
+            PySignal::IdealCapacityModeOverride { mode } => {
+                ControlSignal::IdealCapacityModeOverride { mode: mode.into() }
+            }
+            PySignal::MaxCapacityFraction { fraction } => {
+                ControlSignal::MaxCapacityFraction { fraction }
+            }
+        };
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert_ne!(
+                result.required_capability().bits(),
+                0,
+                "PySignal variant mapped to zero-capability ControlSignal"
+            );
+        }
+        #[cfg(feature = "observe")]
+        dispatch_observer::record_dispatch(&result);
+        result
+    }
+}
+
+#[cfg(feature = "observe")]
+mod dispatch_observer {
+    use std::sync::{LazyLock, Mutex};
+
+    use hares_types::ControlSignal;
+
+    static COUNTERS: LazyLock<Mutex<[u64; 25]>> = LazyLock::new(|| Mutex::new([0; 25]));
+
+    fn variant_index(signal: &ControlSignal) -> usize {
+        match signal {
+            ControlSignal::ThermalSetpoint { .. } => 0,
+            ControlSignal::HumiditySetpoint { .. } => 1,
+            ControlSignal::PowerSetpoint { .. } => 2,
+            ControlSignal::PowerLimit { .. } => 3,
+            ControlSignal::SOCTarget { .. } => 4,
+            ControlSignal::ModeOverride { .. } => 5,
+            ControlSignal::DutyCycle { .. } => 6,
+            ControlSignal::LoadFraction { .. } => 7,
+            ControlSignal::GridConnect { .. } => 8,
+            ControlSignal::SelfConsumption { .. } => 9,
+            ControlSignal::DemandResponse { .. } => 10,
+            ControlSignal::ProtocolNative { .. } => 11,
+            ControlSignal::CurtailmentPercent { .. } => 12,
+            ControlSignal::ReactiveSetpoint { .. } => 13,
+            ControlSignal::PowerFactorSetpoint { .. } => 14,
+            ControlSignal::InverterPriorityMode { .. } => 15,
+            ControlSignal::IdealCapacity { .. } => 16,
+            ControlSignal::ThermalSetpointDelta { .. } => 17,
+            ControlSignal::IdealCapacityModeOverride { .. } => 18,
+            ControlSignal::EvPlugIn { .. } => 19,
+            ControlSignal::EvDrive { .. } => 20,
+            ControlSignal::EvAwayCharge { .. } => 21,
+            ControlSignal::EvSetReadyBy { .. } => 22,
+            ControlSignal::EventDelay { .. } => 23,
+            ControlSignal::MaxCapacityFraction { .. } => 24,
+        }
+    }
+
+    pub fn record_dispatch(signal: &ControlSignal) {
+        let idx = variant_index(signal);
+        if let Ok(mut counters) = COUNTERS.lock() {
+            counters[idx] += 1;
         }
     }
 }
@@ -644,6 +775,162 @@ impl PyDispatchRequest {
         })
     }
 
+    #[staticmethod]
+    #[pyo3(signature = (target, target_rh, min_rh=None, max_rh=None, priority=None))]
+    fn humidity_setpoint(
+        target: String,
+        target_rh: f64,
+        min_rh: Option<f64>,
+        max_rh: Option<f64>,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::HumiditySetpoint {
+                target_rh,
+                min_rh,
+                max_rh,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, connected, priority=None))]
+    fn grid_connect(
+        target: String,
+        connected: bool,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::GridConnect { connected },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, enabled, solar_only_charging, priority=None))]
+    fn self_consumption(
+        target: String,
+        enabled: bool,
+        solar_only_charging: bool,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::SelfConsumption {
+                enabled,
+                solar_only_charging,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, protocol_id, payload, priority=None))]
+    fn protocol_native(
+        target: String,
+        protocol_id: u16,
+        payload: Vec<u8>,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::ProtocolNative {
+                protocol_id,
+                payload,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, percent, priority=None))]
+    fn curtailment_percent(
+        target: String,
+        percent: f64,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::CurtailmentPercent { percent },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, kvar, priority=None))]
+    fn reactive_setpoint(
+        target: String,
+        kvar: f64,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::ReactiveSetpoint { kvar },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, power_factor, priority=None))]
+    fn power_factor_setpoint(
+        target: String,
+        power_factor: f64,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::PowerFactorSetpoint { power_factor },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, priority_enum, priority=None))]
+    fn inverter_priority_mode(
+        target: String,
+        priority_enum: PyInverterPriority,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::InverterPriorityMode {
+                priority: priority_enum,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, mode, priority=None))]
+    fn ideal_capacity_mode_override(
+        target: String,
+        mode: PyIdealCapacityMode,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::IdealCapacityModeOverride { mode },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, fraction, priority=None))]
+    fn max_capacity_fraction(
+        target: String,
+        fraction: f64,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::MaxCapacityFraction { fraction },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "DispatchRequest(target={:?}, signal={:?}, priority={:?})",
@@ -757,6 +1044,67 @@ impl PySignal {
     #[staticmethod]
     fn event_delay(delay_s: f64) -> Self {
         PySignal::EventDelay { delay_s }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target_rh, min_rh=None, max_rh=None))]
+    fn humidity_setpoint(target_rh: f64, min_rh: Option<f64>, max_rh: Option<f64>) -> Self {
+        PySignal::HumiditySetpoint {
+            target_rh,
+            min_rh,
+            max_rh,
+        }
+    }
+
+    #[staticmethod]
+    fn grid_connect(connected: bool) -> Self {
+        PySignal::GridConnect { connected }
+    }
+
+    #[staticmethod]
+    fn self_consumption(enabled: bool, solar_only_charging: bool) -> Self {
+        PySignal::SelfConsumption {
+            enabled,
+            solar_only_charging,
+        }
+    }
+
+    #[staticmethod]
+    fn protocol_native(protocol_id: u16, payload: Vec<u8>) -> Self {
+        PySignal::ProtocolNative {
+            protocol_id,
+            payload,
+        }
+    }
+
+    #[staticmethod]
+    fn curtailment_percent(percent: f64) -> Self {
+        PySignal::CurtailmentPercent { percent }
+    }
+
+    #[staticmethod]
+    fn reactive_setpoint(kvar: f64) -> Self {
+        PySignal::ReactiveSetpoint { kvar }
+    }
+
+    #[staticmethod]
+    fn power_factor_setpoint(power_factor: f64) -> Self {
+        PySignal::PowerFactorSetpoint { power_factor }
+    }
+
+    #[staticmethod]
+    fn inverter_priority_mode(priority: PyInverterPriority) -> Self {
+        PySignal::InverterPriorityMode { priority }
+    }
+
+    #[staticmethod]
+    fn ideal_capacity_mode_override(mode: PyIdealCapacityMode) -> PyResult<Self> {
+        Ok(PySignal::IdealCapacityModeOverride { mode })
+    }
+
+    #[staticmethod]
+    fn max_capacity_fraction(fraction: f64) -> Self {
+        PySignal::MaxCapacityFraction { fraction }
     }
 
     fn __repr__(&self) -> String {
@@ -917,8 +1265,31 @@ impl PyPriority {
         PyPriority::Safety
     }
 
+    #[staticmethod]
+    fn from_str(name: &str) -> PyResult<Self> {
+        match name.to_lowercase().as_str() {
+            "schedule" => Ok(PyPriority::Schedule),
+            "user_override" | "useroverride" => Ok(PyPriority::UserOverride),
+            "grid" => Ok(PyPriority::Grid),
+            "safety" => Ok(PyPriority::Safety),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid Priority variant: {}",
+                name
+            ))),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!("{:?}", self)
+    }
+
+    fn __str__(&self) -> String {
+        match self {
+            PyPriority::Schedule => "Schedule".to_string(),
+            PyPriority::UserOverride => "UserOverride".to_string(),
+            PyPriority::Grid => "Grid".to_string(),
+            PyPriority::Safety => "Safety".to_string(),
+        }
     }
 }
 
@@ -949,7 +1320,32 @@ impl PyDRLevel {
         PyDRLevel::GridEmergency
     }
 
+    #[staticmethod]
+    fn from_str(name: &str) -> PyResult<Self> {
+        match name.to_lowercase().as_str() {
+            "normal" => Ok(PyDRLevel::Normal),
+            "moderate" => Ok(PyDRLevel::Moderate),
+            "high" => Ok(PyDRLevel::High),
+            "critical" => Ok(PyDRLevel::Critical),
+            "grid_emergency" | "gridemergency" => Ok(PyDRLevel::GridEmergency),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid DRLevel variant: {}",
+                name
+            ))),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!("{:?}", self)
+    }
+
+    fn __str__(&self) -> String {
+        match self {
+            PyDRLevel::Normal => "Normal".to_string(),
+            PyDRLevel::Moderate => "Moderate".to_string(),
+            PyDRLevel::High => "High".to_string(),
+            PyDRLevel::Critical => "Critical".to_string(),
+            PyDRLevel::GridEmergency => "GridEmergency".to_string(),
+        }
     }
 }

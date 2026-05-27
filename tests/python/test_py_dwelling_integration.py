@@ -233,6 +233,7 @@ class TestControlInjection:
             ControlSignal,
             DRLevel,
             DutyCycleComponent,
+            IdealCapacityMode,
             InverterPriority,
             OperatingMode,
         )
@@ -262,7 +263,7 @@ class TestControlInjection:
             ControlSignal.power_factor_setpoint(0.95),
             ControlSignal.inverter_priority_mode(InverterPriority.Watt),
             ControlSignal.protocol_native(42, b"\x01\x02"),
-            ControlSignal.ideal_capacity_mode_override("auto"),
+            ControlSignal.ideal_capacity_mode_override(IdealCapacityMode.auto()),
         ]
         for sig in signals:
             d = sig.to_dict()

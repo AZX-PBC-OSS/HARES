@@ -80,6 +80,16 @@ Implement fixes completely:
 - No partial fixes that correct one call site while leaving others wrong.
 - No weakening of assertions (wider tolerances, `assert!` instead of `assert_eq!`) to make a test pass rather than fixing the code.
 
+### No lazy deferrals — fix it now
+
+When you encounter a related or adjacent issue while implementing a ticket, **fix it**. Do not open a ticket and move on. Do not leave a `// TODO`. Do not write "out of scope for this ticket." The issue is in front of you, you understand it, and the fix is doable. That is the moment to fix it — not a hypothetical future moment when someone else re-discovers it.
+
+The broken-window pattern this rule targets: an agent notices something wrong in a file it is already editing, decides it is "adjacent" rather than "core" to the ticket, leaves it broken, and considers the ticket done. That is not done. The codebase is worse than when you started in a way that you could have prevented with one additional edit.
+
+**The test:** if you can describe the fix in one sentence, you can implement it. Describing the bug in a comment or a TODO and not fixing it is the same as leaving it broken — you just added noise.
+
+When a related issue genuinely requires work beyond the current ticket's scope (different crate, different subsystem, non-trivial architectural change), document the dependency concretely and create the tracking ticket *before* marking the current ticket done. Vague "future work" with no ticket ID is an abandoned item.
+
 ### No untracked deferrals
 
 Work that is doable with the current infrastructure must not be deferred to vague "future work" or "a later ticket." A deferred item with no tracking ticket is an abandoned item.

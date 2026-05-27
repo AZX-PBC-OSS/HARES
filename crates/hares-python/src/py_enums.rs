@@ -20,9 +20,9 @@ use hares_types::{
     DepartureConstraint as RustDepartureConstraint, DutyCycleComponent as RustDutyCycleComponent,
     EndUse as RustEndUse, EvConnectionState as RustEvConnectionState,
     ExecutionStage as RustExecutionStage, FluidType as RustFluidType, FuelType as RustFuelType,
-    GridExportRule as RustGridExportRule, InverterPriority as RustInverterPriority,
-    PlugInPolicy as RustPlugInPolicy, StormWatchTrigger as RustStormWatchTrigger,
-    VehicleType as RustVehicleType,
+    GridExportRule as RustGridExportRule, IdealCapacityMode as RustIdealCapacityMode,
+    InverterPriority as RustInverterPriority, PlugInPolicy as RustPlugInPolicy,
+    StormWatchTrigger as RustStormWatchTrigger, VehicleType as RustVehicleType,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyList;
@@ -498,6 +498,77 @@ impl From<PyInverterPriority> for RustInverterPriority {
             PyInverterPriority::Watt => RustInverterPriority::Watt,
             PyInverterPriority::Var => RustInverterPriority::Var,
             PyInverterPriority::Cpf => RustInverterPriority::Cpf,
+        }
+    }
+}
+
+#[pyclass(name = "IdealCapacityMode", from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PyIdealCapacityMode {
+    Auto,
+    On,
+    Off,
+}
+
+#[pymethods]
+impl PyIdealCapacityMode {
+    #[staticmethod]
+    fn auto() -> Self {
+        PyIdealCapacityMode::Auto
+    }
+
+    #[staticmethod]
+    fn on() -> Self {
+        PyIdealCapacityMode::On
+    }
+
+    #[staticmethod]
+    fn off() -> Self {
+        PyIdealCapacityMode::Off
+    }
+
+    #[staticmethod]
+    fn from_str(name: &str) -> PyResult<Self> {
+        match name.to_lowercase().as_str() {
+            "auto" => Ok(PyIdealCapacityMode::Auto),
+            "on" => Ok(PyIdealCapacityMode::On),
+            "off" => Ok(PyIdealCapacityMode::Off),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid IdealCapacityMode variant: {}",
+                name
+            ))),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("IdealCapacityMode.{:?}", self)
+    }
+
+    fn __str__(&self) -> String {
+        match self {
+            PyIdealCapacityMode::Auto => "Auto".to_string(),
+            PyIdealCapacityMode::On => "On".to_string(),
+            PyIdealCapacityMode::Off => "Off".to_string(),
+        }
+    }
+}
+
+impl From<RustIdealCapacityMode> for PyIdealCapacityMode {
+    fn from(mode: RustIdealCapacityMode) -> Self {
+        match mode {
+            RustIdealCapacityMode::Auto => PyIdealCapacityMode::Auto,
+            RustIdealCapacityMode::On => PyIdealCapacityMode::On,
+            RustIdealCapacityMode::Off => PyIdealCapacityMode::Off,
+        }
+    }
+}
+
+impl From<PyIdealCapacityMode> for RustIdealCapacityMode {
+    fn from(mode: PyIdealCapacityMode) -> Self {
+        match mode {
+            PyIdealCapacityMode::Auto => RustIdealCapacityMode::Auto,
+            PyIdealCapacityMode::On => RustIdealCapacityMode::On,
+            PyIdealCapacityMode::Off => RustIdealCapacityMode::Off,
         }
     }
 }
@@ -2082,8 +2153,44 @@ pub enum PyGridExportRule {
 
 #[pymethods]
 impl PyGridExportRule {
+    #[staticmethod]
+    fn solar_only() -> Self {
+        PyGridExportRule::SolarOnly
+    }
+
+    #[staticmethod]
+    fn unrestricted() -> Self {
+        PyGridExportRule::Unrestricted
+    }
+
+    #[staticmethod]
+    fn disabled() -> Self {
+        PyGridExportRule::Disabled
+    }
+
+    #[staticmethod]
+    fn from_str(name: &str) -> PyResult<Self> {
+        match name.to_lowercase().as_str() {
+            "solar_only" | "solaronly" => Ok(PyGridExportRule::SolarOnly),
+            "unrestricted" => Ok(PyGridExportRule::Unrestricted),
+            "disabled" => Ok(PyGridExportRule::Disabled),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid GridExportRule variant: {}",
+                name
+            ))),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!("GridExportRule.{self:?}")
+    }
+
+    fn __str__(&self) -> String {
+        match self {
+            PyGridExportRule::SolarOnly => "SolarOnly".to_string(),
+            PyGridExportRule::Unrestricted => "Unrestricted".to_string(),
+            PyGridExportRule::Disabled => "Disabled".to_string(),
+        }
     }
 }
 
