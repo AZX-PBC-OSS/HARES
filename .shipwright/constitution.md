@@ -117,20 +117,85 @@ Tickets, audit sections, and cited line numbers are starting points — not grou
 - **Read callers, tests, and the surrounding module** before touching anything. A fix that is locally correct but architecturally wrong creates more problems than it solves.
 - **Do not trust `unwrap()`-heavy or poorly-tested code** just because it is pre-existing. If you find it in files you are modifying, fix it.
 
+## Domain alignment
+
+Every implementation decision that touches code, formulas, algorithms, defaults, or units must be verified against the authoritative sources before the work is considered done. This is not optional and is not deferred to review.
+
+### What must be verified
+
+- **Formulas and equations.** Any formula or equation must be traced to a primary source — ASHRAE standard chapter and equation number, EnergyPlus Engineering Reference section, or HPXML specification section. Paraphrased or transcribed equations in tickets, comments, or prior code are starting points, not authority. Verify the equation against the actual document in `docs/eplus/` or `vendors/EnergyPlus/src/`; if the document and the source disagree, the source wins. Every formula in code must carry an inline citation to section and equation number.
+
+- **Algorithms and models.** Any simulation algorithm or sub-model (e.g. AIM-2 infiltration, RC thermal network, psychrometric calculation, equipment capacity curve) must be checked against the EnergyPlus source (`vendors/EnergyPlus/src/`) for implementation correctness and against OCHRE (`vendors/OCHRE/`) as a cross-check. Where HARES diverges from either reference, document the divergence explicitly with a rationale comment.
+
+- **Defaults and coefficients.** Any default value, fallback, or coefficient must have a named source. A default is not a guess — it is a specification value, a standard-mandated value, or a documented engineering choice. If you cannot name the source of a default, it must not exist in the code. Defaults derived from HPXML must be verified against `docs/hpxml/hpxml-elements.md` and `docs/hpxml/hpxml-data-types.md`; defaults derived from EnergyPlus must be verified against the Engineering Reference section or source code for that model.
+
+- **Units.** Every unit used in a formula, constructor, or I/O boundary must be verified against the relevant standard or specification. HPXML units must match the unit vocabulary in `docs/hpxml/hpxml-units.md`; EnergyPlus quantities must match the units used in `vendors/EnergyPlus/src/` for the corresponding model. SI unit assumptions at internal boundaries must be confirmed — do not assume a quantity is in SI because it "looks right." Check the definition.
+
+- **Enumerated values and vocabularies.** String enumerations from HPXML must be verified against `docs/hpxml/hpxml-enumerations.md`. Do not add or accept enumeration members by inference; the specification is the only authority.
+
+### How to verify
+
+1. For EnergyPlus: read the relevant section of `docs/eplus/` for the narrative, then confirm the formula or coefficient against `vendors/EnergyPlus/src/` for the implementation. `vendors/EnergyPlus/tst/` contains test cases that validate expected numeric results — use them.
+2. For OCHRE: read `vendors/OCHRE/` as a cross-check, not a specification. Where OCHRE deviates from ASHRAE or EnergyPlus without justification, treat that as a bug in OCHRE and implement correctly in HARES.
+3. For HPXML: grep `docs/hpxml/hpxml-elements.md` for the element path, `docs/hpxml/hpxml-units.md` for its unit enum and allowed values, and `docs/hpxml/hpxml-enumerations.md` for string fields. These files are grep-friendly by design.
+4. For ASHRAE: cite the standard, edition, chapter, and equation number in the comment. If the standard text is not locally available, state the citation explicitly and flag the item for review rather than proceeding on memory.
+
+### Citation format
+
+Every formula, constant, default, and algorithm in code must carry an inline source citation. The citation must name the document, edition or version, section or chapter, and equation or table number where applicable. Vague citations ("per ASHRAE" or "from EnergyPlus") are not acceptable — they cannot be verified.
+
+Acceptable:
+```rust
+// ASHRAE HoF 2021 Ch.1 Eq.30: h_fg = 2501 kJ/kg at 0°C reference temperature.
+// EnergyPlus ERM 24.1 §5.3.2 Eq.16: Q_inf = ρ·V̇·c_p·(T_out − T_zone)
+// HPXML 4.2 §3.8.2: FoundationWall/Thickness default unit is "in" when Units absent.
+```
+
+Not acceptable:
+```rust
+// from ASHRAE
+// standard value
+// EnergyPlus does this
+// per spec
+```
+
+### Scope
+
+This applies to all new code, all bug fixes, and all modifications to existing formulas or defaults. It also applies retroactively when you encounter unverified or uncited formulas in code you are modifying — if the formula is in a file you are touching, verify it and add the citation. Leaving an unverified formula in a file you have edited is a broken-window violation.
+
+---
+
 ## Physics and numerical quality
 
 ### Quality bar
 
 HARES is new code built for correctness, not a port of any existing tool. The standard is **physics done right** — not parity with any particular codebase for its own sake.
 
-Reference implementations in strict order of authority:
+### Scope: residential load profile simulation
+
+HARES targets **residential load profile simulation** — single- and multi-family homes, single thermal zones or simple multi-zone configurations, and the residential equipment categories that dominate those loads: HVAC, water heating, envelope, appliances, EVs, and distributed storage. This scope is narrower than EnergyPlus (which covers arbitrary multi-zone commercial and industrial buildings and the full equipment taxonomy that goes with them) and narrower than OCHRE (which attempts the same residential scope but with less rigour).
+
+Within that scope, **HARES must meet or exceed OCHRE** in feature coverage, physical accuracy, and numerical correctness. OCHRE is the floor, not the ceiling. Every residential sub-model that OCHRE implements — infiltration, envelope RC network, psychrometrics, equipment capacity curves, schedules, HPXML parsing — must be implemented in HARES at least as completely, and with fewer known deviations from the authoritative standards.
+
+Where EnergyPlus implements the same residential sub-model, **HARES targets EnergyPlus-level correctness**: same governing equations, same coefficients, same psychrometric basis, same reference temperatures. EnergyPlus is the closest available benchmark for "physics done right at simulation fidelity." The goal is not to reproduce EnergyPlus's C&I complexity — it is to reproduce its residential physics accuracy.
+
+**What is explicitly out of scope:**
+- Multi-zone commercial and industrial building simulation
+- Commercial HVAC equipment (VAV systems, chillers, cooling towers, commercial boilers)
+- Industrial process loads
+- Detailed daylighting and radiance calculations
+- District energy systems
+- Complex geometry and shading for non-residential structures
+
+### Reference implementations in strict order of authority
+
 1. **ASHRAE standards** (HoF, 90.1, 152, 140) — the primary authority
 2. **EnergyPlus Engineering Reference** (`docs/eplus/`) — narrative and equations grounded in the standards
 3. **EnergyPlus source code** (`vendors/EnergyPlus/src/`) — authoritative when docs are ambiguous; `vendors/EnergyPlus/tst/` for test cases
-4. **OCHRE** (`vendors/OCHRE/`) — a cross-check only; useful for discovering what choices were made and why, but OCHRE deviates from standards in documented places (e.g. h_fg at 20°C instead of 0°C) and those deviations are bugs in OCHRE, not targets for HARES to replicate
+4. **OCHRE** (`vendors/OCHRE/`) — a cross-check and feature-coverage baseline; useful for discovering what residential choices were made and why, but OCHRE deviates from standards in documented places (e.g. h_fg at 20°C instead of 0°C) and those deviations are bugs in OCHRE, not targets for HARES to replicate
 5. **HPXML 4.2 data dictionary** (`docs/hpxml/`) — authoritative for HPXML element structure, field names, default units, and enumerated values; generated from the XSD schema at `hpxmlwg/hpxml @ v4.2`
 
-Use OCHRE as a sanity check on direction, not as a specification. Where OCHRE does something wrong — deviates from ASHRAE without justification, uses a suboptimal approximation, silently substitutes a default — do it correctly in HARES and document the divergence. There are no legacy paths to maintain and no back-compat constraints. Do it right.
+Use OCHRE as a minimum-coverage bar and a sanity check on direction, not as a specification. Where OCHRE does something wrong — deviates from ASHRAE without justification, uses a suboptimal approximation, silently substitutes a default — do it correctly in HARES and document the divergence. There are no legacy paths to maintain and no back-compat constraints. Do it right.
 
 ### Loud errors at boundaries
 
@@ -177,9 +242,23 @@ These files are grep-friendly. The element table in `hpxml-elements.md` has one 
 
 Test observable behaviour — inputs, outputs, visible state transitions, port contributions. Do not test internal wiring. A test that breaks on a safe refactor is a broken test.
 
+**The refactoring criterion.** A legitimate behaviour-preserving refactor — renaming a private function, reordering a computation, extracting a helper, changing a log message — must never break a test. If a test would break under such a change, it is testing the wrong thing. Delete or rewrite it.
+
 Prefer integration tests that exercise real paths end-to-end over unit tests that mock every collaborator. One integration test that exercises parse → construct → simulate → assert often replaces five mocked unit tests and gives more signal.
 
 Every bug fix must be accompanied by a regression test that would have caught the bug before the fix. The test asserts correct post-fix behaviour — not merely that the code compiles.
+
+### What not to test
+
+**Log output is never a valid test target.** It is never acceptable to assert on `tracing` output, captured log strings, `warn!`/`error!` message text, or any other diagnostic emission. Log messages are implementation detail — they communicate intent to a human operator, not a contract to a caller. They change wording, gain or lose fields, move between log levels, and get removed entirely during legitimate refactors. A test that captures and asserts on log output breaks on every such change while providing zero signal about whether the simulation is correct.
+
+The correct approach: if a condition is important enough to verify in a test, make it observable through the return value or the output state. Return a typed error instead of logging a warning. Surface a field in the output struct. Emit a port contribution that can be inspected. If you cannot make the condition observable through a real interface, that is a signal the interface needs to be improved — not a reason to reach for log capture.
+
+Specifically forbidden:
+- Any test that uses `tracing_test`, `tracing-test`, `tracing_subscriber` test utilities, or any other mechanism to capture and assert on log output
+- Any test that asserts on warning or error message text produced by `warn!`, `error!`, `info!`, or `debug!`
+- Any `assert!(output.contains("some log string"))` or equivalent pattern
+- Any test written primarily to verify that a `warn!` or `error!` call was reached rather than verifying the computation's output
 
 ### Test naming
 

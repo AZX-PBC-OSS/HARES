@@ -1345,7 +1345,61 @@ fn parse_boundary_area(
 ) -> Result<f64, HpxmlError> {
     let area = parse_value_with_units(node.child("Area"), ValueKind::Area);
     match boundary_type {
-        BoundaryType::FoundationWall | BoundaryType::Slab => Ok(area.unwrap_or(0.0)),
+        BoundaryType::FoundationWall => {
+            if let Some(a) = area {
+                if a <= 0.0 {
+                    return Err(HpxmlError::Parse(format!(
+                        "foundation wall '{}' has non-positive area: {}",
+                        id, a
+                    )));
+                }
+                return Ok(a);
+            }
+            let length = parse_value_with_units(node.child("Length"), ValueKind::Length);
+            let height = parse_value_with_units(node.child("Height"), ValueKind::Length);
+            match (length, height) {
+                (Some(l), Some(h)) if l > 0.0 && h > 0.0 => {
+                    // HPXML 4.2: FoundationWall/Length = "Total length of foundation wall" [ft];
+                    // FoundationWall/Height = "Total height in feet of foundation wall" [ft].
+                    // Both are orthogonal horizontal/vertical dimensions of the rectangular
+                    // wall face, so Area = Length × Height.
+                    let derived = l * h;
+                    tracing::debug!(
+                        boundary_id = id,
+                        length_m = l,
+                        height_m = h,
+                        derived_area_m2 = derived,
+                        "Area element missing; derived from Length × Height"
+                    );
+                    Ok(derived)
+                }
+                _ => {
+                    tracing::warn!(
+                        boundary_id = id,
+                        boundary_type = boundary_type_label(boundary_type),
+                        "Area element missing; defaulting to 0.0 — heat loss through this surface will be zero"
+                    );
+                    Ok(0.0)
+                }
+            }
+        }
+        BoundaryType::Slab => {
+            if let Some(a) = area {
+                if a <= 0.0 {
+                    return Err(HpxmlError::Parse(format!(
+                        "slab '{}' has non-positive area: {}",
+                        id, a
+                    )));
+                }
+                return Ok(a);
+            }
+            tracing::warn!(
+                boundary_id = id,
+                boundary_type = boundary_type_label(boundary_type),
+                "Area element missing; defaulting to 0.0 — heat loss through this surface will be zero"
+            );
+            Ok(0.0)
+        }
         _ => {
             let area_m2 = area.ok_or_else(|| {
                 HpxmlError::Parse(format!(
@@ -3087,6 +3141,133 @@ mod tests {
         assert!(matches!(err, HpxmlError::Parse(_)));
         let msg = err.to_string();
         assert!(msg.contains("wall 'Wall1' is missing required Area element"));
+    }
+
+    #[test]
+    fn foundation_wall_missing_area_defaults_to_zero() {
+        let xml = SAMPLE_XML.replace("<Area units=\"ft2\">60</Area>", "");
+        let building = parse_building(&xml).expect("foundation wall without Area should parse");
+        let fw_boundary = building
+            .boundaries
+            .iter()
+            .find(|b| matches!(b.boundary_type, BoundaryType::FoundationWall));
+        assert!(
+            fw_boundary.is_some(),
+            "foundation wall boundary should be present"
+        );
+        assert_eq!(
+            fw_boundary.unwrap().area_m2,
+            0.0,
+            "FoundationWall with missing Area should default to 0.0"
+        );
+    }
+
+    #[test]
+    fn foundation_wall_area_derived_from_length_and_height() {
+        let xml = SAMPLE_XML.replace(
+            "<Area units=\"ft2\">60</Area>",
+            "<Length units=\"ft\">30</Length><Height units=\"ft\">8</Height>",
+        );
+        let building =
+            parse_building(&xml).expect("foundation wall with Length+Height should parse");
+        let fw = building
+            .boundaries
+            .iter()
+            .find(|b| matches!(b.boundary_type, BoundaryType::FoundationWall))
+            .expect("foundation wall boundary should be present");
+        let length_m = 30.0 * 0.3048;
+        let height_m = 8.0 * 0.3048;
+        let expected = length_m * height_m;
+        assert!(
+            (fw.area_m2 - expected).abs() < 1e-6,
+            "derived area: got {}, expected {} (30ft × 8ft)",
+            fw.area_m2,
+            expected
+        );
+        assert!(fw.area_m2 > 0.0, "derived area must be positive");
+    }
+
+    #[test]
+    fn foundation_wall_non_positive_area_errors() {
+        let xml = SAMPLE_XML.replace(
+            "<Area units=\"ft2\">60</Area>",
+            "<Area units=\"ft2\">-5</Area>",
+        );
+        let err =
+            parse_building(&xml).expect_err("foundation wall with negative area should error");
+        assert!(matches!(err, HpxmlError::Parse(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("foundation wall 'FoundationWall1' has non-positive area"));
+    }
+
+    #[test]
+    fn slab_missing_area_defaults_to_zero() {
+        let xml = SAMPLE_XML.replace("<Area units=\"ft2\">80</Area>", "");
+        let building = parse_building(&xml).expect("slab without Area should parse");
+        let slab_boundary = building
+            .boundaries
+            .iter()
+            .find(|b| matches!(b.boundary_type, BoundaryType::Slab));
+        assert!(slab_boundary.is_some(), "slab boundary should be present");
+        assert_eq!(
+            slab_boundary.unwrap().area_m2,
+            0.0,
+            "Slab with missing Area should default to 0.0"
+        );
+    }
+
+    #[test]
+    fn slab_non_positive_area_errors() {
+        let xml = SAMPLE_XML.replace(
+            "<Area units=\"ft2\">80</Area>",
+            "<Area units=\"ft2\">0</Area>",
+        );
+        let err = parse_building(&xml).expect_err("slab with zero area should error");
+        assert!(matches!(err, HpxmlError::Parse(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("slab 'Slab1' has non-positive area: 0"));
+    }
+
+    #[test]
+    fn roof_missing_area_returns_error() {
+        let xml = SAMPLE_XML.replace("<Area units=\"ft2\">120</Area>", "");
+        let err = parse_building(&xml).expect_err("expected missing roof area failure");
+        assert!(matches!(err, HpxmlError::Parse(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("roof 'Roof1' is missing required Area element"));
+    }
+
+    #[test]
+    fn floor_missing_area_returns_error() {
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <FrameFloors>
+          <FrameFloor>
+            <SystemIdentifier id="Floor1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+          </FrameFloor>
+        </FrameFloors>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let err = parse_building(xml).expect_err("expected missing floor area failure");
+        assert!(matches!(err, HpxmlError::Parse(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("floor 'Floor1' is missing required Area element"));
     }
 
     #[test]
