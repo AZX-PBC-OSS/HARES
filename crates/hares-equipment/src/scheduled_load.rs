@@ -26,15 +26,15 @@ const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
 const KEY_CONVECTIVE_GAIN_FRACTION: &str = "convective_gain_fraction";
 const KEY_RADIATIVE_GAIN_FRACTION: &str = "radiative_gain_fraction";
 const KEY_LATENT_GAIN_FRACTION: &str = "latent_gain_fraction";
-const KEY_ZIP_Z: &str = "zip_z";
-const KEY_ZIP_I: &str = "zip_i";
-const KEY_ZIP_P: &str = "zip_p";
-const KEY_ZIP_ZQ: &str = "zip_zq";
-const KEY_ZIP_IQ: &str = "zip_iq";
-const KEY_ZIP_PQ: &str = "zip_pq";
-const KEY_ZIP_PF: &str = "zip_pf";
+pub(crate) const KEY_ZIP_Z: &str = "zip_z";
+pub(crate) const KEY_ZIP_I: &str = "zip_i";
+pub(crate) const KEY_ZIP_P: &str = "zip_p";
+pub(crate) const KEY_ZIP_ZQ: &str = "zip_zq";
+pub(crate) const KEY_ZIP_IQ: &str = "zip_iq";
+pub(crate) const KEY_ZIP_PQ: &str = "zip_pq";
+pub(crate) const KEY_ZIP_PF: &str = "zip_pf";
 // Reserved for configurable reference voltage in the ZIP model.
-const KEY_ZIP_V0: &str = "zip_v0";
+pub(crate) const KEY_ZIP_V0: &str = "zip_v0";
 const KEY_GAS_SCHEDULE_IS_W: &str = "gas_schedule_is_w";
 const KEY_POWER_SCHEDULE_SOURCE: &str = "power_schedule_source";
 const KEY_POWER_SCHEDULE_COL: &str = "power_schedule_col";
@@ -50,29 +50,30 @@ const KEY_GAS_PROFILE_WEEKDAY: &str = "gas_profile_weekday";
 const KEY_GAS_PROFILE_WEEKEND: &str = "gas_profile_weekend";
 const KEY_GAS_PROFILE_MONTH: &str = "gas_profile_month";
 const KEY_GAS_CONSTANT: &str = "gas_constant";
-const ZIP_SUM_TARGET: f64 = 1.0;
-const ZIP_SUM_TOLERANCE: f64 = 1e-9;
+pub(crate) const ZIP_SUM_TARGET: f64 = 1.0;
+pub(crate) const ZIP_SUM_TOLERANCE: f64 = 1e-9;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ZipCoefficients {
-    /// Real-power impedance fraction.
-    z: f64,
-    /// Real-power current fraction.
-    i: f64,
-    /// Real-power constant-power fraction.
-    p_coeff: f64,
-    /// Reference voltage for ZIP normalization (per-unit). Default 1.0 means no
-    /// normalisation relative to rated conditions.
-    /// OCHRE Equipment.py: v0 is the voltage at which the ZIP model was calibrated.
-    v0: f64,
-    /// Reactive-power impedance fraction (Zq in OCHRE ZIP Parameters.csv).
-    zq: f64,
-    /// Reactive-power current fraction (Iq).
-    iq: f64,
-    /// Reactive-power constant fraction (Pq).
-    pq: f64,
-    /// Power-factor multiplier: reactive_power = real_power * pf * (Zq*v² + Iq*v + Pq).
-    pf: f64,
+pub(crate) struct ZipCoefficients {
+    pub(crate) z: f64,
+    pub(crate) i: f64,
+    pub(crate) p_coeff: f64,
+    pub(crate) v0: f64,
+    pub(crate) zq: f64,
+    pub(crate) iq: f64,
+    pub(crate) pq: f64,
+    pub(crate) pf: f64,
+}
+
+impl ZipCoefficients {
+    pub(crate) fn apply(&self, p_kw: f64, voltage_pu: f64) -> (f64, f64) {
+        let v_norm = voltage_pu / self.v0;
+        let zip_multiplier = self.z * v_norm * v_norm + self.i * v_norm + self.p_coeff;
+        let real_kw = p_kw * zip_multiplier;
+        let reactive_base = self.zq * v_norm * v_norm + self.iq * v_norm + self.pq;
+        let reactive_kvar = real_kw * self.pf * reactive_base;
+        (real_kw, reactive_kvar)
+    }
 }
 
 impl Default for ZipCoefficients {
@@ -100,7 +101,7 @@ impl Default for ZipCoefficients {
 /// - Hajagos & Danai, IEEE Trans. Power Systems 13(2), 1998
 /// - Lu et al., IEEE PESGM, 2008
 /// - Arif et al., IEEE Trans. Smart Grid, 2013
-fn zip_coefficients_from_class(class_name: &str) -> Option<ZipCoefficients> {
+pub(crate) fn zip_coefficients_from_class(class_name: &str) -> Option<ZipCoefficients> {
     // Lighting (Bokhari et al. 2014)
     const LIGHTING: ZipCoefficients = ZipCoefficients {
         z: 0.54,
@@ -279,7 +280,7 @@ fn zip_coefficients_from_class(class_name: &str) -> Option<ZipCoefficients> {
         "Clothes Washer" => Some(CLOTHES_WASHER),
         "Clothes Dryer" => Some(CLOTHES_DRYER),
         "Dishwasher" => Some(DISHWASHER),
-        "Range" => Some(RANGE),
+        "Range" | "Cooking Range" => Some(RANGE),
         "ASHP Heater" | "MSHP Heater" => Some(HVAC_HEAT_PUMP),
         "Electric Baseboard" | "Electric Furnace" | "Electric Boiler" => Some(RESISTANCE),
         "Air Conditioner" | "ASHP Cooler" | "MSHP Cooler" | "Room AC" => Some(HVAC_COOLING),
@@ -736,14 +737,7 @@ impl Equipment for ScheduledLoad {
                 };
 
                 let (real_kw, reactive_kvar) = if scheduled_power_kw > 0.0 {
-                    let v_norm = env.grid.voltage_pu / self.zip.v0;
-                    let zip_multiplier =
-                        self.zip.z * v_norm * v_norm + self.zip.i * v_norm + self.zip.p_coeff;
-                    let real_kw = scheduled_power_kw * zip_multiplier;
-                    let reactive_base =
-                        self.zip.zq * v_norm * v_norm + self.zip.iq * v_norm + self.zip.pq;
-                    let reactive_kvar = real_kw * self.zip.pf * reactive_base;
-                    (real_kw, reactive_kvar)
+                    self.zip.apply(scheduled_power_kw, env.grid.voltage_pu)
                 } else {
                     (0.0, 0.0)
                 };
@@ -1097,7 +1091,7 @@ fn scheduled_load_telemetry_fields() -> Vec<TelemetryField> {
 /// Resolve ZIP coefficients by merging type-specific defaults with user-supplied
 /// config key overrides. Each config key (`zip_z`, `zip_i`, ...) overrides the
 /// corresponding field in `base` only when explicitly present in the config map.
-fn parse_zip_coefficients(
+pub(crate) fn parse_zip_coefficients(
     config: &EquipmentConfig,
     base: ZipCoefficients,
 ) -> crate::Result<ZipCoefficients> {

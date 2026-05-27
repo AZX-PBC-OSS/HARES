@@ -21,6 +21,10 @@ use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
     parse_usize, parse_zone_id, restore_schedule_source_state,
 };
+use crate::scheduled_load::{
+    ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE, ZipCoefficients, parse_zip_coefficients,
+    zip_coefficients_from_class,
+};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use crate::config::KEY_EQUIPMENT_ID;
@@ -176,6 +180,8 @@ pub struct EventBasedLoad {
     current_step: usize,
     /// Length of the schedule for wrapping.
     schedule_len: usize,
+
+    zip: Option<ZipCoefficients>,
 }
 
 /// Multi-phase wet appliance cycle with stochastic starts.
@@ -216,6 +222,8 @@ pub struct WetAppliance {
     current_step: usize,
     /// Length of the schedule for wrapping.
     schedule_len: usize,
+
+    zip: Option<ZipCoefficients>,
 }
 
 impl EventBasedLoad {
@@ -266,6 +274,7 @@ impl EventBasedLoad {
             event_cursor: 0,
             current_step: 0,
             schedule_len: 0,
+            zip: None,
         }
     }
 
@@ -358,7 +367,36 @@ impl EventBasedLoad {
         &mut self,
         ports: &mut PortSlots,
         month_scale: f64,
+        voltage_pu: f64,
     ) -> std::result::Result<(), HaresError> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if let Some(zip) = &self.zip {
+            let real_sum = zip.z + zip.i + zip.p_coeff;
+            assert!(
+                (real_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
+                "EventBasedLoad '{}': ZIP real-power coefficients do not sum to 1.0 \
+                 (z={}, i={}, p_coeff={}, sum={})",
+                self.descriptor.name,
+                zip.z,
+                zip.i,
+                zip.p_coeff,
+                real_sum,
+            );
+            if zip.pf != 0.0 {
+                let reactive_sum = zip.zq + zip.iq + zip.pq;
+                assert!(
+                    (reactive_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
+                    "EventBasedLoad '{}': ZIP reactive coefficients do not sum to 1.0 \
+                     (zq={}, iq={}, pq={}, sum={})",
+                    self.descriptor.name,
+                    zip.zq,
+                    zip.iq,
+                    zip.pq,
+                    reactive_sum,
+                );
+            }
+        }
+
         let active_now = self.phase == EventPhase::Active;
         // PowerSetpoint overrides the configured active_power_kw for this step,
         // but only when the equipment is actually in an active event phase.
@@ -385,17 +423,27 @@ impl EventBasedLoad {
         } else {
             0.0
         };
-        let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
+        let raw_electric_kw = if is_fuel { 0.0 } else { active_power_kw };
+
+        let (electric_power_kw, reactive_power_kvar) = if raw_electric_kw > 0.0 {
+            if let Some(zip) = &self.zip {
+                zip.apply(raw_electric_kw, voltage_pu)
+            } else {
+                (raw_electric_kw, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
 
         // Thermal gains come from all input energy regardless of fuel type.
-        let gain_source_w = active_power_kw * 1_000.0;
+        let gain_source_w = electric_power_kw * 1_000.0 + fuel_consumption_w;
         let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
         let latent_gain_w = gain_source_w * self.latent_gain_fraction;
 
         if electric_power_kw != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_kw: electric_power_kw,
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
 
@@ -419,6 +467,8 @@ impl EventBasedLoad {
         }
 
         self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
         self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
@@ -426,7 +476,11 @@ impl EventBasedLoad {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_power_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::REACTIVE)
+                    .then_some(reactive_power_kvar),
                 fuel_w: self
                     .descriptor
                     .core_capabilities
@@ -514,6 +568,36 @@ impl Equipment for EventBasedLoad {
             )));
         }
 
+        // Resolve ZIP coefficients from per-type defaults with user overrides.
+        let class_name = config.ochre_class.as_str();
+        self.zip = match zip_coefficients_from_class(class_name) {
+            Some(base) => {
+                let resolved = parse_zip_coefficients(config, base)?;
+                #[cfg(feature = "observe")]
+                tracing::debug!(
+                    equipment_type = class_name,
+                    instance = %self.descriptor.name,
+                    z = resolved.z,
+                    i = resolved.i,
+                    p_coeff = resolved.p_coeff,
+                    zq = resolved.zq,
+                    iq = resolved.iq,
+                    pq = resolved.pq,
+                    pf = resolved.pf,
+                    "resolved ZIP coefficients",
+                );
+                Some(resolved)
+            }
+            None => {
+                tracing::warn!(
+                    equipment_type = class_name,
+                    instance = %self.descriptor.name,
+                    "no type-specific ZIP coefficients; reactive power will be zero",
+                );
+                None
+            }
+        };
+
         self.month_multipliers = parse_month_multipliers(config);
 
         self.fuel_type = match config.get_str("fuel_type") {
@@ -523,6 +607,11 @@ impl Equipment for EventBasedLoad {
         };
         self.descriptor.fuel = self.fuel_type;
         self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
+            | if self.zip.is_some() {
+                CoreCapabilities::REACTIVE
+            } else {
+                CoreCapabilities::empty()
+            }
             | if has_combustion_fuel(self.fuel_type) {
                 CoreCapabilities::FUEL
             } else {
@@ -577,6 +666,45 @@ impl Equipment for EventBasedLoad {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         self.apply_overrides();
+
+        if env.grid.voltage_pu == 0.0 {
+            self.telemetry.set(tk::ACTIVE_POWER_KW, 0.0);
+            self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
+            self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
+            self.telemetry.set(tk::LATENT_GAIN_W, 0.0);
+            self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
+            self.telemetry.set(tk::STATE, phase_ordinal(self.phase));
+            self.core_output = CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_kvar: self
+                        .descriptor
+                        .core_capabilities
+                        .contains(CoreCapabilities::REACTIVE)
+                        .then_some(0.0),
+                    fuel_w: self
+                        .descriptor
+                        .core_capabilities
+                        .contains(CoreCapabilities::FUEL)
+                        .then_some(FuelPower {
+                            fuel_type: self.fuel_type,
+                            consumption_w: 0.0,
+                        }),
+                    thermal_output_w: None,
+                    sensible_cooling_w: None,
+                    latent_cooling_w: None,
+                },
+                state: CoreState {
+                    operating_mode: None,
+                    soc: None,
+                    speed_index: None,
+                    setpoint_c: None,
+                },
+                performance: CorePerformance::default(),
+            };
+            return Ok(());
+        }
+
         let dt_s = dt.as_secs_f64();
         if self.delay_remaining_s > 0.0 {
             self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
@@ -622,7 +750,7 @@ impl Equipment for EventBasedLoad {
             .month_multipliers
             .map(|m| m[env.current_time.month0() as usize])
             .unwrap_or(1.0);
-        self.update_outputs(ports, month_scale)?;
+        self.update_outputs(ports, month_scale, env.grid.voltage_pu)?;
 
         if self.extracted_events.is_empty() {
             self.advance_phase_timer(dt_s);
@@ -786,6 +914,7 @@ impl WetAppliance {
             event_cursor: 0,
             current_step: 0,
             schedule_len: 0,
+            zip: None,
         }
     }
 
@@ -869,7 +998,36 @@ impl WetAppliance {
         &mut self,
         ports: &mut PortSlots,
         month_scale: f64,
+        voltage_pu: f64,
     ) -> std::result::Result<(), HaresError> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if let Some(zip) = &self.zip {
+            let real_sum = zip.z + zip.i + zip.p_coeff;
+            assert!(
+                (real_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
+                "WetAppliance '{}': ZIP real-power coefficients do not sum to 1.0 \
+                 (z={}, i={}, p_coeff={}, sum={})",
+                self.descriptor.name,
+                zip.z,
+                zip.i,
+                zip.p_coeff,
+                real_sum,
+            );
+            if zip.pf != 0.0 {
+                let reactive_sum = zip.zq + zip.iq + zip.pq;
+                assert!(
+                    (reactive_sum - ZIP_SUM_TARGET).abs() <= ZIP_SUM_TOLERANCE,
+                    "WetAppliance '{}': ZIP reactive coefficients do not sum to 1.0 \
+                     (zq={}, iq={}, pq={}, sum={})",
+                    self.descriptor.name,
+                    zip.zq,
+                    zip.iq,
+                    zip.pq,
+                    reactive_sum,
+                );
+            }
+        }
+
         let active_power_kw = if self.active {
             // In deterministic mode, use extracted event power directly.
             // In stochastic mode, use configured phase power × n_units.
@@ -891,16 +1049,26 @@ impl WetAppliance {
         } else {
             0.0
         };
-        let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
+        let raw_electric_kw = if is_fuel { 0.0 } else { active_power_kw };
 
-        let gain_source_w = active_power_kw * 1_000.0;
+        let (electric_power_kw, reactive_power_kvar) = if raw_electric_kw > 0.0 {
+            if let Some(zip) = &self.zip {
+                zip.apply(raw_electric_kw, voltage_pu)
+            } else {
+                (raw_electric_kw, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
+
+        let gain_source_w = electric_power_kw * 1_000.0 + fuel_consumption_w;
         let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
         let latent_gain_w = gain_source_w * self.latent_gain_fraction;
 
         if electric_power_kw != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_kw: electric_power_kw,
-                reactive_power_kvar: 0.0,
+                reactive_power_kvar,
             })?;
         }
 
@@ -934,6 +1102,8 @@ impl WetAppliance {
         }
 
         self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
         self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
         self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
@@ -944,7 +1114,11 @@ impl WetAppliance {
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_power_kw.max(0.0))),
-                reactive_power_kvar: None,
+                reactive_power_kvar: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::REACTIVE)
+                    .then_some(reactive_power_kvar),
                 fuel_w: self
                     .descriptor
                     .core_capabilities
@@ -1029,6 +1203,36 @@ impl Equipment for WetAppliance {
             )));
         }
 
+        // Resolve ZIP coefficients from per-type defaults with user overrides.
+        let class_name = config.ochre_class.as_str();
+        self.zip = match zip_coefficients_from_class(class_name) {
+            Some(base) => {
+                let resolved = parse_zip_coefficients(config, base)?;
+                #[cfg(feature = "observe")]
+                tracing::debug!(
+                    equipment_type = class_name,
+                    instance = %self.descriptor.name,
+                    z = resolved.z,
+                    i = resolved.i,
+                    p_coeff = resolved.p_coeff,
+                    zq = resolved.zq,
+                    iq = resolved.iq,
+                    pq = resolved.pq,
+                    pf = resolved.pf,
+                    "resolved ZIP coefficients",
+                );
+                Some(resolved)
+            }
+            None => {
+                tracing::warn!(
+                    equipment_type = class_name,
+                    instance = %self.descriptor.name,
+                    "no type-specific ZIP coefficients; reactive power will be zero",
+                );
+                None
+            }
+        };
+
         self.month_multipliers = parse_month_multipliers(config);
 
         self.fuel_type = match config.get_str("fuel_type") {
@@ -1037,6 +1241,17 @@ impl Equipment for WetAppliance {
                 .ok_or_else(|| HaresError::Equipment(format!("unrecognised fuel_type: {raw}")))?,
         };
         self.descriptor.fuel = self.fuel_type;
+        self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
+            | if self.zip.is_some() {
+                CoreCapabilities::REACTIVE
+            } else {
+                CoreCapabilities::empty()
+            }
+            | if has_combustion_fuel(self.fuel_type) {
+                CoreCapabilities::FUEL
+            } else {
+                CoreCapabilities::empty()
+            };
 
         let total_cycle_duration_s: f64 = self.phases.iter().map(|p| p.duration_s).sum();
         self.hot_water_draw_rate_kg_s = if total_cycle_duration_s > 0.0 {
@@ -1103,6 +1318,48 @@ impl Equipment for WetAppliance {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         self.apply_overrides();
+
+        if env.grid.voltage_pu == 0.0 {
+            self.telemetry.set(tk::ACTIVE_POWER_KW, 0.0);
+            self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
+            self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
+            self.telemetry.set(tk::LATENT_GAIN_W, 0.0);
+            self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
+            self.telemetry.set(
+                tk::CYCLE_PHASE,
+                cycle_phase_ordinal(self.active, self.phase_index),
+            );
+            self.core_output = CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_kvar: self
+                        .descriptor
+                        .core_capabilities
+                        .contains(CoreCapabilities::REACTIVE)
+                        .then_some(0.0),
+                    fuel_w: self
+                        .descriptor
+                        .core_capabilities
+                        .contains(CoreCapabilities::FUEL)
+                        .then_some(FuelPower {
+                            fuel_type: self.fuel_type,
+                            consumption_w: 0.0,
+                        }),
+                    thermal_output_w: None,
+                    sensible_cooling_w: None,
+                    latent_cooling_w: None,
+                },
+                state: CoreState {
+                    operating_mode: None,
+                    soc: None,
+                    speed_index: None,
+                    setpoint_c: None,
+                },
+                performance: CorePerformance::default(),
+            };
+            return Ok(());
+        }
+
         let dt_s = dt.as_secs_f64();
         if self.delay_remaining_s > 0.0 {
             self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
@@ -1145,7 +1402,7 @@ impl Equipment for WetAppliance {
             .month_multipliers
             .map(|m| m[env.current_time.month0() as usize])
             .unwrap_or(1.0);
-        self.update_outputs(ports, month_scale)?;
+        self.update_outputs(ports, month_scale, env.grid.voltage_pu)?;
         if self.extracted_events.is_empty() {
             self.advance_cycle(dt_s);
         }
@@ -1549,8 +1806,9 @@ fn ports_for_zone(zone: Option<ZoneId>) -> Vec<PortDeclaration> {
 }
 
 fn default_event_load_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(5);
+    let mut telemetry = Telemetry::with_capacity(6);
     telemetry.insert(tk::ACTIVE_POWER_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
     telemetry.insert(tk::LATENT_GAIN_W, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
@@ -1559,8 +1817,9 @@ fn default_event_load_telemetry() -> Telemetry {
 }
 
 fn default_wet_appliance_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(6);
+    let mut telemetry = Telemetry::with_capacity(7);
     telemetry.insert(tk::ACTIVE_POWER_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
     telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
     telemetry.insert(tk::LATENT_GAIN_W, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
@@ -1574,6 +1833,11 @@ fn event_load_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ACTIVE_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Active electrical power draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kvar".to_string(),
+            description: "Reactive power draw".to_string(),
         },
         TelemetryField {
             name: tk::SENSIBLE_GAIN_W.to_string(),
@@ -1606,6 +1870,11 @@ fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
             description: "Active electrical power draw".to_string(),
         },
         TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
+            unit: "kvar".to_string(),
+            description: "Reactive power draw".to_string(),
+        },
+        TelemetryField {
             name: tk::SENSIBLE_GAIN_W.to_string(),
             unit: "W".to_string(),
             description: "Sensible thermal gain to assigned zone".to_string(),
@@ -1635,8 +1904,8 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, DomainUpdate, EnvironmentState, ExecutionStage, FuelType, GridState,
-        PortSlots, PortType, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
+        ControlSignal, CoreCapabilities, DomainUpdate, EnvironmentState, ExecutionStage, FuelType,
+        GridState, PortSlots, PortType, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
         telemetry_keys as tk,
     };
 
@@ -3298,6 +3567,296 @@ mod tests {
         assert!(
             err.to_string().contains("exceeds 1.0"),
             "expected 'exceeds 1.0' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn event_based_load_with_zip_produces_reactive_power_under_voltage_deviation() {
+        let mut env = base_env();
+        let config = event_config("zip_event", "Clothes Washer");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        assert!(
+            eq.zip.is_some(),
+            "EventBasedLoad 'Clothes Washer' should have type-specific ZIP coefficients"
+        );
+
+        // At nominal voltage (1.0 pu), ZIP should produce reactive power
+        // proportional to real power × pf.
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let real_kw = slots.electrical.load_power_kw;
+        let reactive_kvar = slots.electrical.reactive_power_kvar;
+        assert!(real_kw > 0.0, "expected non-zero real power");
+        assert!(
+            reactive_kvar > 0.0,
+            "expected non-zero reactive power at nominal voltage, got {reactive_kvar}"
+        );
+        // Clothes Washer has pf=0.65, so reactive should be roughly real * pf
+        // (at v=1.0, multiplier=1.0 and base=1.0, so reactive = real * pf * 1.0).
+        let expected_reactive = real_kw * 0.65;
+        assert!(
+            (reactive_kvar - expected_reactive).abs() < 1e-9,
+            "expected reactive {expected_reactive} ≈ real × 0.65, got {reactive_kvar}"
+        );
+
+        // Test at sag voltage (0.95 pu) with a fresh instance.
+        let mut env2 = base_env();
+        env2.grid.voltage_pu = 0.95;
+        let mut eq2 = EventBasedLoad::new(config.clone());
+        eq2.init(&config, &env2).unwrap();
+        let mut slots2 = PortSlots::from_declarations(eq2.ports());
+        set_schedule_payload(&mut env2, vec![1.0, 1.0]);
+        eq2.step(&env2, Duration::from_secs(60), &mut slots2)
+            .unwrap();
+        let reactive_sag = slots2.electrical.reactive_power_kvar;
+        assert!(
+            reactive_sag > 0.0,
+            "expected non-zero reactive power at sag voltage, got {reactive_sag}"
+        );
+        assert!(
+            (reactive_sag - reactive_kvar).abs() > 1e-9,
+            "reactive power should differ between nominal ({reactive_kvar}) and sag ({reactive_sag})"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_with_zip_produces_reactive_power_under_voltage_deviation() {
+        let mut env = base_env();
+        let config = wet_config("zip_washer", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        assert!(
+            eq.zip.is_some(),
+            "WetAppliance 'Clothes Washer' should have type-specific ZIP coefficients"
+        );
+
+        // At nominal voltage, ZIP should produce reactive power.
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let reactive_at_nominal = slots.electrical.reactive_power_kvar;
+        assert!(
+            reactive_at_nominal > 0.0,
+            "expected non-zero reactive power at nominal voltage, got {reactive_at_nominal}"
+        );
+
+        // At sag voltage (0.95 pu), reactive power should differ.
+        slots.zero();
+        env.current_time += ChronoDuration::minutes(1);
+        env.grid.voltage_pu = 0.95;
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let reactive_at_sag = slots.electrical.reactive_power_kvar;
+        assert!(
+            reactive_at_sag > 0.0,
+            "expected non-zero reactive power at sag voltage, got {reactive_at_sag}"
+        );
+        assert!(
+            (reactive_at_sag - reactive_at_nominal).abs() > 1e-9,
+            "reactive power should differ between nominal ({reactive_at_nominal}) and sag ({reactive_at_sag})"
+        );
+    }
+
+    #[test]
+    fn event_based_load_without_zip_produces_zero_reactive_power() {
+        let mut env = base_env();
+        let config = event_config("no_zip_event", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        assert!(
+            eq.zip.is_none(),
+            "EventBasedLoad 'EventBasedLoad' should have no type-specific ZIP coefficients"
+        );
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.reactive_power_kvar.abs() < 1e-12,
+            "expected zero reactive power without ZIP, got {}",
+            slots.electrical.reactive_power_kvar
+        );
+    }
+
+    #[test]
+    fn clothes_washer_reactive_power_changes_with_voltage() {
+        let mut env = base_env();
+        env.grid.voltage_pu = 1.0;
+
+        let config = wet_config("washer_v", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        // Nominal voltage.
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let power_nominal = slots.electrical.load_power_kw;
+        let reactive_nominal = slots.electrical.reactive_power_kvar;
+
+        // Sag voltage.
+        env.current_time += ChronoDuration::minutes(1);
+        env.grid.voltage_pu = 0.90;
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let power_sag = slots.electrical.load_power_kw;
+        let reactive_sag = slots.electrical.reactive_power_kvar;
+
+        assert!(power_nominal > 0.0, "expected non-zero real power");
+        assert!(
+            reactive_nominal > 0.0,
+            "expected non-zero reactive power at nominal"
+        );
+        assert!(power_sag > 0.0, "expected non-zero real power at sag");
+        assert!(
+            reactive_sag > 0.0,
+            "expected non-zero reactive power at sag"
+        );
+
+        // Real power should change with voltage due to ZIP coefficients.
+        assert!(
+            (power_sag - power_nominal).abs() > 1e-12,
+            "real power should differ between nominal ({power_nominal}) and sag ({power_sag})"
+        );
+        assert!(
+            (reactive_sag - reactive_nominal).abs() > 1e-12,
+            "reactive power should differ between nominal ({reactive_nominal}) and sag ({reactive_sag})"
+        );
+    }
+
+    #[test]
+    fn event_based_load_thermal_gain_varies_with_zip_voltage() {
+        // Thermal gains must use ZIP-adjusted real power, not pre-ZIP nominal.
+        // At sag voltage, real power drops → thermal gain must also drop.
+        let mut env_nominal = base_env();
+        env_nominal.grid.voltage_pu = 1.0;
+        let config = event_config("zip_thermal", "Clothes Washer");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env_nominal).unwrap();
+        assert!(
+            eq.zip.is_some(),
+            "Clothes Washer must have ZIP coefficients"
+        );
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env_nominal, vec![1.0, 1.0]);
+        eq.step(&env_nominal, Duration::from_secs(60), &mut slots)
+            .unwrap();
+        let thermal_nominal = slots
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .expect("thermal port must exist")
+            .sensible_gain_w;
+
+        let mut env_sag = base_env();
+        env_sag.grid.voltage_pu = 0.90;
+        let mut eq_sag = EventBasedLoad::new(config.clone());
+        eq_sag.init(&config, &env_sag).unwrap();
+        let mut slots_sag = PortSlots::from_declarations(eq_sag.ports());
+        set_schedule_payload(&mut env_sag, vec![1.0, 1.0]);
+        eq_sag
+            .step(&env_sag, Duration::from_secs(60), &mut slots_sag)
+            .unwrap();
+        let thermal_sag = slots_sag
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .expect("thermal port must exist")
+            .sensible_gain_w;
+
+        assert!(
+            thermal_nominal > 0.0,
+            "thermal gain must be > 0 at nominal voltage"
+        );
+        assert!(thermal_sag > 0.0, "thermal gain must be > 0 at sag voltage");
+        assert!(
+            thermal_sag < thermal_nominal,
+            "thermal gain at sag ({thermal_sag}) must be less than nominal ({thermal_nominal})"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_thermal_gain_varies_with_zip_voltage() {
+        let mut env_nominal = base_env();
+        env_nominal.grid.voltage_pu = 1.0;
+        let config = wet_config("zip_thermal_wet", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env_nominal).unwrap();
+        assert!(
+            eq.zip.is_some(),
+            "Clothes Washer WetAppliance must have ZIP coefficients"
+        );
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env_nominal, vec![1.0, 1.0]);
+        eq.step(&env_nominal, Duration::from_secs(60), &mut slots)
+            .unwrap();
+        let thermal_nominal = slots
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .expect("thermal port must exist")
+            .sensible_gain_w;
+
+        let mut env_sag = base_env();
+        env_sag.grid.voltage_pu = 0.90;
+        let mut eq_sag = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq_sag.init(&config, &env_sag).unwrap();
+        let mut slots_sag = PortSlots::from_declarations(eq_sag.ports());
+        set_schedule_payload(&mut env_sag, vec![1.0, 1.0]);
+        eq_sag
+            .step(&env_sag, Duration::from_secs(60), &mut slots_sag)
+            .unwrap();
+        let thermal_sag = slots_sag
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .expect("thermal port must exist")
+            .sensible_gain_w;
+
+        assert!(
+            thermal_nominal > 0.0,
+            "thermal gain must be > 0 at nominal voltage"
+        );
+        assert!(thermal_sag > 0.0, "thermal gain must be > 0 at sag voltage");
+        assert!(
+            thermal_sag < thermal_nominal,
+            "thermal gain at sag ({thermal_sag}) must be less than nominal ({thermal_nominal})"
+        );
+    }
+
+    #[test]
+    fn gas_wet_appliance_sets_core_capabilities_fuel() {
+        let env = base_env();
+        let config = gas_wet_config("Gas Dryer Core");
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(eq.descriptor().fuel, FuelType::Gas);
+        assert!(
+            eq.descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::FUEL),
+            "gas WetAppliance must set CoreCapabilities::FUEL"
+        );
+
+        // non-gas WetAppliance should not have FUEL
+        let config_elec = wet_config("Elec Washer", "Clothes Washer", 1.0);
+        let mut eq_elec = WetAppliance::new(config_elec.clone(), "Clothes Washer");
+        eq_elec.init(&config_elec, &env).unwrap();
+        assert!(
+            !eq_elec
+                .descriptor()
+                .core_capabilities
+                .contains(CoreCapabilities::FUEL),
+            "electric WetAppliance must not have CoreCapabilities::FUEL"
         );
     }
 }
