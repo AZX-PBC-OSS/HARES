@@ -2445,4 +2445,24 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn spa_heater_month_multipliers_match_spa_pump() {
+        use std::path::Path;
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let profiles = super::load_default_profiles(&defaults_dir);
+
+        let spa_pump = profiles
+            .get("Spa Pump")
+            .expect("Spa Pump profile must exist in defaults");
+        let spa_heater = profiles
+            .get("Spa Heater")
+            .expect("Spa Heater profile must exist in defaults");
+
+        assert_eq!(
+            spa_pump.month_multipliers, spa_heater.month_multipliers,
+            "spa heater month multipliers must match spa pump — both equipment share the \
+             same seasonal usage pattern"
+        );
+    }
 }
