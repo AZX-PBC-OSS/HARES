@@ -853,7 +853,9 @@ pub(crate) fn build_synthetic_weather(
         horizontal_ir_w_m2,
         outdoor_temp_c,
         dew_point_c,
-        0.0, // opaque_sky_cover = 0 (clear sky)
+        50.0, // rel_humidity_pct — not used (IR path always active for synthetic)
+        0.0,  // opaque_sky_cover = 0 (clear sky)
+        hares_io::SkyTempModel::default(),
     );
 
     // Ground temperature: temporal mean of the dry-bulb series, or an explicit

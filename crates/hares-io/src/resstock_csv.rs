@@ -33,7 +33,7 @@ use chrono::{Datelike, NaiveDateTime, Timelike};
 use hares_physics::constants::{ISA_LAPSE_COEFFICIENT, ISA_PRESSURE_EXPONENT};
 
 use crate::epw::{
-    compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, interpolate_ground_temp_c,
+    SkyTempModel, compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, interpolate_ground_temp_c,
     monthly_average_dry_bulb,
 };
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
@@ -313,7 +313,14 @@ pub fn parse_resstock_csv_str(
 
     for row in &raw_rows {
         let t_dp = magnus_dew_point_c(row.dry_bulb_c, row.rh_pct);
-        let t_sky = compute_sky_temp_c(0.0, row.dry_bulb_c, t_dp, 0.0);
+        let t_sky = compute_sky_temp_c(
+            0.0,
+            row.dry_bulb_c,
+            t_dp,
+            row.rh_pct,
+            0.0,
+            SkyTempModel::default(),
+        );
         let t_ground = interpolate_ground_temp_c(
             &monthly_ground_temps,
             row.month,
@@ -926,9 +933,8 @@ Direct Normal Radiation [W/m2],\
 Diffuse Horizontal Radiation [W/m2]
 2005-01-01 01:00:00,10.0,60.0,3.0,180.0,1500.0,600.0,500.0
 2005-01-01 02:00:00,10.0,60.0,3.0,180.0,0.0,0.0,0.0";
-        let result =
-            parse_resstock_csv_str(csv, 0.0, 39.7, -105.0, -7.0)
-                .expect("GHI = 1500.0 should be valid (inclusive upper bound)");
+        let result = parse_resstock_csv_str(csv, 0.0, 39.7, -105.0, -7.0)
+            .expect("GHI = 1500.0 should be valid (inclusive upper bound)");
         assert_eq!(result.ghi_w_m2[0], 1500.0);
     }
 
@@ -943,9 +949,8 @@ Direct Normal Radiation [W/m2],\
 Diffuse Horizontal Radiation [W/m2]
 2005-01-01 01:00:00,10.0,60.0,3.0,180.0,0.0,0.0,0.0
 2005-01-01 02:00:00,10.0,60.0,3.0,180.0,0.0,0.0,0.0";
-        let result =
-            parse_resstock_csv_str(csv, 0.0, 39.7, -105.0, -7.0)
-                .expect("GHI = 0.0 should be valid (inclusive lower bound)");
+        let result = parse_resstock_csv_str(csv, 0.0, 39.7, -105.0, -7.0)
+            .expect("GHI = 0.0 should be valid (inclusive lower bound)");
         assert_eq!(result.ghi_w_m2[0], 0.0);
     }
 }

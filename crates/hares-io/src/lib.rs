@@ -30,8 +30,8 @@ pub use envelope_lut::{
     EnvelopeLookup, EnvelopeLookupResult, EnvelopeLutError, PrecomputedLayer, resolve_boundary_name,
 };
 pub use epw::{
-    DesignConditions, berdahl_martin_sky_emissivity, compute_sky_temp_c, monthly_day_counts,
-    parse_epw, sky_temp_from_emissivity,
+    DesignConditions, SkyTempModel, berdahl_martin_sky_emissivity, clark_allen_sky_emissivity,
+    compute_sky_temp_c, monthly_day_counts, parse_epw, sky_temp_from_emissivity,
 };
 // Re-export canonical physical constants from hares-physics (preserving public API names).
 pub use hares_physics::constants::CELSIUS_TO_KELVIN as KELVIN_OFFSET_C;

@@ -210,7 +210,9 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
             horizontal_infrared_w_m2,
             dry_bulb_c,
             dew_point_c,
+            rel_humidity_pct,
             opaque_sky_cover,
+            SkyTempModel::default(),
         );
 
         let liquid_precip_m = if fields.len() > IDX_LIQUID_PRECIP_DEPTH_MM {
@@ -542,54 +544,112 @@ pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64
 /// longwave radiation and indicate missing or placeholder data.
 const INFRARED_FALLBACK_THRESHOLD: f64 = 50.0;
 
+/// Sky emissivity model selection.
+///
+/// EnergyPlus exposes all four models as user-selectable options via the
+/// `WeatherProperty:SkyTemperature` input object with default `ClarkAllen`.
+/// HARES mirrors this enum so that the clear-sky emissivity formula can be
+/// selected independently of the IR-vs-model cascade.
+///
+/// Cite: EnergyPlus WeatherManager.cc:121–130 (SkyTempModel enum), 3191–3217
+/// (CalcSkyEmissivity), 6699–6892 (WeatherProperty:SkyTemperature parsing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkyTempModel {
+    /// Clark & Allen (1978) — EnergyPlus default.
+    /// ε_clear = 0.787 + 0.764 × ln(T_dp_K / 273.15)
+    #[default]
+    ClarkAllen,
+    /// Berdahl-Martin (1984) recalibrated coefficients per Li, Jiang & Coimbra (2017).
+    /// ε_clear = 0.758 + 0.521 × (T_dp_C / 100) + 0.625 × (T_dp_C / 100)²
+    BerdahlMartin,
+    /// Brunt (1932) — uses dry-bulb saturation × RH/100 for vapor pressure.
+    /// ε_clear = 0.618 + 0.056 × sqrt(P_wv_hPa)
+    Brunt,
+    /// Idso (1981) — uses dry-bulb saturation × RH/100 for vapor pressure.
+    /// ε_clear = 0.685 + 3.2e-5 × P_wv_hPa × exp(1699 / T_db_K)
+    Idso,
+}
+
 /// Compute sky temperature from horizontal infrared radiation (OCHRE method).
 ///
 /// Model selection cascade:
 /// 1. Stefan-Boltzmann inversion when IR >= 50 W/m² (direct measurement).
-/// 2. Berdahl-Martin + Walton cloud correction when opaque sky cover > 0.
-/// 3. Clark-Allen as last resort (no cloud data).
+/// 2. Selected clear-sky emissivity model + Walton cloud correction when
+///    opaque sky cover > 0.
+/// 3. Selected clear-sky emissivity model (no cloud correction) as fallback.
 ///
 /// Recompute sky temperature from the (possibly interpolated) weather inputs.
 ///
 /// Called both during EPW parsing and after resampling so that T_sky stays
 /// consistent with its non-linear inputs.  Directly interpolating T_sky
-/// violates the chain rule — E+ WeatherManager.cc:3113 recomputes after
-/// interpolating all input fields, and so must we.
+/// violates the chain rule — EnergyPlus WeatherManager.cc:3113 recomputes
+/// after interpolating all input fields, and so must we.
+///
+/// Cite: EnergyPlus WeatherManager.cc:3130–3217 (sky temperature dispatch +
+/// CalcSkyEmissivity model selection).
 pub fn compute_sky_temp_c(
     horizontal_infrared_w_m2: f64,
     dry_bulb_c: f64,
     dew_point_c: f64,
+    rel_humidity_pct: f64,
     opaque_sky_cover: f64,
+    model: SkyTempModel,
 ) -> f64 {
     if horizontal_infrared_w_m2 >= INFRARED_FALLBACK_THRESHOLD {
-        // OCHRE / EnergyPlus method: T_sky = (IR / σ)^0.25
+        // Stefan-Boltzmann inversion — model-independent (direct measurement).
         let t_sky_k = (horizontal_infrared_w_m2 / STEFAN_BOLTZMANN).powf(0.25);
         t_sky_k - KELVIN_OFFSET_C
-    } else if opaque_sky_cover > 0.0 {
-        // Berdahl-Martin clear-sky emissivity with Walton cloud correction
-        let eps_clear = berdahl_martin_sky_emissivity(dew_point_c);
-        let eps_sky = walton_cloud_correction(eps_clear, opaque_sky_cover);
-        sky_temp_from_emissivity(dry_bulb_c, eps_sky)
     } else {
-        // Fallback: Clark-Allen empirical correlation when cloud data unavailable
-        clark_allen_sky_temp_c(dry_bulb_c, dew_point_c)
+        let eps_clear = match model {
+            SkyTempModel::ClarkAllen => clark_allen_sky_emissivity(dew_point_c),
+            SkyTempModel::BerdahlMartin => berdahl_martin_sky_emissivity(dew_point_c),
+            SkyTempModel::Brunt => brunt_sky_emissivity(dry_bulb_c, rel_humidity_pct),
+            SkyTempModel::Idso => idso_sky_emissivity(dry_bulb_c, rel_humidity_pct),
+        };
+        if opaque_sky_cover > 0.0 {
+            let eps_sky = walton_cloud_correction(eps_clear, opaque_sky_cover);
+            sky_temp_from_emissivity(dry_bulb_c, eps_sky)
+        } else {
+            sky_temp_from_emissivity(dry_bulb_c, eps_clear)
+        }
     }
 }
 
-/// Clark & Allen (1978) sky temperature from dry bulb and dew point.
+/// Clark & Allen (1978) clear-sky emissivity from dew point temperature.
 ///
-/// ε_clear = 0.787 + 0.764 × ln(T_dp_K / 273)
-/// T_sky = T_db_K × ε_clear^0.25
+/// ε_clear = 0.787 + 0.764 × ln(T_dp_K / 273.15)
+///
+/// EnergyPlus applies `min(DryBulb, DewPoint)` in the numerator; HARES
+/// uses dew point directly since the EPW parser already validates
+/// dew_point_c <= dry_bulb_c.
 ///
 /// Cite: Clark, G. and Allen, C. (1978), "The Estimation of Atmospheric
 /// Radiation for Clear and Cloudy Skies", Proc. 2nd National Passive Solar
 /// Conference (AS/ISES), pp. 675-678.
+/// Cite: EnergyPlus WeatherManager.cc:3214 (CalcSkyEmissivity, ClarkAllen case).
+#[must_use]
+pub fn clark_allen_sky_emissivity(dew_point_c: f64) -> f64 {
+    let dew_point_k = dew_point_c + KELVIN_OFFSET_C;
+    0.787 + 0.764 * (dew_point_k / KELVIN_OFFSET_C).ln()
+}
+
+/// Clark & Allen (1978) sky temperature from dry bulb and dew point.
+///
+/// Convenience wrapper: computes ε_clear via [`clark_allen_sky_emissivity`]
+/// then converts to sky temperature via [`sky_temp_from_emissivity`].
+///
+/// T_sky = T_db_K × ε_clear^0.25 − 273.15
+///
+/// Cite: Clark, G. and Allen, C. (1978), "The Estimation of Atmospheric
+/// Radiation for Clear and Cloudy Skies", Proc. 2nd National Passive Solar
+/// Conference (AS/ISES), pp. 675-678.
+// Why: used by test code in epw.rs, tmy3.rs, psm3.rs, weather.rs for
+// direct Clark-Allen comparison against the compute_sky_temp_c cascade.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
-    let dry_bulb_k = dry_bulb_c + KELVIN_OFFSET_C;
-    let dew_point_k = dew_point_c + KELVIN_OFFSET_C;
-    let sky_k = dry_bulb_k * (0.787 + 0.764 * (dew_point_k / KELVIN_OFFSET_C).ln()).powf(0.25);
-    sky_k - KELVIN_OFFSET_C
+    let emissivity = clark_allen_sky_emissivity(dew_point_c);
+    sky_temp_from_emissivity(dry_bulb_c, emissivity)
 }
 
 /// Berdahl-Martin clear-sky emissivity from dew point temperature.
@@ -614,38 +674,41 @@ pub fn berdahl_martin_sky_emissivity(t_dp_c: f64) -> f64 {
     0.758 + 0.521 * x + 0.625 * x * x
 }
 
-/// Brunt (1932) clear-sky emissivity from dew point temperature.
+/// Brunt (1932) clear-sky emissivity from dry-bulb temperature and
+/// relative humidity.
 ///
 /// ε_clear = 0.618 + 0.056 × sqrt(P_wv_hPa)
 ///
-/// Water vapor partial pressure is approximated at the dew point using the
-/// Magnus formula: P_wv = 6.1078 × exp(17.27 × T_dp / (T_dp + 237.3)) [hPa].
+/// Water vapor partial pressure is computed via the EnergyPlus method:
+/// saturation pressure at dry-bulb temperature × (RH / 100), i.e.
+/// actual vapor pressure using T_db as the saturation reference.
 ///
 /// Cite: Brunt, D. (1932), "Notes on radiation in the atmosphere",
 /// Q.J.R. Meteorol. Soc., 58, 389-420.
-// Not wired into the compute_sky_temp_c cascade; available for future model selection.
-#[allow(dead_code)]
+/// Cite: EnergyPlus WeatherManager.cc:3204–3206 (CalcSkyEmissivity, Brunt case).
 #[must_use]
-pub(crate) fn brunt_sky_emissivity(t_dp_c: f64) -> f64 {
-    let p_wv_hpa = magnus_saturation_pressure_hpa(t_dp_c);
+pub(crate) fn brunt_sky_emissivity(t_db_c: f64, rel_humidity_pct: f64) -> f64 {
+    let p_wv_hpa = magnus_saturation_pressure_hpa(t_db_c) * (rel_humidity_pct / 100.0);
     0.618 + 0.056 * p_wv_hpa.sqrt()
 }
 
-/// Idso (1981) clear-sky emissivity from dry bulb and dew point temperatures.
+/// Idso (1981) clear-sky emissivity from dry-bulb temperature and
+/// relative humidity.
 ///
 /// ε_clear = 0.685 + 3.2e-5 × P_wv_hPa × exp(1699 / T_db_K)
 ///
+/// Water vapor partial pressure is computed via the EnergyPlus method:
+/// saturation pressure at dry-bulb temperature × (RH / 100).
 /// The coefficient 3.2e-5 is calibrated for water vapour pressure in hPa
 /// (matching EnergyPlus). Do not convert to Pa before applying.
 ///
 /// Cite: Idso, S.B. (1981), "A set of equations for full spectrum and 8- to
 /// 14-μm and 10.5- to 12.5-μm thermal radiation from cloudless skies",
 /// Water Resources Research, 17(2), 295-304.
-// Not wired into the compute_sky_temp_c cascade; available for future model selection.
-#[allow(dead_code)]
+/// Cite: EnergyPlus WeatherManager.cc:3207–3209 (CalcSkyEmissivity, Idso case).
 #[must_use]
-pub(crate) fn idso_sky_emissivity(t_db_c: f64, t_dp_c: f64) -> f64 {
-    let p_wv_hpa = magnus_saturation_pressure_hpa(t_dp_c);
+pub(crate) fn idso_sky_emissivity(t_db_c: f64, rel_humidity_pct: f64) -> f64 {
+    let p_wv_hpa = magnus_saturation_pressure_hpa(t_db_c) * (rel_humidity_pct / 100.0);
     let t_db_k = t_db_c + KELVIN_OFFSET_C;
     0.685 + 3.2e-5 * p_wv_hpa * (1699.0 / t_db_k).exp()
 }
@@ -675,7 +738,6 @@ pub fn sky_temp_from_emissivity(t_db_c: f64, epsilon: f64) -> f64 {
 
 /// Magnus formula saturation pressure at temperature `t_c` [deg C].
 /// Returns pressure in hPa (hectopascals / millibars).
-#[allow(dead_code)]
 #[must_use]
 fn magnus_saturation_pressure_hpa(t_c: f64) -> f64 {
     6.1078 * (17.27 * t_c / (t_c + 237.3)).exp()
@@ -945,10 +1007,10 @@ mod tests {
     use super::{
         DOE2_GROUND_DAYS_PER_YEAR, DOE2_GROUND_DIFFUSIVITY, DOE2_GROUND_HOURS_PER_YEAR,
         DOE2_GROUND_PHASE_OFFSET_RAD, DOE2_GROUND_REFERENCE_DEPTH_M, DOE2_MID_MONTH_DAYS,
-        STEFAN_BOLTZMANN, WeatherError, berdahl_martin_sky_emissivity, brunt_sky_emissivity,
-        clark_allen_sky_temp_c, compute_sky_temp_c, doe2_ground_temp_monthly, idso_sky_emissivity,
-        monthly_day_counts, parse_epw, parse_epw_str, sky_temp_from_emissivity,
-        walton_cloud_correction,
+        STEFAN_BOLTZMANN, SkyTempModel, WeatherError, berdahl_martin_sky_emissivity,
+        brunt_sky_emissivity, clark_allen_sky_temp_c, compute_sky_temp_c, doe2_ground_temp_monthly,
+        idso_sky_emissivity, monthly_day_counts, parse_epw, parse_epw_str,
+        sky_temp_from_emissivity, walton_cloud_correction,
     };
 
     fn write_temp_epw(epw_contents: &str) -> PathBuf {
@@ -1072,7 +1134,7 @@ mod tests {
         let ir = 300.0; // W/m²
         let expected_k = (ir / STEFAN_BOLTZMANN).powf(0.25);
         let expected_c = expected_k - 273.15;
-        let t_sky_c = compute_sky_temp_c(ir, 20.0, 10.0, 5.0);
+        let t_sky_c = compute_sky_temp_c(ir, 20.0, 10.0, 50.0, 5.0, SkyTempModel::default());
         assert!(
             (t_sky_c - expected_c).abs() < 0.01,
             "infrared sky temp: got {t_sky_c}, expected {expected_c}"
@@ -1082,7 +1144,7 @@ mod tests {
     #[test]
     fn sky_temperature_falls_back_to_clark_allen_when_no_clouds() {
         // When infrared is below threshold and opaque_sky_cover=0, use Clark-Allen
-        let t_sky_c = compute_sky_temp_c(0.0, 20.0, 10.0, 0.0);
+        let t_sky_c = compute_sky_temp_c(0.0, 20.0, 10.0, 50.0, 0.0, SkyTempModel::default());
         let t_sky_clark = clark_allen_sky_temp_c(20.0, 10.0);
         assert!(
             (t_sky_c - t_sky_clark).abs() < 0.01,
@@ -1176,7 +1238,7 @@ mod tests {
         let ir = 300.0;
         let expected_k = (ir / STEFAN_BOLTZMANN).powf(0.25);
         let expected_c = expected_k - 273.15;
-        let t_sky_c = compute_sky_temp_c(ir, 25.0, 15.0, 5.0);
+        let t_sky_c = compute_sky_temp_c(ir, 25.0, 15.0, 50.0, 5.0, SkyTempModel::default());
         assert!(
             (t_sky_c - expected_c).abs() < 0.01,
             "T_sky from IR=300: got {t_sky_c:.4}, expected {expected_c:.4}"
@@ -1186,7 +1248,7 @@ mod tests {
     #[test]
     fn clark_allen_fallback_activates_when_infrared_zero() {
         // opaque_sky_cover=0 forces Clark-Allen path
-        let t_sky = compute_sky_temp_c(0.0, 15.0, 5.0, 0.0);
+        let t_sky = compute_sky_temp_c(0.0, 15.0, 5.0, 50.0, 0.0, SkyTempModel::default());
         let t_clark = clark_allen_sky_temp_c(15.0, 5.0);
         assert!(
             (t_sky - t_clark).abs() < 0.001,
@@ -1197,7 +1259,7 @@ mod tests {
     #[test]
     fn clark_allen_fallback_activates_when_infrared_below_threshold() {
         // Values below 50 W/m² with no cloud data → Clark-Allen
-        let t_sky = compute_sky_temp_c(30.0, 20.0, 10.0, 0.0);
+        let t_sky = compute_sky_temp_c(30.0, 20.0, 10.0, 50.0, 0.0, SkyTempModel::default());
         let t_clark = clark_allen_sky_temp_c(20.0, 10.0);
         assert!(
             (t_sky - t_clark).abs() < 0.001,
@@ -1610,22 +1672,34 @@ mod tests {
     }
 
     #[test]
-    fn brunt_emissivity_known_case() {
-        // T_dp = 10 C => P_wv = 6.1078 * exp(17.27*10/247.3) = 6.1078 * exp(0.6988)
-        // exp(0.6988) ≈ 2.0114 => P_wv ≈ 12.283 hPa
-        // ε = 0.618 + 0.056 * sqrt(12.283) = 0.618 + 0.056 * 3.5047 ≈ 0.8143
-        let eps = brunt_sky_emissivity(10.0);
-        assert!((eps - 0.8143).abs() < 0.005, "Brunt at T_dp=10C: got {eps}");
+    fn brunt_emissivity_matches_energyplus_vapor_pressure_method() {
+        // EnergyPlus method: P_wv = PsyPsatFnTemp(DryBulb) * RH * 0.01 [hPa]
+        // at T_db = 20°C, RH = 50%:
+        //   Magnus P_sat(20°C) = 6.1078 × exp(17.27 × 20 / 257.3) ≈ 23.39 hPa
+        //   P_wv = 23.39 × 0.50 = 11.695 hPa
+        //   ε = 0.618 + 0.056 × sqrt(11.695) = 0.618 + 0.056 × 3.4198 ≈ 0.8095
+        //
+        // Cite: EnergyPlus WeatherManager.cc:3204–3206 (CalcSkyEmissivity, Brunt case).
+        let eps = brunt_sky_emissivity(20.0, 50.0);
+        assert!(
+            (eps - 0.8095).abs() < 0.001,
+            "Brunt at T_db=20C, RH=50%: got {eps}"
+        );
     }
 
     #[test]
-    fn idso_emissivity_known_case() {
-        // T_db=20C, T_dp=10C: P_wv ≈ 12.28 hPa, exp(1699/293.15) ≈ 328.9
-        // ε = 0.685 + 3.2e-5 × 12.28 × 328.9 ≈ 0.814
-        let eps = idso_sky_emissivity(20.0, 10.0);
+    fn idso_emissivity_matches_energyplus_vapor_pressure_method() {
+        // EnergyPlus method: P_wv = PsyPsatFnTemp(DryBulb) * RH * 0.01 [hPa]
+        // at T_db = 20°C, RH = 50%:
+        //   P_wv = 11.695 hPa (same as Brunt derivation above)
+        //   T_db_K = 293.15, exp(1699 / 293.15) ≈ 328.87
+        //   ε = 0.685 + 3.2e-5 × 11.695 × 328.87 ≈ 0.8081
+        //
+        // Cite: EnergyPlus WeatherManager.cc:3207–3209 (CalcSkyEmissivity, Idso case).
+        let eps = idso_sky_emissivity(20.0, 50.0);
         assert!(
-            (eps - 0.814).abs() < 0.01,
-            "Idso at T_db=20C, T_dp=10C: got {eps}, expected ~0.814"
+            (eps - 0.8081).abs() < 0.001,
+            "Idso at T_db=20C, RH=50%: got {eps}"
         );
     }
 
@@ -1677,7 +1751,7 @@ mod tests {
     #[test]
     fn fallback_to_clark_allen_when_no_clouds() {
         // opaque_sky_cover=0 with low IR => Clark-Allen result
-        let t_sky = compute_sky_temp_c(0.0, 20.0, 10.0, 0.0);
+        let t_sky = compute_sky_temp_c(0.0, 20.0, 10.0, 50.0, 0.0, SkyTempModel::default());
         let t_clark = clark_allen_sky_temp_c(20.0, 10.0);
         assert!(
             (t_sky - t_clark).abs() < 1e-10,
@@ -1691,7 +1765,7 @@ mod tests {
         let t_db = 20.0;
         let t_dp = 10.0;
         let cloud = 5.0;
-        let t_sky = compute_sky_temp_c(0.0, t_db, t_dp, cloud);
+        let t_sky = compute_sky_temp_c(0.0, t_db, t_dp, 50.0, cloud, SkyTempModel::BerdahlMartin);
 
         let eps_clear = berdahl_martin_sky_emissivity(t_dp);
         let eps_sky = walton_cloud_correction(eps_clear, cloud);
@@ -1727,8 +1801,8 @@ mod tests {
     fn stefan_boltzmann_still_primary() {
         // When IR >= 50, result is the same regardless of cloud cover
         let ir = 300.0;
-        let t_sky_no_cloud = compute_sky_temp_c(ir, 20.0, 10.0, 0.0);
-        let t_sky_cloudy = compute_sky_temp_c(ir, 20.0, 10.0, 8.0);
+        let t_sky_no_cloud = compute_sky_temp_c(ir, 20.0, 10.0, 50.0, 0.0, SkyTempModel::default());
+        let t_sky_cloudy = compute_sky_temp_c(ir, 20.0, 10.0, 50.0, 8.0, SkyTempModel::default());
         assert!(
             (t_sky_no_cloud - t_sky_cloudy).abs() < 1e-10,
             "IR >= 50 ignores cloud cover: {t_sky_no_cloud} vs {t_sky_cloudy}"

@@ -31,7 +31,9 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 
-use crate::epw::{compute_sky_temp_c, doe2_ground_temp_monthly, interpolate_ground_temp_c};
+use crate::epw::{
+    SkyTempModel, compute_sky_temp_c, doe2_ground_temp_monthly, interpolate_ground_temp_c,
+};
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
@@ -173,7 +175,8 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
     let sky_temp_c: Vec<f64> = dry_bulb_c
         .iter()
         .zip(dew_point_c.iter())
-        .map(|(&db, &dp)| compute_sky_temp_c(0.0, db, dp, 0.0))
+        .zip(rel_humidity_pct.iter())
+        .map(|((&db, &dp), &rh)| compute_sky_temp_c(0.0, db, dp, rh, 0.0, SkyTempModel::default()))
         .collect();
 
     // Ground temperature via DOE-2 sinusoidal model.
@@ -521,11 +524,11 @@ mod tests {
     /// identical to the current behavior for IR-absent files.
     #[test]
     fn tmy3_sky_temp_zero_ir_matches_clark_allen() {
-        use crate::epw::compute_sky_temp_c;
+        use crate::epw::{SkyTempModel, compute_sky_temp_c};
         let csv = make_tmy3_csv(false);
         let ts = parse_tmy3_str(&csv).expect("should parse");
         let via_clark_allen = clark_allen_sky_temp_c(20.0, 10.0);
-        let via_compute = compute_sky_temp_c(0.0, 20.0, 10.0, 0.0);
+        let via_compute = compute_sky_temp_c(0.0, 20.0, 10.0, 50.0, 0.0, SkyTempModel::default());
         assert!(
             (via_clark_allen - via_compute).abs() < 1e-12,
             "clark_allen and compute_sky_temp_c(0.0,…,0.0) must be identical: \
@@ -586,14 +589,14 @@ mod tests {
     /// accessible today because tmy3 always passes IR=0.
     #[test]
     fn tmy3_sky_temp_routes_through_compute_sky_temp_c() {
-        use crate::epw::compute_sky_temp_c;
+        use crate::epw::{SkyTempModel, compute_sky_temp_c};
         // Confirm that for the specific db=20, dp=10 test pair, calling
         // compute_sky_temp_c(0.0, 20.0, 10.0, 0.0) == clark_allen(20.0, 10.0).
         // After the fix, the TMY3 parser calls compute_sky_temp_c(0.0, …) so
         // sky_temp_c values must be identical to clark_allen values.
         let db = 20.0_f64;
         let dp = 10.0_f64;
-        let routed = compute_sky_temp_c(0.0, db, dp, 0.0);
+        let routed = compute_sky_temp_c(0.0, db, dp, 50.0, 0.0, SkyTempModel::default());
         let direct = clark_allen_sky_temp_c(db, dp);
         assert!(
             (routed - direct).abs() < 1e-12,

@@ -9,7 +9,7 @@ use thiserror::Error;
 use hares_types::DEFAULT_GROUND_ALBEDO;
 
 use crate::epw::DesignConditions;
-use crate::epw::compute_sky_temp_c;
+use crate::epw::{SkyTempModel, compute_sky_temp_c};
 
 /// Supported weather file formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,9 +620,12 @@ impl WeatherTimeSeries {
             let sky_temp_c: Vec<f64> = dry_bulb_c
                 .iter()
                 .zip(&dew_point_c)
+                .zip(&rel_humidity_pct)
                 .zip(&horizontal_infrared_w_m2)
                 .zip(&opaque_sky_cover)
-                .map(|(((&db, &dp), &ir), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+                .map(|((((&db, &dp), &rh), &ir), &osc)| {
+                    compute_sky_temp_c(ir, db, dp, rh, osc, SkyTempModel::default())
+                })
                 .collect();
 
             Ok(Self {
@@ -721,9 +724,12 @@ impl WeatherTimeSeries {
             let sky_temp_c: Vec<f64> = dry_bulb_c
                 .iter()
                 .zip(&dew_point_c)
+                .zip(&rel_humidity_pct)
                 .zip(&horizontal_infrared_w_m2)
                 .zip(&opaque_sky_cover)
-                .map(|(((&db, &dp), &ir), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+                .map(|((((&db, &dp), &rh), &ir), &osc)| {
+                    compute_sky_temp_c(ir, db, dp, rh, osc, SkyTempModel::default())
+                })
                 .collect();
 
             Ok(Self {
@@ -1660,7 +1666,7 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
     /// chain rule (E+ WeatherManager.cc:3113).
     #[test]
     fn sky_temp_recomputed_after_upsampling() {
-        use crate::epw::compute_sky_temp_c;
+        use crate::epw::{SkyTempModel, compute_sky_temp_c};
 
         let mut series = sample_series_5pt();
         // Set IR, dry-bulb, dew-point, and sky cover to values where
@@ -1678,8 +1684,11 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             .iter()
             .zip(&series.dry_bulb_c)
             .zip(&series.dew_point_c)
+            .zip(&series.rel_humidity_pct)
             .zip(&series.opaque_sky_cover)
-            .map(|(((&ir, &db), &dp), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+            .map(|((((&ir, &db), &dp), &rh), &osc)| {
+                compute_sky_temp_c(ir, db, dp, rh, osc, SkyTempModel::default())
+            })
             .collect();
 
         // Upsample by factor 6 (3600s → 600s).
@@ -1693,7 +1702,9 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
                 resampled.horizontal_infrared_w_m2[i],
                 resampled.dry_bulb_c[i],
                 resampled.dew_point_c[i],
+                resampled.rel_humidity_pct[i],
                 resampled.opaque_sky_cover[i],
+                SkyTempModel::default(),
             );
             assert!(
                 (resampled.sky_temp_c[i] - expected).abs() < 1e-9,
@@ -1709,7 +1720,7 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
     /// the mean-downsampled inputs, not just averaged.
     #[test]
     fn sky_temp_recomputed_after_downsampling() {
-        use crate::epw::compute_sky_temp_c;
+        use crate::epw::{SkyTempModel, compute_sky_temp_c};
 
         let mut series = sample_series_5pt();
         series.meta.source_step_secs = 600; // 10-min source
@@ -1724,8 +1735,11 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             .iter()
             .zip(&series.dry_bulb_c)
             .zip(&series.dew_point_c)
+            .zip(&series.rel_humidity_pct)
             .zip(&series.opaque_sky_cover)
-            .map(|(((&ir, &db), &dp), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+            .map(|((((&ir, &db), &dp), &rh), &osc)| {
+                compute_sky_temp_c(ir, db, dp, rh, osc, SkyTempModel::default())
+            })
             .collect();
 
         // Downsample to 3600s (factor 6 → 1 output row).
@@ -1751,8 +1765,11 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             .iter()
             .zip(&series.dry_bulb_c)
             .zip(&series.dew_point_c)
+            .zip(&series.rel_humidity_pct)
             .zip(&series.opaque_sky_cover)
-            .map(|(((&ir, &db), &dp), &osc)| compute_sky_temp_c(ir, db, dp, osc))
+            .map(|((((&ir, &db), &dp), &rh), &osc)| {
+                compute_sky_temp_c(ir, db, dp, rh, osc, SkyTempModel::default())
+            })
             .collect();
 
         let down = series.resample(3600).expect("downsample should succeed");
@@ -1762,7 +1779,9 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             down.horizontal_infrared_w_m2[0],
             down.dry_bulb_c[0],
             down.dew_point_c[0],
+            down.rel_humidity_pct[0],
             down.opaque_sky_cover[0],
+            SkyTempModel::default(),
         );
         assert!(
             (down.sky_temp_c[0] - expected).abs() < 1e-9,

@@ -14,7 +14,7 @@ use chrono::{Datelike, NaiveDate};
 #[cfg(test)]
 use crate::epw::monthly_day_counts;
 use crate::epw::{
-    compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, doe2_ground_temp_monthly,
+    SkyTempModel, compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, doe2_ground_temp_monthly,
     interpolate_ground_temp_c,
 };
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
@@ -265,8 +265,11 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let sky_temp_c: Vec<f64> = dry_bulb_c
         .iter()
         .zip(dew_point_c.iter())
+        .zip(rel_humidity_pct.iter())
         .zip(horizontal_infrared_w_m2.iter())
-        .map(|((&db, &dp), &ir)| compute_sky_temp_c(ir, db, dp, 0.0))
+        .map(|(((&db, &dp), &rh), &ir)| {
+            compute_sky_temp_c(ir, db, dp, rh, 0.0, SkyTempModel::default())
+        })
         .collect();
 
     // Compute ground temperature via DOE-2 model.
@@ -742,11 +745,11 @@ mod tests {
     /// compute_sky_temp_c) does not change the value when IR is absent.
     #[test]
     fn psm3_sky_temp_zero_ir_matches_clark_allen() {
-        use crate::epw::compute_sky_temp_c;
+        use crate::epw::{SkyTempModel, compute_sky_temp_c};
         let csv = make_psm3_csv(60, false);
         let ts = parse_psm3_str(&csv).expect("should parse");
         let via_clark_allen = clark_allen_sky_temp_c(20.0, 10.0);
-        let via_compute = compute_sky_temp_c(0.0, 20.0, 10.0, 0.0);
+        let via_compute = compute_sky_temp_c(0.0, 20.0, 10.0, 50.0, 0.0, SkyTempModel::default());
         assert!(
             (via_clark_allen - via_compute).abs() < 1e-12,
             "clark_allen and compute_sky_temp_c(0.0,…,0.0) must be identical: \
@@ -771,7 +774,7 @@ mod tests {
     /// and horizontal_infrared_w_m2 is populated from the column.
     #[test]
     fn psm3_lwdown_column_activates_stefan_boltzmann_path() {
-        use crate::epw::compute_sky_temp_c;
+        use crate::epw::{SkyTempModel, compute_sky_temp_c};
 
         let day_counts = monthly_day_counts(false);
         let total_records: usize = day_counts.iter().sum::<usize>() * 24;
@@ -808,7 +811,8 @@ mod tests {
         // temp will equal clark_allen result, not the Stefan-Boltzmann value.
         let ts = parse_psm3_str(&csv).expect("should parse PSM3 with Lwdown column");
 
-        let stefan_boltzmann_expected = compute_sky_temp_c(lwdown, 20.0, 10.0, 0.0);
+        let stefan_boltzmann_expected =
+            compute_sky_temp_c(lwdown, 20.0, 10.0, 50.0, 0.0, SkyTempModel::default());
         let clark_allen_fallback = clark_allen_sky_temp_c(20.0, 10.0);
 
         // After the fix: sky_temp_c must equal the Stefan-Boltzmann inversion.
