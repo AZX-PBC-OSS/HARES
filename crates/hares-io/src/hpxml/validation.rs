@@ -78,7 +78,17 @@ pub fn validate_hpxml_schema(xml: &str) -> Result<Vec<ValidationWarning>, Valida
             format!("could not parse XML before schema checks: {err}"),
         )
     })?;
-    validate_hpxml_schema_node(&root)
+    let warnings = validate_hpxml_schema_node(&root)?;
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        let is_v3 = warnings.iter().any(|w| w.field == "schemaVersion");
+        if is_v3 {
+            emit_deprecated_path_counts(xml);
+        }
+    }
+
+    Ok(warnings)
 }
 
 /// Structural completeness check for a pre-parsed HPXML document tree.
@@ -119,6 +129,23 @@ pub fn validate_hpxml_schema_node(
                 format!("unsupported HPXML schemaVersion `{s}`; requires 3.x or 4.x"),
             ));
         }
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        let raw_version = version_attr.map(|s| s.as_str()).unwrap_or("<missing>");
+        let resolved = match major_version {
+            Some(3) => "3.x",
+            Some(m) if m >= 4 => "4.x",
+            _ => "unknown",
+        };
+        tracing::info!(
+            target: "observe",
+            column = "hpxml_schema_version",
+            schema_version_raw = raw_version,
+            schema_version_resolved = resolved,
+            "HPXML schema version detected"
+        );
     }
 
     let xmlns = root
@@ -546,6 +573,25 @@ fn haversine_km(lat1_deg: f64, lon1_deg: f64, lat2_deg: f64, lon2_deg: f64) -> f
     let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
     let c = 2.0 * a.sqrt().asin();
     6_371.0 * c
+}
+
+/// When `check_invariants` is enabled (or debug_assertions), scan a 3.x HPXML
+/// document for deprecated element paths and emit a diagnostic warning quantifying
+/// the risk of relying on deprecated or untested paths.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn emit_deprecated_path_counts(xml: &str) {
+    let energy_factor = xml.match_indices("<EnergyFactor").count();
+    let uniform_ef = xml.match_indices("<UniformEnergyFactor").count();
+
+    if energy_factor > 0 || uniform_ef > 0 {
+        tracing::warn!(
+            deprecated_energy_factor = energy_factor,
+            uniform_energy_factor = uniform_ef,
+            "HPXML 3.x document: deprecated <EnergyFactor> count={} vs 4.x <UniformEnergyFactor> count={}",
+            energy_factor,
+            uniform_ef,
+        );
+    }
 }
 
 #[cfg(test)]

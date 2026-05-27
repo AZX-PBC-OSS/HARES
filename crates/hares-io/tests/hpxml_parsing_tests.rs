@@ -1489,4 +1489,90 @@ fn refrigerator_in_conditioned_basement_retains_gain_fractions() {
         (sensible - 1.0).abs() < f64::EPSILON,
         "Refrigerator default sensible_gain_fraction must be 1.0 in conditioned location, got {sensible}"
     );
+    assert!(
+        latent == 0.0,
+        "Refrigerator default latent_gain_fraction must be 0.0, got {latent}"
+    );
+}
+
+// ===========================================================================
+// HPXML 3.x integration test: full parse → validate → resolve pipeline
+// ===========================================================================
+
+#[test]
+fn hpxml_v3_parses_resolves_equipment_with_schema_warning() {
+    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/hpxml-v3-minimal.xml");
+    let xml = std::fs::read_to_string(&fixture_path).expect("3.x fixture should be readable");
+
+    // Schema validation: 3.x must be accepted with a warning, not rejected.
+    let warnings = validate_hpxml_schema(&xml).expect("3.x schema should be accepted");
+    assert!(
+        warnings.iter().any(|w| w.field == "schemaVersion"),
+        "3.x fixture must produce a schemaVersion warning, got: {warnings:?}"
+    );
+
+    // Parse → building. Must not panic or error on 3.x element paths.
+    let building = parse_building(&xml).expect("3.x fixture should parse");
+
+    // Basic building properties.
+    let conditioned = building
+        .zones
+        .iter()
+        .find(|z| {
+            matches!(
+                z.zone_type,
+                hares_io::hpxml::building::ZoneType::Conditioned
+            )
+        })
+        .expect("should have a conditioned zone");
+    assert!(
+        conditioned.floor_area_m2.is_some(),
+        "conditioned zone should have floor area"
+    );
+    assert!(
+        (conditioned.floor_area_m2.unwrap() - 200.0).abs() < 1.0,
+        "floor area should be 200 m²"
+    );
+    assert!(
+        building.conditioned_volume_m3.is_some(),
+        "conditioned volume should be parsed"
+    );
+    assert!(
+        (building.conditioned_volume_m3.unwrap() - 500.0).abs() < 1.0,
+        "conditioned volume should be 500 m³"
+    );
+    assert!(
+        matches!(
+            building.site.site_type,
+            Some(hares_io::hpxml::SiteType::Suburban)
+        ),
+        "site type should be Suburban"
+    );
+    assert!(
+        building.hvac_capacity_w.is_some(),
+        "HVAC capacity should be parsed from 3.x fixture"
+    );
+    assert!(
+        building.water_heater_setpoint_c.is_some(),
+        "water heater setpoint should be parsed from 3.x fixture"
+    );
+
+    // Resolve equipment → heating, cooling, and water heater must all resolve.
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment should succeed for 3.x fixture");
+
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names.contains(&"Gas Furnace"),
+        "3.x fixture should resolve a heating system, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"Air Conditioner"),
+        "3.x fixture should resolve a cooling system, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"Electric Resistance Water Heater"),
+        "3.x fixture should resolve a water heater, got: {names:?}"
+    );
 }

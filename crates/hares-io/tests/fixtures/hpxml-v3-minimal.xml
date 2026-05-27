@@ -1,0 +1,57 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<HPXML xmlns='http://hpxmlonline.com/2014/10' schemaVersion='3.0'>
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200.0</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500.0</ConditionedBuildingVolume>
+          <NumberofBedrooms>3</NumberofBedrooms>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls/>
+      </Enclosure>
+      <Systems>
+        <HVAC>
+          <HVACPlant>
+            <HeatingSystem>
+              <HeatingSystemType>
+                <Furnace/>
+              </HeatingSystemType>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingCapacity>36000.0</HeatingCapacity>
+              <AnnualHeatingEfficiency>
+                <Units>AFUE</Units>
+                <Value>0.92</Value>
+              </AnnualHeatingEfficiency>
+              <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+            </HeatingSystem>
+            <CoolingSystem>
+              <CoolingSystemType>central air conditioner</CoolingSystemType>
+              <CoolingSystemFuel>electricity</CoolingSystemFuel>
+              <CoolingCapacity>24000.0</CoolingCapacity>
+              <AnnualCoolingEfficiency>
+                <Units>SEER</Units>
+                <Value>13.0</Value>
+              </AnnualCoolingEfficiency>
+              <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+            </CoolingSystem>
+          </HVACPlant>
+        </HVAC>
+        <WaterHeating>
+          <WaterHeatingSystem>
+            <FuelType>electricity</FuelType>
+            <WaterHeaterType>storage water heater</WaterHeaterType>
+            <TankVolume>40.0</TankVolume>
+            <EnergyFactor>0.95</EnergyFactor>
+            <HotWaterTemperature>125.0</HotWaterTemperature>
+          </WaterHeatingSystem>
+        </WaterHeating>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>
