@@ -631,6 +631,14 @@ pub enum ThermalSolverError {
     },
     #[error("failed to initialize steady-state vector: {0}")]
     Initialization(String),
+    #[error(
+        "zone {zone_id:?} capacitance {capacitance_j_k:.3e} J/K too small for steady-state pinning: \
+            the RC network or discretization parameters need attention"
+    )]
+    SingularInitialization {
+        zone_id: ZoneId,
+        capacitance_j_k: f64,
+    },
     #[error("{0}")]
     Configuration(String),
 }

@@ -115,6 +115,70 @@ pub(crate) fn initialize_steady_state(
         }
     }
 
+    // Verify every pinned zone carries enough thermal capacitance for the
+    // state-pinning solve. A zone air node with negligible capacitance (massless
+    // node) creates a kinematic constraint with no energy storage to absorb it;
+    // the reduced (I − A_d) or −A_c matrix becomes singular.
+    //
+    // The standard construction path clamps zone capacitance to ≥ 1,000 J/K
+    // (MIN_CAPACITANCE_J_K in boundary_rc.rs), so this guard fires only when a
+    // nonstandard construction path, a model format that allows zero-mass zones,
+    // or a refactoring that separates the capacitance clamp from the construction
+    // path reaches initialization. OCHRE uses np.linalg.inv(A) directly —
+    // NumPy raises LinAlgError on singularity rather than silently substituting
+    // uniform temperatures.
+    const ZONE_PINNING_MIN_CAPACITANCE_J_K: f64 = 1e-6;
+
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    {
+        let c_zone_diagnostics: Vec<(ZoneId, f64)> = pinned_zones
+            .iter()
+            .map(|zone_id| {
+                let c_zone = wiring.c_zone_j_k.get(zone_id).copied().unwrap_or(0.0);
+                (*zone_id, c_zone)
+            })
+            .collect();
+        tracing::debug!(
+            pinned_zone_capacitances_j_k = ?c_zone_diagnostics,
+            "pinned zone capacitances used for steady-state initialization"
+        );
+    }
+
+    // Guard: reject zones whose capacitance is too small for the state-pinning
+    // solve before we inspect the matrices. This fires as a returned error
+    // (not a panic) so callers can handle the condition at the construction
+    // boundary without crashing the entire process in debug builds.
+    for zone_id in pinned_zones {
+        if let Some(&c_zone) = wiring.c_zone_j_k.get(zone_id) {
+            if c_zone < ZONE_PINNING_MIN_CAPACITANCE_J_K {
+                return Err(ThermalSolverError::SingularInitialization {
+                    zone_id: *zone_id,
+                    capacitance_j_k: c_zone,
+                });
+            }
+        }
+    }
+
+    // Invariant check: in debug/test builds and when check_invariants is
+    // enabled, assert every pinned zone has at least 1 J/K. Zones that reached
+    // this point have already passed the guard above (c_zone >= 1e-6 J/K), but
+    // 1 J/K is the absolute physical minimum for a meaningful thermal
+    // capacitance. Values in [1e-6, 1.0) represent a suspicious path that
+    // passed the soft error guard but indicates a latent construction or
+    // configuration issue that should be investigated.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        for zone_id in pinned_zones {
+            if let Some(&c_zone) = wiring.c_zone_j_k.get(zone_id) {
+                assert!(
+                    c_zone >= 1.0,
+                    "zone {zone_id:?} capacitance {c_zone:.3e} J/K below absolute minimum 1 J/K \
+                     for state pinning"
+                );
+            }
+        }
+    }
+
     // Collect zone state indices to fix as boundary conditions.
     // Only conditioned zones listed in `pinned_zones` are pinned; unconditioned
     // zones (attic, garage, foundation) are left free so their steady-state
@@ -540,6 +604,120 @@ mod tests {
             ),
             Err(other) => {
                 panic!("expected Err(ZoneStateIndexOutOfBounds) but got different error: {other:?}")
+            }
+        }
+    }
+
+    /// `initialize_steady_state` returns `Err(SingularInitialization)` when
+    /// a pinned zone has zero thermal capacitance in `c_zone_j_k`. A massless
+    /// zone node pinned at a fixed temperature creates a kinematic constraint
+    /// with no energy storage to absorb it, making the reduced system singular.
+    #[test]
+    fn zero_capacitance_zone_guard_errors() {
+        let a_d = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.3, 0.5]);
+        let b_d = DMatrix::from_row_slice(2, 1, &[0.0, 0.2]);
+        let c = DMatrix::identity(2, 2);
+        let d = DMatrix::zeros(2, 1);
+
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
+
+        let mut zone_state_indices = HashMap::new();
+        zone_state_indices.insert(ZoneId(1), 0_usize);
+
+        let mut c_zone_j_k = HashMap::new();
+        c_zone_j_k.insert(ZoneId(1), 0.0);
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices,
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::new(),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k,
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+
+        let indoor = 21.0;
+        let env = minimal_env(indoor, -5.0);
+
+        let result = initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]);
+
+        match result {
+            Err(ThermalSolverError::SingularInitialization {
+                zone_id,
+                capacitance_j_k,
+            }) => {
+                assert_eq!(zone_id, ZoneId(1));
+                assert_eq!(capacitance_j_k, 0.0);
+            }
+            Ok(x) => panic!(
+                "expected Err(SingularInitialization) for zero-capacitance zone, \
+                 but got Ok({:?})",
+                x
+            ),
+            Err(other) => {
+                panic!("expected Err(SingularInitialization) but got different error: {other:?}")
+            }
+        }
+    }
+
+    /// `initialize_steady_state` returns `Err(SingularInitialization)` when
+    /// a pinned zone's capacitance is below the 1e-6 J/K pinning threshold but
+    /// not exactly zero. Small non-zero capacitances still create near-singular
+    /// reduced systems whose solution is physically meaningless.
+    #[test]
+    fn near_zero_capacitance_zone_errors() {
+        let a_d = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.3, 0.5]);
+        let b_d = DMatrix::from_row_slice(2, 1, &[0.0, 0.2]);
+        let c = DMatrix::identity(2, 2);
+        let d = DMatrix::zeros(2, 1);
+
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
+
+        let mut zone_state_indices = HashMap::new();
+        zone_state_indices.insert(ZoneId(1), 0_usize);
+
+        let mut c_zone_j_k = HashMap::new();
+        c_zone_j_k.insert(ZoneId(1), 1e-12);
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices,
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::new(),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k,
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+
+        let indoor = 21.0;
+        let env = minimal_env(indoor, -5.0);
+
+        let result = initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]);
+
+        match result {
+            Err(ThermalSolverError::SingularInitialization {
+                zone_id,
+                capacitance_j_k,
+            }) => {
+                assert_eq!(zone_id, ZoneId(1));
+                assert!((capacitance_j_k - 1e-12).abs() < 1e-20);
+            }
+            Ok(x) => panic!(
+                "expected Err(SingularInitialization) for near-zero-capacitance zone, \
+                 but got Ok({:?})",
+                x
+            ),
+            Err(other) => {
+                panic!("expected Err(SingularInitialization) but got different error: {other:?}")
             }
         }
     }
