@@ -572,6 +572,14 @@ impl Ev {
             .set(tk::CAPACITY_KWH, self.battery_capacity_kwh);
         self.telemetry
             .set(tk::FUEL_ECONOMY_KWH_PER_MI, self.fuel_economy_kwh_per_mi);
+
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            effective_wall_kwh_per_mi = self.fuel_economy_kwh_per_mi,
+            battery_capacity_kwh = self.battery_capacity_kwh,
+            charging_efficiency = self.charging_efficiency,
+            "EV runtime: effective wall-to-wheels fuel economy diagnostic",
+        );
     }
 
     fn update_degradation(&mut self, env: &EnvironmentState, dt_s: f64) {

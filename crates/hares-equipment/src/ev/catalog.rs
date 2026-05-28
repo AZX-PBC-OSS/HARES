@@ -111,13 +111,42 @@ pub struct VehicleSpec {
     pub dcfc_power_kw: Option<f64>,
     pub chemistry: BatteryChemistry,
     pub range_miles: f64,
+    /// EPA combined wall-to-wheels fuel economy (kWh per mile).
+    /// Sourced from fueleconomy.gov combined kWh/100mi ÷ 100 for BEVs,
+    /// fueleconomy.gov MPGe → 33.7/MPGe for PHEVs with no kWh/100mi data,
+    /// and fueleconomy.gov combined kWh/100mi for PHEVs (electric-only).
+    /// See docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md References.
+    pub fuel_economy_kwh_per_mi: f64,
     pub degradation_per_year: f64,
     pub vehicle_type: VehicleType,
 }
 
 impl VehicleSpec {
     pub fn to_config(&self) -> EquipmentConfig {
-        let fuel_economy = self.capacity_kwh / self.range_miles;
+        let fuel_economy = self.fuel_economy_kwh_per_mi;
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let dc_kwh_per_mi = self.capacity_kwh / self.range_miles;
+            assert!(
+                fuel_economy >= dc_kwh_per_mi,
+                "{}: fuel_economy_kwh_per_mi ({:.6}) must be >= DC efficiency ({:.6})",
+                self.label,
+                fuel_economy,
+                dc_kwh_per_mi,
+            );
+        }
+
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            vehicle = self.label,
+            capacity_kwh = self.capacity_kwh,
+            range_miles = self.range_miles,
+            dc_kwh_per_mi = self.capacity_kwh / self.range_miles,
+            effective_wall_kwh_per_mi = fuel_economy,
+            "EV catalog: wall-to-wheels fuel economy",
+        );
+
         EquipmentConfig::from_typed(
             self.label.to_string(),
             "EV".to_string(),
@@ -170,6 +199,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(250.0),
         chemistry: BatteryChemistry::Nca,
         range_miles: 310.0,
+        fuel_economy_kwh_per_mi: 0.280, // fueleconomy.gov 2023 Model Y LR AWD: 28 kWh/100mi
         degradation_per_year: 0.027,
         vehicle_type: VehicleType::Bev,
     },
@@ -181,6 +211,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(170.0),
         chemistry: BatteryChemistry::Lfp,
         range_miles: 260.0,
+        fuel_economy_kwh_per_mi: 0.274, // fueleconomy.gov 2023 Model Y AWD (SR): 123 MPGe combined → 33.7/123
         degradation_per_year: 0.012,
         vehicle_type: VehicleType::Bev,
     },
@@ -192,6 +223,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(250.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 358.0,
+        fuel_economy_kwh_per_mi: 0.260, // fueleconomy.gov 2023 Model 3 LR AWD: 26 kWh/100mi
         degradation_per_year: 0.023,
         vehicle_type: VehicleType::Bev,
     },
@@ -203,6 +235,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(55.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 259.0,
+        fuel_economy_kwh_per_mi: 0.280, // fueleconomy.gov 2023 Bolt EV: 28 kWh/100mi
         degradation_per_year: 0.023,
         vehicle_type: VehicleType::Bev,
     },
@@ -214,6 +247,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(55.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 247.0,
+        fuel_economy_kwh_per_mi: 0.290, // fueleconomy.gov 2023 Bolt EUV: 29 kWh/100mi
         degradation_per_year: 0.023,
         vehicle_type: VehicleType::Bev,
     },
@@ -225,6 +259,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(150.0),
         chemistry: BatteryChemistry::Lfp,
         range_miles: 250.0,
+        fuel_economy_kwh_per_mi: 0.330, // fueleconomy.gov 2023 Mach-E SR RWD LFP: 33 kWh/100mi
         degradation_per_year: 0.012,
         vehicle_type: VehicleType::Bev,
     },
@@ -236,6 +271,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(150.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 312.0,
+        fuel_economy_kwh_per_mi: 0.340, // fueleconomy.gov 2023 Mach-E ER RWD: 34 kWh/100mi
         degradation_per_year: 0.023,
         vehicle_type: VehicleType::Bev,
     },
@@ -247,6 +283,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(150.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 320.0,
+        fuel_economy_kwh_per_mi: 0.480, // fueleconomy.gov 2023 F-150 Lightning 4WD ER: 48 kWh/100mi
         degradation_per_year: 0.023,
         vehicle_type: VehicleType::Bev,
     },
@@ -258,6 +295,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(230.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 303.0,
+        fuel_economy_kwh_per_mi: 0.300, // fueleconomy.gov 2023 IONIQ 5 LR AWD: 30 kWh/100mi combined
         degradation_per_year: 0.023,
         vehicle_type: VehicleType::Bev,
     },
@@ -269,6 +307,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: Some(50.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 107.0,
+        fuel_economy_kwh_per_mi: 0.300, // fueleconomy.gov 2016 Leaf 30kWh: 30 kWh/100mi
         degradation_per_year: 0.035,
         vehicle_type: VehicleType::Bev,
     },
@@ -280,6 +319,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: None,
         chemistry: BatteryChemistry::Nmc,
         range_miles: 25.0,
+        fuel_economy_kwh_per_mi: 0.680, // fueleconomy.gov 2024 Wrangler 4xe: 68 kWh/100mi electric
         degradation_per_year: 0.015,
         vehicle_type: VehicleType::Phev,
     },
@@ -291,6 +331,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: None,
         chemistry: BatteryChemistry::Nmc,
         range_miles: 42.0,
+        fuel_economy_kwh_per_mi: 0.359, // fueleconomy.gov 2023 RAV4 Prime: 94 MPGe combined → 33.7/94
         degradation_per_year: 0.015,
         vehicle_type: VehicleType::Phev,
     },
@@ -302,6 +343,7 @@ static CATALOG: &[VehicleSpec] = &[
         dcfc_power_kw: None,
         chemistry: BatteryChemistry::Nmc,
         range_miles: 38.0,
+        fuel_economy_kwh_per_mi: 0.350, // fueleconomy.gov 2013-2015 Volt: 35 kWh/100mi
         degradation_per_year: 0.015,
         vehicle_type: VehicleType::Phev,
     },
@@ -848,6 +890,19 @@ mod tests {
                 "{}: degradation must be in (0,1)",
                 spec.label
             );
+            assert!(
+                spec.fuel_economy_kwh_per_mi > 0.0,
+                "{}: fuel_economy_kwh_per_mi must be positive",
+                spec.label
+            );
+            let dc = spec.capacity_kwh / spec.range_miles;
+            assert!(
+                spec.fuel_economy_kwh_per_mi >= dc,
+                "{}: fuel_economy_kwh_per_mi ({:.6}) must be >= DC eff ({:.6})",
+                spec.label,
+                spec.fuel_economy_kwh_per_mi,
+                dc,
+            );
         }
     }
 
@@ -922,10 +977,83 @@ mod tests {
         let cfg = spec.to_config();
         let typed: EvConfig = cfg.typed().unwrap();
         let fuel_econ = typed.fuel_economy_kwh_per_mi.unwrap();
-        let expected = 77.0 / 310.0;
+        // EPA wall-to-wheels: 0.280 kWh/mi (fueleconomy.gov 28 kWh/100mi)
+        let expected = spec.fuel_economy_kwh_per_mi;
         assert!((fuel_econ - expected).abs() < 1e-10);
+        assert!(fuel_econ > spec.capacity_kwh / spec.range_miles);
         assert_eq!(typed.chemistry.as_deref(), Some("nca"));
         assert_eq!(typed.charging_level.as_deref(), Some("L2"));
+    }
+
+    #[test]
+    fn fuel_economy_stored_for_all_vehicles() {
+        for &id in VehicleId::ALL {
+            let spec = id.spec();
+            let cfg = spec.to_config();
+            let typed: EvConfig = cfg.typed().unwrap();
+            let actual = typed.fuel_economy_kwh_per_mi.unwrap();
+            let expected = spec.fuel_economy_kwh_per_mi;
+            assert!(
+                (actual - expected).abs() < 1e-10,
+                "{}: got {actual:.6}, expected {expected:.6}",
+                spec.label,
+            );
+            let dc_kwh_per_mi = spec.capacity_kwh / spec.range_miles;
+            assert!(
+                actual >= dc_kwh_per_mi,
+                "{}: wall-to-wheels {actual:.6} must be >= DC efficiency {dc_kwh_per_mi:.6}",
+                spec.label,
+            );
+            // EPA wall-to-wheels must be > DC (charging losses exist).
+            assert!(
+                actual > dc_kwh_per_mi || spec.vehicle_type == VehicleType::Phev,
+                "{}: wall-to-wheels must exceed DC efficiency (charging losses)",
+                spec.label,
+            );
+        }
+    }
+
+    #[test]
+    fn fuel_economy_sourced_from_epa_ratings() {
+        // Each value in the catalog must have a fueleconomy.gov source
+        // documented in the inline comment. This test verifies that every
+        // vehicle's stored fuel_economy_kwh_per_mi matches the EPA wall-to-wheels
+        // value cited in docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md
+        // and in the fueleconomy.gov inline source comments.
+
+        // EPA data: fueleconomy.gov combined kWh/100mi for BEVs,
+        // puedeconomy.gov MPGe → 33.7/MPGe for plug-in hybrids using
+        // the EPA conversion of 33.7 kWh per gallon gasoline equivalent.
+        let _epa_kwh_per_gallon: f64 = 33.7;
+
+        let expected: &[(VehicleId, f64, &str)] = &[
+            (VehicleId::TeslaModelYLr, 0.280, "28 kWh/100mi"),
+            (VehicleId::TeslaModelYSr, 0.274, "123 MPGe combined → 33.7/123"),
+            (VehicleId::TeslaModel3Lr, 0.260, "26 kWh/100mi"),
+            (VehicleId::ChevyBoltEv, 0.280, "28 kWh/100mi"),
+            (VehicleId::ChevyBoltEuv, 0.290, "29 kWh/100mi"),
+            (VehicleId::FordMacheSr, 0.330, "33 kWh/100mi"),
+            (VehicleId::FordMacheEr, 0.340, "34 kWh/100mi"),
+            (VehicleId::FordLightningEr, 0.480, "48 kWh/100mi"),
+            (VehicleId::HyundaiIoniq5Lr, 0.300, "30 kWh/100mi"),
+            (VehicleId::NissanLeaf30, 0.300, "30 kWh/100mi"),
+            (VehicleId::Jeep4xe, 0.680, "68 kWh/100mi elec"),
+            (VehicleId::ToyotaRav4Prime, 0.359, "94 MPGe combined → 33.7/94"),
+            (VehicleId::ChevyVoltGen1, 0.350, "35 kWh/100mi"),
+        ];
+
+        for &(id, epa_value, source) in expected {
+            let spec = id.spec();
+            let delta = (spec.fuel_economy_kwh_per_mi - epa_value).abs();
+            assert!(
+                delta < 1e-6,
+                "{}: stored {:.6} does not match EPA {:.6} ({}). Update the catalog entry.",
+                spec.label,
+                spec.fuel_economy_kwh_per_mi,
+                epa_value,
+                source,
+            );
+        }
     }
 
     // ── Archetype tests ──────────────────────────────────────────────
