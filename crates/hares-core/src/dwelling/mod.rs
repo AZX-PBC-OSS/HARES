@@ -63,7 +63,7 @@ use crate::{Actor, EnvironmentManager, SimClock, derive_dwelling_rng};
 #[cfg(feature = "observe")]
 use crate::observer::{
     DispatchCapture, DispatchedSignal, EquipmentObservation, ObserverBuffer, PhaseSnapshots,
-    StepSnapshot,
+    SameTierConflict, StepSnapshot,
 };
 #[cfg(feature = "observe")]
 use crate::observer_capture;
@@ -351,10 +351,45 @@ pub struct SimulationResults {
 
 /// Internal control queue and routing logic.
 ///
+/// # Tier ordering (across priority levels)
+///
 /// Signals are bucketed into tier queues on `queue()` and drained low→high in
 /// `dispatch_into()`. Because every signal fires (no deduplication), the
 /// highest-priority tier writes last and wins. Equipment `apply_control` must
 /// be overwrite-safe (idempotent set, not accumulate).
+///
+/// # Same-tier conflict resolution
+///
+/// Within a single priority tier, signals are dispatched in FIFO order (the
+/// order they were queued). When two or more signals at the same tier target
+/// the same equipment, the last signal queued within that tier wins because
+/// `apply_control` is overwrite-safe — each subsequent `apply_control` call
+/// overwrites the state written by the prior call for the same target. There
+/// is no deduplication, merging, or composition within a tier.
+///
+/// **Strategy:** last-write-wins (FIFO queuing order within the tier).
+///
+/// **Rationale:** Simple, deterministic for a given actor registration order,
+/// and requires no per-signal-type composition rules. Composition strategies
+/// — most-restrictive (min consumption for curtailment, widest deadband for
+/// thermostats), least-restrictive, weighted average — would require
+/// signal-type-specific merge logic that must be designed and maintained for
+/// every new signal variant. Last-write-wins avoids this complexity while
+/// remaining predictable: the outcome is fully determined by the order in
+/// which actors emit signals into the same tier.
+///
+/// **Implications:**
+/// - Simulation results depend on actor registration order. Reordering actor
+///   registration — e.g. swapping the order in which two DR programs are
+///   added — changes which signal wins when both target the same equipment
+///   at the same tier.
+/// - Reproducibility requires recording actor registration order alongside
+///   simulation outputs. The debug/invariant-check log emitted at dwelling
+///   initialization captures this order explicitly.
+/// - Upstream callers that programmatically register actors must be aware
+///   that the last-added actor at a given tier dominates for shared targets.
+///
+/// # Cross-dispatch ledger
 ///
 /// A single timestep may dispatch multiple times (e.g. once pre-thermal-FSM to
 /// flush externally queued setpoints, once post-actor-decide to apply actor
@@ -403,6 +438,35 @@ impl ControlDispatcher {
         equipment: &mut [Box<dyn Equipment>],
         warnings: &mut Vec<String>,
     ) -> DispatchCapture {
+        let mut same_tier_conflicts = Vec::new();
+        for (tier_idx, tier_que) in self.by_tier.iter().enumerate() {
+            let (head, tail) = tier_que.as_slices();
+            let requests: Vec<&DispatchRequest> = head.iter().chain(tail.iter()).collect();
+            for i in 0..requests.len() {
+                for j in (i + 1)..requests.len() {
+                    if requests[i].target.conflicts_with(&requests[j].target) {
+                        let tier = PriorityTier::from_index(tier_idx);
+                        let already_recorded =
+                            same_tier_conflicts.iter().any(|c: &SameTierConflict| {
+                                c.tier == tier && c.target == requests[i].target
+                            });
+                        if !already_recorded {
+                            let signals: Vec<_> = requests
+                                .iter()
+                                .filter(|r| r.target == requests[i].target && r.priority == tier)
+                                .map(|r| r.signal.clone())
+                                .collect();
+                            same_tier_conflicts.push(SameTierConflict {
+                                tier,
+                                target: requests[i].target.clone(),
+                                signals,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         let mut signals = Vec::new();
         self.drain_tiers(
             equipment,
@@ -417,7 +481,10 @@ impl ControlDispatcher {
                 });
             },
         );
-        DispatchCapture { signals }
+        DispatchCapture {
+            signals,
+            same_tier_conflicts,
+        }
     }
 
     fn drain_tiers(
@@ -432,6 +499,44 @@ impl ControlDispatcher {
         // earlier pass does not silently overwrite it.
 
         for (tier_idx, tier_que) in self.by_tier.iter_mut().enumerate() {
+            // Same-tier conflict invariant check: warn when two or more
+            // dispatch requests in the same tier target the same equipment.
+            // This is conditional (log::warn!) because it reflects a real
+            // design choice (last-write-wins) rather than a bug, but the
+            // diagnostic helps users understand non-deterministic outcomes.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                let (head, tail) = tier_que.as_slices();
+                let requests: Vec<&DispatchRequest> = head.iter().chain(tail.iter()).collect();
+                for i in 0..requests.len() {
+                    for j in (i + 1)..requests.len() {
+                        if requests[i].target.conflicts_with(&requests[j].target) {
+                            let tier = PriorityTier::from_index(tier_idx);
+                            // Log the conflict once per target group in this tier.
+                            // Avoid duplicate warnings by checking that we haven't
+                            // already warned for this specific pair's target in a
+                            // previous inner-loop iteration.
+                            let already_warned = (0..i)
+                                .any(|k| requests[k].target.conflicts_with(&requests[i].target));
+                            if !already_warned {
+                                let conflict_signals: Vec<&ControlSignal> = requests
+                                    .iter()
+                                    .filter(|r| r.target.conflicts_with(&requests[i].target))
+                                    .map(|r| &r.signal)
+                                    .collect();
+                                tracing::warn!(
+                                    target = ?requests[i].target,
+                                    tier = ?tier,
+                                    signal_count = conflict_signals.len(),
+                                    signals = ?conflict_signals,
+                                    "same-tier conflict: multiple signals at the same priority tier target the same equipment; last-queued signal wins (FIFO / last-write-wins)"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             for request in tier_que.drain(..) {
                 // Skip lower-priority signals when a strictly higher tier has
                 // already been applied to this target in any pass of the
@@ -1559,9 +1664,17 @@ impl Dwelling {
     pub fn add_actor(&mut self, actor: Box<dyn Actor>) {
         #[cfg(feature = "actor_profiling")]
         self.actor_name_cache.push(actor.name().to_string());
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        let actor_name = actor.name().to_string();
         self.actors.push(actor);
         self.rebuild_schedule();
         self.refresh_equipment_caches();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        tracing::info!(
+            actor_name = actor_name,
+            actor_index = self.actors.len() - 1,
+            "actor registered"
+        );
     }
 
     /// Creates and adds an actor from the registry using the provided config.
@@ -1575,9 +1688,19 @@ impl Dwelling {
         config: crate::actor_registry::ActorConfig,
     ) -> Result<()> {
         let actor = registry.create(config)?;
+        #[cfg(feature = "actor_profiling")]
+        self.actor_name_cache.push(actor.name().to_string());
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        let actor_name = actor.name().to_string();
         self.actors.push(actor);
         self.rebuild_schedule();
         self.refresh_equipment_caches();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        tracing::info!(
+            actor_name = actor_name,
+            actor_index = self.actors.len() - 1,
+            "actor registered"
+        );
         Ok(())
     }
 
@@ -1669,6 +1792,15 @@ impl Dwelling {
         }
         self.rebuild_schedule();
         self.refresh_equipment_caches();
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        for (i, actor) in self.actors.iter().enumerate() {
+            tracing::info!(
+                actor_name = actor.name(),
+                actor_index = i,
+                "actor registered"
+            );
+        }
     }
 }
 
@@ -4223,6 +4355,7 @@ mod tests {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
         last_power_kw: f64,
+        last_soc_target: f64,
         core_output: CoreOutput,
     }
 
@@ -4239,14 +4372,22 @@ mod tests {
                     stage: ExecutionStage::Independent,
                     control_capabilities: capabilities,
                     core_capabilities: CoreCapabilities::empty(),
-                    telemetry_fields: vec![TelemetryField {
-                        name: tk::LAST_POWER_KW.to_string(),
-                        unit: "kW".to_string(),
-                        description: "last applied power".to_string(),
-                    }],
+                    telemetry_fields: vec![
+                        TelemetryField {
+                            name: tk::LAST_POWER_KW.to_string(),
+                            unit: "kW".to_string(),
+                            description: "last applied power".to_string(),
+                        },
+                        TelemetryField {
+                            name: tk::LAST_SOC_TARGET.to_string(),
+                            unit: "fraction".to_string(),
+                            description: "last applied SOC target".to_string(),
+                        },
+                    ],
                 },
-                telemetry: Telemetry::with_capacity(1),
+                telemetry: Telemetry::with_capacity(2),
                 last_power_kw: 0.0,
+                last_soc_target: 0.0,
                 core_output: CoreOutput::default(),
             }
         }
@@ -4267,6 +4408,8 @@ mod tests {
             _env: &hares_types::EnvironmentState,
         ) -> std::result::Result<(), hares_types::HaresError> {
             self.telemetry.insert(tk::LAST_POWER_KW, self.last_power_kw);
+            self.telemetry
+                .insert(tk::LAST_SOC_TARGET, self.last_soc_target);
             Ok(())
         }
 
@@ -4306,12 +4449,19 @@ mod tests {
             &mut self,
             signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
-            if let ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } = signal
-            {
-                self.last_power_kw = *active_power_kw;
-                self.telemetry.insert(tk::LAST_POWER_KW, self.last_power_kw);
+            match signal {
+                ControlSignal::PowerSetpoint {
+                    active_power_kw, ..
+                } => {
+                    self.last_power_kw = *active_power_kw;
+                    self.telemetry.insert(tk::LAST_POWER_KW, self.last_power_kw);
+                }
+                ControlSignal::SOCTarget { target_soc, .. } => {
+                    self.last_soc_target = *target_soc;
+                    self.telemetry
+                        .insert(tk::LAST_SOC_TARGET, self.last_soc_target);
+                }
+                _ => {}
             }
             Ok(())
         }
@@ -5410,6 +5560,309 @@ occupancy = 1.0
         assert!(warnings.is_empty());
         // Last queued signal in the same tier wins (FIFO within tier, last write wins)
         assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(9.0));
+    }
+
+    #[test]
+    fn dispatch_same_tier_same_target_reversed_order_changes_winner() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+        // Same two signals as the last_write_wins test, but queued in reverse order.
+        // This demonstrates that the outcome depends on FIFO order (actor registration
+        // order), not on signal magnitude or any composition strategy.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 9.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        // Now the 1.0 kW signal wins — it was queued last.
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(1.0));
+    }
+
+    #[test]
+    fn dispatch_same_tier_same_target_three_signals_last_wins() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+        for kw in [2.0, 7.0, 4.0] {
+            dispatcher.queue(DispatchRequest {
+                target: DispatchTarget::ByName(Arc::from("Heater")),
+                signal: ControlSignal::PowerSetpoint {
+                    active_power_kw: kw,
+                    reactive_power_kvar: None,
+                },
+                priority: PriorityTier::Schedule,
+            });
+        }
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        // Last queued (4.0 kW) wins.
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(4.0));
+    }
+
+    #[cfg(feature = "observe")]
+    #[test]
+    fn dispatch_same_tier_same_target_observer_captures_conflict() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert_eq!(capture.same_tier_conflicts.len(), 1);
+        let conflict = &capture.same_tier_conflicts[0];
+        assert_eq!(conflict.tier, PriorityTier::Schedule);
+        assert!(matches!(&conflict.target, DispatchTarget::ByName(n) if n.as_ref() == "Heater"));
+        assert_eq!(conflict.signals.len(), 2);
+        // Last signal wins (overwrite-safe apply_control).
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
+        // Signals are recorded in FIFO order; the observer capture preserves both.
+        assert_eq!(capture.signals.len(), 2);
+    }
+
+    #[cfg(feature = "observe")]
+    #[test]
+    fn dispatch_no_same_tier_conflict_observer_empty() {
+        let eq1 = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+        let eq2 = TestEquipment::new("Battery", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+        // Different targets — no conflict.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 2.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
+        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert!(
+            capture.same_tier_conflicts.is_empty(),
+            "no conflict expected for different targets"
+        );
+    }
+
+    #[cfg(feature = "observe")]
+    #[test]
+    fn dispatch_different_tier_same_target_no_same_tier_conflict() {
+        let eq = TestEquipment::new(
+            "Heater",
+            ControlCapabilities::POWER_SETPOINT | ControlCapabilities::THERMAL_SETPOINT,
+        );
+
+        let mut dispatcher = ControlDispatcher::default();
+        // Different tiers don't count as same-tier conflicts.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(22.0),
+                cooling_setpoint_c: None,
+                deadband_c: None,
+            },
+            priority: PriorityTier::UserOverride,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        // Cross-tier overwrite is normal priority-based dispatch, not a same-tier conflict.
+        assert!(capture.same_tier_conflicts.is_empty());
+        assert_eq!(capture.signals.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration: two DR programs targeting the same battery
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn two_dr_programs_targeting_same_battery_last_write_wins() {
+        // Two DR programs at Grid tier emit different SOC setpoints for the
+        // same battery. Last-write-wins determines the effective setpoint.
+        let battery = TestEquipment::new(
+            "Battery1",
+            ControlCapabilities::POWER_SETPOINT | ControlCapabilities::SOC_TARGET,
+        );
+
+        let mut dispatcher = ControlDispatcher::default();
+        // DR program A: request SOC target of 0.80
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery1")),
+            signal: ControlSignal::SOCTarget {
+                target_soc: 0.80,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Grid,
+        });
+        // DR program B: request SOC target of 0.30
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery1")),
+            signal: ControlSignal::SOCTarget {
+                target_soc: 0.30,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Grid,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        // Last-queued signal (0.30) wins.
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_SOC_TARGET),
+            Some(0.30)
+        );
+    }
+
+    #[test]
+    fn two_dr_programs_same_battery_reversed_order_changes_winner() {
+        let battery = TestEquipment::new(
+            "Battery1",
+            ControlCapabilities::POWER_SETPOINT | ControlCapabilities::SOC_TARGET,
+        );
+
+        let mut dispatcher = ControlDispatcher::default();
+        // Same signals, reversed: 0.30 first, 0.80 last → 0.80 wins.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery1")),
+            signal: ControlSignal::SOCTarget {
+                target_soc: 0.30,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Grid,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery1")),
+            signal: ControlSignal::SOCTarget {
+                target_soc: 0.80,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Grid,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_SOC_TARGET),
+            Some(0.80)
+        );
+    }
+
+    #[cfg(feature = "observe")]
+    #[test]
+    fn two_dr_programs_same_battery_observer_captures_conflict() {
+        let battery = TestEquipment::new(
+            "Battery1",
+            ControlCapabilities::POWER_SETPOINT | ControlCapabilities::SOC_TARGET,
+        );
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery1")),
+            signal: ControlSignal::SOCTarget {
+                target_soc: 0.80,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Grid,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery1")),
+            signal: ControlSignal::SOCTarget {
+                target_soc: 0.30,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Grid,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
+        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert_eq!(capture.same_tier_conflicts.len(), 1);
+        let conflict = &capture.same_tier_conflicts[0];
+        assert_eq!(conflict.tier, PriorityTier::Grid);
+        assert!(matches!(&conflict.target, DispatchTarget::ByName(n) if n.as_ref() == "Battery1"));
+        assert_eq!(conflict.signals.len(), 2);
+        // Last signal (0.30) wins.
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_SOC_TARGET),
+            Some(0.30)
+        );
     }
 
     // -----------------------------------------------------------------------

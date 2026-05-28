@@ -142,6 +142,11 @@ pub struct ZoneUpdateCapture {
 pub struct DispatchCapture {
     /// All signals dispatched this timestep, in tier order (low → high).
     pub signals: Vec<DispatchedSignal>,
+    /// Same-tier conflicts detected this timestep: two or more dispatch
+    /// requests at the same priority tier targeting the same equipment.
+    /// Captured before draining so that losing signals are recorded even
+    /// though only the last-queued signal in each conflict pair is applied.
+    pub same_tier_conflicts: Vec<SameTierConflict>,
 }
 
 /// One dispatched control signal with its resolution outcome.
@@ -154,6 +159,18 @@ pub struct DispatchedSignal {
     pub overwrote_earlier: bool,
     /// Whether the target equipment was found.
     pub delivered: bool,
+}
+
+/// A same-tier conflict: two dispatch requests at the same priority tier
+/// target the same equipment, making the outcome dependent on FIFO order
+/// (last-write-wins).
+#[derive(Debug, Clone)]
+pub struct SameTierConflict {
+    pub tier: PriorityTier,
+    pub target: DispatchTarget,
+    /// All signals in the conflict, in FIFO order. The last signal is the
+    /// winning signal (applied last via overwrite-safe `apply_control`).
+    pub signals: Vec<ControlSignal>,
 }
 
 /// Ring buffer of step snapshots with configurable capacity.

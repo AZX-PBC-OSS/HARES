@@ -26,6 +26,23 @@ impl PriorityTier {
     pub const fn index(self) -> usize {
         self as usize
     }
+
+    /// Constructs a `PriorityTier` from its index (0 = Schedule, 3 = Safety).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= PRIORITY_TIER_COUNT`.
+    #[inline]
+    #[must_use]
+    pub const fn from_index(idx: usize) -> Self {
+        match idx {
+            0 => PriorityTier::Schedule,
+            1 => PriorityTier::UserOverride,
+            2 => PriorityTier::Grid,
+            3 => PriorityTier::Safety,
+            _ => panic!("invalid PriorityTier index"),
+        }
+    }
 }
 
 impl From<&ControlSignal> for PriorityTier {

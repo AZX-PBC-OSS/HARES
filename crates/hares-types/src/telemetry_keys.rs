@@ -220,6 +220,7 @@ pub const HUMIDITY_SOLVER_TELEMETRY_KEY: &str = "HumiditySolver";
 
 // ── Dwelling-level / test equipment ─────────────────────────────────────────
 pub const LAST_POWER_KW: &str = "last_power_kw";
+pub const LAST_SOC_TARGET: &str = "last_soc_target";
 
 // ── Protocol bridge ─────────────────────────────────────────────────────────
 /// Protocol ID of the last dispatched ProtocolNative signal.
