@@ -282,6 +282,14 @@ impl PyControlSignal {
         }
     }
 
+    #[staticmethod]
+    #[pyo3(signature = (fraction))]
+    pub fn max_capacity_fraction(fraction: f64) -> Self {
+        Self {
+            signal: ControlSignal::MaxCapacityFraction { fraction },
+        }
+    }
+
     #[classmethod]
     pub fn from_dict(_cls: &Bound<'_, PyType>, d: &Bound<'_, PyDict>) -> PyResult<Self> {
         let kind: String = dict_required(d, "type")?;
@@ -732,6 +740,20 @@ fn parse_inverter_priority_or_enum(d: &Bound<'_, PyDict>, key: &str) -> PyResult
         }
     }
     Err(PyValueError::new_err(format!("invalid value for `{key}`")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_capacity_fraction_constructs_correct_signal() {
+        let sig = PyControlSignal::max_capacity_fraction(0.5);
+        assert!(matches!(
+            sig.signal,
+            ControlSignal::MaxCapacityFraction { fraction: 0.5 }
+        ));
+    }
 }
 
 fn parse_duty_cycle_component_or_enum(

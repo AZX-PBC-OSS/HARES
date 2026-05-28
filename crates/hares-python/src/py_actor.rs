@@ -1349,3 +1349,36 @@ impl PyDRLevel {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_capacity_fraction_signal_converts_to_control_signal() {
+        let signal = PySignal::MaxCapacityFraction { fraction: 0.8 };
+        let cs = signal.into_control_signal();
+        assert!(matches!(
+            cs,
+            ControlSignal::MaxCapacityFraction { fraction: f } if f == 0.8
+        ));
+    }
+
+    #[test]
+    fn max_capacity_fraction_dispatch_request_constructs() {
+        let req = PyDispatchRequest {
+            target: "test_equip".to_string(),
+            signal: PySignal::MaxCapacityFraction { fraction: 0.6 },
+            priority: PyPriority::UserOverride,
+        };
+        let dr = req.into_dispatch_request();
+        assert!(matches!(
+            dr.target,
+            DispatchTarget::ByName(ref name) if name.as_ref() == "test_equip"
+        ));
+        assert!(matches!(
+            dr.signal,
+            ControlSignal::MaxCapacityFraction { fraction: f } if f == 0.6
+        ));
+    }
+}

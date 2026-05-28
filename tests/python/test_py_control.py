@@ -413,6 +413,14 @@ class TestControlSignalRoundTrip:
         round_trip = ControlSignal.from_dict(d)
         assert round_trip.to_dict() == d
 
+    def test_max_capacity_fraction_round_trip(self):
+        original = ControlSignal.max_capacity_fraction(0.5)
+        d = original.to_dict()
+        assert d["type"] == "MaxCapacityFraction"
+        assert d["fraction"] == 0.5
+        round_trip = ControlSignal.from_dict(d)
+        assert round_trip.to_dict() == d
+
     def test_mode_override_round_trip(self):
         original = ControlSignal.mode_override(OperatingMode.Heating)
         d = original.to_dict()
