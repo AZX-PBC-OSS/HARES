@@ -12,7 +12,7 @@ use crate::longwave_radiation::{
     exterior_longwave_w, interior_longwave_linearised_w_into, sky_view_factor,
 };
 
-use hares_physics::film_coefficients::H_OUT_NFRC;
+use hares_physics::film_coefficients::H_OUT_ASHRAE_PEAK;
 
 use super::ThermalSolver;
 
@@ -52,6 +52,9 @@ impl ThermalSolver {
                             lwr_gain_w: 0.0,
                             surface_temp_c: t_ext,
                             injected_w: 0.0,
+                            h_out_computed_w_m2_k: info.h_out_w_m2_k,
+                            h_out_effective_w_m2_k: 0.0,
+                            h_out_fallback_triggered: false,
                         });
                     continue;
                 }
@@ -78,12 +81,19 @@ impl ThermalSolver {
                 //   ΔQ_zone = U·A·(T_air − T_eff) = (U / h_out) · Δq · A
                 // This avoids double-counting: the U-factor's h_out already includes
                 // radiative exchange at T_sky = T_air; we correct for T_sky ≠ T_air only.
-                // Use actual h_out from boundary film resistance when available;
-                // fall back to the ASHRAE conventional combined exterior coefficient
+                // Use actual h_out from boundary film resistance when it is at or
+                // above the physically meaningful natural convection floor of
+                // 1.0 W/(m²·K) (ASHRAE HoF 2021 Ch. 4 §4.2; vertical surface at
+                // ΔT ≈ 0.4°C). Values below 1.0 produce correction factors >34×
+                // relative to the ASHRAE fallback and can produce physically
+                // implausible heat flows (e.g. h_out=0.01 at clear-night yields
+                // ΔQ ≈ −57,600 W for a 12 m² window with U=3.0).
+                //
+                // Fall back to the ASHRAE conventional combined exterior coefficient
                 // (34 W/(m²·K)) — the standard peak-load fallback for fenestration
-                // when explicit film resistance is unavailable.
+                // when explicit film resistance is unavailable or implausibly low.
                 // ASHRAE HoF 2021 Ch. 15, Table 1; Engineers Edge (citing ASHRAE).
-                let h_out = if info.h_out_w_m2_k > 0.0 {
+                let h_out = if info.h_out_w_m2_k >= 1.0 {
                     info.h_out_w_m2_k
                 } else {
                     // The fallback value 34 W/(m²·K) is the ASHRAE conventional
@@ -92,17 +102,35 @@ impl ThermalSolver {
                     // NFRC 100 / ISO 15099 convective boundary condition (26 W/(m²·K)
                     // at 5.5 m/s), but is the correct fallback for simplified
                     // fenestration load-calculation contexts (ASHRAE HoF 2021 Ch. 15).
-                    // A non-positive computed h_out indicates an upstream computation
-                    // failure and should be unreachable in production.
+                    // A computed h_out_w_m2_k below 1.0 indicates either a
+                    // per-timestep film coefficient below the natural convection
+                    // floor (low-wind, small-ΔT edge case) or a zero/uninitialised
+                    // value from construction.
                     tracing::warn!(
                         surface_id = info.surface_id,
                         h_out_w_m2_k = info.h_out_w_m2_k,
-                        "window exterior film coefficient is non-positive; \
-                         using ASHRAE conventional fallback ({H_OUT_NFRC} W/(m²·K)). \
-                         This should be rare — check upstream boundary film computation."
+                        "window exterior film coefficient {:?} is below the \
+                         1.0 W/(m²·K) natural convection floor; \
+                         using ASHRAE conventional fallback ({H_OUT_ASHRAE_PEAK} W/(m²·K)).",
+                        info.h_out_w_m2_k
                     );
-                    H_OUT_NFRC
+                    H_OUT_ASHRAE_PEAK
                 };
+
+                // Invariant: by this point h_out must be ≥ 1.0. The guard above
+                // either selects a computed value ≥ 1.0 or the ASHRAE fallback (34.0).
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    assert!(
+                        h_out >= 1.0,
+                        "invariant violation: h_out ({}) is below the 1.0 W/(m²·K) \
+                         natural convection floor — the guard at line 86 should have \
+                         caught this. surface_id={}",
+                        h_out,
+                        info.surface_id
+                    );
+                }
+
                 let delta_q_w = (u_factor / h_out) * delta_q_w_m2 * info.area_m2;
 
                 let indoor_zone = self
@@ -129,6 +157,9 @@ impl ThermalSolver {
                         lwr_gain_w: delta_q_w,
                         surface_temp_c: t_ext,
                         injected_w: delta_q_w,
+                        h_out_computed_w_m2_k: info.h_out_w_m2_k,
+                        h_out_effective_w_m2_k: h_out,
+                        h_out_fallback_triggered: h_out != info.h_out_w_m2_k,
                     });
                 continue;
             }
@@ -154,6 +185,9 @@ impl ThermalSolver {
                         lwr_gain_w: q_lw,
                         surface_temp_c: t_node_c,
                         injected_w: q_lw,
+                        h_out_computed_w_m2_k: 0.0,
+                        h_out_effective_w_m2_k: 0.0,
+                        h_out_fallback_triggered: false,
                     });
                 continue;
             }
@@ -220,6 +254,9 @@ impl ThermalSolver {
                     lwr_gain_w: q_lw,
                     surface_temp_c: t_surf,
                     injected_w: injected,
+                    h_out_computed_w_m2_k: 0.0,
+                    h_out_effective_w_m2_k: 0.0,
+                    h_out_fallback_triggered: false,
                 });
         }
     }
@@ -529,7 +566,7 @@ mod tests {
 
         let delta_q_w_m2 =
             epsilon * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
-        let delta_q_w = (u_factor / H_OUT_NFRC) * delta_q_w_m2 * area_m2;
+        let delta_q_w = (u_factor / H_OUT_ASHRAE_PEAK) * delta_q_w_m2 * area_m2;
 
         assert!(
             delta_q_w_m2 < 0.0,
@@ -567,7 +604,7 @@ mod tests {
 
         let delta_q_w_m2 =
             epsilon * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
-        let delta_q_w = (u_factor / H_OUT_NFRC) * delta_q_w_m2 * area_m2;
+        let delta_q_w = (u_factor / H_OUT_ASHRAE_PEAK) * delta_q_w_m2 * area_m2;
 
         assert!(
             delta_q_w.abs() < 1e-6,
@@ -595,10 +632,10 @@ mod tests {
         let delta_q_w_m2 =
             epsilon * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
         let raw_delta = delta_q_w_m2 * area_m2;
-        let scaled_delta = (u_factor / H_OUT_NFRC) * delta_q_w_m2 * area_m2;
+        let scaled_delta = (u_factor / H_OUT_ASHRAE_PEAK) * delta_q_w_m2 * area_m2;
 
         let ratio = scaled_delta / raw_delta;
-        let expected_ratio = u_factor / H_OUT_NFRC;
+        let expected_ratio = u_factor / H_OUT_ASHRAE_PEAK;
         assert!(
             (ratio - expected_ratio).abs() < 1e-9,
             "scaling ratio should be U/h_out = {expected_ratio:.6}, got {ratio:.6}"
@@ -627,7 +664,7 @@ mod tests {
         let delta_q_w_m2 =
             epsilon * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
 
-        let delta_nfrc = (u_factor / H_OUT_NFRC) * delta_q_w_m2 * area_m2;
+        let delta_nfrc = (u_factor / H_OUT_ASHRAE_PEAK) * delta_q_w_m2 * area_m2;
         let h_out_actual = 50.0_f64;
         let delta_actual = (u_factor / h_out_actual) * delta_q_w_m2 * area_m2;
 
@@ -651,7 +688,7 @@ mod tests {
 
         let f_sky_v = sky_view_factor(90.0);
         let beta_v = beta_factor(90.0);
-        let delta_v = (u_factor / H_OUT_NFRC)
+        let delta_v = (u_factor / H_OUT_ASHRAE_PEAK)
             * epsilon
             * STEFAN_BOLTZMANN
             * beta_v
@@ -661,7 +698,7 @@ mod tests {
 
         let f_sky_h = sky_view_factor(0.0);
         let beta_h = beta_factor(0.0);
-        let delta_h = (u_factor / H_OUT_NFRC)
+        let delta_h = (u_factor / H_OUT_ASHRAE_PEAK)
             * epsilon
             * STEFAN_BOLTZMANN
             * beta_h
@@ -675,14 +712,14 @@ mod tests {
         );
     }
 
-    /// Verify: H_OUT_NFRC matches the ASHRAE conventional combined exterior
+    /// Verify: H_OUT_ASHRAE_PEAK matches the ASHRAE conventional combined exterior
     /// film coefficient for peak heating load calculations.
     /// ASHRAE HoF 2021 Ch. 15, Table 1; Engineers Edge (citing ASHRAE).
     #[test]
-    fn h_out_nfrc_matches_standard() {
+    fn h_out_ashrae_matches_standard() {
         assert!(
-            (H_OUT_NFRC - 34.0).abs() < 1e-9,
-            "H_OUT_NFRC should be 34.0 W/(m²·K) per ASHRAE conventional peak-load value"
+            (H_OUT_ASHRAE_PEAK - 34.0).abs() < 1e-9,
+            "H_OUT_ASHRAE_PEAK should be 34.0 W/(m²·K) per ASHRAE conventional peak-load value"
         );
     }
 
@@ -756,21 +793,25 @@ mod tests {
         );
     }
 
-    // ── Regression: window exterior LWR uses computed h_out, not NFRC fallback ──
+    // ── Regression: window exterior LWR guard threshold at 1.0 W/(m²·K) ──
     //
-    // The guard at longwave.rs:86 previously used `> 1.0` instead of `> 0.0`,
-    // causing any h_out_w_m2_k in (0, 1] to silently fall back to H_OUT_NFRC
-    // (34 W/(m²·K)) — a 34× to 68× mismatch for valid low-wind conditions.
-    // Fixed: guard is now `> 0.0` so any positive computed coefficient is used.
+    // The guard at longwave.rs:86 uses `>= 1.0` — the natural convection floor
+    // for a vertical surface at ΔT ≈ 0.4°C (ASHRAE HoF 2021 Ch. 4 §4.2). Values
+    // below 1.0 produce correction factors >34× relative to the ASHRAE fallback
+    // and are physically implausible (the DOE-2 model approaches zero at zero wind
+    // and ΔT → 0, creating an unphysical divisor in the T_eff correction at
+    // line 106).
     //
-    // `window_lwr_uses_computed_h_out_not_nfrc_fallback` exercises the production
-    // code path through `apply_exterior_longwave_inputs_iterative` to verify that
-    // the guard at line 86 selects the correct h_out. If the guard reverts to
-    // `> 1.0`, h_out=0.5 triggers the NFRC fallback and the injected δq is 68×
-    // too small, causing the ratio-based assertion to fail.
+    // `window_lwr_uses_computed_h_out_not_fallback` exercises the production
+    // code path through `apply_exterior_longwave_inputs_iterative` with
+    // h_out=1.5, verifying that computed coefficients at or above the guard
+    // are used directly rather than falling back.
     //
-    // `window_lwr_falls_back_to_nfrc_for_zero` guards the boundary case that
-    // non-positive values still fall back to H_OUT_NFRC.
+    // `window_lwr_falls_back_to_ashrae_below_guard` verifies that h_out=0.0
+    // (and by extension any value below 1.0) triggers the ASHRAE fallback.
+    //
+    // `window_lwr_guard_threshold_applied_at_h_out_one` verifies the boundary:
+    // h_out=1.0 uses computed coefficient, h_out=0.99 triggers fallback.
 
     /// Build a minimal one-zone `ThermalSolver` with a single vertical window
     /// exterior surface having the specified film coefficient [W/(m²·K)].
@@ -891,34 +932,29 @@ mod tests {
         }
     }
 
-    /// Regression: a computed h_out of 0.5 W/(m²·K) is a valid low-wind exterior
-    /// film coefficient and must be used directly rather than falling back to the
-    /// NFRC default of 34 W/(m²·K).
+    /// Regression: a computed h_out of 1.5 W/(m²·K) is above the guard threshold
+    /// of 1.0 W/(m²·K) and must be used directly rather than falling back to the
+    /// ASHRAE peak-load value of 34 W/(m²·K).
     ///
-    /// Natural convection coefficients for vertical surfaces can approach
-    /// 1 W/(m²·K) in still air (ASHRAE HoF 2021 Ch. 4 §4.2); for non-vertical
-    /// surfaces they fall well below it. The correct discriminant is `> 0.0`:
-    /// any positive computed coefficient is more accurate than the rating-condition
-    /// tabulated value.
+    /// The guard at line 86 requires `>= 1.0` — the natural convection floor for
+    /// a vertical surface at ΔT ≈ 0.4°C (ASHRAE HoF 2021 Ch. 4 §4.2). A computed
+    /// coefficient of 1.5 is a realistic low-wind value and must be used.
     ///
-    /// Exercises `apply_exterior_longwave_inputs_iterative` — if line 86's guard
-    /// reverts to `> 1.0`, h_out=0.5 triggers the NFRC fallback and the injected
-    /// δq is 68× too small.
+    /// Exercises `apply_exterior_longwave_inputs_iterative` — if the guard
+    /// changes to a threshold above 1.5, h_out=1.5 would trigger the ASHRAE
+    /// fallback and the injected δq would be too small.
     #[test]
-    fn window_lwr_uses_computed_h_out_not_nfrc_fallback() {
+    fn window_lwr_uses_computed_h_out_not_fallback() {
         let env = window_lwr_env();
 
-        let mut solver_0_5 = window_lwr_solver(0.5, &env);
+        let mut solver_1_5 = window_lwr_solver(1.5, &env);
         let mut solver_0 = window_lwr_solver(0.0, &env);
-        let mut u_0_5 = DVector::zeros(solver_0_5.model.input_dim());
+        let mut u_1_5 = DVector::zeros(solver_1_5.model.input_dim());
         let mut u_0 = DVector::zeros(solver_0.model.input_dim());
 
-        solver_0_5.apply_exterior_longwave_inputs_iterative(&mut u_0_5, &env);
+        solver_1_5.apply_exterior_longwave_inputs_iterative(&mut u_1_5, &env);
         solver_0.apply_exterior_longwave_inputs_iterative(&mut u_0, &env);
 
-        // Analytic δq_w_m2 (identical for both; only h_out differs):
-        //   δq = ε·σ·β·F_sky·(T_sky⁴ − T_air⁴)
-        //   with β = √F_sky = √0.5 ≈ 0.7071
         let f_sky = sky_view_factor(90.0);
         let beta = beta_factor(90.0);
         let t_sky_k = -30.0 + CELSIUS_TO_KELVIN; // 243.15 K
@@ -926,44 +962,45 @@ mod tests {
         let delta_q_w_m2 =
             0.84 * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
 
-        let expected_0_5 = (3.0 / 0.5) * delta_q_w_m2 * 12.0;
-        let expected_nfrc = (3.0 / H_OUT_NFRC) * delta_q_w_m2 * 12.0;
+        let expected_1_5 = (3.0 / 1.5) * delta_q_w_m2 * 12.0;
+        let expected_ashrae = (3.0 / H_OUT_ASHRAE_PEAK) * delta_q_w_m2 * 12.0;
 
-        // The solver with h_out=0.5 must use 0.5, not the NFRC fallback.
-        let actual_0_5 = u_0_5[1];
+        // The solver with h_out=1.5 must use 1.5, not the ASHRAE fallback.
+        let actual_1_5 = u_1_5[1];
         assert!(
-            (actual_0_5 - expected_0_5).abs() < 1e-6,
-            "h_out=0.5: window LWR correction expected {expected_0_5:.6} W, got {actual_0_5:.6} W. \
-             The guard at line 86 may have fallen back to H_OUT_NFRC instead of using the \
+            (actual_1_5 - expected_1_5).abs() < 1e-6,
+            "h_out=1.5: window LWR correction expected {expected_1_5:.6} W, got {actual_1_5:.6} W. \
+             The guard at line 86 may have fallen back to H_OUT_ASHRAE_PEAK instead of using the \
              computed coefficient."
         );
 
-        // The solver with h_out=0.0 must fall back to H_OUT_NFRC.
+        // The solver with h_out=0.0 must fall back to H_OUT_ASHRAE_PEAK.
         let actual_0 = u_0[1];
         assert!(
-            (actual_0 - expected_nfrc).abs() < 1e-6,
-            "h_out=0.0: window LWR correction expected NFRC fallback {expected_nfrc:.6} W, \
+            (actual_0 - expected_ashrae).abs() < 1e-6,
+            "h_out=0.0: window LWR correction expected ASHRAE fallback {expected_ashrae:.6} W, \
              got {actual_0:.6} W"
         );
 
-        // Final sanity: ratio must be 34/0.5 = 68.
-        let ratio = actual_0_5 / actual_0;
+        // Final sanity: ratio must be 34/1.5 ≈ 22.667.
+        let ratio = actual_1_5 / actual_0;
         assert!(
-            (ratio - H_OUT_NFRC / 0.5).abs() < 1e-3,
-            "ratio u(0.5)/u(0.0) should be {:.0}, got {ratio}",
-            H_OUT_NFRC / 0.5
+            (ratio - H_OUT_ASHRAE_PEAK / 1.5).abs() < 1e-3,
+            "ratio u(1.5)/u(0.0) should be {:.3}, got {ratio}",
+            H_OUT_ASHRAE_PEAK / 1.5
         );
     }
 
     /// Guard-condition regression: h_out_w_m2_k = 0.0 must still use the
-    /// NFRC fallback after the threshold is corrected to `> 0.0`.
+    /// ASHRAE fallback after the threshold is corrected to `>= 1.0`.
     ///
-    /// Exercises `apply_exterior_longwave_inputs_iterative` — if the guard
-    /// were changed to accept zero (e.g. `>= 0.0` instead of `> 0.0`), a
-    /// computed coefficient of zero would be used in the denominator,
-    /// producing a NaN or infinite δq.
+    /// Exercises `apply_exterior_longwave_inputs_iterative` — any computed
+    /// coefficient below 1.0 W/(m²·K) (including zero, negative, and near-zero
+    /// positive values) triggers the ASHRAE conventional peak-load fallback
+    /// to prevent division by an unphysically small h_out in the T_eff
+    /// correction at line 106.
     #[test]
-    fn window_lwr_falls_back_to_nfrc_for_zero() {
+    fn window_lwr_falls_back_to_ashrae_below_guard() {
         let env = window_lwr_env();
         let mut solver = window_lwr_solver(0.0, &env);
         let mut u = DVector::zeros(solver.model.input_dim());
@@ -975,19 +1012,74 @@ mod tests {
         let t_air_k = -15.0 + CELSIUS_TO_KELVIN;
         let delta_q_w_m2 =
             0.84 * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
-        let expected = (3.0 / H_OUT_NFRC) * delta_q_w_m2 * 12.0;
+        let expected = (3.0 / H_OUT_ASHRAE_PEAK) * delta_q_w_m2 * 12.0;
 
         let actual = u[1];
         assert!(
             (actual - expected).abs() < 1e-6,
-            "h_out=0.0: window LWR correction should use NFRC fallback ({H_OUT_NFRC} W/(m²·K)), \
+            "h_out=0.0: window LWR correction should use ASHRAE fallback ({H_OUT_ASHRAE_PEAK} W/(m²·K)), \
              expected {expected:.6} W, got {actual:.6} W"
         );
     }
 
-    // ── H_OUT_NFRC is now exported from hares-physics::film_coefficients ──────
+    /// Guard threshold boundary: h_out = 1.0 W/(m²·K) (exactly at the guard)
+    /// must use the computed coefficient; h_out = 0.99 (just below) must
+    /// trigger the ASHRAE fallback.
+    ///
+    /// The guard threshold of 1.0 W/(m²·K) is the natural convection floor for
+    /// a vertical surface at ΔT ≈ 0.4°C (ASHRAE HoF 2021 Ch. 4 §4.2). Values
+    /// below this produce correction factors >34× relative to the ASHRAE
+    /// fallback and are physically implausible.
+    #[test]
+    fn window_lwr_guard_threshold_applied_at_h_out_one() {
+        let env = window_lwr_env();
+
+        let mut solver_1_0 = window_lwr_solver(1.0, &env);
+        let mut solver_0_99 = window_lwr_solver(0.99, &env);
+        let mut u_1_0 = DVector::zeros(solver_1_0.model.input_dim());
+        let mut u_0_99 = DVector::zeros(solver_0_99.model.input_dim());
+
+        solver_1_0.apply_exterior_longwave_inputs_iterative(&mut u_1_0, &env);
+        solver_0_99.apply_exterior_longwave_inputs_iterative(&mut u_0_99, &env);
+
+        let f_sky = sky_view_factor(90.0);
+        let beta = beta_factor(90.0);
+        let t_sky_k = -30.0 + CELSIUS_TO_KELVIN;
+        let t_air_k = -15.0 + CELSIUS_TO_KELVIN;
+        let delta_q_w_m2 =
+            0.84 * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
+
+        // h_out=1.0: exactly at guard — must use computed coefficient.
+        let expected_1_0 = (3.0 / 1.0) * delta_q_w_m2 * 12.0;
+        let actual_1_0 = u_1_0[1];
+        assert!(
+            (actual_1_0 - expected_1_0).abs() < 1e-6,
+            "h_out=1.0 (at guard): must use computed coefficient. \
+             expected {expected_1_0:.6} W, got {actual_1_0:.6} W"
+        );
+
+        // h_out=0.99: just below guard — must trigger ASHRAE fallback.
+        let expected_fallback = (3.0 / H_OUT_ASHRAE_PEAK) * delta_q_w_m2 * 12.0;
+        let actual_0_99 = u_0_99[1];
+        assert!(
+            (actual_0_99 - expected_fallback).abs() < 1e-6,
+            "h_out=0.99 (below guard): must use ASHRAE fallback. \
+             expected {expected_fallback:.6} W, got {actual_0_99:.6} W"
+        );
+
+        // Sanity: the ratio 34/1 = 34.
+        let ratio = actual_1_0 / actual_0_99;
+        assert!(
+            (ratio - H_OUT_ASHRAE_PEAK).abs() < 0.01,
+            "ratio u(1.0)/u(0.99) should be ~{:.0}, got {ratio}",
+            H_OUT_ASHRAE_PEAK
+        );
+    }
+
+    // ── H_OUT_ASHRAE_PEAK is now exported from hares-physics::film_coefficients ───
     //
     // Both this module and solver_builder.rs import the same constant, eliminating
-    // the duplicate-literal drift risk. The `h_out_nfrc_matches_standard` test
-    // above guards the numeric value (34.0 W/(m²·K) per ASHRAE Ch. 15).
+    // the duplicate-literal drift risk. The `h_out_ashrae_matches_standard` test
+    // above guards the numeric value (34.0 W/(m²·K) per ASHRAE HoF 2021 Ch. 15,
+    // Table 1).
 }

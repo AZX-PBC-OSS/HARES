@@ -29,11 +29,11 @@
 /// value is the ASHRAE conventional combined coefficient used for peak
 /// heating load calculations. See ASHRAE HoF 2021 Ch. 15, Table 1.
 ///
-/// Used in `hares-envelope::thermal_solver::longwave` as the NFRC-fallback
+/// Used in `hares-envelope::thermal_solver::longwave` as the fallback
 /// exterior film coefficient for window longwave radiation correction, and
 /// in `hares-core::dwelling::solver_builder` as the fallback when a
 /// computed exterior film resistance is unavailable.
-pub const H_OUT_NFRC: f64 = 34.0;
+pub const H_OUT_ASHRAE_PEAK: f64 = 34.0;
 
 /// Zone height ordering for TARP above/below determination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,7 +289,16 @@ pub fn film_resistances(
         let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter);
         let h_glass = (h_natural.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
         let h_forced = roughness.factor() * (h_glass - h_natural);
-        1.0 / (h_natural + h_forced)
+        // Floor the exterior convection coefficient to 1.0 W/(m²·K) — the
+        // natural convection floor for a vertical surface at ΔT ≈ 0.4°C
+        // (ASHRAE HoF 2021 Ch. 4 §4.2). At zero wind and ΔT → 0, the DOE-2
+        // model produces h_natural + h_forced → 0; dividing by near-zero
+        // produces numerically unstable film resistance that causes the window
+        // exterior LWR T_eff correction to diverge (h_out appears in the
+        // denominator at longwave.rs:106). A minimum of 1.0 protects all
+        // consumers of exterior film resistance, not just the window path.
+        let h_ext = (h_natural + h_forced).max(1.0);
+        1.0 / h_ext
     } else if exterior_zone == ZoneLabel::Ground {
         1.0 / h_conv
     } else {
@@ -646,6 +655,66 @@ mod tests {
         assert!(
             r_stucco < r_brick,
             "Stucco (VeryRough) R_ext={r_stucco:.6} must be less than Brick (Rough) R_ext={r_brick:.6}"
+        );
+    }
+
+    /// Integration: at minimum delta_t (0.1 °C, clamped from zero) and zero wind
+    /// speed, the DOE-2 exterior model produces h_natural + h_forced ≈ 0.608
+    /// W/(m²·K). The 1.0 W/(m²·K) floor ensures r_ext = 1.0 / 1.0 = 1.0
+    /// rather than 1.0 / 0.608 ≈ 1.645 (or worse, 1.0 / 0 → ∞).
+    ///
+    /// Without the floor, near-zero exterior convection coefficients produce
+    /// numerically unstable film resistance that flows into the window exterior
+    /// LWR T_eff correction (h_out in the denominator at longwave.rs:106),
+    /// yielding unphysical correction factors.
+    #[test]
+    fn doe2_exterior_floor_at_zero_wind_min_delta_t() {
+        use super::*;
+        use crate::test_utils::approx_eq;
+
+        // avg_ambient_c = 15.0 → t_outdoor = 20.0 = t_conditioned → delta_t = 0.1 (clamped)
+        let (r_int, r_ext) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            0.0,  // zero wind speed
+            10.0, // avg_ground (irrelevant — not Outdoor)
+            15.0, // avg_ambient → t_outdoor = 20.0
+            SurfaceRoughness::Smooth,
+        );
+
+        // At ΔT = 0.1 °C, vertical surface: h_natural = 1.31 × 0.1^(1/3) ≈ 0.608
+        // At zero wind: h_glass = sqrt(h_natural² + 0) = h_natural, forced = 0
+        // h_natural + h_forced ≈ 0.608 < 1.0 → floor to 1.0 → r_ext = 1.0
+        let expected_r_ext = 1.0;
+        approx_eq(r_ext, expected_r_ext, 1e-10);
+
+        // Interior should not be affected — h_conv for vertical ≈ 3.076 → r_int ≈ 0.325
+        let expected_r_int = 1.0 / 3.076;
+        approx_eq(r_int, expected_r_int, 0.001);
+
+        // Without the floor, r_ext would be ≈ 1.645 (1 / 0.608); our result is smaller.
+        assert!(
+            r_ext < 1.1,
+            "with floor, r_ext={r_ext:.6} should be ≤ 1.0; without floor it would be ~1.645"
+        );
+
+        // Now verify at typical wind (2 m/s) the floor does NOT override valid values.
+        let (_, r_ext_typical) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            2.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::Rough,
+        );
+        // At 2 m/s, ΔT = 5.0 (t_outdoor = 15.0), h_natural ≈ 2.24, total > 1.0
+        // r_ext should be much less than 1.0 (typical exterior R at moderate wind)
+        assert!(
+            r_ext_typical < 0.5,
+            "at 2 m/s wind, r_ext={r_ext_typical:.6} should be well below 1.0 — \
+             floor must not override valid values"
         );
     }
 }

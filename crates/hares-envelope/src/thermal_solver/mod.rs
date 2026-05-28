@@ -1021,7 +1021,6 @@ mod tests {
         ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
     use nalgebra::{DMatrix, DVector};
-    use tracing_test::traced_test;
 
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
@@ -2428,7 +2427,6 @@ mod tests {
     /// This test verifies the throttle guard (`ideal_capacity_warned_zones`)
     /// prevents per-timestep warn flood in pathological runs.
     #[test]
-    #[traced_test]
     fn solve_ideal_capacity_throttles_repeat_failures() {
         let zone_temp = 20.0;
         let outdoor_temp = 10.0;
@@ -2498,7 +2496,6 @@ mod tests {
     /// path clears `ideal_capacity_warned_zones` and logs the consecutive-failure
     /// count.
     #[test]
-    #[traced_test]
     fn solve_ideal_capacity_emits_recovery_log_after_success() {
         let zone_temp = 20.0;
         let outdoor_temp = 10.0;

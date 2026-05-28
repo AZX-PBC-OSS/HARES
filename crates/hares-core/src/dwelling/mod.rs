@@ -3349,215 +3349,212 @@ impl Dwelling {
     fn check_invariants(&mut self, dt: StdDuration) -> Result<()> {
         let checker = &self.invariant_checker;
 
-            let dt_s = dt.as_secs_f64();
-            if !dt_s.is_finite() || dt_s <= 0.0 {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "timestep_dt".to_string(),
-                    value: dt_s,
-                    tolerance: 0.0,
-                });
-            }
+        let dt_s = dt.as_secs_f64();
+        if !dt_s.is_finite() || dt_s <= 0.0 {
+            return Err(HaresError::InvariantViolation {
+                check_name: "timestep_dt".to_string(),
+                value: dt_s,
+                tolerance: 0.0,
+            });
+        }
 
-            // Zone temperature bounds (read from already-updated zones).
-            // Split by conditioning status: conditioned zones get tighter bounds
-            // (80 °C) while unconditioned zones (attics under solar load) get
-            // wider bounds (120 °C).
-            debug_assert_eq!(
-                self.latest_env.zones.len(),
-                self.zone_is_conditioned.len(),
-                "zone_is_conditioned length must match latest_env.zones length"
+        // Zone temperature bounds (read from already-updated zones).
+        // Split by conditioning status: conditioned zones get tighter bounds
+        // (80 °C) while unconditioned zones (attics under solar load) get
+        // wider bounds (120 °C).
+        debug_assert_eq!(
+            self.latest_env.zones.len(),
+            self.zone_is_conditioned.len(),
+            "zone_is_conditioned length must match latest_env.zones length"
+        );
+        self.invariant_conditioned_temps.clear();
+        self.invariant_unconditioned_temps.clear();
+        for (zone, &is_cond) in self
+            .latest_env
+            .zones
+            .iter()
+            .zip(self.zone_is_conditioned.iter())
+        {
+            if is_cond {
+                self.invariant_conditioned_temps.push(zone.temperature_c);
+            } else {
+                self.invariant_unconditioned_temps.push(zone.temperature_c);
+            }
+        }
+
+        // Tank node temperatures from all water heater equipment.
+        self.invariant_tank_temps.clear();
+        for eq in &self.equipment {
+            if eq.descriptor().end_use != EndUse::WATER_HEATING {
+                continue;
+            }
+            let telem = eq.telemetry();
+            for key in &self.tank_node_keys {
+                match telem.get(key) {
+                    // allowed: tank node keys are pre-computed at init.
+                    Some(t) => self.invariant_tank_temps.push(t),
+                    None => break,
+                }
+            }
+        }
+        checker.check_temperatures(
+            &self.invariant_conditioned_temps,
+            &self.invariant_unconditioned_temps,
+            &self.invariant_tank_temps,
+        )?;
+
+        // SOC bounds for storage equipment.
+        for eq in &self.equipment {
+            let end_use = &eq.descriptor().end_use;
+            if *end_use != EndUse::BATTERY && *end_use != EndUse::EV {
+                continue;
+            }
+            if let Some(soc) = eq.core_output().state.soc.map(|s| s.get()) {
+                checker.check_soc(soc, 0.0)?;
+            }
+        }
+
+        // Electrical finiteness.
+        let net_kw = self.electrical_solver.net_active_kw();
+        if !net_kw.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "electrical_net_finite".to_string(),
+                value: net_kw,
+                tolerance: 0.0,
+            });
+        }
+
+        // Electrical balance: solver net must match port accumulation.
+        let bus_power = self.ports.electrical.net_active_kw();
+        checker.check_electrical(net_kw, &[-bus_power])?;
+
+        // Thermal balance: deferred -- the multi-node RC state-space model
+        // distributes thermal energy across zone-air and wall-mass nodes.
+        // A zone-air-only balance (C_zone × ΔT / dt vs. component gains)
+        // has a ~6 kW residual because wall-mass energy changes aren't
+        // captured. A proper system-level energy audit requires exposing
+        // per-node capacitances and previous-step state vectors from
+        // ThermalSolver, which exceeds the ~20-line API surface limit.
+        // See follow-up ticket for ThermalSolver::balance_inputs() API.
+
+        // Moisture balance: mass conservation across the humidity solver.
+        if let Some(update) = self
+            .latest_env
+            .custom_domains
+            .iter()
+            .find(|u| u.domain_id == hares_types::HUMIDITY)
+            && let Some(payload) = &update.custom_payload
+        {
+            for &value in payload {
+                if !value.is_finite() {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "humidity_payload_finite".to_string(),
+                        value,
+                        tolerance: 0.0,
+                    });
+                }
+            }
+        }
+        let p_pa = self.latest_env.weather.pressure_pa();
+        let moisture_mult = self.humidity_solver.config.moisture_buffering_multiplier;
+        self.invariant_infiltration_latent.clear();
+        self.invariant_infiltration_m_dot.clear();
+        self.invariant_infiltration_w_outdoor.clear();
+        if let Some(thermal_update) = self
+            .latest_env
+            .custom_domains
+            .iter()
+            .find(|u| u.domain_id == hares_types::THERMAL)
+            && let Some(payload) = &thermal_update.custom_payload
+        {
+            // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor,
+            // energy_balance_residual_w] per zone. The 5-float format carries moisture
+            // coupling data and the per-step energy balance residual for observability.
+            for quint in payload.chunks_exact(5) {
+                let zone_raw = quint[0];
+                let latent = quint[1];
+                let m_dot_inf = quint[2];
+                let w_outdoor = quint[3];
+                let _residual = quint[4];
+                if zone_raw.is_finite() && zone_raw >= 0.0 {
+                    let zone_id = ZoneId(zone_raw as u16);
+                    self.invariant_infiltration_latent.push((zone_id, latent));
+                    if m_dot_inf > 0.0 {
+                        self.invariant_infiltration_m_dot.insert(zone_id, m_dot_inf);
+                        self.invariant_infiltration_w_outdoor
+                            .insert(zone_id, w_outdoor);
+                    }
+                }
+            }
+        }
+        for zone in &self.latest_env.zones {
+            let w_new = self.humidity_solver.humidity_ratio(zone.id);
+            let w_old = self
+                .prev_humidity_ratios
+                .iter()
+                .find(|(z, _)| *z == zone.id)
+                .map(|(_, w)| *w)
+                .unwrap_or(w_new);
+            let d_w = w_new - w_old;
+            if d_w.abs() < f64::EPSILON {
+                continue;
+            }
+            // Skip if the humidity solver clamped w_new (at 0 or w_sat).
+            // Clamping breaks mass conservation by design.
+            if w_new <= 0.0 {
+                continue;
+            }
+            let w_sat =
+                hares_physics::psychrometrics::humidity_ratio_from_tdp(zone.temperature_c, p_pa);
+            if (w_new - w_sat).abs() < f64::EPSILON {
+                continue;
+            }
+            let rho_air = hares_physics::air_properties::moist_air_density_kg_m3(
+                p_pa,
+                zone.temperature_c,
+                w_old,
             );
-            self.invariant_conditioned_temps.clear();
-            self.invariant_unconditioned_temps.clear();
-            for (zone, &is_cond) in self
-                .latest_env
-                .zones
+            let delta_m = d_w * rho_air * zone.volume_m3 * moisture_mult;
+            let latent_from_ports: f64 = self
+                .ports
+                .thermal
                 .iter()
-                .zip(self.zone_is_conditioned.iter())
-            {
-                if is_cond {
-                    self.invariant_conditioned_temps.push(zone.temperature_c);
-                } else {
-                    self.invariant_unconditioned_temps.push(zone.temperature_c);
-                }
-            }
-
-            // Tank node temperatures from all water heater equipment.
-            self.invariant_tank_temps.clear();
-            for eq in &self.equipment {
-                if eq.descriptor().end_use != EndUse::WATER_HEATING {
-                    continue;
-                }
-                let telem = eq.telemetry();
-                for key in &self.tank_node_keys {
-                    match telem.get(key) {
-                        // allowed: tank node keys are pre-computed at init.
-                        Some(t) => self.invariant_tank_temps.push(t),
-                        None => break,
-                    }
-                }
-            }
-            checker.check_temperatures(
-                &self.invariant_conditioned_temps,
-                &self.invariant_unconditioned_temps,
-                &self.invariant_tank_temps,
-            )?;
-
-            // SOC bounds for storage equipment.
-            for eq in &self.equipment {
-                let end_use = &eq.descriptor().end_use;
-                if *end_use != EndUse::BATTERY && *end_use != EndUse::EV {
-                    continue;
-                }
-                if let Some(soc) = eq.core_output().state.soc.map(|s| s.get()) {
-                    checker.check_soc(soc, 0.0)?;
-                }
-            }
-
-            // Electrical finiteness.
-            let net_kw = self.electrical_solver.net_active_kw();
-            if !net_kw.is_finite() {
-                return Err(HaresError::InvariantViolation {
-                    check_name: "electrical_net_finite".to_string(),
-                    value: net_kw,
-                    tolerance: 0.0,
-                });
-            }
-
-            // Electrical balance: solver net must match port accumulation.
-            let bus_power = self.ports.electrical.net_active_kw();
-            checker.check_electrical(net_kw, &[-bus_power])?;
-
-            // Thermal balance: deferred -- the multi-node RC state-space model
-            // distributes thermal energy across zone-air and wall-mass nodes.
-            // A zone-air-only balance (C_zone × ΔT / dt vs. component gains)
-            // has a ~6 kW residual because wall-mass energy changes aren't
-            // captured. A proper system-level energy audit requires exposing
-            // per-node capacitances and previous-step state vectors from
-            // ThermalSolver, which exceeds the ~20-line API surface limit.
-            // See follow-up ticket for ThermalSolver::balance_inputs() API.
-
-            // Moisture balance: mass conservation across the humidity solver.
-            if let Some(update) = self
-                .latest_env
-                .custom_domains
+                .filter(|e| e.zone == zone.id)
+                .map(|e| e.latent_gain_w)
+                .sum();
+            let latent_from_infiltration: f64 = self
+                .invariant_infiltration_latent
                 .iter()
-                .find(|u| u.domain_id == hares_types::HUMIDITY)
-                && let Some(payload) = &update.custom_payload
-            {
-                for &value in payload {
-                    if !value.is_finite() {
-                        return Err(HaresError::InvariantViolation {
-                            check_name: "humidity_payload_finite".to_string(),
-                            value,
-                            tolerance: 0.0,
-                        });
-                    }
-                }
-            }
-            let p_pa = self.latest_env.weather.pressure_pa();
-            let moisture_mult = self.humidity_solver.config.moisture_buffering_multiplier;
-            self.invariant_infiltration_latent.clear();
-            self.invariant_infiltration_m_dot.clear();
-            self.invariant_infiltration_w_outdoor.clear();
-            if let Some(thermal_update) = self
-                .latest_env
-                .custom_domains
-                .iter()
-                .find(|u| u.domain_id == hares_types::THERMAL)
-                && let Some(payload) = &thermal_update.custom_payload
-            {
-                // Thermal custom_payload format: [zone_id, q_latent_w, m_dot_inf_kg_s, w_outdoor,
-                // energy_balance_residual_w] per zone. The 5-float format carries moisture
-                // coupling data and the per-step energy balance residual for observability.
-                for quint in payload.chunks_exact(5) {
-                    let zone_raw = quint[0];
-                    let latent = quint[1];
-                    let m_dot_inf = quint[2];
-                    let w_outdoor = quint[3];
-                    let _residual = quint[4];
-                    if zone_raw.is_finite() && zone_raw >= 0.0 {
-                        let zone_id = ZoneId(zone_raw as u16);
-                        self.invariant_infiltration_latent.push((zone_id, latent));
-                        if m_dot_inf > 0.0 {
-                            self.invariant_infiltration_m_dot.insert(zone_id, m_dot_inf);
-                            self.invariant_infiltration_w_outdoor
-                                .insert(zone_id, w_outdoor);
-                        }
-                    }
-                }
-            }
-            for zone in &self.latest_env.zones {
-                let w_new = self.humidity_solver.humidity_ratio(zone.id);
-                let w_old = self
-                    .prev_humidity_ratios
-                    .iter()
-                    .find(|(z, _)| *z == zone.id)
-                    .map(|(_, w)| *w)
-                    .unwrap_or(w_new);
-                let d_w = w_new - w_old;
-                if d_w.abs() < f64::EPSILON {
-                    continue;
-                }
-                // Skip if the humidity solver clamped w_new (at 0 or w_sat).
-                // Clamping breaks mass conservation by design.
-                if w_new <= 0.0 {
-                    continue;
-                }
-                let w_sat = hares_physics::psychrometrics::humidity_ratio_from_tdp(
-                    zone.temperature_c,
-                    p_pa,
-                );
-                if (w_new - w_sat).abs() < f64::EPSILON {
-                    continue;
-                }
-                let rho_air = hares_physics::air_properties::moist_air_density_kg_m3(
-                    p_pa,
-                    zone.temperature_c,
-                    w_old,
-                );
-                let delta_m = d_w * rho_air * zone.volume_m3 * moisture_mult;
-                let latent_from_ports: f64 = self
-                    .ports
-                    .thermal
-                    .iter()
-                    .filter(|e| e.zone == zone.id)
-                    .map(|e| e.latent_gain_w)
-                    .sum();
-                let latent_from_infiltration: f64 = self
-                    .invariant_infiltration_latent
-                    .iter()
-                    .filter(|(z, _)| *z == zone.id)
-                    .map(|(_, l)| *l)
-                    .sum();
-                let m_dot_inf = self
-                    .invariant_infiltration_m_dot
+                .filter(|(z, _)| *z == zone.id)
+                .map(|(_, l)| *l)
+                .sum();
+            let m_dot_inf = self
+                .invariant_infiltration_m_dot
+                .get(&zone.id)
+                .copied()
+                .unwrap_or(0.0);
+            if m_dot_inf > 0.0 {
+                // Semi-implicit infiltration: the actual moisture mass entering
+                // the zone uses W_{n+1} (not W_n) in the infiltration term.
+                // source_m = Q_other * dt / h_fg + m_dot * (W_out - W_{n+1}) * dt
+                // The explicit q_latent = Q_other + m_dot * h_fg * (W_out - W_n)
+                // so Q_other = q_total - m_dot * h_fg * (W_out - W_n).
+                let w_outdoor = self
+                    .invariant_infiltration_w_outdoor
                     .get(&zone.id)
                     .copied()
                     .unwrap_or(0.0);
-                if m_dot_inf > 0.0 {
-                    // Semi-implicit infiltration: the actual moisture mass entering
-                    // the zone uses W_{n+1} (not W_n) in the infiltration term.
-                    // source_m = Q_other * dt / h_fg + m_dot * (W_out - W_{n+1}) * dt
-                    // The explicit q_latent = Q_other + m_dot * h_fg * (W_out - W_n)
-                    // so Q_other = q_total - m_dot * h_fg * (W_out - W_n).
-                    let w_outdoor = self
-                        .invariant_infiltration_w_outdoor
-                        .get(&zone.id)
-                        .copied()
-                        .unwrap_or(0.0);
-                    let q_total = latent_from_ports + latent_from_infiltration;
-                    let q_other = q_total - m_dot_inf * 2_501_000.0 * (w_outdoor - w_old);
-                    let m_from_q_other = q_other * dt_s / 2_501_000.0;
-                    let m_from_infiltration = m_dot_inf * (w_outdoor - w_new) * dt_s;
-                    let actual_source = m_from_q_other + m_from_infiltration;
-                    checker
-                        .check_moisture(delta_m, &[(actual_source * 2_501_000.0 / dt_s, dt_s)])?;
-                } else {
-                    let total_latent = latent_from_ports + latent_from_infiltration;
-                    checker.check_moisture(delta_m, &[(total_latent, dt_s)])?;
-                }
+                let q_total = latent_from_ports + latent_from_infiltration;
+                let q_other = q_total - m_dot_inf * 2_501_000.0 * (w_outdoor - w_old);
+                let m_from_q_other = q_other * dt_s / 2_501_000.0;
+                let m_from_infiltration = m_dot_inf * (w_outdoor - w_new) * dt_s;
+                let actual_source = m_from_q_other + m_from_infiltration;
+                checker.check_moisture(delta_m, &[(actual_source * 2_501_000.0 / dt_s, dt_s)])?;
+            } else {
+                let total_latent = latent_from_ports + latent_from_infiltration;
+                checker.check_moisture(delta_m, &[(total_latent, dt_s)])?;
             }
+        }
         Ok(())
     }
 }

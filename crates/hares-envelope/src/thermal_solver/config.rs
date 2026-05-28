@@ -432,7 +432,7 @@ pub struct ExteriorSurfaceInfo {
     pub u_factor_w_m2_k: f64,
     /// Exterior combined film coefficient h_out [W/(m²·K)] for window LWR correction.
     /// Computed from boundary input r_film_exterior at build time. 0.0 for opaque surfaces.
-    /// Used as denominator in T_eff = T_air + Δq / h_out. Ref: NFRC 100-2020.
+    /// Used as denominator in T_eff = T_air + Δq / h_out. ASHRAE HoF 2021 Ch. 15, Table 1.
     pub h_out_w_m2_k: f64,
 }
 
@@ -717,7 +717,7 @@ pub struct EnvelopeComponentGains {
     /// When T_sky < T_air (clear night), windows radiate more to sky than the
     /// U-factor (which assumes T_sky ≈ T_air) accounts for. This field tracks
     /// that additional cooling. Negative = cooling. Zero when T_sky = T_air.
-    /// Ref: Walton (1983); E+ Eng.Ref "External Longwave Radiation"; NFRC.
+    /// Ref: Walton (1983); E+ Eng.Ref "External Longwave Radiation"; ASHRAE HoF 2021 Ch. 15.
     pub window_exterior_lwr_w: f64,
     /// Outdoor driving temperature used this timestep [°C].
     pub driving_outdoor_temp_c: f64,
@@ -756,6 +756,16 @@ pub struct ExtSurfaceDiag {
     pub surface_temp_c: f64,
     /// Heat actually injected into the RC node [W] = (solar + lwr) × rad_frac.
     pub injected_w: f64,
+    /// Exterior film coefficient as received from boundary film resistance [W/(m²·K)].
+    /// This is the raw computed value before the guard threshold is applied.
+    pub h_out_computed_w_m2_k: f64,
+    /// Effective exterior film coefficient after guard threshold [W/(m²·K)].
+    /// May differ from `h_out_computed_w_m2_k` when the computed value is below
+    /// the 1.0 W/(m²·K) natural convection floor and the ASHRAE fallback (34.0)
+    /// is substituted.
+    pub h_out_effective_w_m2_k: f64,
+    /// Whether the ASHRAE fallback was triggered (computed h_out < 1.0).
+    pub h_out_fallback_triggered: bool,
 }
 
 /// Per-interior-surface diagnostic snapshot.

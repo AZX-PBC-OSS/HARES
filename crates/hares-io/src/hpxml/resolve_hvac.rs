@@ -1779,7 +1779,11 @@ fn check_primary_designation_invariant(
 ) {
     let count = parsed_ids.len();
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
-    let system_label = if mode == "heating" { "Heating" } else { "Cooling" };
+    let system_label = if mode == "heating" {
+        "Heating"
+    } else {
+        "Cooling"
+    };
 
     if count <= 1 {
         return;
