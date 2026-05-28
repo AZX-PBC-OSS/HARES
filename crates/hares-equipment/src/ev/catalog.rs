@@ -294,8 +294,8 @@ static CATALOG: &[VehicleSpec] = &[
         max_l2_power_kw: 11.0,
         dcfc_power_kw: Some(230.0),
         chemistry: BatteryChemistry::Nmc,
-        range_miles: 303.0,
-        fuel_economy_kwh_per_mi: 0.300, // fueleconomy.gov 2023 IONIQ 5 LR AWD: 30 kWh/100mi combined
+        range_miles: 266.0,
+        fuel_economy_kwh_per_mi: 0.300, // fueleconomy.gov 2023 IONIQ 5 LR AWD: 30 kWh/100mi combined, 266 mi EPA range
         degradation_per_year: 0.023,
         vehicle_type: VehicleType::Bev,
     },
@@ -1054,6 +1054,18 @@ mod tests {
                 source,
             );
         }
+    }
+
+    #[test]
+    fn ioniq5_awd_range_is_epa_combined() {
+        let range = VehicleId::HyundaiIoniq5Lr.spec().range_miles;
+        // EPA combined AWD rating for 2023 IONIQ 5 LR AWD is 266 mi.
+        // Acceptable range 250–270 catches regressions (e.g. back to WLTP 303).
+        // Source: fueleconomy.gov 2023 IONIQ 5 LR AWD.
+        assert!(
+            (250.0..=270.0).contains(&range),
+            "IONIQ 5 LR AWD range {range} outside expected EPA band 250–270 mi",
+        );
     }
 
     // ── Archetype tests ──────────────────────────────────────────────
