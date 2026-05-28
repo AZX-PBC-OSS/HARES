@@ -1429,8 +1429,18 @@ mod tests {
         large_bat.init(&large_cfg, &env).unwrap();
 
         // Disable self-consumption to keep batteries idle.
-        small_bat.apply_control(&ControlSignal::SelfConsumption { enabled: false, solar_only_charging: false }).unwrap();
-        large_bat.apply_control(&ControlSignal::SelfConsumption { enabled: false, solar_only_charging: false }).unwrap();
+        small_bat
+            .apply_control(&ControlSignal::SelfConsumption {
+                enabled: false,
+                solar_only_charging: false,
+            })
+            .unwrap();
+        large_bat
+            .apply_control(&ControlSignal::SelfConsumption {
+                enabled: false,
+                solar_only_charging: false,
+            })
+            .unwrap();
 
         // Record temperatures at checkpoints to verify the small battery
         // is always colder (cooling faster) due to lower thermal inertia.

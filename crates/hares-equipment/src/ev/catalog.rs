@@ -107,6 +107,7 @@ pub struct VehicleSpec {
     pub id: VehicleId,
     pub label: &'static str,
     pub capacity_kwh: f64,
+    /// AC input power rating for Level 2 charging (kW).
     pub max_l2_power_kw: f64,
     pub dcfc_power_kw: Option<f64>,
     pub chemistry: BatteryChemistry,
@@ -255,7 +256,7 @@ static CATALOG: &[VehicleSpec] = &[
         id: VehicleId::FordMacheSr,
         label: "Ford Mach-E SR RWD",
         capacity_kwh: 72.0,
-        max_l2_power_kw: 11.5,
+        max_l2_power_kw: 11.0, // Ford Mach-E OBC: 11 kW AC input (48A × 240V; DC battery output ~10.5 kW). Source: Wikipedia, EV-Database.org.
         dcfc_power_kw: Some(150.0),
         chemistry: BatteryChemistry::Lfp,
         range_miles: 250.0,
@@ -267,7 +268,7 @@ static CATALOG: &[VehicleSpec] = &[
         id: VehicleId::FordMacheEr,
         label: "Ford Mach-E ER RWD",
         capacity_kwh: 88.0,
-        max_l2_power_kw: 11.5,
+        max_l2_power_kw: 11.0, // Ford Mach-E OBC: 11 kW AC input (48A × 240V; DC battery output ~10.5 kW). Source: Wikipedia, EV-Database.org.
         dcfc_power_kw: Some(150.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 312.0,
@@ -1028,7 +1029,11 @@ mod tests {
 
         let expected: &[(VehicleId, f64, &str)] = &[
             (VehicleId::TeslaModelYLr, 0.280, "28 kWh/100mi"),
-            (VehicleId::TeslaModelYSr, 0.274, "123 MPGe combined → 33.7/123"),
+            (
+                VehicleId::TeslaModelYSr,
+                0.274,
+                "123 MPGe combined → 33.7/123",
+            ),
             (VehicleId::TeslaModel3Lr, 0.260, "26 kWh/100mi"),
             (VehicleId::ChevyBoltEv, 0.280, "28 kWh/100mi"),
             (VehicleId::ChevyBoltEuv, 0.290, "29 kWh/100mi"),
@@ -1038,7 +1043,11 @@ mod tests {
             (VehicleId::HyundaiIoniq5Lr, 0.300, "30 kWh/100mi"),
             (VehicleId::NissanLeaf30, 0.300, "30 kWh/100mi"),
             (VehicleId::Jeep4xe, 0.680, "68 kWh/100mi elec"),
-            (VehicleId::ToyotaRav4Prime, 0.359, "94 MPGe combined → 33.7/94"),
+            (
+                VehicleId::ToyotaRav4Prime,
+                0.359,
+                "94 MPGe combined → 33.7/94",
+            ),
             (VehicleId::ChevyVoltGen1, 0.350, "35 kWh/100mi"),
         ];
 
@@ -1066,6 +1075,18 @@ mod tests {
             (250.0..=270.0).contains(&range),
             "IONIQ 5 LR AWD range {range} outside expected EPA band 250–270 mi",
         );
+    }
+
+    #[test]
+    fn mach_e_obc_power_is_11_kw() {
+        // Ford Mustang Mach-E onboard charger AC input rating is 11 kW
+        // (48A × 240V). Both SR LFP and ER NMC variants use the same OBC.
+        // Source: Wikipedia, EV-Database.org. Confirmed in
+        // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 3.
+        let sr = VehicleId::FordMacheSr.spec();
+        let er = VehicleId::FordMacheEr.spec();
+        assert_eq!(sr.max_l2_power_kw, 11.0, "Mach-E SR L2 AC power");
+        assert_eq!(er.max_l2_power_kw, 11.0, "Mach-E ER L2 AC power");
     }
 
     // ── Archetype tests ──────────────────────────────────────────────

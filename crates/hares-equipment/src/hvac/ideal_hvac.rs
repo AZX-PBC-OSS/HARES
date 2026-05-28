@@ -1667,10 +1667,7 @@ mod tests {
             .expect("init should succeed with reconciliation");
         let gap = eq.thermostat_fsm.static_setpoints.cooling_c
             - eq.thermostat_fsm.static_setpoints.heating_c;
-        assert!(
-            gap >= 2.0,
-            "reconciled gap must be >= 2.0 C, got {gap:.3}"
-        );
+        assert!(gap >= 2.0, "reconciled gap must be >= 2.0 C, got {gap:.3}");
     }
 
     // Bug 1: current_target_c must update when setpoint changes mid-mode.

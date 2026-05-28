@@ -947,15 +947,11 @@ mod tests {
         config
             .test_extras_mut()
             .insert("cooling_setpoint_c".to_string(), 22.0.into());
-        hvac
-            .init(&config, &env(20.0, 60, 0))
+        hvac.init(&config, &env(20.0, 60, 0))
             .expect("init should succeed with reconciliation");
         let gap = hvac.thermostat_fsm.static_setpoints.cooling_c
             - hvac.thermostat_fsm.static_setpoints.heating_c;
-        assert!(
-            gap >= 2.0,
-            "reconciled gap must be >= 2.0 C, got {gap:.3}"
-        );
+        assert!(gap >= 2.0, "reconciled gap must be >= 2.0 C, got {gap:.3}");
     }
 
     #[test]
