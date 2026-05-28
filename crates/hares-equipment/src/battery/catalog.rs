@@ -204,6 +204,12 @@ pub fn by_id(id: &str) -> Option<&'static BatterySpec> {
     Some(pid.spec())
 }
 
+// Note: Cell Ah values in per-product comments are approximate. They are
+// derived from pack-level capacity and cell topology rather than individual
+// cell datasheets: effective Ah ≈ capacity_kWh × 1000 / (n_series × n_parallel
+// × nominal_cell_voltage). The nominal cell voltage used in this computation
+// is a chemistry-wide reference (LFP 3.2 V, NMC/NCA 3.65 V) and may differ
+// from the actual cell's nameplate voltage or datasheet Ah rating.
 static CATALOG: &[BatterySpec] = &[
     // Tesla PW3: ~350V LFP, 109S8P with 3.2V/5Ah cylindrical cells
     BatterySpec {
@@ -274,12 +280,12 @@ static CATALOG: &[BatterySpec] = &[
     //   https://enphase.com/store/storage/iq-battery-5p
     // Per-cell DC internal resistance derived from RTE via
     // R_pack = V_pack² × (1 − √RTE) / P_rated, cell_R = R_pack × n_p / n_s.
-// This yields 0.808 mΩ, consistent with published commercial 100Ah LFP
-// prismatic cell DC-IR at 50% SOC, 25°C. Specific cells and sources:
-//   EVE LF100 datasheet (≤0.5 mΩ AC-IR, DC-IR ~0.7-0.9 mΩ),
-//   CALB CA100 datasheet (≤1.0 mΩ DC-IR),
-//   REPT 100Ah datasheet (≤0.8 mΩ DC-IR),
-//   BatteryBits (2023) "LFP Cell Comparison" — consensus 0.6–1.2 mΩ.
+    // This yields 0.808 mΩ, consistent with published commercial 100Ah LFP
+    // prismatic cell DC-IR at 50% SOC, 25°C. Specific cells and sources:
+    //   EVE LF100 datasheet (≤0.5 mΩ AC-IR, DC-IR ~0.7-0.9 mΩ),
+    //   CALB CA100 datasheet (≤1.0 mΩ DC-IR),
+    //   REPT 100Ah datasheet (≤0.8 mΩ DC-IR),
+    //   BatteryBits (2023) "LFP Cell Comparison" — consensus 0.6–1.2 mΩ.
     // Products sharing the same cell type use identical cell_R regardless
     // of pack topology — cell resistance is a cell property.
     BatterySpec {
@@ -967,6 +973,56 @@ mod tests {
                 "{}: cell_resistance_ohm {:.6} outside physical range [{lo:.4}, {hi:.4}] Ω",
                 spec.label,
                 spec.cell_resistance_ohm,
+            );
+        }
+    }
+
+    fn cell_nominal_voltage(chem: BatteryChemistry) -> f64 {
+        match chem {
+            BatteryChemistry::Lfp => 3.2,
+            BatteryChemistry::Nmc => 3.65,
+            BatteryChemistry::Nca => 3.65,
+            BatteryChemistry::Lto => 2.3,
+        }
+    }
+
+    #[test]
+    fn catalog_cell_ah_plausibility() {
+        // Compute effective cell Ah from pack capacity and topology and
+        // verify it falls within a generous per-chemistry plausibility
+        // range. This guards against gross topology/capacity mismatches
+        // (wrong S/P count, misplaced decimal in capacity_kwh, etc.).
+        //
+        // The effective Ah is derived, not a datasheet rating, so the
+        // ranges intentionally cover all known cell form factors.
+        //
+        // LFP spans 4680 cylindrical (~5 Ah) through 100+ Ah prismatic.
+        // NMC/NCA spans 2170 cylindrical (~5 Ah) through pouch cells.
+        // LTO has no catalog entries currently; range is a placeholder.
+
+        for spec in CATALOG {
+            let v_nom = cell_nominal_voltage(spec.chemistry);
+            let cell_count = (spec.n_series_cells * spec.n_parallel_cells) as f64;
+            let effective_ah = spec.capacity_kwh * 1000.0 / (cell_count * v_nom);
+
+            let (lo, hi, form_factor) = match spec.chemistry {
+                BatteryChemistry::Lfp => (3.0, 200.0, "LFP"),
+                BatteryChemistry::Nmc => (2.0, 100.0, "NMC"),
+                BatteryChemistry::Nca => (2.0, 100.0, "NCA"),
+                BatteryChemistry::Lto => (10.0, 100.0, "LTO"),
+            };
+
+            assert!(
+                effective_ah > lo && effective_ah < hi,
+                "{}: effective cell Ah {effective_ah:.2} outside plausible \
+                 range ({lo:.0}–{hi:.0}) for {form_factor} chemistry. \
+                 Topology: {s}S {p}P, capacity: {cap} kWh, V_nom: {v_nom} V. \
+                 Check n_series/n_parallel or capacity_kwh.",
+                spec.label,
+                s = spec.n_series_cells,
+                p = spec.n_parallel_cells,
+                cap = spec.capacity_kwh,
+                v_nom = v_nom,
             );
         }
     }
