@@ -165,6 +165,18 @@ fn build_solver_boundaries(
             None
         };
 
+        // Invariant: exterior boundaries with layer_info must resolve through node_index.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if is_exterior {
+            if let Some(info) = rc.layer_info.get(&surface_idx) {
+                debug_assert!(
+                    outer_wiring.is_some(),
+                    "surface {surface_idx}: outer_node {:?} missing from node_index",
+                    info.outer_node
+                );
+            }
+        }
+
         // Inner wiring: conditioned-interior boundaries with RC layers.
         let inner_wiring = if is_conditioned_interior {
             rc.layer_info.get(&surface_idx).and_then(|info| {
@@ -177,6 +189,18 @@ fn build_solver_boundaries(
         } else {
             None
         };
+
+        // Invariant: interior boundaries with layer_info must resolve through node_index.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if is_conditioned_interior {
+            if let Some(info) = rc.layer_info.get(&surface_idx) {
+                debug_assert!(
+                    inner_wiring.is_some(),
+                    "surface {surface_idx}: inner_node {:?} missing from node_index",
+                    info.inner_node
+                );
+            }
+        }
 
         // Boundary category.
         // Same-zone boundaries (interior == exterior) are internal thermal mass.

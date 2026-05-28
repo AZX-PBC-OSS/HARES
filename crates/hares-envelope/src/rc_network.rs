@@ -136,7 +136,7 @@ impl RCNetwork {
         })
     }
 
-    pub fn build_matrices(&self) -> Result<(DMatrix<f64>, DMatrix<f64>)> {
+    pub fn build_matrices(&self) -> Result<(DMatrix<f64>, DMatrix<f64>, Vec<NodeId>)> {
         let internal_nodes = sorted_internal_nodes(&self.capacitances, &self.external_nodes);
         let mut external_nodes = self.external_nodes.clone();
         external_nodes.sort_unstable();
@@ -179,7 +179,7 @@ impl RCNetwork {
             }
         }
 
-        Ok((a_c, b_c))
+        Ok((a_c, b_c, internal_nodes))
     }
 
     #[must_use]
@@ -203,7 +203,7 @@ fn canonical_edge(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-fn sorted_internal_nodes(
+pub(crate) fn sorted_internal_nodes(
     capacitances: &HashMap<NodeId, f64>,
     external_nodes: &[NodeId],
 ) -> Vec<NodeId> {
@@ -341,7 +341,7 @@ mod tests {
         let res = HashMap::from([((n(1), n(2)), 4.0)]);
         let net = RCNetwork::from_elements(caps, res, vec![n(2)]).unwrap();
 
-        let (a_c, b_c) = net.build_matrices().unwrap();
+        let (a_c, b_c, _internal_nodes) = net.build_matrices().unwrap();
         let expected_a = DMatrix::from_row_slice(1, 1, &[-1.0 / 8.0]);
         let expected_b = DMatrix::from_row_slice(1, 1, &[1.0 / 8.0]);
         assert_eq!(a_c, expected_a);
@@ -357,7 +357,7 @@ mod tests {
             ((n(2), n(11)), 8.0),
         ]);
         let net = RCNetwork::from_elements(caps, res, vec![n(10), n(11)]).unwrap();
-        let (a_c, b_c) = net.build_matrices().unwrap();
+        let (a_c, b_c, _internal_nodes) = net.build_matrices().unwrap();
 
         // Golden constants from OCHRE-equivalent create_rc_matrices setup.
         let a_golden = DMatrix::from_row_slice(2, 2, &[-0.75, 0.5, 0.25, -0.28125]);
@@ -377,8 +377,8 @@ mod tests {
             RCNetwork::from_elements(caps.clone(), with_floating, vec![n(3)]).unwrap();
         let net_direct = RCNetwork::from_elements(caps, direct, vec![n(3)]).unwrap();
 
-        let (a_reduced, b_reduced) = net_reduced.build_matrices().unwrap();
-        let (a_direct, b_direct) = net_direct.build_matrices().unwrap();
+        let (a_reduced, b_reduced, _) = net_reduced.build_matrices().unwrap();
+        let (a_direct, b_direct, _) = net_direct.build_matrices().unwrap();
         assert_matrix_close(&a_reduced, &a_direct, 1e-12);
         assert_matrix_close(&b_reduced, &b_direct, 1e-12);
     }
@@ -388,7 +388,7 @@ mod tests {
         let caps = HashMap::from([(n(1), 5.0)]);
         let res = HashMap::from([((n(1), n(2)), 10.0), ((n(1), n(3)), 7.0)]);
         let net = RCNetwork::from_elements(caps, res, vec![n(2)]).unwrap();
-        let (a_c, b_c) = net.build_matrices().unwrap();
+        let (a_c, b_c, _) = net.build_matrices().unwrap();
 
         let expected_a = DMatrix::from_row_slice(1, 1, &[-1.0 / 50.0]);
         let expected_b = DMatrix::from_row_slice(1, 1, &[1.0 / 50.0]);
@@ -461,10 +461,11 @@ mod tests {
 
         let net_1 = RCNetwork::from_elements(caps_1, res_1, vec![n(10), n(11)]).unwrap();
         let net_2 = RCNetwork::from_elements(caps_2, res_2, vec![n(10), n(11)]).unwrap();
-        let (a1, b1) = net_1.build_matrices().unwrap();
-        let (a2, b2) = net_2.build_matrices().unwrap();
+        let (a1, b1, nodes1) = net_1.build_matrices().unwrap();
+        let (a2, b2, nodes2) = net_2.build_matrices().unwrap();
         assert_matrix_bits_identical(&a1, &a2);
         assert_matrix_bits_identical(&b1, &b2);
+        assert_eq!(nodes1, nodes2);
     }
 
     #[test]
@@ -483,8 +484,8 @@ mod tests {
 
         let net_1 = RCNetwork::from_elements(caps.clone(), res_1, vec![n(10)]).unwrap();
         let net_2 = RCNetwork::from_elements(caps, res_2, vec![n(10)]).unwrap();
-        let (a1, b1) = net_1.build_matrices().unwrap();
-        let (a2, b2) = net_2.build_matrices().unwrap();
+        let (a1, b1, _) = net_1.build_matrices().unwrap();
+        let (a2, b2, _) = net_2.build_matrices().unwrap();
         assert_matrix_bits_identical(&a1, &a2);
         assert_matrix_bits_identical(&b1, &b2);
     }
@@ -504,7 +505,7 @@ mod tests {
         let caps = HashMap::from([(n(1), c)]);
         let res = HashMap::from([((n(1), n(2)), r)]);
         let net = RCNetwork::from_elements(caps, res, vec![n(2)]).unwrap();
-        let (a_c, b_c) = net.build_matrices().unwrap();
+        let (a_c, b_c, _) = net.build_matrices().unwrap();
 
         let (a_d, b_d) = discretize_zoh(&a_c, &b_c, dt).unwrap();
 
@@ -530,7 +531,7 @@ mod tests {
         let caps = HashMap::from([(n(1), 2.0)]);
         let res = HashMap::from([((n(1), n(10)), 2.0), ((n(1), n(5)), 5.0)]);
         let net = RCNetwork::from_elements(caps, res, vec![n(10), n(5)]).unwrap();
-        let (_a_c, b_c) = net.build_matrices().unwrap();
+        let (_a_c, b_c, _) = net.build_matrices().unwrap();
         let expected = DMatrix::from_row_slice(1, 2, &[1.0 / (5.0 * 2.0), 1.0 / (2.0 * 2.0)]);
         assert_eq!(b_c, expected);
     }
@@ -840,7 +841,7 @@ mod tests {
         // construction (ΔT = 0 → q = 0), but we verify it numerically
         // by stepping the model from a uniform initial condition and
         // checking that the state doesn't change.
-        let (a_c, b_c) = net.build_matrices().unwrap();
+        let (a_c, b_c, _) = net.build_matrices().unwrap();
 
         // All external inputs at the same temperature (20°C)
         let x0 = vec![20.0_f64; a_c.nrows()];
@@ -903,5 +904,78 @@ mod tests {
         // cases (sunlit surfaces > 42°C, cold windows < 5°C), the error
         // reaches 10-12%, which is still within BESTEST tolerance (~10% on
         // annual loads) but will be noticeable in detailed comfort calcs.
+    }
+
+    /// Verify that `build_matrices()` returns a sorted internal node list
+    /// that agrees with `sorted_internal_nodes()` element-for-element.
+    #[test]
+    fn build_matrices_returns_sorted_node_list() {
+        let caps = HashMap::from([(n(2), 4.0), (n(1), 2.0)]);
+        let res = HashMap::from([
+            ((n(1), n(2)), 1.0),
+            ((n(1), n(10)), 2.0),
+            ((n(2), n(11)), 8.0),
+        ]);
+        let net = RCNetwork::from_elements(caps, res, vec![n(10), n(11)]).unwrap();
+        let (a_c, b_c, nodes) = net.build_matrices().unwrap();
+
+        let expected = super::sorted_internal_nodes(&net.capacitances, &net.external_nodes);
+        assert_eq!(
+            nodes, expected,
+            "returned node list must match sorted_internal_nodes"
+        );
+        assert_eq!(
+            nodes.len(),
+            a_c.nrows(),
+            "node count must equal A_c row count"
+        );
+        assert_eq!(
+            nodes.len(),
+            b_c.nrows(),
+            "node count must equal B_c row count"
+        );
+    }
+
+    /// Verify that the node_index independently built from `capacitances.keys()`
+    /// (as `assemble_building_rc()` formerly did) agrees with the ordering from
+    /// `sorted_internal_nodes()`. This protects against the dual-sort-path bug.
+    #[test]
+    fn node_index_agrees_with_sorted_internal_nodes() {
+        let caps = HashMap::from([(n(2), 4.0), (n(1), 2.0), (n(3), 6.0)]);
+        let res = HashMap::from([
+            ((n(1), n(2)), 1.0),
+            ((n(2), n(3)), 3.0),
+            ((n(1), n(10)), 2.0),
+            ((n(3), n(10)), 5.0),
+        ]);
+        let net = RCNetwork::from_elements(caps, res, vec![n(10)]).unwrap();
+
+        // The unified sort from build_matrices → sorted_internal_nodes.
+        let (_a_c, _b_c, unified_order) = net.build_matrices().unwrap();
+
+        // The old assemble_building_rc() path: raw capacitances keys, sorted.
+        let mut old_style_order: Vec<NodeId> = net.capacitances.keys().copied().collect();
+        old_style_order.sort_unstable();
+        let old_index: HashMap<NodeId, usize> = old_style_order
+            .iter()
+            .enumerate()
+            .map(|(idx, &nid)| (nid, idx))
+            .collect();
+
+        // When no external nodes have capacitances (validated by from_elements),
+        // old_style_order and unified_order must be element-for-element identical.
+        assert_eq!(
+            old_style_order, unified_order,
+            "raw capacitance key sort must match sorted_internal_nodes when external nodes have no capacitances"
+        );
+
+        // Also verify that building node_index from unified_order produces
+        // the same mapping as building from old_style_order.
+        let unified_index: HashMap<NodeId, usize> = unified_order
+            .iter()
+            .enumerate()
+            .map(|(idx, &nid)| (nid, idx))
+            .collect();
+        assert_eq!(old_index, unified_index);
     }
 }

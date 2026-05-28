@@ -105,7 +105,7 @@ fn build_12node_network() -> RCNetwork {
 }
 
 fn build_state_space(net: &RCNetwork, dt: f64) -> StateSpaceModel {
-    let (a_c, b_c) = net.build_matrices().expect("matrix assembly");
+    let (a_c, b_c, _) = net.build_matrices().expect("matrix assembly");
     let n = a_c.nrows();
     let mapping = OutputMapping {
         output_count: 1,
@@ -150,7 +150,7 @@ fn bench_state_space_step_12node(c: &mut Criterion) {
 
 fn bench_discretize(c: &mut Criterion) {
     let net = build_6node_network();
-    let (a_c, b_c) = net.build_matrices().expect("matrix assembly");
+    let (a_c, b_c, _) = net.build_matrices().expect("matrix assembly");
     let dt = 60.0;
 
     let mut group = c.benchmark_group("discretize");
@@ -235,7 +235,7 @@ fn bench_full_construction(c: &mut Criterion) {
     c.bench_function("full_construction_6node", |b| {
         b.iter(|| {
             let net = build_6node_network();
-            let (a_c, b_c) = net.build_matrices().expect("matrix assembly");
+            let (a_c, b_c, _) = net.build_matrices().expect("matrix assembly");
             let n = a_c.nrows();
             let mapping = OutputMapping {
                 output_count: 1,

@@ -1681,10 +1681,8 @@ mod tests {
         ]);
         let network =
             RCNetwork::from_elements(caps, resistances, vec![NodeId(1), NodeId(2)]).unwrap();
-        let (a_c, b_c_rc) = network.build_matrices().unwrap();
+        let (a_c, b_c_rc, _) = network.build_matrices().unwrap();
 
-        // Augment B_c with a sensible-gain input column (1/C per watt).
-        // RC network gives B_c as 1x2 [outdoor, ground]; we add column for Q_sensible.
         let n_states = a_c.nrows();
         let n_ext = b_c_rc.ncols();
         let n_inputs = n_ext + 1; // +1 for sensible gains
@@ -3199,7 +3197,7 @@ mod tests {
         ]);
         let network =
             RCNetwork::from_elements(caps, resistances, vec![NodeId(1), NodeId(2)]).unwrap();
-        let (a_c, b_c_rc) = network.build_matrices().unwrap();
+        let (a_c, b_c_rc, _) = network.build_matrices().unwrap();
 
         let n_states = a_c.nrows();
         let n_ext = b_c_rc.ncols();

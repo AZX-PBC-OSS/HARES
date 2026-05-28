@@ -917,7 +917,7 @@ fn radiation_frac_impulse_response_matches_closed_form() {
     res.insert((n(2), n(3)), r_outer_kw); // wall mass ↔ outdoor
 
     let net = RCNetwork::from_elements(caps, res, vec![n(3)]).unwrap();
-    let (a_c, b_c) = net.build_matrices().unwrap();
+    let (a_c, b_c, _) = net.build_matrices().unwrap();
 
     // ── Verify floating node was eliminated ──
     // After elimination: zone air (cap) ↔ wall mass (cap) ↔ outdoor (ext)

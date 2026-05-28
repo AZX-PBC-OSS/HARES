@@ -55,7 +55,7 @@ fn build_1r1c_model(r: f64, c: f64, dt: f64) -> StateSpaceModel {
     let caps = HashMap::from([(node(1), c)]);
     let res = HashMap::from([((node(1), node(2)), r)]);
     let net = RCNetwork::from_elements(caps, res, vec![node(2)]).expect("valid 1R-1C network");
-    let (a_c, b_c) = net.build_matrices().expect("1R-1C matrices");
+    let (a_c, b_c, _) = net.build_matrices().expect("1R-1C matrices");
 
     let mapping = OutputMapping {
         output_count: 1,
@@ -121,7 +121,7 @@ fn steady_state_matches_ohms_law() {
     let caps = HashMap::from([(node(1), c)]);
     let res = HashMap::from([((node(1), node(2)), r)]);
     let net = RCNetwork::from_elements(caps, res, vec![node(2)]).expect("valid 1R-1C network");
-    let (a_c, b_c_base) = net.build_matrices().expect("1R-1C matrices");
+    let (a_c, b_c_base, _) = net.build_matrices().expect("1R-1C matrices");
 
     // Extend B_c with a second input column for direct heat injection: dT/dt += Q/C.
     // b_c_base is 1×1 (one state, one external node).  Append a column for heat injection.
@@ -196,7 +196,7 @@ fn eigenvalue_check_stable_model() {
     let caps = HashMap::from([(node(1), c)]);
     let res = HashMap::from([((node(1), node(2)), r)]);
     let net = RCNetwork::from_elements(caps, res, vec![node(2)]).expect("valid 1R-1C network");
-    let (a_c, b_c) = net.build_matrices().expect("matrices");
+    let (a_c, b_c, _) = net.build_matrices().expect("matrices");
 
     let (a_d, _) = discretize_zoh(&a_c, &b_c, dt).expect("ZOH discretization");
     let result = eigenvalue_check(&a_c, &a_d).expect("stable 1R-1C must pass eigenvalue_check");
@@ -227,7 +227,7 @@ fn two_node_rc_both_eigenvalues_stable() {
     ]);
     let net =
         RCNetwork::from_elements(caps, res, vec![node(10), node(11)]).expect("valid 2-node RC");
-    let (a_c, b_c) = net.build_matrices().expect("matrices");
+    let (a_c, b_c, _) = net.build_matrices().expect("matrices");
 
     let dt = 30.0;
     let (a_d, _) = discretize_zoh(&a_c, &b_c, dt).expect("ZOH discretization");
@@ -325,7 +325,7 @@ fn discretization_preserves_stability() {
     ]);
     let net =
         RCNetwork::from_elements(caps, res, vec![node(10), node(11)]).expect("valid 2-node RC");
-    let (a_c, b_c) = net.build_matrices().expect("matrices");
+    let (a_c, b_c, _) = net.build_matrices().expect("matrices");
 
     // Confirm continuous stability (negative real eigenvalues).
     let cont_eigs = a_c.clone().complex_eigenvalues();

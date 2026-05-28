@@ -9,7 +9,7 @@ use nalgebra::DMatrix;
 use thiserror::Error;
 
 use crate::NodeId;
-use crate::rc_network::{RCNetwork, parallel_resistance};
+use crate::rc_network::{RCNetwork, parallel_resistance, sorted_internal_nodes};
 
 // ── Physical constants ──────────────────────────────────────────────────────
 
@@ -1074,20 +1074,87 @@ pub fn assemble_building_rc(
         })
         .collect();
 
-    let (a_c, b_ext) = rc
+    let (a_c, b_ext, internal_node_order) = rc
         .build_matrices()
         .map_err(|err| format!("RC matrix assembly failed: {err}"))?;
 
-    // Sorted internal node order (matches build_matrices row ordering).
-    let mut internal_node_order: Vec<NodeId> = rc.capacitances.keys().copied().collect();
-    internal_node_order.sort_unstable();
-
-    // Precomputed NodeId → row index map.
+    // Precomputed NodeId → row index map from the single-source-of-truth node ordering
+    // returned by build_matrices() (which uses sorted_internal_nodes).
     let node_index: HashMap<NodeId, usize> = internal_node_order
         .iter()
         .enumerate()
         .map(|(idx, &nid)| (nid, idx))
         .collect();
+
+    // Invariant check: cardinality of node_index must match A_c nrows.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        debug_assert_eq!(
+            node_index.len(),
+            a_c.nrows(),
+            "node_index cardinality {node_index_len} != A_c nrows {a_c_nrows}",
+            node_index_len = node_index.len(),
+            a_c_nrows = a_c.nrows()
+        );
+
+        // Cross-validate: the independently-sorted node list from sorted_internal_nodes()
+        // must agree element-for-element with the node_index keys in order.
+        let cross: Vec<NodeId> = sorted_internal_nodes(&rc.capacitances, &rc.external_nodes);
+        let node_index_sorted: Vec<NodeId> = {
+            let mut keys: Vec<_> = node_index.keys().copied().collect();
+            keys.sort_unstable();
+            keys
+        };
+        assert_eq!(
+            cross, node_index_sorted,
+            "sorted_internal_nodes differs from node_index key set"
+        );
+
+        // Validate SurfaceLayerInfo completeness: every layer info's inner_node and
+        // outer_node must be present in the capacitance map.
+        for (bd_idx, info) in &layer_info {
+            debug_assert!(
+                rc.capacitances.contains_key(&info.inner_node),
+                "SurfaceLayerInfo for boundary {bd_idx}: inner_node {:?} missing from capacitances",
+                info.inner_node
+            );
+            debug_assert!(
+                rc.capacitances.contains_key(&info.outer_node),
+                "SurfaceLayerInfo for boundary {bd_idx}: outer_node {:?} missing from capacitances",
+                info.outer_node
+            );
+        }
+    }
+
+    // Observer capture: log internal node count for divergence detection.
+    #[cfg(feature = "observe")]
+    tracing::info!(
+        node_index_len = node_index.len(),
+        internal_node_order_len = internal_node_order.len(),
+        a_c_nrows = a_c.nrows(),
+        "RC assembly internal node mapping"
+    );
+
+    // Emit warning on cardinality mismatch at runtime.
+    if node_index.len() != a_c.nrows() {
+        let missing_from_index: Vec<_> = internal_node_order
+            .iter()
+            .filter(|n| !node_index.contains_key(n))
+            .copied()
+            .collect();
+        let extra_in_index: Vec<_> = node_index
+            .keys()
+            .filter(|n| !internal_node_order.contains(n))
+            .copied()
+            .collect();
+        tracing::warn!(
+            node_index_len = node_index.len(),
+            a_c_nrows = a_c.nrows(),
+            ?missing_from_index,
+            ?extra_in_index,
+            "RC matrix row count mismatch: node_index and A_c disagree on internal node set"
+        );
+    }
 
     // Zone air node → state-vector row.
     let zone_state_rows: Vec<usize> = (0..n_zones)
