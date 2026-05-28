@@ -4,7 +4,7 @@ use std::fmt;
 
 use chrono::{DateTime, Duration, FixedOffset};
 
-use super::building::{BoundaryType, Building, ZoneType, parse_xml_document};
+use super::building::{Building, ZoneType, parse_xml_document};
 use crate::schedule::{ScheduleTimeSeries, normalize_column_name};
 use crate::weather::{WeatherMeta, WeatherTimeSeries};
 

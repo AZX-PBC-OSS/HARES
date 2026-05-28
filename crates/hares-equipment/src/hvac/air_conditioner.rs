@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use hares_types::telemetry_keys as tk;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+#[cfg(test)]
+use crate::HvacSetpointConfig;
 
 use super::ac_config::{
     CentralAirConditionerConfig, RoomAcConfig, default_telemetry, load_curve_pair, telemetry_fields,
