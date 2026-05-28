@@ -52,6 +52,12 @@ impl ControlSignalConstructors for ControlSignal {
         cooling_setpoint_c: Option<f64>,
         deadband_c: Option<f64>,
     ) -> ControlSignal {
+        if let (Some(heat), Some(cool)) = (heating_setpoint_c, cooling_setpoint_c) {
+            debug_assert!(
+                heat < cool,
+                "thermal_setpoint: heating_setpoint_c ({heat}) must be < cooling_setpoint_c ({cool})"
+            );
+        }
         ControlSignal::ThermalSetpoint {
             heating_setpoint_c,
             cooling_setpoint_c,
@@ -95,6 +101,16 @@ impl ControlSignalConstructors for ControlSignal {
             (0.0..=1.0).contains(&target_soc) && target_soc.is_finite(),
             "target_soc must be in [0,1] and finite"
         );
+        if let (Some(min), Some(max)) = (min_soc, max_soc) {
+            debug_assert!(
+                min <= max,
+                "soc_target: min_soc ({min}) must be <= max_soc ({max})"
+            );
+            debug_assert!(
+                (min..=max).contains(&target_soc),
+                "soc_target: target_soc ({target_soc}) must be in [min_soc ({min}), max_soc ({max})]"
+            );
+        }
         ControlSignal::SOCTarget {
             target_soc,
             min_soc,
@@ -166,6 +182,16 @@ impl ControlSignalConstructors for ControlSignal {
             (0.0..=1.0).contains(&target_rh) && target_rh.is_finite(),
             "target_rh must be in [0,1] and finite"
         );
+        if let (Some(min), Some(max)) = (min_rh, max_rh) {
+            debug_assert!(
+                min <= max,
+                "humidity_setpoint: min_rh ({min}) must be <= max_rh ({max})"
+            );
+            debug_assert!(
+                (min..=max).contains(&target_rh),
+                "humidity_setpoint: target_rh ({target_rh}) must be in [min_rh ({min}), max_rh ({max})]"
+            );
+        }
         ControlSignal::HumiditySetpoint {
             target_rh,
             min_rh,
@@ -452,6 +478,61 @@ mod tests {
         #[should_panic(expected = "target_rh must be in [0,1] and finite")]
         fn humidity_setpoint_rejects_infinite_target_rh() {
             ControlSignal::humidity_setpoint(f64::INFINITY, None, None);
+        }
+
+        // ── soc_target cross-field ─────────────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "soc_target: min_soc")]
+        fn soc_target_rejects_inverted_bounds() {
+            ControlSignal::soc_target(0.5, Some(0.9), Some(0.2));
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "soc_target: target_soc")]
+        fn soc_target_rejects_target_below_min() {
+            ControlSignal::soc_target(0.3, Some(0.5), Some(0.9));
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "soc_target: target_soc")]
+        fn soc_target_rejects_target_above_max() {
+            ControlSignal::soc_target(1.0, Some(0.2), Some(0.9));
+        }
+
+        // ── humidity_setpoint cross-field ──────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "humidity_setpoint: min_rh")]
+        fn humidity_setpoint_rejects_inverted_bounds() {
+            ControlSignal::humidity_setpoint(0.45, Some(0.60), Some(0.30));
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "humidity_setpoint: target_rh")]
+        fn humidity_setpoint_rejects_target_below_min() {
+            ControlSignal::humidity_setpoint(0.20, Some(0.30), Some(0.60));
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "humidity_setpoint: target_rh")]
+        fn humidity_setpoint_rejects_target_above_max() {
+            ControlSignal::humidity_setpoint(0.70, Some(0.30), Some(0.60));
+        }
+
+        // ── thermal_setpoint cross-field ───────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "thermal_setpoint: heating_setpoint_c")]
+        fn thermal_setpoint_rejects_heating_above_cooling() {
+            ControlSignal::thermal_setpoint(Some(24.0), Some(20.0), None);
         }
     }
 }
