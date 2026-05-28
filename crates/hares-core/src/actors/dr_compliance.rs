@@ -298,6 +298,13 @@ impl DrCompliance {
     }
 
     /// Generates dispatch signals for the given action.
+    ///
+    /// All signals are dispatched at `PriorityTier::Grid`. DR events are
+    /// utility-initiated and must override both schedule-level operations
+    /// and user overrides. This overrides the central
+    /// `From<&ControlSignal> for PriorityTier` mapping — a DR-induced
+    /// setpoint adjustment or mode override is categorically a grid action,
+    /// not a user or schedule action.
     fn dispatch_for_action(
         target: &DispatchTarget,
         action: &DrAction,

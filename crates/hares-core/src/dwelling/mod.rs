@@ -1484,11 +1484,15 @@ impl Dwelling {
     }
 
     /// Queues a control signal for one equipment instance by name.
+    ///
+    /// Priority is derived from the signal type via the central
+    /// `From<&ControlSignal> for PriorityTier` mapping.
     pub fn apply_control(&mut self, name: &str, signal: ControlSignal) {
+        let priority = PriorityTier::from(&signal);
         self.control_dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from(name)),
             signal,
-            priority: Default::default(),
+            priority,
         });
     }
 
@@ -1520,20 +1524,25 @@ impl Dwelling {
                 .ok_or_else(|| HaresError::Equipment(format!("equipment '{name}' not found")))?;
             eq.validate_signal(&signal)?;
         }
+        let priority = PriorityTier::from(&signal);
         self.control_dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from(name)),
             signal,
-            priority: Default::default(),
+            priority,
         });
         Ok(())
     }
 
     /// Queues a control signal by end-use category.
+    ///
+    /// Priority is derived from the signal type via the central
+    /// `From<&ControlSignal> for PriorityTier` mapping.
     pub fn queue_end_use_control(&mut self, end_use: EndUse, signal: ControlSignal) {
+        let priority = PriorityTier::from(&signal);
         self.control_dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(end_use),
             signal,
-            priority: Default::default(),
+            priority,
         });
     }
 
@@ -2687,6 +2696,9 @@ impl Dwelling {
                     derived.push(DispatchRequest {
                         target: DispatchTarget::ByName(target_name.into()),
                         signal,
+                        // Protocol-bridge-translated signals are equipment-internal
+                        // commands that should take precedence over schedule-tier
+                        // operations but not override grid-level DR signals.
                         priority: PriorityTier::UserOverride,
                     });
                 }

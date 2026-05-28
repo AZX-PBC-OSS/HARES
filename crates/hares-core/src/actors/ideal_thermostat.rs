@@ -255,6 +255,11 @@ impl Actor for IdealThermostat {
             "dispatching thermal setpoint override",
         );
 
+        // `UserOverride` tier — matches the central
+        // `From<&ControlSignal> for PriorityTier` mapping for
+        // `ThermalSetpoint`. The thermostat override is a deliberate
+        // user action (hold mode, away setback, DR pre-conditioning)
+        // and must take precedence over schedule-level setpoints.
         out.push(DispatchRequest {
             target: self.dispatch_target.clone(),
             signal: ControlSignal::ThermalSetpoint {

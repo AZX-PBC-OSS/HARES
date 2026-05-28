@@ -247,7 +247,9 @@ impl Occupant {
             return;
         }
 
-        // Handle away mode: turn off equipment
+        // Handle away mode: turn off equipment.
+        // Uses `UserOverride` — the occupant explicitly commanding equipment
+        // to turn off is a deliberate user action, not a schedule event.
         if presence.is_away() && behavior.off_when_away {
             out.push(DispatchRequest {
                 target: target.clone(),
@@ -259,7 +261,8 @@ impl Occupant {
             return;
         }
 
-        // Handle returning home: turn on equipment if configured
+        // Handle returning home: turn on equipment if configured.
+        // Uses `UserOverride` — matches the central mapping for `ModeOverride`.
         if presence.is_present() && is_transition && behavior.on_when_home {
             out.push(DispatchRequest {
                 target: target.clone(),
@@ -290,6 +293,8 @@ impl Occupant {
     ) {
         if is_transition {
             if presence.is_present() && behavior.on_when_home {
+                // `Schedule` tier — the occupant's presence schedule triggers
+                // a normal operational state change, not a user override.
                 out.push(DispatchRequest {
                     target: target.clone(),
                     signal: ControlSignal::EvPlugIn {
@@ -298,6 +303,7 @@ impl Occupant {
                     priority: PriorityTier::Schedule,
                 });
             } else if presence.is_away() && behavior.off_when_away {
+                // `Schedule` tier — matches the central mapping for `EvPlugIn`.
                 out.push(DispatchRequest {
                     target: target.clone(),
                     signal: ControlSignal::EvPlugIn {
@@ -316,6 +322,10 @@ impl Occupant {
 }
 
 /// Pushes a `PowerSetpoint` if the behavior has one configured.
+///
+/// Uses `UserOverride` rather than the central mapping's `Schedule` default:
+/// the occupant explicitly setting a power target is a deliberate user action,
+/// not a scheduled operating point.
 fn push_power_setpoint_if(
     target: &DispatchTarget,
     behavior: &EquipmentBehavior,
@@ -334,6 +344,10 @@ fn push_power_setpoint_if(
 }
 
 /// Pushes a `LoadFraction` if the behavior has one configured.
+///
+/// Uses `UserOverride` rather than the central mapping's `Schedule` default:
+/// the occupant explicitly limiting equipment load is a deliberate user action,
+/// not a scheduled operating point.
 fn push_load_fraction_if(
     target: &DispatchTarget,
     behavior: &EquipmentBehavior,

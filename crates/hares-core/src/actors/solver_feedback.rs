@@ -105,6 +105,10 @@ impl Actor for SolverFeedbackActor {
                 );
                 continue;
             };
+            // `Schedule` tier — matches the central `From<&ControlSignal>
+            // for PriorityTier` mapping. Solver feedback operates at the
+            // normal schedule level; user overrides and grid DR signals
+            // take precedence over solver-computed ideal capacity.
             out.push(DispatchRequest {
                 target: target.clone(),
                 signal: ControlSignal::IdealCapacity { capacity_w },

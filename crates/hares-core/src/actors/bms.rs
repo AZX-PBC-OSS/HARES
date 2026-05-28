@@ -124,6 +124,13 @@ impl BatteryManagementActor {
     }
 
     fn emit(&self, signal: ControlSignal, out: &mut Vec<DispatchRequest>) {
+        // All BMS signals use `Schedule` tier: the BMS executes a pre-defined
+        // battery management schedule (self-consumption, TOU optimisation,
+        // backup reserve). It is not a user override or grid DR actor.
+        // This overrides the central `From<&ControlSignal> for PriorityTier`
+        // mapping where `PowerLimit` would map to `Grid` — the BMS's use of
+        // `PowerLimit` is a charge-rate cap within a scheduled mode, not a
+        // grid-imposed power constraint.
         out.push(DispatchRequest {
             target: self.dispatch_target.clone(),
             signal,

@@ -480,6 +480,8 @@ impl EvDriverActor {
     ) {
         // Range anxiety override: if tomorrow's trip would strand the driver,
         // charge to full regardless of strategy.
+        // `Schedule` tier — the EV driver is a schedule-level actor; this
+        // override is a pre-defined operational rule, not a user or grid action.
         if self.needs_range_anxiety_override(env) {
             out.push(DispatchRequest {
                 target: self.dispatch_target.clone(),
@@ -524,6 +526,11 @@ impl Actor for EvDriverActor {
     }
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        // All signals emitted by this actor use `Schedule` tier.
+        // The EV driver executes a pre-defined driving/charging schedule
+        // — it is not a user override or grid DR actor. The tier matches
+        // the central `From<&ControlSignal> for PriorityTier` mapping for
+        // EvPlugIn, EvDrive, EvAwayCharge, EvSetReadyBy, and SOCTarget.
         let res_seconds = env.time_res.num_seconds();
         debug_assert!(res_seconds >= 1, "time_res must be >= 1 second");
         self.time_res_minutes = (res_seconds.max(1) as f64) / 60.0;

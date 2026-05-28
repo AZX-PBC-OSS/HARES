@@ -147,6 +147,11 @@ impl ChargingComposer {
         }
     }
 
+    /// Emits dispatch requests from a preference vote.
+    ///
+    /// All signals use `Schedule` tier — matches the central mapping for
+    /// `EvSetReadyBy`, `PowerSetpoint`, and `SOCTarget`. The charging
+    /// composer operates within the EV driver's schedule-level framework.
     fn emit_vote(&self, vote: &PreferenceVote, out: &mut Vec<DispatchRequest>) {
         // If there's a departure_hour + target_soc, use EvSetReadyBy
         if let (Some(departure), Some(target)) = (vote.departure_hour, vote.target_soc) {
