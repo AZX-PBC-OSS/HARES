@@ -1,6 +1,7 @@
 //! Built-in actor implementations for the dwelling orchestrator.
 
 mod bms;
+pub mod constants;
 mod dr_compliance;
 pub mod ev_driver;
 mod ideal_thermostat;
@@ -9,6 +10,7 @@ mod safety_monitor;
 mod solver_feedback;
 
 pub use bms::BatteryManagementActor;
+pub use constants::DEFAULT_FREEZE_THRESHOLD_C;
 pub use dr_compliance::{
     AlwaysComply, ComplianceModel, DrAction, DrCompliance, NeverComply, Probabilistic,
 };

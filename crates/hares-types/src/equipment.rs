@@ -62,6 +62,14 @@ impl EndUse {
     pub const EV: Self = Self::new("ev");
     /// Standard backup generator end use.
     pub const GENERATOR: Self = Self::new("generator");
+    /// Returns true if this end use represents HVAC equipment.
+    ///
+    /// HVAC end uses cover space heating, cooling, and dehumidification —
+    /// equipment that directly affects zone air temperature and humidity.
+    pub fn is_hvac(&self) -> bool {
+        *self == Self::HVAC_HEATING || *self == Self::HVAC_COOLING || *self == Self::DEHUMIDIFIER
+    }
+
     /// Standard dehumidification end use.
     pub const DEHUMIDIFIER: Self = Self::new("dehumidifier");
     /// Default fallback/other end use.

@@ -8,6 +8,8 @@
 //!   threshold is 5°C — an engineering default aligned with freeze-stat
 //!   setpoints used in building simulation (EnergyPlus pipe freeze protection
 //!   and ASHRAE Guideline 36 freeze-stat guidance for air-handling units).
+//!   See [`DEFAULT_FREEZE_THRESHOLD_C`](super::constants) for the full
+//!   source citation.
 //! - **Over-temperature lockout**: any zone temp > over-temp threshold
 //!   triggers `ModeOverride { mode: Off }` at `PriorityTier::Safety`.
 //!   Default threshold is 50°C — a conservative engineering default chosen
@@ -22,8 +24,7 @@ use hares_types::{ControlSignal, EndUse, EnvironmentState, OperatingMode, Teleme
 
 use crate::actor::Actor;
 
-/// Default freeze protection threshold in °C.
-pub const DEFAULT_FREEZE_THRESHOLD_C: f64 = 5.0;
+use super::constants::DEFAULT_FREEZE_THRESHOLD_C;
 
 /// Default over-temperature lockout threshold in °C.
 pub const DEFAULT_OVER_TEMP_THRESHOLD_C: f64 = 50.0;

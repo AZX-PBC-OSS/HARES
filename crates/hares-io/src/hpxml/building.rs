@@ -693,7 +693,14 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 // (top of slab ≈ bottom of wall). Propagate from the first
                 // foundation wall's `DepthBelowGrade`.
                 if bd.foundation_depth_m.is_none() {
-                    bd.foundation_depth_m = foundation_depth_m;
+                    // Fall back to foundation wall depth, or the EPW reference
+                    // depth for building surface ground contact (0.5 m) if
+                    // no foundation wall exists. Depth=0 evaluates Kusuda-
+                    // Achenbach at the ground surface, tracking outdoor air
+                    // with no seasonal damping — physically incorrect for a
+                    // slab-on-grade.
+                    bd.foundation_depth_m = foundation_depth_m
+                        .or(Some(hares_physics::ground::DEFAULT_SLAB_GROUND_DEPTH_M));
                 }
 
                 if let Some(slab_node) = slabs_group.children_named("Slab").find(|n| {

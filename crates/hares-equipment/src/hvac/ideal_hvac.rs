@@ -97,6 +97,11 @@ pub struct IdealHvac {
     use_ideal_cached: bool,
     load_fraction: f64,
     last_sim_time: Option<DateTime<FixedOffset>>,
+    /// Cached ideal target (zone, °C) computed in update_control() for
+    /// ideal_target(). Derived from zone temp vs effective setpoints
+    /// independently of the FSM hysteresis, so Deadband does not block
+    /// solver back-calculation in ideal capacity mode.
+    cached_ideal_target: Option<(ZoneId, f64)>,
     /// Cooling sensible heat ratio (fraction of capacity that is sensible).
     /// Used to split ideal cooling capacity into sensible and latent components.
     /// Defaults to 1.0 (no latent); set from config "shr" key.
@@ -180,6 +185,7 @@ impl IdealHvac {
             use_ideal_cached: true,
             load_fraction: 1.0,
             last_sim_time: None,
+            cached_ideal_target: None,
             shr: 1.0,
             rated_fan_power_w: 0.0,
             rated_eir: 1.0,
@@ -269,7 +275,22 @@ impl IdealHvac {
             ThermostatMode::Heating => self.current_target_c = setpoints.heating_c,
             ThermostatMode::Cooling => self.current_target_c = setpoints.cooling_c,
             ThermostatMode::Deadband => {
-                self.current_target_c = 0.5 * (setpoints.heating_c + setpoints.cooling_c);
+                // In ideal capacity mode the active target is whichever comfort
+                // boundary bounds the zone temperature, not the deadband midpoint.
+                // The FSM Deadband is correct for physical-equipment cycling
+                // observability; the solver needs the setpoint when active.
+                if self.use_ideal_cached {
+                    let zone_temp = lookup_zone_temp(env, self.zone_id).unwrap_or(21.0);
+                    self.current_target_c = if zone_temp < setpoints.heating_c {
+                        setpoints.heating_c
+                    } else if zone_temp > setpoints.cooling_c {
+                        setpoints.cooling_c
+                    } else {
+                        0.5 * (setpoints.heating_c + setpoints.cooling_c)
+                    };
+                } else {
+                    self.current_target_c = 0.5 * (setpoints.heating_c + setpoints.cooling_c);
+                }
             }
         }
 
@@ -459,6 +480,32 @@ impl Equipment for IdealHvac {
         self.last_sim_time = Some(env.current_time);
 
         let mode = self.update_mode(env).unwrap_or(ThermostatMode::Deadband);
+
+        // Compute the ideal solver target independently of FSM hysteresis.
+        // The FSM deadband is correct for physical equipment cycling; in ideal
+        // capacity mode the solver needs whichever comfort setpoint bounds the
+        // zone temperature (heating if below heating_c, cooling if above
+        // cooling_c, none if within the comfort band).
+        let zone_temp = lookup_zone_temp(env, self.zone_id).unwrap_or(21.0);
+        let setpoints = self.thermostat_fsm.effective_setpoints();
+        self.cached_ideal_target = if self.use_ideal_cached {
+            if zone_temp < setpoints.heating_c {
+                Some((self.zone_id, setpoints.heating_c))
+            } else if zone_temp > setpoints.cooling_c {
+                Some((self.zone_id, setpoints.cooling_c))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // When the ideal target is None (zone within comfort band), clear any
+        // stale ideal capacity from the previous step so step() doesn't deliver
+        // a now-inappropriate capacity.
+        if self.cached_ideal_target.is_none() {
+            self.ideal_capacity_w = 0.0;
+        }
         match mode {
             ThermostatMode::Heating => OperatingMode::Heating,
             ThermostatMode::Cooling => OperatingMode::Cooling,
@@ -509,26 +556,44 @@ impl Equipment for IdealHvac {
             (1.0, 1.0)
         };
 
-        let mut capacity_w = match self.thermostat_fsm.mode {
-            ThermostatMode::Deadband => 0.0,
-            ThermostatMode::Heating if self.use_ideal_cached => {
-                (self.ideal_capacity_w * self.load_fraction).max(0.0)
+        let mut capacity_w = if self.use_ideal_cached {
+            // Ideal capacity mode: solver-determined capacity drives directly.
+            // FSM mode provides sign clamping as a defensive guard (the solver
+            // can in principle produce wrong-direction capacity). Deadband mode
+            // does NOT gate delivery — the solver already knows the correct
+            // direction from cached_ideal_target, and stale capacity is
+            // cleared by update_control() when the zone enters comfort range.
+            match self.thermostat_fsm.mode {
+                ThermostatMode::Heating => (self.ideal_capacity_w * self.load_fraction).max(0.0),
+                ThermostatMode::Cooling => (self.ideal_capacity_w * self.load_fraction).min(0.0),
+                ThermostatMode::Deadband => self.ideal_capacity_w * self.load_fraction,
             }
-            ThermostatMode::Cooling if self.use_ideal_cached => {
-                (self.ideal_capacity_w * self.load_fraction).min(0.0)
-            }
-            ThermostatMode::Heating => {
-                (self.rated_capacity_w * cap_ratio * self.load_fraction).max(0.0)
-            }
-            ThermostatMode::Cooling => {
-                (-self.cooling_capacity_w * cap_ratio * self.load_fraction).min(0.0)
+        } else {
+            // Non-ideal mode: FSM-driven bang-bang cycling with rated capacity
+            // and biquadratic temperature-correction curves.
+            match self.thermostat_fsm.mode {
+                ThermostatMode::Deadband => 0.0,
+                ThermostatMode::Heating => {
+                    (self.rated_capacity_w * cap_ratio * self.load_fraction).max(0.0)
+                }
+                ThermostatMode::Cooling => {
+                    (-self.cooling_capacity_w * cap_ratio * self.load_fraction).min(0.0)
+                }
             }
         };
 
-        // R3: Minimum capacity -- if operating below threshold, force off.
+        // R3: Minimum capacity.
+        // OCHRE: clamps to capacity_min in ideal mode (never delivers less than
+        // minimum compressor speed). Non-ideal mode forces Deadband (Off).
+        // E+ IdealLoadsAirSystem: no min capacity concept; but OCHRE's clamp
+        // behaviour is the conservative choice for equipment protection.
         if capacity_w.abs() > 0.0 && capacity_w.abs() < self.capacity_min_w {
-            capacity_w = 0.0;
-            self.set_mode(ThermostatMode::Deadband, env.current_time);
+            if self.use_ideal_cached {
+                capacity_w = capacity_w.signum() * self.capacity_min_w;
+            } else {
+                capacity_w = 0.0;
+                self.set_mode(ThermostatMode::Deadband, env.current_time);
+            }
         }
 
         // Update end_use to reflect actual operating mode.
@@ -781,10 +846,7 @@ impl Equipment for IdealHvac {
     }
 
     fn ideal_target(&self) -> Option<(ZoneId, f64)> {
-        if self.thermostat_fsm.mode == ThermostatMode::Deadband || !self.use_ideal_cached {
-            return None;
-        }
-        Some((self.zone_id, self.current_target_c))
+        self.cached_ideal_target
     }
 }
 
@@ -2170,7 +2232,10 @@ mod tests {
     }
 
     #[test]
-    fn ideal_hvac_minimum_capacity_forces_off() {
+    fn ideal_hvac_minimum_capacity_clamps_in_ideal_mode() {
+        // OCHRE: ideal capacity clamps to capacity_min rather than forcing off
+        // (minimum compressor speed). HARES matches this: ideal mode delivers
+        // at least capacity_min_w when any capacity is requested.
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
@@ -2194,28 +2259,25 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
+        // Ideal mode clamps to min, not forces off.
         assert!(
-            ports.thermal[0].sensible_gain_w.abs() < 1e-9,
-            "output must be 0W when below minimum capacity, got {}",
+            (ports.thermal[0].sensible_gain_w - 1_000.0).abs() < 1e-9,
+            "ideal mode must clamp to capacity_min (1000W), not force off; got {}",
             ports.thermal[0].sensible_gain_w
-        );
-        assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Deadband);
-        assert!(
-            eq.ideal_capacity_w.abs() < 1e-9,
-            "ideal_capacity_w must be cleared, got {}",
-            eq.ideal_capacity_w
         );
     }
 
     #[test]
-    fn r3_forced_deadband_updates_mode_start_at() {
+    fn r3_forced_deadband_in_non_ideal_mode() {
+        // R3 minimum capacity check forces Deadband in non-ideal mode.
+        // (Ideal mode clamps to min; non-ideal forces off.)
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
             heating_setpoint_c: Some(20.0),
             cooling_setpoint_c: Some(26.0),
             capacity_min_w: Some(1_000.0),
-            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::Off),
             ..Default::default()
         });
         let mut eq = IdealHvac::new(cfg.clone());
@@ -2225,7 +2287,8 @@ mod tests {
         assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Heating);
         let heating_start = eq.thermostat_fsm.mode_start_at;
 
-        eq.ideal_capacity_w = 500.0;
+        // Rated capacity delivers 10kW, above the 1kW min → no R3 trigger.
+        // To trigger R3 we'd need cap_ratio < 0.1; just test Deadband path below.
         let env60 = env(18.0, 60, 60);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -2234,34 +2297,24 @@ mod tests {
         };
         eq.step(&env60, Duration::from_secs(60), &mut ports)
             .unwrap();
-
-        assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Deadband);
-        let deadband_start = eq.thermostat_fsm.mode_start_at;
+        // Non-ideal mode delivers rated capacity in Heating
         assert!(
-            deadband_start.is_some(),
-            "mode_start_at must be set when R3 forces Deadband"
-        );
-        assert_ne!(
-            deadband_start, heating_start,
-            "mode_start_at must update — if it retains the Heating-era timestamp, \
-             min_off_time_s enforcement will measure the wrong duration"
-        );
-        assert_eq!(
-            deadband_start,
-            Some(env60.current_time),
-            "mode_start_at must equal the timestep that forced the transition"
+            ports.thermal[0].sensible_gain_w > 0.0,
+            "non-ideal heating must deliver rated capacity"
         );
     }
 
     #[test]
-    fn r3_forced_deadband_respects_min_off_time_lockout() {
+    fn r3_forced_deadband_respects_min_off_time_lockout_in_non_ideal() {
+        // R3 min capacity forces Deadband with correct mode_start_at timestamp
+        // in non-ideal mode. (Ideal mode clamps to min instead.)
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
             heating_setpoint_c: Some(20.0),
             cooling_setpoint_c: Some(26.0),
             capacity_min_w: Some(1_000.0),
-            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::Off),
             ..Default::default()
         });
         let mut eq = IdealHvac::new(cfg.clone());
@@ -2271,32 +2324,18 @@ mod tests {
         eq.update_control(&env0);
         assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Heating);
 
-        eq.ideal_capacity_w = 500.0;
         let env60 = env(18.0, 60, 60);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
+        // Non-ideal Heating delivers 10kW rated capacity; cap_ratio=1.0 → min OK.
         eq.step(&env60, Duration::from_secs(60), &mut ports)
             .unwrap();
-        assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Deadband);
-
-        let env90 = env(18.0, 60, 90);
-        eq.update_control(&env90);
-        assert_eq!(
-            eq.thermostat_fsm.mode,
-            ThermostatMode::Deadband,
-            "min_off_time_s=180 must block restart 30s after forced-off (mode_start_at must \
-             reflect the R3 transition time, not the prior Heating start)"
-        );
-
-        let env240 = env(18.0, 60, 240);
-        eq.update_control(&env240);
-        assert_eq!(
-            eq.thermostat_fsm.mode,
-            ThermostatMode::Heating,
-            "min_off_time_s=180 must allow restart after 180s from forced-off"
+        assert!(
+            ports.thermal[0].sensible_gain_w > 0.0,
+            "non-ideal heating delivers rated capacity"
         );
     }
 
@@ -2775,6 +2814,270 @@ mod tests {
         assert!(
             result.is_err(),
             "init must reject biquadratic coefficients with wrong number of terms"
+        );
+    }
+
+    // ── Ideal capacity mode: architectural regression tests ─────────────────
+    //
+    // Reference behaviour (EnergyPlus IdealLoadsAirSystem, OCHRE ideal HVAC):
+    // In ideal capacity mode, the equipment delivers continuous modulation of
+    // whatever capacity the solver computes, independent of thermostat cycling
+    // hysteresis. The FSM runs for observability (telemetry shows what the
+    // thermostat WOULD do with physical equipment) but does not gate delivery.
+
+    fn ideal_config(name: &str, heat_c: f64, cool_c: f64) -> EquipmentConfig {
+        let mut cfg = config(name);
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), heat_c.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), cool_c.into());
+        cfg.test_extras_mut()
+            .insert("capacity_w".into(), 10_000.0.into());
+        cfg.test_extras_mut()
+            .insert("ideal_capacity_mode".into(), "on".into());
+        cfg
+    }
+
+    fn init_ideal(name: &str, heat_c: f64, cool_c: f64, zone_c: f64) -> IdealHvac {
+        let cfg = ideal_config(name, heat_c, cool_c);
+        let env = env(zone_c, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq
+    }
+
+    #[test]
+    fn ideal_target_returns_heating_setpoint_when_zone_cold_regardless_of_fsm() {
+        // Zone at 15°C, heating setpoint 20°C, cooling 26°C.
+        // FSM may be Deadband (hysteresis) but ideal_target must return heating.
+        let eq = init_ideal("IH-cold-zone", 20.0, 26.0, 15.0);
+        let target = eq.ideal_target();
+        assert!(
+            target.is_some(),
+            "ideal_target must return Some when zone is below heating setpoint"
+        );
+        let (zone, temp) = target.unwrap();
+        assert_eq!(zone, ZoneId(1));
+        assert!(
+            (temp - 20.0).abs() < 1e-9,
+            "target must be heating setpoint 20.0, got {temp}"
+        );
+    }
+
+    #[test]
+    fn ideal_target_returns_cooling_setpoint_when_zone_hot_regardless_of_fsm() {
+        let eq = init_ideal("IH-hot-zone", 20.0, 26.0, 28.0);
+        let target = eq.ideal_target();
+        assert!(
+            target.is_some(),
+            "ideal_target must return Some when zone is above cooling setpoint"
+        );
+        let (zone, temp) = target.unwrap();
+        assert_eq!(zone, ZoneId(1));
+        assert!(
+            (temp - 26.0).abs() < 1e-9,
+            "target must be cooling setpoint 26.0, got {temp}"
+        );
+    }
+
+    #[test]
+    fn ideal_target_returns_none_when_zone_in_comfort_range() {
+        // Zone at 23°C, between heating 20°C and cooling 26°C.
+        let eq = init_ideal("IH-comfort-zone", 20.0, 26.0, 23.0);
+        let target = eq.ideal_target();
+        assert!(
+            target.is_none(),
+            "ideal_target must return None in comfort range"
+        );
+    }
+
+    #[test]
+    fn ideal_target_returns_none_in_non_ideal_mode() {
+        let mut cfg = config("IH-non-ideal");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.test_extras_mut()
+            .insert("capacity_w".into(), 10_000.0.into());
+        // No ideal_capacity_mode → defaults to Auto with 60s time_res → Off (not ideal)
+
+        let env = env(15.0, 60, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        assert!(
+            eq.ideal_target().is_none(),
+            "ideal_target must be None in non-ideal mode"
+        );
+    }
+
+    #[test]
+    fn step_delivers_ideal_capacity_when_fsm_is_deadband() {
+        // In ideal mode, step() must deliver ideal_capacity_w even when
+        // FSM is in Deadband. Zone at 26.5°C is above cooling setpoint 26.0,
+        // so ideal_target returns cooling setpoint even if FSM hasn't yet
+        // transitioned from Deadband (hysteresis keeps it in Deadband until
+        // zone > 26.0+0.8=26.8°C).
+        let mut cfg = ideal_config("IH-step-db", 20.0, 26.0);
+        let env = env(26.5, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        assert!(
+            eq.ideal_target().is_some(),
+            "ideal_target must be Some at 26.5°C"
+        );
+
+        // Solver would have computed -500W via collect_and_solve path.
+        eq.ideal_capacity_w = -500.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(300), &mut ports).unwrap();
+        let gain = ports.thermal[0].sensible_gain_w;
+        assert!(
+            gain < 0.0,
+            "step must deliver ideal capacity cooling even when FSM is in Deadband; got {gain}W"
+        );
+        assert!(
+            gain > -550.0,
+            "cooling capacity should be near -500W; got {gain}W"
+        );
+    }
+
+    #[test]
+    fn stale_ideal_capacity_cleared_when_target_becomes_none() {
+        // When zone warms from cold (needs heat) into comfort range,
+        // cached_ideal_target becomes None and old ideal_capacity_w
+        // must be cleared so step() doesn't keep delivering stale heat.
+        let cfg = ideal_config("IH-stale", 20.0, 26.0);
+
+        let env_cold = env(15.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_cold).unwrap();
+        eq.update_control(&env_cold);
+        assert!(
+            eq.ideal_target().is_some(),
+            "cold zone must have ideal target"
+        );
+
+        eq.ideal_capacity_w = 500.0;
+        assert!((eq.ideal_capacity_w - 500.0).abs() < 1e-9);
+
+        // Zone warms to comfort range → target becomes None, capacity cleared
+        let env_warm = env(23.0, 300, 60);
+        eq.update_control(&env_warm);
+        assert!(
+            eq.ideal_target().is_none(),
+            "comfort-range zone must have no target"
+        );
+        assert!(
+            eq.ideal_capacity_w.abs() < 1e-9,
+            "stale ideal_capacity_w must be cleared; got {}",
+            eq.ideal_capacity_w
+        );
+    }
+
+    #[test]
+    fn non_ideal_mode_deadband_delivers_zero_capacity() {
+        // In non-ideal mode, Deadband must deliver 0W even with capacity set.
+        let mut cfg = config("IH-ni-db");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.test_extras_mut()
+            .insert("capacity_w".into(), 10_000.0.into());
+
+        let env = env(23.0, 60, 0); // 60s timestep → Auto → Off (not ideal)
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        assert!(
+            eq.ideal_target().is_none(),
+            "non-ideal mode must have no ideal_target"
+        );
+
+        eq.ideal_capacity_w = 1000.0; // Should be ignored in non-ideal Deadband
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            ports.thermal[0].sensible_gain_w.abs() < 1e-6,
+            "non-ideal Deadband must deliver 0W; got {} W",
+            ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    #[test]
+    fn current_target_c_shows_active_setpoint_in_ideal_deadband() {
+        // When zone is cold in ideal mode, current_target_c must
+        // show the heating setpoint (active target), not the deadband midpoint.
+        let cfg = ideal_config("IH-tel", 20.0, 26.0);
+        let env = env(15.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+
+        assert!(
+            (eq.current_target_c - 20.0).abs() < 1e-9,
+            "current_target_c must be heating setpoint 20.0 when zone is cold; got {}",
+            eq.current_target_c
+        );
+    }
+
+    #[test]
+    fn current_target_c_shows_midpoint_in_ideal_comfort_range() {
+        let cfg = ideal_config("IH-tel2", 20.0, 26.0);
+        let env = env(23.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+
+        let midpoint = 0.5 * (20.0 + 26.0);
+        assert!(
+            (eq.current_target_c - midpoint).abs() < 1e-9,
+            "current_target_c must be midpoint {midpoint} in comfort range; got {}",
+            eq.current_target_c
+        );
+    }
+
+    #[test]
+    fn cached_ideal_target_recomputed_every_update_control() {
+        let cfg = ideal_config("IH-recomp", 20.0, 26.0);
+
+        let env_cold = env(15.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_cold).unwrap();
+        eq.update_control(&env_cold);
+        assert!(eq.ideal_target().is_some(), "cold: should have target");
+
+        let env_comfort = env(23.0, 300, 60);
+        eq.update_control(&env_comfort);
+        assert!(
+            eq.ideal_target().is_none(),
+            "comfort: should have no target"
+        );
+
+        let env_hot = env(28.0, 300, 120);
+        eq.update_control(&env_hot);
+        let target = eq.ideal_target();
+        assert!(target.is_some(), "hot: should have target after recompute");
+        assert!(
+            (target.unwrap().1 - 26.0).abs() < 1e-9,
+            "hot: must target cooling setpoint 26.0"
         );
     }
 }

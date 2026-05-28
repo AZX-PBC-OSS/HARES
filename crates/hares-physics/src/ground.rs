@@ -43,6 +43,16 @@ pub const DEFAULT_PHASE_DAY_NORTHERN: f64 = 35.0;
 /// 182.5-day offset from northern = average half-year (365/2).
 pub const DEFAULT_PHASE_DAY_SOUTHERN: f64 = 35.0 + 182.5;
 
+/// Minimum representative depth for slab-on-grade ground temperature [m].
+///
+/// EPW Data Dictionary v9.6 specifies 0.5 m as the standard reference depth
+/// for GroundTemperatures:BuildingSurface. Slabs at grade have zero
+/// DepthBelowGrade but the ground temperature driving the thermal coupling
+/// should be evaluated at a subsurface depth where seasonal damping provides
+/// physically realistic attenuation, not at the ground surface (depth=0)
+/// where the Kusuda-Achenbach model degenerates to tracking outdoor air.
+pub const DEFAULT_SLAB_GROUND_DEPTH_M: f64 = 0.5;
+
 /// Period [days] -- one year.
 const TAU_DAYS: f64 = 365.0;
 

@@ -1946,6 +1946,20 @@ impl Dwelling {
         Ok(removed)
     }
 
+    /// Removes all equipment whose end-use matches any of the given set.
+    ///
+    /// Returns the count of equipment removed.
+    pub fn remove_equipment_by_end_use(&mut self, end_uses: &[EndUse]) -> usize {
+        let before = self.equipment.len();
+        self.equipment
+            .retain(|e| !end_uses.contains(&e.descriptor().end_use));
+        let removed = before - self.equipment.len();
+        if removed > 0 {
+            self.refresh_equipment_caches();
+        }
+        removed
+    }
+
     /// Replaces equipment by name with new equipment, returning the old equipment.
     ///
     /// Returns `Err` if no equipment with the given name exists.

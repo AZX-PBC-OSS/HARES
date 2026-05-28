@@ -512,9 +512,6 @@ pub fn assemble_building_rc(
 ) -> Result<(BuildingRC, EnvelopeDiagnostics), String> {
     let outdoor_node = NodeId(OUTDOOR_NODE_ID);
 
-    // Collect unique foundation depths for ground-connected boundaries.
-    // A depth->NodeId map is built so each distinct depth gets its own ground
-    // driving node and B-matrix column.
     let mut unique_depths: Vec<f64> = boundaries
         .iter()
         .filter(|b| b.exterior == ExteriorTarget::Ground && b.area_m2 > 0.0)
