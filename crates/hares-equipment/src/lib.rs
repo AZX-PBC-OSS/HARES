@@ -10,6 +10,7 @@ pub mod event_load;
 pub mod generator;
 pub mod hvac;
 pub mod ndinterp;
+pub mod protocol_bridge;
 pub mod pv;
 pub mod registry;
 pub(crate) mod schedule_helpers;
@@ -67,6 +68,9 @@ pub use hvac::{
 };
 pub use hvac::{DefrostConfig, DefrostControl, DefrostStrategy};
 pub use ndinterp::RegularGridInterpolator;
+pub use protocol_bridge::{
+    JsonHandler, ProtocolBridgeConfig, config::HandlerConfig, handler::EquipmentCommand,
+};
 pub use pv::PvConfig;
 pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};
 pub use ventilation::VentilationConfig;
@@ -135,6 +139,21 @@ pub trait Equipment: Send + Sync {
     /// preconditions (e.g. EV connection state) must override this method.
     fn validate_signal(&self, signal: &ControlSignal) -> Result<()> {
         ensure_signal_supported(self.descriptor().control_capabilities, signal)
+    }
+
+    /// Drains pending `(target_name, ControlSignal)` pairs that this
+    /// equipment generated during the most recent `apply_control` call.
+    ///
+    /// Equipment that translates one control signal into others (e.g.
+    /// `ProtocolBridge` converting a `ProtocolNative` payload into standard
+    /// `ControlSignal` variants) accumulates the derived signals and returns
+    /// them here. The dwelling dispatch loop collects them at the end of each
+    /// dispatch pass and routes them immediately — no timestep delay.
+    ///
+    /// The default implementation returns an empty vec. Override only in
+    /// equipment that produces derived signals.
+    fn drain_command_signals(&mut self) -> Vec<(String, ControlSignal)> {
+        Vec::new()
     }
 
     /// Declares the core output capabilities this equipment type supports.
@@ -282,10 +301,10 @@ mod tests {
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
         ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
-        CorePerformance, CoreState, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-        ExecutionStage, FluidType, FuelType, GridState, LoopId, OperatingMode, PortDeclaration,
-        PortSlots, ProtocolId, SurfaceIrradiance, Telemetry, TelemetryField, WeatherState, ZoneId,
-        ZoneState,
+        CorePerformance, CoreState, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
+        EquipmentId, EvConnectionState, ExecutionStage, FluidType, FuelType, GridState,
+        IdealCapacityMode, InverterPriority, LoopId, OperatingMode, PortDeclaration, PortSlots,
+        ProtocolId, SurfaceIrradiance, Telemetry, TelemetryField, WeatherState, ZoneId, ZoneState,
     };
     use serde::{Deserialize, Serialize};
 
@@ -678,5 +697,193 @@ mod tests {
             matches!(out.flows.electric_kw, Some(ElectricPower::Consumption(kw)) if (kw - 1.5).abs() < 1e-10)
         );
         assert_eq!(out.state.operating_mode, Some(OperatingMode::Charging));
+    }
+
+    #[test]
+    fn every_control_signal_variant_has_at_least_one_equipment_consumer() {
+        use std::panic::AssertUnwindSafe;
+
+        let registry = EquipmentRegistry::new();
+        let payload = ConfigPayload::default();
+
+        // Collect the union of all declared capabilities across all built-in
+        // equipment types. Use catch_unwind because some constructors
+        // (e.g. TanklessWH) panic on missing typed config in their `new()`
+        // rather than deferring to init().
+        let mut all_caps = ControlCapabilities::empty();
+        for class in registry.known_names() {
+            let raw_cfg = EquipmentConfig::with_payload(
+                class.to_string(),
+                class.to_string(),
+                payload.clone(),
+            );
+            let caps = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut eq = registry.create(class, raw_cfg.clone()).ok()?;
+                let _ = eq.init(&raw_cfg, &sample_env());
+                Some(eq.descriptor().control_capabilities)
+            }));
+            if let Ok(Some(caps)) = caps {
+                all_caps |= caps;
+            }
+        }
+
+        // Signal representatives: one per ControlSignal variant with its
+        // required capability.
+        let representatives: &[(ControlSignal, ControlCapabilities)] = &[
+            (
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(20.0),
+                    cooling_setpoint_c: Some(24.0),
+                    deadband_c: Some(1.0),
+                },
+                ControlCapabilities::THERMAL_SETPOINT,
+            ),
+            (
+                ControlSignal::HumiditySetpoint {
+                    target_rh: 0.45,
+                    min_rh: None,
+                    max_rh: None,
+                },
+                ControlCapabilities::HUMIDITY_SETPOINT,
+            ),
+            (
+                ControlSignal::PowerSetpoint {
+                    active_power_kw: 1.0,
+                    reactive_power_kvar: None,
+                },
+                ControlCapabilities::POWER_SETPOINT,
+            ),
+            (
+                ControlSignal::PowerLimit {
+                    max_power_kw: 5.0,
+                    ramp_rate_kw_per_s: None,
+                },
+                ControlCapabilities::POWER_LIMIT,
+            ),
+            (
+                ControlSignal::SOCTarget {
+                    target_soc: 0.5,
+                    min_soc: None,
+                    max_soc: None,
+                },
+                ControlCapabilities::SOC_TARGET,
+            ),
+            (
+                ControlSignal::ModeOverride {
+                    mode: OperatingMode::Off,
+                },
+                ControlCapabilities::MODE_OVERRIDE,
+            ),
+            (
+                ControlSignal::DutyCycle {
+                    on_fraction: 0.5,
+                    period_s: None,
+                    component: None,
+                },
+                ControlCapabilities::DUTY_CYCLE,
+            ),
+            (
+                ControlSignal::LoadFraction { fraction: 0.5 },
+                ControlCapabilities::LOAD_FRACTION,
+            ),
+            (
+                ControlSignal::GridConnect { connected: true },
+                ControlCapabilities::GRID_CONNECT,
+            ),
+            (
+                ControlSignal::SelfConsumption {
+                    enabled: true,
+                    solar_only_charging: false,
+                },
+                ControlCapabilities::SELF_CONSUMPTION,
+            ),
+            (
+                ControlSignal::DemandResponse {
+                    level: DRLevel::Moderate,
+                    duration_s: Some(600.0),
+                },
+                ControlCapabilities::DEMAND_RESPONSE,
+            ),
+            (
+                ControlSignal::ProtocolNative {
+                    protocol: ProtocolId(1),
+                    payload: vec![0x01],
+                },
+                ControlCapabilities::PROTOCOL_NATIVE,
+            ),
+            (
+                ControlSignal::CurtailmentPercent { percent: 50.0 },
+                ControlCapabilities::CURTAILMENT_PERCENT,
+            ),
+            (
+                ControlSignal::ReactiveSetpoint { kvar: 1.0 },
+                ControlCapabilities::REACTIVE_SETPOINT,
+            ),
+            (
+                ControlSignal::PowerFactorSetpoint { power_factor: 0.95 },
+                ControlCapabilities::POWER_FACTOR_SETPOINT,
+            ),
+            (
+                ControlSignal::InverterPriorityMode {
+                    priority: InverterPriority::Watt,
+                },
+                ControlCapabilities::INVERTER_PRIORITY_MODE,
+            ),
+            (
+                ControlSignal::IdealCapacity { capacity_w: 1000.0 },
+                ControlCapabilities::IDEAL_CAPACITY,
+            ),
+            (
+                ControlSignal::ThermalSetpointDelta {
+                    heating_delta_c: Some(1.0),
+                    cooling_delta_c: None,
+                },
+                ControlCapabilities::THERMAL_SETPOINT_DELTA,
+            ),
+            (
+                ControlSignal::IdealCapacityModeOverride {
+                    mode: IdealCapacityMode::On,
+                },
+                ControlCapabilities::IDEAL_CAPACITY_MODE_OVERRIDE,
+            ),
+            (
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn,
+                },
+                ControlCapabilities::EV_PLUG_IN,
+            ),
+            (
+                ControlSignal::EvDrive { kwh: 1.0 },
+                ControlCapabilities::EV_DRIVE,
+            ),
+            (
+                ControlSignal::EvAwayCharge { power_kw: 1.0 },
+                ControlCapabilities::EV_AWAY_CHARGE,
+            ),
+            (
+                ControlSignal::EvSetReadyBy {
+                    departure_hour: 7.0,
+                    target_soc: 0.8,
+                },
+                ControlCapabilities::EV_SET_READY_BY,
+            ),
+            (
+                ControlSignal::EventDelay { delay_s: 60.0 },
+                ControlCapabilities::EVENT_DELAY,
+            ),
+            (
+                ControlSignal::MaxCapacityFraction { fraction: 0.8 },
+                ControlCapabilities::MAX_CAPACITY_FRACTION,
+            ),
+        ];
+
+        for (signal, required) in representatives {
+            assert!(
+                all_caps.contains(*required),
+                "ControlSignal variant {signal:?} (requires {required:?}) has no equipment \
+                 consumer — add an equipment type that declares this capability, \
+                 or remove the variant if it is no longer planned"
+            );
+        }
     }
 }

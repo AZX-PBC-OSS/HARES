@@ -22,8 +22,8 @@ use hares_equipment::{
     ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig, Equipment,
     EquipmentConfig, EquipmentRegistry, EquipmentTypedConfig, EvConfig, GasBoilerConfig,
     GasFurnaceConfig, GeneratorConfig, HeatPumpCommonConfig, HeatPumpCoolerConfig,
-    HeatPumpHeaterConfig, IdealHvacConfig, IndirectTankConfig, PvConfig, RoomAcConfig,
-    VentilationConfig,
+    HeatPumpHeaterConfig, IdealHvacConfig, IndirectTankConfig, ProtocolBridgeConfig, PvConfig,
+    RoomAcConfig, VentilationConfig,
     config::ConfigValue,
     water_heater::wh_config::{
         ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
@@ -1193,6 +1193,14 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 ventilation_type: Some("exhaust_fan".to_string()),
                 balanced: None,
                 hours_in_operation: None,
+            },
+        ),
+        "Protocol Bridge" => typed_alias_config(
+            class,
+            ProtocolBridgeConfig {
+                equipment_id: None,
+                registered_protocols: vec![],
+                handlers: vec![],
             },
         ),
         "EventBasedLoad" | "Clothes Washer" | "Dishwasher" | "Clothes Dryer" | "Cooking Range" => {

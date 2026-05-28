@@ -1211,6 +1211,34 @@ class EV:
     def chevy_volt_gen1() -> EV: ...
     def __repr__(self) -> str: ...
 
+class ProtocolBridge:
+    """Protocol-native control signal bridge.
+
+    Receives ``ProtocolNative`` control signals and either records their
+    dispatch in telemetry or routes them through configured handlers.
+    Registers protocol IDs the bridge should recognise; an empty or omitted
+    ``registered_protocols`` means accept-all.
+
+    ``json_handlers`` specifies protocol IDs for which a JSON payload handler
+    is configured. Each entry creates a ``JsonHandler`` that parses UTF-8 JSON
+    payloads of the form ``[{"target": "...", "signal": {...}}]``. Without at
+    least one handler the bridge records dispatch in telemetry but never routes
+    commands to target equipment.
+    """
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def registered_protocols(self) -> list[int]: ...
+    @property
+    def json_handlers(self) -> list[int]: ...
+    def __init__(
+        self,
+        name: str,
+        registered_protocols: list[int] | None = ...,
+        json_handlers: list[int] | None = ...,
+    ) -> None: ...
+
 # ---------------------------------------------------------------------------
 # Tariff types
 # ---------------------------------------------------------------------------
@@ -1738,6 +1766,7 @@ class Dwelling:
     def add_battery(self, battery: Battery) -> None: ...
     def add_pv(self, pv: PV) -> None: ...
     def add_ev(self, ev: EV) -> None: ...
+    def add_protocol_bridge(self, bridge: ProtocolBridge) -> None: ...
     def add_ev_with_driver(
         self,
         vehicle_id: VehicleId,

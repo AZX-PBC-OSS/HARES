@@ -8,7 +8,7 @@
 //! In production release builds without the feature flag all public functions
 //! compile to nothing -- the compiler eliminates the bodies entirely.
 
-use hares_types::HaresError;
+use hares_types::{ControlCapabilities, HaresError};
 
 /// Entrypoint for per-timestep numerical invariant validation.
 ///
@@ -183,6 +183,32 @@ impl InvariantChecker {
         }
         Ok(())
     }
+
+    /// Verifies that at least one equipment in the dwelling declares the
+    /// `PROTOCOL_NATIVE` capability, so a `ProtocolNative` dispatch has a
+    /// consumer. Without a registered consumer the dispatch is silently
+    /// rejected by the capability gate and the signal never reaches any
+    /// equipment.
+    ///
+    /// Called before dispatching `ProtocolNative` signals in the dwelling's
+    /// Step 2b derived-signal cascade. An empty `capability_sets` — a dwelling
+    /// with no equipment at all — always fails this check.
+    pub fn check_protocol_native_registration(
+        &self,
+        capability_sets: &[ControlCapabilities],
+    ) -> Result<(), HaresError> {
+        let has_consumer = capability_sets
+            .iter()
+            .any(|caps| caps.contains(ControlCapabilities::PROTOCOL_NATIVE));
+        if !has_consumer {
+            return Err(HaresError::InvariantViolation {
+                check_name: "protocol_native_registration".to_string(),
+                value: capability_sets.len() as f64,
+                tolerance: 0.0,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
@@ -204,6 +230,13 @@ impl InvariantChecker {
     }
 
     pub fn check_temperatures(&self, _: &[f64], _: &[f64], _: &[f64]) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_protocol_native_registration(
+        &self,
+        _: &[ControlCapabilities],
+    ) -> Result<(), HaresError> {
         Ok(())
     }
 }
@@ -381,5 +414,39 @@ mod tests {
         // SoC violations warn but do not return Err.
         let result = checker().check_soc(1.5, 0.002);
         assert!(result.is_ok());
+    }
+
+    // ── protocol_native_registration ────────────────────────────────────────
+
+    #[test]
+    fn protocol_native_registration_passes_with_consumer() {
+        let caps = [
+            ControlCapabilities::POWER_SETPOINT,
+            ControlCapabilities::PROTOCOL_NATIVE,
+        ];
+        let result = checker().check_protocol_native_registration(&caps);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn protocol_native_registration_fails_without_consumer() {
+        let caps = [
+            ControlCapabilities::POWER_SETPOINT,
+            ControlCapabilities::THERMAL_SETPOINT,
+        ];
+        let result = checker().check_protocol_native_registration(&caps);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "protocol_native_registration"
+        ));
+    }
+
+    #[test]
+    fn protocol_native_registration_fails_empty() {
+        let caps: [ControlCapabilities; 0] = [];
+        let result = checker().check_protocol_native_registration(&caps);
+        assert!(result.is_err());
     }
 }

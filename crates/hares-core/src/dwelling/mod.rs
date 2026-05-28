@@ -19,7 +19,9 @@ use std::time::Instant;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use chrono_tz::Tz;
-use hares_control::{DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal};
+use hares_control::{
+    DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal, PriorityTier,
+};
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
@@ -39,8 +41,8 @@ use hares_physics::constants::{
 use hares_physics::pv_sizing::RoofInfo;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 use hares_types::{
-    BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary, EndUse,
-    EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, PortDeclaration,
+    BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver, ElectricalSummary,
+    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, PortDeclaration,
     PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId, telemetry_keys as tk,
     validate_core_contract,
 };
@@ -2661,6 +2663,66 @@ impl Dwelling {
                 .profiling
                 .memory_high_water_kb
                 .max(current_process_hwm_kb());
+        }
+
+        // Step 2b: collect and dispatch derived control signals from equipment
+        // that translate one signal into others (e.g. ProtocolBridge converting
+        // a ProtocolNative payload into standard ControlSignal variants).
+        //
+        // This runs AFTER the actor dispatch pass (Step 2) and BEFORE thermal
+        // re-update (Step 2a) so that translated setpoints, mode overrides, and
+        // power targets take effect on the CURRENT timestep.
+        //
+        // A bounded loop (max 3 iterations) handles cascades: a derived signal
+        // dispatched to a second ProtocolBridge could produce further derived
+        // signals. In practice one iteration suffices because bridges emit
+        // standard signals, not ProtocolNative.
+        const MAX_DERIVED_ITERATIONS: u32 = 3;
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        let mut protocol_native_checked = false;
+        for _iteration in 0..MAX_DERIVED_ITERATIONS {
+            let mut derived: Vec<DispatchRequest> = Vec::new();
+            for eq in self.equipment.iter_mut() {
+                for (target_name, signal) in eq.drain_command_signals() {
+                    derived.push(DispatchRequest {
+                        target: DispatchTarget::ByName(target_name.into()),
+                        signal,
+                        priority: PriorityTier::UserOverride,
+                    });
+                }
+            }
+            if derived.is_empty() {
+                break;
+            }
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            if !protocol_native_checked {
+                protocol_native_checked = true;
+                let capabilities: Vec<ControlCapabilities> = self
+                    .equipment
+                    .iter()
+                    .map(|e| e.descriptor().control_capabilities)
+                    .collect();
+                self.invariant_checker
+                    .check_protocol_native_registration(&capabilities)?;
+            }
+            for req in derived {
+                self.control_dispatcher.queue(req);
+            }
+            #[cfg(feature = "observe")]
+            if self.observer_buf.is_some() {
+                let capture = self
+                    .control_dispatcher
+                    .dispatch_into_observed(&mut self.equipment, &mut self.warnings);
+                if let Some(ref mut merged) = obs_phases.post_dispatch {
+                    merged.signals.extend(capture.signals);
+                }
+            } else {
+                self.control_dispatcher
+                    .dispatch_into(&mut self.equipment, &mut self.warnings);
+            }
+            #[cfg(not(feature = "observe"))]
+            self.control_dispatcher
+                .dispatch_into(&mut self.equipment, &mut self.warnings);
         }
 
         // Step 2a: re-run update_control for thermal equipment after control

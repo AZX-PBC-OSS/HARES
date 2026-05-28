@@ -31,8 +31,8 @@ use py_enums::{
     PyStormWatchTrigger, PyVehicleId, PyVehicleType,
 };
 use py_equipment::{
-    PyBattery, PyCoreOutput, PyEquipment, PyEquipmentDescriptor, PyEv, PyPv, PyPvSoilingConfig,
-    PyTelemetryField,
+    PyBattery, PyCoreOutput, PyEquipment, PyEquipmentDescriptor, PyEv, PyProtocolBridge, PyPv,
+    PyPvSoilingConfig, PyTelemetryField,
 };
 use py_fleet::{PyFleet, PyFleetResults, PySteppableFleet};
 use py_metrics::{
@@ -58,6 +58,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPv>()?;
     m.add_class::<PyPvSoilingConfig>()?;
     m.add_class::<PyEv>()?;
+    m.add_class::<PyProtocolBridge>()?;
     m.add_class::<PyTelemetryField>()?;
     m.add_class::<PyEquipmentDescriptor>()?;
     m.add_class::<PyFleet>()?;

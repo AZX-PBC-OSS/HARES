@@ -17,6 +17,7 @@ from ._hares import CoreOutput
 from ._hares import PV
 from ._hares import PvSoilingConfig
 from ._hares import EV
+from ._hares import ProtocolBridge
 
 # Actor system
 from ._hares import Actor
@@ -114,6 +115,7 @@ __all__ = [
     "PV",
     "PvSoilingConfig",
     "EV",
+    "ProtocolBridge",
     # Actor system
     "Actor",
     "DispatchRequest",

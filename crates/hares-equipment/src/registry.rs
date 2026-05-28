@@ -88,6 +88,8 @@ pub const CANONICAL_EQUIPMENT_NAMES: &[&str] = &[
     // Ventilation
     "HRV",
     "ERV",
+    // Protocol bridge
+    "Protocol Bridge",
 ];
 
 /// Registry mapping OCHRE class strings to equipment constructors.
@@ -126,6 +128,7 @@ impl EquipmentRegistry {
         crate::generator::register_with_registry(&mut registry);
         crate::event_load::register_with_registry(&mut registry);
         crate::ventilation::register_with_registry(&mut registry);
+        crate::protocol_bridge::register_with_registry(&mut registry);
         registry
     }
 

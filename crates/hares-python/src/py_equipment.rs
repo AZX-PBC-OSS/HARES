@@ -1091,6 +1091,44 @@ fn extract_u_neg_from_dataframe(py: Python<'_>, df: &Bound<'_, PyAny>) -> PyResu
     UNegTable::new(soc, potential).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Python-facing protocol bridge configuration.
+///
+/// Registers protocol IDs that the bridge should recognise.
+/// An empty or omitted `registered_protocols` means accept all.
+///
+/// `json_handlers` specifies protocol IDs for which a JSON payload handler
+/// is configured. Each entry creates a `JsonHandler` that parses UTF-8 JSON
+/// payloads of the form `[{"target": "...", "signal": {...}}]`. Without at
+/// least one handler, the bridge records dispatch in telemetry but never
+/// routes commands to target equipment.
+#[pyclass(name = "ProtocolBridge")]
+#[derive(Debug)]
+pub struct PyProtocolBridge {
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub registered_protocols: Vec<u16>,
+    #[pyo3(get)]
+    pub json_handlers: Vec<u16>,
+}
+
+#[pymethods]
+impl PyProtocolBridge {
+    #[new]
+    #[pyo3(signature = (name, registered_protocols=None, json_handlers=None))]
+    pub fn new(
+        name: String,
+        registered_protocols: Option<Vec<u16>>,
+        json_handlers: Option<Vec<u16>>,
+    ) -> Self {
+        Self {
+            name,
+            registered_protocols: registered_protocols.unwrap_or_default(),
+            json_handlers: json_handlers.unwrap_or_default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

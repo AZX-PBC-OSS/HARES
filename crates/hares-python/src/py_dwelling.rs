@@ -11,8 +11,8 @@ use hares_core::{
     environment::SurfaceGeometry,
 };
 use hares_equipment::{
-    BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig, PvConfig,
-    config::ConfigValue,
+    BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig,
+    ProtocolBridgeConfig, PvConfig, config::ConfigValue,
 };
 use hares_io::{
     OutputFormat, ResampleOverrides, SimulationConfig, output::metrics::MetricsCalculator,
@@ -42,8 +42,8 @@ use crate::py_control::PyControlSignal;
 use crate::py_enums::PyLutType;
 use crate::py_enums::{PyEvArchetypeId, PyVehicleId};
 use crate::py_equipment::{
-    PyBattery, PyEquipment, PyEquipmentDescriptor, PyEv, PyPv, extract_charging_lut,
-    extract_ocv_table, extract_u_neg_table,
+    PyBattery, PyEquipment, PyEquipmentDescriptor, PyEv, PyProtocolBridge, PyPv,
+    extract_charging_lut, extract_ocv_table, extract_u_neg_table,
 };
 use crate::py_metrics::PySimulationMetrics;
 use crate::py_telemetry::PyTelemetry;
@@ -474,6 +474,24 @@ fn ev_config_from_py(ev: &PyEv) -> EquipmentConfig {
             .map(|state| EvConnectionState::from(state).to_string()),
     };
     EquipmentConfig::from_typed(ev.name.clone(), "EV".to_string(), cfg)
+}
+
+fn protocol_bridge_config_from_py(bridge: &PyProtocolBridge) -> EquipmentConfig {
+    let handlers: Vec<_> = bridge
+        .json_handlers
+        .iter()
+        .map(
+            |&protocol_id| hares_equipment::protocol_bridge::config::HandlerConfig::Json {
+                protocol_id,
+            },
+        )
+        .collect();
+    let cfg = ProtocolBridgeConfig {
+        equipment_id: None,
+        registered_protocols: bridge.registered_protocols.clone(),
+        handlers,
+    };
+    EquipmentConfig::from_typed(bridge.name.clone(), "ProtocolBridge".to_string(), cfg)
 }
 
 fn lock_dwelling(dwelling: &Mutex<Dwelling>) -> PyResult<MutexGuard<'_, Dwelling>> {
@@ -979,6 +997,18 @@ impl PyDwelling {
         Ok(())
     }
 
+    pub fn add_protocol_bridge(&mut self, bridge: &PyProtocolBridge) -> PyResult<()> {
+        let config = protocol_bridge_config_from_py(bridge);
+        let mut eq = self
+            .equipment_registry
+            .create("Protocol Bridge", config.clone())
+            .map_err(to_py_err)?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
+        dwelling.add_equipment(eq);
+        Ok(())
+    }
+
     pub fn remove_equipment(&mut self, name: &str) -> PyResult<()> {
         let mut dwelling = lock_dwelling(&self.dwelling)?;
         dwelling.remove_equipment(name).map_err(to_py_err)?;
@@ -1421,8 +1451,15 @@ impl PyDwelling {
             }
             return Ok(eq);
         }
+        if let Ok(bridge) = obj.extract::<PyRef<'_, PyProtocolBridge>>() {
+            let config = protocol_bridge_config_from_py(&bridge);
+            return self
+                .equipment_registry
+                .create("Protocol Bridge", config)
+                .map_err(to_py_err);
+        }
         Err(PyValueError::new_err(
-            "equipment must be a Battery, PV, or EV instance",
+            "equipment must be a Battery, PV, EV, or ProtocolBridge instance",
         ))
     }
 }

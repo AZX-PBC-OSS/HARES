@@ -79,6 +79,53 @@ class TestAddEquipment:
         tel = dw.telemetry().equipment()
         assert "TestEV" in tel["names"], "EV should appear in equipment telemetry"
 
+    def test_add_protocol_bridge_appears_in_equipment_names(self):
+        from ochre_next import ProtocolBridge
+
+        dw = _make_dwelling()
+        bridge = ProtocolBridge("TestBridge")
+        dw.add_protocol_bridge(bridge)
+        assert "TestBridge" in dw.equipment_names()
+
+    def test_add_protocol_bridge_step_succeeds(self):
+        from ochre_next import ProtocolBridge
+
+        dw = _make_dwelling()
+        bridge = ProtocolBridge("TestBridge")
+        dw.add_protocol_bridge(bridge)
+        result = dw.step()
+        assert "timestamp" in result
+
+        tel = dw.telemetry().equipment()
+        assert "TestBridge" in tel["names"], (
+            "ProtocolBridge should appear in equipment telemetry"
+        )
+
+    def test_add_protocol_bridge_with_registered_protocols(self):
+        from ochre_next import ProtocolBridge
+
+        dw = _make_dwelling()
+        bridge = ProtocolBridge("FilteredBridge", registered_protocols=[1, 42, 99])
+        dw.add_protocol_bridge(bridge)
+        assert "FilteredBridge" in dw.equipment_names()
+        result = dw.step()
+        assert "timestamp" in result
+
+    def test_add_protocol_bridge_with_json_handler(self):
+        from ochre_next import ProtocolBridge
+
+        dw = _make_dwelling()
+        bridge = ProtocolBridge("RoutedBridge", json_handlers=[17])
+        dw.add_protocol_bridge(bridge)
+        assert "RoutedBridge" in dw.equipment_names()
+        result = dw.step()
+        assert "timestamp" in result
+
+        tel = dw.telemetry().equipment()
+        assert "RoutedBridge" in tel["names"], (
+            "ProtocolBridge with JSON handler should appear in equipment telemetry"
+        )
+
 
     def test_ev_max_charging_kw_config_key_applied(self):
         """Regression: max_charging_kw must map to max_charging_power_kw config key.

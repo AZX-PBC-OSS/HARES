@@ -221,6 +221,22 @@ pub const HUMIDITY_SOLVER_TELEMETRY_KEY: &str = "HumiditySolver";
 // ── Dwelling-level / test equipment ─────────────────────────────────────────
 pub const LAST_POWER_KW: &str = "last_power_kw";
 
+// ── Protocol bridge ─────────────────────────────────────────────────────────
+/// Protocol ID of the last dispatched ProtocolNative signal.
+pub const PROTOCOL_ID: &str = "protocol_id";
+/// Payload size in bytes of the last dispatched ProtocolNative signal.
+pub const PAYLOAD_SIZE_BYTES: &str = "payload_size_bytes";
+/// Cumulative count of ProtocolNative dispatch events.
+pub const DISPATCH_COUNT: &str = "dispatch_count";
+/// Number of equipment commands parsed from the most recent ProtocolNative
+/// payload. Zero when the payload produced no commands or when parsing failed.
+pub const PARSED_COMMAND_COUNT: &str = "parsed_command_count";
+/// Cumulative count of handler parse failures.
+pub const PARSE_ERROR_COUNT: &str = "parse_error_count";
+/// Cumulative count of equipment commands parsed across all payloads
+/// since the bridge was initialised or last reset.
+pub const TOTAL_COMMANDS_PARSED: &str = "total_commands_parsed";
+
 // ── Generator ───────────────────────────────────────────────────────────────
 // (ELECTRIC_OUTPUT_KW is in the electrical power section above)
 
