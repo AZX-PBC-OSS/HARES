@@ -6,6 +6,7 @@ pub mod draw_profile;
 pub mod envelope_lut;
 pub mod epw;
 pub mod hpxml;
+pub mod hpxml_schedule;
 pub mod output;
 pub mod psm3;
 pub mod pv_sizing;

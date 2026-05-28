@@ -61,7 +61,7 @@ pub struct CentralAirConditionerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_capacity_curve_coeffs: Option<[f64; 3]>,
     /// Duct configuration (distribution system efficiency).
-    #[serde(flatten)]
+    #[serde(default)]
     pub duct: DuctConfig,
     /// System type string (e.g., "split", "packaged").
     #[serde(default, skip_serializing_if = "Option::is_none")]

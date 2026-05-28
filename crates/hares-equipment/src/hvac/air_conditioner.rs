@@ -25,7 +25,6 @@ use super::coil_physics::{
     CoilResult, LatentDegradationParams, calculate_shr, effective_shr_with_latent_degradation,
 };
 use super::latent_degradation::compute_coil_ao_by_stage;
-use super::heating_config::HvacSetpointConfig;
 use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,

@@ -933,12 +933,12 @@ impl Dwelling {
             parse_schedule_csv(&config.schedule_path, &[], Some(&weather.meta), None)
                 .map_err(|err| HaresError::Io(format!("schedule parse failed: {err}")))?
         } else {
-            hares_io::ScheduleTimeSeries::from_hpxml_setpoints(
+            hares_io::hpxml_schedule::generate_schedule_from_hpxml(
+                &building,
                 config.sim_config.start_time,
                 config.sim_config.duration,
                 config.sim_config.time_res,
-                building.heating_weekday_setpoints_c.as_ref().map(|v| v[0]),
-                building.cooling_weekday_setpoints_c.as_ref().map(|v| v[0]),
+                config.defaults_path.as_deref(),
             )
         };
 

@@ -236,15 +236,15 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-pub(super) struct DefaultScheduleProfile {
-    weekday_fractions: [f64; 24],
-    weekend_fractions: [f64; 24],
-    month_multipliers: [f64; 12],
+pub(crate) struct DefaultScheduleProfile {
+    pub(crate) weekday_fractions: [f64; 24],
+    pub(crate) weekend_fractions: [f64; 24],
+    pub(crate) month_multipliers: [f64; 12],
 }
 
 /// Load default schedule profiles from `Default Schedule Parameters.csv`.
 /// Returns a map keyed by "OCHRE Name" (e.g. "Indoor Lighting", "MELs").
-pub(super) fn load_default_profiles(
+pub(crate) fn load_default_profiles(
     defaults_dir: &Path,
 ) -> HashMap<String, DefaultScheduleProfile> {
     let csv_path = defaults_dir.join("Default Schedule Parameters.csv");
