@@ -2217,15 +2217,15 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "surface 0")]
     fn missing_node_id_asserts_in_wiring() {
-        use std::collections::HashMap;
+        use super::{RCContext, build_solver_boundaries};
         use chrono::TimeZone;
         use hares_envelope::{
             BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget, NodeId, RCPath,
             SurfaceLayerInfo,
         };
-        use hares_io::hpxml::{Building, Boundary, BoundaryType, Site, Zone, ZoneType};
+        use hares_io::hpxml::{Boundary, BoundaryType, Building, Site, Zone, ZoneType};
         use hares_types::{EnvironmentState, GridState, ZoneState};
-        use super::{RCContext, build_solver_boundaries};
+        use std::collections::HashMap;
 
         let building = Building {
             site: Site {
@@ -2399,13 +2399,13 @@ mod tests {
     /// the invariant assertions.
     #[test]
     fn legitimate_none_wiring_for_fallback_r() {
-        use std::collections::HashMap;
         use chrono::TimeZone;
         use hares_envelope::{
             BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget, NodeId, RCPath,
         };
-        use hares_io::hpxml::{Building, Boundary, BoundaryType, Site, Zone, ZoneType};
+        use hares_io::hpxml::{Boundary, BoundaryType, Building, Site, Zone, ZoneType};
         use hares_types::{EnvironmentState, GridState, ZoneState};
+        use std::collections::HashMap;
 
         use super::{RCContext, build_solver_boundaries};
 
@@ -2579,9 +2579,6 @@ mod tests {
             "fallback-R surface must have no inner_wiring"
         );
         assert_eq!(ext_cols, 0, "no exterior surface columns for fallback-R");
-        assert_eq!(
-            int_cols, 0,
-            "no interior surface columns for fallback-R"
-        );
+        assert_eq!(int_cols, 0, "no interior surface columns for fallback-R");
     }
 }

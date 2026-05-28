@@ -56,6 +56,13 @@ impl ControlSignalConstructors for ControlSignal {
     }
 
     fn power_setpoint(active_power_kw: f64, reactive_power_kvar: Option<f64>) -> ControlSignal {
+        debug_assert!(
+            active_power_kw.is_finite(),
+            "active_power_kw must be finite"
+        );
+        if let Some(q) = reactive_power_kvar {
+            debug_assert!(q.is_finite(), "reactive_power_kvar must be finite");
+        }
         ControlSignal::PowerSetpoint {
             active_power_kw,
             reactive_power_kvar,
@@ -63,6 +70,16 @@ impl ControlSignalConstructors for ControlSignal {
     }
 
     fn power_limit(max_power_kw: f64, ramp_rate_kw_per_s: Option<f64>) -> ControlSignal {
+        debug_assert!(
+            max_power_kw >= 0.0 && max_power_kw.is_finite(),
+            "max_power_kw must be >= 0.0 and finite"
+        );
+        if let Some(r) = ramp_rate_kw_per_s {
+            debug_assert!(
+                r >= 0.0 && r.is_finite(),
+                "ramp_rate_kw_per_s must be >= 0.0 and finite"
+            );
+        }
         ControlSignal::PowerLimit {
             max_power_kw,
             ramp_rate_kw_per_s,
@@ -70,6 +87,10 @@ impl ControlSignalConstructors for ControlSignal {
     }
 
     fn soc_target(target_soc: f64, min_soc: Option<f64>, max_soc: Option<f64>) -> ControlSignal {
+        debug_assert!(
+            (0.0..=1.0).contains(&target_soc) && target_soc.is_finite(),
+            "target_soc must be in [0,1] and finite"
+        );
         ControlSignal::SOCTarget {
             target_soc,
             min_soc,
@@ -82,6 +103,16 @@ impl ControlSignalConstructors for ControlSignal {
     }
 
     fn duty_cycle(on_fraction: f64, period_s: Option<f64>) -> ControlSignal {
+        debug_assert!(
+            (0.0..=1.0).contains(&on_fraction) && on_fraction.is_finite(),
+            "on_fraction must be in [0,1] and finite"
+        );
+        if let Some(p) = period_s {
+            debug_assert!(
+                p > 0.0 && p.is_finite(),
+                "period_s must be > 0.0 and finite"
+            );
+        }
         ControlSignal::DutyCycle {
             on_fraction,
             period_s,
@@ -90,6 +121,10 @@ impl ControlSignalConstructors for ControlSignal {
     }
 
     fn load_fraction(fraction: f64) -> ControlSignal {
+        debug_assert!(
+            (0.0..=1.0).contains(&fraction) && fraction.is_finite(),
+            "fraction must be in [0,1] and finite"
+        );
         ControlSignal::LoadFraction { fraction }
     }
 
@@ -105,6 +140,12 @@ impl ControlSignalConstructors for ControlSignal {
     }
 
     fn demand_response(level: DRLevel, duration_s: Option<f64>) -> ControlSignal {
+        if let Some(d) = duration_s {
+            debug_assert!(
+                d >= 0.0 && d.is_finite(),
+                "duration_s must be >= 0.0 and finite"
+            );
+        }
         ControlSignal::DemandResponse { level, duration_s }
     }
 
@@ -113,6 +154,10 @@ impl ControlSignalConstructors for ControlSignal {
         min_rh: Option<f64>,
         max_rh: Option<f64>,
     ) -> ControlSignal {
+        debug_assert!(
+            (0.0..=1.0).contains(&target_rh) && target_rh.is_finite(),
+            "target_rh must be in [0,1] and finite"
+        );
         ControlSignal::HumiditySetpoint {
             target_rh,
             min_rh,
@@ -224,5 +269,172 @@ mod tests {
                 payload: vec![1, 2, 3],
             }
         );
+    }
+
+    #[cfg(debug_assertions)]
+    mod debug_assertion_tests {
+        use super::ControlSignalConstructors;
+        use hares_types::{ControlSignal, DRLevel};
+
+        // ── power_setpoint ──────────────────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "active_power_kw must be finite")]
+        fn power_setpoint_rejects_infinite_active_power() {
+            ControlSignal::power_setpoint(f64::INFINITY, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "reactive_power_kvar must be finite")]
+        fn power_setpoint_rejects_infinite_reactive_power() {
+            ControlSignal::power_setpoint(5.0, Some(f64::INFINITY));
+        }
+
+        // ── power_limit ────────────────────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "max_power_kw must be >= 0.0 and finite")]
+        fn power_limit_rejects_negative_max_power() {
+            ControlSignal::power_limit(-5.0, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "max_power_kw must be >= 0.0 and finite")]
+        fn power_limit_rejects_infinite_max_power() {
+            ControlSignal::power_limit(f64::INFINITY, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "ramp_rate_kw_per_s must be >= 0.0 and finite")]
+        fn power_limit_rejects_negative_ramp_rate() {
+            ControlSignal::power_limit(7.0, Some(-0.5));
+        }
+
+        // ── soc_target ─────────────────────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "target_soc must be in [0,1] and finite")]
+        fn soc_target_rejects_target_soc_below_zero() {
+            ControlSignal::soc_target(-0.5, None, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "target_soc must be in [0,1] and finite")]
+        fn soc_target_rejects_target_soc_above_one() {
+            ControlSignal::soc_target(1.5, None, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "target_soc must be in [0,1] and finite")]
+        fn soc_target_rejects_infinite_target_soc() {
+            ControlSignal::soc_target(f64::INFINITY, None, None);
+        }
+
+        // ── duty_cycle ─────────────────────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "on_fraction must be in [0,1] and finite")]
+        fn duty_cycle_rejects_on_fraction_below_zero() {
+            ControlSignal::duty_cycle(-0.1, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "on_fraction must be in [0,1] and finite")]
+        fn duty_cycle_rejects_on_fraction_above_one() {
+            ControlSignal::duty_cycle(1.5, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "on_fraction must be in [0,1] and finite")]
+        fn duty_cycle_rejects_infinite_on_fraction() {
+            ControlSignal::duty_cycle(f64::INFINITY, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "period_s must be > 0.0 and finite")]
+        fn duty_cycle_rejects_negative_period() {
+            ControlSignal::duty_cycle(0.5, Some(-10.0));
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "period_s must be > 0.0 and finite")]
+        fn duty_cycle_rejects_zero_period() {
+            ControlSignal::duty_cycle(0.5, Some(0.0));
+        }
+
+        // ── load_fraction ──────────────────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "fraction must be in [0,1] and finite")]
+        fn load_fraction_rejects_fraction_below_zero() {
+            ControlSignal::load_fraction(-0.1);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "fraction must be in [0,1] and finite")]
+        fn load_fraction_rejects_fraction_above_one() {
+            ControlSignal::load_fraction(1.5);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "fraction must be in [0,1] and finite")]
+        fn load_fraction_rejects_infinite_fraction() {
+            ControlSignal::load_fraction(f64::INFINITY);
+        }
+
+        // ── demand_response ────────────────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "duration_s must be >= 0.0 and finite")]
+        fn demand_response_rejects_negative_duration() {
+            ControlSignal::demand_response(DRLevel::Moderate, Some(-10.0));
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "duration_s must be >= 0.0 and finite")]
+        fn demand_response_rejects_infinite_duration() {
+            ControlSignal::demand_response(DRLevel::Moderate, Some(f64::INFINITY));
+        }
+
+        // ── humidity_setpoint ──────────────────────────────────────
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "target_rh must be in [0,1] and finite")]
+        fn humidity_setpoint_rejects_target_rh_below_zero() {
+            ControlSignal::humidity_setpoint(-0.1, None, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "target_rh must be in [0,1] and finite")]
+        fn humidity_setpoint_rejects_target_rh_above_one() {
+            ControlSignal::humidity_setpoint(1.5, None, None);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "target_rh must be in [0,1] and finite")]
+        fn humidity_setpoint_rejects_infinite_target_rh() {
+            ControlSignal::humidity_setpoint(f64::INFINITY, None, None);
+        }
     }
 }
