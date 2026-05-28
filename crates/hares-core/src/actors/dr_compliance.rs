@@ -45,7 +45,6 @@ use std::sync::Arc;
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{ControlSignal, DRLevel, EnvironmentState, OperatingMode, Telemetry};
 
-
 use crate::Actor;
 
 use super::constants::DEFAULT_FREEZE_THRESHOLD_C;

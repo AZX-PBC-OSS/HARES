@@ -7,6 +7,7 @@
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::Path;
     use std::path::PathBuf;
 
     use chrono::{Duration, FixedOffset, TimeZone};
@@ -172,7 +173,7 @@ mod tests {
     // ── config builder ───────────────────────────────────────────────────
 
     fn config_for(
-        bldg_dir: &PathBuf,
+        bldg_dir: &Path,
         version: &str,
         hrs: i64,
         min_step: i64,

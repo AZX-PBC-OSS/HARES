@@ -2329,8 +2329,8 @@ mod tests {
         let mut dry_bulb = vec![0.0f64; n];
         let mar_start = jan_hours + feb_hours;
         let mar_end = mar_start + 31 * 24;
-        for h in mar_start..mar_end {
-            dry_bulb[h] = 100.0;
+        for v in &mut dry_bulb[mar_start..mar_end] {
+            *v = 100.0;
         }
 
         let weather = WeatherTimeSeries {
@@ -2462,11 +2462,11 @@ mod tests {
         // January: alternating −10/+10 °C → mean 0 °C, hourly extremes −10..+10
         // February: alternating +20/+40 °C → mean 30 °C, hourly extremes +20..+40
         let mut dry_bulb = vec![0.0f64; n];
-        for h in 0..jan_samples {
-            dry_bulb[h] = if h % 2 == 0 { -10.0 } else { 10.0 };
+        for (h, v) in dry_bulb.iter_mut().enumerate().take(jan_samples) {
+            *v = if h % 2 == 0 { -10.0 } else { 10.0 };
         }
-        for h in jan_samples..n {
-            dry_bulb[h] = if h % 2 == 0 { 20.0 } else { 40.0 };
+        for (h, v) in dry_bulb.iter_mut().enumerate().skip(jan_samples) {
+            *v = if h % 2 == 0 { 20.0 } else { 40.0 };
         }
 
         let weather = WeatherTimeSeries {

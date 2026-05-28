@@ -246,6 +246,7 @@ fn nonthermal_equipment_sees_predictor_consistent_zone_temps() {
 /// ordering claim was audited and found incorrect. The substantive check is
 /// the code reading recorded in the audit section.
 #[test]
+#[allow(clippy::assertions_on_constants)]
 fn ordering_claim_is_factually_incorrect() {
     // The ticket states:
     //   "Non-thermal equipment step (mod.rs:2168) runs AFTER apply_thermal_update_to_zones

@@ -859,10 +859,7 @@ mod tests {
         assert!(hvac.control.disabled_speeds[1]);
         // Remaining slots must be false (initialized to [false; MAX_SPEEDS]).
         for i in 2..MAX_SPEEDS {
-            assert!(
-                !hvac.control.disabled_speeds[i],
-                "slot {i} must be false"
-            );
+            assert!(!hvac.control.disabled_speeds[i], "slot {i} must be false");
         }
     }
 
