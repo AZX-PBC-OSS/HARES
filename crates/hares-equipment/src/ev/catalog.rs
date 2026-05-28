@@ -304,7 +304,7 @@ static CATALOG: &[VehicleSpec] = &[
         id: VehicleId::NissanLeaf30,
         label: "Nissan Leaf S 30kWh",
         capacity_kwh: 27.5,
-        max_l2_power_kw: 6.6,
+        max_l2_power_kw: 3.3, // S trim standard OBC: 3.6 kW (3.3 kW net). 6.6 kW OBC is SV/SL trim or Quick Charge Package option. Source: Nissan Leaf specifications, docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 4.
         dcfc_power_kw: Some(50.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 107.0,
@@ -1087,6 +1087,17 @@ mod tests {
         let er = VehicleId::FordMacheEr.spec();
         assert_eq!(sr.max_l2_power_kw, 11.0, "Mach-E SR L2 AC power");
         assert_eq!(er.max_l2_power_kw, 11.0, "Mach-E ER L2 AC power");
+    }
+
+    #[test]
+    fn leaf_s_obc_power_is_3_3_kw() {
+        // Nissan Leaf S 30kWh base trim came standard with a 3.3 kW (3.6 kW)
+        // onboard charger. The 6.6 kW charger was standard only on SV and SL
+        // trims, or as part of the Quick Charge Package option on the S trim.
+        // Source: Nissan Leaf specifications. Confirmed in
+        // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 4.
+        let spec = VehicleId::NissanLeaf30.spec();
+        assert_eq!(spec.max_l2_power_kw, 3.3, "Nissan Leaf S 30kWh L2 AC power");
     }
 
     // ── Archetype tests ──────────────────────────────────────────────
