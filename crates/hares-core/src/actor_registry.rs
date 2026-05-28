@@ -27,8 +27,9 @@
 
 use std::collections::HashMap;
 
+use hares_control::DispatchTarget;
 use hares_equipment::config::ConfigValue;
-use hares_types::HaresError;
+use hares_types::{EndUse, HaresError};
 
 use hares_equipment::ev::catalog::archetype_by_id;
 use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource};
@@ -36,7 +37,7 @@ use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, Sched
 use crate::Actor;
 use crate::actors::{
     AlwaysComply, BatteryManagementActor, DrCompliance, EquipmentBehavior, EvDriverActor,
-    IdealThermostat, Occupant, Probabilistic,
+    IdealThermostat, Occupant, Probabilistic, SafetyMonitor,
 };
 
 pub type ActorFactory =
@@ -298,6 +299,34 @@ impl ActorRegistry {
                 Ok(Box::new(actor))
             }),
         );
+
+        registry.register(
+            "SafetyMonitor",
+            Box::new(|config: ActorConfig| {
+                let mut monitor = SafetyMonitor::new(&config.name);
+                if let Some(t) = config.get_f64("freeze_threshold_c") {
+                    monitor = monitor.with_freeze_protection_threshold(t);
+                }
+                if let Some(t) = config.get_f64("over_temp_threshold_c") {
+                    monitor = monitor.with_over_temperature_threshold(t);
+                }
+                if let Some(target_str) = config.get_str("target") {
+                    let end_use = match target_str {
+                        "HVAC_HEATING" => EndUse::HVAC_HEATING,
+                        "HVAC_COOLING" => EndUse::HVAC_COOLING,
+                        "WATER_HEATING" => EndUse::WATER_HEATING,
+                        other => {
+                            return Err(HaresError::Control(format!(
+                                "SafetyMonitor: unknown target '{other}'. \
+                                 Valid: HVAC_HEATING, HVAC_COOLING, WATER_HEATING"
+                            )));
+                        }
+                    };
+                    monitor = monitor.with_target(DispatchTarget::ByEndUse(end_use));
+                }
+                Ok(Box::new(monitor))
+            }),
+        );
     }
 
     pub fn register(&mut self, actor_type: impl Into<String>, factory: ActorFactory) {
@@ -351,6 +380,8 @@ mod tests {
         assert!(types.contains(&&"Occupant".to_string()));
         assert!(types.contains(&&"DrCompliance".to_string()));
         assert!(types.contains(&&"EvDriver".to_string()));
+        assert!(types.contains(&&"BatteryManagement".to_string()));
+        assert!(types.contains(&&"SafetyMonitor".to_string()));
     }
 
     #[test]
