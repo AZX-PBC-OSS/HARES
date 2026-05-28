@@ -166,14 +166,21 @@ fn build_solver_boundaries(
         };
 
         // Invariant: exterior boundaries with layer_info must resolve through node_index.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         if is_exterior {
             if let Some(info) = rc.layer_info.get(&surface_idx) {
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 debug_assert!(
                     outer_wiring.is_some(),
                     "surface {surface_idx}: outer_node {:?} missing from node_index",
                     info.outer_node
                 );
+                if outer_wiring.is_none() {
+                    tracing::warn!(
+                        surface_idx = surface_idx,
+                        outer_node = ?info.outer_node,
+                        "surface has layer_info entry but outer_node missing from node_index; exterior injection lost"
+                    );
+                }
             }
         }
 
@@ -191,16 +198,34 @@ fn build_solver_boundaries(
         };
 
         // Invariant: interior boundaries with layer_info must resolve through node_index.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         if is_conditioned_interior {
             if let Some(info) = rc.layer_info.get(&surface_idx) {
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 debug_assert!(
                     inner_wiring.is_some(),
                     "surface {surface_idx}: inner_node {:?} missing from node_index",
                     info.inner_node
                 );
+                if inner_wiring.is_none() {
+                    tracing::warn!(
+                        surface_idx = surface_idx,
+                        inner_node = ?info.inner_node,
+                        "surface has layer_info entry but inner_node missing from node_index; interior wiring lost"
+                    );
+                }
             }
         }
+
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            surface_idx = surface_idx,
+            has_layer_info = rc.layer_info.contains_key(&surface_idx),
+            is_exterior = is_exterior,
+            is_conditioned_interior = is_conditioned_interior,
+            outer_wiring_resolved = outer_wiring.is_some(),
+            inner_wiring_resolved = inner_wiring.is_some(),
+            "surface wiring resolution"
+        );
 
         // Boundary category.
         // Same-zone boundaries (interior == exterior) are internal thermal mass.
@@ -2183,5 +2208,380 @@ mod tests {
             "rewritten boundary must have a zone reference"
         );
         assert_eq!(roof.interior_zone, Some(ZoneType::Attic));
+    }
+
+    /// When a surface has a `layer_info` entry but the referenced `outer_node`
+    /// is not present in `node_index`, the wiring silently produces `None` —
+    /// the invariant check must catch this in debug/check_invariants builds.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "surface 0")]
+    fn missing_node_id_asserts_in_wiring() {
+        use std::collections::HashMap;
+        use chrono::TimeZone;
+        use hares_envelope::{
+            BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget, NodeId, RCPath,
+            SurfaceLayerInfo,
+        };
+        use hares_io::hpxml::{Building, Boundary, BoundaryType, Site, Zone, ZoneType};
+        use hares_types::{EnvironmentState, GridState, ZoneState};
+        use super::{RCContext, build_solver_boundaries};
+
+        let building = Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+            },
+            zones: vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: None,
+                volume_m3: None,
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            boundaries: vec![Boundary {
+                id: "Wall1".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 100.0,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: hares_io::hpxml::building::XmlNode {
+                name: String::new(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            },
+        };
+
+        let boundary_inputs = vec![BoundaryInput {
+            area_m2: 100.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: vec![],
+            precomputed_rc: vec![],
+            fallback_r_m2_k_w: 1.0,
+            r_film_interior_m2_k_w: 0.12,
+            r_film_exterior_m2_k_w: 0.03,
+            framing_factor: None,
+            interior_emissivity: 0.9,
+            foundation_depth_m: 0.0,
+        }];
+
+        // layer_info maps surface 0 to a NodeId(999) that does NOT exist in node_index.
+        let layer_info: HashMap<usize, SurfaceLayerInfo> = HashMap::from([(
+            0,
+            SurfaceLayerInfo {
+                outer_node: NodeId(999),
+                inner_node: NodeId(999),
+                surface_node: None,
+                interior_zone_idx: 0,
+            },
+        )]);
+        let node_index: HashMap<NodeId, usize> = HashMap::new();
+
+        let envelope_diagnostics = EnvelopeDiagnostics {
+            boundaries: vec![BoundaryDiagnostic {
+                boundary_idx: 0,
+                ua_w_per_k: 0.0,
+                r_total_m2_k_w: 0.0,
+                capacitance_j_k: 0.0,
+                n_rc_nodes: 0,
+                interior_zone_idx: 0,
+                exterior_target: ExteriorTarget::Outdoor,
+                area_m2: 100.0,
+                r_film_int_m2_k_w: 0.12,
+                r_film_ext_m2_k_w: 0.03,
+                r_zone_to_inner_m2_k_w: None,
+                r_outer_half_m2_k_w: None,
+                r_inner_half_m2_k_w: None,
+                path: RCPath::FallbackR,
+                inner_node: None,
+                interior_emissivity: 0.9,
+                foundation_depth_m: 0.0,
+            }],
+            zone_capacitances_j_k: vec![1000.0],
+            total_ua_w_per_k: 0.0,
+        };
+
+        let rc = RCContext {
+            layer_info: &layer_info,
+            node_index: &node_index,
+            envelope_diagnostics: &envelope_diagnostics,
+            n_zones: 1,
+            n_ext: 1,
+        };
+
+        let env = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 20.0,
+                humidity_ratio: 0.01,
+                relative_humidity: 0.5,
+                wet_bulb_c: 15.0,
+                volume_m3: 250.0,
+            }],
+            weather: Default::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .unwrap(),
+            time_res: chrono::Duration::minutes(1),
+            price_signal: hares_types::PriceSignal {
+                electricity_price: None,
+                export_price: None,
+                ghg_intensity: None,
+            },
+            electrical: Default::default(),
+        };
+
+        let _ = build_solver_boundaries(&building, &boundary_inputs, &rc, &env);
+    }
+
+    /// A surface with no `layer_info` entry (fallback-R) correctly produces
+    /// `None` for both outer_wiring and inner_wiring without triggering
+    /// the invariant assertions.
+    #[test]
+    fn legitimate_none_wiring_for_fallback_r() {
+        use std::collections::HashMap;
+        use chrono::TimeZone;
+        use hares_envelope::{
+            BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget, NodeId, RCPath,
+        };
+        use hares_io::hpxml::{Building, Boundary, BoundaryType, Site, Zone, ZoneType};
+        use hares_types::{EnvironmentState, GridState, ZoneState};
+
+        use super::{RCContext, build_solver_boundaries};
+
+        let building = Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+            },
+            zones: vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: None,
+                volume_m3: None,
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            boundaries: vec![Boundary {
+                id: "Wall1".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 100.0,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: hares_io::hpxml::building::XmlNode {
+                name: String::new(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            },
+        };
+
+        let boundary_inputs = vec![BoundaryInput {
+            area_m2: 100.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: vec![],
+            precomputed_rc: vec![],
+            fallback_r_m2_k_w: 1.0,
+            r_film_interior_m2_k_w: 0.12,
+            r_film_exterior_m2_k_w: 0.03,
+            framing_factor: None,
+            interior_emissivity: 0.9,
+            foundation_depth_m: 0.0,
+        }];
+
+        // No layer_info entry for this surface (fallback-R path).
+        let layer_info: HashMap<usize, hares_envelope::SurfaceLayerInfo> = HashMap::new();
+        let node_index: HashMap<NodeId, usize> = HashMap::new();
+
+        let envelope_diagnostics = EnvelopeDiagnostics {
+            boundaries: vec![BoundaryDiagnostic {
+                boundary_idx: 0,
+                ua_w_per_k: 0.0,
+                r_total_m2_k_w: 0.0,
+                capacitance_j_k: 0.0,
+                n_rc_nodes: 0,
+                interior_zone_idx: 0,
+                exterior_target: ExteriorTarget::Outdoor,
+                area_m2: 100.0,
+                r_film_int_m2_k_w: 0.12,
+                r_film_ext_m2_k_w: 0.03,
+                r_zone_to_inner_m2_k_w: None,
+                r_outer_half_m2_k_w: None,
+                r_inner_half_m2_k_w: None,
+                path: RCPath::FallbackR,
+                inner_node: None,
+                interior_emissivity: 0.9,
+                foundation_depth_m: 0.0,
+            }],
+            zone_capacitances_j_k: vec![1000.0],
+            total_ua_w_per_k: 0.0,
+        };
+
+        let rc = RCContext {
+            layer_info: &layer_info,
+            node_index: &node_index,
+            envelope_diagnostics: &envelope_diagnostics,
+            n_zones: 1,
+            n_ext: 1,
+        };
+
+        let env = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 20.0,
+                humidity_ratio: 0.01,
+                relative_humidity: 0.5,
+                wet_bulb_c: 15.0,
+                volume_m3: 250.0,
+            }],
+            weather: Default::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .unwrap(),
+            time_res: chrono::Duration::minutes(1),
+            price_signal: hares_types::PriceSignal {
+                electricity_price: None,
+                export_price: None,
+                ghg_intensity: None,
+            },
+            electrical: Default::default(),
+        };
+
+        let (boundaries, ext_cols, int_cols) =
+            build_solver_boundaries(&building, &boundary_inputs, &rc, &env)
+                .expect("build_solver_boundaries should succeed for fallback-R surface");
+
+        assert_eq!(boundaries.len(), 1);
+        assert!(
+            boundaries[0].outer_wiring.is_none(),
+            "fallback-R surface must have no outer_wiring"
+        );
+        assert!(
+            boundaries[0].inner_wiring.is_none(),
+            "fallback-R surface must have no inner_wiring"
+        );
+        assert_eq!(ext_cols, 0, "no exterior surface columns for fallback-R");
+        assert_eq!(
+            int_cols, 0,
+            "no interior surface columns for fallback-R"
+        );
     }
 }
