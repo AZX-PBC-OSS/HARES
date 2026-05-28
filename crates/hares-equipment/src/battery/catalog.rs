@@ -253,7 +253,7 @@ static CATALOG: &[BatterySpec] = &[
         n_series_cells: 110,
         n_parallel_cells: 7,
         cell_resistance_ohm: 0.105285,
-        heater_power_w: 1500.0,
+        heater_power_w: 100.0,
         heater_threshold_c: 5.0,
         min_charge_temp_c: 0.0,
         full_power_temp_c: 10.0,
@@ -280,7 +280,7 @@ static CATALOG: &[BatterySpec] = &[
         n_series_cells: 110,
         n_parallel_cells: 7,
         cell_resistance_ohm: 0.105285,
-        heater_power_w: 1500.0,
+        heater_power_w: 100.0,
         heater_threshold_c: 5.0,
         min_charge_temp_c: 0.0,
         full_power_temp_c: 10.0,
@@ -1095,5 +1095,101 @@ mod tests {
                 pid.spec().label,
             );
         }
+    }
+
+    #[test]
+    fn catalog_heater_power_plausible() {
+        for spec in CATALOG {
+            assert!(
+                spec.heater_power_w <= 700.0,
+                "{}: heater_power_w {:.0} W exceeds plausibility threshold \
+                 for residential battery packs",
+                spec.label,
+                spec.heater_power_w,
+            );
+        }
+    }
+
+    #[test]
+    fn pw2_heater_does_not_drain_battery_in_cold_weather() {
+        use std::time::Duration;
+
+        use chrono::{FixedOffset, TimeZone};
+        use hares_types::{EnvironmentState, GridState, PortSlots, WeatherState};
+
+        use crate::Equipment;
+        use crate::battery::Battery;
+
+        let spec = BatteryProductId::TeslaPw2.spec();
+        let config = spec.to_config();
+
+        let env = EnvironmentState {
+            zones: vec![],
+            weather: WeatherState {
+                outdoor_temp_c: -5.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
+                .single()
+                .expect("valid UTC timestamp"),
+            time_res: chrono::Duration::minutes(5),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        };
+
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).unwrap();
+
+        let initial_soc = bat.telemetry().get("soc").expect("soc telemetry");
+
+        // Simulate 24 hours in cold weather (288 steps at 5 minutes each).
+        let step_duration = Duration::from_secs(300);
+        let mut total_heater_energy_kwh = 0.0;
+        let dt_hours = step_duration.as_secs_f64() / 3600.0;
+
+        for _ in 0..288 {
+            let mut ports = PortSlots::default();
+            bat.step(&env, step_duration, &mut ports).unwrap();
+            let heater_w = bat
+                .telemetry()
+                .get("heater_power_w")
+                .expect("heater_power_w telemetry");
+            total_heater_energy_kwh += heater_w * dt_hours / 1000.0;
+        }
+
+        let final_soc = bat.telemetry().get("soc").expect("soc telemetry");
+
+        // With corrected heater power 100 W, total heater energy over 24 h is
+        // ≤2.8 kWh (~100 W × 24 h = 2.4 kWh plus margin for non-round-down).
+        assert!(
+            total_heater_energy_kwh <= 2.8,
+            "Tesla PW2 heater consumed {total_heater_energy_kwh:.2} kWh over 24 h at -5 C; \
+             expected ≤ 2.8 kWh for 100 W heater",
+        );
+
+        // After 24 h at idle in cold weather with 100 W heater and 10 W standby,
+        // the battery SOC should remain above 0.3. The heater draws grid power
+        // (port-side), not directly from the cells; SOC loss comes from
+        // self-discharge and standby.
+        assert!(
+            final_soc > 0.3,
+            "Tesla PW2 SOC drained to {final_soc:.3} after 24 h at -5 C; \
+             battery should remain functional (initial SOC = {initial_soc:.3})",
+        );
+
+        // Heater should have been active during cold simulation.
+        assert!(
+            total_heater_energy_kwh > 0.0,
+            "heater should activate at -5 C (threshold = 5 C)",
+        );
     }
 }

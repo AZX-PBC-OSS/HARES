@@ -969,6 +969,17 @@ impl Battery {
         self.import_limit_kw = c.import_limit_w.map(|w| w / 1000.0);
         self.export_limit_kw = c.export_limit_w.map(|w| w / 1000.0);
         self.heater_power_w = c.heater_power_w.unwrap_or(DEFAULT_HEATER_POWER_W);
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if self.heater_power_w > 700.0 {
+                tracing::warn!(
+                    heater_power_w = self.heater_power_w,
+                    "Battery heater power {:.0} W exceeds 700 W plausibility threshold \
+                     for residential batteries; verify catalog entry or config",
+                    self.heater_power_w,
+                );
+            }
+        }
         self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
         self.heater_on_discharge = c.heater_on_discharge.unwrap_or(false);
         self.min_discharge_temp_c = c
