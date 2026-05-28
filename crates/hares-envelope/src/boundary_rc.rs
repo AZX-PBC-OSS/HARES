@@ -1135,25 +1135,17 @@ pub fn assemble_building_rc(
         "RC assembly internal node mapping"
     );
 
-    // Emit warning on cardinality mismatch at runtime.
-    if node_index.len() != a_c.nrows() {
-        let missing_from_index: Vec<_> = internal_node_order
-            .iter()
-            .filter(|n| !node_index.contains_key(n))
-            .copied()
-            .collect();
-        let extra_in_index: Vec<_> = node_index
-            .keys()
-            .filter(|n| !internal_node_order.contains(n))
-            .copied()
-            .collect();
-        tracing::warn!(
-            node_index_len = node_index.len(),
-            a_c_nrows = a_c.nrows(),
-            ?missing_from_index,
-            ?extra_in_index,
-            "RC matrix row count mismatch: node_index and A_c disagree on internal node set"
-        );
+    // Emit error on cardinality mismatch in release-with-checks builds
+    // where debug_assert_eq is a no-op. No check in pure release builds.
+    #[cfg(feature = "check_invariants")]
+    {
+        if node_index.len() != a_c.nrows() {
+            tracing::error!(
+                node_index_len = node_index.len(),
+                a_c_nrows = a_c.nrows(),
+                "node_index cardinality does not match A_c nrows"
+            );
+        }
     }
 
     // Zone air node → state-vector row.
@@ -3389,5 +3381,28 @@ mod tests {
                 diag_inner
             );
         }
+    }
+
+    // ── node_index cardinality vs A_c nrows ───────────────────────────
+
+    #[test]
+    fn node_index_cardinality_matches_a_c() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        let layers = vec![
+            make_layer(0.1, 0.5, 1000.0, 800.0, 50.0),
+            make_layer(0.05, 1.0, 2000.0, 900.0, 50.0),
+        ];
+        let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        assert_eq!(rc.node_index.len(), rc.a_c.nrows());
     }
 }
