@@ -115,6 +115,31 @@ impl ThermalSetpoints {
         Ok(())
     }
 
+    pub fn reconcile_for_deadband(self, hysteresis_c: f64) -> Self {
+        let min_gap = 2.0 * hysteresis_c;
+        let gap = self.cooling_c - self.heating_c;
+        if gap < min_gap {
+            let avg = 0.5 * (self.heating_c + self.cooling_c);
+            let half = 0.5 * min_gap;
+            tracing::warn!(
+                original_heating_c = self.heating_c,
+                original_cooling_c = self.cooling_c,
+                gap_c = gap,
+                required_gap_c = min_gap,
+                new_heating_c = avg - half,
+                new_cooling_c = avg + half,
+                "setpoints too close or inverted; reconciled to midpoint with {} C separation",
+                min_gap,
+            );
+            Self {
+                heating_c: avg - half,
+                cooling_c: avg + half,
+            }
+        } else {
+            self
+        }
+    }
+
     pub fn with_schedule_override(self, schedule: Option<ScheduleSetpoints>) -> Self {
         let Some(schedule) = schedule else {
             return self;

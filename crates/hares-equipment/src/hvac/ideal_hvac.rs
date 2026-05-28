@@ -240,11 +240,22 @@ impl IdealHvac {
         &self,
         candidate: RuntimeSetpointOverride,
     ) -> crate::Result<RuntimeSetpointOverride> {
-        self.thermostat_fsm
+        let merged = self
+            .thermostat_fsm
             .static_setpoints
             .with_schedule_override(self.thermostat_fsm.schedule_setpoints)
-            .with_control_override(Some(candidate))
-            .validate_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c)?;
+            .with_control_override(Some(candidate));
+        let reconciled = merged.reconcile_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c);
+        if (reconciled.heating_c - merged.heating_c).abs() > 0.001
+            || (reconciled.cooling_c - merged.cooling_c).abs() > 0.001
+        {
+            return Err(HaresError::Equipment(format!(
+                "runtime setpoint override would violate deadband: \
+                 cooling-heating gap {} C < required {} C",
+                merged.cooling_c - merged.heating_c,
+                2.0 * self.thermostat_fsm.thermostat.hysteresis_c,
+            )));
+        }
         Ok(candidate)
     }
 
@@ -467,8 +478,9 @@ impl Equipment for IdealHvac {
             0.0
         };
 
-        self.effective_setpoints()
-            .validate_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c)?;
+        self.thermostat_fsm.static_setpoints = self
+            .effective_setpoints()
+            .reconcile_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c);
         self.thermostat_fsm.thermostat.validate(env)?;
         self.telemetry = ideal_hvac_default_telemetry();
         self.core_output = CoreOutput::default();
@@ -1639,7 +1651,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_setpoints_rejected() {
+    fn overlapping_setpoints_reconciled() {
         let mut cfg = config("IH");
         cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
@@ -1651,9 +1663,14 @@ mod tests {
 
         let mut eq = IdealHvac::new(cfg.clone());
         let env = env(20.0, 60, 0);
-        let result = eq.init(&cfg, &env);
-
-        assert!(result.is_err(), "overlapping setpoints should be rejected");
+        eq.init(&cfg, &env)
+            .expect("init should succeed with reconciliation");
+        let gap = eq.thermostat_fsm.static_setpoints.cooling_c
+            - eq.thermostat_fsm.static_setpoints.heating_c;
+        assert!(
+            gap >= 2.0,
+            "reconciled gap must be >= 2.0 C, got {gap:.3}"
+        );
     }
 
     // Bug 1: current_target_c must update when setpoint changes mid-mode.

@@ -17,6 +17,7 @@ use serde_json::json;
 use hares_io::ScheduleTimeSeries;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
+use hares_io::hpxml::parse_hpxml;
 use hares_io::hpxml::equipment::resolve_equipment;
 use hares_io::hpxml::validation::{
     validate_building_ranges, validate_cross_inputs, validate_epw_time_gaps, validate_hpxml_schema,
@@ -1804,4 +1805,36 @@ fn hpxml_v4_building_sync_parses_resolves_without_rejection() {
         names.contains(&"Electric Resistance Water Heater"),
         "BuildingSync fixture should resolve a water heater, got: {names:?}"
     );
+}
+
+#[test]
+fn resstock_2025_1_failing_buildings_parse_and_resolve() {
+    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/resstock/2025.1");
+    let failing = ["bldg0352714", "bldg0162486", "bldg0019694", "bldg0527060", "bldg0101439"];
+    for name in &failing {
+        let hpxml_path = base.join(name).join("home.xml");
+        if !hpxml_path.exists() {
+            eprintln!("  {name}: SKIP (fixture not present)");
+            continue;
+        }
+        let building = match parse_hpxml(&hpxml_path) {
+            Ok(b) => b,
+            Err(e) => {
+                panic!("{name}: HPXML parse failed: {e}");
+            }
+        };
+        let specs = match resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None) {
+            Ok(s) => s,
+            Err(e) => {
+                panic!("{name}: equipment resolution failed: {e}");
+            }
+        };
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        eprintln!(
+            "  {name}: OK — heating_sp={:?}, cooling_sp={:?}, equipment={names:?}",
+            building.heating_weekday_setpoints_c.as_ref().map(|v| &v[..3.min(v.len())]),
+            building.cooling_weekday_setpoints_c.as_ref().map(|v| &v[..3.min(v.len())]),
+        );
+    }
 }

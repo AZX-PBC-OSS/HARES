@@ -458,9 +458,10 @@ impl HvacEquipment {
             self.thermostat_fsm.static_setpoints.cooling_c = weekday[0];
         }
 
-        self.thermostat_fsm
+        self.thermostat_fsm.static_setpoints = self
+            .thermostat_fsm
             .static_setpoints
-            .validate_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c)?;
+            .reconcile_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c);
 
         let explicit_airflow_m3_s_per_w = extract_numeric(config, "airflow_m3_s_per_w")
             .or_else(|| extract_numeric(config, "duct_airflow_m3_s_per_w"));
@@ -934,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn thermostat_setpoint_deadband_invariant_is_validated() {
+    fn thermostat_setpoint_deadband_reconciled_when_too_close() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -946,10 +947,15 @@ mod tests {
         config
             .test_extras_mut()
             .insert("cooling_setpoint_c".to_string(), 22.0.into());
-        let err = hvac
+        hvac
             .init(&config, &env(20.0, 60, 0))
-            .expect_err("must fail");
-        assert!(err.to_string().contains("cooling-heating"));
+            .expect("init should succeed with reconciliation");
+        let gap = hvac.thermostat_fsm.static_setpoints.cooling_c
+            - hvac.thermostat_fsm.static_setpoints.heating_c;
+        assert!(
+            gap >= 2.0,
+            "reconciled gap must be >= 2.0 C, got {gap:.3}"
+        );
     }
 
     #[test]
