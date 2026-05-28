@@ -385,7 +385,7 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
 "#;
 
     let building = parse_building(xml).expect("HPXML should parse");
-    let mut specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let mut specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment should succeed");
 
     let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").expect(
@@ -525,7 +525,8 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
 
     let heater_source: ScheduleSourceConfig = serde_json::from_value(
         heater_obj
-            .get("heating_setpoint_source")
+            .get("setpoint")
+            .and_then(|sp| sp.get("heating_setpoint_source"))
             .cloned()
             .expect("heater must have heating_setpoint_source injected from defaults CSV"),
     )
@@ -540,7 +541,10 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
         "expected DailyProfile with weekday[0]=20°C and max_value=1.0, got {heater_source:?}"
     );
     assert!(
-        !heater_obj.contains_key("cooling_setpoint_source"),
+        heater_obj
+            .get("setpoint")
+            .and_then(|sp| sp.get("cooling_setpoint_source"))
+            .is_none(),
         "heater must not get a cooling setpoint source"
     );
 
@@ -561,7 +565,8 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
 
     let cooler_source: ScheduleSourceConfig = serde_json::from_value(
         cooler_obj
-            .get("cooling_setpoint_source")
+            .get("setpoint")
+            .and_then(|sp| sp.get("cooling_setpoint_source"))
             .cloned()
             .expect("cooler must have cooling_setpoint_source injected from defaults CSV"),
     )
@@ -576,7 +581,10 @@ fn simulation_starts_with_only_csv_default_setpoints_no_hpxml_setpoints() {
         "expected DailyProfile with weekday[0]=24°C and max_value=1.0, got {cooler_source:?}"
     );
     assert!(
-        !cooler_obj.contains_key("heating_setpoint_source"),
+        cooler_obj
+            .get("setpoint")
+            .and_then(|sp| sp.get("heating_setpoint_source"))
+            .is_none(),
         "cooler must not get a heating setpoint source"
     );
 }

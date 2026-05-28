@@ -1778,6 +1778,7 @@ fn build_config(
         bldg_id,
         initialization_duration,
         resample_overrides,
+        patches: None,
     })
 }
 

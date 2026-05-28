@@ -7,7 +7,7 @@ use super::core_config::equipment_type_name;
 use super::heating_config::DuctConfig;
 use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
-use hares_types::ScheduleSourceConfig;
+use crate::hvac::heating_config::HvacSetpointConfig;
 
 /// Typed configuration for central air conditioners.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -40,19 +40,11 @@ pub struct CentralAirConditionerConfig {
     /// Fan power per CFM of airflow (W/CFM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w_per_cfm: Option<f64>,
-    /// Cooling setpoint used by the HVAC thermostat FSM.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling_setpoint_c: Option<f64>,
-    /// Heating setpoint used by the HVAC thermostat FSM.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_c: Option<f64>,
+    #[serde(default)]
+    pub setpoint: HvacSetpointConfig,
     /// Thermostat hysteresis around the setpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hysteresis_c: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling_setpoint_source: Option<ScheduleSourceConfig>,
     /// Airflow in m^3/s/W for the HVAC wrapper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub airflow_m3_s_per_w: Option<f64>,
@@ -159,8 +151,8 @@ impl CentralAirConditionerConfig {
             )));
         }
         for (name, value) in [
-            ("cooling_setpoint_c", self.cooling_setpoint_c),
-            ("heating_setpoint_c", self.heating_setpoint_c),
+            ("cooling_setpoint_c", self.setpoint.cooling_setpoint_c),
+            ("heating_setpoint_c", self.setpoint.heating_setpoint_c),
             ("hysteresis_c", self.hysteresis_c),
             ("airflow_m3_s_per_w", self.airflow_m3_s_per_w),
             (
@@ -283,19 +275,11 @@ pub struct RoomAcConfig {
     pub capacity_w: f64,
     /// Required; resolver errors if absent.
     pub eir: f64,
-    /// Cooling setpoint used by the HVAC thermostat FSM.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling_setpoint_c: Option<f64>,
-    /// Heating setpoint used by the HVAC thermostat FSM.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_c: Option<f64>,
+    #[serde(default)]
+    pub setpoint: HvacSetpointConfig,
     /// Thermostat hysteresis around the setpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hysteresis_c: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling_setpoint_source: Option<ScheduleSourceConfig>,
     /// Airflow in m^3/s/W for the HVAC wrapper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub airflow_m3_s_per_w: Option<f64>,
@@ -363,8 +347,8 @@ impl RoomAcConfig {
             )));
         }
         for (name, value) in [
-            ("cooling_setpoint_c", self.cooling_setpoint_c),
-            ("heating_setpoint_c", self.heating_setpoint_c),
+            ("cooling_setpoint_c", self.setpoint.cooling_setpoint_c),
+            ("heating_setpoint_c", self.setpoint.heating_setpoint_c),
             ("hysteresis_c", self.hysteresis_c),
             ("airflow_m3_s_per_w", self.airflow_m3_s_per_w),
             (
@@ -490,11 +474,8 @@ mod tests {
             stage_shrs: Some(vec![0.78, 0.72]),
             fan_power_w: Some(300.0),
             fan_power_w_per_cfm: None,
-            cooling_setpoint_c: None,
-            heating_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
             fraction_load_served: Some(1.0),
             crankcase_heater_kw: None,
@@ -562,11 +543,8 @@ mod tests {
             stage_shrs: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
-            cooling_setpoint_c: None,
-            heating_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
             crankcase_heater_kw: None,
@@ -602,11 +580,8 @@ mod tests {
             stage_shrs: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
-            cooling_setpoint_c: None,
-            heating_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
             crankcase_heater_kw: None,
@@ -642,11 +617,8 @@ mod tests {
             stage_shrs: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
-            cooling_setpoint_c: None,
-            heating_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
             crankcase_heater_kw: None,
@@ -682,11 +654,8 @@ mod tests {
             stage_shrs: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
-            cooling_setpoint_c: None,
-            heating_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
             crankcase_heater_kw: None,
@@ -722,11 +691,8 @@ mod tests {
             stage_shrs: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
-            cooling_setpoint_c: None,
-            heating_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
             crankcase_heater_kw: None,
@@ -776,11 +742,8 @@ mod tests {
                 stage_shrs: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: None,
-                heating_setpoint_c: None,
+                setpoint: HvacSetpointConfig::default(),
                 hysteresis_c: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: None,
                 fraction_load_served: None,
                 crankcase_heater_kw: None,
@@ -829,11 +792,8 @@ mod tests {
             zone_id: Some(1),
             capacity_w: 3_500.0,
             eir: 10.0,
-            cooling_setpoint_c: None,
-            heating_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
             biquadratic_x1_min: Some(10.0),
             biquadratic_x1_max: Some(25.0),
@@ -863,11 +823,8 @@ mod tests {
             zone_id: None,
             capacity_w: 3_500.0,
             eir: 0.0,
-            cooling_setpoint_c: None,
-            heating_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: None,
             biquadratic_x1_min: None,
             biquadratic_x1_max: None,
@@ -893,11 +850,8 @@ mod tests {
             zone_id: None,
             capacity_w: f64::NAN,
             eir: 10.0,
-            cooling_setpoint_c: None,
-            heating_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: None,
             biquadratic_x1_min: None,
             biquadratic_x1_max: None,

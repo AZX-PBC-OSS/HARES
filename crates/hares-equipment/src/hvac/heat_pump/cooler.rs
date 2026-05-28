@@ -16,6 +16,7 @@ use hares_types::telemetry_keys as tk;
 use crate::{Equipment, EquipmentConfig};
 
 use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig};
+use super::super::heating_config::HvacSetpointConfig;
 use super::super::air_conditioner::AirConditioner;
 use super::super::helpers::{equipment_id_from_config, zone_id_from_config};
 use super::constants::{DEFAULT_EQUIPMENT_ID, DEFAULT_ZONE_ID};
@@ -154,11 +155,13 @@ impl HpCooler {
             stage_shrs: hp_cfg.stage_shrs.clone(),
             fan_power_w: hp_cfg.common.fan_power_w,
             fan_power_w_per_cfm: hp_cfg.common.fan_power_w_per_cfm,
-            cooling_setpoint_c: hp_cfg.common.cooling_setpoint_c,
-            heating_setpoint_c: hp_cfg.common.heating_setpoint_c,
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: hp_cfg.common.setpoint.heating_setpoint_c,
+                heating_setpoint_source: hp_cfg.common.setpoint.heating_setpoint_source.clone(),
+                cooling_setpoint_c: hp_cfg.common.setpoint.cooling_setpoint_c,
+                cooling_setpoint_source: hp_cfg.common.setpoint.cooling_setpoint_source.clone(),
+            },
             hysteresis_c: hp_cfg.common.hysteresis_c,
-            heating_setpoint_source: hp_cfg.common.heating_setpoint_source.clone(),
-            cooling_setpoint_source: hp_cfg.common.cooling_setpoint_source.clone(),
             airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
             crankcase_heater_kw: hp_cfg.crankcase_heater_kw,
@@ -384,11 +387,13 @@ impl GshpCooler {
             stage_shrs: hp_cfg.stage_shrs.clone(),
             fan_power_w: hp_cfg.common.fan_power_w,
             fan_power_w_per_cfm: hp_cfg.common.fan_power_w_per_cfm,
-            cooling_setpoint_c: hp_cfg.common.cooling_setpoint_c,
-            heating_setpoint_c: hp_cfg.common.heating_setpoint_c,
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: hp_cfg.common.setpoint.heating_setpoint_c,
+                heating_setpoint_source: hp_cfg.common.setpoint.heating_setpoint_source.clone(),
+                cooling_setpoint_c: hp_cfg.common.setpoint.cooling_setpoint_c,
+                cooling_setpoint_source: hp_cfg.common.setpoint.cooling_setpoint_source.clone(),
+            },
             hysteresis_c: hp_cfg.common.hysteresis_c,
-            heating_setpoint_source: hp_cfg.common.heating_setpoint_source.clone(),
-            cooling_setpoint_source: hp_cfg.common.cooling_setpoint_source.clone(),
             airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
             // Crankcase values are overridden post-init (compressor indoors,
@@ -713,11 +718,13 @@ impl WshpCooler {
             stage_shrs: hp_cfg.stage_shrs.clone(),
             fan_power_w: hp_cfg.common.fan_power_w,
             fan_power_w_per_cfm: hp_cfg.common.fan_power_w_per_cfm,
-            cooling_setpoint_c: hp_cfg.common.cooling_setpoint_c,
-            heating_setpoint_c: hp_cfg.common.heating_setpoint_c,
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: hp_cfg.common.setpoint.heating_setpoint_c,
+                heating_setpoint_source: hp_cfg.common.setpoint.heating_setpoint_source.clone(),
+                cooling_setpoint_c: hp_cfg.common.setpoint.cooling_setpoint_c,
+                cooling_setpoint_source: hp_cfg.common.setpoint.cooling_setpoint_source.clone(),
+            },
             hysteresis_c: hp_cfg.common.hysteresis_c,
-            heating_setpoint_source: hp_cfg.common.heating_setpoint_source.clone(),
-            cooling_setpoint_source: hp_cfg.common.cooling_setpoint_source.clone(),
             airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
             crankcase_heater_kw: None,
@@ -877,6 +884,7 @@ mod tests {
     };
     use crate::config::ConfigPayload;
     use crate::hvac::SpeedControlMode;
+    use crate::HvacSetpointConfig;
 
     fn cooling_env(zone_temp_c: f64, outdoor_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -948,11 +956,8 @@ mod tests {
                     fan_power_w: None,
                     fan_power_w_per_cfm: None,
                     airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
-                    heating_setpoint_c: None,
-                    cooling_setpoint_c: None,
+                    setpoint: HvacSetpointConfig::default(),
                     hysteresis_c: None,
-                    heating_setpoint_source: None,
-                    cooling_setpoint_source: None,
                     duct: Default::default(),
                     biquadratic_x1_min: None,
                     biquadratic_x1_max: None,

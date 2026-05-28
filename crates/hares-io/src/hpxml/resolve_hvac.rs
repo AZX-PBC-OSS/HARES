@@ -13,7 +13,7 @@ use hares_equipment::hvac::heat_pump_config::{
 };
 use hares_equipment::hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
-    GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
+    GasBoilerConfig, GasFurnaceConfig, HvacSetpointConfig, IdealHvacConfig,
 };
 use hares_equipment::{EquipmentConfig, SetpointReconciliation};
 use hares_types::{FuelType, ScheduleSourceConfig};
@@ -758,6 +758,7 @@ fn try_build_gas_furnace_config(
     ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
     let cfg = GasFurnaceConfig {
         equipment_id: None,
@@ -769,8 +770,12 @@ fn try_build_gas_furnace_config(
         ducts,
         stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
         stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-        heating_setpoint_source,
+        setpoint: HvacSetpointConfig {
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            heating_setpoint_source,
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            cooling_setpoint_source,
+        },
     };
     Ok(Some(
         EquipmentConfig::from_typed(name.to_string(), "Gas Furnace".to_string(), cfg)
@@ -806,6 +811,7 @@ fn try_build_electric_furnace_config(
     ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
     let cfg = ElectricFurnaceConfig {
         equipment_id: None,
@@ -815,8 +821,12 @@ fn try_build_electric_furnace_config(
         number_of_speeds: n_speeds,
         fan_power_w,
         ducts,
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-        heating_setpoint_source,
+        setpoint: HvacSetpointConfig {
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            heating_setpoint_source,
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            cooling_setpoint_source,
+        },
     };
     Ok(Some(
         EquipmentConfig::from_typed(name.to_string(), "Electric Furnace".to_string(), cfg)
@@ -888,6 +898,7 @@ fn try_build_gas_boiler_config(
         });
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
     let cfg = GasBoilerConfig {
         equipment_id: None,
@@ -900,8 +911,12 @@ fn try_build_gas_boiler_config(
         flow_rate_kg_s,
         return_temp_c,
         fluid_type: hares_types::FluidType::Water,
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-        heating_setpoint_source,
+        setpoint: HvacSetpointConfig {
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            heating_setpoint_source,
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            cooling_setpoint_source,
+        },
         // Condensing mode inferred from AFUE > 0.90 (OCHRE convention).
         // OCHRE HVAC.py GasBoiler class: `condensing = eir_max < 1 / 0.9`.
         // Condensing boilers operate at lower return water temperatures (~150 °F)
@@ -961,6 +976,7 @@ fn try_build_electric_boiler_config(
         });
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
     let cfg = ElectricBoilerConfig {
         equipment_id: None,
@@ -973,8 +989,12 @@ fn try_build_electric_boiler_config(
         flow_rate_kg_s,
         return_temp_c,
         fluid_type: hares_types::FluidType::Water,
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-        heating_setpoint_source,
+        setpoint: HvacSetpointConfig {
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            heating_setpoint_source,
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            cooling_setpoint_source,
+        },
     };
     Ok(Some(
         EquipmentConfig::from_typed(name.to_string(), "Electric Boiler".to_string(), cfg)
@@ -1001,14 +1021,19 @@ fn try_build_electric_baseboard_config(
     let heating_efficiency = resistance_efficiency_from_params(params, name, "Electric Baseboard")?;
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
     let cfg = ElectricBaseboardConfig {
         equipment_id: None,
         zone_id,
         capacity_w,
         eir: heating_efficiency,
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-        heating_setpoint_source,
+        setpoint: HvacSetpointConfig {
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            heating_setpoint_source,
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            cooling_setpoint_source,
+        },
     };
     Ok(Some(
         EquipmentConfig::from_typed(name.to_string(), "Electric Baseboard".to_string(), cfg)
@@ -1034,13 +1059,15 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
     let cfg = IdealHvacConfig {
         equipment_id: None,
         zone_id: None,
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+        setpoint: HvacSetpointConfig {
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            heating_setpoint_source,
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            cooling_setpoint_source,
+        },
         deadband_c: params.get("deadband_c").and_then(Value::as_f64),
         n_speeds: Some(n_speeds_from_params(params)),
         ideal_capacity_mode: None,
-        heating_setpoint_source,
-        cooling_setpoint_source,
         heating_capacity_w,
         cooling_capacity_w,
         shr: params.get("shr").and_then(Value::as_f64),
@@ -1110,11 +1137,13 @@ fn try_build_central_ac_config(
         stage_shrs: extract_stage_values(params, "shr"),
         fan_power_w,
         fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
-        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        setpoint: HvacSetpointConfig {
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            heating_setpoint_source,
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            cooling_setpoint_source,
+        },
         hysteresis_c: None,
-        heating_setpoint_source,
-        cooling_setpoint_source,
         airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
         fraction_load_served,
         // Crankcase heater: read from HPXML extension (CrankcaseHeaterPowerWatts in W).
@@ -1171,11 +1200,13 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
         zone_id: None,
         capacity_w,
         eir,
-        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
-        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        setpoint: HvacSetpointConfig {
+            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+            heating_setpoint_source,
+            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            cooling_setpoint_source,
+        },
         hysteresis_c: None,
-        heating_setpoint_source,
-        cooling_setpoint_source,
         airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
         biquadratic_x1_min: curve_bounds.x1_min,
         biquadratic_x1_max: curve_bounds.x1_max,
@@ -1314,11 +1345,13 @@ fn try_build_heat_pump_heater_config(
             fan_power_w,
             fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
             airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
-            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+                heating_setpoint_source,
+                cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+                cooling_setpoint_source,
+            },
             hysteresis_c: None,
-            heating_setpoint_source,
-            cooling_setpoint_source,
             duct,
             biquadratic_x1_min: curve_bounds.x1_min,
             biquadratic_x1_max: curve_bounds.x1_max,
@@ -1519,11 +1552,13 @@ fn try_build_heat_pump_cooler_config(
             fan_power_w,
             fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
             airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
-            heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
-            cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+                heating_setpoint_source,
+                cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+                cooling_setpoint_source,
+            },
             hysteresis_c: None,
-            heating_setpoint_source,
-            cooling_setpoint_source,
             duct,
             biquadratic_x1_min: curve_bounds.x1_min,
             biquadratic_x1_max: curve_bounds.x1_max,
@@ -1885,9 +1920,12 @@ pub(super) fn resolve_hvac(
                 .as_deref()
                 .or(child_text(heating, "FuelType").as_deref()),
         );
-        let system_type = parse_named_type(heating, "HeatingSystemType").ok_or_else(|| {
-            HpxmlError::Parse("HeatingSystem is missing required HeatingSystemType element".into())
-        })?;
+        let Some(system_type) = parse_named_type(heating, "HeatingSystemType") else {
+            tracing::warn!(
+                "HeatingSystem has empty or self-closing HeatingSystemType; skipping"
+            );
+            continue;
+        };
         let name = canonical_hvac_heating_name(&system_type, fuel)?;
         let mut params = Map::new();
         insert_capacity_kbtu_h(&mut params, heating, "HeatingCapacity");
@@ -2032,10 +2070,17 @@ pub(super) fn resolve_hvac(
                 .as_deref()
                 .or(Some("electricity")),
         );
-        let system_type = child_text(cooling, "CoolingSystemType").ok_or_else(|| {
-            HpxmlError::Parse("CoolingSystem is missing required CoolingSystemType element".into())
-        })?;
-        let name = canonical_hvac_cooling_name(&system_type, fuel)?;
+        let Some(system_type) = child_text(cooling, "CoolingSystemType") else {
+            tracing::warn!("CoolingSystem has empty or missing CoolingSystemType; skipping");
+            continue;
+        };
+        let name = match canonical_hvac_cooling_name(&system_type, fuel) {
+            Ok(name) => name,
+            Err(e) => {
+                tracing::warn!("Skipping unsupported cooling system: {e}");
+                continue;
+            }
+        };
         let mut params = Map::new();
         insert_capacity_kbtu_h(&mut params, cooling, "CoolingCapacity");
         insert_capacity_w(
@@ -2615,6 +2660,7 @@ fn canonical_hvac_cooling_name(
         "central air conditioner" => "Air Conditioner",
         "room air conditioner" => "Room AC",
         "packaged terminal air conditioner" => "Room AC",
+        "mini-split" => "Room AC",
         _ => {
             return Err(HpxmlError::Parse(
                 format!("unsupported HPXML cooling system type: CoolingSystemType='{ty}'").into(),
@@ -4982,9 +5028,9 @@ mod tests {
 
         use hares_equipment::hvac::heating_config::IdealHvacConfig;
         let cfg: IdealHvacConfig = ec.typed().expect("typed ideal config");
-        assert_eq!(cfg.heating_setpoint_c, Some(19.5));
+        assert_eq!(cfg.setpoint.heating_setpoint_c, Some(19.5));
         assert_eq!(
-            cfg.heating_setpoint_source,
+            cfg.setpoint.heating_setpoint_source,
             Some(ScheduleSourceConfig::DailyProfile {
                 weekday: [19.5; 24],
                 weekend: [19.5; 24],
@@ -4992,8 +5038,8 @@ mod tests {
                 max_value: 1.0,
             })
         );
-        assert_eq!(cfg.cooling_setpoint_c, None);
-        assert_eq!(cfg.cooling_setpoint_source, None);
+        assert_eq!(cfg.setpoint.cooling_setpoint_c, None);
+        assert_eq!(cfg.setpoint.cooling_setpoint_source, None);
     }
 
     #[test]
@@ -5008,7 +5054,7 @@ mod tests {
 
         use hares_equipment::hvac::heating_config::IdealHvacConfig;
         let cfg: IdealHvacConfig = ec.typed().expect("typed ideal config");
-        match cfg.heating_setpoint_source {
+        match cfg.setpoint.heating_setpoint_source {
             Some(ScheduleSourceConfig::DailyProfile {
                 weekday, weekend, ..
             }) => {
@@ -5017,8 +5063,8 @@ mod tests {
             }
             other => panic!("expected DailyProfile setpoint source, got {other:?}"),
         }
-        assert_eq!(cfg.heating_setpoint_c, Some(20.0));
-        assert_eq!(cfg.cooling_setpoint_c, Some(26.0));
+        assert_eq!(cfg.setpoint.heating_setpoint_c, Some(20.0));
+        assert_eq!(cfg.setpoint.cooling_setpoint_c, Some(26.0));
     }
 
     #[test]
@@ -5046,14 +5092,14 @@ mod tests {
         use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
         let cfg: CentralAirConditionerConfig = ec.typed().expect("typed AC config");
         assert_eq!(
-            cfg.heating_setpoint_source,
+            cfg.setpoint.heating_setpoint_source,
             Some(ScheduleSourceConfig::ColumnRef {
                 col_idx: 3,
                 boundary: BoundaryPolicy::Clamp
             })
         );
         assert_eq!(
-            cfg.cooling_setpoint_source,
+            cfg.setpoint.cooling_setpoint_source,
             Some(ScheduleSourceConfig::ColumnRef {
                 col_idx: 4,
                 boundary: BoundaryPolicy::Clamp

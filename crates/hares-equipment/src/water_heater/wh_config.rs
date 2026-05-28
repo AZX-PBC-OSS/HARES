@@ -344,13 +344,6 @@ pub struct TanklessWaterHeaterConfig {
     pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub mains_temp_c_source: Option<ScheduleSourceConfig>,
     pub avg_water_draw_l_per_day: Option<f64>,
-    /// Number of bedrooms (ANSI/RESNET 301 occupancy proxy).
-    /// When provided, gas parasitic power is computed as `5 + 60 * on_time_frac`
-    /// where `on_time_frac = [0.0269, 0.0333, 0.0397, 0.0462, 0.0529][bedrooms - 1]` (clamped 1–5).
-    /// Ignored for electric tankless (no ignition controller).
-    /// Overridden by `parasitic_power_w` if both are set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub number_of_bedrooms: Option<f64>,
 }
 
 impl EquipmentTypedConfig for TanklessWaterHeaterConfig {
@@ -409,12 +402,6 @@ impl TanklessWaterHeaterConfig {
             self.avg_water_draw_l_per_day,
             0.0,
             false,
-        )?;
-        check_range(
-            "tankless_wh: number_of_bedrooms",
-            self.number_of_bedrooms,
-            0.5,
-            10.0,
         )?;
         Ok(())
     }
@@ -846,7 +833,6 @@ mod tests {
             heating_capacity_w: Some(20_000.0),
             setpoint_c: Some(51.67),
             parasitic_power_w: Some(7.38),
-            number_of_bedrooms: None,
             performance_adjustment: Some(0.92),
             inlet_temp_c: None,
             draw_flow_rate_kg_s: None,

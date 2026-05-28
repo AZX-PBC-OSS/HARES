@@ -13,7 +13,7 @@ use hares_equipment::{
 };
 use hares_physics::constants::HOURS_PER_YEAR;
 use hares_types::{BoundaryPolicy, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tracing::warn;
 
 use crate::EquipmentSpec;
@@ -519,8 +519,19 @@ fn spec_has_setpoint_source(spec: &EquipmentSpec, prefix: &str) -> bool {
             ConfigPayload::Typed { data, .. } => Some(data),
             _ => None,
         })
-        .and_then(|data| data.get(&key))
+        .and_then(|data| find_setpoint_source(data, &key))
         .is_some()
+}
+
+/// Walk a JSON object tree looking for a setpoint key at any nesting level.
+fn find_setpoint_source<'a>(data: &'a Value, key: &str) -> Option<&'a Value> {
+    let obj = data.as_object()?;
+    if let Some(sp) = obj.get("setpoint") {
+        if let Some(v) = sp.get(key) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 fn inject_default_setpoint_profile(
@@ -553,7 +564,15 @@ fn inject_default_setpoint_profile(
         return;
     };
     if let Ok(json) = serde_json::to_value(source) {
-        obj.insert(format!("{prefix}_setpoint_source"), json);
+        insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), json);
+    }
+}
+
+fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Value) {
+    if let Some(sp) = obj.get_mut("setpoint") {
+        if let Some(sp_obj) = sp.as_object_mut() {
+            sp_obj.insert(key.to_string(), value);
+        }
     }
 }
 
@@ -612,7 +631,7 @@ fn set_typed_setpoint_source(spec: &mut EquipmentSpec, prefix: &str, col_idx: us
         boundary: BoundaryPolicy::Clamp,
     };
     if let Ok(json) = serde_json::to_value(source) {
-        obj.insert(format!("{prefix}_setpoint_source"), json);
+        insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), json);
     }
 }
 
@@ -1147,11 +1166,30 @@ mod tests {
     use chrono::{DateTime, Duration};
     use hares_equipment::{
         ConfigPayload, ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
-        HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
+        HeatPumpWaterHeaterConfig, HvacSetpointConfig, TanklessWaterHeaterConfig,
     };
     use hares_types::{BoundaryPolicy, FuelType, ScheduleSourceConfig};
     use serde_json::{Map, Value};
     use tempfile::tempdir;
+
+    fn find_setpoint_in_json<'a>(
+        data: &'a serde_json::Map<String, Value>,
+        key: &str,
+    ) -> Option<&'a Value> {
+        if let Some(common) = data.get("common") {
+            if let Some(sp) = common.get("setpoint") {
+                if let Some(v) = sp.get(key) {
+                    return Some(v);
+                }
+            }
+        }
+        if let Some(sp) = data.get("setpoint") {
+            if let Some(v) = sp.get(key) {
+                return Some(v);
+            }
+        }
+        data.get(key)
+    }
 
     fn make_schedule(hours: usize) -> ScheduleTimeSeries {
         let start =
@@ -1633,11 +1671,8 @@ mod tests {
                         fan_power_w: None,
                         fan_power_w_per_cfm: None,
                         airflow_m3_s_per_w: None,
-                        heating_setpoint_c: None,
-                        cooling_setpoint_c: None,
+                        setpoint: HvacSetpointConfig::default(),
                         hysteresis_c: None,
-                        heating_setpoint_source: None,
-                        cooling_setpoint_source: None,
                         duct: hares_equipment::DuctConfig::default(),
                         biquadratic_x1_min: None,
                         biquadratic_x1_max: None,
@@ -1667,12 +1702,11 @@ mod tests {
             .as_ref()
             .expect("heater typed config must remain present");
         let heater_data = match &heater_typed.payload {
-            ConfigPayload::Typed { data, .. } => data,
+            ConfigPayload::Typed { data, .. } => data.as_object().expect("data must be an object"),
             other => panic!("expected typed payload, got {other:?}"),
         };
         let heater_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            heater_data
-                .get("heating_setpoint_source")
+            find_setpoint_in_json(heater_data, "heating_setpoint_source")
                 .cloned()
                 .expect("heater heating_setpoint_source must be injected"),
         )
@@ -1690,12 +1724,11 @@ mod tests {
             .as_ref()
             .expect("cooler typed config must remain present");
         let cooler_data = match &cooler_typed.payload {
-            ConfigPayload::Typed { data, .. } => data,
+            ConfigPayload::Typed { data, .. } => data.as_object().expect("data must be an object"),
             other => panic!("expected typed payload, got {other:?}"),
         };
         let cooler_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            cooler_data
-                .get("cooling_setpoint_source")
+            find_setpoint_in_json(cooler_data, "cooling_setpoint_source")
                 .cloned()
                 .expect("cooler cooling_setpoint_source must be injected"),
         )
@@ -1862,7 +1895,6 @@ mod tests {
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
                 avg_water_draw_l_per_day,
-                number_of_bedrooms: None,
             },
         );
         EquipmentSpec {
@@ -2141,10 +2173,7 @@ mod tests {
                 HeatPumpHeaterConfig {
                     common: HeatPumpCommonConfig {
                         zone_id: Some(1),
-                        heating_setpoint_c: None,
-                        cooling_setpoint_c: None,
-                        heating_setpoint_source: None,
-                        cooling_setpoint_source: None,
+                        setpoint: HvacSetpointConfig::default(),
                         ..HeatPumpCommonConfig::default()
                     },
                     ..HeatPumpHeaterConfig::default()
@@ -2176,11 +2205,8 @@ mod tests {
                         fan_power_w: None,
                         fan_power_w_per_cfm: None,
                         airflow_m3_s_per_w: None,
-                        heating_setpoint_c: None,
-                        cooling_setpoint_c: None,
+                        setpoint: HvacSetpointConfig::default(),
                         hysteresis_c: None,
-                        heating_setpoint_source: None,
-                        cooling_setpoint_source: None,
                         duct: hares_equipment::DuctConfig::default(),
                         biquadratic_x1_min: None,
                         biquadratic_x1_max: None,
@@ -2208,8 +2234,7 @@ mod tests {
         // Heater: should receive a heating DailyProfile with max_value = 20 °C.
         let heater_data = typed_data_of_spec(&specs[0]);
         let heater_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            heater_data
-                .get("heating_setpoint_source")
+            find_setpoint_in_json(heater_data, "heating_setpoint_source")
                 .cloned()
                 .expect("heater heating_setpoint_source must be injected"),
         )
@@ -2226,8 +2251,7 @@ mod tests {
         // Cooler: should receive a cooling DailyProfile with max_value = 24 °C.
         let cooler_data = typed_data_of_spec(&specs[1]);
         let cooler_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            cooler_data
-                .get("cooling_setpoint_source")
+            find_setpoint_in_json(cooler_data, "cooling_setpoint_source")
                 .cloned()
                 .expect("cooler cooling_setpoint_source must be injected"),
         )
@@ -2244,11 +2268,11 @@ mod tests {
         // Heater should NOT get a cooling source, and cooler should NOT get a
         // heating source.
         assert!(
-            !heater_data.contains_key("cooling_setpoint_source"),
+            find_setpoint_in_json(heater_data, "cooling_setpoint_source").is_none(),
             "heater should not have a cooling setpoint source"
         );
         assert!(
-            !cooler_data.contains_key("heating_setpoint_source"),
+            find_setpoint_in_json(cooler_data, "heating_setpoint_source").is_none(),
             "cooler should not have a heating setpoint source"
         );
     }
@@ -2296,8 +2320,11 @@ mod tests {
                 HeatPumpHeaterConfig {
                     common: HeatPumpCommonConfig {
                         zone_id: Some(1),
-                        heating_setpoint_c: Some(22.0),
-                        heating_setpoint_source: Some(hpxml_heating_source.clone()),
+                        setpoint: HvacSetpointConfig {
+                            heating_setpoint_c: Some(22.0),
+                            heating_setpoint_source: Some(hpxml_heating_source.clone()),
+                            ..Default::default()
+                        },
                         ..HeatPumpCommonConfig::default()
                     },
                     ..HeatPumpHeaterConfig::default()
@@ -2329,11 +2356,12 @@ mod tests {
                         fan_power_w: None,
                         fan_power_w_per_cfm: None,
                         airflow_m3_s_per_w: None,
-                        heating_setpoint_c: None,
-                        cooling_setpoint_c: Some(26.0),
+                        setpoint: HvacSetpointConfig {
+                            cooling_setpoint_c: Some(26.0),
+                            cooling_setpoint_source: Some(hpxml_cooling_source.clone()),
+                            ..Default::default()
+                        },
                         hysteresis_c: None,
-                        heating_setpoint_source: None,
-                        cooling_setpoint_source: Some(hpxml_cooling_source.clone()),
                         duct: hares_equipment::DuctConfig::default(),
                         biquadratic_x1_min: None,
                         biquadratic_x1_max: None,
@@ -2360,8 +2388,7 @@ mod tests {
 
         let heater_data = typed_data_of_spec(&specs[0]);
         let heater_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            heater_data
-                .get("heating_setpoint_source")
+            find_setpoint_in_json(heater_data, "heating_setpoint_source")
                 .cloned()
                 .expect("heating_setpoint_source must remain"),
         )
@@ -2373,8 +2400,7 @@ mod tests {
 
         let cooler_data = typed_data_of_spec(&specs[1]);
         let cooler_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
-            cooler_data
-                .get("cooling_setpoint_source")
+            find_setpoint_in_json(cooler_data, "cooling_setpoint_source")
                 .cloned()
                 .expect("cooling_setpoint_source must remain"),
         )
@@ -2396,8 +2422,7 @@ mod tests {
             HeatPumpHeaterConfig {
                 common: HeatPumpCommonConfig {
                     zone_id: Some(1),
-                    heating_setpoint_c: None,
-                    heating_setpoint_source: None,
+                    setpoint: HvacSetpointConfig::default(),
                     ..HeatPumpCommonConfig::default()
                 },
                 ..HeatPumpHeaterConfig::default()

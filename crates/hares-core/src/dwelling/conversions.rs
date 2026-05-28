@@ -765,7 +765,7 @@ mod tests {
 
     use hares_equipment::{
         SetpointReconciliation,
-        hvac::heating_config::{DuctConfig, GasFurnaceConfig},
+        hvac::heating_config::{DuctConfig, GasFurnaceConfig, HvacSetpointConfig},
     };
     use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
     use hares_types::FuelType;
@@ -1024,8 +1024,7 @@ mod tests {
             number_of_speeds: 1,
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig::default(),
         };
         let parameters = serde_json::to_value(&typed_cfg)
@@ -1102,8 +1101,7 @@ mod tests {
             number_of_speeds: 1,
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig::default(),
         };
         let parameters = serde_json::to_value(&typed_cfg)

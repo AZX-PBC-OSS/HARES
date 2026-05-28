@@ -15,7 +15,8 @@ use hares_equipment::water_heater::wh_config::{
 };
 use hares_equipment::{
     BatteryConfig, DefrostConfig, DuctConfig, EquipmentConfig, EquipmentRegistry,
-    EquipmentTypedConfig, EvConfig, GeneratorConfig, PvConfig, VentilationConfig,
+    EquipmentTypedConfig, EvConfig, GeneratorConfig, HvacSetpointConfig, PvConfig,
+    VentilationConfig,
 };
 use hares_types::{
     BoundaryPolicy, EnvironmentState, FuelType, GridState, ScheduleSourceConfig, SurfaceIrradiance,
@@ -50,8 +51,7 @@ fn sample_gas_furnace_config() -> GasFurnaceConfig {
         ducts: sample_duct_config(),
         stage_heating_capacities_w: None,
         stage_heating_eirs: None,
-        heating_setpoint_c: None,
-        heating_setpoint_source: None,
+        setpoint: HvacSetpointConfig::default(),
     }
 }
 
@@ -64,8 +64,7 @@ fn sample_electric_furnace_config() -> ElectricFurnaceConfig {
         fan_power_w: Some(350.0),
         number_of_speeds: 1,
         ducts: sample_duct_config(),
-        heating_setpoint_c: None,
-        heating_setpoint_source: None,
+        setpoint: HvacSetpointConfig::default(),
     }
 }
 
@@ -81,8 +80,7 @@ fn sample_gas_boiler_config() -> GasBoilerConfig {
         fluid_type: hares_types::FluidType::Water,
         fan_power_w: Some(80.0),
         number_of_speeds: 1,
-        heating_setpoint_c: None,
-        heating_setpoint_source: None,
+        setpoint: HvacSetpointConfig::default(),
         condensing: false,
     }
 }
@@ -99,8 +97,7 @@ fn sample_electric_boiler_config() -> ElectricBoilerConfig {
         fluid_type: hares_types::FluidType::Water,
         fan_power_w: Some(80.0),
         number_of_speeds: 1,
-        heating_setpoint_c: None,
-        heating_setpoint_source: None,
+        setpoint: HvacSetpointConfig::default(),
     }
 }
 
@@ -110,8 +107,7 @@ fn sample_electric_baseboard_config() -> ElectricBaseboardConfig {
         zone_id: Some(1),
         capacity_w: 4_500.0,
         eir: 1.0,
-        heating_setpoint_c: None,
-        heating_setpoint_source: None,
+        setpoint: HvacSetpointConfig::default(),
     }
 }
 
@@ -119,13 +115,14 @@ fn sample_ideal_hvac_config() -> IdealHvacConfig {
     IdealHvacConfig {
         equipment_id: Some(6),
         zone_id: Some(1),
-        heating_setpoint_c: Some(21.0),
-        cooling_setpoint_c: Some(26.0),
+        setpoint: HvacSetpointConfig {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            ..Default::default()
+        },
         deadband_c: Some(1.0),
         n_speeds: Some(1),
         ideal_capacity_mode: None,
-        heating_setpoint_source: None,
-        cooling_setpoint_source: None,
         heating_capacity_w: Some(12_000.0),
         cooling_capacity_w: Some(12_000.0),
         shr: Some(0.75),
@@ -155,11 +152,12 @@ fn sample_central_ac_config() -> CentralAirConditionerConfig {
         stage_shrs: Some(vec![0.78, 0.74]),
         fan_power_w: Some(320.0),
         fan_power_w_per_cfm: None,
-        cooling_setpoint_c: Some(26.0),
-        heating_setpoint_c: Some(18.0),
+        setpoint: HvacSetpointConfig {
+            cooling_setpoint_c: Some(26.0),
+            heating_setpoint_c: Some(18.0),
+            ..Default::default()
+        },
         hysteresis_c: Some(1.0),
-        heating_setpoint_source: None,
-        cooling_setpoint_source: None,
         airflow_m3_s_per_w: Some(5.3678384759785085e-5),
         fraction_load_served: Some(1.0),
         duct,
@@ -186,11 +184,12 @@ fn sample_room_ac_config() -> RoomAcConfig {
         zone_id: Some(1),
         capacity_w: 3_500.0,
         eir: 3.412_141_633 / 10.0,
-        cooling_setpoint_c: Some(26.0),
-        heating_setpoint_c: Some(18.0),
+        setpoint: HvacSetpointConfig {
+            cooling_setpoint_c: Some(26.0),
+            heating_setpoint_c: Some(18.0),
+            ..Default::default()
+        },
         hysteresis_c: Some(1.0),
-        heating_setpoint_source: None,
-        cooling_setpoint_source: None,
         airflow_m3_s_per_w: Some(4.294270780782807e-5),
         biquadratic_x1_min: Some(10.0),
         biquadratic_x1_max: Some(25.0),
@@ -234,11 +233,12 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
             fan_power_w: Some(320.0),
             fan_power_w_per_cfm: None,
             airflow_m3_s_per_w: Some(5.3678384759785085e-5),
-            heating_setpoint_c: Some(21.0),
-            cooling_setpoint_c: Some(26.0),
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
             hysteresis_c: Some(1.0),
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             duct,
             biquadratic_x1_min: Some(12.0),
             biquadratic_x1_max: Some(24.0),
@@ -379,7 +379,6 @@ fn sample_tankless_water_heater_config() -> TanklessWaterHeaterConfig {
             boundary: BoundaryPolicy::Clamp,
         }),
         avg_water_draw_l_per_day: Some(220.0),
-        number_of_bedrooms: None,
     }
 }
 

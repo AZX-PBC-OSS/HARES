@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use super::core_config::default_one;
 use super::heat_pump::defrost::DefrostConfig;
-use super::heating_config::DuctConfig;
+use super::heating_config::{DuctConfig, HvacSetpointConfig};
 
 fn default_min_compressor_fraction() -> f64 {
     0.25
 }
 use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
-use hares_types::{FuelType, ScheduleSourceConfig};
+use hares_types::FuelType;
 
 /// Fields shared between `HeatPumpHeaterConfig` and `HeatPumpCoolerConfig`.
 ///
@@ -59,19 +59,13 @@ pub struct HeatPumpCommonConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w_per_cfm: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub airflow_m3_s_per_w: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_c: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling_setpoint_c: Option<f64>,
+    #[serde(default)]
+    pub setpoint: HvacSetpointConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hysteresis_c: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling_setpoint_source: Option<ScheduleSourceConfig>,
-    #[serde(flatten)]
+    #[serde(default)]
     pub duct: DuctConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x1_min: Option<f64>,
@@ -215,11 +209,8 @@ impl Default for HeatPumpCommonConfig {
             fan_power_w: None,
             fan_power_w_per_cfm: None,
             airflow_m3_s_per_w: None,
-            heating_setpoint_c: None,
-            cooling_setpoint_c: None,
+            setpoint: HvacSetpointConfig::default(),
             hysteresis_c: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             duct: DuctConfig::default(),
             biquadratic_x1_min: None,
             biquadratic_x1_max: None,
@@ -354,8 +345,8 @@ impl HeatPumpHeaterConfig {
             }
         }
         for (name, value) in [
-            ("heating_setpoint_c", self.common.heating_setpoint_c),
-            ("cooling_setpoint_c", self.common.cooling_setpoint_c),
+            ("heating_setpoint_c", self.common.setpoint.heating_setpoint_c),
+            ("cooling_setpoint_c", self.common.setpoint.cooling_setpoint_c),
             ("hysteresis_c", self.common.hysteresis_c),
             ("airflow_m3_s_per_w", self.common.airflow_m3_s_per_w),
             ("hp_lockout_temp_c", self.hp_lockout_temp_c),
@@ -567,8 +558,8 @@ impl HeatPumpCoolerConfig {
         }
 
         for (name, value) in [
-            ("heating_setpoint_c", self.common.heating_setpoint_c),
-            ("cooling_setpoint_c", self.common.cooling_setpoint_c),
+            ("heating_setpoint_c", self.common.setpoint.heating_setpoint_c),
+            ("cooling_setpoint_c", self.common.setpoint.cooling_setpoint_c),
             ("hysteresis_c", self.common.hysteresis_c),
             ("airflow_m3_s_per_w", self.common.airflow_m3_s_per_w),
         ] {
@@ -665,11 +656,12 @@ mod tests {
                 fan_power_w: Some(300.0),
                 fan_power_w_per_cfm: None,
                 airflow_m3_s_per_w: Some(4.0e-5),
-                heating_setpoint_c: Some(21.0),
-                cooling_setpoint_c: Some(26.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(26.0),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: Some(12.0),
                 biquadratic_x1_max: Some(24.0),
@@ -757,8 +749,11 @@ mod tests {
                 shr: Some(0.75),
                 fan_power_w: Some(300.0),
                 airflow_m3_s_per_w: Some(4.0e-5),
-                heating_setpoint_c: Some(21.0),
-                cooling_setpoint_c: Some(26.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(26.0),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(1.0),
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: Some(12.0),
@@ -869,11 +864,12 @@ mod tests {
                 fan_power_w: Some(300.0),
                 fan_power_w_per_cfm: None,
                 airflow_m3_s_per_w: Some(4.0e-5),
-                heating_setpoint_c: Some(21.0),
-                cooling_setpoint_c: Some(26.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(26.0),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: Some(12.0),
                 biquadratic_x1_max: Some(24.0),
@@ -924,8 +920,11 @@ mod tests {
                 shr: Some(0.75),
                 fan_power_w: Some(300.0),
                 airflow_m3_s_per_w: Some(4.0e-5),
-                heating_setpoint_c: Some(21.0),
-                cooling_setpoint_c: Some(26.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(26.0),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(1.0),
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: Some(12.0),

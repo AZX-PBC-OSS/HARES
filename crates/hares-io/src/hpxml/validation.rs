@@ -389,32 +389,6 @@ pub fn validate_building_ranges(building: &Building) -> ValidationReport {
         }
     }
 
-    let total_window_area_m2: f64 = building.windows.iter().map(|w| w.area_m2).sum();
-    let total_wall_area_m2: f64 = building
-        .boundaries
-        .iter()
-        .filter(|b| {
-            matches!(b.boundary_type, BoundaryType::Wall)
-                && matches!(b.exterior_zone, Some(ZoneType::Outdoor))
-        })
-        .map(|b| b.area_m2)
-        .sum();
-
-    if total_wall_area_m2 > 0.0 {
-        let ratio = total_window_area_m2 / total_wall_area_m2;
-        if !(0.02..=0.40).contains(&ratio) {
-            report.errors.push(ValidationError::new(
-                "WindowToWallRatio",
-                format!("must be in [0.02, 0.40], got {ratio:.4}"),
-            ));
-        } else if ratio > 0.30 {
-            report.warnings.push(ValidationWarning::new(
-                "WindowToWallRatio",
-                format!("high window-to-wall ratio {ratio:.4} (> 0.30)"),
-            ));
-        }
-    }
-
     // Window U-factor and SHGC presence — every <Window> must carry both
     // <UFactor> and <SHGC> per HPXML §6.5 "Windows".  A silent solver-layer
     // default (5.0 W/(m²·K) / 0.4, single-pane aluminium-equivalent) produces
@@ -811,11 +785,6 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| e.field == "BatteryRoundTripEfficiency")
-        );
-        assert!(
-            report.warnings.iter().any(
-                |w| matches!(w, ValidationWarning { field, .. } if field == "WindowToWallRatio")
-            )
         );
         assert!(
             report.warnings.iter().any(

@@ -2381,10 +2381,11 @@ mod tests {
     };
 
     use super::{ASHPHeater, GshpHeater, MinisplitHeater, SpeedControlMode};
-    use crate::{
-        DefrostConfig, DefrostControl, Equipment, EquipmentConfig, HeatPumpCommonConfig,
-        HeatPumpHeaterConfig,
-    };
+use crate::{
+    DefrostConfig, DefrostControl, Equipment, EquipmentConfig, HeatPumpCommonConfig,
+    HeatPumpHeaterConfig,
+};
+use crate::hvac::heating_config::HvacSetpointConfig;
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
         EnvironmentState {
@@ -2453,11 +2454,12 @@ mod tests {
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
                 airflow_m3_s_per_w: None,
-                heating_setpoint_c: Some(21.0),
-                cooling_setpoint_c: Some(26.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(26.0),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 duct: Default::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -2514,11 +2516,12 @@ mod tests {
                 fan_power_w: Some(0.0),
                 fan_power_w_per_cfm: None,
                 airflow_m3_s_per_w: None,
-                heating_setpoint_c: Some(21.0),
-                cooling_setpoint_c: Some(26.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(26.0),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 duct: Default::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -2874,13 +2877,13 @@ mod tests {
         let cfg = heater_config_with(|typed| {
             let mut weekday = [18.0; 24];
             weekday[1] = 22.0;
-            typed.common.heating_setpoint_source = Some(ScheduleSourceConfig::DailyProfile {
+            typed.common.setpoint.heating_setpoint_source = Some(ScheduleSourceConfig::DailyProfile {
                 weekday,
                 weekend: weekday,
                 month_multipliers: [1.0; 12],
                 max_value: 1.0,
             });
-            typed.common.heating_setpoint_c = Some(18.0);
+            typed.common.setpoint.heating_setpoint_c = Some(18.0);
         });
         let mut eq = ASHPHeater::new(cfg.clone());
 
@@ -3608,7 +3611,7 @@ mod tests {
             typed.er_lockout_temp_c = Some(100.0);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_setpoint_offset_c = Some(0.0);
-            typed.common.heating_setpoint_c = Some(18.0);
+            typed.common.setpoint.heating_setpoint_c = Some(18.0);
         });
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -3658,7 +3661,7 @@ mod tests {
             typed.er_lockout_temp_c = Some(100.0);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_setpoint_offset_c = Some(0.0);
-            typed.common.heating_setpoint_c = Some(18.0);
+            typed.common.setpoint.heating_setpoint_c = Some(18.0);
         });
         let mut eq = ASHPHeater::new(cfg.clone());
         eq.init(&cfg, &make_env(16.0, 0.0, 0)).unwrap();
@@ -4569,8 +4572,11 @@ mod tests {
                 heating_capacity_w: Some(8_000.0),
                 heating_eir: Some(0.33),
                 is_mini_split: true,
-                heating_setpoint_c: Some(21.0),
-                cooling_setpoint_c: Some(26.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(26.0),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(1.0),
                 ..HeatPumpCommonConfig::default()
             },
@@ -4855,7 +4861,7 @@ mod tests {
             typed.er_lockout_temp_c = Some(100.0);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_setpoint_offset_c = Some(0.0);
-            typed.common.heating_setpoint_c = Some(18.0);
+            typed.common.setpoint.heating_setpoint_c = Some(18.0);
         });
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -5081,7 +5087,7 @@ mod tests {
             typed.er_lockout_temp_c = Some(100.0);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_setpoint_offset_c = Some(0.0);
-            typed.common.heating_setpoint_c = Some(18.0);
+            typed.common.setpoint.heating_setpoint_c = Some(18.0);
         });
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -5539,7 +5545,7 @@ mod tests {
             typed.er_setpoint_offset_c = Some(1.6);
             typed.er_lockout_temp_c = Some(4.44);
             typed.hp_lockout_temp_c = Some(-17.78);
-            typed.common.heating_setpoint_c = Some(21.0);
+            typed.common.setpoint.heating_setpoint_c = Some(21.0);
             typed.common.hysteresis_c = Some(1.0);
         });
 
@@ -5586,7 +5592,7 @@ mod tests {
             typed.er_setpoint_offset_c = Some(1.6);
             typed.er_lockout_temp_c = Some(4.44);
             typed.hp_lockout_temp_c = Some(-17.78);
-            typed.common.heating_setpoint_c = Some(21.0);
+            typed.common.setpoint.heating_setpoint_c = Some(21.0);
             typed.common.hysteresis_c = Some(1.0);
         });
 
@@ -5615,7 +5621,7 @@ mod tests {
             typed.er_setpoint_offset_c = Some(0.0);
             typed.er_lockout_temp_c = Some(4.44);
             typed.hp_lockout_temp_c = Some(-17.78);
-            typed.common.heating_setpoint_c = Some(21.0);
+            typed.common.setpoint.heating_setpoint_c = Some(21.0);
             typed.common.hysteresis_c = Some(1.0);
         });
 
@@ -6077,11 +6083,12 @@ mod tests {
                     fan_power_w: None,
                     fan_power_w_per_cfm: None,
                     airflow_m3_s_per_w: None,
-                    heating_setpoint_c: Some(21.0),
-                    cooling_setpoint_c: Some(26.0),
+                    setpoint: HvacSetpointConfig {
+                        heating_setpoint_c: Some(21.0),
+                        cooling_setpoint_c: Some(26.0),
+                        ..Default::default()
+                    },
                     hysteresis_c: Some(1.0),
-                    heating_setpoint_source: None,
-                    cooling_setpoint_source: None,
                     duct: Default::default(),
                     biquadratic_x1_min: None,
                     biquadratic_x1_max: None,
@@ -6276,7 +6283,7 @@ mod ideal_capacity_tests {
     };
 
     use super::ASHPHeater;
-    use crate::{DefrostConfig, Equipment, EquipmentConfig};
+    use crate::{DefrostConfig, Equipment, EquipmentConfig, HvacSetpointConfig};
 
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     /// OAT is held above the HP lockout (default -17.78°C) and above the ER lockout
@@ -6353,28 +6360,29 @@ mod ideal_capacity_tests {
                     fan_power_w: None,
                     fan_power_w_per_cfm: None,
                     airflow_m3_s_per_w: None,
+                setpoint: HvacSetpointConfig {
                     heating_setpoint_c: Some(21.0),
                     cooling_setpoint_c: Some(26.0),
-                    hysteresis_c: Some(1.0),
-                    heating_setpoint_source: None,
-                    cooling_setpoint_source: None,
-                    duct: Default::default(),
-                    biquadratic_x1_min: None,
-                    biquadratic_x1_max: None,
-                    biquadratic_x2_min: None,
-                    biquadratic_x2_max: None,
-                    ff_min: None,
-                    ff_max: None,
-                    plf_min: None,
-                    plf_max: None,
-                    min_compressor_fraction: 0.25,
-                    eir_part_load_benefit: None,
-                    er_stages: 1,
-                    charge_defect_ratio: None,
                     ..Default::default()
                 },
-                hp_lockout_temp_c: None,
-                er_lockout_temp_c: None,
+                hysteresis_c: Some(1.0),
+                duct: Default::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                min_compressor_fraction: 0.25,
+                eir_part_load_benefit: None,
+                er_stages: 1,
+                charge_defect_ratio: None,
+                ..Default::default()
+            },
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
                 max_oat_supplemental_c: None,
                 er_setpoint_offset_c: None,
                 er_hard_lockout_time_s: None,
@@ -6556,11 +6564,12 @@ mod ideal_capacity_tests {
                     fan_power_w: Some(0.0),
                     fan_power_w_per_cfm: None,
                     airflow_m3_s_per_w: None,
-                    heating_setpoint_c: Some(21.0),
-                    cooling_setpoint_c: Some(26.0),
+                    setpoint: HvacSetpointConfig {
+                        heating_setpoint_c: Some(21.0),
+                        cooling_setpoint_c: Some(26.0),
+                        ..Default::default()
+                    },
                     hysteresis_c: Some(1.0),
-                    heating_setpoint_source: None,
-                    cooling_setpoint_source: None,
                     duct: Default::default(),
                     biquadratic_x1_min: None,
                     biquadratic_x1_max: None,
@@ -6717,11 +6726,12 @@ mod ideal_capacity_tests {
                     fan_power_w: Some(0.0),
                     fan_power_w_per_cfm: None,
                     airflow_m3_s_per_w: None,
-                    heating_setpoint_c: Some(21.0),
-                    cooling_setpoint_c: Some(26.0),
+                    setpoint: HvacSetpointConfig {
+                        heating_setpoint_c: Some(21.0),
+                        cooling_setpoint_c: Some(26.0),
+                        ..Default::default()
+                    },
                     hysteresis_c: Some(1.0),
-                    heating_setpoint_source: None,
-                    cooling_setpoint_source: None,
                     duct: Default::default(),
                     biquadratic_x1_min: None,
                     biquadratic_x1_max: None,
@@ -6821,11 +6831,12 @@ mod ideal_capacity_tests {
                     fan_power_w: Some(0.0),
                     fan_power_w_per_cfm: None,
                     airflow_m3_s_per_w: None,
-                    heating_setpoint_c: Some(21.0),
-                    cooling_setpoint_c: Some(26.0),
+                    setpoint: HvacSetpointConfig {
+                        heating_setpoint_c: Some(21.0),
+                        cooling_setpoint_c: Some(26.0),
+                        ..Default::default()
+                    },
                     hysteresis_c: Some(1.0),
-                    heating_setpoint_source: None,
-                    cooling_setpoint_source: None,
                     duct: Default::default(),
                     biquadratic_x1_min: None,
                     biquadratic_x1_max: None,

@@ -25,6 +25,7 @@ use super::coil_physics::{
     CoilResult, LatentDegradationParams, calculate_shr, effective_shr_with_latent_degradation,
 };
 use super::latent_degradation::compute_coil_ao_by_stage;
+use super::heating_config::HvacSetpointConfig;
 use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
@@ -1572,11 +1573,13 @@ fn typed_ac_test_config(eir: f64) -> EquipmentConfig {
             stage_shrs: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
-            cooling_setpoint_c: Some(24.0),
-            heating_setpoint_c: Some(18.0),
+            setpoint: HvacSetpointConfig {
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+            },
             hysteresis_c: Some(1.0),
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
             fraction_load_served: None,
             crankcase_heater_kw: None,
@@ -1613,7 +1616,7 @@ mod tests {
 
     use crate::{
         CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, EquipmentRegistry,
-        RoomAcConfig,
+        HvacSetpointConfig, RoomAcConfig,
     };
 
     fn env(
@@ -1676,11 +1679,13 @@ mod tests {
                 zone_id: Some(1),
                 capacity_w: 3_500.0,
                 eir: 10.0,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -2397,11 +2402,13 @@ mod tests {
                 stage_shrs: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: None,
@@ -2692,11 +2699,13 @@ mod tests {
                 zone_id: Some(1),
                 capacity_w: 3_500.0,
                 eir: 3.412_141_633 / 10.0,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: None,
                 shr: Some(0.65),
                 startup_cd: None,
@@ -2939,11 +2948,13 @@ mod tests {
                 stage_shrs: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: None,
@@ -3050,11 +3061,13 @@ mod tests {
                 zone_id: Some(1),
                 capacity_w: 3_500.0,
                 eir: 0.33,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    cooling_setpoint_source: None,
+                    heating_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                cooling_setpoint_source: None,
-                heating_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
                 shr: None,
                 startup_cd: None,
@@ -3234,7 +3247,7 @@ mod dr_tests {
     };
 
     use super::AirConditioner;
-    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig};
+    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, HvacSetpointConfig};
 
     /// Zone above cooling setpoint, suitable for triggering active cooling.
     fn hot_env(zone_temp_c: f64) -> EnvironmentState {
@@ -3309,11 +3322,13 @@ mod dr_tests {
                 stage_shrs: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(0.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: Some(0.10),
@@ -3637,7 +3652,7 @@ mod crankcase_tests {
     };
 
     use super::AirConditioner;
-    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig};
+    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, HvacSetpointConfig};
 
     fn env(
         zone_temp_c: f64,
@@ -3702,11 +3717,13 @@ mod crankcase_tests {
                 stage_shrs: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: None,
@@ -3793,11 +3810,13 @@ mod crankcase_tests {
                 stage_shrs: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: Some(26.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(26.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(0.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: Some(0.10),
@@ -4039,7 +4058,7 @@ mod ideal_capacity_tests {
     };
 
     use super::AirConditioner;
-    use crate::{Equipment, EquipmentConfig};
+    use crate::{Equipment, EquipmentConfig, HvacSetpointConfig};
 
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     fn make_env(zone_temp_c: f64, time_res_s: i64) -> EnvironmentState {
@@ -4253,11 +4272,13 @@ mod ideal_capacity_tests {
                 zone_id: Some(1),
                 capacity_w: 3_500.0,
                 eir: 0.33,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    cooling_setpoint_source: None,
+                    heating_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                cooling_setpoint_source: None,
-                heating_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
                 shr: None,
                 startup_cd: None,
@@ -4317,11 +4338,13 @@ mod ideal_capacity_tests {
                 zone_id: Some(1),
                 capacity_w: 3_500.0,
                 eir: 0.33,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    cooling_setpoint_source: None,
+                    heating_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                cooling_setpoint_source: None,
-                heating_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
                 shr: None,
                 startup_cd: None,
@@ -4373,11 +4396,13 @@ mod ideal_capacity_tests {
                 stage_shrs: None,
                 fan_power_w: Some(0.0),
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    cooling_setpoint_source: None,
+                    heating_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                cooling_setpoint_source: None,
-                heating_setpoint_source: None,
                 airflow_m3_s_per_w: None,
                 fraction_load_served: Some(1.0),
                 crankcase_heater_kw: None,
@@ -4406,11 +4431,13 @@ mod ideal_capacity_tests {
                 zone_id: Some(1),
                 capacity_w: 3_500.0,
                 eir: 0.33,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    cooling_setpoint_source: None,
+                    heating_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                cooling_setpoint_source: None,
-                heating_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
                 shr: None,
                 startup_cd: None,
@@ -4472,7 +4499,8 @@ mod defaults_tests {
 
     use super::{AirConditioner, RoomAC};
     use crate::{
-        CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, RoomAcConfig,
+        CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, HvacSetpointConfig,
+        RoomAcConfig,
     };
 
     fn make_env(zone_temp_c: f64) -> EnvironmentState {
@@ -4533,11 +4561,13 @@ mod defaults_tests {
                 stage_shrs: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: None,
@@ -4604,11 +4634,13 @@ mod defaults_tests {
                 stage_shrs: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: None,
@@ -4681,11 +4713,13 @@ mod defaults_tests {
                 zone_id: Some(1),
                 capacity_w: 3_500.0,
                 eir: 3.412_141_633 / 10.0,
-                cooling_setpoint_c: Some(24.0),
-                heating_setpoint_c: Some(18.0),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: None,
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -4727,7 +4761,7 @@ mod defaults_tests {
 mod speed_selection_parity_tests {
     use super::CoolingCore;
     use crate::hvac::{HvacEquipment, HvacEquipmentType, SpeedControlMode, ThermostatMode};
-    use crate::{CentralAirConditionerConfig, DuctConfig, EquipmentConfig};
+    use crate::{CentralAirConditionerConfig, DuctConfig, EquipmentConfig, HvacSetpointConfig};
     use hares_types::{EnvironmentState, GridState, WeatherState, ZoneId, ZoneState};
 
     fn minimal_env() -> EnvironmentState {
@@ -4788,11 +4822,13 @@ mod speed_selection_parity_tests {
             stage_shrs: None,
             fan_power_w: Some(0.0),
             fan_power_w_per_cfm: None,
-            cooling_setpoint_c: Some(24.0),
-            heating_setpoint_c: Some(18.0),
+            setpoint: HvacSetpointConfig {
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+            },
             hysteresis_c: Some(1.0),
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
             fraction_load_served: None,
             crankcase_heater_kw: None,

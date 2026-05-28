@@ -1,7 +1,7 @@
 use chrono::{FixedOffset, TimeZone};
 use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
 use hares_equipment::water_heater::wh_config::TanklessWaterHeaterConfig;
-use hares_equipment::{DuctConfig, EquipmentConfig, EquipmentRegistry};
+use hares_equipment::{DuctConfig, EquipmentConfig, EquipmentRegistry, HvacSetpointConfig};
 use hares_types::{
     BoundaryPolicy, EnvironmentState, FuelType, GridState, HumidityAccumulator, PortSlots,
     ScheduleSourceConfig, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
@@ -93,7 +93,6 @@ fn tankless_schedule_sources_round_trip_and_init() {
             boundary: BoundaryPolicy::Clamp,
         }),
         avg_water_draw_l_per_day: Some(220.0),
-        number_of_bedrooms: None,
     };
 
     let serialized = serde_json::to_value(&cfg).expect("serialize tankless config");
@@ -136,11 +135,12 @@ fn central_ac_airflow_and_duct_airflow_round_trip_without_collision() {
         stage_shrs: Some(vec![0.78, 0.74]),
         fan_power_w: Some(320.0),
         fan_power_w_per_cfm: None,
-        cooling_setpoint_c: Some(26.0),
-        heating_setpoint_c: Some(18.0),
+        setpoint: HvacSetpointConfig {
+            cooling_setpoint_c: Some(26.0),
+            heating_setpoint_c: Some(18.0),
+            ..Default::default()
+        },
         hysteresis_c: Some(1.0),
-        heating_setpoint_source: None,
-        cooling_setpoint_source: None,
         airflow_m3_s_per_w: Some(5.3678384759785085e-5),
         fraction_load_served: Some(1.0),
         duct: DuctConfig {

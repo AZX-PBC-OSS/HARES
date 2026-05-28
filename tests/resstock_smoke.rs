@@ -186,6 +186,7 @@ mod tests {
             bldg_id: 100,
             initialization_duration: None,
             resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
+            patches: None,
         };
 
         let result = engine.run(config).expect("engine.run should succeed");

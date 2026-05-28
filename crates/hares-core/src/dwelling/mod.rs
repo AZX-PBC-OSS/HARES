@@ -116,6 +116,11 @@ pub struct DwellingConfig {
     /// (PCHIP for continuous fields, ZOH for energy/wind).
     /// Use `Some(ResampleOverrides::ochre_compat())` for OCHRE parity testing.
     pub resample_overrides: Option<hares_io::ResampleOverrides>,
+    /// HPXML data-quality patches from external metadata (e.g. ResStock).
+    /// Fields supplement or correct HPXML-parsed data when the source
+    /// document contains missing or invalid values.
+    /// `None` for direct HPXML use where no external metadata is available.
+    pub patches: Option<hares_io::HpxmlDataPatches>,
 }
 
 /// Snapshot of accumulated port totals at a stage boundary.
@@ -924,9 +929,18 @@ impl Dwelling {
         let weather = parse_weather(&config.weather_path)
             .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
 
-        let schedule_raw =
+        let schedule_raw = if config.schedule_path.exists() {
             parse_schedule_csv(&config.schedule_path, &[], Some(&weather.meta), None)
-                .map_err(|err| HaresError::Io(format!("schedule parse failed: {err}")))?;
+                .map_err(|err| HaresError::Io(format!("schedule parse failed: {err}")))?
+        } else {
+            hares_io::ScheduleTimeSeries::from_hpxml_setpoints(
+                config.sim_config.start_time,
+                config.sim_config.duration,
+                config.sim_config.time_res,
+                building.heating_weekday_setpoints_c.as_ref().map(|v| v[0]),
+                building.cooling_weekday_setpoints_c.as_ref().map(|v| v[0]),
+            )
+        };
 
         let target_step_secs = duration_to_u32_secs(config.sim_config.time_res)?;
         let schedule = schedule_raw
@@ -970,6 +984,7 @@ impl Dwelling {
             bldg_id: 0,
             initialization_duration: Some(StdDuration::from_secs(7 * 24 * 3600)),
             resample_overrides: None,
+            patches: None,
         };
         Self::from_config(config)
     }
@@ -1045,6 +1060,7 @@ impl Dwelling {
                 .initialization_duration_s
                 .map(StdDuration::from_secs),
             resample_overrides: None,
+            patches: None,
         };
 
         Self::from_preparsed(dwelling_config, hpxml_building, weather, schedule)
@@ -1132,7 +1148,7 @@ impl Dwelling {
             building.site.longitude_deg = Some(weather_lon);
         }
 
-        let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
+        let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides, config.patches.as_ref())
             .map_err(|e| HaresError::Io(e.to_string()))?;
 
         // Centralized fluid loop ID allocation — must run after wiring
@@ -6715,6 +6731,7 @@ occupancy = 1.0
                 .initialization_duration_s
                 .map(StdDuration::from_secs),
             resample_overrides: None,
+            patches: None,
         };
 
         match Dwelling::from_preparsed(dwelling_config, building, weather, schedule) {

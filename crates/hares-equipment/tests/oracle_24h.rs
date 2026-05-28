@@ -18,7 +18,8 @@ use hares_equipment::water_heater::gas::GasWH;
 use hares_equipment::water_heater::tankless::TanklessWH;
 use hares_equipment::{
     DuctConfig, ElectricBaseboardConfig, Equipment, EquipmentConfig, GasFurnaceConfig,
-    GasWaterHeaterConfig, GeneratorConfig, IdealHvacConfig, PvConfig, TanklessWaterHeaterConfig,
+    GasWaterHeaterConfig, GeneratorConfig, HvacSetpointConfig, IdealHvacConfig, PvConfig,
+    TanklessWaterHeaterConfig,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, PortSlots, SurfaceIrradiance,
@@ -122,8 +123,7 @@ fn oracle_gas_furnace_24h_constant_heating() {
             number_of_speeds: 1,
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig {
                 dse_heat: Some(1.0),
                 ..Default::default()
@@ -183,8 +183,7 @@ fn oracle_electric_baseboard_24h_cop1() {
             zone_id: Some(1),
             capacity_w,
             eir: 1.0,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
         },
     );
 
@@ -243,15 +242,16 @@ fn oracle_ideal_hvac_24h_50pct_load() {
         IdealHvacConfig {
             equipment_id: None,
             zone_id: Some(1),
-            heating_setpoint_c: Some(22.0),
-            cooling_setpoint_c: Some(28.0),
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: Some(22.0),
+                cooling_setpoint_c: Some(28.0),
+                ..Default::default()
+            },
             deadband_c: None,
             n_speeds: None,
             ideal_capacity_mode: Some(
                 hares_equipment::hvac::heating_config::IdealCapacityModeConfig::Off,
             ),
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             heating_capacity_w: Some(rated_w),
             cooling_capacity_w: Some(rated_w),
             shr: None,
@@ -621,7 +621,6 @@ fn oracle_tankless_wh_24h_constant_draw() {
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
             avg_water_draw_l_per_day: None,
-            number_of_bedrooms: None,
         },
     );
 

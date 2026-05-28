@@ -293,7 +293,7 @@ fn ev_plug_load_emits_ev_equipment_spec_with_correct_parameters() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let ev = specs
@@ -330,7 +330,7 @@ fn ev_plug_load_large_kwh_emits_250_mile_range() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let ev = specs
@@ -365,7 +365,7 @@ fn ev_plug_load_not_emitted_as_scheduled_load() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     // Should NOT produce a ScheduledLoad/MELs entry
@@ -391,7 +391,7 @@ fn whole_building_ventilation_fan_is_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let fan = specs
@@ -427,7 +427,7 @@ fn exhaust_fan_without_whole_building_flag_is_not_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     assert!(
@@ -448,7 +448,7 @@ fn seasonal_cooling_fan_is_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     assert!(
@@ -470,7 +470,7 @@ fn whole_house_fan_type_resolves_to_exhaust_fan_not_hrv() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let fan = specs
@@ -838,7 +838,7 @@ fn hvac_capacity_equipment_resolution_stores_kbtu_h() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let furnace = specs
@@ -868,7 +868,7 @@ fn water_heater_setpoint_equipment_resolution_stores_celsius() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let wh = specs
@@ -912,7 +912,7 @@ fn pv_inverter_max_power_output_w_converted_to_kw() {
 
     let building = parse_building(&xml).expect("should parse");
     let defaults = DefaultsStore::default();
-    let specs = resolve_equipment(&building, &defaults, &serde_json::Value::Null)
+    let specs = resolve_equipment(&building, &defaults, &serde_json::Value::Null, None)
         .expect("should resolve equipment");
 
     let pv = specs
@@ -1174,7 +1174,7 @@ fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment should succeed for EER-only room AC");
 
     let ac = specs
@@ -1244,7 +1244,7 @@ fn high_eer_central_ac_without_seer_resolves_via_eer_not_zero_sentinel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("EER-only central AC should resolve without error");
 
     let ac = specs
@@ -1280,7 +1280,7 @@ fn cooling_system_missing_both_seer_and_eer_produces_error() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse XML structure");
-    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
 
     assert!(
         result.is_err(),
@@ -1305,7 +1305,7 @@ fn seer_present_cooling_system_resolves_normally_regression() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("SEER-present system must resolve without error");
 
     let ac = specs
@@ -1413,7 +1413,7 @@ fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
     // when CFM25 duct leakage is present (the old bug caused silent
     // zeroing, not a crash, but verifying the full pipeline runs is
     // still a valid integration smoke test).
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("equipment resolution must succeed with CFM25 duct leakage");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -1461,7 +1461,7 @@ fn refrigerator_in_conditioned_basement_retains_gain_fractions() {
 </HPXML>
 "#;
     let building = parse_building(xml).expect("HPXML should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment should succeed");
 
     let fridge = specs
@@ -1560,7 +1560,7 @@ fn hpxml_v3_parses_resolves_equipment_with_schema_warning() {
     );
 
     // Resolve equipment → heating, cooling, and water heater must all resolve.
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment should succeed for 3.x fixture");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -1606,7 +1606,7 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     );
 
     let building = parse_building(&xml).expect("fixture should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment should succeed for fixture");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -1788,7 +1788,7 @@ fn hpxml_v4_building_sync_parses_resolves_without_rejection() {
     );
 
     // Resolve equipment — the full pipeline must succeed.
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment should succeed for BuildingSync fixture");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();

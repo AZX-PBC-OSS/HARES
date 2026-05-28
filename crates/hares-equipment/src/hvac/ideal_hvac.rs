@@ -318,10 +318,10 @@ impl Equipment for IdealHvac {
         if let Some(shr) = typed.shr {
             self.shr = shr.clamp(0.0, 1.0);
         }
-        if let Some(heating_sp) = typed.heating_setpoint_c {
+        if let Some(heating_sp) = typed.setpoint.heating_setpoint_c {
             self.thermostat_fsm.static_setpoints.heating_c = heating_sp;
         }
-        if let Some(cooling_sp) = typed.cooling_setpoint_c {
+        if let Some(cooling_sp) = typed.setpoint.cooling_setpoint_c {
             self.thermostat_fsm.static_setpoints.cooling_c = cooling_sp;
         }
         if let Some(deadband) = typed.deadband_c {
@@ -338,10 +338,10 @@ impl Equipment for IdealHvac {
                 IdealCapacityModeConfig::Auto => IdealCapacityMode::Auto,
             };
         }
-        if let Some(source) = &typed.heating_setpoint_source {
+        if let Some(source) = &typed.setpoint.heating_setpoint_source {
             self.thermostat_fsm.heating_setpoint_source = Some(source.clone().into_runtime());
         }
-        if let Some(source) = &typed.cooling_setpoint_source {
+        if let Some(source) = &typed.setpoint.cooling_setpoint_source {
             self.thermostat_fsm.cooling_setpoint_source = Some(source.clone().into_runtime());
         }
         if let Some(fraction) = typed
@@ -1462,14 +1462,17 @@ mod tests {
     fn typed_column_ref_setpoint_source_reads_schedule_domain() {
         let typed = crate::IdealHvacConfig {
             zone_id: Some(1),
-            heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::ColumnRef {
-                col_idx: 0,
-                boundary: hares_types::BoundaryPolicy::Clamp,
-            }),
-            cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::ColumnRef {
-                col_idx: 1,
-                boundary: hares_types::BoundaryPolicy::Clamp,
-            }),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::ColumnRef {
+                    col_idx: 0,
+                    boundary: hares_types::BoundaryPolicy::Clamp,
+                }),
+                cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::ColumnRef {
+                    col_idx: 1,
+                    boundary: hares_types::BoundaryPolicy::Clamp,
+                }),
+                ..Default::default()
+            },
             ..crate::IdealHvacConfig::default()
         };
         let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
@@ -1666,18 +1669,21 @@ mod tests {
         let typed = crate::IdealHvacConfig {
             zone_id: Some(1),
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
-            heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
-                weekday: heating_weekday,
-                weekend: heating_weekday,
-                month_multipliers: [1.0; 12],
-                max_value: 1.0,
-            }),
-            cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
-                weekday: cooling_weekday,
-                weekend: cooling_weekday,
-                month_multipliers: [1.0; 12],
-                max_value: 1.0,
-            }),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                    weekday: heating_weekday,
+                    weekend: heating_weekday,
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                }),
+                cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                    weekday: cooling_weekday,
+                    weekend: cooling_weekday,
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                }),
+                ..Default::default()
+            },
             ..crate::IdealHvacConfig::default()
         };
         let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
@@ -1721,18 +1727,21 @@ mod tests {
         let typed = crate::IdealHvacConfig {
             zone_id: Some(1),
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
-            heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
-                weekday: heating_weekday,
-                weekend: heating_weekday,
-                month_multipliers: [1.0; 12],
-                max_value: 1.0,
-            }),
-            cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
-                weekday: cooling_weekday,
-                weekend: cooling_weekday,
-                month_multipliers: [1.0; 12],
-                max_value: 1.0,
-            }),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                    weekday: heating_weekday,
+                    weekend: heating_weekday,
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                }),
+                cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                    weekday: cooling_weekday,
+                    weekend: cooling_weekday,
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                }),
+                ..Default::default()
+            },
             ..crate::IdealHvacConfig::default()
         };
         let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
@@ -1759,18 +1768,21 @@ mod tests {
 
         let typed = crate::IdealHvacConfig {
             zone_id: Some(1),
-            heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
-                weekday: heating_weekday,
-                weekend: heating_weekday,
-                month_multipliers: [1.0; 12],
-                max_value: 1.0,
-            }),
-            cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
-                weekday: cooling_weekday,
-                weekend: cooling_weekday,
-                month_multipliers: [1.0; 12],
-                max_value: 1.0,
-            }),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                    weekday: heating_weekday,
+                    weekend: heating_weekday,
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                }),
+                cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                    weekday: cooling_weekday,
+                    weekend: cooling_weekday,
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                }),
+                ..Default::default()
+            },
             ..crate::IdealHvacConfig::default()
         };
         let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
@@ -1994,8 +2006,11 @@ mod tests {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(26.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
             ..Default::default()
         });
@@ -2025,8 +2040,11 @@ mod tests {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             cooling_capacity_w: Some(8_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(24.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(24.0),
+                ..Default::default()
+            },
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
             ..Default::default()
         });
@@ -2057,8 +2075,11 @@ mod tests {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             cooling_capacity_w: Some(20_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(24.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(24.0),
+                ..Default::default()
+            },
             shr: Some(0.8),
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
             ..Default::default()
@@ -2095,8 +2116,11 @@ mod tests {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             cooling_capacity_w: Some(10_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(24.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(24.0),
+                ..Default::default()
+            },
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
             ..Default::default()
         });
@@ -2130,8 +2154,11 @@ mod tests {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
             cooling_capacity_w: Some(10_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(26.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
             rated_fan_power_w: Some(200.0),
             rated_eir: Some(1.0),
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
@@ -2196,8 +2223,11 @@ mod tests {
             zone_id: Some(1),
             heating_capacity_w: Some(12_000.0),
             cooling_capacity_w: Some(9_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(26.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
             ..Default::default()
         });
         let mut eq = IdealHvac::new(cfg.clone());
@@ -2239,8 +2269,11 @@ mod tests {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(26.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
             capacity_min_w: Some(1_000.0),
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
             ..Default::default()
@@ -2274,8 +2307,11 @@ mod tests {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(26.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
             capacity_min_w: Some(1_000.0),
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::Off),
             ..Default::default()
@@ -2311,8 +2347,11 @@ mod tests {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(26.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
             capacity_min_w: Some(1_000.0),
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::Off),
             ..Default::default()
@@ -2392,8 +2431,11 @@ mod tests {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(26.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
             ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
             ..Default::default()
         });
@@ -2461,8 +2503,11 @@ mod tests {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
             cooling_capacity_w: Some(10_000.0),
-            heating_setpoint_c: Some(20.0),
-            cooling_setpoint_c: Some(26.0),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(26.0),
+                ..Default::default()
+            },
             rated_fan_power_w: Some(200.0),
             rated_eir: Some(1.0),
             shr: Some(1.0),

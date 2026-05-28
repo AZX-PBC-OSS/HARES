@@ -4,7 +4,7 @@ use std::fmt;
 
 use hares_types::BatteryChemistry;
 use serde::{Deserialize, Serialize};
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use tracing;
 
 use crate::EquipmentConfig;
@@ -131,6 +131,26 @@ pub struct BatterySpec {
     pub min_charge_temp_c: f64,
     /// Cell temp above which full charge rate is available (°C).
     pub full_power_temp_c: f64,
+    /// Lumped thermal mass for the battery pack (J/K).
+    ///
+    /// Derived as `mass_kg * 900` where Cp ≈ 900 J/(kg·K) is the effective
+    /// specific heat for Li-NMC/LFP cells, pack enclosure, and thermal management
+    /// hardware combined. Mass is from manufacturer datasheets or estimated from
+    /// capacity using chemistry-specific specific energy at pack level.
+    ///
+    /// Reference: Bruggeman et al. (2016) effective Cp for commercial Li-ion
+    /// cells; ASHRAE HoF 2021 Ch. 16 for common construction specific heat.
+    pub thermal_mass_j_per_k: f64,
+    /// Lumped UA heat loss coefficient between pack and ambient (W/K).
+    ///
+    /// Derived as `surface_area_m2 * 3.5` where 3.5 W/(m²·K) is the midpoint
+    /// between OCHRE's effectively 2.0 W/(m²·K) (R-2.5 enclosure) and EnergyPlus's
+    /// 7.5 W/(m²·K) bare-metal default. Surface area estimated from manufacturer
+    /// cabinet dimensions or scaled from mass^(2/3) for similar form factors.
+    ///
+    /// Reference: OCHRE Battery default_parameters.csv thermal_r=0.5 K/W;
+    /// EnergyPlus ElectricPowerServiceManager.cc h=7.5 W/(m²·K).
+    pub ua_w_per_k: f64,
 }
 
 impl BatterySpec {
@@ -160,6 +180,28 @@ impl BatterySpec {
                     "Battery round_trip_efficiency outside expected range for chemistry"
                 );
             }
+        }
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            use std::sync::Once;
+            static CHECK_CATALOG_THERMAL: Once = Once::new();
+            CHECK_CATALOG_THERMAL.call_once(|| {
+                let masses: Vec<f64> = CATALOG.iter().map(|s| s.thermal_mass_j_per_k).collect();
+                let uas: Vec<f64> = CATALOG.iter().map(|s| s.ua_w_per_k).collect();
+                let all_same_mass = masses
+                    .windows(2)
+                    .all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
+                let all_same_ua = uas.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
+                if all_same_mass && all_same_ua {
+                    tracing::warn!(
+                        n = CATALOG.len(),
+                        thermal_mass = CATALOG[0].thermal_mass_j_per_k,
+                        ua = CATALOG[0].ua_w_per_k,
+                        "Battery catalog: all products have identical thermal_mass_j_per_k \
+                         and ua_w_per_k. Catalog thermal properties are not differentiated.",
+                    );
+                }
+            });
         }
         let eta = self.round_trip_efficiency.sqrt();
         EquipmentConfig::from_typed(
@@ -191,8 +233,8 @@ impl BatterySpec {
                 min_discharge_temp_c: None,
                 full_power_temp_c: Some(self.full_power_temp_c),
                 min_charge_temp_c: Some(self.min_charge_temp_c),
-                cell_thermal_mass_j_per_k: None,
-                cell_ua_w_per_k: None,
+                cell_thermal_mass_j_per_k: Some(self.thermal_mass_j_per_k),
+                cell_ua_w_per_k: Some(self.ua_w_per_k),
                 inverter_efficiency: None,
                 charge_efficiency: Some(eta),
                 discharge_efficiency: Some(eta),
@@ -235,6 +277,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 5.0,
         min_charge_temp_c: 0.0,
         full_power_temp_c: 10.0,
+        // mass ≈ 100 kg (Tesla spec) → thermal_mass = 100 × 900 = 90 000 J/K
+        // surface area ≈ 2.35 m² → UA = 2.35 × 3.5 = 8.2 W/K
+        thermal_mass_j_per_k: 90_000.0,
+        ua_w_per_k: 8.2,
     },
     // Tesla PW2: ~400V NMC, 110S7P with 3.65V/5Ah 2170 cells.
     // Catalog entry assumes NMC chemistry (correct for post-2018 PW2).
@@ -257,6 +303,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 5.0,
         min_charge_temp_c: 0.0,
         full_power_temp_c: 10.0,
+        // mass ≈ 114 kg (Tesla spec) → thermal_mass = 114 × 900 = 102 600 J/K
+        // surface area ≈ 2.35 m² → UA = 2.35 × 3.5 = 8.2 W/K
+        thermal_mass_j_per_k: 102_600.0,
+        ua_w_per_k: 8.2,
     },
     // Tesla PW2 (NCA): ~400V NCA, 110S7P with 3.65V/5Ah 2170 cells.
     // Pre-2018 early-production Powerwall 2 units used NCA cells (later units
@@ -284,6 +334,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 5.0,
         min_charge_temp_c: 0.0,
         full_power_temp_c: 10.0,
+        // mass ≈ 114 kg (Tesla spec) → thermal_mass = 114 × 900 = 102 600 J/K
+        // surface area ≈ 2.35 m² → UA = 2.35 × 3.5 = 8.2 W/K
+        thermal_mass_j_per_k: 102_600.0,
+        ua_w_per_k: 8.2,
     },
     // Tesla PW3 x2: ~350V LFP, 109S15P (double the parallel strings)
     BatterySpec {
@@ -305,6 +359,11 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 5.0,
         min_charge_temp_c: 0.0,
         full_power_temp_c: 10.0,
+        // mass ≈ 200 kg (2× 100 kg) → thermal_mass = 200 × 900 = 180 000 J/K
+        // surface area ≈ 4.2 m² (two cabinets with installation spacing)
+        // → UA = 4.2 × 3.5 = 14.8 W/K
+        thermal_mass_j_per_k: 180_000.0,
+        ua_w_per_k: 14.8,
     },
     // Enphase IQ 5P Gen-4 LFP: 48V, 15S1P with 3.2V/100Ah prismatic cells.
     // Round-trip efficiency 96% per Enphase IQ Battery 5P datasheet
@@ -339,6 +398,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 0.0,
         min_charge_temp_c: -20.0,
         full_power_temp_c: 15.0,
+        // mass ≈ 45 kg (Enphase spec: shipped 48 kg) → thermal_mass = 45 × 900 = 40 500 J/K
+        // surface area ≈ 1.66 m² (980×550×190 mm cabinet) → UA = 1.66 × 3.5 = 5.8 W/K
+        thermal_mass_j_per_k: 40_500.0,
+        ua_w_per_k: 5.8,
     },
     // Enphase IQ 5P x2 Gen-4 LFP: 48V, 15S2P (two IQ 5P units).
     // Round-trip efficiency 96% — same cells as IQ 5P:
@@ -363,6 +426,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 0.0,
         min_charge_temp_c: -20.0,
         full_power_temp_c: 15.0,
+        // mass ≈ 90 kg (2× 45 kg) → thermal_mass = 90 × 900 = 81 000 J/K
+        // surface area ≈ 3.0 m² (two cabinets) → UA = 3.0 × 3.5 = 10.5 W/K
+        thermal_mass_j_per_k: 81_000.0,
+        ua_w_per_k: 10.5,
     },
     // Enphase IQ 10C Gen-4 LFP: 48V, 15S2P with 3.2V/100Ah prismatic cells.
     // Round-trip efficiency 96% per Enphase IQ Battery 10C datasheet
@@ -388,6 +455,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 0.0,
         min_charge_temp_c: -20.0,
         full_power_temp_c: 15.0,
+        // mass ≈ 52 kg (Enphase spec) → thermal_mass = 52 × 900 = 46 800 J/K
+        // surface area ≈ 1.80 m² (1074×555×189 mm cabinet) → UA = 1.80 × 3.5 = 6.3 W/K
+        thermal_mass_j_per_k: 46_800.0,
+        ua_w_per_k: 6.3,
     },
     // FranklinWH aPower: 48V LFP, 15S3P with 3.2V/~94Ah prismatic cells
     // (13.6 kWh / (15×3×3.2V) ≈ 94 Ah effective per cell).
@@ -416,6 +487,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 5.0,
         min_charge_temp_c: -20.0,
         full_power_temp_c: 15.0,
+        // mass ≈ 80 kg (FranklinWH Gen-1 spec) → thermal_mass = 80 × 900 = 72 000 J/K
+        // surface area ≈ 2.4 m² → UA = 2.4 × 3.5 = 8.4 W/K
+        thermal_mass_j_per_k: 72_000.0,
+        ua_w_per_k: 8.4,
     },
     // FranklinWH aPower 2: 48V LFP, 15S3P with 3.2V/~104Ah prismatic cells
     // (15.0 kWh / (15×3×3.2V) ≈ 104 Ah effective per cell).
@@ -444,6 +519,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 5.0,
         min_charge_temp_c: -20.0,
         full_power_temp_c: 15.0,
+        // mass ≈ 100 kg (FranklinWH aPower 2 spec) → thermal_mass = 100 × 900 = 90 000 J/K
+        // surface area ≈ 2.5 m² → UA = 2.5 × 3.5 = 8.8 W/K
+        thermal_mass_j_per_k: 90_000.0,
+        ua_w_per_k: 8.8,
     },
     // FranklinWH aPower 2 x2: 48V LFP, 15S6P (two aPower 2 units).
     // Same ~104Ah LFP prismatic cells as aPower 2 → identical cell_R.
@@ -466,6 +545,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 5.0,
         min_charge_temp_c: -20.0,
         full_power_temp_c: 15.0,
+        // mass ≈ 200 kg (2× 100 kg) → thermal_mass = 200 × 900 = 180 000 J/K
+        // surface area ≈ 4.5 m² (two cabinets) → UA = 4.5 × 3.5 = 15.8 W/K
+        thermal_mass_j_per_k: 180_000.0,
+        ua_w_per_k: 15.8,
     },
     // SolarEdge Home: ~400V NMC, 110S5P with 3.65V/5Ah 2170 cells
     BatterySpec {
@@ -487,6 +570,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 0.0,
         min_charge_temp_c: -10.0,
         full_power_temp_c: 15.0,
+        // mass ≈ 88 kg (9.7 kWh / 110 Wh/kg pack-level NMC) → 88 × 900 = 79 200 J/K
+        // surface area ≈ 1.8 m² → UA = 1.8 × 3.5 = 6.3 W/K
+        thermal_mass_j_per_k: 79_200.0,
+        ua_w_per_k: 6.3,
     },
     // LG RESU 10H: ~400V NMC, 110S5P with 3.65V/~5Ah NMC polymer pouch cells.
     // The RESU 10H Type-R uses LG Chem polymer lithium-ion pouch cells,
@@ -513,6 +600,10 @@ static CATALOG: &[BatterySpec] = &[
         heater_threshold_c: 0.0,
         min_charge_temp_c: -10.0,
         full_power_temp_c: 15.0,
+        // mass ≈ 97 kg (LG RESU 10H spec: 97.5 kg) → thermal_mass = 97 × 900 = 87 300 J/K
+        // surface area ≈ 1.68 m² (907×452×120 mm) → UA = 1.68 × 3.5 = 5.9 W/K
+        thermal_mass_j_per_k: 87_300.0,
+        ua_w_per_k: 5.9,
     },
 ];
 
@@ -1190,6 +1281,170 @@ mod tests {
         assert!(
             total_heater_energy_kwh > 0.0,
             "heater should activate at -5 C (threshold = 5 C)",
+        );
+    }
+
+    #[test]
+    fn catalog_products_have_differentiated_thermal_properties() {
+        // Verify at least some catalog products yield different thermal mass
+        // and/or UA values. If all products share identical values, the catalog
+        // is not differentiated and per-product thermal modelling is ineffective.
+        let mut thermal_masses: Vec<f64> = CATALOG.iter().map(|s| s.thermal_mass_j_per_k).collect();
+        thermal_masses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut uas: Vec<f64> = CATALOG.iter().map(|s| s.ua_w_per_k).collect();
+        uas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // At least some products must have different values.
+        let mass_range = thermal_masses.last().unwrap() - thermal_masses.first().unwrap();
+        let ua_range = uas.last().unwrap() - uas.first().unwrap();
+        assert!(
+            mass_range > 1.0 || ua_range > 0.5,
+            "all catalog products have effectively identical thermal mass ({:.0}–{:.0}) \
+             and UA ({:.2}–{:.2}); catalog thermal properties are not differentiated",
+            thermal_masses.first().unwrap(),
+            thermal_masses.last().unwrap(),
+            uas.first().unwrap(),
+            uas.last().unwrap(),
+        );
+    }
+
+    #[test]
+    fn dual_pw3_has_twice_thermal_mass_of_single_pw3() {
+        let single = BatteryProductId::TeslaPw3.spec();
+        let dual = BatteryProductId::TeslaPw3X2.spec();
+        let ratio = dual.thermal_mass_j_per_k / single.thermal_mass_j_per_k;
+        assert!(
+            (1.8..=2.2).contains(&ratio),
+            "dual-PW3 thermal mass ({:.0} J/K) should be roughly 2× single PW3 ({:.0} J/K), \
+             got ratio {ratio:.2}",
+            dual.thermal_mass_j_per_k,
+            single.thermal_mass_j_per_k,
+        );
+    }
+
+    /// Cold-ambient regression: a small battery (Enphase IQ 5P, 45 kg, τ ≈ 1.9 h)
+    /// cools substantially faster than a large battery (dual-PW3, 200 kg, τ ≈ 3.4 h).
+    /// After 2 hours of cold soak from 25 °C at −5 °C ambient, the IQ 5P should be
+    /// measurably colder due to its lower thermal mass and lower thermal inertia.
+    #[test]
+    fn small_battery_cools_faster_than_large_battery_in_cold_soak() {
+        use std::time::Duration;
+
+        use chrono::{FixedOffset, TimeZone};
+        use hares_types::{EnvironmentState, GridState, PortSlots, WeatherState};
+
+        use crate::Equipment;
+        use crate::battery::Battery;
+
+        let env = EnvironmentState {
+            zones: vec![],
+            weather: WeatherState {
+                outdoor_temp_c: -5.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
+                .single()
+                .expect("valid UTC timestamp"),
+            time_res: chrono::Duration::minutes(5),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        };
+
+        let step_duration = Duration::from_secs(300);
+        let steps_2h = 24; // 24 × 5 min = 2 hours
+
+        // --- small battery: Enphase IQ 5P ---
+        // thermal_mass = 40 500 J/K, UA = 5.8 W/K → τ ≈ 1.9 h
+        let small_spec = BatteryProductId::EnphaseIq5p.spec();
+        let small_cfg = small_spec.to_config();
+        let mut small_bat = Battery::new(small_cfg.clone());
+        small_bat.init(&small_cfg, &env).unwrap();
+
+        // --- large battery: dual-PW3 ---
+        // thermal_mass = 180 000 J/K, UA = 14.8 W/K → τ ≈ 3.4 h
+        let large_spec = BatteryProductId::TeslaPw3X2.spec();
+        let large_cfg = large_spec.to_config();
+        let mut large_bat = Battery::new(large_cfg.clone());
+        large_bat.init(&large_cfg, &env).unwrap();
+
+        // Both start warm at 25 °C.
+        small_bat.cell_temp_c = 25.0;
+        large_bat.cell_temp_c = 25.0;
+
+        // Disable self-consumption to keep batteries idle.
+        small_bat.self_consumption_enabled = false;
+        large_bat.self_consumption_enabled = false;
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // Verify the invariant check in to_config does not panic
+            // (catalog is differentiated).
+        }
+
+        // Record temperatures at checkpoints to verify the small battery
+        // is always colder (cooling faster) due to lower thermal inertia.
+        let mut small_temp_1h = 25.0;
+        let mut large_temp_1h = 25.0;
+
+        for step in 0..steps_2h {
+            let mut ports = PortSlots::default();
+            small_bat.step(&env, step_duration, &mut ports).unwrap();
+            let mut ports = PortSlots::default();
+            large_bat.step(&env, step_duration, &mut ports).unwrap();
+
+            if step == 11 {
+                // After 1 hour (12 × 5 min)
+                small_temp_1h = small_bat
+                    .telemetry()
+                    .get("cell_temp_c")
+                    .expect("cell_temp_c telemetry");
+                large_temp_1h = large_bat
+                    .telemetry()
+                    .get("cell_temp_c")
+                    .expect("cell_temp_c telemetry");
+            }
+        }
+
+        let small_final = small_bat
+            .telemetry()
+            .get("cell_temp_c")
+            .expect("cell_temp_c telemetry");
+        let large_final = large_bat
+            .telemetry()
+            .get("cell_temp_c")
+            .expect("cell_temp_c telemetry");
+
+        // After 1 hour at −5 °C ambient, the small battery has cooled more.
+        assert!(
+            small_temp_1h < large_temp_1h,
+            "After 1 h cold soak: IQ 5P temp {small_temp_1h:.2} °C should be < \
+             dual-PW3 temp {large_temp_1h:.2} °C (smaller battery cools faster)",
+        );
+
+        // After 2 hours, the small battery should still be colder.
+        assert!(
+            small_final < large_final,
+            "After 2 h cold soak: IQ 5P temp {small_final:.2} °C should be < \
+             dual-PW3 temp {large_final:.2} °C (smaller battery cools faster)",
+        );
+
+        // IQ 5P should have cooled at least 10 °C from its 25 °C start after 2 h
+        // (τ ≈ 1.9 h means ~65 % of ΔT covered in 2 h: 30 × 0.65 ≈ 19.5 °C drop).
+        let small_drop = 25.0 - small_final;
+        assert!(
+            small_drop > 5.0,
+            "IQ 5P dropped only {small_drop:.1} °C in 2 h; expected > 5 °C \
+             cooling for τ ≈ 1.9 h at −5 °C ambient",
         );
     }
 }

@@ -9,6 +9,18 @@ pub use super::core_config::DuctConfig;
 use super::core_config::default_one;
 use super::core_config::equipment_type_name;
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HvacSetpointConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_source: Option<ScheduleSourceConfig>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GasFurnaceConfig {
@@ -28,14 +40,9 @@ pub struct GasFurnaceConfig {
     /// Per-stage energy input ratios (EIR = 1/AFUE per stage). Overrides `afue` when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_eirs: Option<Vec<f64>>,
-    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
-    /// this seeds the initial setpoint before the first schedule sample.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_c: Option<f64>,
-    /// Time-varying heating setpoint schedule (daily profile or external column).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
-    #[serde(flatten)]
+    #[serde(default)]
+    pub setpoint: HvacSetpointConfig,
+    #[serde(default)]
     pub ducts: DuctConfig,
 }
 
@@ -56,8 +63,7 @@ impl Default for GasFurnaceConfig {
             number_of_speeds: 1,
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig::default(),
         }
     }
@@ -77,14 +83,8 @@ pub struct ElectricFurnaceConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
-    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
-    /// this seeds the initial setpoint before the first schedule sample.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_c: Option<f64>,
-    /// Time-varying heating setpoint schedule (daily profile or external column).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
-    #[serde(flatten)]
+    pub setpoint: HvacSetpointConfig,
+    #[serde(default)]
     pub ducts: DuctConfig,
 }
 
@@ -103,8 +103,7 @@ impl Default for ElectricFurnaceConfig {
             eir: 1.0,
             fan_power_w: None,
             number_of_speeds: 1,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
             ducts: DuctConfig::default(),
         }
     }
@@ -140,13 +139,8 @@ pub struct GasBoilerConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
-    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
-    /// this seeds the initial setpoint before the first schedule sample.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_c: Option<f64>,
-    /// Time-varying heating setpoint schedule (daily profile or external column).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
+    #[serde(default)]
+    pub setpoint: HvacSetpointConfig,
     /// Condensing boiler mode. Inferred from AFUE > 0.90 (OCHRE convention).
     /// Condensing boilers use a 6-coefficient efficiency curve and lower return
     /// water temperature (~65 °C / 150 °F); non-condensing boilers use 10
@@ -175,8 +169,7 @@ impl Default for GasBoilerConfig {
             fluid_type: default_fluid_type(),
             fan_power_w: None,
             number_of_speeds: 1,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
             condensing: false,
         }
     }
@@ -213,13 +206,8 @@ pub struct ElectricBoilerConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
-    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
-    /// this seeds the initial setpoint before the first schedule sample.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_c: Option<f64>,
-    /// Time-varying heating setpoint schedule (daily profile or external column).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
+    #[serde(default)]
+    pub setpoint: HvacSetpointConfig,
 }
 
 impl EquipmentTypedConfig for ElectricBoilerConfig {
@@ -241,8 +229,7 @@ impl Default for ElectricBoilerConfig {
             fluid_type: default_fluid_type(),
             fan_power_w: None,
             number_of_speeds: 1,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
         }
     }
 }
@@ -257,13 +244,8 @@ pub struct ElectricBaseboardConfig {
     /// Electric input ratio [W/W] = electric input power divided by delivered
     /// thermal output. Unity is ideal resistive conversion.
     pub eir: f64,
-    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
-    /// this seeds the initial setpoint before the first schedule sample.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_c: Option<f64>,
-    /// Time-varying heating setpoint schedule (daily profile or external column).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
+    #[serde(default)]
+    pub setpoint: HvacSetpointConfig,
 }
 
 impl EquipmentTypedConfig for ElectricBaseboardConfig {
@@ -279,8 +261,7 @@ impl Default for ElectricBaseboardConfig {
             zone_id: None,
             capacity_w: 0.0,
             eir: 1.0,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
         }
     }
 }
@@ -290,20 +271,14 @@ impl Default for ElectricBaseboardConfig {
 pub struct IdealHvacConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_c: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling_setpoint_c: Option<f64>,
+    #[serde(default)]
+    pub setpoint: HvacSetpointConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadband_c: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_speeds: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ideal_capacity_mode: Option<IdealCapacityModeConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling_setpoint_source: Option<ScheduleSourceConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heating_capacity_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -448,31 +423,46 @@ mod tests {
         let gf = GasFurnaceConfig {
             capacity_w: 12_000.0,
             afue: 0.92,
-            heating_setpoint_c: Some(setpoint),
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: Some(setpoint),
+                ..Default::default()
+            },
             ..GasFurnaceConfig::default()
         };
         let ef = ElectricFurnaceConfig {
             capacity_w: 8_000.0,
             eir: 1.0,
-            heating_setpoint_c: Some(setpoint),
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: Some(setpoint),
+                ..Default::default()
+            },
             ..ElectricFurnaceConfig::default()
         };
         let gb = GasBoilerConfig {
             capacity_w: 15_000.0,
             afue: 0.88,
-            heating_setpoint_c: Some(setpoint),
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: Some(setpoint),
+                ..Default::default()
+            },
             ..GasBoilerConfig::default()
         };
         let eb = ElectricBoilerConfig {
             capacity_w: 10_000.0,
             eir: 1.0,
-            heating_setpoint_c: Some(setpoint),
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: Some(setpoint),
+                ..Default::default()
+            },
             ..ElectricBoilerConfig::default()
         };
         let bb = ElectricBaseboardConfig {
             capacity_w: 5_000.0,
             eir: 1.0,
-            heating_setpoint_c: Some(setpoint),
+            setpoint: HvacSetpointConfig {
+                heating_setpoint_c: Some(setpoint),
+                ..Default::default()
+            },
             ..ElectricBaseboardConfig::default()
         };
 
@@ -482,12 +472,13 @@ mod tests {
         {
             let value = serde_json::to_value(&config).expect("serialize");
             let field = value
-                .get("heating_setpoint_c")
+                .get("setpoint")
+                .and_then(|s| s.get("heating_setpoint_c"))
                 .and_then(serde_json::Value::as_f64)
-                .expect("heating_setpoint_c must appear in serialized form");
+                .expect("setpoint.heating_setpoint_c must appear in serialized form");
             assert!(
                 (field - expected_setpoint).abs() < 1e-9,
-                "heating_setpoint_c must round-trip for {}: got {field}, expected {expected_setpoint}",
+                "setpoint.heating_setpoint_c must round-trip for {}: got {field}, expected {expected_setpoint}",
                 T::equipment_type_name()
             );
             let recovered: T = serde_json::from_value(value.clone()).expect("deserialize");

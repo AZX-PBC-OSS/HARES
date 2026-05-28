@@ -24,22 +24,6 @@ const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 const DEFAULT_EF: f64 = 0.9;
 /// Default rated thermal capacity (W). OCHRE uses 20 kW for tankless.
 const DEFAULT_MAX_THERMAL_POWER_W: f64 = 20_000.0;
-/// OCHRE/ANSI RESNET 301 parasitic electric draw for gas tankless controller (W).
-/// Formula: 5.0 + 60.0 * on_time_frac; default 7.38 W = 3 bedrooms at typical usage.
-const DEFAULT_GAS_PARASITIC_POWER_W: f64 = 7.38;
-
-/// OCHRE/ANSI RESNET 301 on-time fractions indexed by bedroom count (1–5).
-const ON_TIME_FRACS: [f64; 5] = [0.0269, 0.0333, 0.0397, 0.0462, 0.0529];
-
-/// Compute gas tankless parasitic power (W) from bedroom count.
-///
-/// Formula: `5 + 60 * on_time_frac` where `on_time_frac` is from the RESNET 301 table.
-/// Bedroom count is rounded to nearest integer and clamped to [1, 5].
-fn gas_parasitic_from_bedrooms(n_bedrooms: f64) -> f64 {
-    let idx = (n_bedrooms.round() as usize).clamp(1, 5) - 1;
-    5.0 + 60.0 * ON_TIME_FRACS[idx]
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TanklessState {
     setpoint_c: f64,
@@ -127,7 +111,7 @@ impl TanklessWH {
             efficiency_factor: DEFAULT_EF,
             rated_thermal_power_w: DEFAULT_MAX_THERMAL_POWER_W,
             power_limit_w: None,
-            parasitic_power_w: DEFAULT_GAS_PARASITIC_POWER_W,
+            parasitic_power_w: 7.38,
             duty_cycle: 1.0,
             mode_override: None,
             inlet_temp_c: 10.0,
@@ -212,15 +196,7 @@ impl TanklessWH {
             .unwrap_or(DEFAULT_MAX_THERMAL_POWER_W)
             .max(0.0);
         self.power_limit_w = None;
-        self.parasitic_power_w = if let Some(explicit) = c.parasitic_power_w {
-            explicit.max(0.0)
-        } else if self.fuel_type == FuelType::Gas {
-            c.number_of_bedrooms
-                .map(gas_parasitic_from_bedrooms)
-                .unwrap_or(DEFAULT_GAS_PARASITIC_POWER_W)
-        } else {
-            0.0
-        };
+        self.parasitic_power_w = c.parasitic_power_w.unwrap_or(0.0).max(0.0);
         self.duty_cycle = 1.0;
         self.mode_override = None;
         self.inlet_temp_c = if let Some(inlet_temp_c) = c.inlet_temp_c {
@@ -620,7 +596,7 @@ mod tests {
 
     use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 
-    use super::{DEFAULT_GAS_PARASITIC_POWER_W, TanklessWH};
+    use super::TanklessWH;
     use crate::water_heater::DHW_DEMAND_LOOP;
     use crate::{Equipment, EquipmentConfig, TanklessWaterHeaterConfig};
 
@@ -686,8 +662,7 @@ mod tests {
             uniform_energy_factor: None,
             heating_capacity_w: Some(30_000.0),
             setpoint_c: Some(50.0),
-            parasitic_power_w: None,
-            number_of_bedrooms: None,
+            parasitic_power_w: Some(7.38),
             performance_adjustment: None,
             inlet_temp_c: Some(20.0),
             draw_flow_rate_kg_s: Some(0.2),
@@ -1288,7 +1263,7 @@ mod tests {
             "gas fuel port must be zero when burner is off"
         );
         // Parasitic electric draw must be non-zero even when off.
-        let parasitic_kw = DEFAULT_GAS_PARASITIC_POWER_W / 1_000.0;
+        let parasitic_kw = 7.38 / 1_000.0;
         assert!(
             (ports.electrical.load_power_kw - parasitic_kw).abs() < 1e-9,
             "gas standby parasitic electric must be {parasitic_kw:.6} kW, got {}",
@@ -1311,7 +1286,7 @@ mod tests {
         );
 
         // Electrical port must include at least the parasitic draw.
-        let parasitic_kw = DEFAULT_GAS_PARASITIC_POWER_W / 1_000.0;
+        let parasitic_kw = 7.38 / 1_000.0;
         assert!(
             ports.electrical.load_power_kw >= parasitic_kw - 1e-9,
             "gas electrical draw must include at least parasitic_power_w ({parasitic_kw:.6} kW), got {}",
@@ -1574,47 +1549,12 @@ mod tests {
         );
     }
 
-    /// Gas parasitic power is computed from bedroom count using the OCHRE/RESNET 301 formula
-    /// `5 + 60 * on_time_frac`.  Values for bedrooms 1–5 must match the published table.
+    /// Parasitic power is passed through directly from config.
     #[test]
-    fn gas_parasitic_computed_from_bedroom_count() {
-        // (bedrooms, expected_parasitic_w) from OCHRE on_time_frac table.
-        let cases = [
-            (1, 5.0 + 60.0 * 0.0269_f64),
-            (2, 5.0 + 60.0 * 0.0333_f64),
-            (3, 5.0 + 60.0 * 0.0397_f64),
-            (4, 5.0 + 60.0 * 0.0462_f64),
-            (5, 5.0 + 60.0 * 0.0529_f64),
-        ];
-        for (beds, expected_w) in cases {
-            let mut typed = typed_config();
-            typed.fuel_type = FuelType::Gas;
-            typed.parasitic_power_w = None;
-            typed.number_of_bedrooms = Some(beds as f64);
-            typed.draw_flow_rate_kg_s = Some(0.0);
-            let cfg = config_from_typed(typed);
-
-            let mut eq = TanklessWH::new(cfg.clone());
-            eq.init(&cfg, &env()).unwrap();
-
-            // With no draw, the burner is off; only parasitic electric should appear.
-            let ports = step_once(&mut eq);
-
-            assert!(
-                (ports.electrical.load_power_kw - expected_w / 1_000.0).abs() < 1e-9,
-                "parasitic for {beds} bedrooms must be {expected_w:.3} W, got {} W",
-                ports.electrical.load_power_kw * 1_000.0
-            );
-        }
-    }
-
-    /// When `parasitic_power_w` is set explicitly it overrides `number_of_bedrooms`.
-    #[test]
-    fn explicit_parasitic_overrides_bedroom_count() {
+    fn gas_parasitic_power_passed_through() {
         let mut typed = typed_config();
         typed.fuel_type = FuelType::Gas;
         typed.parasitic_power_w = Some(10.0);
-        typed.number_of_bedrooms = Some(3.0);
         typed.draw_flow_rate_kg_s = Some(0.0);
         let cfg = config_from_typed(typed);
 
@@ -1622,10 +1562,9 @@ mod tests {
         eq.init(&cfg, &env()).unwrap();
 
         let ports = step_once(&mut eq);
-
         assert!(
             (ports.electrical.load_power_kw - 10.0 / 1_000.0).abs() < 1e-9,
-            "explicit parasitic_power_w=10W must override bedroom count, got {} W",
+            "parasitic power must be 10W, got {} W",
             ports.electrical.load_power_kw * 1_000.0
         );
     }

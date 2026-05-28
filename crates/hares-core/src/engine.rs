@@ -306,7 +306,6 @@ fn emit_dwelling_profiling_summary(summary: &DwellingProfilingSummary) {
 
 fn validate_input_paths(config: &DwellingConfig) -> Result<(), HaresError> {
     validate_path_exists(&config.hpxml_path, "hpxml_path")?;
-    validate_path_exists(&config.schedule_path, "schedule_path")?;
     validate_path_exists(&config.weather_path, "weather_path")?;
     Ok(())
 }

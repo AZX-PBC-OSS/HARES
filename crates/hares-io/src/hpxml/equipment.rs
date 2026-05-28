@@ -6,6 +6,8 @@ use hares_equipment::{EquipmentConfig, EquipmentTypedConfig};
 use hares_types::FuelType;
 
 use super::HpxmlError;
+use super::data_patches::HpxmlDataPatches;
+
 use super::building::Building;
 
 use crate::defaults::{DefaultsStore, ZipParameters};
@@ -44,12 +46,13 @@ pub fn resolve_equipment(
     building: &Building,
     defaults: &DefaultsStore,
     overrides: &Value,
+    data_patches: Option<&HpxmlDataPatches>,
 ) -> std::result::Result<Vec<EquipmentSpec>, HpxmlError> {
     let mut specs = Vec::new();
     let details = &building.details_xml;
 
     resolve_hvac(building, defaults, &mut specs)?;
-    resolve_water_heaters(details, defaults, &mut specs)?;
+    resolve_water_heaters(details, defaults, &mut specs, data_patches)?;
     resolve_pv(details, defaults, &mut specs)?;
     resolve_batteries(details, defaults, &mut specs)?;
     resolve_ev(details, defaults, &mut specs)?;
@@ -354,7 +357,7 @@ mod tests {
 "#;
 
         let building = parse_building(xml).expect("building should parse");
-        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         assert!(resolved.iter().any(|s| s.name == "ASHP Heater"));
@@ -387,7 +390,7 @@ mod tests {
 "#;
 
         let building = parse_building(xml).expect("building should parse");
-        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         assert!(resolved.iter().any(|s| s.name == "MSHP Heater"));
@@ -435,7 +438,7 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -457,7 +460,7 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -479,7 +482,7 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -503,7 +506,7 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
         let ac = specs
             .iter()
             .find(|s| s.name == "Air Conditioner")
@@ -522,7 +525,7 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
         let ac = specs
             .iter()
             .find(|s| s.name == "Air Conditioner")
@@ -541,7 +544,7 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
         let ac = specs
             .iter()
             .find(|s| s.name == "Air Conditioner")
@@ -563,7 +566,7 @@ mod tests {
         );
         let building = parse_building(&xml).expect("should parse");
         let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
+            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -616,7 +619,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let wh = specs
             .iter()
@@ -652,7 +655,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let wh = specs
             .iter()
@@ -687,7 +690,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let wh = specs
             .iter()
@@ -720,7 +723,7 @@ mod tests {
         </Batteries>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let battery = specs
             .iter()
@@ -765,7 +768,7 @@ mod tests {
         </Batteries>"#
         ));
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let battery = specs
             .iter()
@@ -803,7 +806,7 @@ mod tests {
         </ElectricVehicles>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let ev = specs
             .iter()
@@ -860,7 +863,7 @@ mod tests {
         </Photovoltaics>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let pv = specs
             .iter()
@@ -896,7 +899,7 @@ mod tests {
         </Photovoltaics>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let err = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let err = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect_err("non-fixed tracking should be rejected");
 
         let msg = match err {
@@ -922,7 +925,7 @@ mod tests {
         </Generators></extension>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let generator = specs
             .iter()
@@ -959,7 +962,7 @@ mod tests {
         </VentilationFans></MechanicalVentilation>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let fan = specs
             .iter()
@@ -1003,7 +1006,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let wh = specs
             .iter()
@@ -1084,7 +1087,7 @@ mod tests {
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let furnace = specs
             .iter()
@@ -1115,7 +1118,7 @@ mod tests {
             </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         let heater = specs
@@ -1147,7 +1150,7 @@ mod tests {
             </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         let heater = specs
@@ -1188,7 +1191,7 @@ mod tests {
     fn clothes_washer_gain_fractions_match_ochre() {
         let xml = minimal_appliance_xml("<ClothesWasher />");
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let cw = find_spec(&specs, "Clothes Washer");
         let sens = cw.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = cw.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1200,7 +1203,7 @@ mod tests {
     fn dishwasher_gain_fractions_match_ochre() {
         let xml = minimal_appliance_xml("<Dishwasher />");
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dw = find_spec(&specs, "Dishwasher");
         let sens = dw.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dw.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1214,7 +1217,7 @@ mod tests {
             "<ClothesDryer><FuelType>electricity</FuelType><Vented>true</Vented></ClothesDryer>",
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1232,7 +1235,7 @@ mod tests {
             "<ClothesDryer><FuelType>electricity</FuelType><Vented>false</Vented></ClothesDryer>",
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1247,7 +1250,7 @@ mod tests {
             "<ClothesDryer><FuelType>natural gas</FuelType><Vented>true</Vented></ClothesDryer>",
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1265,7 +1268,7 @@ mod tests {
             "<ClothesDryer><FuelType>natural gas</FuelType><Vented>false</Vented></ClothesDryer>",
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1279,7 +1282,7 @@ mod tests {
         let xml =
             minimal_appliance_xml("<ClothesDryer><FuelType>electricity</FuelType></ClothesDryer>");
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         // Defaults to vented (frac_lost=0.85) → sens=0.135
@@ -1300,7 +1303,7 @@ mod tests {
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let furnace = specs
             .iter()
@@ -1325,7 +1328,7 @@ mod tests {
             </HVACControl>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         let rac = specs
@@ -1396,7 +1399,7 @@ mod tests {
             .expect("building cooling weekday setpoints");
 
         // Path 2: setpoints parsed by resolve_equipment → resolve_hvac → parse_hvac_setpoint_params
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let furnace = specs
             .iter()
@@ -1457,7 +1460,7 @@ mod tests {
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let spec = specs
             .iter()
@@ -1504,7 +1507,7 @@ mod tests {
             </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let spec = specs
             .iter()
@@ -1550,7 +1553,7 @@ mod tests {
             </Dehumidifier>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let spec = specs
             .iter()
@@ -1604,7 +1607,7 @@ mod tests {
         </extension>"#
         ));
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
         let generator = specs
             .iter()
@@ -1665,7 +1668,7 @@ mod tests {
 </HPXML>
 "#;
         let building = parse_building(xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         let heater = specs
@@ -1730,7 +1733,7 @@ mod tests {
 </HPXML>
 "#;
         let building = parse_building(xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment must not error when HeatingCapacity17F is absent");
 
         let heater = specs
@@ -1762,7 +1765,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("ground-to-air must succeed with GSHP model");
         let heater = specs
             .iter()
@@ -1786,7 +1789,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("water-loop-to-air must resolve to WSHP equipment");
         let heater = specs
             .iter()
@@ -1810,7 +1813,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("water-to-air must resolve to WSHP equipment");
         let heater = specs
             .iter()
@@ -1834,7 +1837,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("xml parses");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("air-to-air must succeed");
         let heater = specs
             .iter()
@@ -1892,7 +1895,7 @@ mod tests {
             </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         let boiler = specs
@@ -1956,7 +1959,7 @@ mod tests {
             </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         let tank_cfg: hares_equipment::IndirectTankConfig = specs
@@ -1989,7 +1992,7 @@ mod tests {
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         let boiler_cfg: hares_equipment::GasBoilerConfig = specs
@@ -2033,7 +2036,7 @@ mod tests {
             </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
             .expect("resolve_equipment");
 
         let boiler_cfg: hares_equipment::ElectricBoilerConfig = specs

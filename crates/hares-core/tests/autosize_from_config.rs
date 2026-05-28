@@ -196,6 +196,7 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
         bldg_id: 42,
         initialization_duration: None,
         resample_overrides: None,
+        patches: None,
     };
 
     let dwelling = Dwelling::from_config(config).expect(

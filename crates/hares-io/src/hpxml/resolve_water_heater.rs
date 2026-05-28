@@ -9,6 +9,7 @@ use hares_equipment::{
 use hares_types::{FuelType, normalize_ascii};
 
 use super::building::XmlNode;
+use super::data_patches::HpxmlDataPatches;
 use super::equipment::EquipmentSpec;
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
 use super::xml_helpers::{
@@ -19,13 +20,38 @@ use hares_physics::units as conv;
 use crate::defaults::DefaultsStore;
 use crate::draw_profile::{DistributionSystem, FixtureEfficiency, combined_daily_hot_water_l};
 
+/// ANSI/RESNET 301 on-time fractions for gas tankless parasitic power, indexed by 1–5 bedrooms.
+const TANKLESS_ON_TIME_FRACS: [f64; 5] = [0.0269, 0.0333, 0.0397, 0.0462, 0.0529];
+
+/// Compute gas tankless parasitic power (W) from bedroom count.
+///
+/// Formula: `5 + 60 * on_time_frac` where `on_time_frac` is from the RESNET 301 table.
+/// Bedroom count rounded to nearest integer, clamped to [1, 5].
+fn tankless_parasitic_power_w(n_bedrooms: f64) -> f64 {
+    let idx = (n_bedrooms.round() as usize).clamp(1, 5) - 1;
+    5.0 + 60.0 * TANKLESS_ON_TIME_FRACS[idx]
+}
+
+/// Resolve a bedroom count, trying multiple sources in priority order:
+/// 1. The provided `n_bedrooms` (from HPXML)
+/// 2. The `data_patches.number_of_bedrooms` field
+/// 3. Default of 2.0 (RESNET 301 implicit)
+fn resolve_bedroom_count(
+    n_bedrooms: Option<f64>,
+    data_patches: Option<&HpxmlDataPatches>,
+) -> f64 {
+    n_bedrooms
+        .or_else(|| data_patches.and_then(|p| p.number_of_bedrooms))
+        .unwrap_or(2.0)
+}
+
 pub(super) fn resolve_water_heaters(
     details: &XmlNode,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
+    data_patches: Option<&HpxmlDataPatches>,
 ) -> std::result::Result<(), super::HpxmlError> {
-    // Shared draw parameters parsed once from the WaterHeating section.
-    let (avg_water_draw_l_per_day, n_bedrooms) = parse_avg_water_draw_and_bedrooms(details);
+    let (avg_water_draw_l_per_day, n_bedrooms) = parse_avg_water_draw_and_bedrooms(details, data_patches);
 
     for wh in descendants_named(details, "WaterHeatingSystem") {
         let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();
@@ -180,14 +206,14 @@ pub(super) fn resolve_water_heaters(
                     uniform_energy_factor,
                     heating_capacity_w,
                     setpoint_c,
-                    parasitic_power_w: None,
+                    parasitic_power_w: (fuel == FuelType::Gas)
+                        .then(|| tankless_parasitic_power_w(n_bedrooms.expect("n_bedrooms always Some; parse_avg_water_draw_and_bedrooms resolves via HPXML/data_patches/default"))),
                     performance_adjustment: Some(perf_adj),
                     inlet_temp_c: None,
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
                     avg_water_draw_l_per_day,
-                    number_of_bedrooms: n_bedrooms,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -349,8 +375,10 @@ pub(super) fn resolve_water_heaters(
 /// and `<HotWaterDistribution>` to compute the OCHRE/ANSI-RESNET 301 draw estimate.
 ///
 /// Returns `(None, None)` when bedroom count is absent (required for both outputs).
-fn parse_avg_water_draw_and_bedrooms(details: &XmlNode) -> (Option<f64>, Option<f64>) {
-    // Bedroom count is required; without it the formula cannot be evaluated.
+fn parse_avg_water_draw_and_bedrooms(
+    details: &XmlNode,
+    data_patches: Option<&HpxmlDataPatches>,
+) -> (Option<f64>, Option<f64>) {
     let n_bedrooms_raw = match details
         .path(&[
             "BuildingSummary",
@@ -360,7 +388,7 @@ fn parse_avg_water_draw_and_bedrooms(details: &XmlNode) -> (Option<f64>, Option<
         .and_then(|n| n.text.trim().parse::<f64>().ok())
     {
         Some(v) => v,
-        None => return (None, None),
+        None => resolve_bedroom_count(None, data_patches),
     };
 
     // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797).
@@ -831,7 +859,7 @@ mod tests {
             .expect("building details must exist");
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let spec = specs
@@ -854,6 +882,374 @@ mod tests {
         );
         assert!(cfg.draw_flow_rate_source.is_none());
         assert!(cfg.mains_temp_c_source.is_none());
+    }
+
+    #[test]
+    fn gas_tankless_parasitic_power_computed_from_hpxml_bedrooms() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>4</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.91</EnergyFactor>
+                      <HeatingCapacity>45000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+            .expect("water heaters must resolve");
+
+        let cfg: TanklessWaterHeaterConfig = specs
+            .iter()
+            .find(|s| s.name.contains("Tankless"))
+            .expect("tankless spec must be emitted")
+            .typed_config
+            .as_ref()
+            .expect("typed config")
+            .typed()
+            .expect("tankless config");
+
+        let expected_w = 5.0 + 60.0 * 0.0462_f64;
+        assert_eq!(
+            cfg.parasitic_power_w,
+            Some(expected_w),
+            "gas tankless parasitic for 4 bedrooms must be {expected_w} W"
+        );
+    }
+
+    #[test]
+    fn gas_tankless_parasitic_power_falls_back_to_data_patches() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.91</EnergyFactor>
+                      <HeatingCapacity>45000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut patches = HpxmlDataPatches::default();
+        patches.number_of_bedrooms = Some(5.0);
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, Some(&patches))
+            .expect("water heaters must resolve");
+
+        let cfg: TanklessWaterHeaterConfig = specs
+            .iter()
+            .find(|s| s.name.contains("Tankless"))
+            .expect("tankless spec must be emitted")
+            .typed_config
+            .as_ref()
+            .expect("typed config")
+            .typed()
+            .expect("tankless config");
+
+        let expected_w = 5.0 + 60.0 * 0.0529_f64;
+        assert_eq!(
+            cfg.parasitic_power_w,
+            Some(expected_w),
+            "gas tankless parasitic for 5 bedrooms from patches must be {expected_w} W"
+        );
+    }
+
+    #[test]
+    fn gas_tankless_parasitic_power_defaults_to_two_bedrooms() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.91</EnergyFactor>
+                      <HeatingCapacity>45000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+            .expect("water heaters must resolve");
+
+        let cfg: TanklessWaterHeaterConfig = specs
+            .iter()
+            .find(|s| s.name.contains("Tankless"))
+            .expect("tankless spec must be emitted")
+            .typed_config
+            .as_ref()
+            .expect("typed config")
+            .typed()
+            .expect("tankless config");
+
+        let expected_w = 5.0 + 60.0 * 0.0333_f64;
+        assert_eq!(
+            cfg.parasitic_power_w,
+            Some(expected_w),
+            "gas tankless parasitic default (2 bedrooms) must be {expected_w} W"
+        );
+    }
+
+    #[test]
+    fn electric_tankless_parasitic_power_is_none() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>electricity</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.91</EnergyFactor>
+                      <HeatingCapacity>45000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+            .expect("water heaters must resolve");
+
+        let cfg: TanklessWaterHeaterConfig = specs
+            .iter()
+            .find(|s| s.name.contains("Tankless"))
+            .expect("tankless spec must be emitted")
+            .typed_config
+            .as_ref()
+            .expect("typed config")
+            .typed()
+            .expect("tankless config");
+
+        assert!(
+            cfg.parasitic_power_w.is_none(),
+            "electric tankless must not have parasitic_power_w"
+        );
+    }
+
+    #[test]
+    fn hpxml_bedrooms_take_priority_over_data_patches() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>4</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.91</EnergyFactor>
+                      <HeatingCapacity>45000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut patches = HpxmlDataPatches::default();
+        patches.number_of_bedrooms = Some(1.0);
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, Some(&patches))
+            .expect("water heaters must resolve");
+
+        let cfg: TanklessWaterHeaterConfig = specs
+            .iter()
+            .find(|s| s.name.contains("Tankless"))
+            .expect("tankless spec must be emitted")
+            .typed_config
+            .as_ref()
+            .expect("typed config")
+            .typed()
+            .expect("tankless config");
+
+        let expected_w = 5.0 + 60.0 * 0.0462_f64;
+        assert_eq!(
+            cfg.parasitic_power_w,
+            Some(expected_w),
+            "HPXML bedrooms=4 must beat patches bedrooms=1; expected {expected_w} W for 4 beds"
+        );
+    }
+
+    #[test]
+    fn fractional_bedrooms_rounded_to_nearest_integer() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3.7</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.91</EnergyFactor>
+                      <HeatingCapacity>45000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+            .expect("water heaters must resolve");
+
+        let cfg: TanklessWaterHeaterConfig = specs
+            .iter()
+            .find(|s| s.name.contains("Tankless"))
+            .expect("tankless spec must be emitted")
+            .typed_config
+            .as_ref()
+            .expect("typed config")
+            .typed()
+            .expect("tankless config");
+
+        let expected_w = 5.0 + 60.0 * 0.0462_f64;
+        assert_eq!(
+            cfg.parasitic_power_w,
+            Some(expected_w),
+            "fractional 3.7 bedrooms must round to 4; expected {expected_w} W"
+        );
     }
 
     #[test]
@@ -926,7 +1322,7 @@ mod tests {
             .expect("building details must exist");
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let spec = specs
@@ -979,7 +1375,7 @@ mod tests {
             .expect("building details must exist");
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let spec = specs
@@ -1036,7 +1432,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("building details must exist");
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1157,7 +1553,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("building details must exist");
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1214,7 +1610,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("building details must exist");
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1280,7 +1676,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("building details must exist");
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1331,7 +1727,7 @@ mod tests {
             .path(&["Building", "BuildingDetails"])
             .expect("building details must exist");
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1404,7 +1800,7 @@ mod tests {
             .expect("building details must exist");
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
             .expect("combi boiler with storage tank must resolve successfully");
 
         let spec = specs

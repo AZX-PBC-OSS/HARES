@@ -195,7 +195,7 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
                 continue;
             }
         };
-        let equipment = match resolve_equipment(&building, &DefaultsStore::empty(), &json!({})) {
+        let equipment = match resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None) {
             Ok(specs) => specs,
             Err(err) => {
                 failures.push(format!(
@@ -321,6 +321,7 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
             .and_then(|seconds| u64::try_from(seconds).ok())
             .map(StdDuration::from_secs),
         resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
+        patches: None,
     };
 
     let engine = SimulationEngine::new();

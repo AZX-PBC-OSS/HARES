@@ -13,7 +13,7 @@ use chrono::{FixedOffset, TimeZone};
 use hares_equipment::{
     CentralAirConditionerConfig, DefrostConfig, DuctConfig, ElectricBaseboardConfig,
     EquipmentConfig, EquipmentRegistry, GasFurnaceConfig, HeatPumpCommonConfig,
-    HeatPumpCoolerConfig, HeatPumpHeaterConfig, IdealHvacConfig,
+    HeatPumpCoolerConfig, HeatPumpHeaterConfig, HvacSetpointConfig, IdealHvacConfig,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, HumidityAccumulator, OperatingMode,
@@ -114,11 +114,12 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                 stage_shrs: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
-                cooling_setpoint_c: get("cooling_setpoint_c"),
-                heating_setpoint_c: get("heating_setpoint_c"),
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: get("cooling_setpoint_c"),
+                    heating_setpoint_c: get("heating_setpoint_c"),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: None,
                 fraction_load_served: None,
                 crankcase_heater_kw: None,
@@ -164,11 +165,12 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                     fan_power_w: Some(0.0),
                     fan_power_w_per_cfm: None,
                     airflow_m3_s_per_w: None,
-                    heating_setpoint_c: get("heating_setpoint_c"),
-                    cooling_setpoint_c: get("cooling_setpoint_c"),
+                    setpoint: HvacSetpointConfig {
+                        heating_setpoint_c: get("heating_setpoint_c"),
+                        cooling_setpoint_c: get("cooling_setpoint_c"),
+                        ..Default::default()
+                    },
                     hysteresis_c: Some(1.0),
-                    heating_setpoint_source: None,
-                    cooling_setpoint_source: None,
                     duct: DuctConfig::default(),
                     biquadratic_x1_min: None,
                     biquadratic_x1_max: None,
@@ -200,13 +202,14 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
             IdealHvacConfig {
                 equipment_id: None,
                 zone_id: get("zone_id").map(|v| v as u16),
-                heating_setpoint_c: get("heating_setpoint_c"),
-                cooling_setpoint_c: get("cooling_setpoint_c"),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: get("heating_setpoint_c"),
+                    cooling_setpoint_c: get("cooling_setpoint_c"),
+                    ..Default::default()
+                },
                 deadband_c: None,
                 n_speeds: None,
                 ideal_capacity_mode: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 heating_capacity_w: get("heating_capacity_w"),
                 cooling_capacity_w: get("cooling_capacity_w"),
                 shr: get("shr"),
@@ -261,11 +264,12 @@ fn hp_cooler_cfg(
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
                 airflow_m3_s_per_w: None,
-                heating_setpoint_c: Some(18.0),
-                cooling_setpoint_c: Some(24.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(18.0),
+                    cooling_setpoint_c: Some(24.0),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(0.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -318,8 +322,7 @@ fn gas_furnace_energy_balance() {
             ducts: DuctConfig::default(),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
         },
     );
     let registry = EquipmentRegistry::new();
@@ -399,8 +402,7 @@ fn gas_furnace_fuel_independent_of_duct_dse() {
                 },
                 stage_heating_capacities_w: None,
                 stage_heating_eirs: None,
-                heating_setpoint_c: None,
-                heating_setpoint_source: None,
+                setpoint: HvacSetpointConfig::default(),
             },
         );
         let registry = EquipmentRegistry::new();
@@ -454,8 +456,7 @@ fn electric_baseboard_cop_is_unity() {
             zone_id: Some(1),
             capacity_w: 3_000.0,
             eir: 1.0,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
         },
     );
     let registry = EquipmentRegistry::new();
@@ -950,8 +951,7 @@ fn furnace_thermostat_off_above_setpoint() {
             ducts: DuctConfig::default(),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1048,11 +1048,12 @@ fn two_speed_ac_config() -> EquipmentConfig {
             stage_shrs: Some(vec![0.75, 0.75]),
             fan_power_w: Some(0.0),
             fan_power_w_per_cfm: None,
-            cooling_setpoint_c: Some(24.0),
-            heating_setpoint_c: Some(20.0),
+            setpoint: HvacSetpointConfig {
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(20.0),
+                ..Default::default()
+            },
             hysteresis_c: Some(1.0),
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
             crankcase_heater_kw: None,
@@ -1489,8 +1490,7 @@ fn gas_furnace_first_law_thermal_less_than_fuel() {
             ducts: DuctConfig::default(),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1561,8 +1561,7 @@ fn gas_furnace_dse_multi_zone_energy_conservation() {
             },
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1625,8 +1624,7 @@ fn hvac_default_deadband_matrix_matches_ochre_thresholds() {
             ducts: DuctConfig::default(),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
-            heating_setpoint_c: None,
-            heating_setpoint_source: None,
+            setpoint: HvacSetpointConfig::default(),
         },
     );
     let mut furnace = registry.create("Gas Furnace", furnace_cfg.clone()).unwrap();
@@ -1862,11 +1860,12 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
                 fan_power_w: Some(0.0),
                 fan_power_w_per_cfm: None,
                 airflow_m3_s_per_w: None,
-                heating_setpoint_c: Some(21.0),
-                cooling_setpoint_c: Some(27.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(27.0),
+                    ..Default::default()
+                },
                 hysteresis_c: Some(1.0),
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
                 duct: DuctConfig::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,

@@ -148,6 +148,9 @@ impl Fleet {
                             7 * 24 * 3600,
                         )),
                         resample_overrides: None,
+                        patches: Some(hares_io::HpxmlDataPatches::from_resstock_characteristics(
+                            &building.characteristics,
+                        )),
                     },
                     sample_weight: building.sample_weight,
                 }
@@ -732,6 +735,7 @@ mod tests {
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,
                 resample_overrides: None,
+                patches: None,
             })
             .collect()
     }
@@ -748,6 +752,7 @@ mod tests {
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,
                 resample_overrides: None,
+                patches: None,
             })
             .collect()
     }

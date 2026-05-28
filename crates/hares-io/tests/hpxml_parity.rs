@@ -62,7 +62,7 @@ fn resolve(xml: &str) -> Vec<hares_io::EquipmentSpec> {
 
 fn resolve_with_defaults(xml: &str, defaults: &DefaultsStore) -> Vec<hares_io::EquipmentSpec> {
     let building = parse_building(xml).expect("should parse");
-    resolve_equipment(&building, defaults, &json!({})).expect("resolve_equipment should succeed")
+    resolve_equipment(&building, defaults, &json!({}), None).expect("resolve_equipment should succeed")
 }
 
 fn repo_defaults() -> DefaultsStore {
@@ -671,7 +671,7 @@ fn heat_pump_typed_config_for_mini_split_sets_four_speeds() {
 
     let defaults = repo_defaults();
     let building = parse_building(&xml).expect("should parse");
-    let resolved = resolve_equipment(&building, &defaults, &json!({}))
+    let resolved = resolve_equipment(&building, &defaults, &json!({}), None)
         .expect("resolve_equipment should succeed");
     let cooler_spec = resolved
         .iter()
@@ -765,7 +765,7 @@ fn ashp_backup_lockout_temperature_extracted() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let heater = specs
@@ -834,7 +834,7 @@ fn switchover_only_maps_to_both_lockouts_ochre_parity() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
     let heater = specs
         .iter()
@@ -896,7 +896,7 @@ fn separate_compressor_and_backup_lockouts_independent() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
     let heater = specs
         .iter()
@@ -962,7 +962,7 @@ fn no_lockout_fields_emits_no_lockout_params() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
     let heater = specs
         .iter()
@@ -991,7 +991,7 @@ fn cz4a_ashp_fixture_preserves_single_stage_compressor_intent() {
     // it now requires.
     building.site.latitude_deg.get_or_insert(39.29);
     building.site.longitude_deg.get_or_insert(-76.61);
-    let specs = resolve_equipment(&building, &defaults, &json!({})).expect("resolve_equipment");
+    let specs = resolve_equipment(&building, &defaults, &json!({}), None).expect("resolve_equipment");
 
     let heater = specs
         .iter()
@@ -1026,7 +1026,7 @@ fn propane_storage_water_heater_resolves_and_inits_as_propane() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let wh = specs
@@ -1059,7 +1059,7 @@ fn natural_gas_tankless_water_heater_resolves_and_inits_as_gas() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let wh = specs
@@ -1094,7 +1094,7 @@ fn hpwh_heating_capacity_populates_backup_element_power() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let wh = specs
@@ -1141,7 +1141,7 @@ fn low_power_hpwh_sets_ochre_hp_only_mode_and_defaults() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("resolve_equipment");
 
     let wh = specs
@@ -1198,7 +1198,7 @@ fn propane_furnace_resolves_to_gas_furnace_config_with_propane_fuel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("propane furnace should resolve without error (ticket #079)");
 
     let furnace = specs
@@ -1237,7 +1237,7 @@ fn fuel_oil_2_boiler_resolves_to_gas_boiler_config_with_oil_fuel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
         .expect("fuel oil 2 boiler should resolve without error (ticket #079)");
 
     let boiler = specs
@@ -1432,7 +1432,7 @@ fn resolve_ochre_fixture(fixture_name: &str) -> Vec<hares_io::EquipmentSpec> {
     let xml = ochre_fixture_xml(fixture_name);
     let building = parse_building(&xml).expect("should parse");
     let defaults = repo_defaults();
-    resolve_equipment(&building, &defaults, &json!({})).expect("resolve_equipment should succeed")
+    resolve_equipment(&building, &defaults, &json!({}), None).expect("resolve_equipment should succeed")
 }
 
 #[test]
@@ -2030,7 +2030,7 @@ fn multifamily_shared_boiler_fixture_resolves_equipment() {
     );
 
     let defaults = repo_defaults();
-    let specs = resolve_equipment(&building, &defaults, &json!({}))
+    let specs = resolve_equipment(&building, &defaults, &json!({}), None)
         .expect("shared boiler fixture should resolve equipment");
 
     let gas_boiler = specs

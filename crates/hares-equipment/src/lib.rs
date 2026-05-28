@@ -59,7 +59,7 @@ pub use hvac::heat_pump_config::{
 };
 pub use hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
-    GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
+    GasBoilerConfig, GasFurnaceConfig, HvacSetpointConfig, IdealHvacConfig,
 };
 pub use hvac::{
     AIRFLOW_CENTRAL_AC_M3_S_PER_W, AIRFLOW_HEATING_M3_S_PER_W, AIRFLOW_MSHP_COOLING_M3_S_PER_W,

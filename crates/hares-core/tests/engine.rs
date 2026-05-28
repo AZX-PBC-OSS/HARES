@@ -138,6 +138,7 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
         bldg_id: 123,
         initialization_duration: None,
         resample_overrides: None,
+        patches: None,
     };
 
     let engine = SimulationEngine::new();
@@ -180,6 +181,7 @@ fn run_returns_err_for_missing_hpxml_path() {
         bldg_id: 1,
         initialization_duration: None,
         resample_overrides: None,
+        patches: None,
     };
 
     let engine = SimulationEngine::new();
@@ -190,25 +192,8 @@ fn run_returns_err_for_missing_hpxml_path() {
 }
 
 #[test]
-fn run_returns_err_for_missing_schedule_or_weather_path() {
-    let schedule_missing = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: PathBuf::from("/tmp/does-not-exist-schedule.csv"),
-        weather_path: PathBuf::from("/tmp/weather.epw"),
-        sim_config: simulation_config(unique_temp_path("csv")),
-        defaults_path: None,
-        overrides: None,
-        bldg_id: 2,
-        initialization_duration: None,
-        resample_overrides: None,
-    };
-
+fn run_returns_err_for_missing_weather_path() {
     let engine = SimulationEngine::new();
-    let schedule_err = engine
-        .run(schedule_missing)
-        .expect_err("missing schedule path should return error");
-    assert!(schedule_err.to_string().contains("schedule_path"));
-
     let weather_missing = DwellingConfig {
         hpxml_path: fixture_hpxml_path(),
         schedule_path: unique_temp_path("csv"),
@@ -216,9 +201,10 @@ fn run_returns_err_for_missing_schedule_or_weather_path() {
         sim_config: simulation_config(unique_temp_path("csv")),
         defaults_path: None,
         overrides: None,
-        bldg_id: 3,
+        bldg_id: 2,
         initialization_duration: None,
         resample_overrides: None,
+        patches: None,
     };
     fs::write(&weather_missing.schedule_path, build_schedule_csv())
         .expect("failed to write temp schedule");

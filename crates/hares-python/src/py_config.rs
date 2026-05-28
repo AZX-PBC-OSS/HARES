@@ -617,6 +617,7 @@ impl PyDwellingConfig {
                 .initialization_duration
                 .map(|d| StdDuration::from_secs(d as u64)),
             resample_overrides,
+            patches: None,
         })
     }
 }

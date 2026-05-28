@@ -177,7 +177,6 @@ fn tankless_config(
             heating_capacity_w: Some(20_000.0),
             setpoint_c: Some(setpoint_c),
             parasitic_power_w: Some(0.0),
-            number_of_bedrooms: None,
             performance_adjustment: Some(1.0),
             inlet_temp_c: Some(inlet_temp_c),
             draw_flow_rate_kg_s: Some(draw_flow_rate_kg_s),

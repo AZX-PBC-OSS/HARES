@@ -123,7 +123,10 @@ pub struct DuctConfig {
 
 fn typed_value<'a>(config: &'a EquipmentConfig, key: &str) -> Option<&'a serde_json::Value> {
     match &config.payload {
-        ConfigPayload::Typed { data, .. } => data.get(key),
+        ConfigPayload::Typed { data, .. } => {
+            data.get(key)
+                .or_else(|| data.get("setpoint").and_then(|sp| sp.get(key)))
+        }
         ConfigPayload::Raw { .. } => None,
     }
 }

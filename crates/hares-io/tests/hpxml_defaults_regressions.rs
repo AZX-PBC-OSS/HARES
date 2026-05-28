@@ -218,14 +218,28 @@ fn missing_hvac_type_tags_fail_resolution_instead_of_defaulting() {
     for (label, systems_xml, missing_field) in cases {
         let xml = minimal_hpxml_with_systems(systems_xml);
         let building = parse_building(&xml).expect("minimal fixture should parse");
-        let err = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-            .expect_err("resolve_equipment must fail when required HVAC type tags are absent");
-        match err {
-            HpxmlError::Parse(message) => assert!(
-                message.to_string().contains(missing_field),
-                "{label} case should mention missing {missing_field}, got: {message}"
-            ),
-            other => panic!("{label} case should return HpxmlError::Parse, got {other:?}"),
+        let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
+        match missing_field {
+            "HeatingSystemType" | "CoolingSystemType" => {
+                // Empty/missing HVAC type tags are now skipped gracefully
+                // (valid ResStock 2025.1 buildings with portable heaters, no central HVAC)
+                let specs = result.expect("empty HVAC type should be skipped, not rejected");
+                assert!(
+                    specs.iter().all(|s| s.name != "Gas Furnace" && s.name != "Air Conditioner"),
+                    "{label}: no HVAC equipment should be generated from empty type tag"
+                );
+            }
+            _ => {
+                let err = result
+                    .expect_err("resolve_equipment must fail when required HVAC type tags are absent");
+                match err {
+                    HpxmlError::Parse(message) => assert!(
+                        message.to_string().contains(missing_field),
+                        "{label} case should mention missing {missing_field}, got: {message}"
+                    ),
+                    other => panic!("{label} case should return HpxmlError::Parse, got {other:?}"),
+                }
+            }
         }
     }
 }
@@ -239,7 +253,7 @@ fn base_fixture_resolves_expected_typed_specs_with_repo_defaults() {
     // without triggering the no-silent-defaults guard.
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
-    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}))
+    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
         .expect("base fixture equipment should resolve with repo defaults");
 
     let furnace = specs
@@ -280,7 +294,7 @@ fn dehumidifier_capacity_pints_to_liters_conversion_uses_correct_factor() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}))
+    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
         .expect("dehumidifier fixture equipment should resolve");
 
     let dehumidifier_spec = specs

@@ -668,6 +668,54 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>, ScheduleError> {
     Ok(values)
 }
 
+impl ScheduleTimeSeries {
+    /// Generate a minimal schedule from HPXML-derived setpoints when no schedule CSV
+    /// is available (ResStock 2025.1 ships only home.xml without in.schedules.csv).
+    pub fn from_hpxml_setpoints(
+        start: DateTime<FixedOffset>,
+        duration: Duration,
+        interval: Duration,
+        heating_setpoint_c: Option<f64>,
+        cooling_setpoint_c: Option<f64>,
+    ) -> Self {
+        let n_steps = (duration.num_seconds() / interval.num_seconds()).max(1) as usize;
+        let mut column_names = Vec::new();
+        let mut columns = Vec::new();
+
+        column_names.push("occupants".to_string());
+        columns.push(vec![1.0; n_steps]);
+
+        if let Some(h) = heating_setpoint_c {
+            column_names.push("heating_setpoint".to_string());
+            columns.push(vec![h; n_steps]);
+        }
+        if let Some(c) = cooling_setpoint_c {
+            column_names.push("cooling_setpoint".to_string());
+            columns.push(vec![c; n_steps]);
+        }
+
+        let timestamps: Vec<DateTime<FixedOffset>> = (0..n_steps)
+            .map(|i| start + Duration::seconds(i as i64 * interval.num_seconds()))
+            .collect();
+
+        let column_index: HashMap<String, usize> = column_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        let n_cols = column_index.len();
+        ScheduleTimeSeries {
+            timestamps,
+            column_names,
+            columns,
+            column_index,
+            source_step_secs: interval.num_seconds() as u32,
+            column_aggregations: vec![ColumnAggregation::Mean; n_cols],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

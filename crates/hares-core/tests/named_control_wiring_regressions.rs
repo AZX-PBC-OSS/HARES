@@ -37,6 +37,7 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
         bldg_id,
         initialization_duration: None,
         resample_overrides: None,
+        patches: None,
     };
 
     Dwelling::from_config(config).expect("fixture dwelling must load")

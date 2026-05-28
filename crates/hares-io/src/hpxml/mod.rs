@@ -7,6 +7,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod building;
+pub mod data_patches;
 pub mod equipment;
 mod resolve_der;
 pub mod resolve_hvac;
@@ -24,6 +25,7 @@ pub use building::{
     Boundary, BoundaryType, Building, DuctLocation, DuctSystem, DuctType, MaterialLayer, Site,
     SiteType, Window, Zone, ZoneType,
 };
+pub use data_patches::HpxmlDataPatches;
 pub use equipment::{EquipmentSpec, nested_update, resolve_equipment};
 pub use validation::{ValidationReport, ValidationWarning};
 
@@ -99,10 +101,11 @@ pub enum HpxmlError {
     Parse(ParseError),
     #[error("HPXML schema validation error: {0}")]
     SchemaValidation(ValidationError),
-    #[error("HPXML domain validation failed ({error_count} errors)")]
+    #[error("HPXML domain validation failed ({error_count} errors): {errors:?}")]
     DomainValidation {
         report: validation::ValidationReport,
         error_count: usize,
+        errors: Vec<String>,
     },
     /// A required physics/engineering field is missing from the HPXML input.
     ///
@@ -171,8 +174,10 @@ pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
 
     let report = validate_building_ranges(&building);
     if report.has_errors() {
+        let errors: Vec<String> = report.errors.iter().map(|e| e.to_string()).collect();
         return Err(HpxmlError::DomainValidation {
             error_count: report.errors.len(),
+            errors,
             report,
         });
     }

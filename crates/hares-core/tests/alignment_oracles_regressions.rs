@@ -1032,6 +1032,7 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
             .and_then(|seconds| u64::try_from(seconds).ok())
             .map(StdDuration::from_secs),
         resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
+        patches: None,
     }
 }
 
