@@ -14,6 +14,7 @@ use crate::battery::config::BatteryConfig;
 pub enum BatteryProductId {
     TeslaPw3,
     TeslaPw2,
+    TeslaPw2Nca,
     TeslaPw3X2,
     EnphaseIq5p,
     EnphaseIq5pX2,
@@ -29,6 +30,7 @@ impl BatteryProductId {
     pub const ALL: &[BatteryProductId] = &[
         Self::TeslaPw3,
         Self::TeslaPw2,
+        Self::TeslaPw2Nca,
         Self::TeslaPw3X2,
         Self::EnphaseIq5p,
         Self::EnphaseIq5pX2,
@@ -50,6 +52,7 @@ impl fmt::Display for BatteryProductId {
         let s = match self {
             Self::TeslaPw3 => "TeslaPw3",
             Self::TeslaPw2 => "TeslaPw2",
+            Self::TeslaPw2Nca => "TeslaPw2Nca",
             Self::TeslaPw3X2 => "TeslaPw3X2",
             Self::EnphaseIq5p => "EnphaseIq5p",
             Self::EnphaseIq5pX2 => "EnphaseIq5pX2",
@@ -76,6 +79,7 @@ impl std::str::FromStr for BatteryProductId {
         match normalized.as_str() {
             "teslapw3" => Ok(Self::TeslaPw3),
             "teslapw2" => Ok(Self::TeslaPw2),
+            "teslapw2nca" => Ok(Self::TeslaPw2Nca),
             "teslapw3x2" => Ok(Self::TeslaPw3X2),
             "enphaseiq5p" => Ok(Self::EnphaseIq5p),
             "enphaseiq5px2" => Ok(Self::EnphaseIq5pX2),
@@ -232,7 +236,8 @@ static CATALOG: &[BatterySpec] = &[
         min_charge_temp_c: 0.0,
         full_power_temp_c: 10.0,
     },
-    // Tesla PW2: ~400V NMC, 110S7P with 3.65V/5Ah 2170 cells
+    // Tesla PW2: ~400V NMC, 110S7P with 3.65V/5Ah 2170 cells.
+    // Catalog entry assumes NMC chemistry (correct for post-2018 PW2).
     BatterySpec {
         id: BatteryProductId::TeslaPw2,
         label: "Tesla Powerwall 2",
@@ -240,6 +245,33 @@ static CATALOG: &[BatterySpec] = &[
         max_charge_kw: 5.0,
         max_discharge_kw: 5.0,
         chemistry: BatteryChemistry::Nmc,
+        round_trip_efficiency: 0.90,
+        standby_power_w: 10.0,
+        self_discharge_pct_per_day: 0.067,
+        min_soc: 0.10,
+        max_soc: 1.0,
+        n_series_cells: 110,
+        n_parallel_cells: 7,
+        cell_resistance_ohm: 0.105285,
+        heater_power_w: 1500.0,
+        heater_threshold_c: 5.0,
+        min_charge_temp_c: 0.0,
+        full_power_temp_c: 10.0,
+    },
+    // Tesla PW2 (NCA): ~400V NCA, 110S7P with 3.65V/5Ah 2170 cells.
+    // Pre-2018 early-production Powerwall 2 units used NCA cells (later units
+    // use NMC). The degradation model — OCV curves, SEI growth parameters —
+    // differs between NCA and NMC. For simulations of older PW2 fleets, use
+    // this NCA catalog entry; for post-2018 units, use the default NMC entry.
+    // Same electrical specs (13.5 kWh, 5.0 kW, 90% RTE) per Tesla datasheet:
+    //   https://www.tesla.com/support/energy/powerwall/2
+    BatterySpec {
+        id: BatteryProductId::TeslaPw2Nca,
+        label: "Tesla Powerwall 2 (NCA)",
+        capacity_kwh: 13.5,
+        max_charge_kw: 5.0,
+        max_discharge_kw: 5.0,
+        chemistry: BatteryChemistry::Nca,
         round_trip_efficiency: 0.90,
         standby_power_w: 10.0,
         self_discharge_pct_per_day: 0.067,
@@ -490,7 +522,7 @@ mod tests {
 
     #[test]
     fn all_catalog_specs_valid() {
-        assert_eq!(CATALOG.len(), 11);
+        assert_eq!(CATALOG.len(), 12);
         for (i, spec) in CATALOG.iter().enumerate() {
             assert_eq!(
                 spec.id as usize, i,
@@ -720,6 +752,7 @@ mod tests {
     const LOCAL_RTE_DERIVED: &[BatteryProductId] = &[
         BatteryProductId::TeslaPw3,
         BatteryProductId::TeslaPw2,
+        BatteryProductId::TeslaPw2Nca,
         BatteryProductId::TeslaPw3X2,
         BatteryProductId::EnphaseIq5p, // reference for all 100Ah LFP prismatics
         BatteryProductId::SolaredgeHome,
@@ -864,6 +897,13 @@ mod tests {
                 (0.89, 0.91),
                 "Tesla Powerwall 2 datasheet",
             ),
+            // Tesla Powerwall 2 (NCA) — 90% RTE (same product datasheet as NMC variant):
+            //   https://www.tesla.com/support/energy/powerwall/2
+            (
+                BatteryProductId::TeslaPw2Nca,
+                (0.89, 0.91),
+                "Tesla Powerwall 2 datasheet",
+            ),
             // Tesla Powerwall 3 x2 — 90% RTE (two PW3 units):
             //   https://www.tesla.com/support/energy/powerwall/3
             (
@@ -963,7 +1003,7 @@ mod tests {
                 | BatteryProductId::FranklinApower2X2 => (0.0001, 0.005),
                 // RTE-derived products: wider bounds since cell_R is approximate
                 BatteryProductId::TeslaPw3 | BatteryProductId::TeslaPw3X2 => (0.001, 0.1),
-                BatteryProductId::TeslaPw2 => (0.01, 0.5),
+                BatteryProductId::TeslaPw2 | BatteryProductId::TeslaPw2Nca => (0.01, 0.5),
                 BatteryProductId::SolaredgeHome => (0.01, 0.2),
                 BatteryProductId::LgResu10h => (0.01, 0.2),
             };

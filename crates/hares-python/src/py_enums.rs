@@ -1769,6 +1769,7 @@ impl PyChargingStrategy {
 pub enum PyBatteryProductId {
     TeslaPw3,
     TeslaPw2,
+    TeslaPw2Nca,
     TeslaPw3X2,
     EnphaseIq5p,
     EnphaseIq5pX2,
@@ -1789,6 +1790,10 @@ impl PyBatteryProductId {
     #[staticmethod]
     fn tesla_pw2() -> Self {
         Self::TeslaPw2
+    }
+    #[staticmethod]
+    fn tesla_pw2_nca() -> Self {
+        Self::TeslaPw2Nca
     }
     #[staticmethod]
     fn tesla_pw3_x2() -> Self {
@@ -1848,6 +1853,7 @@ impl From<RustBatteryProductId> for PyBatteryProductId {
         match id {
             RustBatteryProductId::TeslaPw3 => Self::TeslaPw3,
             RustBatteryProductId::TeslaPw2 => Self::TeslaPw2,
+            RustBatteryProductId::TeslaPw2Nca => Self::TeslaPw2Nca,
             RustBatteryProductId::TeslaPw3X2 => Self::TeslaPw3X2,
             RustBatteryProductId::EnphaseIq5p => Self::EnphaseIq5p,
             RustBatteryProductId::EnphaseIq5pX2 => Self::EnphaseIq5pX2,
@@ -1866,6 +1872,7 @@ impl From<PyBatteryProductId> for RustBatteryProductId {
         match id {
             PyBatteryProductId::TeslaPw3 => Self::TeslaPw3,
             PyBatteryProductId::TeslaPw2 => Self::TeslaPw2,
+            PyBatteryProductId::TeslaPw2Nca => Self::TeslaPw2Nca,
             PyBatteryProductId::TeslaPw3X2 => Self::TeslaPw3X2,
             PyBatteryProductId::EnphaseIq5p => Self::EnphaseIq5p,
             PyBatteryProductId::EnphaseIq5pX2 => Self::EnphaseIq5pX2,

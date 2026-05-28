@@ -321,6 +321,10 @@ impl PyBattery {
         Self::from_spec(BatteryProductId::TeslaPw2.spec())
     }
     #[staticmethod]
+    fn tesla_pw2_nca() -> Self {
+        Self::from_spec(BatteryProductId::TeslaPw2Nca.spec())
+    }
+    #[staticmethod]
     fn tesla_pw3_x2() -> Self {
         Self::from_spec(BatteryProductId::TeslaPw3X2.spec())
     }
