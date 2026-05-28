@@ -416,6 +416,11 @@ impl Actor for DrCompliance {
             return;
         }
 
+        // Reset freeze-guard telemetry at the top of the complied path so the
+        // field reflects the current step's guard status regardless of
+        // configuration (hvac_target present or absent).
+        self.telemetry.set("dr_freeze_guard", 0.0);
+
         let before = out.len();
 
         if let Some(target) = &self.hvac_target {
@@ -446,7 +451,6 @@ impl Actor for DrCompliance {
                 );
             } else {
                 Self::dispatch_for_action(target, &self.hvac_action, out);
-                self.telemetry.set("dr_freeze_guard", 0.0);
             }
         }
 
@@ -1217,5 +1221,37 @@ mod tests {
             }
         ));
         assert_eq!(actor.telemetry.get("dr_freeze_guard"), Some(0.0));
+    }
+
+    #[test]
+    fn freeze_guard_telemetry_resets_when_hvac_target_is_none() {
+        // Regression: when hvac_target is None, dr_freeze_guard was only
+        // written inside the load-targets loop, never reset at the top of the
+        // complied path. This test verifies that the field reflects the
+        // current step's guard status across successive decide() calls.
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
+                DrAction::off(),
+            );
+
+        actor.set_dr_level(DRLevel::Critical);
+
+        // Step 1: cold zone — guard fires on HVAC load target
+        let env_cold = test_env().zone_temp(2.0).build();
+        let mut requests = Vec::new();
+        actor.decide(&env_cold, &mut requests);
+        assert_eq!(actor.telemetry.get("dr_freeze_guard"), Some(1.0));
+
+        // Step 2: warm zone — guard does NOT fire, telemetry must reset
+        let env_warm = test_env().zone_temp(22.0).build();
+        let mut requests = Vec::new();
+        actor.decide(&env_warm, &mut requests);
+        assert_eq!(
+            actor.telemetry.get("dr_freeze_guard"),
+            Some(0.0),
+            "dr_freeze_guard must reset to 0.0 in warm step; before the fix it would retain 1.0 from step 1"
+        );
     }
 }
