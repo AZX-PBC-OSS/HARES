@@ -1569,7 +1569,7 @@ fn gshp_heater_pump_power_in_telemetry_and_ports() {
         .get(tk::PUMP_POWER_KW)
         .expect("PUMP_POWER_KW must be present in telemetry");
     assert!(
-        pump_telemetry >= 0.04 && pump_telemetry <= 0.12,
+        (0.04..=0.12).contains(&pump_telemetry),
         "GSHP heater pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
     );
     assert!(
@@ -1638,7 +1638,7 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
         .get(tk::PUMP_POWER_KW)
         .expect("PUMP_POWER_KW must be present in telemetry");
     assert!(
-        pump_telemetry >= 0.04 && pump_telemetry <= 0.12,
+        (0.04..=0.12).contains(&pump_telemetry),
         "GSHP cooler pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
     );
     assert!(

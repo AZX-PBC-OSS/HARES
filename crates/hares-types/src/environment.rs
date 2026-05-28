@@ -765,8 +765,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "vacuum is invalid")]
     fn weather_state_zero_pressure_is_rejected() {
-        let mut w = WeatherState::default();
-        w.pressure_kpa = 0.0;
+        let w = WeatherState {
+            pressure_kpa: 0.0,
+            ..WeatherState::default()
+        };
         assert!(
             w.pressure_kpa > 0.0,
             "pressure_kpa must be > 0 — vacuum is invalid"

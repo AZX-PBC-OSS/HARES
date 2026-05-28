@@ -223,7 +223,7 @@ fn from_config_autosizing_populates_heating_capacity() {
         .collect();
 
     assert!(
-        equipment_names.iter().any(|n| *n == "Gas Furnace"),
+        equipment_names.contains(&"Gas Furnace"),
         "Dwelling equipment should include Gas Furnace; got: {equipment_names:?}"
     );
 

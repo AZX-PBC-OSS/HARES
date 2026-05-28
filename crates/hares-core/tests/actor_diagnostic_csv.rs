@@ -32,7 +32,7 @@ fn unique_temp_csv(tag: &str) -> PathBuf {
     path
 }
 
-fn write_minimal_toml_with_output(path: &PathBuf, csv_path: &PathBuf) {
+fn write_minimal_toml_with_output(path: &PathBuf, csv_path: &Path) {
     let content = format!(
         r#"building_id = 4242
 

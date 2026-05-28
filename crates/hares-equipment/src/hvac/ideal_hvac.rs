@@ -2285,7 +2285,7 @@ mod tests {
         eq.init(&cfg, &env0).unwrap();
         eq.update_control(&env0);
         assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Heating);
-        let heating_start = eq.thermostat_fsm.mode_start_at;
+        let _heating_start = eq.thermostat_fsm.mode_start_at;
 
         // Rated capacity delivers 10kW, above the 1kW min → no R3 trigger.
         // To trigger R3 we'd need cap_ratio < 0.1; just test Deadband path below.
@@ -2922,7 +2922,7 @@ mod tests {
         // so ideal_target returns cooling setpoint even if FSM hasn't yet
         // transitioned from Deadband (hysteresis keeps it in Deadband until
         // zone > 26.0+0.8=26.8°C).
-        let mut cfg = ideal_config("IH-step-db", 20.0, 26.0);
+        let cfg = ideal_config("IH-step-db", 20.0, 26.0);
         let env = env(26.5, 300, 0);
         let mut eq = IdealHvac::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();

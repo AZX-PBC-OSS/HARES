@@ -37,7 +37,7 @@ mod tests {
         dirs
     }
 
-    fn weather_path(version: &str, bldg_dir: &PathBuf) -> PathBuf {
+    fn weather_path(version: &str, bldg_dir: &Path) -> PathBuf {
         let hpxml = fs::read_to_string(bldg_dir.join("home.xml")).unwrap();
         let fips = parse_fips_from_hpxml(&hpxml);
         let weather_dir = project_root()

@@ -6166,7 +6166,7 @@ mod tests {
             (ff - 0.23).abs() < 5.0 * 0.23 / 100.0,
             "2×4 at 16\" OC should be within 5% of 0.23, got {ff:.4}"
         );
-        assert!(ff >= 0.21 && ff <= 0.25, "got {ff:.4}");
+        assert!((0.21..=0.25).contains(&ff), "got {ff:.4}");
     }
 
     /// 2×4 at 24" OC advanced framing, 8 ft wall → per ASHRAE HoF Ch. 27
@@ -6178,7 +6178,7 @@ mod tests {
             (ff - 0.15).abs() < 5.0 * 0.15 / 100.0,
             "2×4 at 24\" OC advanced should be within 5% of 0.15, got {ff:.4}"
         );
-        assert!(ff >= 0.13 && ff <= 0.17, "got {ff:.4}");
+        assert!((0.13..=0.17).contains(&ff), "got {ff:.4}");
     }
 
     /// 2×6 at 16" OC standard framing, 8 ft wall. Wider stud increases
@@ -6262,7 +6262,7 @@ mod tests {
   </Building>
 </HPXML>
 "#;
-        let building = parse_building(&xml).expect("should parse");
+        let building = parse_building(xml).expect("should parse");
         let wall = building
             .boundaries
             .iter()
@@ -6324,7 +6324,7 @@ mod tests {
   </Building>
 </HPXML>
 "#;
-        let building = parse_building(&xml).expect("should parse");
+        let building = parse_building(xml).expect("should parse");
         let wall = building
             .boundaries
             .iter()

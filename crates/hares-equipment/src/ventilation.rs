@@ -1314,7 +1314,7 @@ mod tests {
         assert!(result.is_some(), "Ventilation must return Some");
         let (eff_s, _eff_l) = result.unwrap();
         assert!(
-            eff_s >= 0.0 && eff_s <= 1.0,
+            (0.0..=1.0).contains(&eff_s),
             "sensible effectiveness in range"
         );
     }

@@ -486,9 +486,10 @@ mod tests {
     use super::*;
 
     fn thermostat_with_cycle_time(min_cycle_time_s: f64) -> ThermostatConfig {
-        let mut cfg = ThermostatConfig::default();
-        cfg.min_cycle_time_s = min_cycle_time_s;
-        cfg
+        ThermostatConfig {
+            min_cycle_time_s,
+            ..ThermostatConfig::default()
+        }
     }
 
     fn utc_time(day: u32, hour: u32) -> DateTime<FixedOffset> {

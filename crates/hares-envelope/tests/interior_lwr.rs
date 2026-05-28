@@ -705,7 +705,7 @@ fn flux_residual_criterion_is_more_conservative_than_step_magnitude() {
     // Use a case where temperatures change rapidly — the step magnitude
     // might drop below 0.01 before the flux residual drops below 1e-4.
     let t_zone_c = 22.0_f64;
-    let surfaces = vec![
+    let surfaces = [
         InteriorSurface {
             area_m2: 40.0,
             emissivity: 0.90,
@@ -715,7 +715,7 @@ fn flux_residual_criterion_is_more_conservative_than_step_magnitude() {
             emissivity: 0.90,
         },
     ];
-    let infos = vec![
+    let infos = [
         InteriorSurfaceInfo {
             state_index: 0,
             input_index: 0,

@@ -855,12 +855,12 @@ mod tests {
             hvac.control.speed_count, 2,
             "set_disabled_speeds sets speed_count to n_speed_stages"
         );
-        assert_eq!(hvac.control.disabled_speeds[0], false);
-        assert_eq!(hvac.control.disabled_speeds[1], true);
+        assert!(!hvac.control.disabled_speeds[0]);
+        assert!(hvac.control.disabled_speeds[1]);
         // Remaining slots must be false (initialized to [false; MAX_SPEEDS]).
         for i in 2..MAX_SPEEDS {
-            assert_eq!(
-                hvac.control.disabled_speeds[i], false,
+            assert!(
+                !hvac.control.disabled_speeds[i],
                 "slot {i} must be false"
             );
         }

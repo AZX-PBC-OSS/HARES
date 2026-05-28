@@ -187,7 +187,7 @@ mod tests {
         // For a single borehole at 3 GPM: expect 40–120 W.
         // 0.35 × 0.40 = 0.14 wire-to-water; ~4.7 m total head → ~62 W.
         assert!(
-            kw >= 0.04 && kw <= 0.12,
+            (0.04..=0.12).contains(&kw),
             "single-borehole pump power must be 0.04–0.12 kW, got {kw:.4} kW"
         );
     }

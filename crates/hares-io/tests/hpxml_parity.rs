@@ -2009,7 +2009,7 @@ fn multifamily_fixture_identifies_as_apartment_unit_not_single_family() {
     let not_single_family = building
         .residential_facility_type
         .as_deref()
-        .map_or(true, |t| t != "single-family detached");
+        .is_none_or(|t| t != "single-family detached");
     assert!(
         not_single_family,
         "multifamily fixture must not identify as single-family detached"

@@ -4,6 +4,8 @@ use std::fmt;
 
 use hares_types::BatteryChemistry;
 use serde::{Deserialize, Serialize};
+#[cfg(debug_assertions)]
+use tracing;
 
 use crate::EquipmentConfig;
 use crate::battery::config::BatteryConfig;
@@ -125,6 +127,27 @@ impl BatterySpec {
     /// efficiency are each `sqrt(rte)`. This is valid for AC-coupled systems
     /// where inverter losses dominate and are symmetric.
     pub fn to_config(&self) -> EquipmentConfig {
+        #[cfg(debug_assertions)]
+        {
+            // Typical manufacturer-specified AC round-trip efficiency ranges
+            // for residential BESS by chemistry, drawn from product datasheets
+            // (Tesla, Enphase, FranklinWH, LG RESU, SolarEdge).
+            let (lo, hi) = match self.chemistry {
+                BatteryChemistry::Lfp => (0.88, 0.97),
+                BatteryChemistry::Nmc => (0.88, 0.96),
+                BatteryChemistry::Nca => (0.88, 0.96),
+                BatteryChemistry::Lto => (0.85, 0.95),
+            };
+            if self.round_trip_efficiency < lo || self.round_trip_efficiency > hi {
+                tracing::warn!(
+                    product = self.label,
+                    rte = self.round_trip_efficiency,
+                    chemistry = ?self.chemistry,
+                    expected_range = %format!("[{lo:.2}, {hi:.2}]"),
+                    "Battery round_trip_efficiency outside expected range for chemistry"
+                );
+            }
+        }
         let eta = self.round_trip_efficiency.sqrt();
         EquipmentConfig::from_typed(
             self.label.to_string(),
@@ -236,7 +259,10 @@ static CATALOG: &[BatterySpec] = &[
         min_charge_temp_c: 0.0,
         full_power_temp_c: 10.0,
     },
-    // Enphase IQ 5P: 48V LFP, 15S1P with 3.2V/100Ah prismatic cells
+    // Enphase IQ 5P Gen-4 LFP: 48V, 15S1P with 3.2V/100Ah prismatic cells.
+    // Round-trip efficiency 96% per Enphase IQ Battery 5P datasheet
+    // (AC round-trip, measured at 25°C ambient):
+    //   https://enphase.com/store/storage/iq-battery-5p
     BatterySpec {
         id: BatteryProductId::EnphaseIq5p,
         label: "Enphase IQ 5P",
@@ -244,20 +270,22 @@ static CATALOG: &[BatterySpec] = &[
         max_charge_kw: 3.84,
         max_discharge_kw: 3.84,
         chemistry: BatteryChemistry::Lfp,
-        round_trip_efficiency: 0.90,
+        round_trip_efficiency: 0.96,
         standby_power_w: 15.0,
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
         n_series_cells: 15,
         n_parallel_cells: 1,
-        cell_resistance_ohm: 0.002053,
+        cell_resistance_ohm: 0.000808164,
         heater_power_w: 0.0,
         heater_threshold_c: 0.0,
         min_charge_temp_c: -20.0,
         full_power_temp_c: 15.0,
     },
-    // Enphase IQ 5P x2: 48V LFP, 15S2P
+    // Enphase IQ 5P x2 Gen-4 LFP: 48V, 15S2P (two IQ 5P units).
+    // Round-trip efficiency 96% — same cells as IQ 5P:
+    //   https://enphase.com/store/storage/iq-battery-5p
     BatterySpec {
         id: BatteryProductId::EnphaseIq5pX2,
         label: "Enphase IQ 5P \u{00d7}2",
@@ -265,20 +293,23 @@ static CATALOG: &[BatterySpec] = &[
         max_charge_kw: 7.68,
         max_discharge_kw: 7.68,
         chemistry: BatteryChemistry::Lfp,
-        round_trip_efficiency: 0.90,
+        round_trip_efficiency: 0.96,
         standby_power_w: 30.0,
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
         n_series_cells: 15,
         n_parallel_cells: 2,
-        cell_resistance_ohm: 0.002053,
+        cell_resistance_ohm: 0.000808164,
         heater_power_w: 0.0,
         heater_threshold_c: 0.0,
         min_charge_temp_c: -20.0,
         full_power_temp_c: 15.0,
     },
-    // Enphase IQ 10C: 48V LFP, 15S2P with 3.2V/100Ah prismatic cells
+    // Enphase IQ 10C Gen-4 LFP: 48V, 15S2P with 3.2V/100Ah prismatic cells.
+    // Round-trip efficiency 96% per Enphase IQ Battery 10C datasheet
+    // (AC round-trip, measured at 25°C ambient):
+    //   https://enphase.com/store/storage/iq-battery-10c
     BatterySpec {
         id: BatteryProductId::EnphaseIq10c,
         label: "Enphase IQ 10C",
@@ -286,14 +317,14 @@ static CATALOG: &[BatterySpec] = &[
         max_charge_kw: 7.08,
         max_discharge_kw: 7.08,
         chemistry: BatteryChemistry::Lfp,
-        round_trip_efficiency: 0.90,
+        round_trip_efficiency: 0.96,
         standby_power_w: 15.0,
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
         n_series_cells: 15,
         n_parallel_cells: 2,
-        cell_resistance_ohm: 0.002227,
+        cell_resistance_ohm: 0.000876653,
         heater_power_w: 0.0,
         heater_threshold_c: 0.0,
         min_charge_temp_c: -20.0,
@@ -704,6 +735,124 @@ mod tests {
                 "{}: discharge_eff {discharge} != sqrt({}) = {expected_eta}",
                 spec.label,
                 spec.round_trip_efficiency
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_enphase_rte_matches_datasheet() {
+        // Enphase Gen-4 IQ batteries are rated for up to 96% AC round-trip
+        // efficiency at 25°C ambient per manufacturer datasheets:
+        //   IQ 5P:  https://enphase.com/store/storage/iq-battery-5p
+        //   IQ 10C: https://enphase.com/store/storage/iq-battery-10c
+        let targets = [
+            BatteryProductId::EnphaseIq5p,
+            BatteryProductId::EnphaseIq5pX2,
+            BatteryProductId::EnphaseIq10c,
+        ];
+        for &pid in &targets {
+            let spec = pid.spec();
+            assert!(
+                (spec.round_trip_efficiency - 0.96).abs() < f64::EPSILON,
+                "{}: RTE {:.6} != 0.96",
+                spec.label,
+                spec.round_trip_efficiency
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_rte_datasheet_references() {
+        // Map every catalog product to its manufacturer-documented AC round-trip
+        // efficiency range, with source citations. Ranges account for
+        // specification tolerance and measurement conditions.
+        let rte_ranges: &[(BatteryProductId, (f64, f64), &str)] = &[
+            // Tesla Powerwall 3 — 90% RTE, Tesla spec sheet:
+            //   https://www.tesla.com/support/energy/powerwall/3
+            (
+                BatteryProductId::TeslaPw3,
+                (0.89, 0.91),
+                "Tesla Powerwall 3 datasheet",
+            ),
+            // Tesla Powerwall 2 — 90% RTE:
+            //   https://www.tesla.com/support/energy/powerwall/2
+            (
+                BatteryProductId::TeslaPw2,
+                (0.89, 0.91),
+                "Tesla Powerwall 2 datasheet",
+            ),
+            // Tesla Powerwall 3 x2 — 90% RTE (two PW3 units):
+            //   https://www.tesla.com/support/energy/powerwall/3
+            (
+                BatteryProductId::TeslaPw3X2,
+                (0.89, 0.91),
+                "Tesla Powerwall 3 datasheet",
+            ),
+            // Enphase IQ 5P Gen-4 — up to 96% AC RTE:
+            //   https://enphase.com/store/storage/iq-battery-5p
+            (
+                BatteryProductId::EnphaseIq5p,
+                (0.95, 0.97),
+                "Enphase IQ Battery 5P datasheet",
+            ),
+            // Enphase IQ 5P x2 — same cells as IQ 5P:
+            //   https://enphase.com/store/storage/iq-battery-5p
+            (
+                BatteryProductId::EnphaseIq5pX2,
+                (0.95, 0.97),
+                "Enphase IQ Battery 5P datasheet",
+            ),
+            // Enphase IQ 10C Gen-4 — up to 96% AC RTE:
+            //   https://enphase.com/store/storage/iq-battery-10c
+            (
+                BatteryProductId::EnphaseIq10c,
+                (0.95, 0.97),
+                "Enphase IQ Battery 10C datasheet",
+            ),
+            // FranklinWH aPower Gen-1 — 89% RTE:
+            //   https://www.franklinwh.com/apower/
+            (
+                BatteryProductId::FranklinApower,
+                (0.88, 0.90),
+                "FranklinWH aPower datasheet",
+            ),
+            // FranklinWH aPower 2 — 90% RTE:
+            //   https://www.franklinwh.com/apower-2/
+            (
+                BatteryProductId::FranklinApower2,
+                (0.89, 0.91),
+                "FranklinWH aPower 2 datasheet",
+            ),
+            // FranklinWH aPower 2 x2 — 90% RTE (two aPower 2 units):
+            //   https://www.franklinwh.com/apower-2/
+            (
+                BatteryProductId::FranklinApower2X2,
+                (0.89, 0.91),
+                "FranklinWH aPower 2 datasheet",
+            ),
+            // SolarEdge Home — up to 94.5% RTE:
+            //   https://www.solaredge.com/products/batteries/home-battery
+            (
+                BatteryProductId::SolaredgeHome,
+                (0.935, 0.955),
+                "SolarEdge Home Battery datasheet",
+            ),
+            // LG RESU 10H PRIME — 95%+ RTE:
+            //   https://www.lgesspartner.com/uploads/2020/07/RESU10HP_Data_Sheet_EN.pdf
+            (
+                BatteryProductId::LgResu10h,
+                (0.94, 0.96),
+                "LG RESU 10H PRIME datasheet",
+            ),
+        ];
+
+        for &(pid, (lo, hi), source) in rte_ranges {
+            let spec = pid.spec();
+            assert!(
+                spec.round_trip_efficiency >= lo && spec.round_trip_efficiency <= hi,
+                "{}: RTE {:.4} outside datasheet range [{lo:.2}, {hi:.2}] per {source}",
+                spec.label,
+                spec.round_trip_efficiency,
             );
         }
     }

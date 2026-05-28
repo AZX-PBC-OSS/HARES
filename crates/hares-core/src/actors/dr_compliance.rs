@@ -45,8 +45,6 @@ use std::sync::Arc;
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{ControlSignal, DRLevel, EnvironmentState, OperatingMode, Telemetry};
 
-#[cfg(test)]
-use hares_types::EndUse;
 
 use crate::Actor;
 

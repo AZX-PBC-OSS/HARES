@@ -708,7 +708,7 @@ fn round_trip_heat_pump_config() {
 
 #[test]
 fn heat_pump_config_ignores_unknown_fields() {
-    let mut value = serde_json::to_value(&sample_heat_pump_config()).unwrap();
+    let mut value = serde_json::to_value(sample_heat_pump_config()).unwrap();
     value["unknown_key"] = serde_json::json!(42.0);
     let result: Result<HeatPumpConfig, _> = serde_json::from_value(value);
     assert!(

@@ -1004,7 +1004,7 @@ fn stud_geometry_framing_fraction_2x4_16oc_includes_plates_and_headers() {
         .expect("framing_factor should be set from StudSpacing+StudWidth");
 
     assert!(
-        ff >= 0.21 && ff <= 0.25,
+        (0.21..=0.25).contains(&ff),
         "2×4 at 16\" OC assembly framing fraction should be in [0.21, 0.25] per ASHRAE HOF \
          (studs + plates + headers + corners), got {ff:.4}",
     );
@@ -1028,7 +1028,7 @@ fn stud_geometry_framing_fraction_2x4_24oc_advanced_framing() {
         .expect("framing_factor should be set from StudSpacing+StudWidth");
 
     assert!(
-        ff >= 0.13 && ff <= 0.17,
+        (0.13..=0.17).contains(&ff),
         "2×4 at 24\" OC assembly framing fraction should be in [0.13, 0.17] per ASHRAE HOF \
          (advanced framing — studs + plates + headers), got {ff:.4}",
     );

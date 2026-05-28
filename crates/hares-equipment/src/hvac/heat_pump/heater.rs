@@ -6010,11 +6010,11 @@ mod tests {
             "capacity c0 must be scaled to 0.6; got {}",
             coeffs[0][0]
         );
-        for j in 1..6 {
+        for (j, &val) in coeffs[0].iter().enumerate().skip(1) {
             assert!(
-                coeffs[0][j].abs() < 1e-12,
+                val.abs() < 1e-12,
                 "capacity coeff[{j}] must remain zero; got {}",
-                coeffs[0][j]
+                val
             );
         }
 
@@ -6024,11 +6024,11 @@ mod tests {
             "EIR c0 must remain 1.0; got {}",
             coeffs[1][0]
         );
-        for j in 1..6 {
+        for (j, &val) in coeffs[1].iter().enumerate().skip(1) {
             assert!(
-                coeffs[1][j].abs() < 1e-12,
+                val.abs() < 1e-12,
                 "EIR coeff[{j}] must remain zero; got {}",
-                coeffs[1][j]
+                val
             );
         }
 

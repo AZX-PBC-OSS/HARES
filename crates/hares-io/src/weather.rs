@@ -1838,7 +1838,7 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         assert!((out[6] - 10.0).abs() < 1e-12);
         // Verify all values stay in [0, 360).
         for (i, &v) in out.iter().enumerate() {
-            assert!(v >= 0.0 && v < 360.0, "out[{i}] = {v} out of [0, 360)");
+            assert!((0.0..360.0).contains(&v), "out[{i}] = {v} out of [0, 360)");
         }
         // Verify monotonic increase along the short arc: 350→353→357→0→3→7→10.
         // The raw angles increase (350, 353.33, 356.67, 0, 3.33, 6.67, 10).
@@ -2353,12 +2353,12 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         }
 
         // At the midpoint of each hour (frac = 0.5), value = current hour's value.
-        for i in 0..n {
+        for (i, &val) in values.iter().enumerate() {
             let mid_idx = i * factor + factor / 2;
             assert!(
-                (out[mid_idx] - values[i]).abs() < 1e-12,
+                (out[mid_idx] - val).abs() < 1e-12,
                 "midpoint of hour {i}: expected values[i]={}, got {}",
-                values[i],
+                val,
                 out[mid_idx]
             );
         }

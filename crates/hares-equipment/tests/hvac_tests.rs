@@ -3506,14 +3506,14 @@ fn furnace_core_output_carries_thermal_field() {
     // Thermal output goes to telemetry today — non-zero confirms equipment ran.
     let telemetry_thermal = eq.telemetry().get(tk::THERMAL_OUTPUT_W);
     assert!(
-        telemetry_thermal.map_or(false, |w| w > 1.0),
+        telemetry_thermal.is_some_and(|w| w > 1.0),
         "furnace must emit positive THERMAL_OUTPUT_W in telemetry when heating \
          (got {:?}); this confirms equipment ran and thermal data exists only in telemetry",
         telemetry_thermal,
     );
 
     assert!(
-        co.flows.thermal_output_w.map_or(false, |w| w > 1.0),
+        co.flows.thermal_output_w.is_some_and(|w| w > 1.0),
         "running furnace CoreOutput must carry positive thermal_output_w (got {:?})",
         co.flows.thermal_output_w,
     );
@@ -3584,14 +3584,14 @@ fn ac_core_output_carries_cop() {
     // COP exists only in telemetry today.
     let telemetry_cop = eq.telemetry().get(tk::COP);
     assert!(
-        telemetry_cop.map_or(false, |cop| cop > 0.0),
+        telemetry_cop.is_some_and(|cop| cop > 0.0),
         "AC must emit positive COP in telemetry when cooling \
          (got {:?}); confirms COP data exists only in telemetry, not CoreOutput",
         telemetry_cop,
     );
 
     assert!(
-        co.performance.cop.map_or(false, |cop| cop > 0.0),
+        co.performance.cop.is_some_and(|cop| cop > 0.0),
         "cooling AC CoreOutput must carry positive COP (got {:?})",
         co.performance.cop,
     );

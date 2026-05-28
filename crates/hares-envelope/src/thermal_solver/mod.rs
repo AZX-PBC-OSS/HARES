@@ -2566,10 +2566,9 @@ mod tests {
             "working solver must produce non-zero capacity: q={q:.1}"
         );
         assert!(
-            solver
+            !solver
                 .ideal_capacity_failure_counts
-                .get(&ZoneId(1))
-                .is_none(),
+                .contains_key(&ZoneId(1)),
             "failure counts must be cleared on recovery"
         );
         assert!(
