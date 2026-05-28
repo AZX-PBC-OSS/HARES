@@ -64,7 +64,7 @@ pub fn ochre_signal_to_control(
                 out.push(ControlSignal::power_setpoint(*value, None));
             }
             KEY_DUTY_CYCLE => {
-                out.push(ControlSignal::duty_cycle(*value, None));
+                out.push(ControlSignal::duty_cycle(*value, None, None));
             }
             KEY_LOAD_FRACTION => {
                 out.push(ControlSignal::load_fraction(*value));

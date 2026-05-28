@@ -1,6 +1,6 @@
 //! Control signal enum and associated types.
 
-use hares_types::{ControlSignal, DRLevel, OperatingMode, ProtocolId};
+use hares_types::{ControlSignal, DRLevel, DutyCycleComponent, OperatingMode, ProtocolId};
 
 /// Ergonomic constructor helpers for `ControlSignal`.
 ///
@@ -26,7 +26,11 @@ pub trait ControlSignalConstructors {
 
     fn mode_override(mode: OperatingMode) -> ControlSignal;
 
-    fn duty_cycle(on_fraction: f64, period_s: Option<f64>) -> ControlSignal;
+    fn duty_cycle(
+        on_fraction: f64,
+        period_s: Option<f64>,
+        component: Option<DutyCycleComponent>,
+    ) -> ControlSignal;
 
     fn load_fraction(fraction: f64) -> ControlSignal;
 
@@ -102,7 +106,11 @@ impl ControlSignalConstructors for ControlSignal {
         ControlSignal::ModeOverride { mode }
     }
 
-    fn duty_cycle(on_fraction: f64, period_s: Option<f64>) -> ControlSignal {
+    fn duty_cycle(
+        on_fraction: f64,
+        period_s: Option<f64>,
+        component: Option<DutyCycleComponent>,
+    ) -> ControlSignal {
         debug_assert!(
             (0.0..=1.0).contains(&on_fraction) && on_fraction.is_finite(),
             "on_fraction must be in [0,1] and finite"
@@ -116,7 +124,7 @@ impl ControlSignalConstructors for ControlSignal {
         ControlSignal::DutyCycle {
             on_fraction,
             period_s,
-            component: None,
+            component,
         }
     }
 
@@ -173,7 +181,7 @@ impl ControlSignalConstructors for ControlSignal {
 #[cfg(test)]
 mod tests {
     use super::ControlSignalConstructors;
-    use hares_types::{ControlSignal, DRLevel, OperatingMode, ProtocolId};
+    use hares_types::{ControlSignal, DRLevel, DutyCycleComponent, OperatingMode, ProtocolId};
 
     #[test]
     fn constructors_set_expected_fields() {
@@ -219,11 +227,20 @@ mod tests {
         );
 
         assert_eq!(
-            ControlSignal::duty_cycle(0.6, Some(600.0)),
+            ControlSignal::duty_cycle(0.6, Some(600.0), None),
             ControlSignal::DutyCycle {
                 on_fraction: 0.6,
                 period_s: Some(600.0),
                 component: None,
+            }
+        );
+
+        assert_eq!(
+            ControlSignal::duty_cycle(0.8, Some(300.0), Some(DutyCycleComponent::Compressor)),
+            ControlSignal::DutyCycle {
+                on_fraction: 0.8,
+                period_s: Some(300.0),
+                component: Some(DutyCycleComponent::Compressor),
             }
         );
 
@@ -344,35 +361,35 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic(expected = "on_fraction must be in [0,1] and finite")]
         fn duty_cycle_rejects_on_fraction_below_zero() {
-            ControlSignal::duty_cycle(-0.1, None);
+            ControlSignal::duty_cycle(-0.1, None, None);
         }
 
         #[test]
         #[cfg(debug_assertions)]
         #[should_panic(expected = "on_fraction must be in [0,1] and finite")]
         fn duty_cycle_rejects_on_fraction_above_one() {
-            ControlSignal::duty_cycle(1.5, None);
+            ControlSignal::duty_cycle(1.5, None, None);
         }
 
         #[test]
         #[cfg(debug_assertions)]
         #[should_panic(expected = "on_fraction must be in [0,1] and finite")]
         fn duty_cycle_rejects_infinite_on_fraction() {
-            ControlSignal::duty_cycle(f64::INFINITY, None);
+            ControlSignal::duty_cycle(f64::INFINITY, None, None);
         }
 
         #[test]
         #[cfg(debug_assertions)]
         #[should_panic(expected = "period_s must be > 0.0 and finite")]
         fn duty_cycle_rejects_negative_period() {
-            ControlSignal::duty_cycle(0.5, Some(-10.0));
+            ControlSignal::duty_cycle(0.5, Some(-10.0), None);
         }
 
         #[test]
         #[cfg(debug_assertions)]
         #[should_panic(expected = "period_s must be > 0.0 and finite")]
         fn duty_cycle_rejects_zero_period() {
-            ControlSignal::duty_cycle(0.5, Some(0.0));
+            ControlSignal::duty_cycle(0.5, Some(0.0), None);
         }
 
         // ── load_fraction ──────────────────────────────────────────

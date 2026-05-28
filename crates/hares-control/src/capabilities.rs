@@ -38,7 +38,7 @@ mod tests {
                 ControlCapabilities::MODE_OVERRIDE,
             ),
             (
-                ControlSignal::duty_cycle(0.5, Some(900.0)),
+                ControlSignal::duty_cycle(0.5, Some(900.0), None),
                 ControlCapabilities::DUTY_CYCLE,
             ),
             (
