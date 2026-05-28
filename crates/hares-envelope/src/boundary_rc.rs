@@ -444,6 +444,62 @@ pub fn derive_zone_uas(boundaries: &[BoundaryInput], n_zones: usize) -> Vec<f64>
     uas
 }
 
+/// Validate that every `SurfaceLayerInfo` entry's `inner_node` and `outer_node`
+/// are present in both the capacitance map and the node index.
+///
+/// In debug/check_invariants builds the checks are `debug_assert!` that panic
+/// on first violation.  In all builds a `tracing::warn!` is emitted for any
+/// missing node so production deployments don't silently lose surface wiring.
+fn validate_surface_layer_info(
+    layer_info: &HashMap<usize, SurfaceLayerInfo>,
+    capacitances: &HashMap<NodeId, f64>,
+    node_index: &HashMap<NodeId, usize>,
+) {
+    for (bd_idx, info) in layer_info {
+        let inner_has_cap = capacitances.contains_key(&info.inner_node);
+        let outer_has_cap = capacitances.contains_key(&info.outer_node);
+        let inner_in_index = node_index.contains_key(&info.inner_node);
+        let outer_in_index = node_index.contains_key(&info.outer_node);
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                inner_has_cap,
+                "SurfaceLayerInfo for boundary {bd_idx}: inner_node {:?} missing from capacitances",
+                info.inner_node
+            );
+            debug_assert!(
+                outer_has_cap,
+                "SurfaceLayerInfo for boundary {bd_idx}: outer_node {:?} missing from capacitances",
+                info.outer_node
+            );
+            debug_assert!(
+                inner_in_index,
+                "SurfaceLayerInfo for boundary {bd_idx}: inner_node {:?} missing from node_index",
+                info.inner_node
+            );
+            debug_assert!(
+                outer_in_index,
+                "SurfaceLayerInfo for boundary {bd_idx}: outer_node {:?} missing from node_index",
+                info.outer_node
+            );
+        }
+
+        if !inner_has_cap {
+            tracing::warn!(bd_idx = bd_idx, node = ?info.inner_node, "SurfaceLayerInfo inner_node missing from capacitances");
+        }
+        if !outer_has_cap {
+            tracing::warn!(bd_idx = bd_idx, node = ?info.outer_node, "SurfaceLayerInfo outer_node missing from capacitances");
+        }
+        if !inner_in_index {
+            tracing::warn!(bd_idx = bd_idx, node = ?info.inner_node, "SurfaceLayerInfo inner_node missing from node_index");
+        }
+        if !outer_in_index {
+            tracing::warn!(bd_idx = bd_idx, node = ?info.outer_node, "SurfaceLayerInfo outer_node missing from node_index");
+        }
+    }
+}
+
 /// Assemble the multi-layer RC network from pre-resolved boundary data.
 ///
 /// Returns the continuous-time state-space matrices and metadata needed
@@ -1109,19 +1165,25 @@ pub fn assemble_building_rc(
             cross, node_index_sorted,
             "sorted_internal_nodes differs from node_index key set"
         );
+    }
 
-        // Validate SurfaceLayerInfo completeness: every layer info's inner_node and
-        // outer_node must be present in the capacitance map.
+    validate_surface_layer_info(&layer_info, &rc.capacitances, &node_index);
+
+    // Observer capture: record SurfaceLayerInfo wiring completeness per boundary.
+    #[cfg(feature = "observe")]
+    {
         for (bd_idx, info) in &layer_info {
-            debug_assert!(
-                rc.capacitances.contains_key(&info.inner_node),
-                "SurfaceLayerInfo for boundary {bd_idx}: inner_node {:?} missing from capacitances",
-                info.inner_node
-            );
-            debug_assert!(
-                rc.capacitances.contains_key(&info.outer_node),
-                "SurfaceLayerInfo for boundary {bd_idx}: outer_node {:?} missing from capacitances",
-                info.outer_node
+            let inner_ok = rc.capacitances.contains_key(&info.inner_node)
+                && node_index.contains_key(&info.inner_node);
+            let outer_ok = rc.capacitances.contains_key(&info.outer_node)
+                && node_index.contains_key(&info.outer_node);
+            tracing::info!(
+                bd_idx = bd_idx,
+                inner_node = ?info.inner_node,
+                outer_node = ?info.outer_node,
+                inner_resolved = inner_ok,
+                outer_resolved = outer_ok,
+                "SurfaceLayerInfo wiring completeness"
             );
         }
     }
@@ -3404,5 +3466,69 @@ mod tests {
             assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
         assert_eq!(rc.node_index.len(), rc.a_c.nrows());
+    }
+
+    // ── SurfaceLayerInfo node validation ─────────────────────────────
+
+    #[test]
+    fn surface_layer_info_nodes_in_capacitances() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        let layers = vec![
+            make_layer(0.1, 0.5, 1000.0, 800.0, 50.0),
+            make_layer(0.05, 1.0, 2000.0, 900.0, 50.0),
+        ];
+        let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        // Every SurfaceLayerInfo entry must have both inner_node and outer_node
+        // present in the capacitances map and node_index.
+        for (bd_idx, info) in &rc.layer_info {
+            assert!(
+                rc.node_capacitances.contains_key(&info.inner_node),
+                "boundary {bd_idx}: inner_node {:?} missing from capacitances",
+                info.inner_node
+            );
+            assert!(
+                rc.node_capacitances.contains_key(&info.outer_node),
+                "boundary {bd_idx}: outer_node {:?} missing from capacitances",
+                info.outer_node
+            );
+            assert!(
+                rc.node_index.contains_key(&info.inner_node),
+                "boundary {bd_idx}: inner_node {:?} missing from node_index",
+                info.inner_node
+            );
+            assert!(
+                rc.node_index.contains_key(&info.outer_node),
+                "boundary {bd_idx}: outer_node {:?} missing from node_index",
+                info.outer_node
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "SurfaceLayerInfo for boundary")]
+    fn missing_surface_layer_node_asserts() {
+        let info = SurfaceLayerInfo {
+            outer_node: NodeId(LAYER_NODE_BASE + 9999),
+            inner_node: NodeId(LAYER_NODE_BASE + 9998),
+            surface_node: None,
+            interior_zone_idx: 0,
+        };
+        let mut layer_info: HashMap<usize, SurfaceLayerInfo> = HashMap::new();
+        layer_info.insert(0, info);
+        let capacitances: HashMap<NodeId, f64> = HashMap::new();
+        let node_index: HashMap<NodeId, usize> = HashMap::new();
+
+        validate_surface_layer_info(&layer_info, &capacitances, &node_index);
     }
 }
