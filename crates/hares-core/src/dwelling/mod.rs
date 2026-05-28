@@ -1148,8 +1148,13 @@ impl Dwelling {
             building.site.longitude_deg = Some(weather_lon);
         }
 
-        let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides, config.patches.as_ref())
-            .map_err(|e| HaresError::Io(e.to_string()))?;
+        let mut equipment_specs = resolve_equipment(
+            &building,
+            &defaults,
+            &empty_overrides,
+            config.patches.as_ref(),
+        )
+        .map_err(|e| HaresError::Io(e.to_string()))?;
 
         // Centralized fluid loop ID allocation — must run after wiring
         // (resolve_loop_wiring, inside resolve_equipment) and before

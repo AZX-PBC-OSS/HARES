@@ -111,6 +111,7 @@ fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> Equipm
             min_soc: Some(0.05),
             max_soc: Some(0.95),
             initial_soc: Some(initial_soc),
+            initial_cell_temp_c: None,
             import_limit_w: None,
             export_limit_w: None,
             heater_power_w: None,

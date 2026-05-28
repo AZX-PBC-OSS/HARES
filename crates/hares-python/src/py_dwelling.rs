@@ -397,6 +397,7 @@ fn battery_config_from_py(battery: &PyBattery) -> EquipmentConfig {
         min_soc: battery.min_soc,
         max_soc: battery.max_soc,
         initial_soc: battery.initial_soc,
+        initial_cell_temp_c: None,
         import_limit_w: battery.import_limit_w,
         export_limit_w: battery.export_limit_w,
         heater_power_w: battery.heater_power_w,

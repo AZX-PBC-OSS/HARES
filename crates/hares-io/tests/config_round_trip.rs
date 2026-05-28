@@ -443,6 +443,7 @@ fn sample_battery_config() -> BatteryConfig {
         min_soc: Some(0.1),
         max_soc: Some(0.9),
         initial_soc: Some(0.5),
+        initial_cell_temp_c: None,
         import_limit_w: Some(7_000.0),
         export_limit_w: Some(5_000.0),
         heater_power_w: Some(250.0),

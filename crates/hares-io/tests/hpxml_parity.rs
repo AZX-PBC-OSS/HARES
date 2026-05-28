@@ -62,7 +62,8 @@ fn resolve(xml: &str) -> Vec<hares_io::EquipmentSpec> {
 
 fn resolve_with_defaults(xml: &str, defaults: &DefaultsStore) -> Vec<hares_io::EquipmentSpec> {
     let building = parse_building(xml).expect("should parse");
-    resolve_equipment(&building, defaults, &json!({}), None).expect("resolve_equipment should succeed")
+    resolve_equipment(&building, defaults, &json!({}), None)
+        .expect("resolve_equipment should succeed")
 }
 
 fn repo_defaults() -> DefaultsStore {
@@ -991,7 +992,8 @@ fn cz4a_ashp_fixture_preserves_single_stage_compressor_intent() {
     // it now requires.
     building.site.latitude_deg.get_or_insert(39.29);
     building.site.longitude_deg.get_or_insert(-76.61);
-    let specs = resolve_equipment(&building, &defaults, &json!({}), None).expect("resolve_equipment");
+    let specs =
+        resolve_equipment(&building, &defaults, &json!({}), None).expect("resolve_equipment");
 
     let heater = specs
         .iter()
@@ -1432,7 +1434,8 @@ fn resolve_ochre_fixture(fixture_name: &str) -> Vec<hares_io::EquipmentSpec> {
     let xml = ochre_fixture_xml(fixture_name);
     let building = parse_building(&xml).expect("should parse");
     let defaults = repo_defaults();
-    resolve_equipment(&building, &defaults, &json!({}), None).expect("resolve_equipment should succeed")
+    resolve_equipment(&building, &defaults, &json!({}), None)
+        .expect("resolve_equipment should succeed")
 }
 
 #[test]

@@ -345,8 +345,14 @@ impl HeatPumpHeaterConfig {
             }
         }
         for (name, value) in [
-            ("heating_setpoint_c", self.common.setpoint.heating_setpoint_c),
-            ("cooling_setpoint_c", self.common.setpoint.cooling_setpoint_c),
+            (
+                "heating_setpoint_c",
+                self.common.setpoint.heating_setpoint_c,
+            ),
+            (
+                "cooling_setpoint_c",
+                self.common.setpoint.cooling_setpoint_c,
+            ),
             ("hysteresis_c", self.common.hysteresis_c),
             ("airflow_m3_s_per_w", self.common.airflow_m3_s_per_w),
             ("hp_lockout_temp_c", self.hp_lockout_temp_c),
@@ -558,8 +564,14 @@ impl HeatPumpCoolerConfig {
         }
 
         for (name, value) in [
-            ("heating_setpoint_c", self.common.setpoint.heating_setpoint_c),
-            ("cooling_setpoint_c", self.common.setpoint.cooling_setpoint_c),
+            (
+                "heating_setpoint_c",
+                self.common.setpoint.heating_setpoint_c,
+            ),
+            (
+                "cooling_setpoint_c",
+                self.common.setpoint.cooling_setpoint_c,
+            ),
             ("hysteresis_c", self.common.hysteresis_c),
             ("airflow_m3_s_per_w", self.common.airflow_m3_s_per_w),
         ] {

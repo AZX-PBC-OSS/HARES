@@ -437,8 +437,8 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+            .expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -459,8 +459,8 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+            .expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -481,8 +481,8 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+            .expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -505,8 +505,8 @@ mod tests {
         </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+            .expect("resolve_equipment");
         let ac = specs
             .iter()
             .find(|s| s.name == "Air Conditioner")
@@ -524,8 +524,8 @@ mod tests {
         </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+            .expect("resolve_equipment");
         let ac = specs
             .iter()
             .find(|s| s.name == "Air Conditioner")
@@ -543,8 +543,8 @@ mod tests {
         </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+            .expect("resolve_equipment");
         let ac = specs
             .iter()
             .find(|s| s.name == "Air Conditioner")
@@ -565,8 +565,8 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs =
-            resolve_equipment(&building, &repo_defaults(), &json!({}), None).expect("resolve_equipment");
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+            .expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -1191,7 +1191,8 @@ mod tests {
     fn clothes_washer_gain_fractions_match_ochre() {
         let xml = minimal_appliance_xml("<ClothesWasher />");
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+        let specs =
+            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let cw = find_spec(&specs, "Clothes Washer");
         let sens = cw.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = cw.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1203,7 +1204,8 @@ mod tests {
     fn dishwasher_gain_fractions_match_ochre() {
         let xml = minimal_appliance_xml("<Dishwasher />");
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+        let specs =
+            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dw = find_spec(&specs, "Dishwasher");
         let sens = dw.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dw.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1217,7 +1219,8 @@ mod tests {
             "<ClothesDryer><FuelType>electricity</FuelType><Vented>true</Vented></ClothesDryer>",
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+        let specs =
+            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1235,7 +1238,8 @@ mod tests {
             "<ClothesDryer><FuelType>electricity</FuelType><Vented>false</Vented></ClothesDryer>",
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+        let specs =
+            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1250,7 +1254,8 @@ mod tests {
             "<ClothesDryer><FuelType>natural gas</FuelType><Vented>true</Vented></ClothesDryer>",
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+        let specs =
+            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1268,7 +1273,8 @@ mod tests {
             "<ClothesDryer><FuelType>natural gas</FuelType><Vented>false</Vented></ClothesDryer>",
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+        let specs =
+            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
@@ -1282,7 +1288,8 @@ mod tests {
         let xml =
             minimal_appliance_xml("<ClothesDryer><FuelType>electricity</FuelType></ClothesDryer>");
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
+        let specs =
+            resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None).unwrap();
         let dryer = find_spec(&specs, "Clothes Dryer");
         let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
         // Defaults to vented (frac_lost=0.85) → sens=0.135

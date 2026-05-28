@@ -116,7 +116,10 @@ fn generated_schedule_uses_default_profiles_when_dir_provided() {
     let midnight = sched.columns[occ_idx][0];
     let noon = sched.columns[occ_idx][12];
     assert!(midnight > 0.0 && noon > 0.0);
-    assert!((midnight - noon).abs() > 1e-9, "occupancy should vary: midnight={midnight}, noon={noon}");
+    assert!(
+        (midnight - noon).abs() > 1e-9,
+        "occupancy should vary: midnight={midnight}, noon={noon}"
+    );
 }
 
 #[test]
@@ -151,8 +154,7 @@ fn generated_schedule_without_defaults_uses_constant_one() {
 #[test]
 fn generated_schedule_parity_with_real_csv_for_resstock_2025_1() {
     let defaults_dir = project_root().join("defaults");
-    let bldg_dir = project_root()
-        .join("tests/fixtures/resstock/2025.1/bldg0527060");
+    let bldg_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0527060");
 
     // Skip if fixture not available
     if !bldg_dir.join("home.xml").exists() {
@@ -185,8 +187,14 @@ fn generated_schedule_parity_with_real_csv_for_resstock_2025_1() {
     // Setpoints must be physically plausible
     let heat = generated.columns[generated.column_index["heating_setpoint"]][0];
     let cool = generated.columns[generated.column_index["cooling_setpoint"]][0];
-    assert!(heat > 5.0 && heat < 40.0, "implausible heating setpoint: {heat}");
-    assert!(cool > 10.0 && cool < 50.0, "implausible cooling setpoint: {cool}");
+    assert!(
+        heat > 5.0 && heat < 40.0,
+        "implausible heating setpoint: {heat}"
+    );
+    assert!(
+        cool > 10.0 && cool < 50.0,
+        "implausible cooling setpoint: {cool}"
+    );
     assert!(cool > heat, "cooling must be above heating");
 }
 
@@ -208,7 +216,7 @@ fn minimal_hpxml() -> String {
         </BuildingDetails>
       </Building>
     </HPXML>"#
-    .to_string()
+        .to_string()
 }
 
 fn minimal_hpxml_with_hvac_control() -> String {
@@ -235,5 +243,5 @@ fn minimal_hpxml_with_hvac_control() -> String {
         </BuildingDetails>
       </Building>
     </HPXML>"#
-    .to_string()
+        .to_string()
 }

@@ -396,6 +396,7 @@ fn oracle_battery_self_discharge_24h() {
             min_soc: Some(0.0),
             max_soc: Some(1.0),
             initial_soc: Some(initial_soc),
+            initial_cell_temp_c: None,
             import_limit_w: None,
             export_limit_w: None,
             heater_power_w: Some(0.0),

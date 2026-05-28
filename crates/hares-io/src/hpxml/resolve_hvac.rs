@@ -1921,9 +1921,7 @@ pub(super) fn resolve_hvac(
                 .or(child_text(heating, "FuelType").as_deref()),
         );
         let Some(system_type) = parse_named_type(heating, "HeatingSystemType") else {
-            tracing::warn!(
-                "HeatingSystem has empty or self-closing HeatingSystemType; skipping"
-            );
+            tracing::warn!("HeatingSystem has empty or self-closing HeatingSystemType; skipping");
             continue;
         };
         let name = canonical_hvac_heating_name(&system_type, fuel)?;

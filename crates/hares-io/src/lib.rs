@@ -37,7 +37,9 @@ pub use epw::{
 // Re-export canonical physical constants from hares-physics (preserving public API names).
 pub use hares_physics::constants::CELSIUS_TO_KELVIN as KELVIN_OFFSET_C;
 pub use hares_physics::constants::STEFAN_BOLTZMANN;
-pub use hpxml::{Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml, resolve_equipment};
+pub use hpxml::{
+    Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml, resolve_equipment,
+};
 pub use output::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
     OutputSummary, SimulationMetrics, StreamingRecorder, build_schema,

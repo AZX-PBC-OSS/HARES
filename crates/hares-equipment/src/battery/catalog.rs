@@ -225,6 +225,7 @@ impl BatterySpec {
                 min_soc: Some(self.min_soc),
                 max_soc: Some(self.max_soc),
                 initial_soc: None,
+                initial_cell_temp_c: None,
                 import_limit_w: None,
                 export_limit_w: None,
                 heater_power_w: Some(self.heater_power_w),
@@ -732,6 +733,7 @@ mod tests {
             min_soc: Some(0.05),
             max_soc: Some(1.0),
             initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
             import_limit_w: None,
             export_limit_w: None,
             heater_power_w: Some(0.0),
@@ -1334,8 +1336,10 @@ mod tests {
         use chrono::{FixedOffset, TimeZone};
         use hares_types::{EnvironmentState, GridState, PortSlots, WeatherState};
 
+        use hares_types::ControlSignal;
+
         use crate::Equipment;
-        use crate::battery::Battery;
+        use crate::battery::{Battery, BatteryConfig};
 
         let env = EnvironmentState {
             zones: vec![],
@@ -1363,33 +1367,70 @@ mod tests {
         let step_duration = Duration::from_secs(300);
         let steps_2h = 24; // 24 × 5 min = 2 hours
 
+        // Helper: build a config from spec with a custom initial cell temperature.
+        fn spec_config_with_temp(
+            spec: &BatterySpec,
+            initial_cell_temp_c: f64,
+        ) -> crate::EquipmentConfig {
+            let eta = spec.round_trip_efficiency.sqrt();
+            crate::EquipmentConfig::from_typed(
+                spec.label.to_string(),
+                "Battery".to_string(),
+                BatteryConfig {
+                    equipment_id: None,
+                    zone_id: None,
+                    capacity_kwh: spec.capacity_kwh,
+                    max_charge_kw: spec.max_charge_kw,
+                    max_discharge_kw: spec.max_discharge_kw,
+                    n_series: Some(spec.n_series_cells),
+                    n_parallel: Some(spec.n_parallel_cells),
+                    ah_cell: None,
+                    v_cell: None,
+                    cell_resistance_ohm: Some(spec.cell_resistance_ohm),
+                    pack_voltage_v: None,
+                    chemistry: Some(spec.chemistry.as_config_str().to_string()),
+                    standby_power_w: Some(spec.standby_power_w),
+                    self_discharge_pct_per_day: Some(spec.self_discharge_pct_per_day),
+                    min_soc: Some(spec.min_soc),
+                    max_soc: Some(spec.max_soc),
+                    initial_soc: None,
+                    initial_cell_temp_c: Some(initial_cell_temp_c),
+                    import_limit_w: None,
+                    export_limit_w: None,
+                    heater_power_w: Some(spec.heater_power_w),
+                    heater_threshold_c: Some(spec.heater_threshold_c),
+                    heater_on_discharge: None,
+                    min_discharge_temp_c: None,
+                    full_power_temp_c: Some(spec.full_power_temp_c),
+                    min_charge_temp_c: Some(spec.min_charge_temp_c),
+                    cell_thermal_mass_j_per_k: Some(spec.thermal_mass_j_per_k),
+                    cell_ua_w_per_k: Some(spec.ua_w_per_k),
+                    inverter_efficiency: None,
+                    charge_efficiency: Some(eta),
+                    discharge_efficiency: Some(eta),
+                    bms_mode: None,
+                    grid_export_rule: None,
+                },
+            )
+        }
+
         // --- small battery: Enphase IQ 5P ---
         // thermal_mass = 40 500 J/K, UA = 5.8 W/K → τ ≈ 1.9 h
         let small_spec = BatteryProductId::EnphaseIq5p.spec();
-        let small_cfg = small_spec.to_config();
+        let small_cfg = spec_config_with_temp(small_spec, 25.0);
         let mut small_bat = Battery::new(small_cfg.clone());
         small_bat.init(&small_cfg, &env).unwrap();
 
         // --- large battery: dual-PW3 ---
         // thermal_mass = 180 000 J/K, UA = 14.8 W/K → τ ≈ 3.4 h
         let large_spec = BatteryProductId::TeslaPw3X2.spec();
-        let large_cfg = large_spec.to_config();
+        let large_cfg = spec_config_with_temp(large_spec, 25.0);
         let mut large_bat = Battery::new(large_cfg.clone());
         large_bat.init(&large_cfg, &env).unwrap();
 
-        // Both start warm at 25 °C.
-        small_bat.cell_temp_c = 25.0;
-        large_bat.cell_temp_c = 25.0;
-
         // Disable self-consumption to keep batteries idle.
-        small_bat.self_consumption_enabled = false;
-        large_bat.self_consumption_enabled = false;
-
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            // Verify the invariant check in to_config does not panic
-            // (catalog is differentiated).
-        }
+        small_bat.apply_control(&ControlSignal::SelfConsumption { enabled: false, solar_only_charging: false }).unwrap();
+        large_bat.apply_control(&ControlSignal::SelfConsumption { enabled: false, solar_only_charging: false }).unwrap();
 
         // Record temperatures at checkpoints to verify the small battery
         // is always colder (cooling faster) due to lower thermal inertia.

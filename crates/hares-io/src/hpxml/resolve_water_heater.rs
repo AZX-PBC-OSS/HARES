@@ -36,10 +36,7 @@ fn tankless_parasitic_power_w(n_bedrooms: f64) -> f64 {
 /// 1. The provided `n_bedrooms` (from HPXML)
 /// 2. The `data_patches.number_of_bedrooms` field
 /// 3. Default of 2.0 (RESNET 301 implicit)
-fn resolve_bedroom_count(
-    n_bedrooms: Option<f64>,
-    data_patches: Option<&HpxmlDataPatches>,
-) -> f64 {
+fn resolve_bedroom_count(n_bedrooms: Option<f64>, data_patches: Option<&HpxmlDataPatches>) -> f64 {
     n_bedrooms
         .or_else(|| data_patches.and_then(|p| p.number_of_bedrooms))
         .unwrap_or(2.0)
@@ -51,7 +48,8 @@ pub(super) fn resolve_water_heaters(
     specs: &mut Vec<EquipmentSpec>,
     data_patches: Option<&HpxmlDataPatches>,
 ) -> std::result::Result<(), super::HpxmlError> {
-    let (avg_water_draw_l_per_day, n_bedrooms) = parse_avg_water_draw_and_bedrooms(details, data_patches);
+    let (avg_water_draw_l_per_day, n_bedrooms) =
+        parse_avg_water_draw_and_bedrooms(details, data_patches);
 
     for wh in descendants_named(details, "WaterHeatingSystem") {
         let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();

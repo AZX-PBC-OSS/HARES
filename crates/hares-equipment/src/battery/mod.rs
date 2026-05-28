@@ -1024,7 +1024,9 @@ impl Battery {
         let initial_soc = c.initial_soc.unwrap_or(DEFAULT_INITIAL_SOC);
         self.soc = initial_soc.clamp(self.min_soc, self.max_soc);
 
-        self.cell_temp_c = if let Some(zone_id) = self.descriptor.zone {
+        self.cell_temp_c = if let Some(initial_temp) = c.initial_cell_temp_c {
+            initial_temp
+        } else if let Some(zone_id) = self.descriptor.zone {
             env.zones
                 .iter()
                 .find(|z| z.id == zone_id)
@@ -1794,6 +1796,7 @@ mod tests {
             min_soc: None,
             max_soc: None,
             initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
             import_limit_w: None,
             export_limit_w: None,
             heater_power_w: None,
@@ -1863,6 +1866,7 @@ mod tests {
             min_soc: None,
             max_soc: None,
             initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
             import_limit_w: None,
             export_limit_w: None,
             heater_power_w: None,

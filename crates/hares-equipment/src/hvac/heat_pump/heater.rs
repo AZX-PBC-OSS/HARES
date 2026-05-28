@@ -2381,11 +2381,11 @@ mod tests {
     };
 
     use super::{ASHPHeater, GshpHeater, MinisplitHeater, SpeedControlMode};
-use crate::{
-    DefrostConfig, DefrostControl, Equipment, EquipmentConfig, HeatPumpCommonConfig,
-    HeatPumpHeaterConfig,
-};
-use crate::hvac::heating_config::HvacSetpointConfig;
+    use crate::hvac::heating_config::HvacSetpointConfig;
+    use crate::{
+        DefrostConfig, DefrostControl, Equipment, EquipmentConfig, HeatPumpCommonConfig,
+        HeatPumpHeaterConfig,
+    };
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
         EnvironmentState {
@@ -2877,12 +2877,13 @@ use crate::hvac::heating_config::HvacSetpointConfig;
         let cfg = heater_config_with(|typed| {
             let mut weekday = [18.0; 24];
             weekday[1] = 22.0;
-            typed.common.setpoint.heating_setpoint_source = Some(ScheduleSourceConfig::DailyProfile {
-                weekday,
-                weekend: weekday,
-                month_multipliers: [1.0; 12],
-                max_value: 1.0,
-            });
+            typed.common.setpoint.heating_setpoint_source =
+                Some(ScheduleSourceConfig::DailyProfile {
+                    weekday,
+                    weekend: weekday,
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                });
             typed.common.setpoint.heating_setpoint_c = Some(18.0);
         });
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -6360,29 +6361,29 @@ mod ideal_capacity_tests {
                     fan_power_w: None,
                     fan_power_w_per_cfm: None,
                     airflow_m3_s_per_w: None,
-                setpoint: HvacSetpointConfig {
-                    heating_setpoint_c: Some(21.0),
-                    cooling_setpoint_c: Some(26.0),
+                    setpoint: HvacSetpointConfig {
+                        heating_setpoint_c: Some(21.0),
+                        cooling_setpoint_c: Some(26.0),
+                        ..Default::default()
+                    },
+                    hysteresis_c: Some(1.0),
+                    duct: Default::default(),
+                    biquadratic_x1_min: None,
+                    biquadratic_x1_max: None,
+                    biquadratic_x2_min: None,
+                    biquadratic_x2_max: None,
+                    ff_min: None,
+                    ff_max: None,
+                    plf_min: None,
+                    plf_max: None,
+                    min_compressor_fraction: 0.25,
+                    eir_part_load_benefit: None,
+                    er_stages: 1,
+                    charge_defect_ratio: None,
                     ..Default::default()
                 },
-                hysteresis_c: Some(1.0),
-                duct: Default::default(),
-                biquadratic_x1_min: None,
-                biquadratic_x1_max: None,
-                biquadratic_x2_min: None,
-                biquadratic_x2_max: None,
-                ff_min: None,
-                ff_max: None,
-                plf_min: None,
-                plf_max: None,
-                min_compressor_fraction: 0.25,
-                eir_part_load_benefit: None,
-                er_stages: 1,
-                charge_defect_ratio: None,
-                ..Default::default()
-            },
-            hp_lockout_temp_c: None,
-            er_lockout_temp_c: None,
+                hp_lockout_temp_c: None,
+                er_lockout_temp_c: None,
                 max_oat_supplemental_c: None,
                 er_setpoint_offset_c: None,
                 er_hard_lockout_time_s: None,

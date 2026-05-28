@@ -82,6 +82,7 @@ fn base_battery_config() -> BatteryConfig {
         min_soc: Some(0.15),
         max_soc: Some(0.95),
         initial_soc: Some(0.5),
+        initial_cell_temp_c: None,
         import_limit_w: None,
         export_limit_w: None,
         heater_power_w: None,

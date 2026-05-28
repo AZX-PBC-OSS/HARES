@@ -42,6 +42,10 @@ pub struct BatteryConfig {
     pub min_soc: Option<f64>,
     pub max_soc: Option<f64>,
     pub initial_soc: Option<f64>,
+    /// Initial cell temperature (°C). When `None`, the temperature is derived
+    /// from the zone or ambient environment. When `Some`, overrides the
+    /// ambient derivation to allow warm-start or cold-start scenarios.
+    pub initial_cell_temp_c: Option<f64>,
 
     // Limits
     pub import_limit_w: Option<f64>,
@@ -171,6 +175,7 @@ mod tests {
             min_soc: None,
             max_soc: None,
             initial_soc: None,
+            initial_cell_temp_c: None,
             import_limit_w: None,
             export_limit_w: None,
             heater_power_w: None,

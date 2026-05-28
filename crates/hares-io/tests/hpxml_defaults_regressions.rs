@@ -225,13 +225,16 @@ fn missing_hvac_type_tags_fail_resolution_instead_of_defaulting() {
                 // (valid ResStock 2025.1 buildings with portable heaters, no central HVAC)
                 let specs = result.expect("empty HVAC type should be skipped, not rejected");
                 assert!(
-                    specs.iter().all(|s| s.name != "Gas Furnace" && s.name != "Air Conditioner"),
+                    specs
+                        .iter()
+                        .all(|s| s.name != "Gas Furnace" && s.name != "Air Conditioner"),
                     "{label}: no HVAC equipment should be generated from empty type tag"
                 );
             }
             _ => {
-                let err = result
-                    .expect_err("resolve_equipment must fail when required HVAC type tags are absent");
+                let err = result.expect_err(
+                    "resolve_equipment must fail when required HVAC type tags are absent",
+                );
                 match err {
                     HpxmlError::Parse(message) => assert!(
                         message.to_string().contains(missing_field),

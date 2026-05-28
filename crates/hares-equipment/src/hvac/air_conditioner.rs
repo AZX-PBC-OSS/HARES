@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 #[cfg(test)]
 use crate::HvacSetpointConfig;
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::ac_config::{
     CentralAirConditionerConfig, RoomAcConfig, default_telemetry, load_curve_pair, telemetry_fields,
@@ -3248,7 +3248,9 @@ mod dr_tests {
     };
 
     use super::AirConditioner;
-    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, HvacSetpointConfig};
+    use crate::{
+        CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, HvacSetpointConfig,
+    };
 
     /// Zone above cooling setpoint, suitable for triggering active cooling.
     fn hot_env(zone_temp_c: f64) -> EnvironmentState {
@@ -3653,7 +3655,9 @@ mod crankcase_tests {
     };
 
     use super::AirConditioner;
-    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, HvacSetpointConfig};
+    use crate::{
+        CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, HvacSetpointConfig,
+    };
 
     fn env(
         zone_temp_c: f64,

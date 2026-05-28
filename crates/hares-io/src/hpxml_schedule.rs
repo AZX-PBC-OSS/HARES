@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use chrono::{Datelike, DateTime, Duration, FixedOffset, Timelike};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, Timelike};
 
 use crate::hpxml::building::Building;
 use crate::schedule::{ColumnAggregation, ScheduleTimeSeries};

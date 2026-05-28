@@ -16,8 +16,8 @@ use hares_types::telemetry_keys as tk;
 use crate::{Equipment, EquipmentConfig};
 
 use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig};
-use super::super::heating_config::HvacSetpointConfig;
 use super::super::air_conditioner::AirConditioner;
+use super::super::heating_config::HvacSetpointConfig;
 use super::super::helpers::{equipment_id_from_config, zone_id_from_config};
 use super::constants::{DEFAULT_EQUIPMENT_ID, DEFAULT_ZONE_ID};
 
@@ -882,9 +882,9 @@ mod tests {
     use super::{
         super::super::super::Equipment, super::super::super::EquipmentConfig, GshpCooler, HpCooler,
     };
+    use crate::HvacSetpointConfig;
     use crate::config::ConfigPayload;
     use crate::hvac::SpeedControlMode;
-    use crate::HvacSetpointConfig;
 
     fn cooling_env(zone_temp_c: f64, outdoor_c: f64) -> EnvironmentState {
         EnvironmentState {

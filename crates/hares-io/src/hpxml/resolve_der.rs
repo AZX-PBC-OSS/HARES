@@ -143,6 +143,7 @@ pub(super) fn resolve_batteries(
             min_soc: None,
             max_soc: None,
             initial_soc: None,
+            initial_cell_temp_c: None,
             import_limit_w: None,
             export_limit_w: None,
             heater_power_w: None,
