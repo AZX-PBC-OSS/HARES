@@ -12,6 +12,7 @@ use hares_physics::solar::{clear_sky_irradiance, perez_tilted_irradiance, solar_
 use hares_types::{DEFAULT_GROUND_ALBEDO, DomainUpdate, EnvironmentState, PortSlots, ZoneId};
 use nalgebra::DVector;
 
+use super::CoupledState;
 use super::ThermalSolver;
 use super::config::{FilmCoefficientModel, StateSpaceWiring};
 
@@ -40,7 +41,7 @@ impl ThermalSolver {
     /// or 0.0 if the zone is unknown or solving fails.
     ///
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
-    /// or `last_coupled_lu`).
+    /// or `last_coupled_state`).
     pub fn autosize_capacity(&self, zone: ZoneId, target_c: f64, design_outdoor_c: f64) -> f64 {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
@@ -177,7 +178,7 @@ impl ThermalSolver {
     /// or 0.0 if the zone is unknown or solving fails.
     ///
     /// This method does NOT modify the solver's persistent state (`x`, `last_u`,
-    /// or `last_coupled_lu`).
+    /// or `last_coupled_state`).
     pub fn autosize_capacity_cooling(
         &self,
         zone: ZoneId,
@@ -305,9 +306,9 @@ impl ThermalSolver {
 
     /// Estimate the ideal HVAC capacity needed to reach an explicit target temperature.
     ///
-    /// Uses `last_u`, `last_coupling`, and `last_coupled_lu` as background.
+    /// Uses `last_u`, `last_coupling`, and `last_coupled_state` as background.
     /// When `prepare_inputs()` has been called first (two-phase path), these
-    /// contain current-step weather/solar/infiltration data. Zero allocation --
+    /// contain current-step weather/solar/infiltration data. Zero allocation —
     /// the coupled LU is cached by `prepare_inputs` or the previous `integrate`.
     ///
     /// Returns the required capacity in watts (positive = heating, negative = cooling),
@@ -326,8 +327,8 @@ impl ThermalSolver {
             return 0.0;
         };
 
-        let total = match &self.last_coupled_lu {
-            Some(lu) => {
+        let total = match &self.last_coupled_state {
+            CoupledState::LU(lu) => {
                 let coupling = crate::CouplingData {
                     lu,
                     couplings: &self.last_coupling,
@@ -341,7 +342,15 @@ impl ThermalSolver {
                     &coupling,
                 )
             }
-            None => self.model.solve_for_output_input(
+            CoupledState::Identity => self.model.solve_for_scalar_input_identity_coupled(
+                &self.x,
+                &self.last_u,
+                target_c,
+                output_idx,
+                input_idx,
+                &self.last_coupling,
+            ),
+            CoupledState::Uncoupled => self.model.solve_for_output_input(
                 &self.x,
                 &self.last_u,
                 target_c,
@@ -534,7 +543,7 @@ impl ThermalSolver {
     }
 
     /// Phase 1: build input vector and coupling from current weather/solar/infiltration.
-    /// Stores results in `last_u`, `last_coupling`, `last_coupled_lu` so that
+    /// Stores results in `last_u`, `last_coupling`, `last_coupled_state` so that
     /// `solve_ideal_capacity_for_target` sees current-step data.
     /// Does NOT cache u for the integration step -- `integrate` rebuilds it from
     /// post-dispatch ports.
@@ -546,12 +555,16 @@ impl ThermalSolver {
         self.build_coupling();
 
         if !self.coupling_buf.is_empty() {
-            let coupled_lu = self
-                .model
-                .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
-            self.last_coupled_lu = Some(coupled_lu);
+            if self.model.m_is_identity() {
+                self.last_coupled_state = CoupledState::Identity;
+            } else {
+                let coupled_lu = self
+                    .model
+                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
+                self.last_coupled_state = CoupledState::LU(coupled_lu);
+            }
         } else {
-            self.last_coupled_lu = None;
+            self.last_coupled_state = CoupledState::Uncoupled;
         }
 
         self.last_u.clone_from(&u);
@@ -575,22 +588,33 @@ impl ThermalSolver {
         self.apply_convection_forcing();
 
         if !self.coupling_buf.is_empty() {
-            let coupled_lu = self
-                .model
-                .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
+            if self.model.m_is_identity() {
+                self.model.step_with_identity_coupling_into(
+                    &self.x,
+                    &u,
+                    &mut self.rhs_buf,
+                    &self.coupling_buf,
+                );
 
-            self.model.step_with_coupled_lu_into(
-                &self.x,
-                &u,
-                &mut self.rhs_buf,
-                &coupled_lu,
-                &self.coupling_buf,
-            );
+                self.last_coupled_state = CoupledState::Identity;
+            } else {
+                let coupled_lu = self
+                    .model
+                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
 
-            self.last_coupled_lu = Some(coupled_lu);
+                self.model.step_with_coupled_lu_into(
+                    &self.x,
+                    &u,
+                    &mut self.rhs_buf,
+                    &coupled_lu,
+                    &self.coupling_buf,
+                );
+
+                self.last_coupled_state = CoupledState::LU(coupled_lu);
+            }
         } else {
             self.model.step_into(&self.x, &u, &mut self.rhs_buf);
-            self.last_coupled_lu = None;
+            self.last_coupled_state = CoupledState::Uncoupled;
         }
 
         std::mem::swap(&mut self.x, &mut self.rhs_buf);

@@ -45,10 +45,14 @@ dev = [
     "pytest-xdist>=3.8.0",
 ]
 ochre = [
+    "boto3>=1.42.78",
+    "click>=8.1",
     "fastparquet>=2026.3.0",
     "matplotlib>=3.10.8",
+    "nrel-pysam>=7.1.0",
     "numba>=0.64.0",
-    "pint>=0.25.3",
+    "pandas>=2.0",
+    "pint>=0.24,<0.25",
     "psychrolib>=2.5.0",
     "pvlib>=0.15.0",
     "pyarrow>=23.0.1",

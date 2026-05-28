@@ -62,6 +62,18 @@ use initialization::initialize_steady_state;
 
 const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
 
+/// Per-step coupled-solve state: tracks whether couplings are active and which
+/// solver path to use for the HVAC capacity solve in [`ThermalSolver::solve_ideal_capacity_for_target`].
+#[derive(Debug, Clone)]
+pub(crate) enum CoupledState {
+    /// No couplings active; use uncoupled solve path.
+    Uncoupled,
+    /// Couplings active with M = I; use closed-form O(n) diagonal-scaling solve.
+    Identity,
+    /// Couplings active with M ≠ I; use O(n³) LU factorization solve.
+    LU(nalgebra::linalg::LU<f64, nalgebra::Dyn, nalgebra::Dyn>),
+}
+
 #[derive(Debug, Clone)]
 pub struct ThermalSolver {
     model: StateSpaceModel,
@@ -81,9 +93,9 @@ pub struct ThermalSolver {
     m_scratch: DMatrix<f64>,
     /// Per-step coupling tuples: (state_idx, d_implicit, forcing). Reused each step.
     coupling_buf: Vec<(usize, f64, f64)>,
-    /// Previous coupling tuples and pre-built LU for `solve_ideal_capacity_for_target`.
+    /// Previous coupling tuples and coupled-solve state for `solve_ideal_capacity_for_target`.
     last_coupling: Vec<(usize, f64, f64)>,
-    last_coupled_lu: Option<nalgebra::linalg::LU<f64, nalgebra::Dyn, nalgebra::Dyn>>,
+    last_coupled_state: CoupledState,
     /// Per-exterior-surface converged surface temperatures [°C] for LWR continuity.
     /// Indexed parallel to `config.exterior_surfaces`.
     exterior_surface_temps: Vec<f64>,
@@ -449,7 +461,7 @@ impl ThermalSolver {
             .collect();
         let coupling_buf = Vec::with_capacity(env.zones.len());
         let last_coupling = Vec::new();
-        let last_coupled_lu = None;
+        let last_coupled_state = CoupledState::Uncoupled;
         let latent_buf = HashMap::new();
         let exterior_surface_temps =
             vec![env.weather.outdoor_temp_c; config.exterior_surfaces.len()];
@@ -533,7 +545,7 @@ impl ThermalSolver {
             m_scratch,
             coupling_buf,
             last_coupling,
-            last_coupled_lu,
+            last_coupled_state,
             latent_buf,
             exterior_surface_temps,
             component_gains: EnvelopeComponentGains::default(),

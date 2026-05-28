@@ -1102,9 +1102,13 @@ dev = [
     { name = "ruff" },
 ]
 ochre = [
+    { name = "boto3" },
+    { name = "click" },
     { name = "fastparquet" },
     { name = "matplotlib" },
+    { name = "nrel-pysam" },
     { name = "numba" },
+    { name = "pandas" },
     { name = "pint" },
     { name = "psychrolib" },
     { name = "pvlib" },
@@ -1146,10 +1150,14 @@ dev = [
     { name = "ruff", specifier = ">=0.15.8" },
 ]
 ochre = [
+    { name = "boto3", specifier = ">=1.42.78" },
+    { name = "click", specifier = ">=8.1" },
     { name = "fastparquet", specifier = ">=2026.3.0" },
     { name = "matplotlib", specifier = ">=3.10.8" },
+    { name = "nrel-pysam", specifier = ">=7.1.0" },
     { name = "numba", specifier = ">=0.64.0" },
-    { name = "pint", specifier = ">=0.25.3" },
+    { name = "pandas", specifier = ">=2.0" },
+    { name = "pint", specifier = ">=0.24,<0.25" },
     { name = "psychrolib", specifier = ">=2.5.0" },
     { name = "pvlib", specifier = ">=0.15.0" },
     { name = "pyarrow", specifier = ">=23.0.1" },
@@ -1291,7 +1299,7 @@ wheels = [
 
 [[package]]
 name = "pint"
-version = "0.25.3"
+version = "0.24.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "flexcache" },
@@ -1299,9 +1307,9 @@ dependencies = [
     { name = "platformdirs" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/52/9d/b1379cdbd33a49d17d627bc24e2b63cca06a1c5343b38072d2889499e82e/pint-0.25.3.tar.gz", hash = "sha256:f8f5df6cf65314d74da1ade1bf96f8e3e4d0c41b51577ac53c49e7d44ca5acee", size = 255106, upload-time = "2026-03-19T21:57:08.72Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/20/bb/52b15ddf7b7706ed591134a895dbf6e41c8348171fb635e655e0a4bbb0ea/pint-0.24.4.tar.gz", hash = "sha256:35275439b574837a6cd3020a5a4a73645eb125ce4152a73a2f126bf164b91b80", size = 342225, upload-time = "2024-11-07T16:29:46.061Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1b/dd/a9fe6a0a09512da23951c68bf36466aeecd89def3183dc095edbc807ddc5/pint-0.25.3-py3-none-any.whl", hash = "sha256:27eb25143bd5de9fcc4d5a4b484f16faf6b4615aa93ece6b3373a8c1a3c1b97d", size = 307488, upload-time = "2026-03-19T21:57:07.022Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/16/bd2f5904557265882108dc2e04f18abc05ab0c2b7082ae9430091daf1d5c/Pint-0.24.4-py3-none-any.whl", hash = "sha256:aa54926c8772159fcf65f82cc0d34de6768c151b32ad1deb0331291c38fe7659", size = 302029, upload-time = "2024-11-07T16:29:43.976Z" },
 ]
 
 [[package]]
