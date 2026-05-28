@@ -131,6 +131,12 @@ pub const AH_CELL: &str = "ah_cell";
 pub const V_CELL: &str = "v_cell";
 /// How pack topology was determined: 0 = defaults, 1 = explicit, 2 = cell_parameters, 3 = mixed.
 pub const DERIVATION_SOURCE: &str = "derivation_source";
+/// Physical pack capacity implied by the derived integer topology [kWh].
+/// Computed as n_parallel * ah_cell * n_series * v_cell / 1000 after topology derivation.
+pub const IMPLIED_CAPACITY_KWH: &str = "implied_capacity_kwh";
+/// Declared (configured) pack capacity [kWh] — the target that topology derivation
+/// attempts to satisfy.
+pub const DECLARED_CAPACITY_KWH: &str = "declared_capacity_kwh";
 
 // ── EV-specific ─────────────────────────────────────────────────────────────
 pub const CONNECTION_STATE: &str = "connection_state";

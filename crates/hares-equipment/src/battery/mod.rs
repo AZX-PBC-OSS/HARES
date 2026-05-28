@@ -756,10 +756,7 @@ impl Battery {
                 let pack_v = self.n_series as f64 * vc;
                 let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
                 if !has_explicit_parallel {
-                    self.n_parallel = (pack_ah / ah).round() as u32;
-                    if self.n_parallel == 0 {
-                        self.n_parallel = 1;
-                    }
+                    self.n_parallel = u32::max(1, (pack_ah / ah).ceil() as u32);
                 }
                 tracing::warn!(
                     explicit_n_series = ?explicit_series,
@@ -788,10 +785,7 @@ impl Battery {
                 }
                 let pack_v = self.n_series as f64 * vc;
                 let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
-                self.n_parallel = (pack_ah / ah).round() as u32;
-                if self.n_parallel == 0 {
-                    self.n_parallel = 1;
-                }
+                self.n_parallel = u32::max(1, (pack_ah / ah).ceil() as u32);
             } else {
                 self.derivation_source = DerivationSource::Defaults;
             }
@@ -799,6 +793,59 @@ impl Battery {
             self.derivation_source = DerivationSource::Explicit;
         } else {
             self.derivation_source = DerivationSource::Defaults;
+        }
+
+        // Capacity consistency check: when topology was derived from cell
+        // parameters (fully or partially), verify that the integer topology
+        // produces a physical capacity within 10% of the declared value.
+        // Matching EnergyPlus cmod_battwatts.cpp:133 which uses ceil() and
+        // recalculates batt_kwh from integer topology.
+        if has_cell_params
+            && (self.derivation_source == DerivationSource::CellParameters
+                || self.derivation_source == DerivationSource::Mixed)
+        {
+            if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
+                if ah > 0.0 && vc > 0.0 {
+                    let implied_kwh =
+                        self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
+                    let relative_error =
+                        (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
+                    // With ceil(), implied_kwh >= declared_kwh; the check guards
+                    // against pathological cell-parameter combinations where a
+                    // single cell's Ah capacity dwarfs the pack requirement,
+                    // producing a physically invalid topology.
+                    if relative_error > 0.10 {
+                        tracing::error!(
+                            self.n_series,
+                            self.n_parallel,
+                            ah_cell = ah,
+                            v_cell = vc,
+                            capacity_kwh = self.capacity_kwh,
+                            implied_capacity_kwh = implied_kwh,
+                            relative_error,
+                            "Battery topology derived from cell parameters is inconsistent \
+                             with declared capacity: implied {:.2} kWh vs declared {:.2} kWh \
+                             (relative error {:.1}% > 10%)",
+                            implied_kwh,
+                            self.capacity_kwh,
+                            relative_error * 100.0,
+                        );
+                        return Err(HaresError::Equipment(format!(
+                            "derived battery topology (n_series={}, n_parallel={}) implies capacity \
+                             {:.2} kWh, which differs from declared {:.2} kWh by {:.1}% (>10% threshold). \
+                             Cell parameters (ah_cell={} Ah, v_cell={} V) are incompatible with the \
+                             declared pack capacity",
+                            self.n_series,
+                            self.n_parallel,
+                            implied_kwh,
+                            self.capacity_kwh,
+                            relative_error * 100.0,
+                            ah,
+                            vc,
+                        )));
+                    }
+                }
+            }
         }
 
         // Invariant check: when both explicit topology and cell params were
@@ -817,7 +864,7 @@ impl Battery {
                         let pack_v = derived_series as f64 * vc;
                         let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
                         let derived_parallel = {
-                            let p = (pack_ah / ah).round() as u32;
+                            let p = (pack_ah / ah).ceil() as u32;
                             if p == 0 { 1 } else { p }
                         };
                         let series_diff =
@@ -836,20 +883,65 @@ impl Battery {
                                  from cell-parameter derivation by >1 cell"
                             );
                         }
+
+                        // Capacity consistency invariant: warn when the declared
+                        // capacity_kwh and the topology (whether explicit or derived)
+                        // produce an implied capacity mismatch >10%.
+                        // This catches pathological configs that slip through
+                        // the main derivation check (e.g. explicit topology that
+                        // the user believes matches the cell parameters but doesn't).
+                        let implied_kwh =
+                            self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0;
+                        let relative_error =
+                            (implied_kwh - self.capacity_kwh).abs() / self.capacity_kwh;
+                        if relative_error > 0.10 {
+                            tracing::warn!(
+                                self.n_series,
+                                self.n_parallel,
+                                ah_cell = ah,
+                                v_cell = vc,
+                                capacity_kwh = self.capacity_kwh,
+                                implied_capacity_kwh = implied_kwh,
+                                relative_error,
+                                "Battery topology invariant: declared capacity_kwh \
+                                 ({:.2} kWh) inconsistent with topology-implied \
+                                 capacity ({:.2} kWh, {:.1}% error)",
+                                self.capacity_kwh,
+                                implied_kwh,
+                                relative_error * 100.0,
+                            );
+                        }
                     }
                 }
             }
         }
 
         #[cfg(feature = "observe")]
-        tracing::debug!(
-            derivation_source = ?self.derivation_source,
-            n_series = self.n_series,
-            n_parallel = self.n_parallel,
-            ah_cell = c.ah_cell,
-            v_cell = c.v_cell,
-            "Battery topology initialized",
-        );
+        {
+            let implied_kwh = if has_cell_params {
+                if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
+                    if ah > 0.0 && vc > 0.0 {
+                        Some(self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            tracing::debug!(
+                derivation_source = ?self.derivation_source,
+                n_series = self.n_series,
+                n_parallel = self.n_parallel,
+                ah_cell = c.ah_cell,
+                v_cell = c.v_cell,
+                declared_capacity_kwh = self.capacity_kwh,
+                implied_capacity_kwh,
+                "Battery topology initialized",
+            );
+        }
 
         if self.n_series == 0 || self.n_parallel == 0 {
             return Err(HaresError::Equipment(
@@ -954,6 +1046,20 @@ impl Battery {
         self.telemetry.set(tk::V_CELL, c.v_cell.unwrap_or(f64::NAN));
         self.telemetry
             .set(tk::DERIVATION_SOURCE, self.derivation_source.code());
+        self.telemetry
+            .set(tk::DECLARED_CAPACITY_KWH, self.capacity_kwh);
+        // Compute implied capacity from the integer topology when cell params
+        // are available; set NaN sentinel otherwise (same pattern as ah_cell/v_cell).
+        let implied_kwh = if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
+            if ah > 0.0 && vc > 0.0 && self.n_series > 0 && self.n_parallel > 0 {
+                self.n_parallel as f64 * ah * self.n_series as f64 * vc / 1000.0
+            } else {
+                f64::NAN
+            }
+        } else {
+            f64::NAN
+        };
+        self.telemetry.set(tk::IMPLIED_CAPACITY_KWH, implied_kwh);
         self.core_output = CoreOutput::default();
 
         Ok(())
@@ -1477,6 +1583,8 @@ fn default_telemetry() -> Telemetry {
     t.insert(tk::AH_CELL, f64::NAN);
     t.insert(tk::V_CELL, f64::NAN);
     t.insert(tk::DERIVATION_SOURCE, 0.0);
+    t.insert(tk::IMPLIED_CAPACITY_KWH, f64::NAN);
+    t.insert(tk::DECLARED_CAPACITY_KWH, f64::NAN);
     t
 }
 
@@ -1577,6 +1685,17 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
             unit: "enum".to_string(),
             description: "Topology derivation source: 0=defaults, 1=explicit, 2=cell_parameters, 3=mixed"
                 .to_string(),
+        },
+        TelemetryField {
+            name: tk::IMPLIED_CAPACITY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "Pack capacity implied by integer topology (n_parallel * ah_cell * n_series * v_cell / 1000)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::DECLARED_CAPACITY_KWH.to_string(),
+            unit: "kWh".to_string(),
+            description: "Declared pack capacity from config".to_string(),
         },
     ]
 }
@@ -4296,10 +4415,10 @@ mod tests {
     }
 
     /// Cell-parameter derivation must still work when no explicit n_series/n_parallel
-    /// are provided.
+    /// are provided, and the implied capacity must be within 10% of declared.
     #[test]
     fn battery_topology_derivation_without_conflict() {
-        let config = battery_config(&[(KEY_AH_CELL, 50.0), (KEY_V_CELL, 3.6)]);
+        let config = battery_config(&[(KEY_AH_CELL, 5.0), (KEY_V_CELL, 3.6)]);
         let mut bat = Battery::new(config.clone());
         let env = base_env();
         bat.init(&config, &env).unwrap();
@@ -4307,21 +4426,23 @@ mod tests {
         // Derivation: target_pack_v = 350 V default
         // n_series = round(350 / 3.6) = round(97.22) = 97
         // pack_v = 97 * 3.6 = 349.2 V, pack_ah = 10.0 kWh * 1000 / 349.2 = 28.637 Ah
-        // n_parallel = round(28.637 / 50.0) = round(0.573) = 1
+        // n_parallel = ceil(28.637 / 5.0) = ceil(5.727) = 6
         assert_eq!(
             bat.n_series, 97,
             "n_series should be derived from target_pack_v / v_cell"
         );
         assert_eq!(
-            bat.n_parallel, 1,
-            "n_parallel should be derived from pack_ah / ah_cell"
+            bat.n_parallel, 6,
+            "n_parallel should be ceil(pack_ah / ah_cell)"
         );
+        // Implied capacity: 6 * 5.0 * 97 * 3.6 / 1000 = 10.476 kWh
+        // Relative error: |10.476 - 10| / 10 = 4.76% < 10% ✓
         assert_eq!(
             bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
             2.0,
             "derivation_source must be CellParameters (2.0)"
         );
-        assert!((bat.telemetry().get(tk::AH_CELL).unwrap() - 50.0).abs() < 1e-12);
+        assert!((bat.telemetry().get(tk::AH_CELL).unwrap() - 5.0).abs() < 1e-12);
         assert!((bat.telemetry().get(tk::V_CELL).unwrap() - 3.6).abs() < 1e-12);
     }
 
@@ -4366,7 +4487,7 @@ mod tests {
 
         assert_eq!(bat.n_series, 14, "explicit n_series must be preserved");
         // pack_v = 14 * 3.6 = 50.4 V, pack_ah = 10 kWh * 1000 / 50.4 ≈ 198.41 Ah
-        // n_parallel = round(198.41 / 70) = 3
+        // n_parallel = ceil(198.41 / 70) = 3
         assert_eq!(
             bat.n_parallel, 3,
             "n_parallel must be derived from cell params when not explicit"
@@ -4378,5 +4499,112 @@ mod tests {
         );
         assert!((bat.telemetry().get(tk::AH_CELL).unwrap() - 70.0).abs() < 1e-12);
         assert!((bat.telemetry().get(tk::V_CELL).unwrap() - 3.6).abs() < 1e-12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Topology capacity consistency tests (T-0062)
+    // -----------------------------------------------------------------------
+
+    /// When cell parameters imply an n_parallel that rounds-to-zero (pack_ah
+    /// much smaller than ah_cell), `ceil()` produces n_parallel=1 but the
+    /// implied physical capacity is grossly inconsistent with the declared
+    /// value → init_typed must return an error.
+    #[test]
+    fn battery_topology_n_parallel_zero_is_error() {
+        // ah_cell=100, v_cell=3.6, capacity_kwh=5.0
+        // n_series = round(350/3.6) = 97, pack_v = 349.2 V
+        // pack_ah = 5.0 * 1000 / 349.2 ≈ 14.32 Ah
+        // n_parallel = ceil(14.32 / 100) = 1
+        // implied = 1 * 100 * 97 * 3.6 / 1000 = 34.92 kWh
+        // error = |34.92 - 5.0| / 5.0 = 598% > 10% → error
+        let config = battery_config(&[
+            (KEY_AH_CELL, 100.0),
+            (KEY_V_CELL, 3.6),
+            (KEY_CAPACITY_KWH, 5.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        let result = bat.init(&config, &env);
+
+        assert!(
+            result.is_err(),
+            "expected error for incompatible cell parameters (ah_cell=100, capacity_kwh=5.0)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("incompatible") || msg.contains("inconsistent") || msg.contains("differ"),
+            "error must describe topology/capacity mismatch, got: {msg}"
+        );
+    }
+
+    /// The problematic case from the review finding: ah_cell=100, v_cell=3.6,
+    /// capacity_kwh=13.5. ceil() produces n_parallel=1 but implied capacity
+    /// (34.92 kWh) is 2.6× the declared (13.5 kWh) → init_typed must error.
+    #[test]
+    fn battery_topology_capacity_consistency_ceil() {
+        // n_series = round(350/3.6) = 97, pack_v = 349.2 V
+        // pack_ah = 13.5 * 1000 / 349.2 ≈ 38.66 Ah
+        // n_parallel = ceil(38.66 / 100) = ceil(0.387) = 1
+        // implied = 1 * 100 * 97 * 3.6 / 1000 = 34.92 kWh
+        // error = |34.92 - 13.5| / 13.5 ≈ 158.7% > 10% → error
+        let config = battery_config(&[
+            (KEY_AH_CELL, 100.0),
+            (KEY_V_CELL, 3.6),
+            (KEY_CAPACITY_KWH, 13.5),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        let result = bat.init(&config, &env);
+
+        assert!(
+            result.is_err(),
+            "expected error for the review-finding case (ah_cell=100, capacity_kwh=13.5)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("34.92") || msg.contains("implied") || msg.contains("inconsistent"),
+            "error message must indicate the capacity mismatch, got: {msg}"
+        );
+    }
+
+    /// With compatible cell parameters, topology derivation produces a
+    /// consistent implied capacity within 10% of declared → init_typed
+    /// must succeed.
+    #[test]
+    fn battery_topology_capacity_consistent() {
+        // ah_cell=5.0, v_cell=3.6, capacity_kwh=13.5
+        // n_series = round(350/3.6) = 97, pack_v = 349.2 V
+        // pack_ah = 13.5 * 1000 / 349.2 ≈ 38.66 Ah
+        // n_parallel = ceil(38.66 / 5.0) = ceil(7.733) = 8
+        // implied = 8 * 5.0 * 97 * 3.6 / 1000 = 13.968 kWh
+        // error = |13.968 - 13.5| / 13.5 ≈ 3.47% < 10% ✓
+        let config = battery_config(&[
+            (KEY_AH_CELL, 5.0),
+            (KEY_V_CELL, 3.6),
+            (KEY_CAPACITY_KWH, 13.5),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        assert_eq!(bat.n_series, 97);
+        assert_eq!(bat.n_parallel, 8);
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            2.0,
+            "derivation_source must be CellParameters (2.0)"
+        );
+        // Implied capacity telemetry should be populated (not NaN)
+        let implied = bat.telemetry().get(tk::IMPLIED_CAPACITY_KWH).unwrap();
+        assert!(
+            !implied.is_nan(),
+            "implied_capacity_kwh must be computed when cell params are present"
+        );
+        let error = (implied - 13.5).abs() / 13.5;
+        assert!(
+            error < 0.10,
+            "implied capacity {implied} kWh must be within 10% of declared 13.5 kWh (error: {:.1}%)",
+            error * 100.0
+        );
     }
 }
