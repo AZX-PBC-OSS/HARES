@@ -1469,7 +1469,35 @@ impl CoolingCore {
                 }
                 self.hvac.control.max_capacity_fraction = *fraction;
             }
-            _ => {}
+            _ => {
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    // Signals reaching the hvac catch-all path with a declared
+                    // capability must be handled by HvacEquipment::apply_control_signal.
+                    // Currently ThermalSetpointDelta is the only variant that falls
+                    // through to this path; ThermalSetpoint and MaxCapacityFraction
+                    // are handled by explicit arms above.
+                    let required = signal.required_capability();
+                    if self.descriptor.control_capabilities.contains(required) {
+                        debug_assert!(
+                            matches!(signal, ControlSignal::ThermalSetpointDelta { .. }),
+                            "CoolingCore '{}': signal {:?} (capability {:?}) \
+                             reached the hvac catch-all path — add an explicit \
+                             match arm in apply_control_unchecked for this signal variant",
+                            self.descriptor.equipment_type,
+                            signal,
+                            required,
+                        );
+                    }
+                }
+                #[cfg(feature = "observe")]
+                tracing::debug!(
+                    signal_variant = ?signal,
+                    equipment = %self.descriptor.equipment_type,
+                    "control signal routed through hvac catch-all path",
+                );
+                self.hvac.apply_control_signal(signal);
+            }
         }
         Ok(())
     }
@@ -1576,7 +1604,7 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, ExecutionStage, GridState, HumidityAccumulator,
+        ControlSignal, DRLevel, EnvironmentState, ExecutionStage, GridState, HumidityAccumulator,
         OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
         telemetry_keys as tk,
     };
@@ -3067,6 +3095,131 @@ mod tests {
              central-AC default would draw 0.05 kW at 5 °C. Got {}",
             ports.electrical.net_active_kw()
         );
+    }
+
+    #[test]
+    fn thermal_setpoint_delta_adjusts_cooling_setpoint_on_ac() {
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let env_state = env(28.0, 0.010, 19.0, 35.0);
+        eq.init(&cfg, &env_state).unwrap();
+
+        assert!(
+            eq.descriptor()
+                .control_capabilities
+                .contains(hares_types::ControlCapabilities::THERMAL_SETPOINT_DELTA),
+            "AirConditioner must declare THERMAL_SETPOINT_DELTA capability"
+        );
+
+        let baseline = eq.core.hvac.effective_setpoints();
+
+        // Dispatch ThermalSetpointDelta: raise cooling setpoint by 1 °C.
+        eq.apply_control(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: None,
+            cooling_delta_c: Some(1.0),
+        })
+        .unwrap();
+
+        let adjusted = eq.core.hvac.effective_setpoints();
+        let expected_cooling = baseline.cooling_c + 1.0;
+        assert!(
+            (adjusted.cooling_c - expected_cooling).abs() < 1e-9,
+            "cooling setpoint must increase by 1 °C: baseline={}, expected={}, got={}",
+            baseline.cooling_c,
+            expected_cooling,
+            adjusted.cooling_c,
+        );
+        // Heating setpoint unchanged — delta only specified for cooling.
+        assert_eq!(
+            adjusted.heating_c, baseline.heating_c,
+            "heating setpoint must not change when only cooling_delta_c is specified"
+        );
+    }
+
+    /// Every signal variant corresponding to a declared capability must return
+    /// Ok(()) when dispatched to the AirConditioner (T-0048 regression guard).
+    #[test]
+    fn all_declared_ac_capabilities_return_ok_on_apply_control() {
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let env_state = env(28.0, 0.010, 19.0, 35.0);
+        eq.init(&cfg, &env_state).unwrap();
+
+        let declared = eq.descriptor().control_capabilities;
+
+        let signals: &[(&str, ControlSignal)] = &[
+            (
+                "ThermalSetpoint",
+                ControlSignal::ThermalSetpoint {
+                    heating_setpoint_c: Some(18.0),
+                    cooling_setpoint_c: Some(24.0),
+                    deadband_c: Some(1.5),
+                },
+            ),
+            (
+                "ThermalSetpointDelta",
+                ControlSignal::ThermalSetpointDelta {
+                    heating_delta_c: None,
+                    cooling_delta_c: Some(1.0),
+                },
+            ),
+            (
+                "DutyCycle",
+                ControlSignal::DutyCycle {
+                    on_fraction: 0.5,
+                    period_s: None,
+                    component: None,
+                },
+            ),
+            (
+                "LoadFraction",
+                ControlSignal::LoadFraction { fraction: 0.8 },
+            ),
+            (
+                "PowerLimit",
+                ControlSignal::PowerLimit {
+                    max_power_kw: 2.0,
+                    ramp_rate_kw_per_s: None,
+                },
+            ),
+            (
+                "ModeOverride",
+                ControlSignal::ModeOverride {
+                    mode: OperatingMode::Cooling,
+                },
+            ),
+            (
+                "DemandResponse",
+                ControlSignal::DemandResponse {
+                    level: DRLevel::Moderate,
+                    duration_s: None,
+                },
+            ),
+            (
+                "IdealCapacity",
+                ControlSignal::IdealCapacity {
+                    capacity_w: -3_000.0,
+                },
+            ),
+            (
+                "MaxCapacityFraction",
+                ControlSignal::MaxCapacityFraction { fraction: 0.75 },
+            ),
+        ];
+
+        for (label, signal) in signals {
+            let required = signal.required_capability();
+            assert!(
+                declared.contains(required),
+                "test invariant: signal '{label}' requires capability {required:?} \
+                 which must be in AC's declared capabilities {declared:?}",
+            );
+            let result = eq.apply_control(signal);
+            assert!(
+                result.is_ok(),
+                "apply_control for '{label}' signal must return Ok(()), got {result:?}",
+            );
+        }
     }
 }
 
