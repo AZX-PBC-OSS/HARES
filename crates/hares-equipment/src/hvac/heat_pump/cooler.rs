@@ -1447,4 +1447,100 @@ mod tests {
              in cooling mode than default (60 m); got deep={ewt_deep:.3}, default={ewt_default:.3}"
         );
     }
+
+    /// D2ACooler (ASHP/air-air cooler) must apply ThermalSetpointDelta by
+    /// adjusting the runtime setpoint via the catch-all → HvacEquipment path.
+    #[test]
+    fn hp_cooler_thermal_setpoint_delta_adjusts_cooling_setpoint() {
+        let cfg = base_config();
+        let mut eq = HpCooler::ashp_cooler(cfg.clone());
+        let env = cooling_env(28.0, 35.0);
+        eq.init(&cfg, &env).unwrap();
+
+        assert!(
+            eq.descriptor()
+                .control_capabilities
+                .contains(ControlCapabilities::THERMAL_SETPOINT_DELTA),
+            "HpCooler must declare THERMAL_SETPOINT_DELTA capability"
+        );
+
+        let baseline = eq.inner.core.hvac.effective_setpoints();
+
+        // Dispatch ThermalSetpointDelta: raise cooling setpoint by 0.5 °C.
+        eq.apply_control(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: None,
+            cooling_delta_c: Some(0.5),
+        })
+        .unwrap();
+
+        let adjusted = eq.inner.core.hvac.effective_setpoints();
+        let expected_cooling = baseline.cooling_c + 0.5;
+        assert!(
+            (adjusted.cooling_c - expected_cooling).abs() < 1e-9,
+            "cooling setpoint must increase by 0.5 °C: baseline={}, expected={}, got={}",
+            baseline.cooling_c,
+            expected_cooling,
+            adjusted.cooling_c,
+        );
+        // Heating setpoint unchanged — delta only specified for cooling.
+        assert_eq!(
+            adjusted.heating_c, baseline.heating_c,
+            "heating setpoint must not change when only cooling_delta_c is specified"
+        );
+    }
+
+    /// GshpCooler must apply ThermalSetpointDelta by adjusting the runtime
+    /// setpoint via the catch-all → HvacEquipment path.
+    #[test]
+    fn gshp_cooler_thermal_setpoint_delta_adjusts_cooling_setpoint() {
+        use crate::{HeatPumpCommonConfig, HeatPumpCoolerConfig};
+
+        let cfg = EquipmentConfig::from_typed(
+            "GSHP Cooler Test".to_string(),
+            "GSHP Cooler".to_string(),
+            HeatPumpCoolerConfig {
+                common: HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(8_000.0),
+                    cooling_eir: Some(0.33),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut eq = GshpCooler::new(cfg.clone());
+        let env = cooling_env(28.0, 35.0);
+        eq.init(&cfg, &env).unwrap();
+
+        assert!(
+            eq.descriptor()
+                .control_capabilities
+                .contains(ControlCapabilities::THERMAL_SETPOINT_DELTA),
+            "GshpCooler must declare THERMAL_SETPOINT_DELTA capability"
+        );
+
+        let baseline = eq.inner.core.hvac.effective_setpoints();
+
+        // Dispatch ThermalSetpointDelta: raise cooling setpoint by 0.5 °C.
+        eq.apply_control(&ControlSignal::ThermalSetpointDelta {
+            heating_delta_c: None,
+            cooling_delta_c: Some(0.5),
+        })
+        .unwrap();
+
+        let adjusted = eq.inner.core.hvac.effective_setpoints();
+        let expected_cooling = baseline.cooling_c + 0.5;
+        assert!(
+            (adjusted.cooling_c - expected_cooling).abs() < 1e-9,
+            "cooling setpoint must increase by 0.5 °C: baseline={}, expected={}, got={}",
+            baseline.cooling_c,
+            expected_cooling,
+            adjusted.cooling_c,
+        );
+        // Heating setpoint unchanged — delta only specified for cooling.
+        assert_eq!(
+            adjusted.heating_c, baseline.heating_c,
+            "heating setpoint must not change when only cooling_delta_c is specified"
+        );
+    }
 }
