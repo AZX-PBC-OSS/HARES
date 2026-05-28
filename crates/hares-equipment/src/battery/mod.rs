@@ -279,6 +279,32 @@ struct BatteryCheckpoint {
 // Battery struct
 // ---------------------------------------------------------------------------
 
+/// How the battery pack topology (n_series, n_parallel) was determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DerivationSource {
+    /// Default values (DEFAULT_N_SERIES / DEFAULT_N_PARALLEL) — no explicit
+    /// config and no cell parameters provided.
+    Defaults,
+    /// User explicitly provided n_series / n_parallel.
+    Explicit,
+    /// Derived from ah_cell / v_cell cell parameters.
+    CellParameters,
+    /// Partially explicit: one topology param was provided by the user,
+    /// the other was derived from cell parameters.
+    Mixed,
+}
+
+impl DerivationSource {
+    fn code(self) -> f64 {
+        match self {
+            Self::Defaults => 0.0,
+            Self::Explicit => 1.0,
+            Self::CellParameters => 2.0,
+            Self::Mixed => 3.0,
+        }
+    }
+}
+
 pub struct Battery {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
@@ -296,6 +322,7 @@ pub struct Battery {
     max_discharge_kw: f64,
     n_series: u32,
     n_parallel: u32,
+    derivation_source: DerivationSource,
     cell_resistance_ohm: f64,
     chemistry: BatteryChemistry,
     ocv_table: OcvTable,
@@ -409,6 +436,7 @@ impl Battery {
             max_discharge_kw: DEFAULT_MAX_DISCHARGE_KW,
             n_series: DEFAULT_N_SERIES,
             n_parallel: DEFAULT_N_PARALLEL,
+            derivation_source: DerivationSource::Defaults,
             cell_resistance_ohm: DEFAULT_CELL_RESISTANCE_OHM,
             chemistry: BatteryChemistry::Nmc,
             ocv_table: OcvTable::default_li_nmc(),
@@ -685,23 +713,144 @@ impl Battery {
         self.max_discharge_kw = c.max_discharge_kw;
 
         // Pack topology
-        self.n_series = c.n_series.unwrap_or(DEFAULT_N_SERIES);
-        self.n_parallel = c.n_parallel.unwrap_or(DEFAULT_N_PARALLEL);
-        if let (Some(ah_cell), Some(v_cell)) = (c.ah_cell, c.v_cell) {
-            if ah_cell > 0.0 && v_cell > 0.0 {
+        let explicit_series = c.n_series;
+        let explicit_parallel = c.n_parallel;
+        let has_explicit_series = explicit_series.is_some();
+        let has_explicit_parallel = explicit_parallel.is_some();
+        let has_both_explicit = has_explicit_series && has_explicit_parallel;
+        let has_any_explicit = has_explicit_series || has_explicit_parallel;
+        let is_mixed = has_any_explicit && !has_both_explicit;
+        let has_cell_params = c.ah_cell.is_some() && c.v_cell.is_some();
+
+        // Start with explicit values (or defaults).
+        self.n_series = explicit_series.unwrap_or(DEFAULT_N_SERIES);
+        self.n_parallel = explicit_parallel.unwrap_or(DEFAULT_N_PARALLEL);
+
+        if has_both_explicit && has_cell_params {
+            // Conflict: user provided both explicit topology AND cell parameters.
+            // Prefer explicit topology — cell-parameter derivation is skipped.
+            self.derivation_source = DerivationSource::Explicit;
+            tracing::warn!(
+                explicit_n_series = ?explicit_series,
+                explicit_n_parallel = ?explicit_parallel,
+                ah_cell = c.ah_cell,
+                v_cell = c.v_cell,
+                "Battery config provides both explicit topology and cell parameters; \
+                 preferring explicit topology, skipping ah_cell/v_cell derivation"
+            );
+        } else if is_mixed && has_cell_params {
+            // Partial explicit: user provided one topology param alongside
+            // cell parameters. Use the explicit param, derive the missing one
+            // from cell params, and emit a warning describing the mixed result.
+            let ah = c.ah_cell.unwrap();
+            let vc = c.v_cell.unwrap();
+            if ah > 0.0 && vc > 0.0 {
+                self.derivation_source = DerivationSource::Mixed;
+                if !has_explicit_series {
+                    let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
+                    self.n_series = (target_pack_v / vc).round() as u32;
+                    if self.n_series == 0 {
+                        self.n_series = 1;
+                    }
+                }
+                let pack_v = self.n_series as f64 * vc;
+                let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
+                if !has_explicit_parallel {
+                    self.n_parallel = (pack_ah / ah).round() as u32;
+                    if self.n_parallel == 0 {
+                        self.n_parallel = 1;
+                    }
+                }
+                tracing::warn!(
+                    explicit_n_series = ?explicit_series,
+                    explicit_n_parallel = ?explicit_parallel,
+                    ah_cell = c.ah_cell,
+                    v_cell = c.v_cell,
+                    final_n_series = self.n_series,
+                    final_n_parallel = self.n_parallel,
+                    "Battery config provides partial explicit topology with cell parameters; \
+                     mixing explicit and derived values"
+                );
+            } else {
+                self.derivation_source = DerivationSource::Defaults;
+            }
+        } else if !has_any_explicit && has_cell_params {
+            // Derive topology from cell parameters — only when the user
+            // did NOT provide explicit n_series / n_parallel.
+            let ah = c.ah_cell.unwrap();
+            let vc = c.v_cell.unwrap();
+            if ah > 0.0 && vc > 0.0 {
+                self.derivation_source = DerivationSource::CellParameters;
                 let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
-                self.n_series = (target_pack_v / v_cell).round() as u32;
+                self.n_series = (target_pack_v / vc).round() as u32;
                 if self.n_series == 0 {
                     self.n_series = 1;
                 }
-                let pack_v = self.n_series as f64 * v_cell;
+                let pack_v = self.n_series as f64 * vc;
                 let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
-                self.n_parallel = (pack_ah / ah_cell).round() as u32;
+                self.n_parallel = (pack_ah / ah).round() as u32;
                 if self.n_parallel == 0 {
                     self.n_parallel = 1;
                 }
+            } else {
+                self.derivation_source = DerivationSource::Defaults;
+            }
+        } else if has_any_explicit {
+            self.derivation_source = DerivationSource::Explicit;
+        } else {
+            self.derivation_source = DerivationSource::Defaults;
+        }
+
+        // Invariant check: when both explicit topology and cell params were
+        // provided, verify the explicit values are reasonably close to what
+        // cell-parameter derivation would have produced.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if has_any_explicit && has_cell_params {
+                if let (Some(ah), Some(vc)) = (c.ah_cell, c.v_cell) {
+                    if ah > 0.0 && vc > 0.0 {
+                        let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
+                        let derived_series = {
+                            let s = (target_pack_v / vc).round() as u32;
+                            if s == 0 { 1 } else { s }
+                        };
+                        let pack_v = derived_series as f64 * vc;
+                        let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
+                        let derived_parallel = {
+                            let p = (pack_ah / ah).round() as u32;
+                            if p == 0 { 1 } else { p }
+                        };
+                        let series_diff =
+                            (self.n_series as i64 - derived_series as i64).unsigned_abs();
+                        let parallel_diff =
+                            (self.n_parallel as i64 - derived_parallel as i64).unsigned_abs();
+                        if series_diff > 1 || parallel_diff > 1 {
+                            tracing::warn!(
+                                self.n_series,
+                                self.n_parallel,
+                                derived_n_series = derived_series,
+                                derived_n_parallel = derived_parallel,
+                                series_diff,
+                                parallel_diff,
+                                "Battery topology invariant: explicit topology differs \
+                                 from cell-parameter derivation by >1 cell"
+                            );
+                        }
+                    }
+                }
             }
         }
+
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            derivation_source = ?self.derivation_source,
+            n_series = self.n_series,
+            n_parallel = self.n_parallel,
+            ah_cell = c.ah_cell,
+            v_cell = c.v_cell,
+            "Battery topology initialized",
+        );
+
         if self.n_series == 0 || self.n_parallel == 0 {
             return Err(HaresError::Equipment(
                 "n_series and n_parallel must be positive".to_string(),
@@ -798,6 +947,13 @@ impl Battery {
 
         self.telemetry = default_telemetry();
         self.telemetry.set(tk::SOC, self.soc);
+        self.telemetry.set(tk::N_SERIES, self.n_series as f64);
+        self.telemetry.set(tk::N_PARALLEL, self.n_parallel as f64);
+        self.telemetry
+            .set(tk::AH_CELL, c.ah_cell.unwrap_or(f64::NAN));
+        self.telemetry.set(tk::V_CELL, c.v_cell.unwrap_or(f64::NAN));
+        self.telemetry
+            .set(tk::DERIVATION_SOURCE, self.derivation_source.code());
         self.core_output = CoreOutput::default();
 
         Ok(())
@@ -1302,7 +1458,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry() -> Telemetry {
-    let mut t = Telemetry::with_capacity(13);
+    let mut t = Telemetry::with_capacity(18);
     t.insert(tk::SOC, 0.0);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
     t.insert(tk::OHMIC_LOSS_W, 0.0);
@@ -1316,6 +1472,11 @@ fn default_telemetry() -> Telemetry {
     t.insert(tk::TERMINAL_VOLTAGE_V, 0.0);
     t.insert(tk::CURRENT_A, 0.0);
     t.insert(tk::OPERATING_MODE, 0.0);
+    t.insert(tk::N_SERIES, 0.0);
+    t.insert(tk::N_PARALLEL, 0.0);
+    t.insert(tk::AH_CELL, f64::NAN);
+    t.insert(tk::V_CELL, f64::NAN);
+    t.insert(tk::DERIVATION_SOURCE, 0.0);
     t
 }
 
@@ -1389,6 +1550,32 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 4=Standby, 5=Charging, 6=Discharging"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::N_SERIES.to_string(),
+            unit: "-".to_string(),
+            description: "Pack series cell count".to_string(),
+        },
+        TelemetryField {
+            name: tk::N_PARALLEL.to_string(),
+            unit: "-".to_string(),
+            description: "Pack parallel cell count".to_string(),
+        },
+        TelemetryField {
+            name: tk::AH_CELL.to_string(),
+            unit: "Ah".to_string(),
+            description: "Per-cell capacity from config (NaN when not provided)".to_string(),
+        },
+        TelemetryField {
+            name: tk::V_CELL.to_string(),
+            unit: "V".to_string(),
+            description: "Per-cell nominal voltage from config (NaN when not provided)".to_string(),
+        },
+        TelemetryField {
+            name: tk::DERIVATION_SOURCE.to_string(),
+            unit: "enum".to_string(),
+            description: "Topology derivation source: 0=defaults, 1=explicit, 2=cell_parameters, 3=mixed"
                 .to_string(),
         },
     ]
@@ -4060,5 +4247,136 @@ mod tests {
             "after 365 days, nominal ({}) should differ from rated ({rated})",
             bat.capacity_kwh_nominal
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Topology derivation tests (T-0061)
+    // -----------------------------------------------------------------------
+
+    /// When both explicit n_series/n_parallel and ah_cell/v_cell are provided,
+    /// the explicit topology must be preserved and a conflict warning emitted.
+    #[test]
+    fn battery_topology_conflict_preserves_explicit() {
+        let config = battery_config(&[
+            (KEY_N_SERIES, 14.0),
+            (KEY_N_PARALLEL, 3.0),
+            (KEY_AH_CELL, 70.0),
+            (KEY_V_CELL, 3.6),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        assert_eq!(bat.n_series, 14, "explicit n_series must be preserved");
+        assert_eq!(bat.n_parallel, 3, "explicit n_parallel must be preserved");
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            1.0,
+            "derivation_source must be Explicit (1.0)"
+        );
+        // ah_cell / v_cell raw config values should be present in telemetry
+        assert!(
+            (bat.telemetry().get(tk::AH_CELL).unwrap() - 70.0).abs() < 1e-12,
+            "ah_cell must reflect config value"
+        );
+        assert!(
+            (bat.telemetry().get(tk::V_CELL).unwrap() - 3.6).abs() < 1e-12,
+            "v_cell must reflect config value"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::N_SERIES).unwrap(),
+            14.0,
+            "n_series telemetry must match struct"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::N_PARALLEL).unwrap(),
+            3.0,
+            "n_parallel telemetry must match struct"
+        );
+    }
+
+    /// Cell-parameter derivation must still work when no explicit n_series/n_parallel
+    /// are provided.
+    #[test]
+    fn battery_topology_derivation_without_conflict() {
+        let config = battery_config(&[(KEY_AH_CELL, 50.0), (KEY_V_CELL, 3.6)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Derivation: target_pack_v = 350 V default
+        // n_series = round(350 / 3.6) = round(97.22) = 97
+        // pack_v = 97 * 3.6 = 349.2 V, pack_ah = 10.0 kWh * 1000 / 349.2 = 28.637 Ah
+        // n_parallel = round(28.637 / 50.0) = round(0.573) = 1
+        assert_eq!(
+            bat.n_series, 97,
+            "n_series should be derived from target_pack_v / v_cell"
+        );
+        assert_eq!(
+            bat.n_parallel, 1,
+            "n_parallel should be derived from pack_ah / ah_cell"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            2.0,
+            "derivation_source must be CellParameters (2.0)"
+        );
+        assert!((bat.telemetry().get(tk::AH_CELL).unwrap() - 50.0).abs() < 1e-12);
+        assert!((bat.telemetry().get(tk::V_CELL).unwrap() - 3.6).abs() < 1e-12);
+    }
+
+    /// Explicit n_series/n_parallel with no cell parameters must be preserved.
+    #[test]
+    fn battery_topology_explicit_without_cell_params() {
+        let config = battery_config(&[(KEY_N_SERIES, 10.0), (KEY_N_PARALLEL, 2.0)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        assert_eq!(bat.n_series, 10);
+        assert_eq!(bat.n_parallel, 2);
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            1.0,
+            "derivation_source must be Explicit"
+        );
+        // ah_cell / v_cell not provided → NaN sentinel
+        assert!(
+            bat.telemetry().get(tk::AH_CELL).unwrap().is_nan(),
+            "ah_cell must be NaN when not provided"
+        );
+        assert!(
+            bat.telemetry().get(tk::V_CELL).unwrap().is_nan(),
+            "v_cell must be NaN when not provided"
+        );
+    }
+
+    /// When only one topology param is provided alongside cell parameters,
+    /// the explicit param is preserved and the missing one is derived.
+    /// Regression test for the partial-explicit case where `||` previously
+    /// blocked all derivation when any explicit value was present.
+    #[test]
+    fn battery_topology_partial_explicit_derives_missing() {
+        // n_series=14 explicit, n_parallel missing → derive parallel from cell params
+        let config =
+            battery_config(&[(KEY_N_SERIES, 14.0), (KEY_AH_CELL, 70.0), (KEY_V_CELL, 3.6)]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        assert_eq!(bat.n_series, 14, "explicit n_series must be preserved");
+        // pack_v = 14 * 3.6 = 50.4 V, pack_ah = 10 kWh * 1000 / 50.4 ≈ 198.41 Ah
+        // n_parallel = round(198.41 / 70) = 3
+        assert_eq!(
+            bat.n_parallel, 3,
+            "n_parallel must be derived from cell params when not explicit"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::DERIVATION_SOURCE).unwrap(),
+            3.0,
+            "derivation_source must be Mixed (3.0)"
+        );
+        assert!((bat.telemetry().get(tk::AH_CELL).unwrap() - 70.0).abs() < 1e-12);
+        assert!((bat.telemetry().get(tk::V_CELL).unwrap() - 3.6).abs() < 1e-12);
     }
 }

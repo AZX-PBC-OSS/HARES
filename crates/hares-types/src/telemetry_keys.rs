@@ -121,6 +121,16 @@ pub const CYCLE_COUNT: &str = "cycle_count";
 pub const CAPACITY_FADE_PCT: &str = "capacity_fade_pct";
 pub const TERMINAL_VOLTAGE_V: &str = "terminal_voltage_v";
 pub const CURRENT_A: &str = "current_a";
+/// Pack series cell count.
+pub const N_SERIES: &str = "n_series";
+/// Pack parallel cell count.
+pub const N_PARALLEL: &str = "n_parallel";
+/// Per-cell capacity [Ah] from config (f64::NAN when not provided).
+pub const AH_CELL: &str = "ah_cell";
+/// Per-cell nominal voltage [V] from config (f64::NAN when not provided).
+pub const V_CELL: &str = "v_cell";
+/// How pack topology was determined: 0 = defaults, 1 = explicit, 2 = cell_parameters, 3 = mixed.
+pub const DERIVATION_SOURCE: &str = "derivation_source";
 
 // ── EV-specific ─────────────────────────────────────────────────────────────
 pub const CONNECTION_STATE: &str = "connection_state";
