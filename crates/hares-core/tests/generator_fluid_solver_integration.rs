@@ -104,8 +104,11 @@ fn generator_fluid_solver_invariant_passes() {
         stack_nominal_temp_c: None,
         heat_rec_max_temp_c: None,
     };
-    let config =
-        EquipmentConfig::from_typed("Test CHP Gen".to_string(), "Gas Generator".to_string(), gen_cfg);
+    let config = EquipmentConfig::from_typed(
+        "Test CHP Gen".to_string(),
+        "Gas Generator".to_string(),
+        gen_cfg,
+    );
 
     let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
     generator.init(&config, &env()).unwrap();
@@ -146,11 +149,8 @@ fn generator_fluid_solver_invariant_passes() {
     // Feed the port data into a FluidSolver. This triggers the T-0084 invariant
     // (debug_assert! in debug builds) that checks sum(declared_thermal_power_w)
     // against sum(flow × Cp × ΔT). If the invariant fires, the test panics.
-    let mut solver = FluidSolver::new(
-        FluidSolverConfig::default(),
-        &[(loop_id, FluidType::Water)],
-    )
-    .unwrap();
+    let mut solver =
+        FluidSolver::new(FluidSolverConfig::default(), &[(loop_id, FluidType::Water)]).unwrap();
 
     let update = solver.resolve_new(&slots, &env(), Duration::from_secs(60));
     let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();

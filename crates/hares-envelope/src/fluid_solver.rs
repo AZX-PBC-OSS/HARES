@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, FLUID, FluidDomainPayload, FluidLoopState, FluidType,
     HaresError, LoopId, PortSlots,
 };
-use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
 
@@ -358,7 +358,10 @@ mod tests {
         let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         let s = &states[0];
-        approx_eq(s.net_power_w, CP_LIQUID_WATER_J_KG_K * (1.0 * 10.0 + 2.0 * 10.0));
+        approx_eq(
+            s.net_power_w,
+            CP_LIQUID_WATER_J_KG_K * (1.0 * 10.0 + 2.0 * 10.0),
+        );
         approx_eq(s.mean_supply_temp_c, (1.0 * 60.0 + 2.0 * 50.0) / 3.0);
         approx_eq(s.mean_return_temp_c, (1.0 * 50.0 + 2.0 * 40.0) / 3.0);
     }
@@ -551,7 +554,9 @@ mod tests {
     fn thermal_power_w_persists_through_zero() {
         // After accumulating, zeroing the accumulator must clear thermal_power_w.
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
-        fluid.add(0.5, 60.0, 40.0, Some(CP_LIQUID_WATER_J_KG_K)).unwrap();
+        fluid
+            .add(0.5, 60.0, 40.0, Some(CP_LIQUID_WATER_J_KG_K))
+            .unwrap();
         assert!(fluid.total_thermal_power_w > 0.0);
         fluid.zero();
         assert!((fluid.total_thermal_power_w - 0.0).abs() < 1e-9);

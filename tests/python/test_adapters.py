@@ -19,7 +19,7 @@ class TestSamPvGeneratePvLut:
 
     def _make_weather_file(self, tmp_path: Path) -> Path:
         weather = tmp_path / "test.epw"
-        weather.write_text("fake epw content for testing\n")
+        weather.write_text("LOCATION,x,x,x,x,x,40.0,-105.0,-7.0,1600.0\n")
         return weather
 
     def _mock_pvwatts_output(self) -> dict:
@@ -49,7 +49,7 @@ class TestSamPvGeneratePvLut:
             )
 
         assert isinstance(lut, sam_pv.PvLut)
-        expected_columns = {"month", "hour", "ghi", "dni", "dhi", "temp_c", "ac_power_kw"}
+        expected_columns = {"solar_zenith_deg", "solar_azimuth_deg", "ghi", "dni", "dhi", "temp_c", "ac_power_kw"}
         assert set(lut.table.column_names) == expected_columns
 
     def test_save_writes_parquet(self, tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ class TestSamPvGeneratePvLut:
             )
             assert mock_run.call_count == 1
 
-            weather.write_text("different weather content\n")
+            weather.write_text("LOCATION,x,x,x,x,x,35.0,-80.0,-5.0,300.0\n")
             sam_pv.generate_pv_lut(
                 system_capacity_kw=5.0,
                 tilt=30.0,
@@ -169,6 +169,67 @@ class TestSamPvGeneratePvLut:
                 cache_dir=cache_dir,
             )
             assert mock_run.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Solar position regression tests (T-0085 Critical fix)
+# ---------------------------------------------------------------------------
+
+
+class TestSolarPosition:
+    """Tests for sam_pv._solar_position — ensures the Spencer model works."""
+
+    def test_returns_numeric_tuple_without_name_error(self) -> None:
+        """Catch the NameError: _solar_position must not reference undefined variables."""
+        from ochre_next.adapters.sam_pv import _solar_position
+
+        zenith, azimuth = _solar_position(40.0, 0.0, 0.0, 4380)
+
+        assert isinstance(zenith, float)
+        assert isinstance(azimuth, float)
+        assert zenith >= 0.0, f"zenith must be non-negative, got {zenith}"
+        assert 0.0 <= azimuth <= 360.0, f"azimuth must be 0–360, got {azimuth}"
+
+    def test_midnight_sun_below_horizon(self) -> None:
+        """At midnight UTC, lat=40°N, the sun should be below the horizon."""
+        from ochre_next.adapters.sam_pv import _solar_position
+
+        hour_of_year = 0  # Jan 1 00:00-01:00
+        zenith, _ = _solar_position(40.0, 0.0, 0.0, hour_of_year)
+        assert zenith > 90.0, f"midnight zenith should be >90°, got {zenith}"
+
+    def test_equinox_noon_lat40(self) -> None:
+        """At equinox noon, lat=40°N: zenith ≈ 40°, azimuth ≈ 180° (south).
+
+        Compares against the Rust hares-physics solar_position test
+        `solar_position_at_lat40_equinox_noon` (solar_parity.rs:308).
+        Spencer model tolerance ±3° for zenith, ±30° for azimuth.
+        """
+        from ochre_next.adapters.sam_pv import _solar_position
+
+        day_80_noon = 80 * 24 + 12  # March 21 noon (leap-year ordinal 80), non-leap day
+        zenith, azimuth = _solar_position(40.0, 0.0, 0.0, day_80_noon)
+
+        assert 39.0 <= zenith <= 43.0, (
+            f"equinox noon zenith at lat=40° should be ~40°, got {zenith}"
+        )
+        assert 160.0 <= azimuth <= 210.0, (
+            f"equinox noon azimuth at lat=40° should be ~180° (south), got {azimuth}"
+        )
+
+    def test_varying_inputs_all_return(self) -> None:
+        """Call _solar_position across a range of hours and latitudes."""
+        from ochre_next.adapters.sam_pv import _solar_position
+
+        for lat in (-60.0, 0.0, 40.0, 70.0):
+            for h in (0, 8760 // 4, 8760 // 2, 8760 * 3 // 4, 8759):
+                zenith, azimuth = _solar_position(lat, 0.0, 0.0, h)
+                assert 0.0 <= zenith <= 180.0, (
+                    f"zenith out of [0,180] range at lat={lat}, hour={h}: {zenith}"
+                )
+                assert 0.0 <= azimuth <= 360.0, (
+                    f"azimuth out of [0,360] range at lat={lat}, hour={h}: {azimuth}"
+                )
 
 
 # ---------------------------------------------------------------------------

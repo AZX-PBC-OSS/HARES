@@ -1,4 +1,50 @@
 //! PV SAM look-up table: parsing, storage, and interpolation.
+//!
+//! ## Location independence
+//!
+//! The LUT is indexed on **solar-position-aware dimensions** (solar zenith and
+//! azimuth angles) rather than calendar month/hour. This decouples the LUT
+//! from the generating EPW file's geographic location:
+//!
+//! - **Before (T-0085):** the LUT used `month`/`hour` as temporal-proxy axes.
+//!   PVWatts internally translates horizontal irradiance to tilted-surface
+//!   irradiance using sun position, so a LUT generated from a Phoenix EPW
+//!   would produce different AC power than one from Seattle for the same
+//!   (month, hour, GHI, DNI, DHI, temp) tuple — a 5–15% systematic bias.
+//!
+//! - **Now:** the LUT uses `solar_zenith_deg` and `solar_azimuth_deg` axes.
+//!   Sun position is computed by the LUT generator from the EPW's location
+//!   metadata. The consumer computes sun position from the simulation site
+//!   coordinates and queries the LUT directly. A given (zenith, azimuth,
+//!   GHI, DNI, DHI, temperature) tuple yields the same AC power regardless
+//!   of which EPW file generated the LUT.
+//!
+//! ## Cross-location usage
+//!
+//! The LUT embeds its generating site's latitude and longitude as Parquet
+//! file-level metadata. On load the invariant check (gated behind
+//! `debug_assertions` or `feature = "check_invariants"`) logs the embedded
+//! location for informational purposes and warns if the metadata is absent
+//! (lat/lon ≈ 0.0, indicating a pre-T-0085 LUT). A true cross-location
+//! comparison against the simulation site is not possible because
+//! `EnvironmentState` carries no `site_latitude_deg`/`site_longitude_deg`
+//! fields (see Known Limitations below).
+//!
+//! LUT files in the legacy `month`/`hour` column format are **not
+//! supported** — the loader returns a descriptive error if it finds those
+//! columns instead of `solar_zenith_deg`/`solar_azimuth_deg`. Re-generate
+//! LUTs with the updated Python adapter (`python/ochre_next/adapters/sam_pv.py`).
+//!
+//! ## Known Limitations
+//!
+//! - **What:** The invariant check cannot compare LUT location against the
+//!   simulation site location because `EnvironmentState` does not carry
+//!   latitude/longitude fields.
+//!   **Constraint:** `hares-types::EnvironmentState` — adding location fields
+//!   requires a coordinated crate-level change.
+//!   **Tried:** logging the LUT location at load time (informational only).
+//!   **Resolvable when:** `EnvironmentState` gains `site_latitude_deg` and
+//!   `site_longitude_deg` fields (tracked in a follow-up ticket).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -33,8 +79,8 @@ impl AxisNorm {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PvLut {
-    month_values: Vec<f64>,
-    hour_values: Vec<f64>,
+    solar_zenith_values: Vec<f64>,
+    solar_azimuth_values: Vec<f64>,
     ghi_values: Vec<f64>,
     dni_values: Vec<f64>,
     dhi_values: Vec<f64>,
@@ -42,6 +88,8 @@ pub(crate) struct PvLut {
     values: HashMap<(usize, usize, usize, usize, usize, usize), f64>,
     nn_entries: Vec<([usize; 6], f64)>,
     nn_norms: [AxisNorm; 6],
+    latitude_deg: f64,
+    longitude_deg: f64,
 }
 
 impl PvLut {
@@ -70,20 +118,46 @@ impl PvLut {
             ))
         })?;
 
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| {
-                HaresError::Equipment(format!(
-                    "failed to build Parquet reader for PV SAM LUT '{}': {e}",
-                    path.display()
-                ))
-            })?
-            .build()
-            .map_err(|e| {
-                HaresError::Equipment(format!(
-                    "failed to read Parquet batches for PV SAM LUT '{}': {e}",
-                    path.display()
-                ))
-            })?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+            HaresError::Equipment(format!(
+                "failed to build Parquet reader for PV SAM LUT '{}': {e}",
+                path.display()
+            ))
+        })?;
+
+        // Read file-level key-value metadata for location.
+        let parquet_meta = builder.metadata();
+        let file_kv = parquet_meta.file_metadata().key_value_metadata();
+        let mut latitude_deg: f64 = 0.0;
+        let mut longitude_deg: f64 = 0.0;
+        if let Some(kv_list) = file_kv {
+            for kv in kv_list {
+                match kv.key.as_str() {
+                    "harvest_lut_latitude_deg" => {
+                        latitude_deg = kv
+                            .value
+                            .as_deref()
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .unwrap_or(0.0);
+                    }
+                    "harvest_lut_longitude_deg" => {
+                        longitude_deg = kv
+                            .value
+                            .as_deref()
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .unwrap_or(0.0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut reader = builder.build().map_err(|e| {
+            HaresError::Equipment(format!(
+                "failed to read Parquet batches for PV SAM LUT '{}': {e}",
+                path.display()
+            ))
+        })?;
 
         let mut rows = Vec::new();
         for batch_result in &mut reader {
@@ -94,8 +168,8 @@ impl PvLut {
                 ))
             })?;
 
-            let month = find_column_f64(&batch, &["month"])?;
-            let hour = find_column_f64(&batch, &["hour"])?;
+            let zenith = find_column_f64(&batch, &["solar_zenith_deg"])?;
+            let azimuth = find_column_f64(&batch, &["solar_azimuth_deg"])?;
             let ghi = find_column_f64(&batch, &["ghi", "ghi_w_m2"])?;
             let dni = find_column_f64(&batch, &["dni", "dni_w_m2"])?;
             let dhi = find_column_f64(&batch, &["dhi", "dhi_w_m2"])?;
@@ -104,10 +178,10 @@ impl PvLut {
 
             let n = batch.num_rows();
             for i in 0..n {
-                let Some(month) = get_valid_f64(month, i) else {
+                let Some(zenith) = get_valid_f64(zenith, i) else {
                     continue;
                 };
-                let Some(hour) = get_valid_f64(hour, i) else {
+                let Some(azimuth) = get_valid_f64(azimuth, i) else {
                     continue;
                 };
                 let Some(ghi) = get_valid_f64(ghi, i) else {
@@ -125,11 +199,11 @@ impl PvLut {
                 let Some(ac) = get_valid_f64(ac, i) else {
                     continue;
                 };
-                rows.push((month, hour, ghi, dni, dhi, temp, ac));
+                rows.push((zenith, azimuth, ghi, dni, dhi, temp, ac));
             }
         }
 
-        Self::from_rows(path, rows)
+        Self::from_rows(path, rows, latitude_deg, longitude_deg)
     }
 
     fn from_csv(path: &Path) -> Result<Self, HaresError> {
@@ -147,8 +221,8 @@ impl PvLut {
             )));
         };
         let headers: Vec<&str> = header.split(',').map(str::trim).collect();
-        let month_idx = csv_column_index(&headers, &["month"])?;
-        let hour_idx = csv_column_index(&headers, &["hour"])?;
+        let zenith_idx = csv_column_index(&headers, &["solar_zenith_deg"])?;
+        let azimuth_idx = csv_column_index(&headers, &["solar_azimuth_deg"])?;
         let ghi_idx = csv_column_index(&headers, &["ghi", "ghi_w_m2"])?;
         let dni_idx = csv_column_index(&headers, &["dni", "dni_w_m2"])?;
         let dhi_idx = csv_column_index(&headers, &["dhi", "dhi_w_m2"])?;
@@ -158,10 +232,10 @@ impl PvLut {
         let mut rows = Vec::new();
         for line in lines {
             let cols: Vec<&str> = line.split(',').map(str::trim).collect();
-            let Some(month) = parse_csv_f64(cols.get(month_idx).copied()) else {
+            let Some(zenith) = parse_csv_f64(cols.get(zenith_idx).copied()) else {
                 continue;
             };
-            let Some(hour) = parse_csv_f64(cols.get(hour_idx).copied()) else {
+            let Some(azimuth) = parse_csv_f64(cols.get(azimuth_idx).copied()) else {
                 continue;
             };
             let Some(ghi) = parse_csv_f64(cols.get(ghi_idx).copied()) else {
@@ -179,15 +253,17 @@ impl PvLut {
             let Some(ac) = parse_csv_f64(cols.get(ac_idx).copied()) else {
                 continue;
             };
-            rows.push((month, hour, ghi, dni, dhi, temp, ac));
+            rows.push((zenith, azimuth, ghi, dni, dhi, temp, ac));
         }
 
-        Self::from_rows(path, rows)
+        Self::from_rows(path, rows, 0.0, 0.0)
     }
 
     fn from_rows(
         path: &Path,
         rows: Vec<(f64, f64, f64, f64, f64, f64, f64)>,
+        latitude_deg: f64,
+        longitude_deg: f64,
     ) -> Result<Self, HaresError> {
         if rows.is_empty() {
             return Err(HaresError::Equipment(format!(
@@ -196,31 +272,31 @@ impl PvLut {
             )));
         }
 
-        let mut month_axis = BTreeSet::new();
-        let mut hour_axis = BTreeSet::new();
+        let mut zenith_axis = BTreeSet::new();
+        let mut azimuth_axis = BTreeSet::new();
         let mut ghi_axis = BTreeSet::new();
         let mut dni_axis = BTreeSet::new();
         let mut dhi_axis = BTreeSet::new();
         let mut temp_axis = BTreeSet::new();
 
-        for &(month, hour, ghi, dni, dhi, temp, _) in &rows {
-            month_axis.insert(quantize_lut_axis(month));
-            hour_axis.insert(quantize_lut_axis(hour));
+        for &(zenith, azimuth, ghi, dni, dhi, temp, _) in &rows {
+            zenith_axis.insert(quantize_lut_axis(zenith));
+            azimuth_axis.insert(quantize_lut_axis(azimuth));
             ghi_axis.insert(quantize_lut_axis(ghi));
             dni_axis.insert(quantize_lut_axis(dni));
             dhi_axis.insert(quantize_lut_axis(dhi));
             temp_axis.insert(quantize_lut_axis(temp));
         }
 
-        let month_values = lut_axis_to_values(month_axis);
-        let hour_values = lut_axis_to_values(hour_axis);
+        let solar_zenith_values = lut_axis_to_values(zenith_axis);
+        let solar_azimuth_values = lut_axis_to_values(azimuth_axis);
         let ghi_values = lut_axis_to_values(ghi_axis);
         let dni_values = lut_axis_to_values(dni_axis);
         let dhi_values = lut_axis_to_values(dhi_axis);
         let temp_values = lut_axis_to_values(temp_axis);
 
-        let month_idx = index_map(&month_values);
-        let hour_idx = index_map(&hour_values);
+        let zenith_idx = index_map(&solar_zenith_values);
+        let azimuth_idx = index_map(&solar_azimuth_values);
         let ghi_idx = index_map(&ghi_values);
         let dni_idx = index_map(&dni_values);
         let dhi_idx = index_map(&dhi_values);
@@ -228,14 +304,14 @@ impl PvLut {
 
         let mut values = HashMap::with_capacity(rows.len());
         let mut nn_entries = Vec::with_capacity(rows.len());
-        for &(month, hour, ghi, dni, dhi, temp, ac) in &rows {
+        for &(zenith, azimuth, ghi, dni, dhi, temp, ac) in &rows {
             let indices = [
-                *month_idx
-                    .get(&quantize_lut_axis(month))
-                    .expect("month index exists"),
-                *hour_idx
-                    .get(&quantize_lut_axis(hour))
-                    .expect("hour index exists"),
+                *zenith_idx
+                    .get(&quantize_lut_axis(zenith))
+                    .expect("zenith index exists"),
+                *azimuth_idx
+                    .get(&quantize_lut_axis(azimuth))
+                    .expect("azimuth index exists"),
                 *ghi_idx
                     .get(&quantize_lut_axis(ghi))
                     .expect("ghi index exists"),
@@ -257,8 +333,8 @@ impl PvLut {
         }
 
         let nn_norms = [
-            AxisNorm::from_values(&month_values),
-            AxisNorm::from_values(&hour_values),
+            AxisNorm::from_values(&solar_zenith_values),
+            AxisNorm::from_values(&solar_azimuth_values),
             AxisNorm::from_values(&ghi_values),
             AxisNorm::from_values(&dni_values),
             AxisNorm::from_values(&dhi_values),
@@ -266,8 +342,8 @@ impl PvLut {
         ];
 
         Ok(Self {
-            month_values,
-            hour_values,
+            solar_zenith_values,
+            solar_azimuth_values,
             ghi_values,
             dni_values,
             dhi_values,
@@ -275,25 +351,49 @@ impl PvLut {
             values,
             nn_entries,
             nn_norms,
+            latitude_deg,
+            longitude_deg,
         })
+    }
+
+    #[inline]
+    pub(crate) fn latitude_deg(&self) -> f64 {
+        self.latitude_deg
+    }
+
+    #[inline]
+    pub(crate) fn longitude_deg(&self) -> f64 {
+        self.longitude_deg
     }
 
     pub(crate) fn interpolate(
         &self,
-        month: f64,
-        hour: f64,
+        solar_zenith_deg: f64,
+        solar_azimuth_deg: f64,
         ghi: f64,
         dni: f64,
         dhi: f64,
         temp_c: f64,
     ) -> f64 {
-        let month = month.clamp(
-            *self.month_values.first().expect("month axis non-empty"),
-            *self.month_values.last().expect("month axis non-empty"),
+        let solar_zenith_deg = solar_zenith_deg.clamp(
+            *self
+                .solar_zenith_values
+                .first()
+                .expect("zenith axis non-empty"),
+            *self
+                .solar_zenith_values
+                .last()
+                .expect("zenith axis non-empty"),
         );
-        let hour = hour.clamp(
-            *self.hour_values.first().expect("hour axis non-empty"),
-            *self.hour_values.last().expect("hour axis non-empty"),
+        let solar_azimuth_deg = solar_azimuth_deg.clamp(
+            *self
+                .solar_azimuth_values
+                .first()
+                .expect("azimuth axis non-empty"),
+            *self
+                .solar_azimuth_values
+                .last()
+                .expect("azimuth axis non-empty"),
         );
         let ghi = ghi.clamp(
             *self.ghi_values.first().expect("ghi axis non-empty"),
@@ -312,8 +412,8 @@ impl PvLut {
             *self.temp_values.last().expect("temp axis non-empty"),
         );
 
-        let month_br = axis_bracket(&self.month_values, month);
-        let hour_br = axis_bracket(&self.hour_values, hour);
+        let zenith_br = axis_bracket(&self.solar_zenith_values, solar_zenith_deg);
+        let azimuth_br = axis_bracket(&self.solar_azimuth_values, solar_azimuth_deg);
         let ghi_br = axis_bracket(&self.ghi_values, ghi);
         let dni_br = axis_bracket(&self.dni_values, dni);
         let dhi_br = axis_bracket(&self.dhi_values, dhi);
@@ -322,19 +422,19 @@ impl PvLut {
         let mut weighted_sum = 0.0;
         let mut total_weight = 0.0;
 
-        for (m_idx, m_w) in bracket_corners(month_br) {
-            for (h_idx, h_w) in bracket_corners(hour_br) {
+        for (z_idx, z_w) in bracket_corners(zenith_br) {
+            for (a_idx, a_w) in bracket_corners(azimuth_br) {
                 for (g_idx, g_w) in bracket_corners(ghi_br) {
                     for (d_idx, d_w) in bracket_corners(dni_br) {
                         for (dh_idx, dh_w) in bracket_corners(dhi_br) {
                             for (t_idx, t_w) in bracket_corners(temp_br) {
-                                let weight = m_w * h_w * g_w * d_w * dh_w * t_w;
+                                let weight = z_w * a_w * g_w * d_w * dh_w * t_w;
                                 if weight <= 0.0 {
                                     continue;
                                 }
                                 if let Some(ac_kw) = self
                                     .values
-                                    .get(&(m_idx, h_idx, g_idx, d_idx, dh_idx, t_idx))
+                                    .get(&(z_idx, a_idx, g_idx, d_idx, dh_idx, t_idx))
                                 {
                                     weighted_sum += weight * ac_kw;
                                     total_weight += weight;
@@ -352,14 +452,14 @@ impl PvLut {
 
         // Sparse-grid fallback: nearest-neighbor with normalized distance.
         let axes: [&[f64]; 6] = [
-            &self.month_values,
-            &self.hour_values,
+            &self.solar_zenith_values,
+            &self.solar_azimuth_values,
             &self.ghi_values,
             &self.dni_values,
             &self.dhi_values,
             &self.temp_values,
         ];
-        let query = [month, hour, ghi, dni, dhi, temp_c];
+        let query = [solar_zenith_deg, solar_azimuth_deg, ghi, dni, dhi, temp_c];
         let query_norm: [f64; 6] = std::array::from_fn(|i| self.nn_norms[i].normalize(query[i]));
 
         let mut best_dist = f64::INFINITY;
@@ -403,9 +503,12 @@ fn parse_csv_f64(raw: Option<&str>) -> Option<f64> {
 
 #[cfg(test)]
 impl PvLut {
+    // Why: from_raw is only compiled in test builds; the dead_code lint fires
+    // in non-test builds where cfg(test) modules are excluded from analysis.
+    #[allow(dead_code)]
     pub(crate) fn from_raw(
-        month_values: Vec<f64>,
-        hour_values: Vec<f64>,
+        solar_zenith_values: Vec<f64>,
+        solar_azimuth_values: Vec<f64>,
         ghi_values: Vec<f64>,
         dni_values: Vec<f64>,
         dhi_values: Vec<f64>,
@@ -420,16 +523,16 @@ impl PvLut {
             values.insert(key, ac);
         }
         let nn_norms = [
-            AxisNorm::from_values(&month_values),
-            AxisNorm::from_values(&hour_values),
+            AxisNorm::from_values(&solar_zenith_values),
+            AxisNorm::from_values(&solar_azimuth_values),
             AxisNorm::from_values(&ghi_values),
             AxisNorm::from_values(&dni_values),
             AxisNorm::from_values(&dhi_values),
             AxisNorm::from_values(&temp_values),
         ];
         Self {
-            month_values,
-            hour_values,
+            solar_zenith_values,
+            solar_azimuth_values,
             ghi_values,
             dni_values,
             dhi_values,
@@ -437,6 +540,8 @@ impl PvLut {
             values,
             nn_entries: entries,
             nn_norms,
+            latitude_deg: 0.0,
+            longitude_deg: 0.0,
         }
     }
 }

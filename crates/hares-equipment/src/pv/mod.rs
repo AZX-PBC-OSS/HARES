@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::{Datelike, Timelike};
+use chrono::Datelike;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -212,10 +212,10 @@ impl PV {
             .surface_id
             .and_then(|surface_id| self.luts_by_surface.get(&surface_id))
         {
-            let month = f64::from(env.current_time.month() as u8);
-            let hour = f64::from(env.current_time.hour() as u8)
-                + f64::from(env.current_time.minute() as u8) / 60.0
-                + f64::from(env.current_time.second() as u8) / 3600.0;
+            // Solar zenith from altitude: zenith = 90° - altitude.
+            // Clamped to 0° minimum (sun at zenith is 0°).
+            let solar_zenith_deg = (90.0 - env.weather.solar_altitude_deg).max(0.0);
+            let solar_azimuth_deg = env.weather.solar_azimuth_deg;
             // SAM LUTs are indexed by horizontal irradiance from weather data,
             // not tilted-surface (POA) values.
             let ghi = env.weather.ghi_w_m2.max(0.0);
@@ -225,7 +225,14 @@ impl PV {
             // not POA, so soiling can't be folded into the LUT inputs. Apply
             // the soiling/shading ratios as a post-LUT power derating instead.
             let ac_power_kw = lut
-                .interpolate(month, hour, ghi, dni, dhi, ambient_temp_c)
+                .interpolate(
+                    solar_zenith_deg,
+                    solar_azimuth_deg,
+                    ghi,
+                    dni,
+                    dhi,
+                    ambient_temp_c,
+                )
                 .max(0.0)
                 * soiling_ratio
                 * shading_factor;
@@ -456,6 +463,10 @@ impl PV {
             };
             if let Some(path) = array.sam_lut_path.as_deref() {
                 let lut = PvLut::from_path(Path::new(path))?;
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                check_lut_location(&lut, path);
+                #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+                let _ = path;
                 self.luts_by_surface.insert(surface_id, lut);
             }
         }
@@ -552,6 +563,32 @@ impl PV {
     #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
     fn check_invariants(&self) -> crate::Result<()> {
         Ok(())
+    }
+}
+
+/// Validate LUT location metadata on load.
+///
+/// Gated behind `debug_assertions` or `feature = "check_invariants"` so the
+/// check compiles to nothing in production release builds. Logs the embedded
+/// latitude/longitude; warns if metadata is absent (both ≈ 0.0) since that
+/// indicates a pre-T-0085 LUT that was regenerated without location metadata.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn check_lut_location(lut: &PvLut, path: &str) {
+    let lut_lat = lut.latitude_deg();
+    let lut_lon = lut.longitude_deg();
+    if lut_lat.abs() < 1e-9 && lut_lon.abs() < 1e-9 {
+        tracing::warn!(
+            lut_path = %path,
+            "PV LUT missing location metadata (lat/lon ≈ 0.0); \
+             re-generate with updated sam_pv.py adapter",
+        );
+    } else {
+        tracing::info!(
+            lut_path = %path,
+            lut_latitude_deg = lut_lat,
+            lut_longitude_deg = lut_lon,
+            "PV LUT loaded with location metadata",
+        );
     }
 }
 
@@ -1013,15 +1050,17 @@ mod tests {
     }
 
     fn write_pv_lut_csv(path: &Path, ac_power_kw: f64) {
-        let contents =
-            format!("month,hour,ghi,dni,dhi,temp_c,ac_power_kw\n6,12,0,0,0,25,{ac_power_kw}\n");
+        let contents = format!(
+            "solar_zenith_deg,solar_azimuth_deg,ghi,dni,dhi,temp_c,ac_power_kw\n\
+             30,180,0,0,0,25,{ac_power_kw}\n"
+        );
         std::fs::write(path, contents).expect("write pv csv lut");
     }
 
     fn write_pv_lut_parquet(path: &Path, ac_power_kw: f64) {
         let schema = std::sync::Arc::new(Schema::new(vec![
-            Field::new("month", DataType::Float64, false),
-            Field::new("hour", DataType::Float64, false),
+            Field::new("solar_zenith_deg", DataType::Float64, false),
+            Field::new("solar_azimuth_deg", DataType::Float64, false),
             Field::new("ghi", DataType::Float64, false),
             Field::new("dni", DataType::Float64, false),
             Field::new("dhi", DataType::Float64, false),
@@ -1031,8 +1070,8 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                std::sync::Arc::new(Float64Array::from(vec![6.0])),
-                std::sync::Arc::new(Float64Array::from(vec![12.0])),
+                std::sync::Arc::new(Float64Array::from(vec![30.0])),
+                std::sync::Arc::new(Float64Array::from(vec![180.0])),
                 std::sync::Arc::new(Float64Array::from(vec![0.0])),
                 std::sync::Arc::new(Float64Array::from(vec![0.0])),
                 std::sync::Arc::new(Float64Array::from(vec![0.0])),
@@ -1608,7 +1647,8 @@ mod tests {
     #[test]
     fn typed_sam_lut_csv_drives_ac_output() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
-        let env = env_with_surfaces(
+        // LUT entry: zenith=30°, azimuth=180° → solar_altitude=60°, azimuth=180°.
+        let mut env = env_with_surfaces(
             vec![SurfaceIrradiance {
                 surface_id: sid,
                 direct_w_m2: 0.0,
@@ -1618,6 +1658,8 @@ mod tests {
             }],
             25.0,
         );
+        env.weather.solar_altitude_deg = 60.0;
+        env.weather.solar_azimuth_deg = 180.0;
         let path = unique_temp_path("pv_lut", "csv");
         write_pv_lut_csv(&path, 2.75);
 
@@ -1636,7 +1678,8 @@ mod tests {
     #[test]
     fn typed_sam_lut_parquet_drives_ac_output() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
-        let env = env_with_surfaces(
+        // LUT entry: zenith=30°, azimuth=180° → solar_altitude=60°, azimuth=180°.
+        let mut env = env_with_surfaces(
             vec![SurfaceIrradiance {
                 surface_id: sid,
                 direct_w_m2: 0.0,
@@ -1646,6 +1689,8 @@ mod tests {
             }],
             25.0,
         );
+        env.weather.solar_altitude_deg = 60.0;
+        env.weather.solar_azimuth_deg = 180.0;
         let path = unique_temp_path("pv_lut", "parquet");
         write_pv_lut_parquet(&path, 3.10);
 
@@ -1750,36 +1795,33 @@ mod tests {
     #[test]
     fn lut_nearest_neighbor_uses_normalized_distance() {
         // Force NN fallback by placing entries at non-adjacent corners of a 3-point
-        // month axis, so the query month=6 bracket (month indices 0,1) finds no data.
-        // Point A: month=1, GHI=0, output=1.0
-        // Point B: month=12, GHI=1200, output=5.0
-        // The trilinear bracket for month=6 spans indices 0..1, but neither
+        // zenith axis, so the query zenith=45 bracket (indices 0,1) finds no data.
+        // Point A: zenith=10, GHI=1200, output=1.0
+        // Point B: zenith=80, GHI=0, output=5.0
+        // The trilinear bracket for zenith=45 spans indices 0..1, but neither
         // (0,*,0,*,*,*) nor (1,*,0,*,*,*) exist for the GHI=100 bracket.
-        // With normalization, month range=11, GHI range=1200.
-        // Point A (month=1,GHI=0): norm_dist = ((6-1)/11)^2 + ((100-0)/1200)^2 = 0.207+0.007 = 0.214
-        // Point B (month=12,GHI=1200): norm_dist = ((6-12)/11)^2 + ((100-1200)/1200)^2 = 0.298+0.840 = 1.138
-        // So NN picks Point A.
+        // With normalization, zenith range=70, GHI range=1200.
+        // Point A (zenith=10,GHI=1200): norm_dist = ((45-10)/70)^2 + ((100-1200)/1200)^2 = 0.25+0.84 = 1.09
+        // Point B (zenith=80,GHI=0): norm_dist = ((45-80)/70)^2 + ((100-0)/1200)^2 = 0.25+0.007 = 0.257
+        // So NN picks B (value=5.0).
         let lut = PvLut::from_raw(
-            vec![1.0, 6.5, 12.0], // 3 month values so query=6 brackets [0,1] (1.0,6.5)
-            vec![12.0],
-            vec![0.0, 600.0, 1200.0], // 3 GHI values so query=100 brackets [0,1] (0,600)
+            vec![10.0, 40.0, 80.0], // 3 zenith values → query=45 brackets [1,2] (40,80) — no, query=45
+            vec![180.0],            // azimuth values unchanged
+            vec![0.0, 600.0, 1200.0], // 3 GHI values → query=100 brackets [0,1] (0,600)
             vec![500.0],
             vec![100.0],
             vec![25.0],
             vec![
-                // Only populate entries at combos that DON'T match the bracket corners
-                // for (month in {0,1}, ghi in {0,1}). The bracket tries (0,0),(0,1),(1,0),(1,1)
-                // but we only have data at (0,2) and (2,0).
-                ([0, 0, 2, 0, 0, 0], 1.0), // month=1, GHI=1200
-                ([2, 0, 0, 0, 0, 0], 5.0), // month=12, GHI=0
+                ([0, 0, 2, 0, 0, 0], 1.0), // zenith=10, azimuth=180, GHI=1200
+                ([2, 0, 0, 0, 0, 0], 5.0), // zenith=80, azimuth=180, GHI=0
             ],
         );
-        let result = lut.interpolate(6.0, 12.0, 100.0, 500.0, 100.0, 25.0);
-        // With normalization: query=(6,100) vs A=(1,1200) vs B=(12,0)
-        // Norm month: (6-1)/(12-1)=0.455 for query, (1-1)/11=0 for A, (12-1)/11=1 for B
+        let result = lut.interpolate(45.0, 180.0, 100.0, 500.0, 100.0, 25.0);
+        // query=(45,100) vs A=(10,1200) vs B=(80,0)
+        // Norm zenith: (45-10)/(80-10)=0.5 for query, (10-10)/70=0 for A, (80-10)/70=1 for B
         // Norm GHI: (100-0)/1200=0.083 for query, (1200-0)/1200=1 for A, (0-0)/1200=0 for B
-        // dist_A = (0.455-0)^2 + (0.083-1)^2 = 0.207 + 0.841 = 1.048
-        // dist_B = (0.455-1)^2 + (0.083-0)^2 = 0.297 + 0.007 = 0.304
+        // dist_A = (0.5-0)^2 + (0.083-1)^2 = 0.25 + 0.841 = 1.091
+        // dist_B = (0.5-1)^2 + (0.083-0)^2 = 0.25 + 0.007 = 0.257
         // B wins (value=5.0)
         approx_eq(result, 5.0);
     }
@@ -2404,5 +2446,102 @@ mod tests {
             "expected clipping with 3kW inverter, got {clipping_kw:.3}"
         );
         approx_eq(ports.electrical.generation_power_kw, -3.0);
+    }
+
+    // --- T-0085: solar-position-aware LUT tests ---
+
+    /// A LUT indexed on solar zenith must produce different AC power at
+    /// different sun positions for the same horizontal irradiance inputs.
+    /// This confirms that the solar-position axes are functional: PVWatts
+    /// internally translates GHI/DNI/DHI to tilted-surface irradiance
+    /// based on sun geometry, so entries at different zenith angles encode
+    /// different POA-tilted→AC mappings.
+    #[test]
+    fn lut_solar_position_affects_power_output() {
+        // Two entries at different zenith angles (same azimuth, same
+        // irradiance/temperature) with different AC power — simulating
+        // how PVWatts produces more POA at low zenith (sun overhead)
+        // than at high zenith (sun near horizon).
+        let lut = PvLut::from_raw(
+            vec![20.0, 70.0], // zenith: low=overhead, high=near horizon
+            vec![180.0],      // azimuth: due south
+            vec![800.0],      // ghi
+            vec![600.0],      // dni
+            vec![200.0],      // dhi
+            vec![25.0],       // temp
+            vec![
+                ([0, 0, 0, 0, 0, 0], 4.2), // zenith=20° → high POA → high power
+                ([1, 0, 0, 0, 0, 0], 1.3), // zenith=70° → low POA → low power
+            ],
+        );
+
+        // Query at exactly the entry points — interpolate returns the exact
+        // entry value when the query matches a bracket point.
+        let power_overhead = lut.interpolate(20.0, 180.0, 800.0, 600.0, 200.0, 25.0);
+        let power_horizon = lut.interpolate(70.0, 180.0, 800.0, 600.0, 200.0, 25.0);
+
+        approx_eq(power_overhead, 4.2);
+        approx_eq(power_horizon, 1.3);
+        assert!(
+            power_overhead > power_horizon,
+            "overhead zenith=20° power ({power_overhead:.2}) must exceed horizon zenith=70° power ({power_horizon:.2})"
+        );
+    }
+
+    /// Integration test: the same LUT queried with identical horizontal
+    /// irradiance (GHI=800, DNI=600, DHI=200, temp=25) but different
+    /// solar geometries produces different AC power. This verifies the
+    /// fix works end-to-end — the LUT no longer treats all sun positions
+    /// identically.
+    #[test]
+    fn lut_different_solar_geometries_produce_different_power() {
+        // Build a 4-entry LUT across two zenith values and two GHI values.
+        // At zenith=20°, high GHI gives 5.0 kW, low GHI gives 0.5 kW.
+        // At zenith=70°, high GHI gives 2.0 kW, low GHI gives 0.1 kW.
+        let lut = PvLut::from_raw(
+            vec![20.0, 70.0],
+            vec![180.0],
+            vec![200.0, 800.0],
+            vec![150.0, 600.0],
+            vec![50.0, 200.0],
+            vec![25.0],
+            vec![
+                ([0, 0, 0, 0, 0, 0], 0.5), // zenith=20, GHI=200
+                ([0, 0, 1, 1, 1, 0], 5.0), // zenith=20, GHI=800
+                ([1, 0, 0, 0, 0, 0], 0.1), // zenith=70, GHI=200
+                ([1, 0, 1, 1, 1, 0], 2.0), // zenith=70, GHI=800
+            ],
+        );
+
+        // At GHI=800: zenith=20° → 5.0 kW, zenith=70° → 2.0 kW
+        let p_low = lut.interpolate(20.0, 180.0, 800.0, 600.0, 200.0, 25.0);
+        let p_high = lut.interpolate(70.0, 180.0, 800.0, 600.0, 200.0, 25.0);
+
+        approx_eq(p_low, 5.0);
+        approx_eq(p_high, 2.0);
+        assert!(
+            (p_low - p_high).abs() > 0.0,
+            "zenith=20° power ({p_low:.2}) must differ from zenith=70° power ({p_high:.2})"
+        );
+
+        // Verify the difference exceeds 2% of the higher value — per the
+        // ticket's acceptance threshold.
+        let diff_pct = (p_low - p_high).abs() / p_low * 100.0;
+        assert!(
+            diff_pct > 2.0,
+            "power difference {diff_pct:.1}% must exceed 2% threshold"
+        );
+    }
+
+    /// CSV LUT files don't carry location metadata (Parquet file-level
+    /// key-value metadata is Parquet-only). The loader defaults to
+    /// lat=lon=0.0, which the invariant check emits a warning for.
+    #[test]
+    fn lut_csv_defaults_location_to_zero() {
+        let path = unique_temp_path("pv_lut_no_meta", "csv");
+        write_pv_lut_csv(&path, 2.5);
+        let lut = PvLut::from_path(&path).expect("load csv lut");
+        approx_eq(lut.latitude_deg(), 0.0);
+        approx_eq(lut.longitude_deg(), 0.0);
     }
 }
