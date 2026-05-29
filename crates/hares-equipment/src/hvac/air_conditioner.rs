@@ -1346,6 +1346,7 @@ impl CoolingCore {
             supply_temp_c,
             adp_temp_c,
             bypass_factor,
+            ..
         } = calculate_shr(
             coil_entering_db_c,
             zone.humidity_ratio,

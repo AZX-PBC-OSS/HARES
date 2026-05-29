@@ -209,6 +209,11 @@ pub(super) struct CoilResult {
     pub bypass_factor: f64,
     /// Supply air dry-bulb temperature [°C]: T_adp + BF * (T_entering - T_adp).
     pub supply_temp_c: f64,
+    /// `true` when ADP exceeded entering dry-bulb and was clamped — distinct
+    /// from natural dry-coil operation (T_ADP ≤ DBT with SHR = 1.0).
+    /// Only compiled when the `observe` feature is active.
+    #[cfg(feature = "observe")]
+    pub adp_exceeds_dbt: bool,
 }
 
 pub(super) fn calculate_shr(
@@ -225,6 +230,8 @@ pub(super) fn calculate_shr(
             adp_temp_c: db_in_c,
             bypass_factor: 1.0,
             supply_temp_c: db_in_c,
+            #[cfg(feature = "observe")]
+            adp_exceeds_dbt: false,
         });
     }
 
@@ -267,13 +274,46 @@ pub(super) fn calculate_shr(
         )));
     }
 
-    let h_tin_wadp = moist_air_enthalpy(db_in_c, w_adp);
-    let denom = h_in - h_adp;
-    let shr = if denom != 0.0 {
-        ((h_tin_wadp - h_adp) / denom).min(1.0)
-    } else {
+    // ── ADP guard: apparatus dew point must not exceed entering dry-bulb ──
+    //
+    // Under extreme temperature/humidity combinations (e.g. outdoor 50 °C
+    // with high latent load and small bypass factor) the enthalpy-based ADP
+    // calculation can produce t_adp > db_in_c, yielding non-physical
+    // supply-air reheat without external energy. Clamp to db_in_c and treat
+    // as fully dry coil (SHR = 1.0) — matching the guard in
+    // coil_bypass_factor (line ~383) and EnergyPlus WaterCoils.cc:383.
+    //
+    // Ref: docs/reviews/hvac-config/hvaccfg-09-coil-physics-twet-convergence.md
+    let adp_exceeds_dbt = t_adp > db_in_c;
+    if adp_exceeds_dbt {
+        t_adp = db_in_c;
+        // ASHRAE HoF 2021 Ch.1 Eq.22: w_sat at the clamped temperature
+        // ensures w_adp is consistent for the clamped state.
+        w_adp = humidity_ratio_from_rel_hum(t_adp, 1.0, p_pa);
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            entering_db_c = db_in_c,
+            "ADP exceeds entering dry-bulb — clamped to entering temperature"
+        );
+    }
+
+    let shr = if adp_exceeds_dbt {
         1.0
+    } else {
+        let h_tin_wadp = moist_air_enthalpy(db_in_c, w_adp);
+        let denom = h_in - h_adp;
+        if denom != 0.0 {
+            ((h_tin_wadp - h_adp) / denom).min(1.0)
+        } else {
+            1.0
+        }
     };
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    debug_assert!(
+        t_adp <= db_in_c,
+        "apparatus dew point {t_adp} exceeds entering dry-bulb {db_in_c}"
+    );
 
     let supply_temp_c = t_adp + bf * (db_in_c - t_adp);
 
@@ -282,6 +322,8 @@ pub(super) fn calculate_shr(
         adp_temp_c: t_adp,
         bypass_factor: bf,
         supply_temp_c,
+        #[cfg(feature = "observe")]
+        adp_exceeds_dbt,
     })
 }
 
@@ -1255,6 +1297,92 @@ mod coil_psychrometric_tests {
         assert_eq!(
             bf, BYPASS_FACTOR_FLOOR,
             "near-zero-denominator guard must return exactly BYPASS_FACTOR_FLOOR, got {bf:.6}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // ADP guard: apparatus dew point clamped to entering dry-bulb.
+    //
+    // When the enthalpy-based ADP calculation produces t_adp > db_in_c
+    // (possible with supersaturated entering air and a small d_h), the
+    // guard clamps t_adp to db_in_c and sets SHR = 1.0 — matching the
+    // guard in coil_bypass_factor (line ~383) and EnergyPlus WaterCoils.cc.
+    //
+    // Ref: docs/reviews/hvac-config/hvaccfg-09-coil-physics-twet-convergence.md Finding 3
+    // ------------------------------------------------------------------
+
+    /// Construct inputs that drive ADP above entering dry-bulb: supersaturated
+    /// entering air (w_in > w_sat(db_in_c)) with small cooling load so h_adp
+    /// stays above h_sat(db_in_c).  The converged t_adp > db_in_c, the guard
+    /// clamps it, and SHR is forced to 1.0.
+    fn adp_exceeds_dbt_inputs() -> (f64, f64, f64, f64, f64, f64) {
+        // 30 °C DB, w = 0.04 kg/kg is supersaturated (w_sat(30°C) ≈ 0.0272).
+        // Small capacity (1 kW) and high bypass keep h_adp > h_sat(db_in_c).
+        let db_c: f64 = 30.0;
+        let w_in: f64 = 0.04;
+        let p_kpa: f64 = 101.325;
+        let q_kw: f64 = 1.0;
+        let flow_m3_s: f64 = 1.0;
+        let ao: f64 = 1.0;
+        (db_c, w_in, p_kpa, q_kw, flow_m3_s, ao)
+    }
+
+    #[test]
+    fn adp_exceeds_dbt_clamped_to_entering() {
+        let (db_c, w_in, p_kpa, q_kw, flow_m3_s, ao) = adp_exceeds_dbt_inputs();
+        let result = calculate_shr(db_c, w_in, p_kpa, q_kw, flow_m3_s, ao).unwrap();
+        assert!(
+            result.supply_temp_c <= db_c + 1e-10,
+            "supply temp {:.6} must not exceed entering dry-bulb {db_c}",
+            result.supply_temp_c
+        );
+        assert_eq!(
+            result.adp_temp_c, db_c,
+            "ADP must be clamped to entering dry-bulb {db_c}, got {:.6}",
+            result.adp_temp_c
+        );
+    }
+
+    #[test]
+    fn adp_clamp_sets_shr_to_one() {
+        let (db_c, w_in, p_kpa, q_kw, flow_m3_s, ao) = adp_exceeds_dbt_inputs();
+        let result = calculate_shr(db_c, w_in, p_kpa, q_kw, flow_m3_s, ao).unwrap();
+        assert_eq!(
+            result.shr, 1.0,
+            "clamped ADP must force SHR = 1.0 (dry coil), got {:.6}",
+            result.shr
+        );
+    }
+
+    /// Normal 30 °C / 60% RH entering air with rated 3-ton capacity.
+    /// ADP converges well below entering dry-bulb; the new guard must not
+    /// interfere with the psychrometric calculation.
+    #[test]
+    fn adp_guard_regression_normal_conditions() {
+        // 30 °C DB, 60% RH at 101.325 kPa → W ≈ 0.016 kg/kg.
+        let db_c: f64 = 30.0;
+        let w_in: f64 = 0.0160;
+        let p_kpa: f64 = 101.325;
+        let flow_m3_s: f64 = 0.49554;
+        // 3-ton rated capacity, compute Ao for consistency.
+        let q_kw: f64 = 10.5505;
+        let ao = coil_ao_factor(db_c, w_in, p_kpa, q_kw, flow_m3_s, 0.70).unwrap();
+        let result = calculate_shr(db_c, w_in, p_kpa, q_kw, flow_m3_s, ao).unwrap();
+
+        assert!(
+            result.shr > 0.5 && result.shr < 1.0,
+            "normal conditions SHR must be in (0.5, 1.0), got {:.6}",
+            result.shr
+        );
+        assert!(
+            result.adp_temp_c < db_c - 1.0,
+            "normal conditions ADP {:.6} must be well below entering {db_c}",
+            result.adp_temp_c
+        );
+        assert!(
+            result.supply_temp_c < db_c,
+            "normal conditions supply temp {:.6} must be below entering {db_c}",
+            result.supply_temp_c
         );
     }
 }
