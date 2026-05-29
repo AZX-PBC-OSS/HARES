@@ -1,7 +1,10 @@
 //! Generator equipment models: gas generators and fuel cells.
 //!
-//! Both types share identical physics (efficiency model, ramp-rate, self-consumption,
-//! combined heat and power). A single `Generator` struct handles all logic.
+//! Gas generators share identical combustion physics (efficiency model, ramp-rate, self-consumption,
+//! combined heat and power). Fuel cells diverge: DC stack power passes through an inverter
+//! (DC→AC conversion with configurable efficiency), and stack cooling heat is tracked separately
+//! via the EnergyPlus stack cooler polynomial. A single `Generator` struct handles all logic with
+//! conditional branching on `GeneratorKind`.
 //! `GasGenerator` and `FuelCell` are newtypes that forward via `delegate_equipment!`.
 //!
 //! Physics overview:
@@ -57,6 +60,24 @@ pub struct GeneratorConfig {
     pub flow_rate_kg_s: Option<f64>,
     pub supply_temp_c: Option<f64>,
     pub return_temp_c: Option<f64>,
+    /// FuelCell DC-to-AC inverter efficiency [0, 1].
+    /// Ignored for GasGenerator. Default: 0.95 for FuelCell (EnergyPlus typical).
+    pub inverter_efficiency: Option<f64>,
+    /// FuelCell stack operating temperature (°C).
+    /// EnergyPlus FuelCellElectricGenerator.cc:1859 — TstackActual.
+    pub stack_temp_c: Option<f64>,
+    /// FuelCell stack cooler polynomial coefficient r0 (dimensionless offset).
+    /// EnergyPlus FuelCellElectricGenerator.cc:1862 — qs_cool polynomial.
+    pub stack_cooler_r0: Option<f64>,
+    /// FuelCell stack cooler polynomial coefficient r1 (1/K or 1/°C).
+    pub stack_cooler_r1: Option<f64>,
+    /// FuelCell stack cooler polynomial coefficient r2 (1/W).
+    pub stack_cooler_r2: Option<f64>,
+    /// FuelCell stack cooler polynomial coefficient r3 (1/W^2).
+    pub stack_cooler_r3: Option<f64>,
+    /// FuelCell stack cooler nominal temperature (°C) for offset reference.
+    /// EnergyPlus FuelCellElectricGenerator.cc:1862 — TstackNom.
+    pub stack_nominal_temp_c: Option<f64>,
 }
 
 impl EquipmentTypedConfig for GeneratorConfig {
@@ -139,6 +160,41 @@ impl GeneratorConfig {
                 "generator zone_id must be non-zero when provided".to_string(),
             ));
         }
+        if let Some(inv_eff) = self.inverter_efficiency {
+            if !inv_eff.is_finite() || inv_eff <= 0.0 || inv_eff > 1.0 {
+                return Err(HaresError::Equipment(
+                    "generator inverter_efficiency must be finite and in (0, 1]".to_string(),
+                ));
+            }
+        }
+        if let Some(st) = self.stack_temp_c {
+            if !st.is_finite() || st < 0.0 {
+                return Err(HaresError::Equipment(
+                    "generator stack_temp_c must be finite and >= 0".to_string(),
+                ));
+            }
+        }
+        for (name, val) in [
+            ("stack_cooler_r0", self.stack_cooler_r0),
+            ("stack_cooler_r1", self.stack_cooler_r1),
+            ("stack_cooler_r2", self.stack_cooler_r2),
+            ("stack_cooler_r3", self.stack_cooler_r3),
+        ] {
+            if let Some(v) = val {
+                if !v.is_finite() {
+                    return Err(HaresError::Equipment(format!(
+                        "generator {name} must be finite"
+                    )));
+                }
+            }
+        }
+        if let Some(snt) = self.stack_nominal_temp_c {
+            if !snt.is_finite() || snt < 0.0 {
+                return Err(HaresError::Equipment(
+                    "generator stack_nominal_temp_c must be finite and >= 0".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -173,6 +229,20 @@ const KEY_FLOW_RATE_KG_S: &str = "flow_rate_kg_s";
 const KEY_SUPPLY_TEMP_C: &str = "supply_temp_c";
 #[cfg(test)]
 const KEY_RETURN_TEMP_C: &str = "return_temp_c";
+#[cfg(test)]
+const KEY_INVERTER_EFFICIENCY: &str = "inverter_efficiency";
+#[cfg(test)]
+const KEY_STACK_TEMP_C: &str = "stack_temp_c";
+#[cfg(test)]
+const KEY_STACK_COOLER_R0: &str = "stack_cooler_r0";
+#[cfg(test)]
+const KEY_STACK_COOLER_R1: &str = "stack_cooler_r1";
+#[cfg(test)]
+const KEY_STACK_COOLER_R2: &str = "stack_cooler_r2";
+#[cfg(test)]
+const KEY_STACK_COOLER_R3: &str = "stack_cooler_r3";
+#[cfg(test)]
+const KEY_STACK_NOMINAL_TEMP_C: &str = "stack_nominal_temp_c";
 
 // ---------------------------------------------------------------------------
 // Physical defaults
@@ -213,7 +283,58 @@ const DEFAULT_SUPPLY_TEMP_C: f64 = 70.0;
 /// Default CHP return temperature (°C) entering the heat exchanger.
 const DEFAULT_RETURN_TEMP_C: f64 = 60.0;
 
+/// Default inverter efficiency for fuel cells: 95 % DC-to-AC.
+/// Residential fuel cell inverters typically range 93–97 %.
+/// EnergyPlus FuelCellElectricGenerator.cc:2112-2113 — constant inverter model.
+const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.95;
+
+/// Default stack operating temperature for a residential PEMFC (°C).
+/// PEM fuel cells operate at 60–80 °C; SOFCs run much hotter (600–1000 °C)
+/// but residential units are typically PEM-based.
+const DEFAULT_STACK_TEMP_C: f64 = 70.0;
+
+/// Default stack cooler polynomial coefficient r0.
+/// At nominal temperature, ~20 % of DC power is rejected as stack heat.
+const DEFAULT_STACK_COOLER_R0: f64 = 0.20;
+
+/// Default stack cooler polynomial coefficient r1 (1/°C).
+/// At default 0.0, there is no temperature offset sensitivity.
+const DEFAULT_STACK_COOLER_R1: f64 = 0.0;
+
+/// Default stack cooler polynomial coefficient r2 (1/W).
+const DEFAULT_STACK_COOLER_R2: f64 = 0.0;
+
+/// Default stack cooler polynomial coefficient r3 (1/W²).
+const DEFAULT_STACK_COOLER_R3: f64 = 0.0;
+
+/// Default stack cooler nominal temperature (°C).
+/// Matches the default operating temperature.
+const DEFAULT_STACK_NOMINAL_TEMP_C: f64 = 70.0;
+
 const IDLE_KW_THRESHOLD: f64 = 1e-6;
+
+/// Compute stack cooler heat removal using the EnergyPlus polynomial.
+///
+/// EnergyPlus FuelCellElectricGenerator.cc:1859-1865:
+///   qs_cool = (r0 + r1*(Tstack - Tnom)) * (1 + r2*Pel + r3*Pel²) * Pel
+///
+/// All inputs must be in SI: Pel (W), temperatures (°C). r0 dimensionless,
+/// r1 (1/°C), r2 (1/W), r3 (1/W²) — matching EnergyPlus source convention.
+/// Returns stack cooler heat in W.
+fn compute_stack_cooler_heat(
+    pel_w: f64,
+    tstack_c: f64,
+    tnom_c: f64,
+    r0: f64,
+    r1: f64,
+    r2: f64,
+    r3: f64,
+) -> f64 {
+    let dt = tstack_c - tnom_c;
+    let temp_factor = r0 + r1 * dt;
+    let power_factor = 1.0 + r2 * pel_w + r3 * pel_w * pel_w;
+    (temp_factor * power_factor * pel_w).max(0.0)
+}
 
 // ---------------------------------------------------------------------------
 // EfficiencyModel -- separated concern for computing load-dependent efficiency
@@ -408,7 +529,7 @@ impl EfficiencyModel {
 // GeneratorKind
 // ---------------------------------------------------------------------------
 
-/// Variant tag -- physics are identical; used only for labelling and default efficiency type.
+/// Variant tag — used for labelling, default efficiency type, and fuel-cell-specific physics branching.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GeneratorKind {
     GasGenerator,
@@ -476,6 +597,21 @@ pub struct Generator {
     supply_temp_c: f64,
     return_temp_c: f64,
 
+    // Fuel-cell-specific physics (ignored for combustion generators)
+    /// DC-to-AC inverter efficiency [0, 1]. 1.0 for combustion generators
+    /// (no inverter). Default 0.95 for fuel cells.
+    inverter_efficiency: f64,
+    /// Stack operating temperature (°C).
+    stack_temp_c: f64,
+    /// Stack cooler polynomial coefficients r0..r3.
+    /// EnergyPlus FuelCellElectricGenerator.cc:1862:
+    ///   qs_cool = (r0 + r1*(Tstack - Tnom)) * (1 + r2*Pel + r3*Pel²) * Pel
+    stack_cooler_r0: f64,
+    stack_cooler_r1: f64,
+    stack_cooler_r2: f64,
+    stack_cooler_r3: f64,
+    stack_nominal_temp_c: f64,
+
     // Dynamic state
     current_power_kw: f64,
     mode: OperatingMode,
@@ -529,7 +665,7 @@ impl Generator {
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::FUEL
                 | CoreCapabilities::HAS_MODE,
-            telemetry_fields: generator_telemetry_fields(has_chp),
+            telemetry_fields: generator_telemetry_fields(has_chp, kind == GeneratorKind::FuelCell),
         };
 
         let efficiency = typed.as_ref().map_or_else(
@@ -550,7 +686,7 @@ impl Generator {
         Self {
             descriptor,
             ports,
-            telemetry: default_telemetry(has_chp),
+            telemetry: default_telemetry(has_chp, kind == GeneratorKind::FuelCell),
             core_output: CoreOutput::default(),
             kind,
             rated_power_kw: typed
@@ -585,6 +721,38 @@ impl Generator {
                 .as_ref()
                 .and_then(|c| c.return_temp_c)
                 .unwrap_or(DEFAULT_RETURN_TEMP_C),
+            inverter_efficiency: typed
+                .as_ref()
+                .and_then(|c| c.inverter_efficiency)
+                .unwrap_or(if kind == GeneratorKind::FuelCell {
+                    DEFAULT_INVERTER_EFFICIENCY
+                } else {
+                    1.0
+                }),
+            stack_temp_c: typed
+                .as_ref()
+                .and_then(|c| c.stack_temp_c)
+                .unwrap_or(DEFAULT_STACK_TEMP_C),
+            stack_cooler_r0: typed
+                .as_ref()
+                .and_then(|c| c.stack_cooler_r0)
+                .unwrap_or(DEFAULT_STACK_COOLER_R0),
+            stack_cooler_r1: typed
+                .as_ref()
+                .and_then(|c| c.stack_cooler_r1)
+                .unwrap_or(DEFAULT_STACK_COOLER_R1),
+            stack_cooler_r2: typed
+                .as_ref()
+                .and_then(|c| c.stack_cooler_r2)
+                .unwrap_or(DEFAULT_STACK_COOLER_R2),
+            stack_cooler_r3: typed
+                .as_ref()
+                .and_then(|c| c.stack_cooler_r3)
+                .unwrap_or(DEFAULT_STACK_COOLER_R3),
+            stack_nominal_temp_c: typed
+                .as_ref()
+                .and_then(|c| c.stack_nominal_temp_c)
+                .unwrap_or(DEFAULT_STACK_NOMINAL_TEMP_C),
             current_power_kw: 0.0,
             mode: OperatingMode::Off,
             power_setpoint_kw: None,
@@ -603,7 +771,16 @@ impl Generator {
         } else {
             delta // no ramp limit on decrease
         };
-        (self.current_power_kw + clamped_delta).clamp(0.0, self.rated_power_kw)
+        (self.current_power_kw + clamped_delta).clamp(0.0, self.max_ac_kw())
+    }
+
+    /// Maximum grid-visible AC output (kW), accounting for inverter losses for fuel cells.
+    fn max_ac_kw(&self) -> f64 {
+        if self.kind == GeneratorKind::FuelCell {
+            self.rated_power_kw * self.inverter_efficiency
+        } else {
+            self.rated_power_kw
+        }
     }
 
     /// Determine the unconstrained target power before ramp-rate limiting.
@@ -619,8 +796,9 @@ impl Generator {
     /// it shuts off instead (OCHRE `get_power_limits` min operating power).
     /// This check is applied after resolving the target regardless of source.
     fn determine_target_kw(&self, net_load_kw: f64) -> f64 {
+        let max_ac = self.max_ac_kw();
         let raw = if let Some(sp) = self.power_setpoint_kw {
-            sp.clamp(0.0, self.rated_power_kw)
+            sp.clamp(0.0, max_ac)
         } else if !self.self_consumption_enabled {
             // SelfConsumption disabled: generator is locked off unless an
             // explicit PowerSetpoint is active.
@@ -632,7 +810,7 @@ impl Generator {
             let desired_import = net_load_kw
                 .min(self.grid_import_limit_kw)
                 .max(-self.export_limit_kw);
-            (net_load_kw - desired_import).clamp(0.0, self.rated_power_kw)
+            (net_load_kw - desired_import).clamp(0.0, max_ac)
         };
 
         // Enforce minimum operating power regardless of control source.
@@ -666,6 +844,19 @@ impl Generator {
         self.flow_rate_kg_s = c.flow_rate_kg_s.unwrap_or(self.flow_rate_kg_s);
         self.supply_temp_c = c.supply_temp_c.unwrap_or(self.supply_temp_c);
         self.return_temp_c = c.return_temp_c.unwrap_or(self.return_temp_c);
+        self.inverter_efficiency =
+            c.inverter_efficiency
+                .unwrap_or(if self.kind == GeneratorKind::FuelCell {
+                    DEFAULT_INVERTER_EFFICIENCY
+                } else {
+                    1.0
+                });
+        self.stack_temp_c = c.stack_temp_c.unwrap_or(self.stack_temp_c);
+        self.stack_cooler_r0 = c.stack_cooler_r0.unwrap_or(self.stack_cooler_r0);
+        self.stack_cooler_r1 = c.stack_cooler_r1.unwrap_or(self.stack_cooler_r1);
+        self.stack_cooler_r2 = c.stack_cooler_r2.unwrap_or(self.stack_cooler_r2);
+        self.stack_cooler_r3 = c.stack_cooler_r3.unwrap_or(self.stack_cooler_r3);
+        self.stack_nominal_temp_c = c.stack_nominal_temp_c.unwrap_or(self.stack_nominal_temp_c);
 
         self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind)?;
         self.efficiency.validate()?;
@@ -695,8 +886,9 @@ impl Generator {
         self.self_consumption_enabled = true;
 
         let has_chp = self.eta_thermal > 0.0;
-        self.descriptor.telemetry_fields = generator_telemetry_fields(has_chp);
-        self.telemetry = default_telemetry(has_chp);
+        self.descriptor.telemetry_fields =
+            generator_telemetry_fields(has_chp, self.kind == GeneratorKind::FuelCell);
+        self.telemetry = default_telemetry(has_chp, self.kind == GeneratorKind::FuelCell);
         self.telemetry
             .set(tk::ETA_ELECTRIC, self.efficiency.rated());
         self.core_output = CoreOutput::default();
@@ -758,19 +950,56 @@ impl Equipment for Generator {
 
         self.current_power_kw = output_kw;
 
-        // Compute load-dependent efficiency.
-        let capacity_ratio = output_kw / self.rated_power_kw;
+        // Fuel cells use a DC intermediate with inverter conversion.
+        // Combustion generators send output_kw directly to the grid.
+        // For fuel cells, output_kw is the AC target; the stack must produce
+        // more DC to compensate for inverter losses.
+        let is_fuel_cell = self.kind == GeneratorKind::FuelCell;
+        let dc_kw = if is_fuel_cell && output_kw > IDLE_KW_THRESHOLD {
+            output_kw / self.inverter_efficiency
+        } else {
+            output_kw
+        };
+        let dc_power_w = dc_kw * 1000.0;
+
+        // Capacity ratio uses DC power for fuel cells (stack rating),
+        // AC power for combustion generators.
+        // EnergyPlus FuelCellElectricGenerator.cc:1697 — curve vs Pel/NomPel.
+        let capacity_ratio = dc_kw / self.rated_power_kw;
         let eta = self.efficiency.evaluate(capacity_ratio);
 
         // Derive fuel and heat flows.
+        // Fuel is computed from DC stack power, not AC output.
         let fuel_w = if output_kw > IDLE_KW_THRESHOLD && eta > 0.0 {
-            (output_kw * 1000.0) / eta
+            dc_power_w / eta
         } else {
             0.0
         };
         let electrical_w = output_kw * 1000.0;
+        // EnergyPlus FuelCellElectricGenerator.cc:2112-2116 — inverter model.
+        let inverter_loss_w = if is_fuel_cell {
+            dc_power_w - electrical_w
+        } else {
+            0.0
+        };
+        // EnergyPlus FuelCellElectricGenerator.cc:1859-1865 — stack cooler polynomial.
+        let stack_cooling_w = if is_fuel_cell && output_kw > IDLE_KW_THRESHOLD {
+            compute_stack_cooler_heat(
+                dc_power_w,
+                self.stack_temp_c,
+                self.stack_nominal_temp_c,
+                self.stack_cooler_r0,
+                self.stack_cooler_r1,
+                self.stack_cooler_r2,
+                self.stack_cooler_r3,
+            )
+        } else {
+            0.0
+        };
         let q_thermal_w = fuel_w * self.eta_thermal;
-        let q_flue_w = fuel_w - electrical_w - q_thermal_w;
+        // Total waste heat = fuel - AC electrical; includes inverter loss and stack heat.
+        let total_waste_w = fuel_w - electrical_w;
+        let q_flue_w = total_waste_w - q_thermal_w;
 
         // Energy accounting for zone and fluid ports:
         //   - No CHP (eta_thermal=0): all non-electrical fuel loss → zone as waste heat
@@ -846,6 +1075,25 @@ impl Equipment for Generator {
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
             self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
         }
+        if is_fuel_cell {
+            self.telemetry.set(tk::FUEL_CELL_DC_KW, dc_kw);
+            self.telemetry
+                .set(tk::FUEL_CELL_INVERTER_LOSS_W, inverter_loss_w);
+            self.telemetry
+                .set(tk::FUEL_CELL_STACK_HEAT_W, stack_cooling_w);
+            // Observer capture: record fuel cell internal physics for diagnostics.
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    fuel_cell_dc_kw = dc_kw,
+                    fuel_cell_inverter_loss_w = inverter_loss_w,
+                    fuel_cell_stack_heat_w = stack_cooling_w,
+                    inverter_efficiency = self.inverter_efficiency,
+                    stack_temp_c = self.stack_temp_c,
+                    "FuelCell step complete",
+                );
+            }
+        }
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Generation(output_kw.max(0.0))),
@@ -896,10 +1144,16 @@ impl Equipment for Generator {
 
         // Recompute derived telemetry from restored power so consumers see
         // consistent values without needing to run a step first.
-        let capacity_ratio = self.current_power_kw / self.rated_power_kw;
+        let is_fuel_cell = self.kind == GeneratorKind::FuelCell;
+        let dc_kw = if is_fuel_cell && self.current_power_kw > IDLE_KW_THRESHOLD {
+            self.current_power_kw / self.inverter_efficiency
+        } else {
+            self.current_power_kw
+        };
+        let capacity_ratio = dc_kw / self.rated_power_kw;
         let eta = self.efficiency.evaluate(capacity_ratio);
         let fuel_w = if self.current_power_kw > IDLE_KW_THRESHOLD && eta > 0.0 {
-            (self.current_power_kw * 1000.0) / eta
+            (dc_kw * 1000.0) / eta
         } else {
             0.0
         };
@@ -914,6 +1168,24 @@ impl Equipment for Generator {
             let q_flue_w = fuel_w - self.current_power_kw * 1000.0 - q_thermal_w;
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
             self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
+        }
+        if is_fuel_cell {
+            let dc_power_w = dc_kw * 1000.0;
+            let inverter_loss_w = (dc_kw - self.current_power_kw) * 1000.0;
+            let stack_cooling_w = compute_stack_cooler_heat(
+                dc_power_w,
+                self.stack_temp_c,
+                self.stack_nominal_temp_c,
+                self.stack_cooler_r0,
+                self.stack_cooler_r1,
+                self.stack_cooler_r2,
+                self.stack_cooler_r3,
+            );
+            self.telemetry.set(tk::FUEL_CELL_DC_KW, dc_kw);
+            self.telemetry
+                .set(tk::FUEL_CELL_INVERTER_LOSS_W, inverter_loss_w);
+            self.telemetry
+                .set(tk::FUEL_CELL_STACK_HEAT_W, stack_cooling_w);
         }
         self.core_output = CoreOutput::default();
 
@@ -1009,8 +1281,8 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // Telemetry helpers
 // ---------------------------------------------------------------------------
 
-fn default_telemetry(has_chp: bool) -> Telemetry {
-    let capacity = if has_chp { 6 } else { 4 };
+fn default_telemetry(has_chp: bool, is_fuel_cell: bool) -> Telemetry {
+    let capacity = if has_chp { 6 } else { 4 } + if is_fuel_cell { 3 } else { 0 };
     let mut t = Telemetry::with_capacity(capacity);
     t.insert(tk::ELECTRIC_OUTPUT_KW, 0.0);
     t.insert(tk::FUEL_INPUT_W, 0.0);
@@ -1020,10 +1292,15 @@ fn default_telemetry(has_chp: bool) -> Telemetry {
         t.insert(tk::THERMAL_OUTPUT_W, 0.0);
         t.insert(tk::FLUE_LOSS_W, 0.0);
     }
+    if is_fuel_cell {
+        t.insert(tk::FUEL_CELL_DC_KW, 0.0);
+        t.insert(tk::FUEL_CELL_INVERTER_LOSS_W, 0.0);
+        t.insert(tk::FUEL_CELL_STACK_HEAT_W, 0.0);
+    }
     t
 }
 
-fn generator_telemetry_fields(has_chp: bool) -> Vec<TelemetryField> {
+fn generator_telemetry_fields(has_chp: bool, is_fuel_cell: bool) -> Vec<TelemetryField> {
     let mut fields = vec![
         TelemetryField {
             name: tk::ELECTRIC_OUTPUT_KW.to_string(),
@@ -1057,6 +1334,23 @@ fn generator_telemetry_fields(has_chp: bool) -> Vec<TelemetryField> {
             name: tk::FLUE_LOSS_W.to_string(),
             unit: "W".to_string(),
             description: "Residual flue loss (P_fuel - P_electric - Q_thermal)".to_string(),
+        });
+    }
+    if is_fuel_cell {
+        fields.push(TelemetryField {
+            name: tk::FUEL_CELL_DC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "DC stack electrical output before inverter".to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::FUEL_CELL_INVERTER_LOSS_W.to_string(),
+            unit: "W".to_string(),
+            description: "Power lost in DC-to-AC inverter conversion".to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::FUEL_CELL_STACK_HEAT_W.to_string(),
+            unit: "W".to_string(),
+            description: "Stack cooling heat removed by stack cooler".to_string(),
         });
     }
     fields
@@ -1152,6 +1446,13 @@ mod tests {
             flow_rate_kg_s: None,
             supply_temp_c: None,
             return_temp_c: None,
+            inverter_efficiency: None,
+            stack_temp_c: None,
+            stack_cooler_r0: None,
+            stack_cooler_r1: None,
+            stack_cooler_r2: None,
+            stack_cooler_r3: None,
+            stack_nominal_temp_c: None,
         };
         for (k, v) in overrides {
             match (*k, v) {
@@ -1179,6 +1480,25 @@ mod tests {
                 }
                 (KEY_SUPPLY_TEMP_C, ConfigValue::Float(value)) => cfg.supply_temp_c = Some(*value),
                 (KEY_RETURN_TEMP_C, ConfigValue::Float(value)) => cfg.return_temp_c = Some(*value),
+                (KEY_INVERTER_EFFICIENCY, ConfigValue::Float(value)) => {
+                    cfg.inverter_efficiency = Some(*value)
+                }
+                (KEY_STACK_TEMP_C, ConfigValue::Float(value)) => cfg.stack_temp_c = Some(*value),
+                (KEY_STACK_COOLER_R0, ConfigValue::Float(value)) => {
+                    cfg.stack_cooler_r0 = Some(*value)
+                }
+                (KEY_STACK_COOLER_R1, ConfigValue::Float(value)) => {
+                    cfg.stack_cooler_r1 = Some(*value)
+                }
+                (KEY_STACK_COOLER_R2, ConfigValue::Float(value)) => {
+                    cfg.stack_cooler_r2 = Some(*value)
+                }
+                (KEY_STACK_COOLER_R3, ConfigValue::Float(value)) => {
+                    cfg.stack_cooler_r3 = Some(*value)
+                }
+                (KEY_STACK_NOMINAL_TEMP_C, ConfigValue::Float(value)) => {
+                    cfg.stack_nominal_temp_c = Some(*value)
+                }
                 (KEY_ZONE_ID, ConfigValue::Float(value)) => cfg.zone_id = Some(*value as u16),
                 (KEY_EQUIPMENT_ID, ConfigValue::Float(value)) => {
                     cfg.equipment_id = Some(*value as u32)
@@ -2471,8 +2791,9 @@ mod tests {
     #[test]
     fn fuel_cell_defaults_to_curve_efficiency() {
         // Create a FuelCell without specifying efficiency_type -- it must default to Curve,
-        // not Constant. Curve efficiency at cr=0.25 (OCHRE default) gives eta < rated,
-        // whereas Constant would return rated at all loads.
+        // not Constant. For FuelCell, the DC stack power is higher than AC because of
+        // inverter losses (default inverter_efficiency = 0.95), so the capacity_ratio
+        // at 2.5 kW AC is 2.5/0.95/10 = 0.263, giving eta ≈ 0.5.
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.95.into()),
             (KEY_DELTA_KW_PER_S, 100.0.into()),
@@ -2480,9 +2801,8 @@ mod tests {
         let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
         fc.init(&config, &base_env()).unwrap();
 
-        // At cr=1.0, curve and constant both return rated (1.0 * rated = rated).
-        // At cr=0.25, OCHRE default curve gives rated * 0.5; constant gives rated.
-        // Use a setpoint at 25% (2.5 kW of 10 kW rated).
+        // At cr=1.0 DC (≈9.5 kW AC for fuel cell), curve and constant both return rated.
+        // At cr≈0.263 (2.5 kW AC), OCHRE default curve gives rated * 0.526; constant gives rated.
         fc.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 2.5,
             reactive_power_kvar: None,
@@ -2493,11 +2813,12 @@ mod tests {
             .unwrap();
 
         let eta = fc.telemetry().get(tk::ETA_ELECTRIC).unwrap();
-        // Curve: eta = 0.95 * 0.5 = 0.475 (cr=0.25 interpolates to er=0.5 on OCHRE default)
-        // Constant: eta = 0.95
+        // Fuel cell DC power = 2.5 / 0.95 = 2.6316 kW, cr = 0.26316
+        // Curve interp on OCHRE default (0,0)-(0.5,1): er = 0.5263, eta = 0.95*0.5263 ≈ 0.5
+        // Constant at any cr: eta = 0.95
         assert!(
-            (eta - 0.475).abs() < 1e-6,
-            "FuelCell at cr=0.25 should use curve efficiency (eta≈0.475), got {eta}. \
+            (eta - 0.5).abs() < 1e-2,
+            "FuelCell at 2.5 kW AC (cr≈0.263) should use curve efficiency (eta≈0.5), got {eta}. \
              This indicates the default is Constant rather than Curve."
         );
     }
@@ -2522,6 +2843,13 @@ mod tests {
             flow_rate_kg_s: None,
             supply_temp_c: None,
             return_temp_c: None,
+            inverter_efficiency: None,
+            stack_temp_c: None,
+            stack_cooler_r0: None,
+            stack_cooler_r1: None,
+            stack_cooler_r2: None,
+            stack_cooler_r3: None,
+            stack_nominal_temp_c: None,
         }
     }
 
@@ -2702,5 +3030,308 @@ mod tests {
         r#gen.init(&ec, &env).expect("typed init");
 
         assert_eq!(r#gen.descriptor().fuel, FuelType::Propane);
+    }
+
+    // =======================================================================
+    // Fuel-cell-specific physics tests
+    // =======================================================================
+
+    #[test]
+    fn fuel_cell_dc_power_exceeds_ac_power_by_inverter_loss() {
+        // A FuelCell with inverter_efficiency < 1.0 must produce more DC
+        // than AC to compensate for inverter conversion losses.
+        let config = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.50.into()),
+            (KEY_INVERTER_EFFICIENCY, 0.90.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
+        fc.init(&config, &base_env()).unwrap();
+
+        fc.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+        })
+        .unwrap();
+        let mut slots = ports_for(&fc);
+        fc.step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let ac_kw = fc.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let dc_kw = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
+        let inv_loss_w = fc.telemetry().get(tk::FUEL_CELL_INVERTER_LOSS_W).unwrap();
+
+        // AC output matches the setpoint.
+        assert!((ac_kw - 5.0).abs() < 1e-9, "AC output should be 5 kW");
+        // DC must be higher than AC because inverter has losses.
+        assert!(dc_kw > ac_kw, "DC ({dc_kw} kW) must exceed AC ({ac_kw} kW)");
+        // P_ac = P_dc * inverter_efficiency
+        assert!(
+            (ac_kw - dc_kw * 0.90).abs() < 1e-9,
+            "P_ac = P_dc * inverter_eta: {ac_kw} != {dc_kw} * 0.90"
+        );
+        // Inverter loss = DC - AC
+        let expected_loss = (dc_kw - ac_kw) * 1000.0;
+        assert!(
+            (inv_loss_w - expected_loss).abs() < 1.0,
+            "inverter_loss_w={inv_loss_w}, expected={expected_loss}"
+        );
+    }
+
+    #[test]
+    fn fuel_cell_stack_heat_polynomial_matches_energyplus() {
+        // EnergyPlus FuelCellElectricGenerator.cc:1862:
+        //   qs_cool = (r0 + r1*(Tstack - Tnom)) * (1 + r2*Pel + r3*Pel^2) * Pel
+        // With r0=0.2, r1=0.0, r2=0.0, r3=0.0:
+        //   qs_cool = 0.2 * Pel (20 % of DC power as stack heat)
+        let config = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.50.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_STACK_COOLER_R0, 0.20.into()),
+            (KEY_STACK_COOLER_R1, 0.0.into()),
+            (KEY_STACK_COOLER_R2, 0.0.into()),
+            (KEY_STACK_COOLER_R3, 0.0.into()),
+            (KEY_STACK_NOMINAL_TEMP_C, 70.0.into()),
+            (KEY_STACK_TEMP_C, 70.0.into()),
+        ]);
+        let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
+        fc.init(&config, &base_env()).unwrap();
+
+        fc.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+        })
+        .unwrap();
+        let mut slots = ports_for(&fc);
+        fc.step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let dc_kw = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
+        let stack_heat_w = fc.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap();
+        // With r0=0.2 and all other coeffs zero: qs_cool = 0.2 * P_dc_W
+        let expected_heat_w = 0.20 * dc_kw * 1000.0;
+        assert!(
+            (stack_heat_w - expected_heat_w).abs() < 1.0,
+            "stack cooling: {stack_heat_w} W, expected {expected_heat_w} W"
+        );
+    }
+
+    #[test]
+    fn fuel_cell_stack_heat_scales_with_temperature_offset() {
+        // When Tstack > Tnom and r1 > 0, stack heat increases with temperature.
+        // qs_cool = (r0 + r1*(Tstack - Tnom)) * Pel (with r2=r3=0)
+        let config = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.50.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_STACK_COOLER_R0, 0.10.into()),
+            (KEY_STACK_COOLER_R1, 0.005.into()), // 0.5%/°C
+            (KEY_STACK_COOLER_R2, 0.0.into()),
+            (KEY_STACK_COOLER_R3, 0.0.into()),
+            (KEY_STACK_NOMINAL_TEMP_C, 70.0.into()),
+            (KEY_STACK_TEMP_C, 80.0.into()), // 10°C above nominal
+        ]);
+        let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
+        fc.init(&config, &base_env()).unwrap();
+
+        fc.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+        })
+        .unwrap();
+        let mut slots = ports_for(&fc);
+        fc.step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let dc_kw = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
+        let stack_heat_w = fc.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap();
+        // (r0 + r1*10) * Pel = (0.10 + 0.005*10) * Pel = 0.15 * Pel
+        let expected_heat_w = (0.10 + 0.005 * 10.0) * dc_kw * 1000.0;
+        assert!(
+            (stack_heat_w - expected_heat_w).abs() < 1.0,
+            "stack cooling with temp offset: {stack_heat_w} W, expected {expected_heat_w} W"
+        );
+    }
+
+    #[test]
+    fn fuel_cell_stack_heat_r2_coefficient_uses_watt_units() {
+        // Regression: verify that r2 and r3 use 1/W and 1/W² (EnergyPlus convention).
+        // Before the fix, the function accepted kW causing r2/r3 to be off by 1e3/1e6.
+        // r2=2e-5 (1/W), Pel=~5263 W → r2*Pel = 0.1053 → power_factor = 1.1053
+        let config = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.50.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_STACK_COOLER_R0, 0.20.into()),
+            (KEY_STACK_COOLER_R1, 0.0.into()),
+            (KEY_STACK_COOLER_R2, 2e-5.into()),
+            (KEY_STACK_COOLER_R3, 0.0.into()),
+            (KEY_STACK_NOMINAL_TEMP_C, 70.0.into()),
+            (KEY_STACK_TEMP_C, 70.0.into()),
+            (KEY_INVERTER_EFFICIENCY, 0.95.into()),
+        ]);
+        let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
+        fc.init(&config, &base_env()).unwrap();
+
+        fc.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+        })
+        .unwrap();
+        let mut slots = ports_for(&fc);
+        fc.step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let dc_kw = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
+        let stack_heat_w = fc.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap();
+        // Pel = dc_kw * 1000, power_factor = 1 + r2*Pel = 1 + 2e-5 * Pel
+        let pel_w = dc_kw * 1000.0;
+        let power_factor = 1.0 + 2e-5 * pel_w;
+        let expected_heat_w = 0.20 * power_factor * pel_w;
+        assert!(
+            (stack_heat_w - expected_heat_w).abs() < 1.0,
+            "r2=2e-5: stack_heat={stack_heat_w} W, expected={expected_heat_w} W (dc={dc_kw} kW, pel={pel_w} W, pf={power_factor})"
+        );
+    }
+
+    #[test]
+    fn fuel_cell_telemetry_fields_registered() {
+        // A FuelCell must register three fuel-cell-specific telemetry fields.
+        let fc = Generator::new(gen_config(&[]), GeneratorKind::FuelCell);
+        let names: Vec<&str> = fc
+            .descriptor()
+            .telemetry_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        for expected in &[
+            tk::FUEL_CELL_DC_KW,
+            tk::FUEL_CELL_INVERTER_LOSS_W,
+            tk::FUEL_CELL_STACK_HEAT_W,
+        ] {
+            assert!(
+                names.contains(expected),
+                "FuelCell missing telemetry field: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn fuel_cell_fuel_consumption_includes_inverter_loss() {
+        // With inverter_efficiency < 1.0, a FuelCell requires more fuel per kW
+        // of AC output than a GasGenerator with the same eta_electric.
+        let config_gg = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.50.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let config_fc = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.50.into()),
+            (KEY_INVERTER_EFFICIENCY, 0.90.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+
+        let mut gg = Generator::new(config_gg.clone(), GeneratorKind::GasGenerator);
+        gg.init(&config_gg, &base_env()).unwrap();
+        let mut fc = Generator::new(config_fc.clone(), GeneratorKind::FuelCell);
+        fc.init(&config_fc, &base_env()).unwrap();
+
+        // Run GasGenerator at 5 kW AC with eta=0.50.
+        gg.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+        })
+        .unwrap();
+        gg.step(&base_env(), Duration::from_secs(1), &mut ports_for(&gg))
+            .unwrap();
+
+        // Run FuelCell at 5 kW AC with eta=0.50, inverter=0.90.
+        fc.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+        })
+        .unwrap();
+        fc.step(&base_env(), Duration::from_secs(1), &mut ports_for(&fc))
+            .unwrap();
+
+        let fuel_gg_w = gg.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let fuel_fc_w = fc.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+
+        // GasGenerator fuel = 5 kW AC / 0.50 = 10000 W
+        assert!((fuel_gg_w - 10_000.0).abs() < 1.0);
+        // FuelCell fuel = (5 kW / 0.90) DC / 0.50 = 5.5556 kW / 0.50 = 11111 W
+        assert!(
+            fuel_fc_w > fuel_gg_w,
+            "FuelCell should use more fuel due to inverter loss"
+        );
+        assert!(
+            (fuel_fc_w - 11_111.1111).abs() < 20.0,
+            "FuelCell fuel should be ~11111 W, got {fuel_fc_w}"
+        );
+    }
+
+    #[test]
+    fn gas_generator_unchanged_by_fuel_cell_changes() {
+        // Regression: A GasGenerator with default config must produce the same
+        // results as before the fuel cell physics were added (inverter_efficiency=1.0).
+        let config = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.30.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        // 5 kW AC / 0.30 eta = 16666.67 W fuel
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let expected = (5.0 / 0.30) * 1000.0;
+        assert!(
+            (fuel_w - expected).abs() < 1.0,
+            "GasGenerator fuel unchanged: {fuel_w} vs {expected}"
+        );
+        // No fuel cell telemetry on gas generator — fields not registered.
+        assert!(
+            generator.telemetry().get(tk::FUEL_CELL_DC_KW).is_none(),
+            "GasGenerator should not register fuel_cell_dc_kw"
+        );
+        assert!(
+            generator
+                .telemetry()
+                .get(tk::FUEL_CELL_INVERTER_LOSS_W)
+                .is_none(),
+            "GasGenerator should not register fuel_cell_inverter_loss_w"
+        );
+    }
+
+    #[test]
+    fn fuel_cell_save_load_state_preserves_telemetry() {
+        let config = gen_config(&[
+            (KEY_ETA_ELECTRIC, 0.50.into()),
+            (KEY_INVERTER_EFFICIENCY, 0.90.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
+        fc.init(&config, &base_env()).unwrap();
+        ramp_to_steady_state(&mut fc, 5.0, &base_env());
+
+        let mut slots = ports_for(&fc);
+        fc.step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+        let bytes = fc.save_state();
+
+        let mut fc2 = Generator::new(config.clone(), GeneratorKind::FuelCell);
+        fc2.init(&config, &base_env()).unwrap();
+        fc2.load_state(&bytes).unwrap();
+
+        assert!((fc2.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap() - 5.0 / 0.90).abs() < 1e-6);
+        assert!(fc2.telemetry().get(tk::FUEL_CELL_INVERTER_LOSS_W).unwrap() > 0.0);
+        assert!(fc2.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap() > 0.0);
     }
 }

@@ -533,6 +533,13 @@ fn sample_generator_config() -> GeneratorConfig {
         flow_rate_kg_s: Some(0.5),
         supply_temp_c: Some(60.0),
         return_temp_c: Some(40.0),
+        inverter_efficiency: None,
+        stack_temp_c: None,
+        stack_cooler_r0: None,
+        stack_cooler_r1: None,
+        stack_cooler_r2: None,
+        stack_cooler_r3: None,
+        stack_nominal_temp_c: None,
     }
 }
 

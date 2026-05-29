@@ -294,6 +294,13 @@ pub(super) fn resolve_generators(
             flow_rate_kg_s: None,
             supply_temp_c: None,
             return_temp_c: None,
+            inverter_efficiency: None,
+            stack_temp_c: None,
+            stack_cooler_r0: None,
+            stack_cooler_r1: None,
+            stack_cooler_r2: None,
+            stack_cooler_r3: None,
+            stack_nominal_temp_c: None,
         };
 
         specs.push(build_typed_spec(

@@ -569,6 +569,13 @@ fn generator_fuel_efficiency_at_half_load() {
             flow_rate_kg_s: None,
             supply_temp_c: None,
             return_temp_c: None,
+            inverter_efficiency: None,
+            stack_temp_c: None,
+            stack_cooler_r0: None,
+            stack_cooler_r1: None,
+            stack_cooler_r2: None,
+            stack_cooler_r3: None,
+            stack_nominal_temp_c: None,
         },
     );
 
@@ -655,6 +662,13 @@ fn generator_ramp_rate_is_kw_per_second() {
             flow_rate_kg_s: None,
             supply_temp_c: None,
             return_temp_c: None,
+            inverter_efficiency: None,
+            stack_temp_c: None,
+            stack_cooler_r0: None,
+            stack_cooler_r1: None,
+            stack_cooler_r2: None,
+            stack_cooler_r3: None,
+            stack_nominal_temp_c: None,
         },
     );
 
@@ -723,6 +737,13 @@ fn generator_capacity_min_enforced() {
             flow_rate_kg_s: None,
             supply_temp_c: None,
             return_temp_c: None,
+            inverter_efficiency: None,
+            stack_temp_c: None,
+            stack_cooler_r0: None,
+            stack_cooler_r1: None,
+            stack_cooler_r2: None,
+            stack_cooler_r3: None,
+            stack_nominal_temp_c: None,
         },
     );
 

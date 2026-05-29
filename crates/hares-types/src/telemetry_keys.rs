@@ -257,6 +257,17 @@ pub const TOTAL_COMMANDS_PARSED: &str = "total_commands_parsed";
 // ── Generator ───────────────────────────────────────────────────────────────
 // (ELECTRIC_OUTPUT_KW is in the electrical power section above)
 
+// ── Fuel cell ───────────────────────────────────────────────────────────────
+/// DC stack electrical output (kW) before inverter losses.
+/// EnergyPlus FuelCellElectricGenerator.cc:1691-1711 — DC power efficiency model.
+pub const FUEL_CELL_DC_KW: &str = "fuel_cell_dc_kw";
+/// Power lost in DC-to-AC inverter conversion (W).
+/// EnergyPlus FuelCellElectricGenerator.cc:2104-2124 — inverter model.
+pub const FUEL_CELL_INVERTER_LOSS_W: &str = "fuel_cell_inverter_loss_w";
+/// Stack cooling heat (W) removed by the stack cooler.
+/// EnergyPlus FuelCellElectricGenerator.cc:1859-1865 — stack cooler polynomial.
+pub const FUEL_CELL_STACK_HEAT_W: &str = "fuel_cell_stack_heat_w";
+
 /// Generate a tank node temperature key for the given node index.
 ///
 /// Returns a string like `"tank_node_0_c"`, `"tank_node_1_c"`, etc.
