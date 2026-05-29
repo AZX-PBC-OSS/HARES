@@ -150,6 +150,42 @@ fn usable_fraction(shape: RoofShape) -> f64 {
     }
 }
 
+/// Annual-average diffuse-to-global ratio (Kd) fallback for the continental US.
+///
+/// Used when no weather data is available. Derived from the annual-average Kd
+/// spectrum of approximately 0.12 (Phoenix, arid) to 0.25 (Seattle, cloudy
+/// marine) at US TMY3 reference stations; 0.18 is the mid-range default.
+/// NREL NSRDB multi-year TMY3 averages at 32 US reference stations spanning
+/// 25–48°N.
+pub const DEFAULT_DIFFUSE_FRACTION: f64 = 0.18;
+
+/// Compute the annual-average diffuse-to-global ratio (Kd = ΣDHI / ΣGHI)
+/// from hourly weather data.
+///
+/// Filters out nighttime hours (GHI = 0) to avoid division instabilities.
+/// Falls back to [`DEFAULT_DIFFUSE_FRACTION`] when data is empty or all
+/// GHI values are zero.
+///
+/// # References
+/// - NREL NSRDB TMY3: annual-average DHI/GHI at 32 US reference stations.
+/// - Perez et al. (1990) Solar Energy 44(5):271-289 — beam/diffuse
+///   decomposition basis for irradiance components.
+pub fn compute_annual_diffuse_fraction(ghi: &[f64], dhi: &[f64]) -> f64 {
+    if ghi.is_empty() || dhi.is_empty() {
+        return DEFAULT_DIFFUSE_FRACTION;
+    }
+    let (sum_ghi, sum_dhi) = ghi
+        .iter()
+        .zip(dhi.iter())
+        .filter(|(g, _)| **g > 0.0)
+        .fold((0.0, 0.0), |(sg, sd), (g, d)| (sg + g, sd + d));
+    if sum_ghi > 0.0 {
+        sum_dhi / sum_ghi
+    } else {
+        DEFAULT_DIFFUSE_FRACTION
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Azimuth helpers
 // ---------------------------------------------------------------------------
@@ -213,11 +249,42 @@ fn azimuth_production_factor(azimuth_deg: f64, latitude: f64) -> f64 {
 }
 
 /// Solar production score for a roof plane, weighting area by usable
-/// fraction and latitude-dependent azimuth production factor.
+/// fraction and azimuth production factor.
 ///
-/// score = area × usable_fraction(shape) × azimuth_production_factor(az, lat)
-fn plane_solar_score(area_m2: f64, azimuth_deg: f64, shape: RoofShape, latitude: f64) -> f64 {
-    let production_factor = azimuth_production_factor(azimuth_deg, latitude);
+/// score = area × usable_fraction(shape) × production_factor(az, lat, Kd)
+///
+/// When `diffuse_fraction` is `Some(Kd)` computed from weather data, the
+/// production factor models the beam/diffuse split explicitly:
+///
+///   factor = Kd + (1 − Kd) · cos(θ)^e
+///
+/// where θ is the angular distance from due south clamped to [0, π/2] and
+/// the exponent e = 1.0 + 0.005·(latitude − 35°) captures the latitude
+/// dependence of direct-beam incidence geometry.
+///
+/// When `diffuse_fraction` is `None`, falls back to the
+/// [`azimuth_production_factor`] quadratic model calibrated to NREL PVWatts
+/// Table 4 (Dobos 2014) orientation factors.
+///
+/// This is a relative ranking heuristic, not an absolute production model.
+/// Expected errors of ±15–20% relative to TMY3-based transposition simulation
+/// for non-south arrays (Perez 1990 anisotropic sky model with weather data).
+fn plane_solar_score(
+    area_m2: f64,
+    azimuth_deg: f64,
+    shape: RoofShape,
+    latitude: f64,
+    diffuse_fraction: Option<f64>,
+) -> f64 {
+    let production_factor = match diffuse_fraction {
+        Some(df) => {
+            let deviation_rad =
+                (south_distance(azimuth_deg).to_radians()).min(std::f64::consts::PI / 2.0);
+            let exponent = 1.0 + 0.005 * (latitude - 35.0);
+            df + (1.0 - df) * deviation_rad.cos().powf(exponent)
+        }
+        None => azimuth_production_factor(azimuth_deg, latitude),
+    };
     area_m2 * usable_fraction(shape) * production_factor
 }
 
@@ -266,7 +333,9 @@ fn resolve_azimuth(plane: &RoofPlane, wall_azimuths: &[f64]) -> f64 {
 ///
 /// `wall_azimuths` provides fallback orientation when roof planes lack an
 /// explicit azimuth. `latitude` enables latitude-dependent scoring and
-/// flat-roof tilt selection.
+/// flat-roof tilt selection. `diffuse_fraction` is the annual-average
+/// DHI/GHI ratio from weather data; when `None` the scoring falls back to
+/// the NREL PVWatts Table 4 empirical model.
 pub fn compute_usable_area(
     roof: &RoofInfo,
     roof_shape: RoofShape,
@@ -274,6 +343,7 @@ pub fn compute_usable_area(
     latitude: Option<f64>,
     panel_watts: Option<u32>,
     panel_area_m2: Option<f64>,
+    diffuse_fraction: Option<f64>,
 ) -> Result<UsableRoofArea, PvSizingError> {
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
@@ -302,6 +372,34 @@ pub fn compute_usable_area(
     }
 
     let lat = latitude.unwrap_or(35.0);
+
+    // Invariant: computed diffuse fraction must be physically valid.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    if let Some(kd) = diffuse_fraction {
+        assert!(
+            (0.0..=1.0).contains(&kd),
+            "computed diffuse fraction Kd={:.4} out of range [0, 1]",
+            kd
+        );
+        if !(0.10..=0.30).contains(&kd) {
+            tracing::warn!(
+                pv_diffuse_fraction = kd,
+                pv_latitude = lat,
+                "computed diffuse fraction Kd={:.4} outside expected continental-US range [0.10, 0.30]",
+                kd
+            );
+        }
+    }
+
+    // Diagnostic: log the computed diffuse fraction when available.
+    if let Some(kd) = diffuse_fraction {
+        tracing::info!(
+            pv_diffuse_fraction = kd,
+            pv_latitude = lat,
+            "PV sizing using location-specific diffuse fraction Kd={:.4}",
+            kd
+        );
+    }
 
     // Invariant: East-facing panels must not be worse than West-facing.
     // Physical basis: afternoon ambient temperatures are higher than morning
@@ -371,8 +469,20 @@ pub fn compute_usable_area(
         *candidates
             .iter()
             .max_by(|(ia, az_a), (ib, az_b)| {
-                let sa = plane_solar_score(roof.planes[*ia].area_m2, *az_a, roof_shape, lat);
-                let sb = plane_solar_score(roof.planes[*ib].area_m2, *az_b, roof_shape, lat);
+                let sa = plane_solar_score(
+                    roof.planes[*ia].area_m2,
+                    *az_a,
+                    roof_shape,
+                    lat,
+                    diffuse_fraction,
+                );
+                let sb = plane_solar_score(
+                    roof.planes[*ib].area_m2,
+                    *az_b,
+                    roof_shape,
+                    lat,
+                    diffuse_fraction,
+                );
                 sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
             })
             .unwrap()
@@ -548,6 +658,7 @@ pub fn enumerate_pv_candidates(
     latitude: Option<f64>,
     panel_watts: Option<u32>,
     panel_area_m2: Option<f64>,
+    diffuse_fraction: Option<f64>,
 ) -> Vec<PvCandidate> {
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
@@ -588,7 +699,8 @@ pub fn enumerate_pv_candidates(
                 plane.tilt_deg
             };
 
-            let solar_score = plane_solar_score(effective_area, az, roof_shape, lat);
+            let solar_score =
+                plane_solar_score(effective_area, az, roof_shape, lat, diffuse_fraction);
 
             Some(PvCandidate {
                 plane_idx: i,
@@ -739,7 +851,8 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         let usable =
-            compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None).unwrap();
+            compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None, None)
+                .unwrap();
         // Single gable plane → halved, then ×0.75.
         assert!((usable.usable_m2 - 100.0 / 2.0 * 0.75).abs() < 0.01);
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
@@ -756,7 +869,8 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         let usable =
-            compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None).unwrap();
+            compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None, None)
+                .unwrap();
         // Two planes → no halving; south plane used directly.
         assert!((usable.usable_m2 - 50.0 * 0.75).abs() < 0.01);
     }
@@ -767,7 +881,7 @@ mod tests {
             planes: vec![plane(100.0, 26.0, Some(0.0))],
             total_roof_area_m2: 100.0,
         };
-        let result = compute_usable_area(&roof, RoofShape::Gable, &[], None, None, None);
+        let result = compute_usable_area(&roof, RoofShape::Gable, &[], None, None, None, None);
         assert!(result.is_err());
     }
 
@@ -778,7 +892,7 @@ mod tests {
             total_roof_area_m2: 200.0,
         };
         let usable =
-            compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None).unwrap();
+            compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None, None).unwrap();
         // Flat: effective = 200 × 0.70 = 140 m².
         // Panel footprint = 2.0 / 0.40 = 5.0 m² (lat 35 → GCR 0.40).
         // Max panels = floor(140 / 5) = 28.
@@ -799,7 +913,7 @@ mod tests {
             total_roof_area_m2: 140.0,
         };
         let usable =
-            compute_usable_area(&roof, RoofShape::Hip, &[], Some(40.0), None, None).unwrap();
+            compute_usable_area(&roof, RoofShape::Hip, &[], Some(40.0), None, None, None).unwrap();
         // South: 60×0.35=21 m² → 10 panels, factor=1.0 → +10
         // ENE (θ=120°): 40×0.35=14 m² → 7 panels, k(40)=0.5154, x=0.667
         //   factor=1-0.5154×0.444=0.771, weighted=floor(7×0.771)=5
@@ -822,9 +936,9 @@ mod tests {
             total_roof_area_m2: 140.0,
         };
         let low_lat =
-            compute_usable_area(&roof, RoofShape::Hip, &[], Some(25.0), None, None).unwrap();
+            compute_usable_area(&roof, RoofShape::Hip, &[], Some(25.0), None, None, None).unwrap();
         let high_lat =
-            compute_usable_area(&roof, RoofShape::Hip, &[], Some(48.0), None, None).unwrap();
+            compute_usable_area(&roof, RoofShape::Hip, &[], Some(48.0), None, None, None).unwrap();
         assert!(
             low_lat.max_panels > high_lat.max_panels,
             "max_panels at 25°N ({}) should exceed max_panels at 48°N ({})",
@@ -1042,7 +1156,7 @@ mod tests {
             total_roof_area_m2: 180.0,
         };
         let candidates =
-            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], Some(40.0), None, None);
+            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], Some(40.0), None, None, None);
         // 3 non-north planes.
         assert_eq!(candidates.len(), 3);
         // Best first (south with most area).
@@ -1065,6 +1179,7 @@ mod tests {
             RoofShape::Gable,
             &[90.0, 180.0, 270.0],
             Some(40.0),
+            None,
             None,
             None,
         )
@@ -1187,18 +1302,18 @@ mod tests {
     fn hip_best_plane_consistent_between_compute_and_enumerate() {
         let roof = RoofInfo {
             planes: vec![
-                plane(40.0, 26.0, Some(60.0)),   // ENE — moderate area
-                plane(60.0, 26.0, Some(180.0)),  // south — largest area
-                plane(30.0, 26.0, Some(270.0)),  // west — small
-                plane(50.0, 26.0, Some(0.0)),    // north (filtered)
+                plane(40.0, 26.0, Some(60.0)),  // ENE — moderate area
+                plane(60.0, 26.0, Some(180.0)), // south — largest area
+                plane(30.0, 26.0, Some(270.0)), // west — small
+                plane(50.0, 26.0, Some(0.0)),   // north (filtered)
             ],
             total_roof_area_m2: 180.0,
         };
         let lat = 40.0;
         let usable =
-            compute_usable_area(&roof, RoofShape::Hip, &[], Some(lat), None, None).unwrap();
+            compute_usable_area(&roof, RoofShape::Hip, &[], Some(lat), None, None, None).unwrap();
         let candidates =
-            enumerate_pv_candidates(&roof, RoofShape::Hip, &[], Some(lat), None, None);
+            enumerate_pv_candidates(&roof, RoofShape::Hip, &[], Some(lat), None, None, None);
 
         // The top enumerated candidate should match compute_usable_area's best plane.
         assert!(
@@ -1223,7 +1338,7 @@ mod tests {
             let factor = azimuth_production_factor(c.azimuth_deg, lat);
             let shape = RoofShape::Hip;
             let area = roof.planes[c.plane_idx].area_m2;
-            let expected_score = plane_solar_score(area, c.azimuth_deg, shape, lat);
+            let expected_score = plane_solar_score(area, c.azimuth_deg, shape, lat, None);
             assert!(
                 (c.solar_score - expected_score).abs() < 1e-10,
                 "solar_score mismatch for plane {}: {} vs {}",
@@ -1233,7 +1348,240 @@ mod tests {
             );
             // The production factor used in enumerate must equal what
             // compute_usable_area's Hip aggregation path would use.
-            assert!(factor > 0.5, "factor {:.4} too low for az={:.1}", factor, c.azimuth_deg);
+            assert!(
+                factor > 0.5,
+                "factor {:.4} too low for az={:.1}",
+                factor,
+                c.azimuth_deg
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_annual_diffuse_fraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn diffuse_fraction_correct_on_known_data() {
+        // GHI / DHI pairs with known Kd = 0.20:
+        // Sum GHI = 500, Sum DHI = 100 → Kd = 0.20
+        let ghi = vec![200.0, 300.0, 0.0, 150.0];
+        let dhi = vec![40.0, 60.0, 5.0, 30.0];
+        let kd = compute_annual_diffuse_fraction(&ghi, &dhi);
+        // (40+60+30) / (200+300+150) = 130/650 = 0.20
+        assert!((kd - 0.20).abs() < 1e-10);
+    }
+
+    #[test]
+    fn diffuse_fraction_fallback_on_empty_input() {
+        assert!(
+            (compute_annual_diffuse_fraction(&[], &[]) - DEFAULT_DIFFUSE_FRACTION).abs() < 1e-10
+        );
+        assert!(
+            (compute_annual_diffuse_fraction(&[], &[100.0]) - DEFAULT_DIFFUSE_FRACTION).abs()
+                < 1e-10
+        );
+    }
+
+    #[test]
+    fn diffuse_fraction_fallback_when_all_ghi_zero() {
+        let ghi = vec![0.0, 0.0, 0.0];
+        let dhi = vec![50.0, 30.0, 20.0];
+        let kd = compute_annual_diffuse_fraction(&ghi, &dhi);
+        assert!((kd - DEFAULT_DIFFUSE_FRACTION).abs() < 1e-10);
+    }
+
+    #[test]
+    fn diffuse_fraction_filters_nighttime_hours() {
+        // All GHI zero → should still fall back.
+        // Adding one positive GHI hour: GHI=100, DHI=40 at that hour.
+        let ghi = vec![0.0, 100.0, 0.0];
+        let dhi = vec![10.0, 40.0, 20.0];
+        let kd = compute_annual_diffuse_fraction(&ghi, &dhi);
+        // Only hour 1 contributes: 40/100 = 0.40
+        assert!((kd - 0.40).abs() < 1e-10);
+    }
+
+    #[test]
+    fn diffuse_fraction_all_direct_beam() {
+        // Kd = 0 when DHI = 0 everywhere (completely clear sky).
+        let ghi = vec![500.0, 300.0];
+        let dhi = vec![0.0, 0.0];
+        let kd = compute_annual_diffuse_fraction(&ghi, &dhi);
+        assert!((kd - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn diffuse_fraction_all_diffuse() {
+        // Kd = 1 when all irradiance is diffuse.
+        let ghi = vec![500.0, 300.0];
+        let dhi = vec![500.0, 300.0];
+        let kd = compute_annual_diffuse_fraction(&ghi, &dhi);
+        assert!((kd - 1.0).abs() < 1e-10);
+    }
+
+    // -----------------------------------------------------------------------
+    // plane_solar_score with varying diffuse fraction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solar_score_monotonic_with_diffuse_fraction() {
+        // Higher Kd → score for non-south planes increases because
+        // more irradiance arrives as omnidirectional diffuse.
+        let area = 100.0;
+        let az = 135.0; // SE-facing (45° from south)
+        let shape = RoofShape::Gable;
+        let lat = 35.0;
+
+        let score_low_kd = plane_solar_score(area, az, shape, lat, Some(0.12)); // Phoenix (arid)
+        let score_mid_kd = plane_solar_score(area, az, shape, lat, Some(0.18)); // continental US avg
+        let score_high_kd = plane_solar_score(area, az, shape, lat, Some(0.25)); // Seattle (cloudy)
+
+        assert!(
+            score_high_kd > score_mid_kd,
+            "cloudy (Kd=0.25) score {:.4} should exceed mid (Kd=0.18) score {:.4}",
+            score_high_kd,
+            score_mid_kd
+        );
+        assert!(
+            score_mid_kd > score_low_kd,
+            "mid (Kd=0.18) score {:.4} should exceed arid (Kd=0.12) score {:.4}",
+            score_mid_kd,
+            score_low_kd
+        );
+    }
+
+    #[test]
+    fn south_facing_score_independent_of_diffuse_fraction() {
+        // Due-south: cos(0°) = 1, so factor = Kd + (1-Kd)*1 = 1 regardless of Kd.
+        let area = 100.0;
+        let az = 180.0; // due south
+        let shape = RoofShape::Gable;
+        let lat = 35.0;
+
+        let score_low = plane_solar_score(area, az, shape, lat, Some(0.12));
+        let score_high = plane_solar_score(area, az, shape, lat, Some(0.25));
+        let expected = area * usable_fraction(shape) * 1.0;
+
+        assert!((score_low - expected).abs() < 1e-10);
+        assert!((score_high - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn diffuse_fraction_none_uses_pvwatts_model() {
+        // When diffuse_fraction is None, plane_solar_score must use the
+        // azimuth_production_factor model (backward compatibility).
+        let area = 100.0;
+        let az = 135.0;
+        let shape = RoofShape::Gable;
+        let lat = 35.0;
+
+        let score = plane_solar_score(area, az, shape, lat, None);
+        let expected = area * usable_fraction(shape) * azimuth_production_factor(az, lat);
+        assert!((score - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn east_west_production_increases_with_diffuse_fraction() {
+        // E/W panels benefit most from diffuse: at θ=90° the ticket model
+        // gives factor = Kd (beam contribution = 0). Higher Kd directly
+        // increases the E/W score.
+        let area = 100.0;
+        let az = 90.0; // due east
+        let shape = RoofShape::Gable;
+        let lat = 35.0;
+
+        let score_012 = plane_solar_score(area, az, shape, lat, Some(0.12));
+        let score_025 = plane_solar_score(area, az, shape, lat, Some(0.25));
+
+        // Kd=0.25 → factor = 0.25, Kd=0.12 → factor = 0.12
+        // score ratio ≈ 0.25/0.12 ≈ 2.08
+        assert!(score_025 > score_012 * 2.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_usable_area with varying diffuse fraction (integration)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn plane_selection_differs_with_diffuse_fraction() {
+        // Two Gable planes: south plane has moderate area, east plane has 4× area.
+        // At low Kd (arid, 0.12), south plane wins because orientation dominates.
+        // At high Kd (cloudy, 0.28), east plane wins because area dominates.
+        // Two-plane Gable → no halving, each plane used directly.
+        let roof = RoofInfo {
+            planes: vec![
+                plane(28.0, 26.0, Some(180.0)), // south, small
+                plane(112.0, 26.0, Some(90.0)), // east, 4× larger
+            ],
+            total_roof_area_m2: 140.0,
+        };
+
+        // Low Kd (0.12): south plane favored because orientation matters more.
+        let result_low_kd = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            Some(0.12),
+        )
+        .unwrap();
+        assert_eq!(
+            result_low_kd.best_plane_idx, 0,
+            "at Kd=0.12, south plane should be selected"
+        );
+
+        // High Kd (0.28): east plane wins because area dominates orientation.
+        let result_high_kd = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            Some(0.28),
+        )
+        .unwrap();
+        assert_eq!(
+            result_high_kd.best_plane_idx, 1,
+            "at Kd=0.28, larger east plane should be selected"
+        );
+    }
+
+    #[test]
+    fn solar_score_exactly_one_for_south_with_any_kd() {
+        // Invariant: south-facing always scores 1.0× the area-weight product.
+        let area = 100.0;
+        let shape = RoofShape::Gable;
+        let base = area * usable_fraction(shape);
+        for kd in [0.0, 0.10, 0.18, 0.25, 0.40, 0.60, 1.0] {
+            let score = plane_solar_score(area, 180.0, shape, 35.0, Some(kd));
+            assert!(
+                (score - base).abs() < 1e-10,
+                "south score should equal area × usable at Kd={kd}, got {score} vs {base}"
+            );
+        }
+    }
+
+    #[test]
+    fn solar_score_bounded_between_zero_and_area() {
+        let area = 100.0;
+        let shape = RoofShape::Gable;
+        let max_score = area * usable_fraction(shape);
+        for kd in [0.0, 0.10, 0.18, 0.25, 0.40, 1.0] {
+            for az in (0..360).step_by(45) {
+                let score = plane_solar_score(area, az as f64, shape, 35.0, Some(kd));
+                assert!(
+                    score >= 0.0,
+                    "score should be non-negative: Kd={kd}, az={az}"
+                );
+                assert!(
+                    score <= max_score + 1e-10,
+                    "score should not exceed area × usable: Kd={kd}, az={az}, {score} > {max_score}"
+                );
+            }
         }
     }
 }

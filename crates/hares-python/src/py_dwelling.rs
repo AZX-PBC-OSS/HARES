@@ -1291,7 +1291,16 @@ impl PyDwelling {
 
     /// Enumerate all viable PV candidate placements, one per non-north-facing
     /// roof plane, sorted by solar production score (best first).
-    pub fn pv_candidates(&self) -> PyResult<Vec<crate::py_pv_sizing::PyPvCandidate>> {
+    ///
+    /// Args:
+    ///     diffuse_fraction: Optional annual-average DHI/GHI ratio (Kd) for
+    ///         weather-aware scoring. If ``None``, uses the NREL PVWatts
+    ///         empirical model. Compute with ``hares.compute_annual_diffuse_fraction()``.
+    #[pyo3(signature = (diffuse_fraction=None))]
+    pub fn pv_candidates(
+        &self,
+        diffuse_fraction: Option<f64>,
+    ) -> PyResult<Vec<crate::py_pv_sizing::PyPvCandidate>> {
         let dwelling = lock_dwelling(&self.dwelling)?;
         let roof_shape = hares_physics::pv_sizing::infer_roof_shape(
             &dwelling.roof_info,
@@ -1303,6 +1312,7 @@ impl PyDwelling {
             roof_shape,
             &dwelling.wall_azimuths,
             dwelling.latitude_deg,
+            diffuse_fraction,
         ))
     }
 
@@ -1310,12 +1320,21 @@ impl PyDwelling {
     ///
     /// Returns the best single-array sizing result. Use `pv_candidates()` to
     /// see all viable placements.
-    #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0))]
+    ///
+    /// Args:
+    ///     target_kw: Desired PV capacity in kW.
+    ///     min_kw: Minimum acceptable capacity (default 2.0).
+    ///     max_kw: Maximum capacity limit (default 14.0).
+    ///     diffuse_fraction: Optional annual-average DHI/GHI ratio (Kd) for
+    ///         weather-aware scoring. If ``None``, uses the NREL PVWatts
+    ///         empirical model. Compute with ``hares.compute_annual_diffuse_fraction()``.
+    #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0, diffuse_fraction=None))]
     pub fn estimate_pv_capacity(
         &self,
         target_kw: f64,
         min_kw: f64,
         max_kw: f64,
+        diffuse_fraction: Option<f64>,
     ) -> PyResult<crate::py_pv_sizing::PyPvSizingResult> {
         let dwelling = lock_dwelling(&self.dwelling)?;
         let roof_shape = hares_physics::pv_sizing::infer_roof_shape(
@@ -1331,6 +1350,7 @@ impl PyDwelling {
             target_kw,
             min_kw,
             max_kw,
+            diffuse_fraction,
         )
         .map_err(pyo3::exceptions::PyValueError::new_err)
     }
