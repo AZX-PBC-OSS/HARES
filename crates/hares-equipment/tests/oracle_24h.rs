@@ -6,6 +6,9 @@
 
 use std::time::Duration;
 
+use arrow::array::Float64Array;
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_equipment::battery::Battery;
 use hares_equipment::battery::config::BatteryConfig;
@@ -25,6 +28,9 @@ use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, PortSlots, SurfaceIrradiance,
     ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
 };
+use parquet::arrow::ArrowWriter;
+use parquet::file::metadata::KeyValue;
+use parquet::file::properties::WriterProperties;
 
 const STEPS: usize = 1440;
 const DT_S: u64 = 60;
@@ -366,6 +372,145 @@ fn oracle_pv_24h_constant_irradiance() {
     let expected_kwh = ac_kw * HOURS_24;
 
     assert_within_pct(total_gen_kwh, expected_kwh, 1.0, "PV generation");
+}
+
+/// PV LUT path oracle: verifies that the LUT path produces equivalent 24h
+/// cumulative generation when the LUT encodes the analytically expected
+/// AC power and SAM metadata matches HARES configuration.
+///
+/// Uses a synthetic single-entry Parquet LUT with embedded SAM metadata
+/// (inv_eff=0.96, losses=0.14). HARES is configured with the same values,
+/// making the LUT correction an identity (no-op). The cumulative AC
+/// generation must match the hand-calculated expected value.
+#[test]
+fn oracle_pv_24h_lut_parity() {
+    let capacity_kw: f64 = 5.0;
+    let system_losses: f64 = 0.14;
+    let inverter_eff: f64 = 0.96;
+    let ghi_w_m2: f64 = 800.0;
+    let ambient_c: f64 = 25.0;
+    let wind_m_s: f64 = 1.0;
+
+    let noct_c: f64 = 47.0;
+    let t_ref_c: f64 = 25.0;
+    let gamma_per_c: f64 = -0.0047;
+
+    // Compute the analytically expected AC power per timestep (same as
+    // the non-LUT oracle).
+    let poa_w_m2 = ghi_w_m2;
+    let noct_factor = (noct_c - 20.0) / 800.0;
+    let wind_correction = 9.5 / (5.7 + 3.8 * wind_m_s);
+    let cell_temp_c = ambient_c + poa_w_m2 * noct_factor * wind_correction;
+    let temp_derate = (1.0 + gamma_per_c * (cell_temp_c - t_ref_c)).max(0.0);
+    let dc_kw = capacity_kw * (poa_w_m2 / 1000.0) * temp_derate * (1.0 - system_losses);
+    let expected_ac_kw_per_step = dc_kw * inverter_eff;
+    let expected_kwh = expected_ac_kw_per_step * HOURS_24;
+
+    // Build a synthetic Parquet LUT with one entry matching the weather
+    // conditions. The LUT's AC output is set to the analytically expected
+    // AC power so the LUT correction is identity (SAM and HARES match).
+    let lut_path =
+        std::env::temp_dir().join(format!("pv_lut_oracle_{}.parquet", std::process::id()));
+    {
+        let schema = Schema::new(vec![
+            Field::new("solar_zenith_deg", DataType::Float64, false),
+            Field::new("solar_azimuth_deg", DataType::Float64, false),
+            Field::new("ghi", DataType::Float64, false),
+            Field::new("dni", DataType::Float64, false),
+            Field::new("dhi", DataType::Float64, false),
+            Field::new("temp_c", DataType::Float64, false),
+            Field::new("ac_power_kw", DataType::Float64, false),
+        ]);
+        // LUT entry: zenith=45° (altitude=45° → zenith=90-45=45°),
+        // azimuth=180°, GHI=800, DNI=600, DHI=200, temp=25°C.
+        let zenith_deg = 90.0 - 45.0; // from solar_altitude_deg = 45.0
+        let batch = RecordBatch::try_new(
+            std::sync::Arc::new(schema.clone()),
+            vec![
+                std::sync::Arc::new(Float64Array::from(vec![zenith_deg])),
+                std::sync::Arc::new(Float64Array::from(vec![180.0])),
+                std::sync::Arc::new(Float64Array::from(vec![ghi_w_m2])),
+                std::sync::Arc::new(Float64Array::from(vec![600.0])),
+                std::sync::Arc::new(Float64Array::from(vec![200.0])),
+                std::sync::Arc::new(Float64Array::from(vec![ambient_c])),
+                std::sync::Arc::new(Float64Array::from(vec![expected_ac_kw_per_step])),
+            ],
+        )
+        .expect("record batch");
+        let file = std::fs::File::create(&lut_path).expect("create lut file");
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![
+                KeyValue::new(
+                    "harvest_lut_sam_inv_eff".to_string(),
+                    format!("{inverter_eff}"),
+                ),
+                KeyValue::new(
+                    "harvest_lut_sam_losses".to_string(),
+                    format!("{system_losses}"),
+                ),
+            ]))
+            .build();
+        let mut writer = ArrowWriter::try_new(file, std::sync::Arc::new(schema), Some(props))
+            .expect("arrow writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+    }
+
+    let surface_id = hares_equipment::pv::surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+
+    let mut env = base_env();
+    env.weather.outdoor_temp_c = ambient_c;
+    env.weather.wind_speed_m_s = wind_m_s;
+    env.weather.ghi_w_m2 = ghi_w_m2;
+    env.weather.dni_w_m2 = 600.0;
+    env.weather.dhi_w_m2 = 200.0;
+    env.weather.solar_altitude_deg = 45.0;
+    env.weather.solar_azimuth_deg = 180.0;
+    env.weather.solar_irradiance = vec![SurfaceIrradiance {
+        surface_id,
+        direct_w_m2: 0.0,
+        diffuse_w_m2: 0.0,
+        reflected_w_m2: 0.0,
+        angle_of_incidence_rad: 0.0,
+    }];
+
+    let cfg = EquipmentConfig::from_typed(
+        "TestPVLUT".to_string(),
+        "PV".to_string(),
+        PvConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kw,
+            tilt_deg: Some(30.0),
+            azimuth_deg: Some(180.0),
+            module_type: Some("Standard".to_string()),
+            noct_c: Some(noct_c),
+            array_type: None,
+            system_losses_fraction: Some(system_losses),
+            inverter_efficiency: Some(inverter_eff),
+            inverter_capacity_kw: None,
+            power_factor: None,
+            surface_resolution_deg: None,
+            sam_lut_path: Some(lut_path.to_string_lossy().into_owned()),
+            arrays: None,
+        },
+    );
+
+    let mut eq = PV::new(cfg.clone());
+    eq.init(&cfg, &env).unwrap();
+
+    let mut total_gen_kw_s = 0.0;
+
+    for _ in 0..STEPS {
+        let mut ports = default_ports();
+        eq.step(&env, DT, &mut ports).unwrap();
+
+        total_gen_kw_s += (-ports.electrical.net_active_kw()) * DT_S as f64;
+    }
+
+    let total_gen_kwh = total_gen_kw_s / 3_600.0;
+
+    assert_within_pct(total_gen_kwh, expected_kwh, 1.0, "PV LUT generation");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

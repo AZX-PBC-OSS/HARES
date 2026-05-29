@@ -427,11 +427,21 @@ impl PvLut {
         })
     }
 
+    /// LUT geographic location latitude in degrees.
+    ///
+    /// Only compiled when debug_assertions, check_invariants, or tests are
+    /// active (used by `check_lut_location` and test assertions).
+    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
     #[inline]
     pub(crate) fn latitude_deg(&self) -> f64 {
         self.latitude_deg
     }
 
+    /// LUT geographic location longitude in degrees.
+    ///
+    /// Only compiled when debug_assertions, check_invariants, or tests are
+    /// active (used by `check_lut_location` and test assertions).
+    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
     #[inline]
     pub(crate) fn longitude_deg(&self) -> f64 {
         self.longitude_deg

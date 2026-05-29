@@ -84,7 +84,15 @@ fn cell_temperature_noct_wind(
 /// Compute direct-path (non-LUT) DC and AC power for a single array.
 ///
 /// Used by the invariant check and observer histogram to compare LUT-path
-/// results against the equivalent direct computation.
+/// results against the equivalent direct computation. Only compiled when
+/// at least one of `test`, `debug_assertions`, `check_invariants`, or
+/// `observe` is active — in stripped release builds the function is dead.
+#[cfg(any(
+    test,
+    debug_assertions,
+    feature = "check_invariants",
+    feature = "observe"
+))]
 #[inline]
 fn compute_direct_power(
     array: &PvArray,
@@ -110,12 +118,24 @@ fn compute_direct_power(
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    not(feature = "observe"),
+    allow(dead_code)
+    // Why: fields dc_power_kw_before_losses and lut_path_active are only read
+    // inside #[cfg(feature = "observe")] blocks in step(). Without the feature
+    // they are written but never read, triggering dead_code. Gating the fields
+    // themselves behind #[cfg(feature = "observe")] would require conditional
+    // construction at every call site (LUT path, non-LUT path, test helpers),
+    // which is more invasive than a single suppression.
+)]
 struct ArrayStepOutput {
     dc_power_kw: f64,
     ac_power_kw: f64,
     irradiance_w_m2: f64,
     cell_temp_c: f64,
     interp_method: Option<InterpolationMethod>,
+    dc_power_kw_before_losses: f64,
+    lut_path_active: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -228,6 +248,29 @@ impl PV {
         }
     }
 
+    /// Compute DC and AC power for a single PV array.
+    ///
+    /// Two paths exist depending on whether a SAM PVWatts lookup table (LUT)
+    /// is configured for this array's surface:
+    ///
+    /// **Non-LUT path**: computes cell temperature via the SAM-NOCT wind
+    /// model, applies temperature derating, then system losses and inverter
+    /// efficiency to produce DC and AC power from tilted-surface irradiance.
+    ///
+    /// **LUT path**: delegates power prediction to a pre-computed SAM PVWatts
+    /// LUT that maps solar geometry (zenith, azimuth), irradiance components
+    /// (GHI, DNI, DHI), and ambient temperature to AC power. The LUT is
+    /// assumed to have been generated **with** the PVWatts v5 default 14%
+    /// system losses and 96% inverter efficiency baked in (standard SAM
+    /// practice). HARES reverses these baked-in values using the LUT's
+    /// embedded SAM metadata (`inv_eff` / `losses`), then re-applies its own
+    /// configurable `system_losses_fraction` and `inverter_efficiency` for
+    /// consistency with the non-LUT path. Legacy LUTs without SAM metadata
+    /// bypass the correction (results may be biased).
+    ///
+    /// Both paths apply soiling and shading reduction before the power
+    /// calculation. The LUT path additionally applies soiling/shading on top
+    /// of the LUT's own AC power output.
     fn step_one_array(
         &self,
         env: &EnvironmentState,
@@ -286,8 +329,13 @@ impl PV {
             // (NREL/TP-7A40-80694). SSC declares both with unit "%"
             // (cmod_pvwattsv5.cpp:53-54). The Python adapter divides by
             // 100 so the Rust consumer receives fraction form (0.96, 0.14).
+            let dc_true = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
+                ac_power_kw / sam_inv_eff / (1.0 - sam_losses).max(1e-9)
+            } else {
+                ac_power_kw / self.inverter_efficiency.max(1e-9)
+            };
+
             let (dc_power_kw, ac_power_kw) = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
-                let dc_true = ac_power_kw / sam_inv_eff / (1.0 - sam_losses).max(1e-9);
                 let dc_power_kw = dc_true * (1.0 - self.system_losses_fraction);
                 let ac_power_kw = dc_power_kw * self.inverter_efficiency;
                 (dc_power_kw, ac_power_kw.max(0.0))
@@ -295,9 +343,32 @@ impl PV {
                 // Legacy LUT without SAM metadata — fall back to pre-T-0086
                 // behaviour. Results will be biased by ~4-18% due to double-
                 // applied inverter efficiency and missing system losses.
-                let dc_power_kw = ac_power_kw / self.inverter_efficiency.max(1e-9);
-                (dc_power_kw, ac_power_kw)
+                (dc_true, ac_power_kw)
             };
+
+            // T-0107 invariant check: warn when system_losses_fraction
+            // deviates from the PVWatts v5 default by more than
+            // 1 percentage point. The LUT embeds the SAM default losses;
+            // a large deviation may cause inconsistent results between
+            // LUT and non-LUT paths.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                let abs_diff = (self.system_losses_fraction - DEFAULT_SYSTEM_LOSSES_FRACTION).abs();
+                if abs_diff > 0.01 {
+                    // Why: gated behind check_invariants — using
+                    // tracing::warn! because this is a diagnostic, not
+                    // a correctness guarantee. The user may deliberately
+                    // configure a different loss value.
+                    tracing::warn!(
+                        system_losses_fraction = self.system_losses_fraction,
+                        pvwatts_default = DEFAULT_SYSTEM_LOSSES_FRACTION,
+                        abs_diff = abs_diff,
+                        "PV system_losses_fraction deviates from PVWatts v5 default \
+                         by >1pp. If the SAM LUT was generated with default losses, the \
+                         LUT and non-LUT paths may produce inconsistent results.",
+                    );
+                }
+            }
 
             // Invariant check: in debug/invariant builds, compare LUT-path
             // AC against the direct-path AC computed from the same array
@@ -363,12 +434,18 @@ impl PV {
                 );
             }
 
+            // dc_power_kw_before_losses: the raw DC recovered from the LUT
+            // AC output before HARES' own system_losses_fraction is applied.
+            let dc_before_losses = dc_true;
+
             return ArrayStepOutput {
                 dc_power_kw,
                 ac_power_kw,
                 irradiance_w_m2,
                 cell_temp_c,
                 interp_method: Some(interp_method),
+                dc_power_kw_before_losses: dc_before_losses,
+                lut_path_active: true,
             };
         }
 
@@ -381,8 +458,9 @@ impl PV {
 
         let gamma = array.module_type.gamma_per_c();
         let temp_derate = (1.0 + gamma * (cell_temp_c - DEFAULT_T_REF_C)).max(0.0);
-        let mut dc_power_kw =
+        let dc_before_losses =
             array.capacity_kw * (irradiance_w_m2 / IRRADIANCE_AT_STC_W_M2) * temp_derate;
+        let mut dc_power_kw = dc_before_losses;
         dc_power_kw *= 1.0 - self.system_losses_fraction;
         let ac_power_kw = (dc_power_kw * self.inverter_efficiency).max(0.0);
 
@@ -392,6 +470,8 @@ impl PV {
             irradiance_w_m2,
             cell_temp_c,
             interp_method: None,
+            dc_power_kw_before_losses: dc_before_losses,
+            lut_path_active: false,
         }
     }
 
@@ -797,6 +877,8 @@ impl Equipment for PV {
         let mut total_cell_temp_weighted = 0.0;
         let mut total_capacity_kw = 0.0;
         let mut lut_nn_fallback = false;
+        #[cfg(feature = "observe")]
+        let (mut any_lut_path, mut total_dc_before_losses) = (false, 0.0);
 
         for array in &self.arrays {
             let surface_id = array.surface_id.ok_or_else(|| {
@@ -819,6 +901,13 @@ impl Equipment for PV {
             let output = self.step_one_array(env, irr, array, soiling_ratio, shading_factor);
             if output.interp_method == Some(InterpolationMethod::NearestNeighbor) {
                 lut_nn_fallback = true;
+            }
+            #[cfg(feature = "observe")]
+            {
+                if output.lut_path_active {
+                    any_lut_path = true;
+                }
+                total_dc_before_losses += output.dc_power_kw_before_losses;
             }
             total_dc_power_kw += output.dc_power_kw;
             total_ac_power_kw += output.ac_power_kw;
@@ -857,6 +946,21 @@ impl Equipment for PV {
                 clipped_kw = inverter_clipping_kw,
                 ac_power_kw = final_p_kw,
                 "PV inverter clipping",
+            );
+        }
+
+        // T-0107 observer capture: record which code path was taken and
+        // the DC power before system_losses_fraction was applied. This
+        // allows downstream monitoring to compute the effective derate
+        // factor and detect path-specific bias.
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                lut_path_active = any_lut_path,
+                system_losses_fraction = self.system_losses_fraction,
+                dc_power_kw_before_losses = total_dc_before_losses,
+                total_dc_power_kw = total_dc_power_kw,
+                "PV step completed",
             );
         }
 
@@ -1126,10 +1230,10 @@ mod tests {
 
     use super::lut::{InterpolationMethod, PvLut};
     use super::{
-        ArrayType, DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_POWER_FACTOR,
-        DEFAULT_SYSTEM_LOSSES_FRACTION, Equipment, EquipmentConfig, ModuleType,
-        NOCT_REFERENCE_IRRADIANCE_W_M2, NOCT_REFERENCE_TEMP_C, PV, PvArray, PvArraySpec, PvConfig,
-        cell_temperature_noct_wind, surface_id_for_orientation,
+        ArrayType, DEFAULT_GAMMA_PER_C, DEFAULT_INVERTER_EFFICIENCY, DEFAULT_NOCT_C,
+        DEFAULT_POWER_FACTOR, DEFAULT_SYSTEM_LOSSES_FRACTION, Equipment, EquipmentConfig,
+        ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2, NOCT_REFERENCE_TEMP_C, PV, PvArray,
+        PvArraySpec, PvConfig, cell_temperature_noct_wind, surface_id_for_orientation,
     };
 
     fn env_with_surfaces(
@@ -2126,8 +2230,6 @@ mod tests {
         // Verify that after a step with a sparse LUT (NN fallback),
         // the telemetry method is set to 1.0 and the fallback count
         // increments.
-        use std::collections::HashMap;
-        use std::path::Path;
 
         let path = unique_temp_path("pv_lut_nn_telemetry", "parquet");
         // Write a sparse Parquet LUT with only 2 entries in a 6-element grid.
@@ -3389,5 +3491,279 @@ mod tests {
         let mut writer = ArrowWriter::try_new(file, schema, Some(props)).expect("arrow writer");
         writer.write(&batch).expect("write parquet batch");
         writer.close().expect("close parquet writer");
+    }
+
+    // --- T-0107: LUT vs non-LUT parity with matching system_losses_fraction ---
+
+    /// When HARES `system_losses_fraction` and `inverter_efficiency` match the
+    /// SAM values embedded in the LUT metadata, both the LUT and non-LUT paths
+    /// produce identical `dc_power_kw` for the same array configuration at the
+    /// same irradiance and temperature conditions.
+    ///
+    /// The test uses a synthetic Parquet LUT with one entry at STC-equivalent
+    /// conditions (POA ≈ 1000 W/m², ambient=25°C, wind=1 m/s). The LUT's AC
+    /// output is set to what the non-LUT path computes at these conditions, so
+    /// the LUT correction is a no-op (identity) and both paths converge.
+    #[test]
+    fn lut_non_lut_parity_matching_losses() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+
+        // STC-like conditions. Use wind=1.0 so wind correction factor is 1.0,
+        // making the NOCT formula identical to the basic model:
+        //   T_cell = 25 + 1000*(45-20)/800 = 56.25°C
+        //   temp_derate = 1 + (-0.0047)*(56.25-25) = 0.853125
+        //   DC_no_losses = 5.0 * 1.0 * 0.853125 = 4.265625 kW
+        //   DC = 4.265625 * (1-0.14) = 3.6684375 kW
+        //   AC = 3.6684375 * 0.96 = 3.5217 kW
+        let capacity_kw = 5.0;
+        let sam_losses = 0.14;
+        let sam_inv_eff = 0.96;
+        let hares_losses = sam_losses;
+        let hares_inv_eff = sam_inv_eff;
+        let ambient_c = 25.0;
+
+        let t_cell = cell_temperature_noct_wind(ambient_c, 1000.0, DEFAULT_NOCT_C, 1.0);
+        let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
+        let expected_dc_no_losses = capacity_kw * derate; // 4.265625
+        let expected_dc = expected_dc_no_losses * (1.0 - hares_losses); // 3.6684375
+        let expected_ac = expected_dc * hares_inv_eff;
+
+        // LUT AC output at the matching coordinates: set to expected_ac so
+        // the LUT correction is identity.
+        let path = unique_temp_path("pv_lut_t0107_parity", "parquet");
+        write_pv_lut_parquet_with_meta(&path, expected_ac, sam_inv_eff, sam_losses);
+
+        // Non-LUT PV: no LUT path, confirms baseline.
+        let cfg_no_lut = EquipmentConfig::from_typed(
+            "PV NoLUT".to_string(),
+            "PV".to_string(),
+            PvConfig {
+                equipment_id: Some(1),
+                capacity_kw,
+                tilt_deg: Some(30.0),
+                azimuth_deg: Some(180.0),
+                module_type: Some("Standard".to_string()),
+                noct_c: Some(DEFAULT_NOCT_C),
+                system_losses_fraction: Some(hares_losses),
+                inverter_efficiency: Some(hares_inv_eff),
+                surface_resolution_deg: Some(5.0),
+                ..base_pv_typed_config()
+            },
+        );
+        let mut pv_no_lut = PV::new(cfg_no_lut.clone());
+        let env = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            ambient_c,
+            1.0,
+        );
+        pv_no_lut.init(&cfg_no_lut, &env).unwrap();
+        let mut ports = PortSlots::default();
+        pv_no_lut
+            .step(&env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let dc_no_lut = pv_no_lut.telemetry().get(tk::DC_POWER_KW).unwrap();
+        approx_eq(dc_no_lut, expected_dc);
+
+        // LUT PV: same config plus LUT path.
+        let mut cfg_lut = base_pv_typed_config();
+        cfg_lut.equipment_id = Some(2);
+        cfg_lut.capacity_kw = capacity_kw;
+        cfg_lut.system_losses_fraction = Some(hares_losses);
+        cfg_lut.inverter_efficiency = Some(hares_inv_eff);
+        cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        let cfg_lut = EquipmentConfig::from_typed("PV LUT".to_string(), "PV".to_string(), cfg_lut);
+
+        // Weather must match LUT entry coordinates: zenith=30 (altitude=60),
+        // azimuth=180, GHI=DNI=DHI=0 (LUT has a single entry at these coords).
+        // The LUT skips the non-LUT power formula and returns AC directly.
+        let mut env_lut = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0, // non-zero for cell temp ancillary calc
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            ambient_c,
+            1.0,
+        );
+        env_lut.weather.solar_altitude_deg = 60.0; // zenith = 30
+        env_lut.weather.solar_azimuth_deg = 180.0;
+        env_lut.weather.ghi_w_m2 = 0.0;
+        env_lut.weather.dni_w_m2 = 0.0;
+        env_lut.weather.dhi_w_m2 = 0.0;
+
+        let mut pv_lut = PV::new(cfg_lut.clone());
+        pv_lut.init(&cfg_lut, &env_lut).unwrap();
+        let mut ports_lut = PortSlots::default();
+        pv_lut
+            .step(&env_lut, Duration::from_secs(60), &mut ports_lut)
+            .unwrap();
+        let dc_lut = pv_lut.telemetry().get(tk::DC_POWER_KW).unwrap();
+
+        // The LUT path should produce the same DC power as the non-LUT path
+        // because the LUT metadata correction is a no-op when SAM and HARES
+        // parameters match.
+        approx_eq(dc_lut, dc_no_lut);
+    }
+
+    /// Regression: when system_losses_fraction is changed from the PVWatts
+    /// default (0.14) but the LUT encodes the default losses, both paths
+    /// still produce consistent DC because the correction un-derates and
+    /// re-derates.
+    #[test]
+    fn lut_non_lut_consistency_with_custom_losses() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+
+        let capacity_kw = 5.0;
+        let sam_losses = 0.14;
+        let sam_inv_eff = 0.96;
+        let hares_losses = 0.05; // custom, different from SAM default
+        let hares_inv_eff = 0.92; // custom, different from SAM default
+        let ambient_c = 25.0;
+
+        // Non-LUT path: what the direct formula produces with custom losses.
+        let t_cell = cell_temperature_noct_wind(ambient_c, 1000.0, DEFAULT_NOCT_C, 1.0);
+        let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
+        let dc_no_losses = capacity_kw * derate;
+        let expected_dc = dc_no_losses * (1.0 - hares_losses);
+
+        // Compute what the LUT's raw AC would be if SAM uses default losses.
+        // SAM: AC_lut = DC_no_losses * (1 - sam_losses) * sam_inv_eff
+        let ac_lut = dc_no_losses * (1.0 - sam_losses) * sam_inv_eff;
+
+        // LUT-path correction: dc_true = AC_lut / sam_inv_eff / (1 - sam_losses)
+        //                    = dc_no_losses
+        // HARES DC = dc_true * (1 - hares_losses) = dc_no_losses * (1 - 0.05)
+        // This should exactly match the non-LUT path.
+
+        let path = unique_temp_path("pv_lut_t0107_custom", "parquet");
+        write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
+
+        // LUT PV.
+        let mut cfg_lut = base_pv_typed_config();
+        cfg_lut.equipment_id = Some(2);
+        cfg_lut.capacity_kw = capacity_kw;
+        cfg_lut.system_losses_fraction = Some(hares_losses);
+        cfg_lut.inverter_efficiency = Some(hares_inv_eff);
+        cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        let cfg_lut = EquipmentConfig::from_typed("PV LUT".to_string(), "PV".to_string(), cfg_lut);
+
+        let mut env_lut = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            ambient_c,
+            1.0,
+        );
+        env_lut.weather.solar_altitude_deg = 60.0;
+        env_lut.weather.solar_azimuth_deg = 180.0;
+        env_lut.weather.ghi_w_m2 = 0.0;
+        env_lut.weather.dni_w_m2 = 0.0;
+        env_lut.weather.dhi_w_m2 = 0.0;
+
+        let mut pv_lut = PV::new(cfg_lut.clone());
+        pv_lut.init(&cfg_lut, &env_lut).unwrap();
+        let mut ports_lut = PortSlots::default();
+        pv_lut
+            .step(&env_lut, Duration::from_secs(60), &mut ports_lut)
+            .unwrap();
+        let dc_lut = pv_lut.telemetry().get(tk::DC_POWER_KW).unwrap();
+
+        approx_eq(dc_lut, expected_dc);
+    }
+
+    /// Verify that `dc_power_kw_before_losses` is populated correctly in
+    /// both LUT and non-LUT paths. The field is internal to `step_one_array`
+    /// so verification is indirect: final `dc_power_kw` is checked against
+    /// the expected formula. In the non-LUT path `before_losses` equals
+    /// `capacity * POA/STC * temp_derate`; in the LUT path it equals
+    /// `ac_lut / sam_inv_eff / (1 - sam_losses)`, the raw DC recovered
+    /// before HARES' `system_losses_fraction` is applied.
+    #[test]
+    fn dc_power_kw_before_losses_populated() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+        let ambient_c = 25.0;
+
+        let t_cell = cell_temperature_noct_wind(ambient_c, 1000.0, DEFAULT_NOCT_C, 1.0);
+        let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
+        let expected_dc_no_losses = 5.0 * derate;
+        let expected_dc = expected_dc_no_losses * (1.0 - DEFAULT_SYSTEM_LOSSES_FRACTION);
+
+        // Non-LUT path: before_losses should equal expected_dc_no_losses,
+        // and final DC = expected_dc_no_losses * (1 - DEFAULT_SYSTEM_LOSSES_FRACTION).
+        let cfg_no_lut = config_single();
+        let env = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            ambient_c,
+            1.0,
+        );
+        let mut pv_no_lut = PV::new(cfg_no_lut.clone());
+        pv_no_lut.init(&cfg_no_lut, &env).unwrap();
+        let mut ports = PortSlots::default();
+        pv_no_lut
+            .step(&env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let dc_final = pv_no_lut.telemetry().get(tk::DC_POWER_KW).unwrap();
+        approx_eq(dc_final, expected_dc);
+
+        // LUT path: the LUT's AC output encodes SAM's default losses and
+        // inverter efficiency. The LUT metadata-aware correction recovers
+        // dc_true = ac_lut / sam_inv_eff / (1 - sam_losses) which should
+        // equal expected_dc_no_losses when the LUT AC matches the non-LUT
+        // path formula. dc_before_losses is set to dc_true, and final DC
+        // = dc_true * (1 - hares_losses) = expected_dc.
+        let sam_losses = DEFAULT_SYSTEM_LOSSES_FRACTION;
+        let sam_inv_eff = DEFAULT_INVERTER_EFFICIENCY;
+        let ac_lut = expected_dc_no_losses * (1.0 - sam_losses) * sam_inv_eff;
+        let path = unique_temp_path("pv_lut_before_losses", "parquet");
+        write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
+
+        let mut cfg_lut = base_pv_typed_config();
+        cfg_lut.equipment_id = Some(2);
+        cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        let cfg_lut = EquipmentConfig::from_typed("PV LUT".to_string(), "PV".to_string(), cfg_lut);
+
+        let mut env_lut = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            ambient_c,
+            1.0,
+        );
+        env_lut.weather.solar_altitude_deg = 60.0; // zenith = 30
+        env_lut.weather.solar_azimuth_deg = 180.0;
+        env_lut.weather.ghi_w_m2 = 0.0;
+        env_lut.weather.dni_w_m2 = 0.0;
+        env_lut.weather.dhi_w_m2 = 0.0;
+
+        let mut pv_lut = PV::new(cfg_lut.clone());
+        pv_lut.init(&cfg_lut, &env_lut).unwrap();
+        let mut ports_lut = PortSlots::default();
+        pv_lut
+            .step(&env_lut, Duration::from_secs(60), &mut ports_lut)
+            .unwrap();
+        let dc_lut = pv_lut.telemetry().get(tk::DC_POWER_KW).unwrap();
+        approx_eq(dc_lut, expected_dc);
     }
 }
