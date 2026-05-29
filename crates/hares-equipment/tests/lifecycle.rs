@@ -713,6 +713,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 integrated_energy_factor: None,
                 fraction_served: Some(1.0),
                 target_rh: Some(0.5),
+                part_load_curve_coeffs: None,
+                plf_min: None,
             },
         ),
         "Heat Pump Heater" | "ASHP Heater" | "MSHP Heater" | "GSHP Heater" | "WSHP Heater" => {

@@ -424,6 +424,8 @@ pub(super) fn resolve_scheduled_loads(
                             .get("fraction_served")
                             .and_then(Value::as_f64),
                         target_rh: spec.parameters.get("target_rh").and_then(Value::as_f64),
+                        part_load_curve_coeffs: None,
+                        plf_min: None,
                     };
                     spec.typed_config = Some(EquipmentConfig::from_typed(
                         "Dehumidifier".to_string(),

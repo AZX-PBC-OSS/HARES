@@ -276,6 +276,8 @@ fn sample_dehumidifier_config() -> DehumidifierConfig {
         integrated_energy_factor: Some(2.4),
         fraction_served: Some(1.0),
         target_rh: Some(0.50),
+        part_load_curve_coeffs: None,
+        plf_min: None,
     }
 }
 

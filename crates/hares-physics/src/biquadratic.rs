@@ -5,6 +5,11 @@ pub fn quadratic(coeffs: &[f64; 3], x: f64) -> f64 {
     coeffs[0] + coeffs[1] * x + coeffs[2] * x * x
 }
 
+/// Evaluate a cubic polynomial `a + b*x + c*x^2 + d*x^3`.
+pub fn cubic(coeffs: &[f64; 4], x: f64) -> f64 {
+    coeffs[0] + coeffs[1] * x + coeffs[2] * x * x + coeffs[3] * x * x * x
+}
+
 /// Evaluate a biquadratic polynomial `a + b*x1 + c*x1^2 + d*x2 + e*x2^2 + f*x1*x2`.
 pub fn biquadratic(coeffs: &[f64; 6], x1: f64, x2: f64) -> f64 {
     coeffs[0]

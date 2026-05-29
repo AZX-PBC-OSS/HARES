@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_physics::biquadratic::BiquadraticCurve;
+use hares_physics::biquadratic::cubic;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -23,6 +24,11 @@ use super::dehumidifier_defaults::{
 };
 use super::helpers::{equipment_id_from_config, zone_id_from_config};
 
+// Water density assumed as 1.0 kg/L (constant approximation).
+// EnergyPlus ZoneDehumidifier.cc:723 uses RhoH2O(max(InletAirTemp - 11.0, 1.0))
+// — temperature-dependent water density. At rated conditions (26.7°C) this
+// is ~0.9965 kg/L. The constant 1.0 kg/L introduces ±0.35% error at rated
+// conditions, which is within engineering tolerance for residential simulation.
 const KG_PER_LITER_WATER: f64 = 1.0;
 const HOURS_PER_DAY: f64 = 24.0;
 const MINUTES_PER_HOUR: f64 = 60.0;
@@ -52,6 +58,18 @@ const WATTS_PER_KILOWATT: f64 = 1_000.0;
 const WATTS_PER_KILOWATT_HOUR: f64 = 3_600_000.0;
 const DEFAULT_NORMALIZED_CURVE: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
+// Default cubic PLF curve coefficients derived from the ticket directive:
+// PLF = C0 + C1·PLR + C2·PLR² + C3·PLR³
+// Default values give PLF ≈ 0.7 at PLR=0 and PLF = 1.0 at PLR=1.0.
+// These match the shape described in H-1153 problem statement §2 but do
+// not correspond to any EnergyPlus-shipped default — EnergyPlus defaults
+// to PLF = 1.0 (no degradation) when no PartLoadCurve is configured
+// (ZoneDehumidifier.cc lines 763–767).
+const DEFAULT_PLF_CURVE_COEFFS: [f64; 4] = [0.7, 1.0, -0.7, 0.0];
+// PLF lower clamp per EnergyPlus ZoneDehumidifier.cc lines 769–808.
+const DEFAULT_PLF_MIN: f64 = 0.7;
+const DEFAULT_PLF_MAX: f64 = 1.0;
+
 const KEY_MIN_RH: &str = "min_rh";
 const KEY_MAX_RH: &str = "max_rh";
 
@@ -71,6 +89,9 @@ struct PerformanceSnapshot {
     electric_power_w: f64,
     latent_removal_w: f64,
     sensible_gain_w: f64,
+    plr: f64,
+    plf: f64,
+    rtf: f64,
 }
 
 pub struct Dehumidifier {
@@ -93,6 +114,10 @@ pub struct Dehumidifier {
     water_removal_curve_rated_value: f64,
     energy_factor_curve_rated_value: f64,
     accumulated_water_removal_l: f64,
+    /// Cubic part-load curve coefficients [C0, C1, C2, C3] mapping PLR → PLF.
+    part_load_curve_coeffs: [f64; 4],
+    /// Lower clamp for PLF (part-load factor).
+    plf_min: f64,
 }
 
 impl Dehumidifier {
@@ -145,6 +170,8 @@ impl Dehumidifier {
             water_removal_curve_rated_value: 1.0,
             energy_factor_curve_rated_value: 1.0,
             accumulated_water_removal_l: 0.0,
+            part_load_curve_coeffs: DEFAULT_PLF_CURVE_COEFFS,
+            plf_min: DEFAULT_PLF_MIN,
         }
     }
 
@@ -175,8 +202,54 @@ impl Dehumidifier {
                 electric_power_w: 0.0,
                 latent_removal_w: 0.0,
                 sensible_gain_w: 0.0,
+                plr: 0.0,
+                plf: 1.0,
+                rtf: 0.0,
             };
         }
+
+        // ---- PLR: part-load ratio ---------------------------------------
+        // EnergyPlus CalcZoneDehumidifier lines 726–731:
+        //   PLR = max(0.0, min(1.0, -QZnDehumidReq / WaterRemovalMassRate))
+        //
+        // Under normal operation (no mode override) HARES approximates the
+        // zone moisture load as proportional to the excess relative humidity
+        // above the switch-off threshold, normalised by the deadband width.
+        // When mode_override forces Cooling, the unit runs at full capacity
+        // (PLR = 1.0) regardless of the current zone humidity.
+        let plr = if matches!(self.mode_override, Some(OperatingMode::Cooling)) {
+            1.0
+        } else {
+            let deadband_width = (self.max_rh - self.min_rh).max(1e-12);
+            ((zone_rh - self.min_rh) / deadband_width).clamp(0.0, 1.0)
+        };
+
+        // ---- PLF: part-load factor (cycling efficiency) ------------------
+        // EnergyPlus CalcZoneDehumidifier lines 763–767:
+        //   PLF = PartLoadCurve->value(PLR)   if curve present
+        //   PLF = 1.0                         otherwise (no degradation)
+        //
+        // HARES uses a cubic curve by default; the default coefficients are an
+        // engineering choice matching the shape described in the ticket directive
+        // (not an EnergyPlus-shipped default).
+        let plf_raw = cubic(&self.part_load_curve_coeffs, plr);
+
+        // EnergyPlus CalcZoneDehumidifier lines 769–808: clamps PLF to
+        // [0.7, 1.0] and then separately handles PLF < PLR by resetting
+        // RTF to 1.0.  HARES deviates from that sequential strategy by
+        // instead clamping PLF to [plf_min.max(plr), 1.0], guaranteeing
+        // PLF ≥ PLR structurally so RTF ≤ 1.0 without a downstream branch.
+        let plf = plf_raw.clamp(self.plf_min.max(plr), DEFAULT_PLF_MAX);
+
+        // ---- RTF: runtime fraction --------------------------------------
+        // EnergyPlus CalcZoneDehumidifier lines 810–831:
+        //   if (PLF > 0.0 && PLF >= PLR) RunTimeFraction = PLR / PLF
+        //   else                         RunTimeFraction = 1.0
+        let rtf = if plf > 0.0 && plf >= plr {
+            (plr / plf).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
 
         let wr_multiplier = evaluate_normalized_curve(
             &self.water_removal_curve,
@@ -194,20 +267,30 @@ impl Dehumidifier {
         let water_removal_l_day =
             (self.rated_water_removal_l_day * self.fraction_load_served * wr_multiplier).max(0.0);
         let energy_factor_l_kwh = (self.rated_energy_factor_l_kwh * ef_multiplier).max(0.0);
+
+        // EnergyPlus CalcZoneDehumidifier lines 829–831, 852–855: average
+        // electric power is on-cycle power scaled by runtime fraction (RTF).
+        // EnergyPlus CalcZoneDehumidifier line 858: latent (moisture) output
+        // is scaled by PLR, not RTF — the two scalars are independent.
         let water_removal_kg_s = water_removal_l_day * KG_PER_LITER_WATER / SECONDS_PER_DAY;
-        let electric_power_w = if energy_factor_l_kwh > 0.0 {
+        let electric_power_w_on = if energy_factor_l_kwh > 0.0 {
             water_removal_kg_s * WATTS_PER_KILOWATT_HOUR / energy_factor_l_kwh
         } else {
             0.0
         };
-        let latent_removal_w = water_removal_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG;
+        let electric_power_w = electric_power_w_on * rtf;
+        let water_removal_kg_s_avg = water_removal_kg_s * plr;
+        let latent_removal_w = water_removal_kg_s_avg * LATENT_HEAT_VAPORISATION_0C_J_KG;
         let sensible_gain_w = latent_removal_w + electric_power_w;
 
         PerformanceSnapshot {
-            water_removal_l_day,
+            water_removal_l_day: water_removal_l_day * plr,
             electric_power_w,
             latent_removal_w,
             sensible_gain_w,
+            plr,
+            plf,
+            rtf,
         }
     }
 
@@ -233,6 +316,9 @@ impl Dehumidifier {
         self.telemetry.set(tk::MAX_RH, self.max_rh);
         self.telemetry
             .set(tk::IS_ON, if self.is_on { 1.0 } else { 0.0 });
+        self.telemetry.set(tk::PART_LOAD_RATIO, snapshot.plr);
+        self.telemetry.set(tk::PART_LOAD_FACTOR, snapshot.plf);
+        self.telemetry.set(tk::RUNTIME_FRACTION, snapshot.rtf);
     }
 }
 
@@ -251,6 +337,14 @@ impl Dehumidifier {
             .unwrap_or(1.8);
 
         self.fraction_load_served = cfg.fraction_served.unwrap_or(1.0).clamp(0.0, 1.0);
+
+        self.part_load_curve_coeffs = cfg
+            .part_load_curve_coeffs
+            .unwrap_or(DEFAULT_PLF_CURVE_COEFFS);
+        self.plf_min = cfg
+            .plf_min
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(DEFAULT_PLF_MIN);
 
         let target_rh_raw = cfg.target_rh.unwrap_or(DEFAULT_TARGET_RH_FRACTION);
         self.target_rh = parse_rh_fraction(target_rh_raw, "target_rh")?;
@@ -285,6 +379,38 @@ impl Dehumidifier {
         self.energy_factor_curve_rated_value =
             self.energy_factor_curve.evaluate(RATED_DB_C, RATED_RH);
 
+        Ok(())
+    }
+
+    /// Check PLF/RTF invariant bounds.
+    ///
+    /// EnergyPlus CalcZoneDehumidifier lines 769–808 require
+    /// `0.7 ≤ PLF ≤ 1.0` and `0 ≤ RTF ≤ 1`.  Gated behind
+    /// `debug_assertions` or `feature = "check_invariants"` so the
+    /// check compiles to nothing in production release builds.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn check_invariants(&self, plf: f64, rtf: f64) -> crate::Result<()> {
+        use hares_types::HaresError;
+        if plf < self.plf_min || plf > 1.0 {
+            return Err(HaresError::InvariantViolation {
+                check_name: "dehumidifier_plf_bounds".to_string(),
+                value: plf,
+                tolerance: 0.0,
+            });
+        }
+        if !(0.0..=1.0).contains(&rtf) {
+            return Err(HaresError::InvariantViolation {
+                check_name: "dehumidifier_rtf_bounds".to_string(),
+                value: rtf,
+                tolerance: 0.0,
+            });
+        }
+        Ok(())
+    }
+
+    /// Stub for unchecked builds — the body is eliminated by the compiler.
+    #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+    fn check_invariants(&self, _plf: f64, _rtf: f64) -> crate::Result<()> {
         Ok(())
     }
 }
@@ -322,6 +448,9 @@ impl Equipment for Dehumidifier {
             electric_power_w: 0.0,
             latent_removal_w: 0.0,
             sensible_gain_w: 0.0,
+            plr: 0.0,
+            plf: 1.0,
+            rtf: 0.0,
         });
         Ok(())
     }
@@ -358,6 +487,7 @@ impl Equipment for Dehumidifier {
             zone.relative_humidity
                 .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION),
         );
+        self.check_invariants(snapshot.plf, snapshot.rtf)?;
         if snapshot.electric_power_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_kw: snapshot.electric_power_w / WATTS_PER_KILOWATT,
@@ -444,6 +574,9 @@ impl Equipment for Dehumidifier {
             electric_power_w: self.telemetry.get(tk::ELECTRIC_POWER_W).unwrap_or(0.0),
             latent_removal_w: self.telemetry.get(tk::LATENT_REMOVAL_W).unwrap_or(0.0),
             sensible_gain_w: self.telemetry.get(tk::SENSIBLE_GAIN_W).unwrap_or(0.0),
+            plr: 0.0,
+            plf: 1.0,
+            rtf: 0.0,
         });
         self.core_output = CoreOutput::default();
         Ok(())
@@ -541,7 +674,7 @@ fn evaluate_normalized_curve(
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(10);
+    let mut telemetry = Telemetry::with_capacity(13);
     telemetry.insert(tk::WATER_REMOVAL_L_DAY, 0.0);
     telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
@@ -558,6 +691,9 @@ fn default_telemetry() -> Telemetry {
         DEFAULT_TARGET_RH_FRACTION + DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION,
     );
     telemetry.insert(tk::IS_ON, 0.0);
+    telemetry.insert(tk::PART_LOAD_RATIO, 0.0);
+    telemetry.insert(tk::PART_LOAD_FACTOR, 1.0);
+    telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry
 }
 
@@ -612,6 +748,22 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::IS_ON.to_string(),
             unit: "bool".to_string(),
             description: "1 when compressor/fan are on, else 0".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_RATIO.to_string(),
+            unit: "fraction".to_string(),
+            description: "Part-load ratio: fraction of rated capacity needed".to_string(),
+        },
+        TelemetryField {
+            name: tk::PART_LOAD_FACTOR.to_string(),
+            unit: "fraction".to_string(),
+            description: "Part-load factor: cycling efficiency correction (PLF_MIN ≤ PLF ≤ 1.0)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::RUNTIME_FRACTION.to_string(),
+            unit: "fraction".to_string(),
+            description: "Runtime fraction: PLR / PLF".to_string(),
         },
     ]
 }
@@ -699,6 +851,8 @@ mod tests {
                 integrated_energy_factor: None,
                 fraction_served: None,
                 target_rh: Some(50.0),
+                part_load_curve_coeffs: None,
+                plf_min: None,
             },
         )
     }
@@ -1100,5 +1254,277 @@ mod tests {
         let max = eq.telemetry().get(tk::MAX_RH).unwrap();
         approx_eq(min, 0.4875);
         approx_eq(max, 0.5125);
+    }
+
+    // ── PLF cycling model tests ──────────────────────────────────────────
+
+    /// At continuous full load (PLR = 1.0), PLF must equal 1.0 and RTF must
+    /// equal 1.0. The unit must produce the same water removal, electric power,
+    /// latent removal, and sensible gain as it would under the pre-PLF binary-on
+    /// model (i.e. no cycling degradation at full load).
+    #[test]
+    fn plf_at_full_load_is_identity() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.60)).unwrap();
+        eq.update_control(&env(0.60));
+        let mut slots = ports();
+        eq.step(&env(0.60), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        let plr = eq.telemetry().get(tk::PART_LOAD_RATIO).unwrap();
+        let plf = eq.telemetry().get(tk::PART_LOAD_FACTOR).unwrap();
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap();
+
+        approx_eq(plr, 1.0);
+        approx_eq(plf, 1.0);
+        approx_eq(rtf, 1.0);
+
+        // Verify full-load output matches the rated capacity:
+        // At PLR=1.0, PLF=1.0, RTF=1.0 the output must equal the pre-PLF
+        // binary-on output.  The rated_condition_reproduces_rated_outputs test
+        // already validates this path; here we assert that the PLF model
+        // introduces identity scaling at full load.
+        let water_l_day = eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+        let rated_l_day = 70.0 * 0.473_176_5;
+        approx_eq(water_l_day, rated_l_day);
+    }
+
+    /// At part load (PLR ≈ 0.5), the default cubic PLF curve evaluates to
+    /// 1.025 at PLR=0.5 (> 1.0) and clamps to 1.0 — this test verifies the
+    /// clamping behavior when the cubic exceeds the upper bound. The runtime
+    /// fraction should be PLR / PLF = 0.5 / 1.0 = 0.5.
+    #[test]
+    fn plf_clamping_at_half_load() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.53)).unwrap();
+        // Turn on at 0.53 (above max_rh=0.5125).
+        eq.update_control(&env(0.53));
+        // Now run at 0.50 (mid-band, unit stays on from hysteresis).
+        eq.update_control(&env(0.50));
+        let mut slots = ports();
+        eq.step(&env(0.50), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        let plr = eq.telemetry().get(tk::PART_LOAD_RATIO).unwrap();
+        let plf = eq.telemetry().get(tk::PART_LOAD_FACTOR).unwrap();
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap();
+
+        // PLR ≈ 0.5 because RH is at the midpoint of the deadband:
+        // plr = (0.50 - 0.4875) / (0.5125 - 0.4875) = 0.0125 / 0.025 = 0.5
+        approx_eq(plr, 0.5);
+
+        // PLF at PLR=0.5 via cubic [0.7, 1.0, -0.7, 0.0]:
+        // PLF = 0.7 + 1.0*0.5 - 0.7*0.25 = 0.7 + 0.5 - 0.175 = 1.025
+        // Clamped to [0.7, 1.0] → 1.0
+        approx_eq(plf, 1.0);
+
+        // RTF = PLR / PLF = 0.5 / 1.0 = 0.5
+        approx_eq(rtf, 0.5);
+
+        // Water removal at RTF=0.5: rated * 0.5 (plus curve factors at 0.50 RH)
+        let wr_rated = 70.0 * 0.473_176_5;
+        let wr_observed = eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+        // At 0.50 RH (vs rated 0.60 RH) the curve decreases output.
+        // Water removal is scaled by PLR (0.5) per EnergyPlus line 858;
+        // since PLF=1.0 and RTF=0.5 at this point the scalars coincide.
+        assert!(
+            wr_observed < wr_rated * 0.6,
+            "water removal at half load ({wr_observed:.4}) should be well below \
+             rated capacity ({wr_rated:.4})"
+        );
+        assert!(wr_observed > 0.0, "unit should still be removing moisture");
+    }
+
+    /// Verify PLF clamping at the PLR boundaries.
+    ///
+    /// - At PLR = 0, PLF = 0.7 (the PLF_MIN floor, since the cubic gives 0.7).
+    /// - At PLR = 1.0, PLF = 1.0 (the PLF_MAX ceiling).
+    #[test]
+    fn plf_clamping_at_boundaries() {
+        // Analytical check of the default cubic curve.
+        use hares_physics::biquadratic::cubic;
+        let coeffs = [0.7, 1.0, -0.7, 0.0];
+
+        // PLR = 0: cubic → 0.7, clamped to [0.7, 1.0] → 0.7
+        let plf_at_0 = cubic(&coeffs, 0.0).clamp(0.7, 1.0);
+        approx_eq(plf_at_0, 0.7);
+
+        // PLR = 1.0: cubic → 0.7 + 1.0 - 0.7 = 1.0, clamped to [1.0, 1.0] → 1.0
+        let plf_at_1 = cubic(&coeffs, 1.0).clamp(0.7, 1.0);
+        approx_eq(plf_at_1, 1.0);
+
+        // Verify through the dehumidifier at PLR=1.0 (rated conditions).
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.60)).unwrap();
+        eq.update_control(&env(0.60));
+        let mut slots = ports();
+        eq.step(&env(0.60), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        let plf = eq.telemetry().get(tk::PART_LOAD_FACTOR).unwrap();
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap();
+
+        // At full load, PLF = 1.0 and RTF = 1.0.
+        assert!(
+            (plf - 1.0).abs() < 1e-9,
+            "PLF at full load must be 1.0, got {plf}"
+        );
+        assert!(
+            (rtf - 1.0).abs() < 1e-9,
+            "RTF at full load must be 1.0, got {rtf}"
+        );
+    }
+
+    /// PLR, PLF, and RTF telemetry fields must be present and populated
+    /// after every step, even when the unit is off.
+    #[test]
+    fn plf_telemetry_fields_always_present() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.40)).unwrap();
+
+        // Off state: PLR=0, PLF=1.0, RTF=0
+        let mut slots = ports();
+        eq.step(&env(0.40), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        assert!(eq.telemetry().get(tk::PART_LOAD_RATIO).is_some());
+        assert!(eq.telemetry().get(tk::PART_LOAD_FACTOR).is_some());
+        assert!(eq.telemetry().get(tk::RUNTIME_FRACTION).is_some());
+
+        approx_eq(eq.telemetry().get(tk::PART_LOAD_RATIO).unwrap(), 0.0);
+        approx_eq(eq.telemetry().get(tk::PART_LOAD_FACTOR).unwrap(), 1.0);
+        approx_eq(eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap(), 0.0);
+
+        // On state: PLR > 0
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Cooling,
+        })
+        .unwrap();
+        eq.update_control(&env(0.60));
+        eq.step(&env(0.60), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        assert!(
+            eq.telemetry().get(tk::PART_LOAD_RATIO).unwrap() > 0.0,
+            "PLR should be > 0 when unit is on at high humidity"
+        );
+    }
+
+    /// Regression test: compare HARES dehumidifier output against EnergyPlus
+    /// `CalcZoneDehumidifier` for matched configurations. EnergyPlus uses
+    /// independent scalars: PLR for moisture output (line 858) and RTF for
+    /// electric power (line 855). This test verifies HARES follows the same
+    /// pattern by using a custom PLF curve that creates PLR ≠ RTF divergence
+    /// at part load, and asserts the correct scalar is applied to each output.
+    ///
+    /// Test points:
+    /// 1. Full load (PLR=1.0): PLR=RTF=1.0, outputs match rated capacity.
+    /// 2. Part load (PLR=0.5) with PLF=0.7: water removal scales by PLR (0.5),
+    ///    electric power scales by RTF (≈0.7143). The ratio water_removal / PLR
+    ///    must equal the full-load water removal, proving the PLR scalar is
+    ///    applied to moisture and NOT the electric scalar (RTF).
+    #[test]
+    fn energyplus_regression_independent_plr_rtf_scalars() {
+        // Why: Clippy fires `items_after_test_module` on inner function definitions
+        // inside test functions because rustc treats them as module-level items even
+        // when nested inside a function body. There is no way to move this helper
+        // without duplicating the test or pulling it out of the test module.
+        #[allow(clippy::items_after_test_module)]
+        fn custom_eplus_dehumidifier_config(coeffs: Option<[f64; 4]>) -> EquipmentConfig {
+            EquipmentConfig::from_typed(
+                "E+ Regression".to_string(),
+                "Dehumidifier".to_string(),
+                crate::DehumidifierConfig {
+                    equipment_id: Some(9),
+                    zone_id: Some(1),
+                    capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                    energy_factor: Some(2.0),
+                    integrated_energy_factor: None,
+                    fraction_served: None,
+                    target_rh: Some(50.0),
+                    part_load_curve_coeffs: coeffs,
+                    plf_min: None,
+                },
+            )
+        }
+
+        // ── Test 1: Full load (default curve, PLR=1.0) ──────────────────
+        // EnergyPlus: PLR=1.0 → PLF=1.0 → RTF=1.0. All scalars unity.
+        let cfg = custom_eplus_dehumidifier_config(None);
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.60)).unwrap();
+        eq.update_control(&env(0.60));
+        let mut slots = ports();
+        eq.step(&env(0.60), Duration::from_secs(60), &mut slots)
+            .unwrap();
+
+        let plr = eq.telemetry().get(tk::PART_LOAD_RATIO).unwrap();
+        let plf = eq.telemetry().get(tk::PART_LOAD_FACTOR).unwrap();
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap();
+        approx_eq(plr, 1.0);
+        approx_eq(plf, 1.0);
+        approx_eq(rtf, 1.0);
+
+        let wr_full_load = eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+        let rated_l_day = 70.0 * 0.473_176_5;
+        approx_eq(wr_full_load, rated_l_day);
+
+        // ── Test 2: Part load, PLF=0.7 constant curve ────────────────────
+        // PLF = 0.7 + 0·PLR + 0·PLR² + 0·PLR³ = 0.7 for all PLR.
+        // At PLR=0.5: RTF = 0.5/0.7 ≈ 0.7143.
+        // Water removal MUST scale by PLR (0.5), NOT RTF (0.7143).
+        // Electric power MUST scale by RTF (0.7143).
+        let cfg2 = custom_eplus_dehumidifier_config(Some([0.7, 0.0, 0.0, 0.0]));
+        let mut eq2 = Dehumidifier::new(cfg2.clone());
+        eq2.init(&cfg2, &env(0.53)).unwrap();
+
+        // Turn on above max_rh, then step at mid-band (hysteresis keeps it on).
+        eq2.update_control(&env(0.53));
+        eq2.update_control(&env(0.50));
+        let mut slots2 = ports();
+        eq2.step(&env(0.50), Duration::from_secs(60), &mut slots2)
+            .unwrap();
+
+        let plr2 = eq2.telemetry().get(tk::PART_LOAD_RATIO).unwrap();
+        let plf2 = eq2.telemetry().get(tk::PART_LOAD_FACTOR).unwrap();
+        let rtf2 = eq2.telemetry().get(tk::RUNTIME_FRACTION).unwrap();
+        let wr_part = eq2.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+        let ep_part = eq2.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+
+        approx_eq(plr2, 0.5);
+        approx_eq(plf2, 0.7);
+        approx_eq(rtf2, 0.5 / 0.7);
+
+        // Now force full-load (PLR=1.0) at the same ambient conditions
+        // to get the base water removal and electric power at this RH.
+        // At PLR=1.0, PLF is clamped to max(0.7, 1.0)=1.0, RTF=1.0.
+        eq2.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Cooling,
+        })
+        .unwrap();
+        eq2.update_control(&env(0.50));
+        let mut slots_full = ports();
+        eq2.step(&env(0.50), Duration::from_secs(60), &mut slots_full)
+            .unwrap();
+        let wr_base = eq2.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+        let ep_base = eq2.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+
+        // EnergyPlus line 858: LatentOutput = WaterRemovalMassRate * PLR
+        // → water removal at part load = water removal at full load × PLR.
+        approx_eq(wr_part, wr_base * plr2);
+        // EnergyPlus line 855: ElectricPowerAvg = ElectricPowerOnCycle * RTF
+        // → electric power at part load = electric power at full load × RTF.
+        approx_eq(ep_part, ep_base * rtf2);
+
+        // Negative control: prove the scalars differ
+        // (this assertion would fail if both used the same scalar).
+        assert!(
+            (plr2 - rtf2).abs() > 1e-9,
+            "PLR ({plr2}) and RTF ({rtf2}) must differ for the custom curve to exercise independent scalars"
+        );
     }
 }

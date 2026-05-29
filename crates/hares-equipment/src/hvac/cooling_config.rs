@@ -449,6 +449,22 @@ pub struct DehumidifierConfig {
     /// Target relative humidity setpoint (fraction 0–1 or percent 0–100).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_rh: Option<f64>,
+    /// Cubic part-load curve coefficients [C0, C1, C2, C3] mapping PLR → PLF.
+    ///
+    /// When `Some`, the PLF is computed as `cubic(&coeffs, plr)` instead of the
+    /// simplified `1 − Cd·(1−PLR)` formula. EnergyPlus `ZoneDehumidifier.cc`
+    /// supports an optional `PartLoadCurve` (Curve:Cubic or Curve:Quadratic) on
+    /// the `ZoneHVAC:Dehumidifier:DX` object.
+    ///
+    /// Default: EnergyPlus-informed cubic `[0.7, 1.0, -0.7, 0.0]`
+    /// (PLF = 0.7 + 1.0·PLR − 0.7·PLR²), giving PLF=0.7 at PLR=0 and
+    /// PLF=1.0 at PLR=1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_load_curve_coeffs: Option<[f64; 4]>,
+    /// Lower clamp for PLF (part-load factor). Defaults to 0.7 per
+    /// EnergyPlus `ZoneDehumidifier.cc` lines 769–808.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plf_min: Option<f64>,
 }
 
 impl EquipmentTypedConfig for DehumidifierConfig {
@@ -480,6 +496,13 @@ impl DehumidifierConfig {
                 return Err(HaresError::Equipment(format!(
                     "DehumidifierConfig: integrated_energy_factor must be finite and positive, got {ief}"
                 )));
+            }
+        }
+        if let Some(coeffs) = self.part_load_curve_coeffs {
+            if coeffs.iter().any(|v| !v.is_finite()) {
+                return Err(HaresError::Equipment(
+                    "DehumidifierConfig: part_load_curve_coeffs must be finite".to_string(),
+                ));
             }
         }
         Ok(())
@@ -1046,6 +1069,8 @@ mod tests {
             integrated_energy_factor: None,
             fraction_served: Some(1.0),
             target_rh: Some(0.50),
+            part_load_curve_coeffs: None,
+            plf_min: None,
         };
         let ec = typed_config(cfg.clone());
         let recovered: DehumidifierConfig = ec.typed().unwrap();
@@ -1066,6 +1091,8 @@ mod tests {
             integrated_energy_factor: None,
             fraction_served: None,
             target_rh: None,
+            part_load_curve_coeffs: None,
+            plf_min: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1080,6 +1107,8 @@ mod tests {
             integrated_energy_factor: None,
             fraction_served: None,
             target_rh: None,
+            part_load_curve_coeffs: None,
+            plf_min: None,
         };
         assert!(cfg.validate().is_err());
     }
