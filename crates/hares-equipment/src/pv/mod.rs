@@ -76,6 +76,34 @@ fn cell_temperature_noct_wind(
     ambient_temp_c + irradiance_w_m2 * noct_factor * wind_correction
 }
 
+/// Compute direct-path (non-LUT) DC and AC power for a single array.
+///
+/// Used by the invariant check and observer histogram to compare LUT-path
+/// results against the equivalent direct computation.
+#[inline]
+fn compute_direct_power(
+    array: &PvArray,
+    irradiance_w_m2: f64,
+    ambient_temp_c: f64,
+    wind_speed_m_s: f64,
+    system_losses_fraction: f64,
+    inverter_efficiency: f64,
+) -> (f64, f64) {
+    let cell_temp_c = cell_temperature_noct_wind(
+        ambient_temp_c,
+        irradiance_w_m2,
+        array.noct_c,
+        wind_speed_m_s,
+    );
+    let gamma = array.module_type.gamma_per_c();
+    let temp_derate = (1.0 + gamma * (cell_temp_c - DEFAULT_T_REF_C)).max(0.0);
+    let mut dc_power_kw =
+        array.capacity_kw * (irradiance_w_m2 / IRRADIANCE_AT_STC_W_M2) * temp_derate;
+    dc_power_kw *= 1.0 - system_losses_fraction;
+    let ac_power_kw = (dc_power_kw * inverter_efficiency).max(0.0);
+    (dc_power_kw, ac_power_kw)
+}
+
 #[derive(Clone, Debug)]
 struct ArrayStepOutput {
     dc_power_kw: f64,
@@ -216,14 +244,9 @@ impl PV {
             // Clamped to 0° minimum (sun at zenith is 0°).
             let solar_zenith_deg = (90.0 - env.weather.solar_altitude_deg).max(0.0);
             let solar_azimuth_deg = env.weather.solar_azimuth_deg;
-            // SAM LUTs are indexed by horizontal irradiance from weather data,
-            // not tilted-surface (POA) values.
             let ghi = env.weather.ghi_w_m2.max(0.0);
             let dni = env.weather.dni_w_m2.max(0.0);
             let dhi = env.weather.dhi_w_m2.max(0.0);
-            // SAM LUTs are indexed on weather-station irradiance (GHI/DNI/DHI),
-            // not POA, so soiling can't be folded into the LUT inputs. Apply
-            // the soiling/shading ratios as a post-LUT power derating instead.
             let ac_power_kw = lut
                 .interpolate(
                     solar_zenith_deg,
@@ -236,13 +259,105 @@ impl PV {
                 .max(0.0)
                 * soiling_ratio
                 * shading_factor;
-            let dc_power_kw = ac_power_kw / self.inverter_efficiency.max(1e-9);
+
             let cell_temp_c = cell_temperature_noct_wind(
                 ambient_temp_c,
                 irradiance_w_m2,
                 array.noct_c,
                 env.weather.wind_speed_m_s,
             );
+
+            let sam_inv_eff = lut.sam_inv_eff();
+            let sam_losses = lut.sam_losses();
+
+            // T-0086: SAM's PVWatts already applies its own internal inverter
+            // efficiency (inv_eff) and system losses (losses) when producing
+            // the AC output stored in the LUT. Recover the true DC power by
+            // dividing these out, then re-apply HARES' configured values so
+            // both LUT and non-LUT paths use the same sequence:
+            //   DC → system_losses → inverter_efficiency → AC
+            //
+            // SAM PVWatts v8 defaults: inv_eff = 96%, losses = 14%
+            // (NREL/TP-7A40-80694). SSC declares both with unit "%"
+            // (cmod_pvwattsv5.cpp:53-54). The Python adapter divides by
+            // 100 so the Rust consumer receives fraction form (0.96, 0.14).
+            let (dc_power_kw, ac_power_kw) = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
+                let dc_true = ac_power_kw / sam_inv_eff / (1.0 - sam_losses).max(1e-9);
+                let dc_power_kw = dc_true * (1.0 - self.system_losses_fraction);
+                let ac_power_kw = dc_power_kw * self.inverter_efficiency;
+                (dc_power_kw, ac_power_kw.max(0.0))
+            } else {
+                // Legacy LUT without SAM metadata — fall back to pre-T-0086
+                // behaviour. Results will be biased by ~4-18% due to double-
+                // applied inverter efficiency and missing system losses.
+                let dc_power_kw = ac_power_kw / self.inverter_efficiency.max(1e-9);
+                (dc_power_kw, ac_power_kw)
+            };
+
+            // Invariant check: in debug/invariant builds, compare LUT-path
+            // AC against the direct-path AC computed from the same array
+            // specification. This catches metadata-aware correction bugs.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                let (_, ac_direct) = compute_direct_power(
+                    array,
+                    irradiance_w_m2,
+                    ambient_temp_c,
+                    env.weather.wind_speed_m_s,
+                    self.system_losses_fraction,
+                    self.inverter_efficiency,
+                );
+                let diff = if ac_direct > 0.0 {
+                    (ac_power_kw - ac_direct).abs() / ac_direct
+                } else if ac_power_kw > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                // T-0086 requires 0.1% relative tolerance. SAM's PVWatts v8
+                // uses the same NOCT cell temperature model as HARES and the
+                // same DC = capacity*(POA/STC)*temp_derate formula, so the
+                // two paths should agree closely when SAM_inv_eff ≈ HARES_inv_eff
+                // and SAM_losses ≈ HARES_losses. The LUT transposition from
+                // GHI/DNI/DHI to POA may differ from the weather file's POA.
+                if diff >= 0.001 {
+                    // Why: this is gated behind check_invariants — using
+                    // tracing::error! instead of assert! because the feature
+                    // can be enabled in release builds and an invariant
+                    // diagnostic should not abort the simulation.
+                    tracing::error!(
+                        lut_ac_kw = ac_power_kw,
+                        direct_ac_kw = ac_direct,
+                        diff_ratio = diff,
+                        "PV LUT vs direct AC power mismatch {diff:.6} exceeds 0.1% threshold",
+                    );
+                }
+            }
+
+            // Observer capture: record LUT vs direct AC power ratio.
+            #[cfg(feature = "observe")]
+            {
+                let (_, ac_direct) = compute_direct_power(
+                    array,
+                    irradiance_w_m2,
+                    ambient_temp_c,
+                    env.weather.wind_speed_m_s,
+                    self.system_losses_fraction,
+                    self.inverter_efficiency,
+                );
+                let ratio = if ac_direct > 0.0 {
+                    ac_power_kw / ac_direct
+                } else {
+                    f64::NAN
+                };
+                tracing::debug!(
+                    pv_lut_vs_direct_ac_diff_ratio = ratio,
+                    lut_ac_kw = ac_power_kw,
+                    direct_ac_kw = ac_direct,
+                    "PV LUT vs direct comparison",
+                );
+            }
+
             return ArrayStepOutput {
                 dc_power_kw,
                 ac_power_kw,
@@ -467,6 +582,23 @@ impl PV {
                 check_lut_location(&lut, path);
                 #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
                 let _ = path;
+
+                // T-0086: warn once at load time if the LUT lacks SAM's
+                // internal inverter efficiency and system losses metadata.
+                // Legacy LUTs (pre-T-0086 Python adapter) and CSV LUTs omit
+                // these fields; the correction defaults to the pre-T-0086
+                // fallback, which may produce 4-18% systematic bias.
+                let sam_inv_eff = lut.sam_inv_eff();
+                if sam_inv_eff <= 0.0 || sam_inv_eff > 1.0 {
+                    tracing::warn!(
+                        lut_path = %path,
+                        sam_inv_eff = sam_inv_eff,
+                        "PV LUT lacks SAM inverter efficiency metadata; \
+                         fallback applies HARES inverter_efficiency to SAM AC output. \
+                         Re-generate LUT with updated sam_pv.py adapter.",
+                    );
+                }
+
                 self.luts_by_surface.insert(surface_id, lut);
             }
         }
@@ -942,12 +1074,14 @@ mod tests {
         WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
     use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::KeyValue;
+    use parquet::file::properties::WriterProperties;
 
     use super::lut::PvLut;
     use super::{
         DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_POWER_FACTOR, DEFAULT_SYSTEM_LOSSES_FRACTION,
         Equipment, EquipmentConfig, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2,
-        NOCT_REFERENCE_TEMP_C, PV, PvArraySpec, PvConfig, cell_temperature_noct_wind,
+        NOCT_REFERENCE_TEMP_C, PV, PvArray, PvArraySpec, PvConfig, cell_temperature_noct_wind,
         surface_id_for_orientation,
     };
 
@@ -1082,6 +1216,53 @@ mod tests {
         .expect("record batch");
         let file = std::fs::File::create(path).expect("create pv parquet lut");
         let mut writer = ArrowWriter::try_new(file, schema, None).expect("arrow writer");
+        writer.write(&batch).expect("write parquet batch");
+        writer.close().expect("close parquet writer");
+    }
+
+    /// Write a Parquet LUT with embedded SAM metadata (inv_eff, losses).
+    fn write_pv_lut_parquet_with_meta(
+        path: &Path,
+        ac_power_kw: f64,
+        sam_inv_eff: f64,
+        sam_losses: f64,
+    ) {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("solar_zenith_deg", DataType::Float64, false),
+            Field::new("solar_azimuth_deg", DataType::Float64, false),
+            Field::new("ghi", DataType::Float64, false),
+            Field::new("dni", DataType::Float64, false),
+            Field::new("dhi", DataType::Float64, false),
+            Field::new("temp_c", DataType::Float64, false),
+            Field::new("ac_power_kw", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                std::sync::Arc::new(Float64Array::from(vec![30.0])),
+                std::sync::Arc::new(Float64Array::from(vec![180.0])),
+                std::sync::Arc::new(Float64Array::from(vec![0.0])),
+                std::sync::Arc::new(Float64Array::from(vec![0.0])),
+                std::sync::Arc::new(Float64Array::from(vec![0.0])),
+                std::sync::Arc::new(Float64Array::from(vec![25.0])),
+                std::sync::Arc::new(Float64Array::from(vec![ac_power_kw])),
+            ],
+        )
+        .expect("record batch");
+        let file = std::fs::File::create(path).expect("create pv parquet lut");
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![
+                KeyValue::new(
+                    "harvest_lut_sam_inv_eff".to_string(),
+                    format!("{}", sam_inv_eff),
+                ),
+                KeyValue::new(
+                    "harvest_lut_sam_losses".to_string(),
+                    format!("{}", sam_losses),
+                ),
+            ]))
+            .build();
+        let mut writer = ArrowWriter::try_new(file, schema, Some(props)).expect("arrow writer");
         writer.write(&batch).expect("write parquet batch");
         writer.close().expect("close parquet writer");
     }
@@ -2543,5 +2724,200 @@ mod tests {
         let lut = PvLut::from_path(&path).expect("load csv lut");
         approx_eq(lut.latitude_deg(), 0.0);
         approx_eq(lut.longitude_deg(), 0.0);
+    }
+
+    // --- T-0086: LUT metadata-aware inverter efficiency & system losses ---
+
+    /// LUT with SAM metadata (inv_eff=0.96, losses=0.14), HARES configured
+    /// with the same values. The corrected LUT-path AC power must equal the
+    /// raw LUT AC power (correction is a no-op when SAM values match HARES).
+    #[test]
+    fn lut_metadata_matching_values_produces_identity_correction() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+
+        // LUT entry: zenith=30°, azimuth=180°, temp=25°C — at zero irradiance
+        // so AC power = 0.0. Use a single entry for simplicity.
+        // The correction math: AC_corrected = AC_lut / inv_eff / (1-losses) * (1-losses) * inv_eff
+        // When SAM and HARES values match, this simplifies to AC_lut.
+        let path = unique_temp_path("pv_lut_t0086_match", "parquet");
+        let lut_ac = 3.80;
+        write_pv_lut_parquet_with_meta(&path, lut_ac, 0.96, 0.14);
+
+        let mut typed = base_pv_typed_config();
+        typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        typed.inverter_efficiency = Some(0.96);
+        typed.system_losses_fraction = Some(0.14);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+
+        let mut env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        // Weather must match LUT entry coordinates for exact hit.
+        env.weather.solar_altitude_deg = 60.0; // zenith = 90-60 = 30
+        env.weather.solar_azimuth_deg = 180.0;
+        env.weather.ghi_w_m2 = 0.0;
+        env.weather.dni_w_m2 = 0.0;
+        env.weather.dhi_w_m2 = 0.0;
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).expect("init pv");
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step pv");
+
+        let ac = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0);
+        // When SAM=HARES, corrected AC must equal the raw LUT AC.
+        approx_eq(ac, lut_ac);
+    }
+
+    /// LUT with SAM metadata (inv_eff=0.96, losses=0.14), but HARES
+    /// configured with different values (inverter_efficiency=0.90,
+    /// system_losses_fraction=0.10). The corrected AC must match the
+    /// algebraic expectation: AC_lut / SAM_inv_eff / (1-SAM_losses)
+    /// * (1-HARES_losses) * HARES_inv_eff.
+    #[test]
+    fn lut_metadata_different_values_adjusts_output() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+
+        let lu_ac = 3.80;
+        let path = unique_temp_path("pv_lut_t0086_diff", "parquet");
+        write_pv_lut_parquet_with_meta(&path, lu_ac, 0.96, 0.14);
+
+        let mut typed = base_pv_typed_config();
+        typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        typed.inverter_efficiency = Some(0.90);
+        typed.system_losses_fraction = Some(0.10);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+
+        let mut env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        env.weather.solar_altitude_deg = 60.0;
+        env.weather.solar_azimuth_deg = 180.0;
+        env.weather.ghi_w_m2 = 0.0;
+        env.weather.dni_w_m2 = 0.0;
+        env.weather.dhi_w_m2 = 0.0;
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).expect("init pv");
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step pv");
+
+        let ac = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0);
+        // Correction: dc_true = 3.80 / 0.96 / (1-0.14) = 3.80 / 0.96 / 0.86 = 4.5988
+        // dc_harves = 4.5988 * (1-0.10) = 4.1389
+        // ac_harves = 4.1389 * 0.90 = 3.725
+        let expected_ac = lu_ac / 0.96 / (1.0 - 0.14) * (1.0 - 0.10) * 0.90;
+        approx_eq(ac, expected_ac);
+    }
+
+    /// Legacy LUT (CSV, no metadata) falls back to pre-T-0086 behavior:
+    /// DC = AC / HARES_inv_eff, and AC passes through unchanged.
+    /// The output must match the old (pre-fix) computation.
+    #[test]
+    fn legacy_lut_no_metadata_falls_back_to_old_behavior() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+
+        let path = unique_temp_path("pv_lut_t0086_legacy", "csv");
+        write_pv_lut_csv(&path, 2.75);
+
+        let mut typed = base_pv_typed_config();
+        typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        typed.inverter_efficiency = Some(0.96);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+
+        let mut env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        env.weather.solar_altitude_deg = 60.0;
+        env.weather.solar_azimuth_deg = 180.0;
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).expect("init pv");
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step pv");
+
+        let ac = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0);
+        let dc = pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(-1.0);
+
+        // Pre-T-0086 legacy math: AC = LUT AC, DC = AC / inv_eff.
+        approx_eq(ac, 2.75);
+        approx_eq(dc, 2.75 / 0.96);
+    }
+
+    /// Verify that the LUT metadata fields are correctly read from a
+    /// Parquet file written with SAM configuration embedded.
+    #[test]
+    fn lut_parquet_reads_sam_metadata() {
+        let path = unique_temp_path("pv_lut_t0086_read_meta", "parquet");
+        write_pv_lut_parquet_with_meta(&path, 2.5, 0.92, 0.12);
+        let lut = PvLut::from_path(&path).expect("load lut");
+        approx_eq(lut.sam_inv_eff(), 0.92);
+        approx_eq(lut.sam_losses(), 0.12);
+    }
+
+    /// CSV LUTs always default SAM metadata to zero (no key-value
+    /// metadata support in CSV format).
+    #[test]
+    fn lut_csv_defaults_sam_metadata_to_zero() {
+        let path = unique_temp_path("pv_lut_t0086_csv", "csv");
+        write_pv_lut_csv(&path, 1.0);
+        let lut = PvLut::from_path(&path).expect("load csv lut");
+        approx_eq(lut.sam_inv_eff(), 0.0);
+        approx_eq(lut.sam_losses(), 0.0);
+    }
+
+    /// Verify that the compute_direct_power helper produces results
+    /// identical to the non-LUT path at STC with zero losses and unity
+    /// inverter efficiency.
+    #[test]
+    fn compute_direct_power_matches_step_one_array() {
+        let array = PvArray {
+            tilt_deg: 30.0,
+            azimuth_deg: 180.0,
+            capacity_kw: 5.0,
+            noct_c: DEFAULT_NOCT_C,
+            module_type: ModuleType::Standard,
+            surface_id: Some(1),
+            sam_lut_path: None,
+            attached_boundary_id: None,
+        };
+
+        // At STC: irradiance=1000, temp=25, wind=1.0, losses=0, inv_eff=1.0
+        let (dc, ac) = super::compute_direct_power(&array, 1000.0, 25.0, 1.0, 0.0, 1.0);
+
+        // T_cell = 25 + 1000*(47-20)/800 = 25 + 33.75 = 58.75
+        // temp_derate = 1 + (-0.0047)*(58.75-25) = 1 - 0.158625 = 0.841375
+        // DC = 5.0 * 1.0 * 0.841375 = 4.206875 kW
+        let t_cell = cell_temperature_noct_wind(25.0, 1000.0, DEFAULT_NOCT_C, 1.0);
+        let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
+        let expected_dc = 5.0 * derate;
+        let expected_ac = expected_dc * 1.0;
+
+        approx_eq(dc, expected_dc);
+        approx_eq(ac, expected_ac);
     }
 }

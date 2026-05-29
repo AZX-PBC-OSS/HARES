@@ -48,6 +48,8 @@ class PvWattsOutput(TypedDict):
     dn: list[float]
     df: list[float]
     tamb: list[float]
+    inv_eff: float
+    losses: float
 
 
 GHI_BIN_W_M2 = 50
@@ -259,16 +261,22 @@ class PvLut:
     elevation_m: float = 0.0
 
     def save(self, path: Path) -> None:
-        """Write the LUT to a Parquet file on disk with embedded location metadata."""
+        """Write the LUT to a Parquet file on disk with embedded metadata."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Embed location metadata as Parquet file-level key-value metadata
-        # so the Rust consumer can validate cross-location LUT usage.
+        # Embed location and SAM configuration metadata as Parquet
+        # file-level key-value metadata so the Rust consumer can
+        # correct for SAM's internal inverter efficiency and system
+        # losses (T-0086).
         kv_meta = {
             b"harvest_lut_latitude_deg": f"{self.latitude_deg:.6f}".encode(),
             b"harvest_lut_longitude_deg": f"{self.longitude_deg:.6f}".encode(),
             b"harvest_lut_elevation_m": f"{self.elevation_m:.6f}".encode(),
         }
+        if "inv_eff" in self.metadata:
+            kv_meta[b"harvest_lut_sam_inv_eff"] = f"{self.metadata['inv_eff']:.6f}".encode()
+        if "losses" in self.metadata:
+            kv_meta[b"harvest_lut_sam_losses"] = f"{self.metadata['losses']:.6f}".encode()
         table_with_meta = self.table.replace_schema_metadata(kv_meta)
         pq.write_table(table_with_meta, path)
         if "content_hash" in self.metadata:
@@ -305,6 +313,8 @@ def _run_pvwatts(
         "dn": list(pv.Outputs.dn),
         "df": list(pv.Outputs.df),
         "tamb": list(pv.Outputs.tamb),
+        "inv_eff": pv.SystemDesign.inv_eff / 100.0,
+        "losses": pv.SystemDesign.losses / 100.0,
     }
 
 
@@ -443,9 +453,17 @@ def generate_pv_lut(
         if _cache_valid(cached_path, content_hash):
             LOGGER.info("PV LUT cache hit: %s", cached_path)
             table = pq.read_table(cached_path)
+            schema_meta = table.schema.metadata or {}
+            inv_eff = float(schema_meta.get(b"harvest_lut_sam_inv_eff", b"0.0"))
+            losses = float(schema_meta.get(b"harvest_lut_sam_losses", b"0.0"))
             return PvLut(
                 table=table,
-                metadata={"content_hash": content_hash, "cached": True},
+                metadata={
+                    "content_hash": content_hash,
+                    "cached": True,
+                    "inv_eff": inv_eff,
+                    "losses": losses,
+                },
                 latitude_deg=latitude_deg,
                 longitude_deg=longitude_deg,
                 elevation_m=elevation_m,
@@ -468,7 +486,12 @@ def generate_pv_lut(
     )
     lut = PvLut(
         table=table,
-        metadata={"content_hash": content_hash, "cached": False},
+        metadata={
+            "content_hash": content_hash,
+            "cached": False,
+            "inv_eff": raw["inv_eff"],
+            "losses": raw["losses"],
+        },
         latitude_deg=latitude_deg,
         longitude_deg=longitude_deg,
         elevation_m=elevation_m,

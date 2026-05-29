@@ -90,6 +90,8 @@ pub(crate) struct PvLut {
     nn_norms: [AxisNorm; 6],
     latitude_deg: f64,
     longitude_deg: f64,
+    sam_inv_eff: f64,
+    sam_losses: f64,
 }
 
 impl PvLut {
@@ -125,11 +127,13 @@ impl PvLut {
             ))
         })?;
 
-        // Read file-level key-value metadata for location.
+        // Read file-level key-value metadata for location and SAM configuration.
         let parquet_meta = builder.metadata();
         let file_kv = parquet_meta.file_metadata().key_value_metadata();
         let mut latitude_deg: f64 = 0.0;
         let mut longitude_deg: f64 = 0.0;
+        let mut sam_inv_eff: f64 = 0.0;
+        let mut sam_losses: f64 = 0.0;
         if let Some(kv_list) = file_kv {
             for kv in kv_list {
                 match kv.key.as_str() {
@@ -142,6 +146,20 @@ impl PvLut {
                     }
                     "harvest_lut_longitude_deg" => {
                         longitude_deg = kv
+                            .value
+                            .as_deref()
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .unwrap_or(0.0);
+                    }
+                    "harvest_lut_sam_inv_eff" => {
+                        sam_inv_eff = kv
+                            .value
+                            .as_deref()
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .unwrap_or(0.0);
+                    }
+                    "harvest_lut_sam_losses" => {
+                        sam_losses = kv
                             .value
                             .as_deref()
                             .and_then(|v| v.parse::<f64>().ok())
@@ -203,7 +221,14 @@ impl PvLut {
             }
         }
 
-        Self::from_rows(path, rows, latitude_deg, longitude_deg)
+        Self::from_rows(
+            path,
+            rows,
+            latitude_deg,
+            longitude_deg,
+            sam_inv_eff,
+            sam_losses,
+        )
     }
 
     fn from_csv(path: &Path) -> Result<Self, HaresError> {
@@ -256,7 +281,7 @@ impl PvLut {
             rows.push((zenith, azimuth, ghi, dni, dhi, temp, ac));
         }
 
-        Self::from_rows(path, rows, 0.0, 0.0)
+        Self::from_rows(path, rows, 0.0, 0.0, 0.0, 0.0)
     }
 
     fn from_rows(
@@ -264,6 +289,8 @@ impl PvLut {
         rows: Vec<(f64, f64, f64, f64, f64, f64, f64)>,
         latitude_deg: f64,
         longitude_deg: f64,
+        sam_inv_eff: f64,
+        sam_losses: f64,
     ) -> Result<Self, HaresError> {
         if rows.is_empty() {
             return Err(HaresError::Equipment(format!(
@@ -353,6 +380,8 @@ impl PvLut {
             nn_norms,
             latitude_deg,
             longitude_deg,
+            sam_inv_eff,
+            sam_losses,
         })
     }
 
@@ -364,6 +393,16 @@ impl PvLut {
     #[inline]
     pub(crate) fn longitude_deg(&self) -> f64 {
         self.longitude_deg
+    }
+
+    #[inline]
+    pub(crate) fn sam_inv_eff(&self) -> f64 {
+        self.sam_inv_eff
+    }
+
+    #[inline]
+    pub(crate) fn sam_losses(&self) -> f64 {
+        self.sam_losses
     }
 
     pub(crate) fn interpolate(
@@ -542,6 +581,8 @@ impl PvLut {
             nn_norms,
             latitude_deg: 0.0,
             longitude_deg: 0.0,
+            sam_inv_eff: 0.0,
+            sam_losses: 0.0,
         }
     }
 }
