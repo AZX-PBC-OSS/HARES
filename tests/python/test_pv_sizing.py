@@ -152,7 +152,7 @@ class TestPvSizing:
 
     def test_sizing_panel_count(self, dwelling_summer_24h):
         result = dwelling_summer_24h.estimate_pv_capacity(6.0)
-        # 420 W panels: 6 kW ≈ 15 panels.
+        # 440 W panels: 6 kW ≈ 14 panels.
         expected_panels = round(result.capacity_kw * 1000 / result.panel_watts)
         assert result.num_panels == expected_panels
 
@@ -166,6 +166,15 @@ class TestPvSizing:
         r = repr(result)
         assert "PvSizingResult" in r
         assert "panels=" in r
+
+    def test_custom_panel_watts_changes_capacity(self, dwelling_summer_24h):
+        default = dwelling_summer_24h.estimate_pv_capacity(6.0)
+        custom = dwelling_summer_24h.estimate_pv_capacity(
+            6.0, panel_watts=300, panel_area_m2=1.6
+        )
+        assert default.panel_watts != custom.panel_watts
+        assert default.panel_watts == 440
+        assert custom.panel_watts == 300
 
 
 # ---------------------------------------------------------------------------

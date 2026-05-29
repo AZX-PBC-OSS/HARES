@@ -1,0 +1,20 @@
+# Standard monocrystalline 440W panel — 2026 mainstream residential.
+# Representative mid-range panel based on NREL SAM 2024 module database
+# and 2026 market data (Qcells Q.TRON 430-455W range, SunPower Maxeon 7: 450W).
+# Module efficiency ~21% (210 W/m² at STC).
+name = "Standard 440W"
+panel_watts = 440
+panel_area_m2 = 2.1
+# NOCT = Nominal Operating Cell Temperature per IEC 61215.
+# 45°C is PVWatts v8 default for standard rack-mounted modules.
+# SAM PVWatts v8 Technical Reference: NREL/TP-7A40-80694 §2.4.
+noct_c = 45.0
+# Module type string matching PVWatts v8 module type enumeration:
+#   standard, premium, thin_film
+# SAM PVWatts v8: Standard gamma = -0.0047, Premium gamma = -0.0035,
+# ThinFilm gamma = -0.0020.
+module_type = "standard"
+# Total system derate factor (wiring, soiling, mismatch, inverter, shading).
+# EnergyPlus PVWatts IDD V26-1-0 Generator:PVWatts field N6 default = 0.14 (14%).
+# Valid range [0, 0.99]. Applied after temperature derating per PVWatts convention.
+system_losses_fraction = 0.14

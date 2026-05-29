@@ -84,6 +84,50 @@ pub struct HvacMultispeedParameters {
 /// API alias for HVAC coefficient lookups.
 pub type BiquadraticCoefficients = HvacCurveSet;
 
+/// PV panel specification loaded from a TOML file in `defaults/pv/`.
+///
+/// Each TOML file defines one panel model's physical and performance
+/// parameters. Fields map to the PV sizing module's override parameters
+/// and to PVWatts v8 module type configuration.
+///
+/// Source citations:
+/// - NOCT defaults from SAM PVWatts v8 (NREL/TP-7A40-80694 §2.4)
+/// - Module type gammas from SAM PVWatts v8 SSC defaults
+/// - System losses default 0.14 from EnergyPlus PVWatts V26-1-0 field N6
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PvPanelDefaults {
+    /// Human-readable panel model name (e.g. "Standard 440W").
+    pub name: String,
+    /// STC nameplate wattage (W).
+    pub panel_watts: u32,
+    /// Module footprint area (m²).
+    pub panel_area_m2: f64,
+    /// Nominal Operating Cell Temperature (°C) per IEC 61215.
+    /// PVWatts v8 default: 45°C for standard, 43°C for premium.
+    #[serde(default = "PvPanelDefaults::default_noct_c")]
+    pub noct_c: f64,
+    /// Module type string matching PVWatts v8 enumeration:
+    /// "standard", "premium", "thin_film".
+    #[serde(default = "PvPanelDefaults::default_module_type")]
+    pub module_type: String,
+    /// Total system derate fraction (wiring, soiling, mismatch,
+    /// inverter, shading). EnergyPlus PVWatts default = 0.14.
+    #[serde(default = "PvPanelDefaults::default_system_losses")]
+    pub system_losses_fraction: f64,
+}
+
+impl PvPanelDefaults {
+    fn default_noct_c() -> f64 {
+        45.0
+    }
+    fn default_module_type() -> String {
+        "standard".to_string()
+    }
+    fn default_system_losses() -> f64 {
+        0.14
+    }
+}
+
 /// Generic default parameters loaded from a TOML file in any equipment
 /// subdirectory.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -105,6 +149,8 @@ pub struct DefaultsStore {
     generator: HashMap<String, EquipmentDefaults>,
     loads: HashMap<String, EquipmentDefaults>,
     pv: HashMap<String, EquipmentDefaults>,
+    /// Typed PV panel specifications loaded from `defaults/pv/*.toml`.
+    pv_panel: HashMap<String, PvPanelDefaults>,
     water_heating: HashMap<String, EquipmentDefaults>,
     envelope_lut: Option<crate::envelope_lut::EnvelopeLookup>,
 }
@@ -174,6 +220,7 @@ impl DefaultsStore {
         store.generator = load_toml_dir(&defaults_dir.join("generator"))?;
         store.loads = load_toml_dir(&defaults_dir.join("loads"))?;
         store.pv = load_toml_dir(&defaults_dir.join("pv"))?;
+        store.pv_panel = load_pv_panel_defaults(&defaults_dir.join("pv"))?;
         store.water_heating = load_toml_dir(&defaults_dir.join("water_heating"))?;
 
         Ok(store)
@@ -273,6 +320,27 @@ impl DefaultsStore {
         self.envelope_lut.as_ref()
     }
 
+    /// Look up a PV panel specification by file-stem name (canonicalized
+    /// to lowercase snake case).
+    #[must_use]
+    pub fn pv_panel_defaults(&self, name: &str) -> Option<&PvPanelDefaults> {
+        self.pv_panel.get(&normalize_equipment_key(name))
+    }
+
+    /// Number of PV panel specifications loaded.
+    #[must_use]
+    pub fn pv_panel_count(&self) -> usize {
+        self.pv_panel.len()
+    }
+
+    /// Take ownership of the loaded PV panel defaults map, leaving an empty
+    /// map in its place. Called by `Dwelling::from_preparsed` to transfer
+    /// panel defaults to the Dwelling struct so they are accessible at PV
+    /// sizing call sites.
+    pub fn take_pv_panel_map(&mut self) -> HashMap<String, PvPanelDefaults> {
+        std::mem::take(&mut self.pv_panel)
+    }
+
     /// Number of ZIP parameter entries loaded.
     #[must_use]
     pub fn zip_count(&self) -> usize {
@@ -354,6 +422,51 @@ fn load_toml_dir(dir: &Path) -> Result<HashMap<String, EquipmentDefaults>, Defau
                     path: path.clone(),
                     reason: e.to_string(),
                 })?;
+            map.insert(stem, defaults);
+        }
+    }
+    Ok(map)
+}
+
+/// Load typed PV panel specification TOML files from `defaults/pv/`.
+///
+/// Each `.toml` file is deserialized into a [`PvPanelDefaults`] keyed by
+/// normalized file stem name. Errors on missing files silently produce an
+/// empty map — the caller is responsible for falling back to compile-time
+/// constants.
+fn load_pv_panel_defaults(dir: &Path) -> Result<HashMap<String, PvPanelDefaults>, DefaultsError> {
+    let mut map = HashMap::new();
+    if !dir.exists() {
+        return Ok(map);
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| DefaultsError::Io {
+        path: dir.to_path_buf(),
+        source: e,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| DefaultsError::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?;
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "toml") {
+            let stem =
+                normalize_equipment_key(&path.file_stem().unwrap_or_default().to_string_lossy());
+            let content = std::fs::read_to_string(&path).map_err(|e| DefaultsError::Io {
+                path: path.clone(),
+                source: e,
+            })?;
+            let defaults: PvPanelDefaults = match toml::from_str(&content) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "skipping non-conforming TOML in defaults/pv/ — not a PvPanelDefaults file"
+                    );
+                    continue;
+                }
+            };
             map.insert(stem, defaults);
         }
     }
@@ -768,6 +881,16 @@ pf = 1.0
         assert!((ac.pf - 0.96).abs() < 1e-10);
         assert!((ac.zp - 1.60).abs() < 1e-10);
         assert!((ac.pp - 2.09).abs() < 1e-10);
+
+        assert!(
+            store.pv_panel_count() >= 2,
+            "should load at least two PV panel specs"
+        );
+        let std440 = store
+            .pv_panel_defaults("standard_440")
+            .expect("standard_440 PV panel spec");
+        assert_eq!(std440.panel_watts, 440);
+        assert!((std440.panel_area_m2 - 2.1).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1017,5 +1140,80 @@ max_plf,1.0\n",
 
         let store = DefaultsStore::load(dir.path()).expect("load empty defaults");
         assert_eq!(store.zip_count(), 0);
+    }
+
+    #[test]
+    fn load_pv_panel_defaults_deserializes_complete_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+
+        let pv_dir = dir.path().join("pv");
+        std::fs::create_dir_all(&pv_dir).unwrap();
+        std::fs::write(
+            pv_dir.join("standard_440.toml"),
+            r#"
+name = "Standard 440W"
+panel_watts = 440
+panel_area_m2 = 2.1
+noct_c = 45.0
+module_type = "standard"
+system_losses_fraction = 0.14
+"#,
+        )
+        .unwrap();
+
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "water_heating",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        assert_eq!(store.pv_panel_count(), 1);
+
+        let panel = store
+            .pv_panel_defaults("standard_440")
+            .expect("standard_440 panel");
+        assert_eq!(panel.name, "Standard 440W");
+        assert_eq!(panel.panel_watts, 440);
+        assert!((panel.panel_area_m2 - 2.1).abs() < 1e-10);
+        assert!((panel.noct_c - 45.0).abs() < 1e-10);
+        assert_eq!(panel.module_type, "standard");
+        assert!((panel.system_losses_fraction - 0.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn load_pv_panel_defaults_falls_back_when_dir_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_zip(dir.path());
+
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        // No .toml files in pv/, so pv_panel_count should be 0.
+        // The caller should fall back to compile-time constants.
+        assert_eq!(store.pv_panel_count(), 0);
+        assert!(store.pv_panel_defaults("anything").is_none());
     }
 }

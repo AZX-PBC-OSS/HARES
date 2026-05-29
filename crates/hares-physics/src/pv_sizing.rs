@@ -85,11 +85,16 @@ pub struct PvSizingResult {
 // ---------------------------------------------------------------------------
 
 /// Representative modern monocrystalline panel defaults.
-/// 420 W at ~21% efficiency (per NREL Best Research-Cell Efficiency Chart
+/// 440 W at ~21% efficiency (per NREL Best Research-Cell Efficiency Chart
 /// 2023 — "Crystalline Si Cells — Mono-Si" commercial modules);
-/// 2.0 m² footprint (≈ 1.05 m × 1.90 m, industry-standard 60/72-cell frame).
-const DEFAULT_PANEL_WATTS: u32 = 420;
-const DEFAULT_PANEL_AREA_M2: f64 = 2.0;
+/// 2026 mainstream residential panels: Qcells Q.TRON 430-455W,
+/// SunPower Maxeon 7 450W, REC Alpha Pure-RX 470W.
+/// 440W is the mid-range default; update every ~2 years to track
+/// the ~5W/year upward trend in residential module wattage.
+/// 2.1 m² footprint (≈ 1.10 m × 1.90 m, industry-standard 60/72-cell frame
+/// at ~21% efficiency: 440 / (1000 × 0.21) ≈ 2.10 m²).
+const DEFAULT_PANEL_WATTS: u32 = 440;
+const DEFAULT_PANEL_AREA_M2: f64 = 2.1;
 /// Total system derate factor (wiring, soiling, mismatch, inverter, shading).
 /// EnergyPlus PVWatts IDD V26-1-0 Generator:PVWatts, field N6 (system_losses),
 /// default = 0.14 (14%). Valid range [0, 0.99].
@@ -413,6 +418,26 @@ pub fn compute_usable_area(
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
 
+    // Invariant: panel physical parameters must be in valid ranges.
+    // No residential panel exceeds ~3.5 m²; the 5.0 m² upper bound allows
+    // for future large-format utility panels without being physically
+    // impossible.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            panel_watts > 0,
+            "panel_watts must be positive, got {panel_watts}"
+        );
+        assert!(
+            panel_area_m2 > 0.0,
+            "panel_area_m2 must be positive, got {panel_area_m2}"
+        );
+        assert!(
+            panel_area_m2 < 5.0,
+            "panel_area_m2 must be < 5.0 m² (no residential panel exceeds ~3.5 m²), got {panel_area_m2}"
+        );
+    }
+
     if roof.planes.is_empty() {
         return Err(PvSizingError::NoRoofPlanes);
     }
@@ -644,6 +669,8 @@ pub fn compute_usable_area(
                 pv_hip_latitude = lat,
                 pv_hip_prod_factor_sum = hip_prod_factor_sum,
                 pv_hip_weighted_panels = total_weighted_panels,
+                pv_panel_watts = panel_watts,
+                pv_panel_area_m2 = panel_area_m2,
                 "PV Hip aggregation telemetry"
             );
         }
@@ -717,6 +744,8 @@ pub fn compute_usable_area(
             pv_production_factor = prod_factor,
             pv_roof_shape = ?roof_shape,
             pv_max_panels = max_panels,
+            pv_panel_watts = panel_watts,
+            pv_panel_area_m2 = panel_area_m2,
             "PV Gable/Flat plane selected"
         );
     }
@@ -746,6 +775,29 @@ pub fn size_pv_system(
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
     let system_losses = system_losses.unwrap_or(DEFAULT_SYSTEM_LOSSES);
 
+    // Invariant: panel physical parameters must be in valid ranges.
+    // No residential panel exceeds ~3.5 m²; the 5.0 m² upper bound allows
+    // for future large-format panels without being physically impossible.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            panel_watts > 0,
+            "panel_watts must be positive, got {panel_watts}"
+        );
+        assert!(
+            panel_area_m2 > 0.0,
+            "panel_area_m2 must be positive, got {panel_area_m2}"
+        );
+        assert!(
+            panel_area_m2 < 5.0,
+            "panel_area_m2 must be < 5.0 m² (no residential panel exceeds ~3.5 m²), got {panel_area_m2}"
+        );
+        assert!(
+            (0.0..=0.99).contains(&system_losses),
+            "system_losses must be in [0, 0.99], got {system_losses}"
+        );
+    }
+
     if usable.max_capacity_kw < min_kw {
         return Err(PvSizingError::InsufficientRoof {
             available_kw: usable.max_capacity_kw,
@@ -759,6 +811,19 @@ pub fn size_pv_system(
         ((clamped_kw * 1000.0 / panel_watts as f64).ceil() as u32).min(usable.max_panels);
     let capacity_kw = (num_panels as f64) * (panel_watts as f64) / 1000.0;
     let collector_area_m2 = (num_panels as f64) * panel_area_m2;
+
+    #[cfg(feature = "observe")]
+    {
+        tracing::debug!(
+            pv_panel_watts = panel_watts,
+            pv_panel_area_m2 = panel_area_m2,
+            pv_system_losses_fraction = system_losses,
+            pv_num_panels = num_panels,
+            pv_capacity_kw = capacity_kw,
+            pv_collector_area_m2 = collector_area_m2,
+            "PV system sizing result"
+        );
+    }
 
     Ok(PvSizingResult {
         capacity_kw,
@@ -1020,9 +1085,9 @@ mod tests {
         let usable =
             compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None, None).unwrap();
         // Flat: effective = 200 × 0.70 = 140 m².
-        // Panel footprint = 2.0 / 0.403 ≈ 4.97 m² (lat 35 → geometric GCR ≈ 0.403).
-        // Max panels = floor(140 / 4.97) ≈ 28.
-        assert_eq!(usable.max_panels, 28);
+        // Panel footprint = 2.1 / 0.403 ≈ 5.21 m² (lat 35 → geometric GCR ≈ 0.403).
+        // Max panels = floor(140 / 5.21) ≈ 26.
+        assert_eq!(usable.max_panels, 26);
     }
 
     #[test]
@@ -1041,10 +1106,10 @@ mod tests {
         let usable =
             compute_usable_area(&roof, RoofShape::Hip, &[], Some(40.0), None, None, None).unwrap();
         // South: 60×0.35=21 m² → 10 panels, factor=1.0 → +10
-        // ENE (θ=120°): 40×0.35=14 m² → 7 panels, k(40)=0.5154, x=0.667
-        //   factor=1-0.5154×0.444=0.771, weighted=floor(7×0.771)=5
-        // Total: 15
-        assert_eq!(usable.max_panels, 15);
+        // ENE (θ=120°): 40×0.35=14 m² → 6 panels, k(40)=0.5154, x=0.667
+        //   factor=1-0.5154×0.444=0.771, weighted=floor(6×0.771)=4
+        // Total: 14
+        assert_eq!(usable.max_panels, 14);
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
     }
 
@@ -1196,7 +1261,7 @@ mod tests {
             best_plane_idx: 0,
             usable_m2: 37.5,
             max_panels: 18,
-            max_capacity_kw: 7.56,
+            max_capacity_kw: 7.92,
             roof_shape: RoofShape::Gable,
             azimuth_deg: 180.0,
             tilt_deg: 26.0,
@@ -1851,8 +1916,8 @@ mod tests {
         let usable =
             compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None, None).unwrap();
         // 200 × 0.70 = 140 m² usable. GCR ≈ 0.40 at lat=35° tilt=25°.
-        // Panel footprint = 2.0 / ~0.403 ≈ 4.96 m². 140 / 4.96 ≈ 28.2 → 28.
-        assert_eq!(usable.max_panels, 28);
+        // Panel footprint = 2.1 / ~0.403 ≈ 5.21 m². 140 / 5.21 ≈ 26.87 → 26.
+        assert_eq!(usable.max_panels, 26);
     }
 
     /// Flat-roof capacity must decrease monotonically with latitude.
@@ -1941,5 +2006,109 @@ mod tests {
                 "candidate panel count should use geometric GCR"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Panel override round-trip consistency
+    // -----------------------------------------------------------------------
+
+    /// Passing explicit overrides equal to the compile-time defaults must
+    /// produce exactly the same result as passing `None` — the two paths
+    /// are mathematically equivalent.
+    #[test]
+    fn explicit_overrides_match_default_behavior() {
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, 26.0, Some(180.0))],
+            total_roof_area_m2: 100.0,
+        };
+        let lat = 40.0;
+
+        // Default path (None for panel params).
+        let result_default =
+            compute_usable_area(&roof, RoofShape::Gable, &[], Some(lat), None, None, None).unwrap();
+
+        // Explicit override equal to compile-time constants.
+        let result_explicit = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(lat),
+            Some(DEFAULT_PANEL_WATTS),
+            Some(DEFAULT_PANEL_AREA_M2),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result_default.max_panels, result_explicit.max_panels);
+        assert!(
+            (result_default.max_capacity_kw - result_explicit.max_capacity_kw).abs() < 1e-10,
+            "max_capacity_kw mismatch: {} vs {}",
+            result_default.max_capacity_kw,
+            result_explicit.max_capacity_kw
+        );
+        assert_eq!(
+            result_default.best_plane_idx,
+            result_explicit.best_plane_idx
+        );
+    }
+
+    /// When a custom panel spec is provided via overrides, the sizing result
+    /// must differ from the default (440 W baseline). A smaller, less powerful
+    /// panel yields fewer watts per m² and thus lower capacity for the same
+    /// usable area.
+    #[test]
+    fn custom_panel_override_produces_different_result() {
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, 26.0, Some(180.0))],
+            total_roof_area_m2: 100.0,
+        };
+        let lat = 40.0;
+
+        let result_440w =
+            compute_usable_area(&roof, RoofShape::Gable, &[], Some(lat), None, None, None).unwrap();
+
+        // Hypothetical low-wattage panel: 300 W, 1.6 m² (older/smaller module).
+        let result_300w = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(lat),
+            Some(300),
+            Some(1.6),
+            None,
+        )
+        .unwrap();
+
+        // Same roof, same usable area → panel count differs by area ratio.
+        // max_capacity_kw should differ because of wattage change.
+        assert!(
+            result_440w.max_capacity_kw > result_300w.max_capacity_kw,
+            "440W panel ({:.2} kW) should yield higher capacity than 300W ({:.2} kW)",
+            result_440w.max_capacity_kw,
+            result_300w.max_capacity_kw
+        );
+
+        // Result from size_pv_system with explicit losses must match explicit
+        // vs None (default losses = 0.14).
+        let sizing_default =
+            size_pv_system(&result_440w, 5.0, 2.0, 14.0, None, None, None).unwrap();
+        let sizing_explicit = size_pv_system(
+            &result_440w,
+            5.0,
+            2.0,
+            14.0,
+            Some(0.14),
+            Some(440),
+            Some(2.0),
+        )
+        .unwrap();
+        assert_eq!(
+            sizing_default.num_panels, sizing_explicit.num_panels,
+            "explicit override matching compile-time default must yield identical result"
+        );
+        assert!(
+            (sizing_default.system_losses_fraction - sizing_explicit.system_losses_fraction).abs()
+                < 1e-10
+        );
     }
 }

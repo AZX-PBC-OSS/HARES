@@ -1296,10 +1296,18 @@ impl PyDwelling {
     ///     diffuse_fraction: Optional annual-average DHI/GHI ratio (Kd) for
     ///         weather-aware scoring. If ``None``, uses the NREL PVWatts
     ///         empirical model. Compute with ``hares.compute_annual_diffuse_fraction()``.
-    #[pyo3(signature = (diffuse_fraction=None))]
+    ///     panel_watts: Optional panel wattage override (W). When ``None``,
+    ///         falls back to the loaded panel spec (DefaultsStore), or the
+    ///         compile-time default (440 W) when no spec is loaded.
+    ///     panel_area_m2: Optional panel area override (m²). When ``None``,
+    ///         falls back to the loaded panel spec (DefaultsStore), or the
+    ///         compile-time default (2.1 m²) when no spec is loaded.
+    #[pyo3(signature = (diffuse_fraction=None, *, panel_watts=None, panel_area_m2=None))]
     pub fn pv_candidates(
         &self,
         diffuse_fraction: Option<f64>,
+        panel_watts: Option<u32>,
+        panel_area_m2: Option<f64>,
     ) -> PyResult<Vec<crate::py_pv_sizing::PyPvCandidate>> {
         let dwelling = lock_dwelling(&self.dwelling)?;
         let roof_shape = hares_physics::pv_sizing::infer_roof_shape(
@@ -1313,6 +1321,9 @@ impl PyDwelling {
             &dwelling.wall_azimuths,
             dwelling.latitude_deg,
             diffuse_fraction,
+            panel_watts,
+            panel_area_m2,
+            dwelling.pv_panel_defaults(),
         ))
     }
 
@@ -1328,13 +1339,26 @@ impl PyDwelling {
     ///     diffuse_fraction: Optional annual-average DHI/GHI ratio (Kd) for
     ///         weather-aware scoring. If ``None``, uses the NREL PVWatts
     ///         empirical model. Compute with ``hares.compute_annual_diffuse_fraction()``.
-    #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0, diffuse_fraction=None))]
+    ///     panel_watts: Optional panel wattage override (W). When ``None``,
+    ///         falls back to the compile-time default (440 W).
+    ///     panel_area_m2: Optional panel area override (m²). When ``None``,
+    ///         falls back to the compile-time default (2.1 m²).
+    ///     system_losses: Optional system losses fraction override (0–1).
+    ///         When ``None``, falls back to the compile-time default (0.14).
+    #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0, diffuse_fraction=None, *,
+        panel_watts=None, panel_area_m2=None, system_losses=None))]
+    // Why: PyO3 signature mirrors the full Rust API surface;
+    // a builder type adds indirection at the binding layer.
+    #[allow(clippy::too_many_arguments)]
     pub fn estimate_pv_capacity(
         &self,
         target_kw: f64,
         min_kw: f64,
         max_kw: f64,
         diffuse_fraction: Option<f64>,
+        panel_watts: Option<u32>,
+        panel_area_m2: Option<f64>,
+        system_losses: Option<f64>,
     ) -> PyResult<crate::py_pv_sizing::PyPvSizingResult> {
         let dwelling = lock_dwelling(&self.dwelling)?;
         let roof_shape = hares_physics::pv_sizing::infer_roof_shape(
@@ -1351,6 +1375,10 @@ impl PyDwelling {
             min_kw,
             max_kw,
             diffuse_fraction,
+            panel_watts,
+            panel_area_m2,
+            system_losses,
+            dwelling.pv_panel_defaults(),
         )
         .map_err(pyo3::exceptions::PyValueError::new_err)
     }

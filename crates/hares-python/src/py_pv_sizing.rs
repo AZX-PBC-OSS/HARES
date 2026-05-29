@@ -1,5 +1,8 @@
 //! Python bindings for PV sizing and roof plane introspection.
 
+use std::collections::HashMap;
+
+use hares_io::PvPanelDefaults;
 use hares_physics::pv_sizing::{self, PvCandidate, PvSizingResult, RoofInfo, RoofPlane, RoofShape};
 use pyo3::prelude::*;
 
@@ -277,20 +280,61 @@ pub(crate) fn roof_planes_from_dwelling(roof_info: &RoofInfo) -> Vec<PyRoofPlane
         .collect()
 }
 
+/// Resolve panel parameters from the defaults store when all three are None.
+///
+/// When the caller provides no explicit panel overrides, consult the
+/// `PvPanelDefaults` store loaded from `defaults/pv/*.toml`. Uses the
+/// lexicographically first key for deterministic behaviour regardless of
+/// HashMap iteration order. If the store is empty, None propagates to the
+/// physics layer where compile-time constants apply.
+fn resolve_panel_defaults(
+    panel_watts: Option<u32>,
+    panel_area_m2: Option<f64>,
+    system_losses: Option<f64>,
+    store: &HashMap<String, PvPanelDefaults>,
+) -> (Option<u32>, Option<f64>, Option<f64>) {
+    if panel_watts.is_none() && panel_area_m2.is_none() && system_losses.is_none() {
+        if let Some(spec) = store.keys().min().and_then(|k| store.get(k)) {
+            return (
+                Some(spec.panel_watts),
+                Some(spec.panel_area_m2),
+                Some(spec.system_losses_fraction),
+            );
+        }
+        // Store is empty — compile-time constants apply downstream.
+        tracing::warn!(
+            "pv_panel_defaults store is empty; falling back to compile-time constants \
+             (440 W / 2.1 m²). Load defaults/pv/ to configure panel specs."
+        );
+    }
+    (panel_watts, panel_area_m2, system_losses)
+}
+
+/// Internal helper – mirrors the full Rust API surface for PV candidate
+/// enumeration including all optional parameters.
+// Why: the parameter count reflects the complete set of tunable PV sizing
+// inputs; constructing a builder/params type would add indirection for no
+// benefit at this binding layer.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pv_candidates_from_dwelling(
     roof_info: &RoofInfo,
     roof_shape: RoofShape,
     wall_azimuths: &[f64],
     latitude: Option<f64>,
     diffuse_fraction: Option<f64>,
+    panel_watts: Option<u32>,
+    panel_area_m2: Option<f64>,
+    pv_panel_defaults: &HashMap<String, PvPanelDefaults>,
 ) -> Vec<PyPvCandidate> {
+    let (panel_watts, panel_area_m2, _) =
+        resolve_panel_defaults(panel_watts, panel_area_m2, None, pv_panel_defaults);
     pv_sizing::enumerate_pv_candidates(
         roof_info,
         roof_shape,
         wall_azimuths,
         latitude,
-        None,
-        None,
+        panel_watts,
+        panel_area_m2,
         diffuse_fraction,
     )
     .into_iter()
@@ -312,18 +356,189 @@ pub(crate) fn size_pv_from_dwelling(
     min_kw: f64,
     max_kw: f64,
     diffuse_fraction: Option<f64>,
+    panel_watts: Option<u32>,
+    panel_area_m2: Option<f64>,
+    system_losses: Option<f64>,
+    pv_panel_defaults: &HashMap<String, PvPanelDefaults>,
 ) -> Result<PyPvSizingResult, String> {
+    let (panel_watts, panel_area_m2, system_losses) =
+        resolve_panel_defaults(panel_watts, panel_area_m2, system_losses, pv_panel_defaults);
     let usable = pv_sizing::compute_usable_area(
         roof_info,
         roof_shape,
         wall_azimuths,
         latitude,
-        None,
-        None,
+        panel_watts,
+        panel_area_m2,
         diffuse_fraction,
     )
     .map_err(|e| e.to_string())?;
-    let result = pv_sizing::size_pv_system(&usable, target_kw, min_kw, max_kw, None, None, None)
-        .map_err(|e| e.to_string())?;
+    let result = pv_sizing::size_pv_system(
+        &usable,
+        target_kw,
+        min_kw,
+        max_kw,
+        system_losses,
+        panel_watts,
+        panel_area_m2,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(PyPvSizingResult { inner: result })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_roof() -> RoofInfo {
+        RoofInfo {
+            planes: vec![RoofPlane {
+                area_m2: 100.0,
+                tilt_deg: 26.0,
+                azimuth_deg: Some(180.0),
+                material: None,
+                boundary_index: None,
+            }],
+            total_roof_area_m2: 100.0,
+        }
+    }
+
+    #[test]
+    fn size_pv_from_dwelling_respects_panel_overrides() {
+        let roof = make_roof();
+
+        // Default path (no overrides, no store) — uses compile-time 440W / 2.1 m².
+        let result_default = size_pv_from_dwelling(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            5.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            &HashMap::new(),
+        )
+        .expect("default sizing");
+
+        // Custom 300W / 1.6 m² panel — must produce different (lower) capacity.
+        let result_custom = size_pv_from_dwelling(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            5.0,
+            2.0,
+            14.0,
+            None,
+            Some(300),
+            Some(1.6),
+            Some(0.14),
+            &HashMap::new(),
+        )
+        .expect("custom sizing");
+
+        assert_ne!(
+            result_default.inner.panel_watts, result_custom.inner.panel_watts,
+            "custom panel_watts override must differ from default"
+        );
+        assert!(
+            result_default.inner.panel_watts > result_custom.inner.panel_watts,
+            "default 440W panel must have higher wattage than 300W override"
+        );
+    }
+
+    #[test]
+    fn pv_candidates_respects_panel_overrides() {
+        let roof = make_roof();
+
+        let candidates_default = pv_candidates_from_dwelling(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            &HashMap::new(),
+        );
+        let candidates_custom = pv_candidates_from_dwelling(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            Some(470),
+            Some(2.0),
+            &HashMap::new(),
+        );
+
+        assert_eq!(candidates_default.len(), candidates_custom.len());
+        // max_capacity_kw should differ because panel wattage differs.
+        let def_cap = candidates_default[0].inner.max_capacity_kw;
+        let cust_cap = candidates_custom[0].inner.max_capacity_kw;
+        assert_ne!(
+            def_cap, cust_cap,
+            "custom panel (470W / 2.0 m²) must produce different capacity than default (440W / 2.0 m²)"
+        );
+        assert!(
+            cust_cap > def_cap,
+            "custom 470W panel should yield higher capacity than 440W default"
+        );
+    }
+
+    #[test]
+    fn store_consults_defaults_when_all_params_none() {
+        let roof = make_roof();
+        let mut store = HashMap::new();
+        store.insert(
+            "300w_panel".to_string(),
+            PvPanelDefaults {
+                name: "300W Test Panel".to_string(),
+                panel_watts: 300,
+                panel_area_m2: 1.6,
+                noct_c: 45.0,
+                module_type: "standard".to_string(),
+                system_losses_fraction: 0.14,
+            },
+        );
+
+        let candidates = pv_candidates_from_dwelling(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            &store,
+        );
+
+        // When all panel params are None, the store should be consulted.
+        // A 300W/1.6m² panel produces a different max_capacity_kw than the
+        // compile-time 440W/2.1m² default.
+        assert_eq!(candidates.len(), 1);
+        let def_candidates = pv_candidates_from_dwelling(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            // Empty store → compile-time defaults (440W / 2.1 m²)
+            &HashMap::new(),
+        );
+        assert_ne!(
+            candidates[0].inner.max_capacity_kw, def_candidates[0].inner.max_capacity_kw,
+            "store-supplied 300W panel must differ from compile-time 440W default"
+        );
+        assert!(
+            def_candidates[0].inner.max_capacity_kw > candidates[0].inner.max_capacity_kw,
+            "440W default should yield higher capacity than 300W store panel"
+        );
+    }
 }

@@ -30,9 +30,9 @@ use hares_equipment::{
     SetpointReconciliation, UNegTable,
 };
 use hares_io::{
-    Building, DefaultsStore, ScheduleTimeSeries, SimulationConfig, StreamingRecorder,
-    WeatherTimeSeries, build_schema, parse_hpxml, parse_schedule_csv, parse_weather,
-    resolve_equipment,
+    Building, DefaultsStore, PvPanelDefaults, ScheduleTimeSeries, SimulationConfig,
+    StreamingRecorder, WeatherTimeSeries, build_schema, parse_hpxml, parse_schedule_csv,
+    parse_weather, resolve_equipment,
 };
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
@@ -791,6 +791,10 @@ pub struct Dwelling {
     pub latitude_deg: Option<f64>,
     /// Facility type from HPXML, for roof shape inference.
     pub facility_type: Option<String>,
+    /// PV panel defaults loaded from `defaults/pv/*.toml`, keyed by file stem.
+    /// Populated during `from_preparsed` so PV sizing call sites can resolve
+    /// panel specifications when the caller provides no explicit overrides.
+    pub pv_panel_defaults: HashMap<String, PvPanelDefaults>,
 
     control_dispatcher: ControlDispatcher,
     price_signal: PriceSignal,
@@ -1066,6 +1070,12 @@ impl Dwelling {
         Self::from_preparsed(dwelling_config, hpxml_building, weather, schedule)
     }
 
+    /// PV panel defaults loaded from `defaults/pv/*.toml`, keyed by file stem.
+    /// Returns an empty map when no panel specs were loaded.
+    pub fn pv_panel_defaults(&self) -> &HashMap<String, PvPanelDefaults> {
+        &self.pv_panel_defaults
+    }
+
     fn from_preparsed(
         config: DwellingConfig,
         mut building: Building,
@@ -1129,7 +1139,7 @@ impl Dwelling {
         } else {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
         };
-        let defaults = match DefaultsStore::load(&resolved_defaults_dir) {
+        let mut defaults = match DefaultsStore::load(&resolved_defaults_dir) {
             Ok(store) => store,
             Err(err) => {
                 warnings.push(format!(
@@ -1439,6 +1449,7 @@ impl Dwelling {
             wall_azimuths,
             latitude_deg,
             facility_type,
+            pv_panel_defaults: defaults.take_pv_panel_map(),
             control_dispatcher: ControlDispatcher::default(),
             price_signal: PriceSignal::default(),
             tariff_evaluator: None,
