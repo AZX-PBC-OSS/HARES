@@ -3936,6 +3936,7 @@ fn build_actors_from_seeds(
                     ScheduleSource::Constant(30.0),
                     ScheduleSource::Constant(480.0),
                     ScheduleSource::Constant(600.0),
+                    None,
                     0.8,
                     fuel_economy_kwh_per_mi,
                     capacity_kwh,

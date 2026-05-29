@@ -172,6 +172,7 @@ impl ActorRegistry {
                 let duration_schedule = preset
                     .map(|p| p.build_duration_schedule(seed_bytes))
                     .unwrap_or(ScheduleSource::Constant(600.0));
+                let arrival_schedule = preset.and_then(|p| p.build_arrival_schedule(seed_bytes));
                 let fuel_economy = config.get_f64("fuel_economy_kwh_per_mi").unwrap_or(0.3);
                 let capacity_kwh = config.get_f64("capacity_kwh").unwrap_or(60.0);
                 let avg_speed = config.get_f64("average_speed_mph").unwrap_or(30.0);
@@ -185,6 +186,7 @@ impl ActorRegistry {
                     miles_schedule,
                     departure_schedule,
                     duration_schedule,
+                    arrival_schedule,
                     event_day_ratio,
                     fuel_economy,
                     capacity_kwh,

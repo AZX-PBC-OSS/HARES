@@ -460,8 +460,6 @@ pub struct ArchetypePreset {
     pub strategy: ChargingStrategy,
     pub plug_in_policy: PlugInPolicy,
     pub event_day_ratio: f64,
-    pub arrival_fuzz_minutes: f64,
-    pub departure_fuzz_minutes: f64,
     /// Log-space mu parameter for daily miles log-normal distribution.
     /// Mean = exp(mu + sigma²/2).
     pub daily_drive_miles_mu: f64,
@@ -481,8 +479,13 @@ pub struct ArchetypePreset {
     pub departure_minute_mean: f64,
     pub departure_minute_stddev: f64,
     /// Trip duration (minutes): mean and stddev for Gaussian sampling.
+    /// Used as the fallback when arrival is not directly sampled.
     pub duration_minutes_mean: f64,
     pub duration_minutes_stddev: f64,
+    /// Arrival time (minute of day): mean and stddev for Gaussian sampling.
+    /// `None` means fall back to the current departure+duration derivation.
+    pub arrival_minute_mean: Option<f64>,
+    pub arrival_minute_stddev: Option<f64>,
 }
 
 impl ArchetypePreset {
@@ -605,6 +608,27 @@ impl ArchetypePreset {
             clamp_max: Some(1200.0),
         }
     }
+
+    /// Build a `ScheduleSource` for arrival time (minute of day) with Gaussian noise.
+    /// Returns `None` when `arrival_minute_mean` is `None` — callers should fall back
+    /// to the current departure+duration derivation.
+    pub fn build_arrival_schedule(&self, seed: [u8; 32]) -> Option<ScheduleSource> {
+        let mean = self.arrival_minute_mean?;
+        let stddev = self.arrival_minute_stddev?;
+        let mut arr_seed = seed;
+        arr_seed[2] ^= 0xAA;
+        Some(ScheduleSource::Stochastic {
+            kind: DistributionKind::Gaussian {
+                mean,
+                std_dev: stddev,
+            },
+            seed: arr_seed,
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed(arr_seed),
+            clamp_min: Some(0.0),
+            clamp_max: Some(1439.0),
+        })
+    }
 }
 
 pub fn archetype_by_id(id: &str) -> Option<&'static ArchetypePreset> {
@@ -624,8 +648,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.50,
-        arrival_fuzz_minutes: 30.0,
-        departure_fuzz_minutes: 30.0,
         // FHWA, "Summary of Travel Trends: 2017 NHTS," (FHWA-PL-18-019),
         // 2018, Ch.2 Table 3b; TRPMILES microdata CV ≈ 0.7–0.8.
         // sigma=0.65 yields CV≈0.725 within this range.
@@ -641,6 +663,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
         duration_minutes_stddev: 60.0,
+        // NHTS 2017: arrival peak 17:00-17:30, tighter stddev than the
+        // old 67-min effective stddev from departure+duration independent draws.
+        arrival_minute_mean: Some(1020.0),
+        arrival_minute_stddev: Some(30.0),
     },
     ArchetypePreset {
         id: EvArchetypeId::DailyCommuterL1,
@@ -649,8 +675,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.90,
-        arrival_fuzz_minutes: 30.0,
-        departure_fuzz_minutes: 30.0,
         daily_drive_miles_mu: 3.01,
         daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
@@ -662,6 +686,9 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
         duration_minutes_stddev: 60.0,
+        // NHTS 2017: arrival peak 17:00-17:30.
+        arrival_minute_mean: Some(1020.0),
+        arrival_minute_stddev: Some(30.0),
     },
     ArchetypePreset {
         id: EvArchetypeId::LongCommuterL2,
@@ -670,8 +697,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.70,
-        arrival_fuzz_minutes: 30.0,
-        departure_fuzz_minutes: 30.0,
         // Floor of 10 mi retained as a genuine minimum-commute constraint.
         daily_drive_miles_mu: 4.11,
         daily_drive_miles_sigma: 0.65,
@@ -684,6 +709,9 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 660.0,
         duration_minutes_stddev: 60.0,
+        // NHTS 2017: long commuters arrive slightly later ~17:30, wider spread.
+        arrival_minute_mean: Some(1050.0),
+        arrival_minute_stddev: Some(45.0),
     },
     ArchetypePreset {
         id: EvArchetypeId::WfhOccasional,
@@ -695,8 +723,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         },
         plug_in_policy: PlugInPolicy::LowSoc { threshold: 0.3 },
         event_day_ratio: 0.20,
-        arrival_fuzz_minutes: 45.0,
-        departure_fuzz_minutes: 45.0,
         // Simple daily params unused (overridden by weekday/weekend below)
         // when all four weekday/weekend fields are Some.
         // mu=0, sigma=0.65 → trivial fallback; NoisyTimeWindows path wins.
@@ -711,6 +737,8 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 60.0,
         duration_minutes_mean: 180.0,
         duration_minutes_stddev: 45.0,
+        arrival_minute_mean: None,
+        arrival_minute_stddev: None,
     },
     ArchetypePreset {
         id: EvArchetypeId::WfhL1Minimal,
@@ -719,8 +747,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.90,
-        arrival_fuzz_minutes: 30.0,
-        departure_fuzz_minutes: 30.0,
         // mu=1.87 → mean=exp(1.87+0.65²/2)≈8 mi, realistic for minimal drivers.
         daily_drive_miles_mu: 1.87,
         daily_drive_miles_sigma: 0.65,
@@ -733,6 +759,8 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 60.0,
         duration_minutes_mean: 120.0,
         duration_minutes_stddev: 30.0,
+        arrival_minute_mean: None,
+        arrival_minute_stddev: None,
     },
     ArchetypePreset {
         id: EvArchetypeId::HeavyUseSuv,
@@ -745,8 +773,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.60,
-        arrival_fuzz_minutes: 30.0,
-        departure_fuzz_minutes: 30.0,
         // Floor of 5 mi: heavy-use driver, always at least a short trip.
         daily_drive_miles_mu: 3.80,
         daily_drive_miles_sigma: 0.65,
@@ -759,6 +785,9 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
         duration_minutes_stddev: 60.0,
+        // NHTS 2017: heavy-use commuter arrival ~17:00, wider spread.
+        arrival_minute_mean: Some(1020.0),
+        arrival_minute_stddev: Some(45.0),
     },
     ArchetypePreset {
         id: EvArchetypeId::ShiftWorker,
@@ -770,8 +799,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.50,
-        arrival_fuzz_minutes: 45.0,
-        departure_fuzz_minutes: 45.0,
         daily_drive_miles_mu: 3.19,
         daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
@@ -783,6 +810,8 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 45.0,
         duration_minutes_mean: 540.0,
         duration_minutes_stddev: 60.0,
+        arrival_minute_mean: None,
+        arrival_minute_stddev: None,
     },
     ArchetypePreset {
         id: EvArchetypeId::WeekendWarrior,
@@ -794,8 +823,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         },
         plug_in_policy: PlugInPolicy::LowSoc { threshold: 0.3 },
         event_day_ratio: 0.30,
-        arrival_fuzz_minutes: 30.0,
-        departure_fuzz_minutes: 30.0,
         // Simple daily params unused (overridden by weekday/weekend).
         daily_drive_miles_mu: 0.0,
         daily_drive_miles_sigma: 0.65,
@@ -808,6 +835,8 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 60.0,
         duration_minutes_mean: 480.0,
         duration_minutes_stddev: 90.0,
+        arrival_minute_mean: None,
+        arrival_minute_stddev: None,
     },
     ArchetypePreset {
         id: EvArchetypeId::WorkplaceCharger,
@@ -816,8 +845,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.85,
-        arrival_fuzz_minutes: 30.0,
-        departure_fuzz_minutes: 30.0,
         daily_drive_miles_mu: 3.19,
         daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
@@ -829,6 +856,8 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
         duration_minutes_stddev: 60.0,
+        arrival_minute_mean: None,
+        arrival_minute_stddev: None,
     },
     ArchetypePreset {
         id: EvArchetypeId::RetireeL1,
@@ -837,8 +866,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.90,
-        arrival_fuzz_minutes: 45.0,
-        departure_fuzz_minutes: 45.0,
         // mu=2.09 → mean=exp(2.09+0.65²/2)≈10 mi, realistic for retirees.
         daily_drive_miles_mu: 2.09,
         daily_drive_miles_sigma: 0.65,
@@ -851,6 +878,8 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 90.0,
         duration_minutes_mean: 180.0,
         duration_minutes_stddev: 60.0,
+        arrival_minute_mean: None,
+        arrival_minute_stddev: None,
     },
     ArchetypePreset {
         id: EvArchetypeId::PhevCommuter,
@@ -863,8 +892,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.50,
-        arrival_fuzz_minutes: 30.0,
-        departure_fuzz_minutes: 30.0,
         daily_drive_miles_mu: 3.34,
         daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
@@ -876,6 +903,9 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
         duration_minutes_stddev: 60.0,
+        // NHTS 2017: PHEV commuter arrival ~17:00.
+        arrival_minute_mean: Some(1020.0),
+        arrival_minute_stddev: Some(30.0),
     },
     ArchetypePreset {
         id: EvArchetypeId::TouOptimizerCa,
@@ -888,8 +918,6 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         },
         plug_in_policy: PlugInPolicy::Always,
         event_day_ratio: 0.50,
-        arrival_fuzz_minutes: 30.0,
-        departure_fuzz_minutes: 30.0,
         daily_drive_miles_mu: 3.43,
         daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
@@ -901,6 +929,9 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
         duration_minutes_stddev: 60.0,
+        // NHTS 2017: TOU-optimizer commuter arrival ~17:00.
+        arrival_minute_mean: Some(1020.0),
+        arrival_minute_stddev: Some(30.0),
     },
 ];
 
@@ -1238,16 +1269,6 @@ mod tests {
                 "{}: event_day_ratio must be in (0,1]",
                 preset.label
             );
-            assert!(
-                preset.arrival_fuzz_minutes >= 0.0,
-                "{}: arrival_fuzz must be non-negative",
-                preset.label
-            );
-            assert!(
-                preset.departure_fuzz_minutes >= 0.0,
-                "{}: departure_fuzz must be non-negative",
-                preset.label
-            );
         }
     }
 
@@ -1489,5 +1510,131 @@ mod tests {
                 preset.label
             );
         }
+    }
+
+    // ── Arrival-time sampling tests ──────────────────────────────────
+
+    #[test]
+    fn build_arrival_schedule_returns_some_for_commuter_presets() {
+        let commuter_ids = &[
+            EvArchetypeId::DailyCommuterL2,
+            EvArchetypeId::DailyCommuterL1,
+            EvArchetypeId::LongCommuterL2,
+            EvArchetypeId::HeavyUseSuv,
+            EvArchetypeId::PhevCommuter,
+            EvArchetypeId::TouOptimizerCa,
+        ];
+        for &id in commuter_ids {
+            let preset = id.preset();
+            assert!(
+                preset.arrival_minute_mean.is_some(),
+                "{}: commuter preset should have arrival_minute_mean set",
+                preset.label
+            );
+            assert!(
+                preset.arrival_minute_stddev.is_some(),
+                "{}: commuter preset should have arrival_minute_stddev set",
+                preset.label
+            );
+            let schedule = preset.build_arrival_schedule([42u8; 32]);
+            assert!(
+                schedule.is_some(),
+                "{}: build_arrival_schedule should return Some for commuter preset",
+                preset.label
+            );
+        }
+    }
+
+    #[test]
+    fn build_arrival_schedule_returns_none_for_non_commuter_presets() {
+        let non_commuter_ids = &[
+            EvArchetypeId::WfhOccasional,
+            EvArchetypeId::WfhL1Minimal,
+            EvArchetypeId::ShiftWorker,
+            EvArchetypeId::WeekendWarrior,
+            EvArchetypeId::WorkplaceCharger,
+            EvArchetypeId::RetireeL1,
+        ];
+        for &id in non_commuter_ids {
+            let preset = id.preset();
+            assert!(
+                preset.arrival_minute_mean.is_none(),
+                "{}: non-commuter preset should have arrival_minute_mean=None, got Some",
+                preset.label
+            );
+            assert!(
+                preset.arrival_minute_stddev.is_none(),
+                "{}: non-commuter preset should have arrival_minute_stddev=None, got Some",
+                preset.label
+            );
+            assert!(
+                preset.build_arrival_schedule([42u8; 32]).is_none(),
+                "{}: build_arrival_schedule should return None for non-commuter preset",
+                preset.label
+            );
+        }
+    }
+
+    /// For DailyCommuterL2 with arrival mean 1020 (17:00) and stddev 30,
+    /// sample 100,000 arrival times and verify mean ≈ 1020 and
+    /// P(arrival < departure) ≈ 0 (given departure at 480±30, the gap is
+    /// large enough that no arrival sample should precede departure).
+    /// NHTS 2017 daily VMT data confirms morning departures cluster at
+    /// 7:00–8:00 with evening arrivals at 17:00–17:30; the ~540-minute
+    /// gap makes arrival-before-departure astronomically unlikely.
+    #[test]
+    fn daily_commuter_l2_arrival_samples_match_nhts_params() {
+        let preset = EvArchetypeId::DailyCommuterL2.preset();
+        let mut schedule = preset.build_arrival_schedule([42u8; 32]).unwrap();
+        let env = sample_env();
+
+        let n = 100_000;
+        let mut samples: Vec<f64> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let sample = schedule.value_at(&env).unwrap().clamp(0.0, 1439.0);
+            samples.push(sample);
+        }
+
+        let mean: f64 = samples.iter().sum::<f64>() / n as f64;
+        // arrival_minute_mean = 1020; allow 2% sampling noise at 100k draws.
+        assert!(
+            (mean - 1020.0).abs() / 1020.0 < 0.05,
+            "arrival empirical mean {mean:.1} deviates from 1020.0 beyond 5%"
+        );
+
+        // stddev ≈ 30; allow generous sampling noise.
+        let variance: f64 =
+            samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+        let stddev = variance.sqrt();
+        assert!(
+            stddev > 20.0 && stddev < 50.0,
+            "arrival empirical stddev {stddev:.1} outside [20, 50] band"
+        );
+
+        // Verify NO samples are before the earliest plausible departure.
+        // Departure mean is 480 (08:00) with stddev 30; 6σ departure upper
+        // bound is ~660 (11:00). Arrival before departure would require a
+        // draw below 660, which for N(1020,30) is many σ away.
+        let departure_upper_bound = 660.0;
+        let early_arrivals = samples
+            .iter()
+            .filter(|&&x| x < departure_upper_bound)
+            .count();
+        assert!(
+            early_arrivals == 0,
+            "found {early_arrivals} arrival samples before 660-min departure upper bound"
+        );
+    }
+
+    #[test]
+    fn arrival_schedule_deterministic_given_same_seed() {
+        let preset = EvArchetypeId::DailyCommuterL2.preset();
+        let seed = [42u8; 32];
+        let s1 = preset.build_arrival_schedule(seed);
+        let s2 = preset.build_arrival_schedule(seed);
+        assert_eq!(
+            s1, s2,
+            "build_arrival_schedule must be deterministic given same seed"
+        );
     }
 }

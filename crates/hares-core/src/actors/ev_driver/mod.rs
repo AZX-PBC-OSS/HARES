@@ -214,6 +214,8 @@ pub struct EvDriverActor {
     daily_drive_miles: ScheduleSource,
     departure_time: ScheduleSource,
     trip_duration: ScheduleSource,
+    /// Direct arrival-time sampling. `None` means fall back to `departure + trip_duration`.
+    arrival_time: Option<ScheduleSource>,
     event_day_ratio: f64,
     fuel_economy_kwh_per_mi: f64,
     capacity_kwh: f64,
@@ -252,6 +254,8 @@ impl EvDriverActor {
     ///
     /// `seed` is required for deterministic behavior. All stochastic draws
     /// derive from this single seed.
+    // Why: all parameters are independent behavioral inputs with no sensible defaults —
+    // the actor's stochastic behavior depends on each being explicitly set by the caller.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: &str,
@@ -261,6 +265,7 @@ impl EvDriverActor {
         daily_drive_miles: ScheduleSource,
         departure_time: ScheduleSource,
         trip_duration: ScheduleSource,
+        arrival_time: Option<ScheduleSource>,
         event_day_ratio: f64,
         fuel_economy_kwh_per_mi: f64,
         capacity_kwh: f64,
@@ -304,6 +309,7 @@ impl EvDriverActor {
             daily_drive_miles,
             departure_time,
             trip_duration,
+            arrival_time,
             event_day_ratio,
             fuel_economy_kwh_per_mi,
             capacity_kwh,
@@ -408,20 +414,48 @@ impl EvDriverActor {
             return;
         }
 
-        // Sample departure time and duration from ScheduleSource (seeded, reproducible)
+        // Sample departure time from ScheduleSource (seeded, reproducible)
         let departure_min = self
             .departure_time
             .value_at(env)
             .unwrap_or(480.0)
             .clamp(0.0, 1439.0) as u16;
 
-        let duration_min = self
-            .trip_duration
-            .value_at(env)
-            .unwrap_or(600.0)
-            .clamp(30.0, 1200.0) as u16;
-
-        let arrival = (departure_min as u32 + duration_min as u32).min(1439) as u16;
+        let arrival = if let Some(ref mut arrival_src) = self.arrival_time {
+            // Direct arrival sampling: arrival is drawn independently.
+            // Re-sample up to 5 times if arrival <= departure to preserve
+            // the constraint arrival > departure without altering the
+            // unconditional arrival distribution shape.
+            let mut arrival_raw = arrival_src
+                .value_at(env)
+                .unwrap_or(1080.0)
+                .clamp(0.0, 1439.0) as u16;
+            for _ in 0..5 {
+                if arrival_raw > departure_min {
+                    break;
+                }
+                arrival_raw = arrival_src
+                    .value_at(env)
+                    .unwrap_or(1080.0)
+                    .clamp(0.0, 1439.0) as u16;
+            }
+            // Guard: if re-sampling fails (extremely unlikely given the
+            // ~540-minute gap between commuter departure and arrival means),
+            // clamp to departure+1 to keep the invariant.
+            if arrival_raw <= departure_min {
+                (departure_min as u32 + 1).min(1439) as u16
+            } else {
+                arrival_raw
+            }
+        } else {
+            // Fallback: derive arrival from departure + trip duration.
+            let dur = self
+                .trip_duration
+                .value_at(env)
+                .unwrap_or(600.0)
+                .clamp(30.0, 1200.0) as u16;
+            (departure_min as u32 + dur as u32).min(1439) as u16
+        };
 
         // Sample daily miles from the ScheduleSource
         let miles = self
@@ -433,9 +467,6 @@ impl EvDriverActor {
         #[cfg(feature = "observe")]
         {
             // Log raw sampled miles per vehicle-day for distributional validation.
-            // This column can be used to verify that the log-normal distribution
-            // eliminates the zero-spike artefact present with the old Gaussian
-            // parameterisation (where ~0.17% of draws were clamped to 0).
             tracing::debug!(
                 actor = %self.name,
                 raw_miles = miles,
@@ -450,6 +481,23 @@ impl EvDriverActor {
                     "EV daily miles below 1-mi diagnostic threshold"
                 );
             }
+            // Emit departure, arrival, and derived duration as diagnostic
+            // columns per vehicle-day for distributional validation.
+            let dur = (arrival as u32).saturating_sub(departure_min as u32) as u16;
+            let kind = if self.arrival_time.is_some() {
+                "direct"
+            } else {
+                "derived"
+            };
+            tracing::debug!(
+                actor = %self.name,
+                departure_minute = departure_min,
+                arrival_minute = arrival,
+                duration_minutes = dur,
+                arrival_distribution_kind = kind,
+                day_ordinal = self.current_day_ordinal,
+                "EV driver daily schedule sample"
+            );
         }
         let temp_multiplier = temp_efficiency_multiplier(env.weather.outdoor_temp_c);
         let drive_kwh = miles * self.fuel_economy_kwh_per_mi * temp_multiplier;
@@ -746,6 +794,7 @@ mod tests {
             ScheduleSource::Constant(30.0),  // 30 miles/day
             ScheduleSource::Constant(480.0), // depart 08:00
             ScheduleSource::Constant(600.0), // 10h away → arrive 18:00
+            None,                            // no direct arrival sampling
             1.0,                             // event every day
             0.3,                             // 0.3 kWh/mi
             60.0,                            // 60 kWh battery
@@ -1776,6 +1825,7 @@ mod tests {
             ScheduleSource::Constant(30.0),
             ScheduleSource::Constant(480.0),
             ScheduleSource::Constant(600.0),
+            None,
             1.0,
             0.3,
             60.0,
@@ -2870,6 +2920,273 @@ mod tests {
             has_charging_signal,
             "minute 1081 (post-arrival HomePluggedIn) must emit SOCTarget(0.9), \
              got: {post_arrival_signals:?}"
+        );
+    }
+
+    // ── Arrival-time sampling tests ───────────────────────────────────
+
+    #[test]
+    fn direct_arrival_sampling_emits_signals_at_sampled_arrival_time() {
+        // Actor with arrival_time set to Constant(900) (15:00). Verify that
+        // arrival signals fire at 15:00, not at departure+duration=18:00.
+        let mut actor = EvDriverActor::new(
+            "TestDriver",
+            "EV1",
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            ScheduleSource::Constant(30.0),
+            ScheduleSource::Constant(480.0),
+            ScheduleSource::Constant(600.0),
+            Some(ScheduleSource::Constant(900.0)),
+            1.0,
+            0.3,
+            60.0,
+            7.2,
+            30.0,
+            20.0,
+            0.0,
+            0.0,
+            42,
+        );
+
+        let mut out = Vec::new();
+
+        // Depart at 08:00.
+        actor.decide(&env_at_minute(480), &mut out);
+        assert!(
+            out.iter().any(|d| matches!(
+                d.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::Disconnected
+                }
+            )),
+            "departure at 08:00 should emit Disconnected"
+        );
+        out.clear();
+
+        // Drive through to 14:58.
+        for step in 481..=898 {
+            actor.decide(&env_at_minute(step), &mut out);
+            out.clear();
+        }
+
+        // At 14:59: should not have arrived yet.
+        actor.decide(&env_at_minute(899), &mut out);
+        let early = out.iter().any(|d| {
+            matches!(
+                d.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
+        });
+        assert!(
+            !early,
+            "should NOT emit HomePluggedIn before sampled arrival at 15:00"
+        );
+        out.clear();
+
+        // At 15:00: arrival fires.
+        actor.decide(&env_at_minute(900), &mut out);
+        let has_arrival = out.iter().any(|d| {
+            matches!(
+                d.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
+        });
+        assert!(
+            has_arrival,
+            "direct arrival at 15:00 should emit HomePluggedIn, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn no_arrival_params_falls_back_to_departure_plus_duration() {
+        // Actor with arrival_time=None: arrival = departure + trip_duration.
+        // departure=480, duration=420 → arrival=900 (15:00).
+        let mut actor = EvDriverActor::new(
+            "TestDriver",
+            "EV1",
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            ScheduleSource::Constant(30.0),
+            ScheduleSource::Constant(480.0),
+            ScheduleSource::Constant(420.0),
+            None,
+            1.0,
+            0.3,
+            60.0,
+            7.2,
+            30.0,
+            20.0,
+            0.0,
+            0.0,
+            42,
+        );
+
+        let mut out = Vec::new();
+
+        actor.decide(&env_at_minute(480), &mut out);
+        assert!(out.iter().any(|d| matches!(
+            d.signal,
+            ControlSignal::EvPlugIn {
+                state: EvConnectionState::Disconnected
+            }
+        )));
+        out.clear();
+
+        for step in 481..=898 {
+            actor.decide(&env_at_minute(step), &mut out);
+            out.clear();
+        }
+
+        // At 14:59: not yet arrived.
+        actor.decide(&env_at_minute(899), &mut out);
+        let early = out.iter().any(|d| {
+            matches!(
+                d.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
+        });
+        assert!(
+            !early,
+            "should NOT emit HomePluggedIn before 15:00 (departure+duration)"
+        );
+        out.clear();
+
+        // At 15:00: arrival via fallback path.
+        actor.decide(&env_at_minute(900), &mut out);
+        let has_arrival = out.iter().any(|d| {
+            matches!(
+                d.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
+        });
+        assert!(
+            has_arrival,
+            "fallback arrival at 15:00 should emit HomePluggedIn, got: {out:?}"
+        );
+    }
+
+    /// Verify that direct sampling produces a different arrival time than
+    /// the derived path would for the same departure. Two actors with
+    /// same departure but different arrival config diverge.
+    #[test]
+    fn direct_sampling_arrival_differs_from_derived() {
+        // Actor A: arrival_time=Constant(1020) — arrives 17:00.
+        // Actor B: arrival_time=None, duration=Constant(420) — arrives 15:00.
+        let mut actor_direct = EvDriverActor::new(
+            "DriverDirect",
+            "EV1",
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            ScheduleSource::Constant(30.0),
+            ScheduleSource::Constant(480.0),
+            ScheduleSource::Constant(420.0),
+            Some(ScheduleSource::Constant(1020.0)),
+            1.0,
+            0.3,
+            60.0,
+            7.2,
+            30.0,
+            20.0,
+            0.0,
+            0.0,
+            42,
+        );
+
+        let mut actor_derived = EvDriverActor::new(
+            "DriverDerived",
+            "EV1",
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            ScheduleSource::Constant(30.0),
+            ScheduleSource::Constant(480.0),
+            ScheduleSource::Constant(420.0),
+            None,
+            1.0,
+            0.3,
+            60.0,
+            7.2,
+            30.0,
+            20.0,
+            0.0,
+            0.0,
+            43,
+        );
+
+        let mut out = Vec::new();
+
+        // Depart both.
+        actor_direct.decide(&env_at_minute(480), &mut out);
+        out.clear();
+        actor_derived.decide(&env_at_minute(480), &mut out);
+        out.clear();
+
+        // Drive both through to 14:59.
+        for step in 481..=899 {
+            actor_direct.decide(&env_at_minute(step), &mut out);
+            out.clear();
+            actor_derived.decide(&env_at_minute(step), &mut out);
+            out.clear();
+        }
+
+        // At 15:00: derived actor arrives, direct actor does NOT.
+        actor_direct.decide(&env_at_minute(900), &mut out);
+        let direct_1500 = out.iter().any(|d| {
+            matches!(
+                d.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
+        });
+        out.clear();
+
+        actor_derived.decide(&env_at_minute(900), &mut out);
+        let derived_1500 = out.iter().any(|d| {
+            matches!(
+                d.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
+        });
+        out.clear();
+
+        assert!(
+            !direct_1500,
+            "direct actor should NOT arrive at 15:00 (arrival set to 17:00)"
+        );
+        assert!(
+            derived_1500,
+            "derived actor should arrive at 15:00 (departure 08:00 + 7h)"
+        );
+
+        // Drive direct actor to 17:00 and verify arrival.
+        for step in 901..=1019 {
+            actor_direct.decide(&env_at_minute(step), &mut out);
+            out.clear();
+        }
+
+        actor_direct.decide(&env_at_minute(1020), &mut out);
+        let direct_1700 = out.iter().any(|d| {
+            matches!(
+                d.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
+        });
+        assert!(
+            direct_1700,
+            "direct actor should arrive at 17:00, got: {out:?}"
         );
     }
 }

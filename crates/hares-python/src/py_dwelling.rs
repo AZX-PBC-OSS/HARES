@@ -983,6 +983,7 @@ impl PyDwelling {
             preset.build_miles_schedule(seed_bytes),
             preset.build_departure_schedule(seed_bytes),
             preset.build_duration_schedule(seed_bytes),
+            preset.build_arrival_schedule(seed_bytes),
             preset.event_day_ratio,
             fuel_economy,
             spec.capacity_kwh,
