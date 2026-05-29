@@ -328,7 +328,7 @@ static CATALOG: &[VehicleSpec] = &[
         id: VehicleId::ToyotaRav4Prime,
         label: "Toyota RAV4 Prime",
         capacity_kwh: 14.4,
-        max_l2_power_kw: 3.3,
+        max_l2_power_kw: 6.6,
         dcfc_power_kw: None,
         chemistry: BatteryChemistry::Nmc,
         range_miles: 42.0,
@@ -1109,6 +1109,17 @@ mod tests {
         // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 4.
         let spec = VehicleId::NissanLeaf30.spec();
         assert_eq!(spec.max_l2_power_kw, 3.3, "Nissan Leaf S 30kWh L2 AC power");
+    }
+
+    #[test]
+    fn rav4_prime_obc_power_is_6_6_kw() {
+        // Toyota RAV4 Prime standard OBC is 6.6 kW for 2022+ model years
+        // (all trims) and 2021 XSE. Only the 2021 SE base model had 3.3 kW.
+        // 6.6 kW is the most representative default.
+        // Source: Toyota specifications, Wikipedia. Confirmed in
+        // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 6.
+        let spec = VehicleId::ToyotaRav4Prime.spec();
+        assert_eq!(spec.max_l2_power_kw, 6.6, "Toyota RAV4 Prime L2 AC power");
     }
 
     // ── Archetype tests ──────────────────────────────────────────────
