@@ -281,6 +281,14 @@ impl EvDriverActor {
         let composer = ChargingComposer::new(prefs, target);
         let expected_daily_miles = daily_drive_miles.mean();
 
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            actor = name,
+            distribution = ?daily_drive_miles,
+            analytical_mean_mi = expected_daily_miles,
+            "EV driver daily-miles distribution"
+        );
+
         let mut telemetry = Telemetry::with_capacity(4);
         telemetry.insert("soc", 1.0);
         telemetry.insert("phase", 0.0);
@@ -422,6 +430,27 @@ impl EvDriverActor {
             .unwrap_or(30.0)
             .max(0.0);
 
+        #[cfg(feature = "observe")]
+        {
+            // Log raw sampled miles per vehicle-day for distributional validation.
+            // This column can be used to verify that the log-normal distribution
+            // eliminates the zero-spike artefact present with the old Gaussian
+            // parameterisation (where ~0.17% of draws were clamped to 0).
+            tracing::debug!(
+                actor = %self.name,
+                raw_miles = miles,
+                day_ordinal = self.current_day_ordinal,
+                "EV daily miles sample"
+            );
+            if miles < 1.0 {
+                tracing::debug!(
+                    actor = %self.name,
+                    miles = miles,
+                    day_ordinal = self.current_day_ordinal,
+                    "EV daily miles below 1-mi diagnostic threshold"
+                );
+            }
+        }
         let temp_multiplier = temp_efficiency_multiplier(env.weather.outdoor_temp_c);
         let drive_kwh = miles * self.fuel_economy_kwh_per_mi * temp_multiplier;
 

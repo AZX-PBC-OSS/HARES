@@ -28,19 +28,28 @@ The EV charger models Level 1 and Level 2 residential charging with stochastic d
 - Charging efficiency: 0.9 default (AC-to-DC)
 - SOC limits: `initial_soc` (default 1.0), `soc_max` (default 1.0)
 
-### Driver Archetypes (7 variants)
+### Driver Archetypes (12 variants)
 
-Stochastic daily driving with log-normal mileage distribution:
+Stochastic daily driving with log-normal mileage distribution calibrated to
+NHTS 2017 VMT data (μ ≈ 3.35, σ ≈ 0.65 for typical ~35 mi/day, CV ≈ 0.73).
+Log-normal has natural [0,∞) support, correctly capturing the right-skew
+observed in daily VMT without the negative-draw clamping artefact of a
+Gaussian parameterisation.
 
-| Archetype | Arrival | Duration | SOC | Notes |
-|-----------|---------|----------|-----|-------|
-| Commuter | 18:00 | 12h | 40% | Standard weekday |
-| ShiftWorker | 7am/21pm | 9h | 50% | 14-day rotation |
-| WorkFromHome | 15:00 | 6h | 70% | Reduced driving |
-| WeekendWarrior | 19:00/21:00 | varies | split | 1.8x weekend mileage |
-| SeniorRetiree | 14:00 | 8h | 65% | 0.75x weekend |
-| SchoolRunFamily | 9:30/16:30 | varies | varies | Two daily trips |
-| SingleCarShared | 17:00/20:00 | varies | 50/50 | Shared household |
+| Archetype | Level | Departure | Duration | Daily mi (mean) | Strategy |
+|-----------|-------|-----------|----------|-----------------|----------|
+| Daily Commuter L2 | L2 | 08:00 | 10h | 38 | Nightly (22-6, 90% SOC) |
+| Daily Commuter L1 | L1 | 08:00 | 10h | 25 | Immediate (100%) |
+| Long Commuter L2 | L2 | 07:00 | 11h | 75 | Immediate (100%) |
+| WFH Occasional | L2 | 10:00 | 3h | 12/25 wd/we | Low SOC (30%/80%) |
+| WFH L1 Minimal | L1 | 10:00 | 2h | 8 | Immediate (100%) |
+| Heavy-Use SUV | L2 | 08:00 | 10h | 55 | Nightly (22-6, 90% SOC) |
+| Shift Worker | L2 | 06:00 | 9h | 30 | PreDeparture (90%) |
+| Weekend Warrior | L2 | 09:00 | 8h | 10/30 wd/we | Low SOC (30%/80%) |
+| Workplace Charger | L1 | 08:00 | 10h | 30 | Immediate (100%) |
+| Retiree L1 | L1 | 10:00 | 3h | 10 | Immediate (100%) |
+| PHEV Commuter | L2 | 08:00 | 10h | 35 | Nightly (22-6, 90% SOC) |
+| TOU Optimizer CA | L2 | 08:00 | 10h | 38 | TOU Aware (90%) |
 
 ## Availability & Plug-In Policy
 

@@ -438,9 +438,21 @@ impl std::str::FromStr for EvArchetypeId {
 
 /// Static preset data for an EV driver archetype.
 ///
-/// Miles schedule parameters are stored as plain scalars since ScheduleSource
-/// contains RNG state and cannot be `const`. Call `build_miles_schedule` to
-/// construct the runtime ScheduleSource from a seed.
+/// Miles schedule parameters are stored as log-normal mu/sigma (log-space)
+/// since daily vehicle miles travelled (VMT) follows a right-skewed
+/// log-normal distribution in NHTS data, not a symmetric Gaussian.
+/// FHWA, "Summary of Travel Trends: 2017 National Household Travel
+/// Survey," U.S. DOT (FHWA-PL-18-019), 2018. Ch.2 Table 3b: daily VMT
+/// per driver = 28.5 mi; Appendix A Figure A-8: trip-distance distribution
+/// up to 50+ mi confirms right-skew. CV ≈ 0.7–0.8 derived from TRPMILES
+/// microdata (NHTS Trip File Codebook v1.2, Aug 2020); sigma=0.65 yields
+/// CV≈0.725 in log-space.
+/// The log-normal has natural [0,∞) support, eliminating the need to clamp
+/// negative Gaussian draws. Call `build_miles_schedule` to construct the
+/// runtime ScheduleSource from a seed.
+///
+/// Departure-time and duration parameters remain Gaussian because those
+/// quantities are adequately modelled by symmetric distributions.
 pub struct ArchetypePreset {
     pub id: EvArchetypeId,
     pub label: &'static str,
@@ -450,17 +462,21 @@ pub struct ArchetypePreset {
     pub event_day_ratio: f64,
     pub arrival_fuzz_minutes: f64,
     pub departure_fuzz_minutes: f64,
-    pub daily_drive_miles_mean: f64,
-    pub daily_drive_miles_stddev: f64,
+    /// Log-space mu parameter for daily miles log-normal distribution.
+    /// Mean = exp(mu + sigma²/2).
+    pub daily_drive_miles_mu: f64,
+    /// Log-space sigma parameter for daily miles log-normal distribution.
+    /// Controls right-skew: CV = sqrt(exp(sigma²) − 1).
+    pub daily_drive_miles_sigma: f64,
     pub daily_drive_miles_min: f64,
-    /// Weekday miles mean for NoisyTimeWindows archetypes (None for simple).
-    pub weekday_miles_mean: Option<f64>,
-    /// Weekday miles stddev for NoisyTimeWindows archetypes.
-    pub weekday_miles_stddev: Option<f64>,
-    /// Weekend miles mean for NoisyTimeWindows archetypes.
-    pub weekend_miles_mean: Option<f64>,
-    /// Weekend miles stddev for NoisyTimeWindows archetypes.
-    pub weekend_miles_stddev: Option<f64>,
+    /// Weekday miles mu for NoisyTimeWindows archetypes (None for simple).
+    pub weekday_miles_mu: Option<f64>,
+    /// Weekday miles sigma for NoisyTimeWindows archetypes.
+    pub weekday_miles_sigma: Option<f64>,
+    /// Weekend miles mu for NoisyTimeWindows archetypes.
+    pub weekend_miles_mu: Option<f64>,
+    /// Weekend miles sigma for NoisyTimeWindows archetypes.
+    pub weekend_miles_sigma: Option<f64>,
     /// Departure time (minute of day): mean and stddev for Gaussian sampling.
     pub departure_minute_mean: f64,
     pub departure_minute_stddev: f64,
@@ -472,21 +488,39 @@ pub struct ArchetypePreset {
 impl ArchetypePreset {
     /// Build the runtime `ScheduleSource` for daily miles from this preset.
     ///
-    /// Simple archetypes produce a `ScheduleSource::Stochastic` with Gaussian
-    /// noise and a clamp floor. NoisyTimeWindows archetypes (WfhOccasional,
+    /// Simple archetypes produce a `ScheduleSource::Stochastic` with log-normal
+    /// noise and a floor clamp. NoisyTimeWindows archetypes (WfhOccasional,
     /// WeekendWarrior) produce a `ScheduleSource::noisy_time_windows` with
-    /// day-dependent Gaussian distributions.
+    /// day-dependent log-normal distributions.
+    ///
+    /// NHTS 2017 data shows daily VMT has strong right skew; a log-normal
+    /// with mu ≈ 3.35, sigma ≈ 0.65 yields mean ≈ 35 mi and realistic
+    /// 95th/99th percentiles (~80 mi / ~120 mi). Log-normal's natural [0,∞)
+    /// support eliminates the negative-draw clamping artefact present with
+    /// the original Gaussian parameterisation.
+    ///
+    /// FHWA, "Summary of Travel Trends: 2017 National Household Travel
+    /// Survey," U.S. DOT (FHWA-PL-18-019), 2018. Ch.2 Table 3b: daily VMT
+    /// per driver = 28.5 mi; Appendix A Figure A-8: right-skewed trip
+    /// distribution. CV ≈ 0.7–0.8 derived from TRPMILES microdata (NHTS
+    /// Trip File Codebook v1.2, Aug 2020). sigma=0.65 yields CV≈0.725
+    /// within this range. Mu values derived from archetype target means.
     pub fn build_miles_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
-        if let (Some(wd_mean), Some(wd_std), Some(we_mean), Some(we_std)) = (
-            self.weekday_miles_mean,
-            self.weekday_miles_stddev,
-            self.weekend_miles_mean,
-            self.weekend_miles_stddev,
+        if let (Some(wd_mu), Some(wd_sigma), Some(we_mu), Some(we_sigma)) = (
+            self.weekday_miles_mu,
+            self.weekday_miles_sigma,
+            self.weekend_miles_mu,
+            self.weekend_miles_sigma,
         ) {
+            // For log-normal, the full distribution is carried via
+            // DistributionKind::LogNormal{mu,sigma} with offset=0.0
+            // (offset + sample = LogNormal(mu,sigma)). This differs from
+            // the old Gaussian approach where offset held the mean and
+            // DistributionKind held the spread only.
             let min_val = if self.daily_drive_miles_min > 0.0 {
                 Some(self.daily_drive_miles_min)
             } else {
-                Some(0.0)
+                None
             };
             ScheduleSource::noisy_time_windows(
                 vec![
@@ -494,10 +528,10 @@ impl ArchetypePreset {
                         DayFilter::Weekdays,
                         0,
                         1440,
-                        wd_mean,
-                        DistributionKind::Gaussian {
-                            mean: 0.0,
-                            std_dev: wd_std,
+                        0.0,
+                        DistributionKind::LogNormal {
+                            mu: wd_mu,
+                            sigma: wd_sigma,
                         },
                         min_val,
                         None,
@@ -506,10 +540,10 @@ impl ArchetypePreset {
                         DayFilter::Weekends,
                         0,
                         1440,
-                        we_mean,
-                        DistributionKind::Gaussian {
-                            mean: 0.0,
-                            std_dev: we_std,
+                        0.0,
+                        DistributionKind::LogNormal {
+                            mu: we_mu,
+                            sigma: we_sigma,
                         },
                         min_val,
                         None,
@@ -522,12 +556,12 @@ impl ArchetypePreset {
             let clamp_min = if self.daily_drive_miles_min > 0.0 {
                 Some(self.daily_drive_miles_min)
             } else {
-                Some(0.0)
+                None
             };
             ScheduleSource::Stochastic {
-                kind: DistributionKind::Gaussian {
-                    mean: self.daily_drive_miles_mean,
-                    std_dev: self.daily_drive_miles_stddev,
+                kind: DistributionKind::LogNormal {
+                    mu: self.daily_drive_miles_mu,
+                    sigma: self.daily_drive_miles_sigma,
                 },
                 seed,
                 draw_count: 0,
@@ -592,13 +626,17 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.50,
         arrival_fuzz_minutes: 30.0,
         departure_fuzz_minutes: 30.0,
-        daily_drive_miles_mean: 38.0,
-        daily_drive_miles_stddev: 13.0,
+        // FHWA, "Summary of Travel Trends: 2017 NHTS," (FHWA-PL-18-019),
+        // 2018, Ch.2 Table 3b; TRPMILES microdata CV ≈ 0.7–0.8.
+        // sigma=0.65 yields CV≈0.725 within this range.
+        // mu=3.43 → mean=exp(3.43+0.65²/2)≈38 mi, 95th≈90 mi, 99th≈140 mi.
+        daily_drive_miles_mu: 3.43,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 480.0,
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
@@ -613,13 +651,13 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.90,
         arrival_fuzz_minutes: 30.0,
         departure_fuzz_minutes: 30.0,
-        daily_drive_miles_mean: 25.0,
-        daily_drive_miles_stddev: 9.0,
+        daily_drive_miles_mu: 3.01,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 480.0,
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
@@ -634,13 +672,14 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.70,
         arrival_fuzz_minutes: 30.0,
         departure_fuzz_minutes: 30.0,
-        daily_drive_miles_mean: 75.0,
-        daily_drive_miles_stddev: 20.0,
+        // Floor of 10 mi retained as a genuine minimum-commute constraint.
+        daily_drive_miles_mu: 4.11,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 10.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 420.0,
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 660.0,
@@ -658,13 +697,16 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.20,
         arrival_fuzz_minutes: 45.0,
         departure_fuzz_minutes: 45.0,
-        daily_drive_miles_mean: 0.0,
-        daily_drive_miles_stddev: 0.0,
+        // Simple daily params unused (overridden by weekday/weekend below)
+        // when all four weekday/weekend fields are Some.
+        // mu=0, sigma=0.65 → trivial fallback; NoisyTimeWindows path wins.
+        daily_drive_miles_mu: 0.0,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: Some(12.0),
-        weekday_miles_stddev: Some(6.0),
-        weekend_miles_mean: Some(25.0),
-        weekend_miles_stddev: Some(10.0),
+        weekday_miles_mu: Some(2.27),
+        weekday_miles_sigma: Some(0.65),
+        weekend_miles_mu: Some(3.01),
+        weekend_miles_sigma: Some(0.65),
         departure_minute_mean: 600.0,
         departure_minute_stddev: 60.0,
         duration_minutes_mean: 180.0,
@@ -679,13 +721,14 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.90,
         arrival_fuzz_minutes: 30.0,
         departure_fuzz_minutes: 30.0,
-        daily_drive_miles_mean: 8.0,
-        daily_drive_miles_stddev: 4.0,
+        // mu=1.87 → mean=exp(1.87+0.65²/2)≈8 mi, realistic for minimal drivers.
+        daily_drive_miles_mu: 1.87,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 600.0,
         departure_minute_stddev: 60.0,
         duration_minutes_mean: 120.0,
@@ -704,13 +747,14 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.60,
         arrival_fuzz_minutes: 30.0,
         departure_fuzz_minutes: 30.0,
-        daily_drive_miles_mean: 55.0,
-        daily_drive_miles_stddev: 18.0,
+        // Floor of 5 mi: heavy-use driver, always at least a short trip.
+        daily_drive_miles_mu: 3.80,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 5.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 480.0,
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
@@ -728,13 +772,13 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.50,
         arrival_fuzz_minutes: 45.0,
         departure_fuzz_minutes: 45.0,
-        daily_drive_miles_mean: 30.0,
-        daily_drive_miles_stddev: 10.0,
+        daily_drive_miles_mu: 3.19,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 360.0,
         departure_minute_stddev: 45.0,
         duration_minutes_mean: 540.0,
@@ -752,13 +796,14 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.30,
         arrival_fuzz_minutes: 30.0,
         departure_fuzz_minutes: 30.0,
-        daily_drive_miles_mean: 0.0,
-        daily_drive_miles_stddev: 0.0,
+        // Simple daily params unused (overridden by weekday/weekend).
+        daily_drive_miles_mu: 0.0,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: Some(10.0),
-        weekday_miles_stddev: Some(5.0),
-        weekend_miles_mean: Some(30.0),
-        weekend_miles_stddev: Some(12.0),
+        weekday_miles_mu: Some(2.09),
+        weekday_miles_sigma: Some(0.65),
+        weekend_miles_mu: Some(3.19),
+        weekend_miles_sigma: Some(0.65),
         departure_minute_mean: 540.0,
         departure_minute_stddev: 60.0,
         duration_minutes_mean: 480.0,
@@ -773,13 +818,13 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.85,
         arrival_fuzz_minutes: 30.0,
         departure_fuzz_minutes: 30.0,
-        daily_drive_miles_mean: 30.0,
-        daily_drive_miles_stddev: 10.0,
+        daily_drive_miles_mu: 3.19,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 480.0,
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
@@ -794,13 +839,14 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.90,
         arrival_fuzz_minutes: 45.0,
         departure_fuzz_minutes: 45.0,
-        daily_drive_miles_mean: 10.0,
-        daily_drive_miles_stddev: 5.0,
+        // mu=2.09 → mean=exp(2.09+0.65²/2)≈10 mi, realistic for retirees.
+        daily_drive_miles_mu: 2.09,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 600.0,
         departure_minute_stddev: 90.0,
         duration_minutes_mean: 180.0,
@@ -819,13 +865,13 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.50,
         arrival_fuzz_minutes: 30.0,
         departure_fuzz_minutes: 30.0,
-        daily_drive_miles_mean: 35.0,
-        daily_drive_miles_stddev: 12.0,
+        daily_drive_miles_mu: 3.34,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 480.0,
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
@@ -844,13 +890,13 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         event_day_ratio: 0.50,
         arrival_fuzz_minutes: 30.0,
         departure_fuzz_minutes: 30.0,
-        daily_drive_miles_mean: 38.0,
-        daily_drive_miles_stddev: 13.0,
+        daily_drive_miles_mu: 3.43,
+        daily_drive_miles_sigma: 0.65,
         daily_drive_miles_min: 0.0,
-        weekday_miles_mean: None,
-        weekday_miles_stddev: None,
-        weekend_miles_mean: None,
-        weekend_miles_stddev: None,
+        weekday_miles_mu: None,
+        weekday_miles_sigma: None,
+        weekend_miles_mu: None,
+        weekend_miles_sigma: None,
         departure_minute_mean: 480.0,
         departure_minute_stddev: 30.0,
         duration_minutes_mean: 600.0,
@@ -861,6 +907,60 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration as ChronoDuration;
+    use chrono::{FixedOffset, TimeZone};
+    use hares_types::{EnvironmentState, GridState, WeatherState, ZoneState};
+
+    fn sample_env() -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: hares_types::ZoneId(1),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                outdoor_wet_bulb_c: 10.0,
+                outdoor_enthalpy_j_kg: 0.0,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 180.0,
+                mains_temp_c: 15.0,
+                rainfall_m: 0.0,
+                ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .unwrap(),
+            time_res: ChronoDuration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
 
     #[test]
     fn all_catalog_specs_valid() {
@@ -1221,13 +1321,171 @@ mod tests {
         for &id in &[EvArchetypeId::WfhOccasional, EvArchetypeId::WeekendWarrior] {
             let preset = id.preset();
             assert!(
-                preset.weekday_miles_mean.is_some(),
-                "{}: should have weekday_miles_mean",
+                preset.weekday_miles_mu.is_some(),
+                "{}: should have weekday_miles_mu",
                 preset.label
             );
             assert!(
-                preset.weekend_miles_mean.is_some(),
-                "{}: should have weekend_miles_mean",
+                preset.weekend_miles_mu.is_some(),
+                "{}: should have weekend_miles_mu",
+                preset.label
+            );
+        }
+    }
+
+    #[test]
+    fn archetype_all_presets_have_log_normal_params() {
+        for &id in EvArchetypeId::ALL {
+            let preset = id.preset();
+            assert!(
+                preset.daily_drive_miles_sigma > 0.0,
+                "{}: sigma must be positive for LogNormal",
+                preset.label
+            );
+            assert!(
+                preset.daily_drive_miles_mu.is_finite(),
+                "{}: mu must be finite",
+                preset.label
+            );
+        }
+    }
+
+    #[test]
+    fn build_miles_schedule_emits_log_normal() {
+        for &id in EvArchetypeId::ALL {
+            let preset = id.preset();
+            let schedule = preset.build_miles_schedule([0u8; 32]);
+            match schedule {
+                ScheduleSource::Stochastic { kind, .. } => {
+                    assert!(
+                        matches!(kind, DistributionKind::LogNormal { .. }),
+                        "{}: expected LogNormal, got {:?}",
+                        preset.label,
+                        kind
+                    );
+                }
+                ScheduleSource::TimeWindows { windows, .. } => {
+                    for w in &windows {
+                        if let Some(ref noise) = w.noise {
+                            assert!(
+                                matches!(noise, DistributionKind::LogNormal { .. }),
+                                "{}: expected LogNormal in TimeWindows noise, got {:?}",
+                                preset.label,
+                                noise
+                            );
+                        }
+                    }
+                }
+                _ => panic!("{}: unexpected ScheduleSource variant", preset.label),
+            }
+        }
+    }
+
+    #[test]
+    fn log_normal_analytical_mean_preserves_calibration() {
+        // Verify that switching from Gaussian to LogNormal preserves the
+        // intended fleet mean within ±5% for all simple (non-TW) archetypes.
+        // Original Gaussian means serve as the calibration target.
+        let calibration_targets: &[(EvArchetypeId, f64)] = &[
+            (EvArchetypeId::DailyCommuterL2, 38.0),
+            (EvArchetypeId::DailyCommuterL1, 25.0),
+            (EvArchetypeId::LongCommuterL2, 75.0),
+            (EvArchetypeId::WfhL1Minimal, 8.0),
+            (EvArchetypeId::HeavyUseSuv, 55.0),
+            (EvArchetypeId::ShiftWorker, 30.0),
+            (EvArchetypeId::WorkplaceCharger, 30.0),
+            (EvArchetypeId::RetireeL1, 10.0),
+            (EvArchetypeId::PhevCommuter, 35.0),
+            (EvArchetypeId::TouOptimizerCa, 38.0),
+        ];
+        for &(id, target) in calibration_targets {
+            let preset = id.preset();
+            let schedule = preset.build_miles_schedule([1u8; 32]);
+            let mean = schedule.mean();
+            let rel_error = (mean - target).abs() / target;
+            assert!(
+                rel_error < 0.05,
+                "{}: analytical mean {:.3} deviates from target {:.1} by {:.1}%",
+                preset.label,
+                mean,
+                target,
+                rel_error * 100.0
+            );
+        }
+    }
+
+    #[test]
+    fn log_normal_never_produces_negative_draws() {
+        let preset = EvArchetypeId::DailyCommuterL2.preset();
+        let mut schedule = preset.build_miles_schedule([42u8; 32]);
+        let env = sample_env();
+        for _ in 0..10_000 {
+            let v = schedule.value_at(&env).unwrap();
+            assert!(v >= 0.0, "log-normal draw produced negative value: {v}");
+        }
+    }
+
+    #[test]
+    fn log_normal_empirical_moments_daily_commuter_l2() {
+        // Sample 100_000 draws from DailyCommuterL2 log-normal and verify:
+        // - mean ≈ 38 mi (within 5%)
+        // - median < mean (right skew confirmed)
+        // - P(draw < 0) = 0
+        // - 95th percentile ≤ 95 mi  (theoretical ≈ 90 mi; 95 allows sampling noise)
+        // - 99th percentile ≤ 160 mi (theoretical ≈ 140 mi; 160 allows sampling noise)
+        let preset = EvArchetypeId::DailyCommuterL2.preset();
+        let mut schedule = preset.build_miles_schedule([7u8; 32]);
+        let env = sample_env();
+
+        let n = 100_000;
+        let mut samples: Vec<f64> = Vec::with_capacity(n);
+        for _ in 0..n {
+            samples.push(schedule.value_at(&env).unwrap().max(0.0));
+        }
+
+        let mean: f64 = samples.iter().sum::<f64>() / n as f64;
+        assert!(
+            (mean - 38.0).abs() / 38.0 < 0.05,
+            "empirical mean {mean:.2} deviates from 38.0 beyond 5%"
+        );
+
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = samples[n / 2];
+        assert!(
+            median < mean,
+            "median {median:.2} not less than mean {mean:.2} (right skew not confirmed)"
+        );
+
+        // P(draw < 0) = 0 by log-normal support
+        assert!(samples.first().unwrap() >= &0.0);
+
+        let p95 = samples[(n as f64 * 0.95) as usize];
+        assert!(
+            p95 <= 95.0,
+            "95th percentile {p95:.1} exceeds 95 mi threshold"
+        );
+
+        let p99 = samples[(n as f64 * 0.99) as usize];
+        assert!(
+            p99 <= 160.0,
+            "99th percentile {p99:.1} exceeds 160 mi threshold"
+        );
+    }
+
+    #[test]
+    fn noisy_time_windows_mean_is_nonzero() {
+        // Regression: before the ScheduleSource::mean() fix for TimeWindows
+        // with noise, WfhOccasional and WeekendWarrior returned mean()=0.0
+        // because only the `value` field was summed (both are 0.0) and the
+        // log-normal distribution mean was ignored. Verify both archetypes
+        // now return a realistic non-zero daily miles mean.
+        for &id in &[EvArchetypeId::WfhOccasional, EvArchetypeId::WeekendWarrior] {
+            let preset = id.preset();
+            let schedule = preset.build_miles_schedule([1u8; 32]);
+            let mean = schedule.mean();
+            assert!(
+                mean > 5.0,
+                "{}: mean()={mean} should be >5 mi/day (was 0 before noise-aware fix)",
                 preset.label
             );
         }

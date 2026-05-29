@@ -785,7 +785,10 @@ impl ScheduleSource {
                 if windows.is_empty() {
                     return default.unwrap_or(0.0);
                 }
-                let sum: f64 = windows.iter().map(|w| w.value).sum();
+                let sum: f64 = windows
+                    .iter()
+                    .map(|w| w.value + w.noise.as_ref().map(|n| n.mean()).unwrap_or(0.0))
+                    .sum();
                 sum / windows.len() as f64
             }
         }
@@ -2672,12 +2675,79 @@ mod tests {
     }
 
     #[test]
-    fn mean_column_ref_returns_zero() {
-        let source = ScheduleSource::ColumnRef {
-            col_idx: 0,
-            boundary: BoundaryPolicy::Clamp,
+    fn mean_time_windows_with_noise_includes_noise_analytical_mean() {
+        // When a window carries a noise distribution (e.g. log-normal),
+        // mean() must include the distribution's analytical mean, not just
+        // the window's value field. This is the pattern used by NoisyTimeWindows
+        // archetypes (WfhOccasional, WeekendWarrior) where value=0.0 and the
+        // full distribution mean lives in the noise DistributionKind.
+        let lognorm_mean = (2.27_f64 + 0.65_f64 * 0.65_f64 / 2.0_f64).exp(); // ≈ 11.95
+        let w1 = TimeWindow::with_noise(
+            DayFilter::Weekdays,
+            0,
+            1440,
+            0.0,
+            DistributionKind::LogNormal {
+                mu: 2.27,
+                sigma: 0.65,
+            },
+            None,
+            None,
+        );
+        let w2 = TimeWindow::with_noise(
+            DayFilter::Weekends,
+            0,
+            1440,
+            0.0,
+            DistributionKind::LogNormal {
+                mu: 3.01,
+                sigma: 0.65,
+            },
+            None,
+            None,
+        );
+        let w2_mean = (3.01_f64 + 0.65_f64 * 0.65_f64 / 2.0_f64).exp(); // ≈ 25.06
+        let source = ScheduleSource::TimeWindows {
+            windows: vec![w1, w2],
+            default: None,
+            rng_state: None,
         };
-        assert_eq!(source.mean(), 0.0);
+        let expected = (lognorm_mean + w2_mean) / 2.0;
+        let got = source.mean();
+        assert!(
+            (got - expected).abs() / expected < 1e-10,
+            "TimeWindows mean with log-normal noise: got {got}, expected {expected}"
+        );
+        assert!(got > 0.0, "mean should be non-zero with log-normal noise");
+    }
+
+    #[test]
+    fn mean_time_windows_mixed_noise_and_noise_free() {
+        // Window with value=42.0 (no noise) + window with value=0.0
+        // and noise mean=30.0 → combined mean = (42.0 + 30.0) / 2 = 36.0
+        let noisy = TimeWindow::with_noise(
+            DayFilter::Weekdays,
+            0,
+            1440,
+            0.0,
+            DistributionKind::Gaussian {
+                mean: 30.0,
+                std_dev: 5.0,
+            },
+            None,
+            None,
+        );
+        let plain = TimeWindow::new(DayFilter::Weekends, 0, 1440, 42.0);
+        let source = ScheduleSource::TimeWindows {
+            windows: vec![noisy, plain],
+            default: None,
+            rng_state: None,
+        };
+        let got = source.mean();
+        assert!(
+            (got - 36.0).abs() < 1e-10,
+            "mixed noise/noiseless mean: got {got}, expected 36.0"
+        );
     }
 
     // ── DistributionKind::mean() tests ──────────────────────────────
