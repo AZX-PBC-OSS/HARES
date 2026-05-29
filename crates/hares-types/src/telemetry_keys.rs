@@ -255,6 +255,23 @@ pub const PARSE_ERROR_COUNT: &str = "parse_error_count";
 pub const TOTAL_COMMANDS_PARSED: &str = "total_commands_parsed";
 
 // ── Generator ───────────────────────────────────────────────────────────────
+/// Jacket water heat recovery power in watts.
+/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+/// jacket water heat recovery is a manufacturer-supplied PLR-dependent curve.
+pub const JACKET_WATER_W: &str = "jacket_water_w";
+/// Lube oil heat recovery power in watts.
+/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+/// lube oil heat recovery is a manufacturer-supplied PLR-dependent curve.
+pub const LUBE_OIL_W: &str = "lube_oil_w";
+/// Exhaust heat recovery power in watts.
+/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+/// exhaust heat recovery is modelled via PLR-dependent curves and
+/// NTU-effectiveness HX; no standard fixed value exists.
+pub const EXHAUST_WATER_W: &str = "exhaust_water_w";
+/// Jacket water supply temperature in °C. ~90°C for typical IC engines.
+pub const SUPPLY_TEMP_JACKET_C: &str = "supply_temp_jacket_c";
+/// Exhaust heat exchanger supply temperature in °C. ~400–500°C raw exhaust.
+pub const SUPPLY_TEMP_EXHAUST_C: &str = "supply_temp_exhaust_c";
 // (ELECTRIC_OUTPUT_KW is in the electrical power section above)
 
 // ── Fuel cell ───────────────────────────────────────────────────────────────

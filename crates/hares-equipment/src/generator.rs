@@ -48,7 +48,29 @@ pub struct GeneratorConfig {
     pub fuel_type: Option<FuelType>,
     pub rated_power_kw: f64,
     pub eta_electric: Option<f64>,
+    /// DEPRECATED: lumped thermal recovery efficiency. Replaced by per-stream
+    /// eta_jacket_water / eta_lube_oil / eta_exhaust. When only eta_thermal
+    /// is provided and the per-stream fields are absent, it is distributed
+    /// using engineering-estimate split fractions: jacket ~30 %, lube ~10 %,
+    /// exhaust ~60 %. EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+    /// per-stream heat recovery fractions are manufacturer-supplied PLR-dependent
+    /// curves, not fixed values.
     pub eta_thermal: Option<f64>,
+    /// Recoverable jacket water heat fraction at ~90°C.
+    /// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+    /// jacket water heat recovery fraction is a manufacturer-supplied quadratic
+    /// PLR curve (b₁ + b₂·PLR + b₃·PLR²).
+    pub eta_jacket_water: Option<f64>,
+    /// Recoverable lube oil heat fraction at ~85°C.
+    /// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+    /// lube oil heat recovery fraction is a manufacturer-supplied quadratic
+    /// PLR curve (c₁ + c₂·PLR + c₃·PLR²).
+    pub eta_lube_oil: Option<f64>,
+    /// Recoverable exhaust heat fraction at ~400–500°C.
+    /// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
+    /// exhaust heat recovery fraction is a manufacturer-supplied quadratic
+    /// PLR curve (d₁ + d₂·PLR + d₃·PLR²).
+    pub eta_exhaust: Option<f64>,
     pub efficiency_type: Option<String>,
     pub efficiency_curve_points: Option<Vec<GeneratorEfficiencyCurvePoint>>,
     pub delta_kw_per_s: Option<f64>,
@@ -108,6 +130,9 @@ impl GeneratorConfig {
         for (name, val) in [
             ("eta_electric", self.eta_electric),
             ("eta_thermal", self.eta_thermal),
+            ("eta_jacket_water", self.eta_jacket_water),
+            ("eta_lube_oil", self.eta_lube_oil),
+            ("eta_exhaust", self.eta_exhaust),
         ] {
             if let Some(v) = val {
                 if !v.is_finite() || !(0.0..=1.0).contains(&v) {
@@ -117,11 +142,26 @@ impl GeneratorConfig {
                 }
             }
         }
+        // Validate legacy combined eta_thermal + eta_electric sum constraint.
         if let (Some(eta_e), Some(eta_t)) = (self.eta_electric, self.eta_thermal) {
             if eta_e + eta_t > 1.0 + f64::EPSILON {
                 return Err(HaresError::Equipment(
                     "generator eta_electric + eta_thermal must not exceed 1.0".to_string(),
                 ));
+            }
+        }
+        // Validate per-stream eta sum against eta_electric when per-stream fields are used.
+        let per_stream_sum = self.eta_jacket_water.unwrap_or(0.0)
+            + self.eta_lube_oil.unwrap_or(0.0)
+            + self.eta_exhaust.unwrap_or(0.0);
+        if per_stream_sum > 0.0 {
+            if let Some(eta_e) = self.eta_electric {
+                if eta_e + per_stream_sum > 1.0 + f64::EPSILON {
+                    return Err(HaresError::Equipment(
+                        "generator eta_electric + per-stream heat recovery sum must not exceed 1.0"
+                            .to_string(),
+                    ));
+                }
             }
         }
         if let Some(ramp) = self.delta_kw_per_s {
@@ -214,6 +254,12 @@ const KEY_ETA_ELECTRIC: &str = "eta_electric";
 #[cfg(test)]
 const KEY_ETA_THERMAL: &str = "eta_thermal";
 #[cfg(test)]
+const KEY_ETA_JACKET_WATER: &str = "eta_jacket_water";
+#[cfg(test)]
+const KEY_ETA_LUBE_OIL: &str = "eta_lube_oil";
+#[cfg(test)]
+const KEY_ETA_EXHAUST: &str = "eta_exhaust";
+#[cfg(test)]
 const KEY_EFFICIENCY_TYPE: &str = "efficiency_type";
 #[cfg(test)]
 const KEY_DELTA_KW_PER_S: &str = "delta_kw_per_s";
@@ -255,6 +301,27 @@ const DEFAULT_ETA_ELECTRIC: f64 = 0.30;
 /// Thermal recovery is disabled by default; set > 0.0 to activate CHP.
 const DEFAULT_ETA_THERMAL: f64 = 0.0;
 
+/// Engineering estimate: jacket water heat fraction at rated PLR.
+/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: jacket fraction
+/// is a manufacturer-supplied quadratic curve of PLR with no standard fixed value.
+/// 0.30 is an engineering estimate consistent with typical IC engine heat rejection
+/// at rated load; no primary-source measurement available for this field split.
+const JACKET_FRACTION_OF_THERMAL: f64 = 0.30;
+
+/// Engineering estimate: lube oil heat fraction at rated PLR.
+/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: lube oil fraction
+/// is a manufacturer-supplied quadratic curve of PLR with no standard fixed value.
+/// 0.10 is an engineering estimate consistent with typical IC engine heat rejection
+/// at rated load; no primary-source measurement available for this field split.
+const LUBE_FRACTION_OF_THERMAL: f64 = 0.10;
+
+/// Engineering estimate: exhaust heat fraction at rated PLR.
+/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: exhaust fraction
+/// is a manufacturer-supplied quadratic curve of PLR with no standard fixed value.
+/// 0.60 is an engineering estimate consistent with typical IC engine heat rejection
+/// at rated load; no primary-source measurement available for this field split.
+const EXHAUST_FRACTION_OF_THERMAL: f64 = 0.60;
+
 /// Conservative ramp rate for a residential-class reciprocating generator.
 /// A 10 kW unit ramps to full load in ~10 s → 1 kW/s.
 /// OCHRE uses 0.1 kW/min (~0.0017 kW/s) which is unrealistically slow for
@@ -282,6 +349,19 @@ const DEFAULT_SUPPLY_TEMP_C: f64 = 70.0;
 
 /// Default CHP return temperature (°C) entering the heat exchanger.
 const DEFAULT_RETURN_TEMP_C: f64 = 60.0;
+
+/// Engineering estimate: typical IC engine jacket water supply temperature (°C).
+/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: jacket water
+/// temperature emerges from PLR-dependent curves and the heat recovery loop model;
+/// no standard fixed value exists. 90°C is a typical residential IC engine value.
+const DEFAULT_SUPPLY_TEMP_JACKET_C: f64 = 90.0;
+
+/// Engineering estimate: typical IC engine exhaust temperature at HX inlet (°C).
+/// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine: exhaust temperature
+/// is modelled via PLR-dependent exhaust gas temperature curves and NTU-effectiveness
+/// HX; no standard fixed value exists. 450°C is a midpoint in the typical 400–500°C
+/// range for IC engines.
+const DEFAULT_SUPPLY_TEMP_EXHAUST_C: f64 = 450.0;
 
 /// Default inverter efficiency for fuel cells: 95 % DC-to-AC.
 /// Residential fuel cell inverters typically range 93–97 %.
@@ -334,6 +414,46 @@ fn compute_stack_cooler_heat(
     let temp_factor = r0 + r1 * dt;
     let power_factor = 1.0 + r2 * pel_w + r3 * pel_w * pel_w;
     (temp_factor * power_factor * pel_w).max(0.0)
+}
+
+/// Resolve the per-stream heat recovery efficiencies from config.
+///
+/// When per-stream fields (`eta_jacket_water` / `eta_lube_oil` / `eta_exhaust`) are
+/// present, use them directly. When only legacy `eta_thermal` is provided, distribute it
+/// using engineering-estimate split fractions: jacket ~30 %, lube ~10 %, exhaust ~60 %.
+///
+/// EnergyPlus uses PLR-dependent curves for per-stream heat recovery, not fixed
+/// fractions (ICEngineElectricGenerator.cc:596–649).
+///
+/// Returns `(eta_jacket_water, eta_lube_oil, eta_exhaust)`.
+fn resolve_heat_recovery_etas(config: &Option<&GeneratorConfig>) -> (f64, f64, f64) {
+    let cfg = match config {
+        Some(c) => c,
+        None => return (0.0, 0.0, 0.0),
+    };
+
+    // When any per-stream field is explicitly set, use per-stream values.
+    let any_per_stream =
+        cfg.eta_jacket_water.is_some() || cfg.eta_lube_oil.is_some() || cfg.eta_exhaust.is_some();
+    if any_per_stream {
+        return (
+            cfg.eta_jacket_water.unwrap_or(0.0),
+            cfg.eta_lube_oil.unwrap_or(0.0),
+            cfg.eta_exhaust.unwrap_or(0.0),
+        );
+    }
+
+    // Legacy path: distribute eta_thermal using engineering-estimate split fractions.
+    let eta_thermal = cfg.eta_thermal.unwrap_or(DEFAULT_ETA_THERMAL);
+    if eta_thermal > 0.0 {
+        (
+            eta_thermal * JACKET_FRACTION_OF_THERMAL,
+            eta_thermal * LUBE_FRACTION_OF_THERMAL,
+            eta_thermal * EXHAUST_FRACTION_OF_THERMAL,
+        )
+    } else {
+        (0.0, 0.0, 0.0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +706,11 @@ pub struct Generator {
     efficiency: EfficiencyModel,
     /// Thermal recovery efficiency; 0.0 means no CHP.
     eta_thermal: f64,
+    /// Per-stream heat recovery fractions.
+    /// EnergyPlus ICEngineElectricGenerator.cc:596–649.
+    eta_jacket_water: f64,
+    eta_lube_oil: f64,
+    eta_exhaust: f64,
     /// Maximum output-power change per second (kW/s).
     delta_kw_per_s: f64,
     grid_import_limit_kw: f64,
@@ -596,6 +721,10 @@ pub struct Generator {
     flow_rate_kg_s: f64,
     supply_temp_c: f64,
     return_temp_c: f64,
+    /// Jacket water supply temperature (°C) for telemetry. ~90°C typical.
+    supply_temp_jacket_c: f64,
+    /// Exhaust heat exchanger supply temperature (°C) for telemetry. ~400–500°C typical.
+    supply_temp_exhaust_c: f64,
 
     // Fuel-cell-specific physics (ignored for combustion generators)
     /// DC-to-AC inverter efficiency [0, 1]. 1.0 for combustion generators
@@ -635,8 +764,11 @@ impl Generator {
             .as_ref()
             .and_then(|c| c.eta_thermal)
             .unwrap_or(DEFAULT_ETA_THERMAL);
+        let (eta_jacket_water, eta_lube_oil, eta_exhaust) =
+            resolve_heat_recovery_etas(&typed.as_ref());
+        let has_thermal = eta_jacket_water > 0.0 || eta_lube_oil > 0.0 || eta_exhaust > 0.0;
         let loop_raw = typed.as_ref().and_then(|c| c.loop_id).map(LoopId);
-        let chp_loop_id = if eta_thermal > 0.0 {
+        let chp_loop_id = if has_thermal {
             loop_raw.filter(|lid| lid.0 != 0)
         } else {
             None
@@ -650,7 +782,7 @@ impl Generator {
             ports.push(PortDeclaration::fluid(lid, FluidType::Water));
         }
 
-        let has_chp = eta_thermal > 0.0;
+        let has_chp = has_thermal;
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id),
             name: config.name.clone(),
@@ -696,6 +828,9 @@ impl Generator {
             capacity_min_kw: typed.as_ref().and_then(|c| c.capacity_min_kw),
             efficiency,
             eta_thermal,
+            eta_jacket_water,
+            eta_lube_oil,
+            eta_exhaust,
             delta_kw_per_s: typed
                 .as_ref()
                 .and_then(|c| c.delta_kw_per_s)
@@ -721,6 +856,8 @@ impl Generator {
                 .as_ref()
                 .and_then(|c| c.return_temp_c)
                 .unwrap_or(DEFAULT_RETURN_TEMP_C),
+            supply_temp_jacket_c: DEFAULT_SUPPLY_TEMP_JACKET_C,
+            supply_temp_exhaust_c: DEFAULT_SUPPLY_TEMP_EXHAUST_C,
             inverter_efficiency: typed
                 .as_ref()
                 .and_then(|c| c.inverter_efficiency)
@@ -838,6 +975,10 @@ impl Generator {
         self.rated_power_kw = c.rated_power_kw;
         self.capacity_min_kw = c.capacity_min_kw;
         self.eta_thermal = c.eta_thermal.unwrap_or(self.eta_thermal);
+        let (eta_jacket_water, eta_lube_oil, eta_exhaust) = resolve_heat_recovery_etas(&Some(&c));
+        self.eta_jacket_water = eta_jacket_water;
+        self.eta_lube_oil = eta_lube_oil;
+        self.eta_exhaust = eta_exhaust;
         self.delta_kw_per_s = c.delta_kw_per_s.unwrap_or(self.delta_kw_per_s);
         self.grid_import_limit_kw = c.grid_import_limit_kw.unwrap_or(self.grid_import_limit_kw);
         self.export_limit_kw = c.export_limit_kw.unwrap_or(self.export_limit_kw);
@@ -861,7 +1002,7 @@ impl Generator {
         self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind)?;
         self.efficiency.validate()?;
 
-        if self.eta_thermal > 0.0 {
+        if self.eta_jacket_water > 0.0 || self.eta_lube_oil > 0.0 || self.eta_exhaust > 0.0 {
             if let Some(lid) = c.loop_id {
                 if lid == 0 {
                     return Err(HaresError::Equipment(
@@ -885,7 +1026,8 @@ impl Generator {
         self.power_setpoint_kw = None;
         self.self_consumption_enabled = true;
 
-        let has_chp = self.eta_thermal > 0.0;
+        let has_chp =
+            self.eta_jacket_water > 0.0 || self.eta_lube_oil > 0.0 || self.eta_exhaust > 0.0;
         self.descriptor.telemetry_fields =
             generator_telemetry_fields(has_chp, self.kind == GeneratorKind::FuelCell);
         self.telemetry = default_telemetry(has_chp, self.kind == GeneratorKind::FuelCell);
@@ -996,28 +1138,56 @@ impl Equipment for Generator {
         } else {
             0.0
         };
-        let q_thermal_w = fuel_w * self.eta_thermal;
+        // Per-stream heat recovery: jacket water, lube oil, exhaust.
+        // EnergyPlus ICEngineElectricGenerator.cc:596–649 — multi-stream heat recovery.
+        // Each stream has a different recoverable fraction and temperature quality.
+        let q_jacket_w = fuel_w * self.eta_jacket_water;
+        let q_lube_w = fuel_w * self.eta_lube_oil;
+        let q_exhaust_w = fuel_w * self.eta_exhaust;
+        let q_thermal_w = q_jacket_w + q_lube_w + q_exhaust_w;
         // Total waste heat = fuel - AC electrical; includes inverter loss and stack heat.
         let total_waste_w = fuel_w - electrical_w;
         let q_flue_w = total_waste_w - q_thermal_w;
 
-        // Energy accounting for zone and fluid ports:
-        //   - No CHP (eta_thermal=0): all non-electrical fuel loss → zone as waste heat
-        //   - CHP with fluid port: q_thermal → fluid port only; q_flue → zone
-        //     (q_thermal is the useful recovered heat routed to the hydronic loop;
-        //      q_flue is the residual stack loss that escapes to the zone/building)
-        //   - CHP without fluid port: q_thermal → zone (no loop to route it to)
+        // Invariant: energy conservation within the generator.
+        // q_jacket + q_lube + q_exhaust must not exceed fuel_w - electrical_w.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let margin = 10.0 * f64::EPSILON * fuel_w.abs().max(1.0);
+            debug_assert!(
+                q_thermal_w <= total_waste_w + margin,
+                "generator per-stream heat recovery ({q_thermal_w} W) exceeds available waste heat ({total_waste_w} W)"
+            );
+        }
+
+        let has_thermal =
+            self.eta_jacket_water > 0.0 || self.eta_lube_oil > 0.0 || self.eta_exhaust > 0.0;
+
         // Energy routing to zone and fluid ports:
         //   - CHP with fluid port: q_thermal → fluid, q_flue → zone (no double-count)
-        //   - CHP without fluid port: all non-electrical loss → zone (q_thermal + q_flue)
+        //   - CHP without fluid port: all non-electrical loss → zone
         //   - No CHP: all non-electrical loss → zone (q_flue only, since q_thermal=0)
-        let zone_heat_w = if self.eta_thermal > 0.0 && self.chp_loop_id.is_some() {
-            q_flue_w // fluid port takes q_thermal; zone only gets flue loss
-        } else {
-            // No fluid port: zone receives all waste heat (q_thermal + q_flue).
-            // When eta_thermal=0, q_thermal_w=0 so this reduces to q_flue_w.
-            q_thermal_w + q_flue_w
-        };
+        //
+        // When routing to zone without a fluid port, thermal categories are
+        // differentiated by temperature grade:
+        //   - Jacket water + lube oil (~85–90°C): JacketLoss (low-grade, for DHW preheat)
+        //   - Exhaust (~400–500°C): InternalGain (high-grade, usable for absorption chilling)
+        //   - Flue loss (residual): InternalGain
+        //   EnergyPlus ICEngineElectricGenerator.cc:596–649 — multi-stream heat recovery.
+        let (zone_jacket_loss_w, zone_internal_gain_w) =
+            if has_thermal && self.chp_loop_id.is_some() {
+                // Fluid port takes all q_thermal; zone only gets flue loss.
+                (0.0, q_flue_w)
+            } else {
+                // No fluid port: zone receives all waste heat, split by category.
+                // Jacket + lube → JacketLoss; exhaust + flue → InternalGain.
+                if has_thermal {
+                    (q_jacket_w + q_lube_w, q_exhaust_w + q_flue_w)
+                } else {
+                    // No heat recovery at all: all waste heat → InternalGain.
+                    (0.0, total_waste_w)
+                }
+            };
 
         // Write electrical port (negative = generation).
         ports.accumulate(&PortContribution::Electrical {
@@ -1033,12 +1203,23 @@ impl Equipment for Generator {
             })?;
         }
 
-        // Write thermal port: zone heat gains from waste heat or CHP.
-        if zone_heat_w > IDLE_KW_THRESHOLD {
+        // Write zone thermal ports, differentiated by category.
+        if zone_jacket_loss_w > IDLE_KW_THRESHOLD {
             if let Some(zone) = self.descriptor.zone {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
-                    sensible_gain_w: zone_heat_w,
+                    sensible_gain_w: zone_jacket_loss_w,
+                    radiant_gain_w: 0.0,
+                    latent_gain_w: 0.0,
+                    category: ThermalCategory::JacketLoss,
+                })?;
+            }
+        }
+        if zone_internal_gain_w > IDLE_KW_THRESHOLD {
+            if let Some(zone) = self.descriptor.zone {
+                ports.accumulate(&PortContribution::Thermal {
+                    zone,
+                    sensible_gain_w: zone_internal_gain_w,
                     radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
                     category: ThermalCategory::InternalGain,
@@ -1071,9 +1252,32 @@ impl Equipment for Generator {
         self.telemetry
             .set(tk::RAMP_LIMITED, if ramp_limited { 1.0 } else { 0.0 });
 
-        if self.eta_thermal > 0.0 {
+        if has_thermal {
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
             self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
+            self.telemetry.set(tk::JACKET_WATER_W, q_jacket_w);
+            self.telemetry.set(tk::LUBE_OIL_W, q_lube_w);
+            self.telemetry.set(tk::EXHAUST_WATER_W, q_exhaust_w);
+            self.telemetry
+                .set(tk::SUPPLY_TEMP_JACKET_C, self.supply_temp_jacket_c);
+            self.telemetry
+                .set(tk::SUPPLY_TEMP_EXHAUST_C, self.supply_temp_exhaust_c);
+
+            // Observer capture: record per-stream heat recovery for diagnostics.
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    q_jacket_water_w = q_jacket_w,
+                    q_lube_oil_w = q_lube_w,
+                    q_exhaust_water_w = q_exhaust_w,
+                    supply_temp_jacket_c = self.supply_temp_jacket_c,
+                    supply_temp_exhaust_c = self.supply_temp_exhaust_c,
+                    eta_jacket_water = self.eta_jacket_water,
+                    eta_lube_oil = self.eta_lube_oil,
+                    eta_exhaust = self.eta_exhaust,
+                    "Generator step complete — per-stream heat recovery",
+                );
+            }
         }
         if is_fuel_cell {
             self.telemetry.set(tk::FUEL_CELL_DC_KW, dc_kw);
@@ -1102,7 +1306,11 @@ impl Equipment for Generator {
                     fuel_type: FuelType::Gas,
                     consumption_w: fuel_w.max(0.0),
                 }),
-                thermal_output_w: None,
+                thermal_output_w: if has_thermal && q_thermal_w > 0.0 {
+                    Some(q_thermal_w)
+                } else {
+                    None
+                },
                 sensible_cooling_w: None,
                 latent_cooling_w: None,
             },
@@ -1163,11 +1371,23 @@ impl Equipment for Generator {
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
         self.telemetry.set(tk::ETA_ELECTRIC, eta);
 
-        if self.eta_thermal > 0.0 {
-            let q_thermal_w = fuel_w * self.eta_thermal;
+        let has_thermal =
+            self.eta_jacket_water > 0.0 || self.eta_lube_oil > 0.0 || self.eta_exhaust > 0.0;
+        if has_thermal {
+            let q_jacket_w = fuel_w * self.eta_jacket_water;
+            let q_lube_w = fuel_w * self.eta_lube_oil;
+            let q_exhaust_w = fuel_w * self.eta_exhaust;
+            let q_thermal_w = q_jacket_w + q_lube_w + q_exhaust_w;
             let q_flue_w = fuel_w - self.current_power_kw * 1000.0 - q_thermal_w;
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
             self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
+            self.telemetry.set(tk::JACKET_WATER_W, q_jacket_w);
+            self.telemetry.set(tk::LUBE_OIL_W, q_lube_w);
+            self.telemetry.set(tk::EXHAUST_WATER_W, q_exhaust_w);
+            self.telemetry
+                .set(tk::SUPPLY_TEMP_JACKET_C, self.supply_temp_jacket_c);
+            self.telemetry
+                .set(tk::SUPPLY_TEMP_EXHAUST_C, self.supply_temp_exhaust_c);
         }
         if is_fuel_cell {
             let dc_power_w = dc_kw * 1000.0;
@@ -1282,7 +1502,8 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry(has_chp: bool, is_fuel_cell: bool) -> Telemetry {
-    let capacity = if has_chp { 6 } else { 4 } + if is_fuel_cell { 3 } else { 0 };
+    // Base: 4 fields. CHP: 7 extra (thermal, flue, jacket, lube, exhaust, +2 supply temps).
+    let capacity = if has_chp { 11 } else { 4 } + if is_fuel_cell { 3 } else { 0 };
     let mut t = Telemetry::with_capacity(capacity);
     t.insert(tk::ELECTRIC_OUTPUT_KW, 0.0);
     t.insert(tk::FUEL_INPUT_W, 0.0);
@@ -1291,6 +1512,11 @@ fn default_telemetry(has_chp: bool, is_fuel_cell: bool) -> Telemetry {
     if has_chp {
         t.insert(tk::THERMAL_OUTPUT_W, 0.0);
         t.insert(tk::FLUE_LOSS_W, 0.0);
+        t.insert(tk::JACKET_WATER_W, 0.0);
+        t.insert(tk::LUBE_OIL_W, 0.0);
+        t.insert(tk::EXHAUST_WATER_W, 0.0);
+        t.insert(tk::SUPPLY_TEMP_JACKET_C, 0.0);
+        t.insert(tk::SUPPLY_TEMP_EXHAUST_C, 0.0);
     }
     if is_fuel_cell {
         t.insert(tk::FUEL_CELL_DC_KW, 0.0);
@@ -1328,12 +1554,38 @@ fn generator_telemetry_fields(has_chp: bool, is_fuel_cell: bool) -> Vec<Telemetr
         fields.push(TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
-            description: "CHP thermal recovery output (P_fuel * eta_thermal)".to_string(),
+            description: "Total CHP thermal recovery output (sum of jacket, lube, exhaust)"
+                .to_string(),
         });
         fields.push(TelemetryField {
             name: tk::FLUE_LOSS_W.to_string(),
             unit: "W".to_string(),
             description: "Residual flue loss (P_fuel - P_electric - Q_thermal)".to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::JACKET_WATER_W.to_string(),
+            unit: "W".to_string(),
+            description: "Jacket water heat recovery (P_fuel * eta_jacket_water)".to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::LUBE_OIL_W.to_string(),
+            unit: "W".to_string(),
+            description: "Lube oil heat recovery (P_fuel * eta_lube_oil)".to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::EXHAUST_WATER_W.to_string(),
+            unit: "W".to_string(),
+            description: "Exhaust heat recovery (P_fuel * eta_exhaust)".to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::SUPPLY_TEMP_JACKET_C.to_string(),
+            unit: "°C".to_string(),
+            description: "Jacket water supply temperature for recovery".to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::SUPPLY_TEMP_EXHAUST_C.to_string(),
+            unit: "°C".to_string(),
+            description: "Exhaust HX supply temperature for recovery".to_string(),
         });
     }
     if is_fuel_cell {
@@ -1436,6 +1688,9 @@ mod tests {
             rated_power_kw: 10.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
+            eta_jacket_water: None,
+            eta_lube_oil: None,
+            eta_exhaust: None,
             efficiency_type: None,
             efficiency_curve_points: None,
             delta_kw_per_s: Some(1.0),
@@ -1459,6 +1714,11 @@ mod tests {
                 (KEY_RATED_POWER_KW, ConfigValue::Float(value)) => cfg.rated_power_kw = *value,
                 (KEY_ETA_ELECTRIC, ConfigValue::Float(value)) => cfg.eta_electric = Some(*value),
                 (KEY_ETA_THERMAL, ConfigValue::Float(value)) => cfg.eta_thermal = Some(*value),
+                (KEY_ETA_JACKET_WATER, ConfigValue::Float(value)) => {
+                    cfg.eta_jacket_water = Some(*value)
+                }
+                (KEY_ETA_LUBE_OIL, ConfigValue::Float(value)) => cfg.eta_lube_oil = Some(*value),
+                (KEY_ETA_EXHAUST, ConfigValue::Float(value)) => cfg.eta_exhaust = Some(*value),
                 (KEY_EFFICIENCY_TYPE, ConfigValue::Text(value)) => {
                     cfg.efficiency_type = Some(value.clone())
                 }
@@ -2312,6 +2572,460 @@ mod tests {
     }
 
     // =======================================================================
+    // Per-stream heat recovery
+    // =======================================================================
+
+    #[test]
+    fn per_stream_heat_recovery_sums_to_thermal_output() {
+        // When per-stream eta fields are set directly, q_thermal_w must equal
+        // the sum of the three individual streams.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.12.into()),
+            (KEY_ETA_LUBE_OIL, 0.04.into()),
+            (KEY_ETA_EXHAUST, 0.24.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 6.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let q_jacket_w = generator.telemetry().get(tk::JACKET_WATER_W).unwrap();
+        let q_lube_w = generator.telemetry().get(tk::LUBE_OIL_W).unwrap();
+        let q_exhaust_w = generator.telemetry().get(tk::EXHAUST_WATER_W).unwrap();
+        let q_thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+
+        assert!(
+            (q_jacket_w - fuel_w * 0.12).abs() < 1.0,
+            "jacket water recovery should match eta_jacket_water"
+        );
+        assert!(
+            (q_lube_w - fuel_w * 0.04).abs() < 1.0,
+            "lube oil recovery should match eta_lube_oil"
+        );
+        assert!(
+            (q_exhaust_w - fuel_w * 0.24).abs() < 1.0,
+            "exhaust recovery should match eta_exhaust"
+        );
+        assert!(
+            ((q_jacket_w + q_lube_w + q_exhaust_w) - q_thermal_w).abs() < 1.0,
+            "per-stream sum must equal total thermal output"
+        );
+    }
+
+    #[test]
+    fn per_stream_fractions_applied_independently_at_partial_load() {
+        // Each stream's eta is applied independently. At different PLRs,
+        // each stream should scale proportionally with fuel_w.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.10.into()),
+            (KEY_ETA_LUBE_OIL, 0.05.into()),
+            (KEY_ETA_EXHAUST, 0.25.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        // Half load (5 kW): verify each stream scales independently.
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w_half = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let jacket_half = generator.telemetry().get(tk::JACKET_WATER_W).unwrap();
+        let lube_half = generator.telemetry().get(tk::LUBE_OIL_W).unwrap();
+        let exhaust_half = generator.telemetry().get(tk::EXHAUST_WATER_W).unwrap();
+
+        assert!(
+            (jacket_half - fuel_w_half * 0.10).abs() < 1.0,
+            "jacket at half load"
+        );
+        assert!(
+            (lube_half - fuel_w_half * 0.05).abs() < 1.0,
+            "lube at half load"
+        );
+        assert!(
+            (exhaust_half - fuel_w_half * 0.25).abs() < 1.0,
+            "exhaust at half load"
+        );
+
+        // Full load (10 kW): total is higher but fractions remain the same.
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+        slots.zero();
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w_full = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let jacket_full = generator.telemetry().get(tk::JACKET_WATER_W).unwrap();
+        let lube_full = generator.telemetry().get(tk::LUBE_OIL_W).unwrap();
+        let exhaust_full = generator.telemetry().get(tk::EXHAUST_WATER_W).unwrap();
+
+        assert!(
+            (jacket_full - fuel_w_full * 0.10).abs() < 1.0,
+            "jacket at full load"
+        );
+        assert!(
+            (lube_full - fuel_w_full * 0.05).abs() < 1.0,
+            "lube at full load"
+        );
+        assert!(
+            (exhaust_full - fuel_w_full * 0.25).abs() < 1.0,
+            "exhaust at full load"
+        );
+
+        // At full load, each stream is larger than at half load.
+        assert!(
+            jacket_full > jacket_half,
+            "jacket should increase with load"
+        );
+        assert!(lube_full > lube_half, "lube should increase with load");
+        assert!(
+            exhaust_full > exhaust_half,
+            "exhaust should increase with load"
+        );
+    }
+
+    #[test]
+    fn legacy_eta_thermal_backward_compat_sums_to_thermal_output() {
+        // When only eta_thermal is provided (no per-stream fields), the
+        // backward-compat distribution (jacket 30%, lube 10%, exhaust 60%)
+        // should sum to the original q_thermal_w = fuel_w * eta_thermal.
+        let config = gen_config(&[
+            (KEY_ETA_THERMAL, 0.40.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 6.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let q_jacket_w = generator.telemetry().get(tk::JACKET_WATER_W).unwrap();
+        let q_lube_w = generator.telemetry().get(tk::LUBE_OIL_W).unwrap();
+        let q_exhaust_w = generator.telemetry().get(tk::EXHAUST_WATER_W).unwrap();
+        let q_thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+
+        // Legacy expectation: q_thermal_w = fuel_w * 0.40
+        assert!(
+            (q_thermal_w - fuel_w * 0.40).abs() < 1.0,
+            "q_thermal should still match legacy formula"
+        );
+        // Per-stream sum should equal q_thermal_w
+        let stream_sum = q_jacket_w + q_lube_w + q_exhaust_w;
+        assert!(
+            (stream_sum - q_thermal_w).abs() < 1.0,
+            "per-stream sum should match total: sum={stream_sum}, q_thermal={q_thermal_w}"
+        );
+        // Engineering-estimate split fractions: jacket ~30%, lube ~10%, exhaust ~60%
+        assert!(
+            (q_jacket_w - q_thermal_w * 0.30).abs() < 1.0,
+            "jacket should be ~30% of thermal: got {q_jacket_w}, expected ~{}",
+            q_thermal_w * 0.30
+        );
+        assert!(
+            (q_lube_w - q_thermal_w * 0.10).abs() < 1.0,
+            "lube should be ~10% of thermal: got {q_lube_w}, expected ~{}",
+            q_thermal_w * 0.10
+        );
+        assert!(
+            (q_exhaust_w - q_thermal_w * 0.60).abs() < 1.0,
+            "exhaust should be ~60% of thermal: got {q_exhaust_w}, expected ~{}",
+            q_thermal_w * 0.60
+        );
+    }
+
+    #[test]
+    fn per_stream_energy_balance_closure() {
+        // fuel_w == electrical_w + q_jacket_w + q_lube_w + q_exhaust_w + q_flue_w
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.12.into()),
+            (KEY_ETA_LUBE_OIL, 0.04.into()),
+            (KEY_ETA_EXHAUST, 0.24.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 7.5,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let q_jacket_w = generator.telemetry().get(tk::JACKET_WATER_W).unwrap();
+        let q_lube_w = generator.telemetry().get(tk::LUBE_OIL_W).unwrap();
+        let q_exhaust_w = generator.telemetry().get(tk::EXHAUST_WATER_W).unwrap();
+        let q_flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
+
+        let balance = fuel_w - electric_w - q_jacket_w - q_lube_w - q_exhaust_w - q_flue_w;
+        assert!(
+            balance.abs() < 1.0,
+            "energy balance violation: fuel={fuel_w}, elec={electric_w}, jacket={q_jacket_w}, \
+             lube={q_lube_w}, exhaust={q_exhaust_w}, flue={q_flue_w}, residual={balance}"
+        );
+    }
+
+    #[test]
+    fn per_stream_supply_temps_registered_as_telemetry() {
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.12.into()),
+            (KEY_ETA_EXHAUST, 0.24.into()),
+        ]);
+        let generator = Generator::new(config, GeneratorKind::GasGenerator);
+        let names: Vec<&str> = generator
+            .descriptor()
+            .telemetry_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&tk::SUPPLY_TEMP_JACKET_C),
+            "missing supply_temp_jacket_c"
+        );
+        assert!(
+            names.contains(&tk::SUPPLY_TEMP_EXHAUST_C),
+            "missing supply_temp_exhaust_c"
+        );
+    }
+
+    #[test]
+    fn per_stream_telemetry_values_are_set_when_chp_active() {
+        // All per-stream telemetry keys must be non-zero when CHP is active.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.12.into()),
+            (KEY_ETA_LUBE_OIL, 0.04.into()),
+            (KEY_ETA_EXHAUST, 0.24.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 6.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let jacket_w = generator.telemetry().get(tk::JACKET_WATER_W).unwrap();
+        let lube_w = generator.telemetry().get(tk::LUBE_OIL_W).unwrap();
+        let exhaust_w = generator.telemetry().get(tk::EXHAUST_WATER_W).unwrap();
+        let jacket_temp = generator.telemetry().get(tk::SUPPLY_TEMP_JACKET_C).unwrap();
+        let exhaust_temp = generator
+            .telemetry()
+            .get(tk::SUPPLY_TEMP_EXHAUST_C)
+            .unwrap();
+
+        assert!(jacket_w > 0.0, "jacket water recovery should be positive");
+        assert!(lube_w > 0.0, "lube oil recovery should be positive");
+        assert!(exhaust_w > 0.0, "exhaust recovery should be positive");
+        assert!(
+            (jacket_temp - DEFAULT_SUPPLY_TEMP_JACKET_C).abs() < 1e-9,
+            "supply_temp_jacket should be default"
+        );
+        assert!(
+            (exhaust_temp - DEFAULT_SUPPLY_TEMP_EXHAUST_C).abs() < 1e-9,
+            "supply_temp_exhaust should be default"
+        );
+    }
+
+    #[test]
+    fn per_stream_thermal_category_jacket_loss_when_no_fluid_port() {
+        // Without a CHP fluid port, jacket+lube heat should be routed to
+        // ThermalCategory::JacketLoss and exhaust+flue to InternalGain.
+        // This tests the category-level splitting.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.10.into()),
+            (KEY_ETA_LUBE_OIL, 0.05.into()),
+            (KEY_ETA_EXHAUST, 0.25.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        // Total sensible gain = jacket + lube + exhaust + flue
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let total_waste_w = fuel_w - electric_w;
+
+        assert!(
+            slots.thermal.len() >= 1,
+            "should have a thermal accumulator"
+        );
+        let acc = &slots.thermal[0];
+        assert!(
+            (acc.sensible_gain_w - total_waste_w).abs() < 1.0,
+            "total zone sensible gain should equal waste heat: got {} W, expected {total_waste_w} W",
+            acc.sensible_gain_w
+        );
+
+        // Jacket + lube should be in JacketLoss category
+        let q_jacket_w = generator.telemetry().get(tk::JACKET_WATER_W).unwrap();
+        let q_lube_w = generator.telemetry().get(tk::LUBE_OIL_W).unwrap();
+        let jacket_loss_w = acc.sensible_for_category(ThermalCategory::JacketLoss);
+        assert!(
+            (jacket_loss_w - (q_jacket_w + q_lube_w)).abs() < 1.0,
+            "JacketLoss category should contain jacket ({q_jacket_w}) + lube ({q_lube_w}), got {jacket_loss_w} W"
+        );
+
+        // Exhaust + flue should be in InternalGain category
+        let q_exhaust_w = generator.telemetry().get(tk::EXHAUST_WATER_W).unwrap();
+        let q_flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
+        let internal_gain_w = acc.sensible_for_category(ThermalCategory::InternalGain);
+        assert!(
+            (internal_gain_w - (q_exhaust_w + q_flue_w)).abs() < 1.0,
+            "InternalGain category should contain exhaust ({q_exhaust_w}) + flue ({q_flue_w}), got {internal_gain_w} W"
+        );
+    }
+
+    #[test]
+    fn per_stream_load_state_restores_stream_telemetry() {
+        // After save/load, the per-stream telemetry keys must be populated.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.15.into()),
+            (KEY_ETA_LUBE_OIL, 0.05.into()),
+            (KEY_ETA_EXHAUST, 0.20.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        ramp_to_steady_state(&mut generator, 8.0, &base_env());
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let bytes = generator.save_state();
+        let mut generator2 = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator2.init(&config, &base_env()).unwrap();
+        generator2.load_state(&bytes).unwrap();
+
+        assert!(
+            generator2.telemetry().get(tk::JACKET_WATER_W).unwrap() > 0.0,
+            "jacket water should be restored"
+        );
+        assert!(
+            generator2.telemetry().get(tk::LUBE_OIL_W).unwrap() > 0.0,
+            "lube oil should be restored"
+        );
+        assert!(
+            generator2.telemetry().get(tk::EXHAUST_WATER_W).unwrap() > 0.0,
+            "exhaust water should be restored"
+        );
+        assert!(
+            generator2
+                .telemetry()
+                .get(tk::SUPPLY_TEMP_JACKET_C)
+                .unwrap()
+                > 0.0,
+            "supply_temp_jacket should be restored"
+        );
+        assert!(
+            generator2
+                .telemetry()
+                .get(tk::SUPPLY_TEMP_EXHAUST_C)
+                .unwrap()
+                > 0.0,
+            "supply_temp_exhaust should be restored"
+        );
+    }
+
+    #[test]
+    fn per_stream_core_output_thermal_output_populated() {
+        // When per-stream CHP is active, CoreOutput.flows.thermal_output_w
+        // should be Some(q_thermal_w) rather than None.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.12.into()),
+            (KEY_ETA_EXHAUST, 0.24.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let co = generator.core_output();
+        assert!(
+            co.flows.thermal_output_w.is_some(),
+            "thermal_output_w should be populated when CHP is active"
+        );
+        assert!(
+            co.flows.thermal_output_w.unwrap() > 0.0,
+            "thermal_output_w should be positive"
+        );
+    }
+
+    // =======================================================================
     // Save/load state
     // =======================================================================
 
@@ -2833,6 +3547,9 @@ mod tests {
             rated_power_kw: 10.0,
             eta_electric: None,
             eta_thermal: None,
+            eta_jacket_water: None,
+            eta_lube_oil: None,
+            eta_exhaust: None,
             efficiency_type: None,
             efficiency_curve_points: None,
             delta_kw_per_s: None,
