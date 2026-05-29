@@ -2712,3 +2712,150 @@ fn ev_init_typed_sets_fields_from_ev_config() {
     assert_eq!(ev.charging_level, ChargingLevel::L2);
     assert!((ev.rated_power_kw - 7.2).abs() < 1e-9);
 }
+
+// ── Raw config cold-charging field path tests ──────────────────────
+
+#[test]
+fn raw_config_reads_cold_charging_and_strategy_fields() {
+    let mut raw = HashMap::new();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_CHARGING_LEVEL.to_string(), "L2".into());
+    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(
+        KEY_MIN_CHARGE_TEMP_C.to_string(),
+        crate::config::ConfigValue::Float(-10.0),
+    );
+    raw.insert(
+        KEY_FULL_POWER_TEMP_C.to_string(),
+        crate::config::ConfigValue::Float(15.0),
+    );
+    raw.insert(
+        KEY_HEATER_POWER_W.to_string(),
+        crate::config::ConfigValue::Float(500.0),
+    );
+    raw.insert(
+        KEY_HEATER_THRESHOLD_C.to_string(),
+        crate::config::ConfigValue::Float(5.0),
+    );
+    raw.insert(
+        KEY_THERMAL_MASS_J_PER_K.to_string(),
+        crate::config::ConfigValue::Float(30_000.0),
+    );
+    raw.insert(
+        KEY_UA_W_PER_K.to_string(),
+        crate::config::ConfigValue::Float(8.0),
+    );
+    let strategy_json = serde_json::to_string(&ChargingStrategy::Nightly {
+        off_peak_start_hour: 22.0,
+        off_peak_end_hour: 6.0,
+        target_soc: 0.8,
+    })
+    .unwrap();
+    raw.insert(
+        KEY_CHARGING_STRATEGY.to_string(),
+        crate::config::ConfigValue::Text(strategy_json),
+    );
+
+    let config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw);
+    let ev = Ev::new(config);
+
+    assert_eq!(ev.min_charge_temp_c, -10.0);
+    assert_eq!(ev.full_power_temp_c, 15.0);
+    assert_eq!(ev.heater_power_w, 500.0);
+    assert_eq!(ev.heater_threshold_c, 5.0);
+    assert_eq!(ev.thermal_mass_j_per_k, 30_000.0);
+    assert_eq!(ev.ua_w_per_k, 8.0);
+    assert_eq!(
+        ev.charging_strategy(),
+        &ChargingStrategy::Nightly {
+            off_peak_start_hour: 22.0,
+            off_peak_end_hour: 6.0,
+            target_soc: 0.8,
+        }
+    );
+}
+
+#[test]
+fn raw_config_cold_charging_defaults_preserved() {
+    let mut raw = HashMap::new();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_CHARGING_LEVEL.to_string(), "L2".into());
+    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+
+    let config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw);
+    let ev = Ev::new(config);
+
+    assert_eq!(ev.min_charge_temp_c, DEFAULT_MIN_CHARGE_TEMP_C);
+    assert_eq!(ev.full_power_temp_c, DEFAULT_FULL_POWER_TEMP_C);
+    assert_eq!(ev.heater_power_w, DEFAULT_HEATER_POWER_W);
+    assert_eq!(ev.heater_threshold_c, DEFAULT_HEATER_THRESHOLD_C);
+    assert_eq!(ev.thermal_mass_j_per_k, DEFAULT_THERMAL_MASS_J_PER_K);
+    assert_eq!(ev.ua_w_per_k, DEFAULT_UA_W_PER_K);
+    assert_eq!(
+        ev.charging_strategy(),
+        &ChargingStrategy::Immediate { target_soc: 1.0 }
+    );
+}
+
+#[test]
+fn raw_and_typed_config_cold_derate_equivalence() {
+    // Raw path: -15 C min, 10 C full, battery at 0 C (→ derate = 0.6)
+    let mut raw_data = HashMap::new();
+    raw_data.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw_data.insert(KEY_CHARGING_LEVEL.to_string(), "L2".into());
+    raw_data.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw_data.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
+    raw_data.insert(
+        KEY_MIN_CHARGE_TEMP_C.to_string(),
+        crate::config::ConfigValue::Float(-15.0),
+    );
+    raw_data.insert(
+        KEY_FULL_POWER_TEMP_C.to_string(),
+        crate::config::ConfigValue::Float(10.0),
+    );
+    raw_data.insert(
+        KEY_BATTERY_TEMP_C.to_string(),
+        crate::config::ConfigValue::Float(0.0),
+    );
+    let raw_config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw_data);
+    let mut raw_ev = Ev::new(raw_config);
+
+    // Typed path: same values
+    let cfg = EvConfig {
+        capacity_kwh: 60.0,
+        max_charging_power_kw: 7.2,
+        min_charge_temp_c: Some(-15.0),
+        full_power_temp_c: Some(10.0),
+        battery_temp_c: Some(0.0),
+        initial_soc: Some(0.3),
+        ..minimal_ev_config()
+    };
+    let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg);
+    let mut typed_ev = Ev::new(typed.clone());
+    let env = sample_env();
+    typed_ev.init(&typed, &env).unwrap();
+
+    assert_eq!(raw_ev.min_charge_temp_c, typed_ev.min_charge_temp_c);
+    assert_eq!(raw_ev.full_power_temp_c, typed_ev.full_power_temp_c);
+
+    let mut ports = PortSlots::default();
+    raw_ev
+        .step(&env, Duration::minutes(15), &mut ports)
+        .unwrap();
+    let mut ports = PortSlots::default();
+    typed_ev
+        .step(&env, Duration::minutes(15), &mut ports)
+        .unwrap();
+
+    assert_eq!(
+        raw_ev.telemetry().get("charge_derate"),
+        typed_ev.telemetry().get("charge_derate"),
+        "raw and typed paths must produce the same charge_derate telemetry"
+    );
+    let raw_power = raw_ev.telemetry().get("active_power_kw").unwrap();
+    let typed_power = typed_ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        (raw_power - typed_power).abs() < 1e-9,
+        "raw ({raw_power}) and typed ({typed_power}) paths must produce the same charging power"
+    );
+}

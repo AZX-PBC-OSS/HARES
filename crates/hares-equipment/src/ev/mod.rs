@@ -179,12 +179,22 @@ impl Ev {
                 .unwrap_or(DEFAULT_L1_VOLTAGE_V),
             soc_max,
             charging_curve_lut: None,
-            min_charge_temp_c: DEFAULT_MIN_CHARGE_TEMP_C,
-            full_power_temp_c: DEFAULT_FULL_POWER_TEMP_C,
-            heater_power_w: DEFAULT_HEATER_POWER_W,
-            heater_threshold_c: DEFAULT_HEATER_THRESHOLD_C,
-            thermal_mass_j_per_k: DEFAULT_THERMAL_MASS_J_PER_K,
-            ua_w_per_k: DEFAULT_UA_W_PER_K,
+            min_charge_temp_c: config
+                .get_f64(KEY_MIN_CHARGE_TEMP_C)
+                .unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C),
+            full_power_temp_c: config
+                .get_f64(KEY_FULL_POWER_TEMP_C)
+                .unwrap_or(DEFAULT_FULL_POWER_TEMP_C),
+            heater_power_w: config
+                .get_f64(KEY_HEATER_POWER_W)
+                .unwrap_or(DEFAULT_HEATER_POWER_W),
+            heater_threshold_c: config
+                .get_f64(KEY_HEATER_THRESHOLD_C)
+                .unwrap_or(DEFAULT_HEATER_THRESHOLD_C),
+            thermal_mass_j_per_k: config
+                .get_f64(KEY_THERMAL_MASS_J_PER_K)
+                .unwrap_or(DEFAULT_THERMAL_MASS_J_PER_K),
+            ua_w_per_k: config.get_f64(KEY_UA_W_PER_K).unwrap_or(DEFAULT_UA_W_PER_K),
             v2l_enabled: config.get_bool(KEY_V2L_ENABLED).unwrap_or(false),
             v2l_soc_reserve: config
                 .get_f64(KEY_V2L_SOC_RESERVE)
@@ -218,7 +228,10 @@ impl Ev {
             custom_u_neg: false,
             v2l_active: false,
             v2l_power_kw: 0.0,
-            charging_strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
+            charging_strategy: config
+                .get_str(KEY_CHARGING_STRATEGY)
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(ChargingStrategy::Immediate { target_soc: 1.0 }),
             plug_in_policy: config
                 .get_str(KEY_PLUG_IN_POLICY)
                 .and_then(|s| serde_json::from_str(s).ok())
