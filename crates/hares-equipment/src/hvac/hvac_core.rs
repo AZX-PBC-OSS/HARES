@@ -118,6 +118,58 @@ pub const AIRFLOW_CENTRAL_AC_M3_S_PER_W: f64 = 5.367_838_475_978_508_5e-5;
 pub const AIRFLOW_MSHP_COOLING_M3_S_PER_W: f64 = 4.186_914_011_263_237e-5;
 pub const AIRFLOW_ROOM_AC_M3_S_PER_W: f64 = 4.294_270_780_782_807e-5;
 
+/// EnergyPlus auto-sizing SHR coefficient [W·s/m³].
+///
+/// EnergyPlus `CoolingSHRSizing.cc:87–93`:
+///   SHR = 0.431 + 6086.0 × (VolFlow / Capacity)
+/// where VolFlow is rated volumetric airflow in m³/s and Capacity is
+/// rated net cooling capacity in W. With VolFlow = airflow_m3_s_per_w ×
+/// Capacity the expression simplifies to SHR = 0.431 + 6086.0 ×
+/// airflow_m3_s_per_w. At 320 CFM/ton (room AC) this yields SHR ≈ 0.69;
+/// at 400 CFM/ton (central AC) it yields SHR ≈ 0.76.
+pub const SHR_AUTOSIZE_COEFFICIENT: f64 = 6086.0;
+
+/// Default SHR for room AC equipment (≈320 CFM/ton).
+///
+/// Fallback used when airflow is unavailable at init.
+/// Derived from EnergyPlus `CoolingSHRSizing.cc:87–93` at 320 CFM/ton.
+pub const DEFAULT_SHR_ROOM_AC: f64 = 0.70;
+
+/// Default SHR for central AC equipment (≈400 CFM/ton).
+///
+/// Fallback used when airflow is unavailable at init.
+/// Derived from EnergyPlus `CoolingSHRSizing.cc:87–93` at 400 CFM/ton.
+pub const DEFAULT_SHR_CENTRAL_AC: f64 = 0.75;
+
+/// Derives default SHR from equipment airflow using EnergyPlus auto-sizing.
+///
+/// EnergyPlus `CoolingSHRSizing.cc:87–93`:
+///   SHR = 0.431 + 6086.0 × (VolFlow / Capacity)
+///
+/// With VolFlow = airflow_m3_s_per_w × capacity_w, the formula simplifies:
+///   SHR = 0.431 + 6086.0 × airflow_m3_s_per_w
+///
+/// Result is clamped to [0.5, 1.0].
+///
+/// When airflow is not available or non-positive, falls back to
+/// hardcoded defaults: 0.70 for room AC, 0.75 for central AC.
+pub fn derive_default_shr(
+    airflow_m3_s_per_w: Option<f64>,
+    capacity_w: Option<f64>,
+    is_room_ac: bool,
+) -> f64 {
+    let shr = if let (Some(af), Some(_cap)) = (airflow_m3_s_per_w.filter(|&a| a > 0.0), capacity_w)
+    {
+        // EnergyPlus CoolingSHRSizing.cc:87–93.
+        0.431 + SHR_AUTOSIZE_COEFFICIENT * af
+    } else if is_room_ac {
+        DEFAULT_SHR_ROOM_AC
+    } else {
+        DEFAULT_SHR_CENTRAL_AC
+    };
+    shr.clamp(0.5, 1.0)
+}
+
 /// Refrigerant charge defect capacity correction coefficient (Cc).
 ///
 /// Capacity multiplier = 1.0 + CC_CHARGE_DEFECT * r
@@ -3444,5 +3496,54 @@ mod tests {
             defaults[1], expected_eir,
             "MSHP EIR coefficients must match CSV"
         );
+    }
+
+    #[test]
+    fn derive_default_shr_at_room_ac_airflow() {
+        // Room AC airflow ≈ 320 CFM/ton → EnergyPlus auto-sizing predicts
+        // SHR ≈ 0.431 + 6086 × 4.294e-5 ≈ 0.692.
+        let shr = derive_default_shr(Some(AIRFLOW_ROOM_AC_M3_S_PER_W), Some(3_500.0), true);
+        assert!(
+            (shr - 0.692).abs() < 0.005,
+            "Room AC derived SHR should be ~0.692, got {shr}"
+        );
+    }
+
+    #[test]
+    fn derive_default_shr_at_central_ac_airflow() {
+        // Central AC airflow ≈ 400 CFM/ton → EnergyPlus auto-sizing predicts
+        // SHR ≈ 0.431 + 6086 × 5.368e-5 ≈ 0.758.
+        let shr = derive_default_shr(Some(AIRFLOW_CENTRAL_AC_M3_S_PER_W), Some(8_000.0), false);
+        assert!(
+            (shr - 0.758).abs() < 0.005,
+            "Central AC derived SHR should be ~0.758, got {shr}"
+        );
+    }
+
+    #[test]
+    fn derive_default_shr_falls_back_when_airflow_missing() {
+        let shr_room = derive_default_shr(None, Some(3_500.0), true);
+        assert!(
+            (shr_room - DEFAULT_SHR_ROOM_AC).abs() < 1e-12,
+            "Room AC fallback should be {DEFAULT_SHR_ROOM_AC}, got {shr_room}"
+        );
+
+        let shr_central = derive_default_shr(None, Some(8_000.0), false);
+        assert!(
+            (shr_central - DEFAULT_SHR_CENTRAL_AC).abs() < 1e-12,
+            "Central AC fallback should be {DEFAULT_SHR_CENTRAL_AC}, got {shr_central}"
+        );
+    }
+
+    #[test]
+    fn derive_default_shr_clamped_to_valid_range() {
+        let shr_high = derive_default_shr(Some(0.001), Some(1_000.0), false);
+        assert!(
+            shr_high <= 1.0,
+            "SHR must be clamped to 1.0, got {shr_high}"
+        );
+
+        let shr_low = derive_default_shr(Some(1e-8), Some(1_000.0), false);
+        assert!(shr_low >= 0.5, "SHR must be clamped to 0.5, got {shr_low}");
     }
 }

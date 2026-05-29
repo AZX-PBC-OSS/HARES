@@ -543,7 +543,21 @@ impl CoolingCore {
             self.hvac.config.airflow_m3_s_per_w = cfg
                 .airflow_m3_s_per_w
                 .unwrap_or(super::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W);
-            self.rated_shr = cfg.shr.unwrap_or(0.75).clamp(0.0, 1.0);
+            let default_shr = super::hvac_core::derive_default_shr(
+                Some(self.hvac.config.airflow_m3_s_per_w),
+                Some(cfg.capacity_w),
+                true,
+            );
+            if cfg.shr.is_none() {
+                tracing::debug!(
+                    equipment_name = %config.name,
+                    shr = default_shr,
+                    airflow_m3_s_per_w = self.hvac.config.airflow_m3_s_per_w,
+                    capacity_w = cfg.capacity_w,
+                    "Room AC derived default SHR from EnergyPlus auto-sizing formula"
+                );
+            }
+            self.rated_shr = cfg.shr.unwrap_or(default_shr).clamp(0.0, 1.0);
             // Priority: explicit user Cd → SEER-derived Cd → EnergyPlus SEER2 default 0.20.
             // EnergyPlus `StandardRatings.cc:177–180`: SEER2 Cd=0.20.
             let derived = cfg.derived_cooling_startup_cd();
@@ -630,7 +644,21 @@ impl CoolingCore {
             let speed_mode = cfg.cooling_speed_control_mode();
             self.hvac.config.speed_control_mode = speed_mode;
 
-            self.rated_shr = cfg.shr.unwrap_or(0.75).clamp(0.0, 1.0);
+            let default_shr = super::hvac_core::derive_default_shr(
+                Some(self.hvac.config.airflow_m3_s_per_w),
+                Some(rated_cap),
+                false,
+            );
+            if cfg.shr.is_none() {
+                tracing::debug!(
+                    equipment_name = %config.name,
+                    shr = default_shr,
+                    airflow_m3_s_per_w = self.hvac.config.airflow_m3_s_per_w,
+                    capacity_w = rated_cap,
+                    "Central AC derived default SHR from EnergyPlus auto-sizing formula"
+                );
+            }
+            self.rated_shr = cfg.shr.unwrap_or(default_shr).clamp(0.0, 1.0);
 
             // Per-stage SHR values if provided.
             self.stage_shrs = cfg.stage_shrs.clone().unwrap_or_default();
@@ -5162,8 +5190,12 @@ mod defaults_tests {
 #[cfg(test)]
 mod speed_selection_parity_tests {
     use super::CoolingCore;
+    use super::{AirConditioner, RoomAC};
     use crate::hvac::{HvacEquipment, HvacEquipmentType, SpeedControlMode, ThermostatMode};
-    use crate::{CentralAirConditionerConfig, DuctConfig, EquipmentConfig, HvacSetpointConfig};
+    use crate::{
+        CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, HvacSetpointConfig,
+        RoomAcConfig,
+    };
     use hares_types::{EnvironmentState, GridState, WeatherState, ZoneId, ZoneState};
 
     fn minimal_env() -> EnvironmentState {
@@ -5349,5 +5381,200 @@ mod speed_selection_parity_tests {
         assert_eq!(vs.speed_frac, 0.0);
         assert_eq!(vs.part_load_ratio, 1.0);
         assert_eq!(ms.part_load_ratio, 1.0);
+    }
+
+    #[test]
+    fn room_ac_explicit_shr_used_not_derived_default() {
+        // When shr is explicitly set, the derived default must not be used.
+        let cfg = EquipmentConfig::from_typed(
+            "RAC".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 3.412_141_633 / 10.0,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                hysteresis_c: Some(1.0),
+                airflow_m3_s_per_w: None,
+                shr: Some(0.65),
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                min_oat_compressor_cooling_c: None,
+            },
+        );
+        let env = minimal_env();
+        let mut eq = RoomAC::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        assert!(
+            (eq.core.rated_shr - 0.65).abs() < 1e-12,
+            "explicit shr=0.65 must be used, got {}",
+            eq.core.rated_shr
+        );
+    }
+
+    #[test]
+    fn room_ac_default_shr_matches_derived_value() {
+        // Without explicit SHR, the room AC must derive SHR from airflow
+        // using the EnergyPlus auto-sizing formula.
+        let cfg = EquipmentConfig::from_typed(
+            "RAC".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 3.412_141_633 / 10.0,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                hysteresis_c: Some(1.0),
+                airflow_m3_s_per_w: None,
+                shr: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                min_oat_compressor_cooling_c: None,
+            },
+        );
+        let env = minimal_env();
+        let mut eq = RoomAC::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        // At room AC airflow (320 CFM/ton), EnergyPlus auto-sizing predicts SHR ≈ 0.69.
+        assert!(
+            (eq.core.rated_shr - 0.69).abs() < 0.01,
+            "room AC default SHR should be ~0.69, got {}",
+            eq.core.rated_shr
+        );
+    }
+
+    #[test]
+    fn room_ac_and_central_ac_default_shr_differ() {
+        // Room AC and central AC must have distinct default SHR values
+        // because they operate at different airflow-per-ton ratios.
+        // Room AC (lower airflow) → lower SHR.
+        // Central AC (higher airflow) → higher SHR.
+        let room_cfg = EquipmentConfig::from_typed(
+            "RAC".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 3.412_141_633 / 10.0,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                hysteresis_c: Some(1.0),
+                airflow_m3_s_per_w: None,
+                shr: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                min_oat_compressor_cooling_c: None,
+            },
+        );
+        let central_cfg = EquipmentConfig::from_typed(
+            "CAC".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                eir: 3.412_141_633 / 10.0,
+                shr: None,
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                hysteresis_c: Some(1.0),
+                airflow_m3_s_per_w: None,
+                fraction_load_served: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
+            },
+        );
+        let env_state = minimal_env();
+        let mut room_eq = RoomAC::new(room_cfg.clone());
+        room_eq.init(&room_cfg, &env_state).unwrap();
+        let mut central_eq = AirConditioner::new(central_cfg.clone());
+        central_eq.init(&central_cfg, &env_state).unwrap();
+
+        let room_shr = room_eq.core.rated_shr;
+        let central_shr = central_eq.core.rated_shr;
+
+        assert!(
+            room_shr < central_shr,
+            "room AC default SHR ({room_shr}) must be less than central AC default SHR ({central_shr})"
+        );
+        assert!(
+            room_shr > 0.0,
+            "room AC default SHR must be positive, got {room_shr}"
+        );
+        assert!(
+            central_shr > 0.0,
+            "central AC default SHR must be positive, got {central_shr}"
+        );
     }
 }
