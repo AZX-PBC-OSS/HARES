@@ -12,6 +12,19 @@ use crate::pv::array_config::PvArraySpec;
 /// `arrays` field). When `arrays` is present and non-empty, `capacity_kw`
 /// must equal the sum of per-array capacities; other top-level singular
 /// fields are ignored in favour of the per-array specs.
+///
+/// ## System losses and soiling interaction
+///
+/// The default `system_losses_fraction` (0.14) matches the PVWatts v5 default
+/// and includes a 2% static soiling component (multiplier 0.98). When the
+/// Kimber dynamic soiling model is active (via `soiling_config`), the PV
+/// equipment automatically subtracts the static soiling component from
+/// `system_losses_fraction`, preventing double-counting of soiling losses.
+/// The effective loss fraction used in power computation is then 0.12 for
+/// the remaining non-soiling components (mismatch, wiring, connections, LID,
+/// nameplate, age, availability). A warning is emitted when a custom
+/// `system_losses_fraction` is provided alongside a dynamic soiling model
+/// so that users can verify the effective value matches their intent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PvConfig {

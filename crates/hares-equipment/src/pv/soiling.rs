@@ -3,6 +3,19 @@
 //! Implements the Kimber soiling model, which tracks dust accumulation on PV
 //! panels during dry periods and resets soiling after rain cleaning events.
 //!
+//! ## Interaction with `system_losses_fraction`
+//!
+//! The PVWatts v5 default `system_losses_fraction` (14%) includes a static 2%
+//! soiling component (multiplier 0.98). When the Kimber dynamic soiling model
+//! is enabled, the PV equipment automatically subtracts this static soiling
+//! component from `system_losses_fraction`, yielding an effective loss of 12%
+//! (for the remaining loss components: mismatch, wiring, connections, LID,
+//! nameplate, age, availability). This prevents double-counting soiling losses.
+//!
+//! If the user configures a custom `system_losses_fraction` alongside the
+//! Kimber model, a warning is emitted advising that the value has been
+//! auto-adjusted.
+//!
 //! Reference:
 //!   Kimber, A., Mitchell, L., Nogradi, S., Wenger, H. (2006).
 //!   "The Effect of Soiling on Large Grid-Connected Photovoltaic Systems in

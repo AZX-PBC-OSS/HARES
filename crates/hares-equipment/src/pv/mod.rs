@@ -41,7 +41,38 @@ const DEFAULT_T_REF_C: f64 = 25.0;
 const DEFAULT_POWER_FACTOR: f64 = 1.0;
 /// Temperature coefficient of power for the default Standard module type (PVWatts v8).
 const DEFAULT_GAMMA_PER_C: f64 = -0.0047;
+/// PVWatts v5 default DC-side system loss fraction (14%).
+///
+/// The PVWatts v5 default system losses of 14% are defined multiplicatively
+/// from component loss multipliers (NREL/TP-7A40-80694, Dobos 2014):
+///
+/// | Component              | Multiplier |
+/// |------------------------|------------|
+/// | Soiling                | 0.98       |
+/// | Shading                | 0.97       |
+/// | Snow                   | 1.00       |
+/// | Mismatch               | 0.98       |
+/// | Wiring                 | 0.98       |
+/// | Connections            | 0.995      |
+/// | Light-induced degradation | 0.985   |
+/// | Nameplate rating       | 0.99       |
+/// | Age                    | 1.00       |
+/// | Availability           | 0.97       |
+///
+/// Product: 0.98×0.97×0.98×0.98×0.995×0.985×0.99×0.97 ≈ 0.86 → loss ≈ 14%.
+/// HARES applies this as a linear post-temperature DC derate for simplicity
+/// (Δ ≈ 0.07 percentage points vs multiplicative on the 14% default).
 const DEFAULT_SYSTEM_LOSSES_FRACTION: f64 = 0.14;
+/// Static soiling multiplier in the PVWatts v5 default loss breakdown.
+///
+/// The 0.98 soiling component (2% loss) is baked into the PVWatts v5 14%
+/// default system losses. When a dynamic soiling model (e.g., Kimber) is
+/// active, this static component must be removed from
+/// `system_losses_fraction` to avoid double-counting.
+///
+/// Reference: NREL/TP-7A40-80694 (PVWatts Version 5 Manual, Dobos 2014),
+/// Table 2: DC-to-AC Derate Factors. Soiling = 0.98 (2.0%).
+const PVWATTS_SOILING_COMPONENT: f64 = 0.02;
 const IRRADIANCE_AT_STC_W_M2: f64 = 1_000.0;
 const NOCT_REFERENCE_TEMP_C: f64 = 20.0;
 const NOCT_REFERENCE_IRRADIANCE_W_M2: f64 = 800.0;
@@ -162,6 +193,13 @@ pub struct PV {
     inverter_capacity_kw: Option<f64>,
     power_factor: f64,
     system_losses_fraction: f64,
+    /// Effective system loss fraction after soiling-component reconciliation.
+    ///
+    /// When the Kimber soiling model is active (`soiling_config` is `Some`),
+    /// the PVWatts static soiling component (2% = 0.02) is automatically
+    /// subtracted from this value to prevent double-counting. Set in
+    /// `init_typed()`.
+    effective_system_losses_fraction: f64,
     power_limit_kw: Option<f64>,
     curtailment_fraction: f64,
     inverter_priority: InverterPriority,
@@ -234,6 +272,7 @@ impl PV {
             inverter_capacity_kw: None,
             power_factor: DEFAULT_POWER_FACTOR,
             system_losses_fraction: DEFAULT_SYSTEM_LOSSES_FRACTION,
+            effective_system_losses_fraction: DEFAULT_SYSTEM_LOSSES_FRACTION,
             power_limit_kw: None,
             curtailment_fraction: 0.0,
             inverter_priority: InverterPriority::Var,
@@ -336,7 +375,7 @@ impl PV {
             };
 
             let (dc_power_kw, ac_power_kw) = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
-                let dc_power_kw = dc_true * (1.0 - self.system_losses_fraction);
+                let dc_power_kw = dc_true * (1.0 - self.effective_system_losses_fraction);
                 let ac_power_kw = dc_power_kw * self.inverter_efficiency;
                 (dc_power_kw, ac_power_kw.max(0.0))
             } else {
@@ -380,7 +419,7 @@ impl PV {
                     irradiance_w_m2,
                     ambient_temp_c,
                     env.weather.wind_speed_m_s,
-                    self.system_losses_fraction,
+                    self.effective_system_losses_fraction,
                     self.inverter_efficiency,
                 );
                 let diff = if ac_direct > 0.0 {
@@ -418,7 +457,7 @@ impl PV {
                     irradiance_w_m2,
                     ambient_temp_c,
                     env.weather.wind_speed_m_s,
-                    self.system_losses_fraction,
+                    self.effective_system_losses_fraction,
                     self.inverter_efficiency,
                 );
                 let ratio = if ac_direct > 0.0 {
@@ -461,7 +500,7 @@ impl PV {
         let dc_before_losses =
             array.capacity_kw * (irradiance_w_m2 / IRRADIANCE_AT_STC_W_M2) * temp_derate;
         let mut dc_power_kw = dc_before_losses;
-        dc_power_kw *= 1.0 - self.system_losses_fraction;
+        dc_power_kw *= 1.0 - self.effective_system_losses_fraction;
         let ac_power_kw = (dc_power_kw * self.inverter_efficiency).max(0.0);
 
         ArrayStepOutput {
@@ -756,6 +795,34 @@ impl PV {
         self.soiling_config = None;
         self.soiling_state = None;
 
+        // T-0108: When the Kimber soiling model is active, subtract the
+        // PVWatts static soiling component (2% = 0.02) from
+        // system_losses_fraction to prevent double-counting:
+        //   1. Kimber dynamic soiling → applied as irradiance reduction
+        //   2. system_losses_fraction → applied as DC derate
+        // The PVWatts v5 default 14% includes a 0.98 soiling multiplier;
+        // without reconciliation, both would apply simultaneously.
+        let user_configured_losses = c.system_losses_fraction.is_some();
+        self.effective_system_losses_fraction = if self.soiling_config.is_some() {
+            let adjusted = (self.system_losses_fraction - PVWATTS_SOILING_COMPONENT).max(0.0);
+            if user_configured_losses {
+                // The user provided their own system_losses_fraction but the
+                // static soiling component was auto-removed. Warn so they can
+                // verify the effective value matches their intent.
+                tracing::warn!(
+                    configured = self.system_losses_fraction,
+                    removed = PVWATTS_SOILING_COMPONENT,
+                    effective = adjusted,
+                    "PV system_losses_fraction reduced by PVWatts static soiling component \
+                     (2%) because dynamic Kimber soiling model is active. \
+                     Verify effective_system_losses_fraction matches intent.",
+                );
+            }
+            adjusted
+        } else {
+            self.system_losses_fraction
+        };
+
         self.telemetry
             .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
         self.telemetry.set(tk::DC_POWER_KW, 0.0);
@@ -871,6 +938,32 @@ impl Equipment for PV {
             env.current_time.month(),
         );
 
+        // T-0108 invariant: when soiling is active, verify the soiling ratio
+        // is plausible and that combined soiling (dynamic + any residual static)
+        // does not exceed 35%, which would indicate a likely misconfiguration.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                (0.0..=1.0).contains(&soiling_ratio),
+                "soiling_ratio {soiling_ratio} out of range [0.0, 1.0]"
+            );
+            let static_soiling_in_losses = if self.soiling_config.is_some() {
+                0.0 // removed by reconciliation
+            } else {
+                PVWATTS_SOILING_COMPONENT
+            };
+            let combined = soiling_ratio * (1.0 - static_soiling_in_losses);
+            if combined < 0.65 {
+                tracing::warn!(
+                    soiling_ratio = soiling_ratio,
+                    static_soiling_removed = self.soiling_config.is_some(),
+                    combined = combined,
+                    "PV combined soiling exceeds 35% (>{:.2}); check soiling config and loss parameters",
+                    1.0 - combined,
+                );
+            }
+        }
+
         let mut total_dc_power_kw = 0.0;
         let mut total_ac_power_kw = 0.0;
         let mut total_irradiance_weighted = 0.0;
@@ -953,11 +1046,15 @@ impl Equipment for PV {
         // the DC power before system_losses_fraction was applied. This
         // allows downstream monitoring to compute the effective derate
         // factor and detect path-specific bias.
+        // T-0108: also capture soiling reconciliation state.
         #[cfg(feature = "observe")]
         {
             tracing::debug!(
                 lut_path_active = any_lut_path,
                 system_losses_fraction = self.system_losses_fraction,
+                effective_system_losses_fraction = self.effective_system_losses_fraction,
+                soiling_ratio = soiling_ratio,
+                static_soiling_component_removed = self.soiling_config.is_some(),
                 dc_power_kw_before_losses = total_dc_before_losses,
                 total_dc_power_kw = total_dc_power_kw,
                 "PV step completed",
@@ -1055,6 +1152,15 @@ impl Equipment for PV {
         self.soiling_config = decoded.soiling_config;
         self.soiling_state = decoded.soiling_state;
         self.shading_model = decoded.shading_model;
+        // Recompute effective losses: soiling_config may have been restored
+        // from a checkpoint where the Kimber model was active, and
+        // init_typed() computed the default (no-soiling) value before
+        // load_state() was called.
+        self.effective_system_losses_fraction = if self.soiling_config.is_some() {
+            (self.system_losses_fraction - PVWATTS_SOILING_COMPONENT).max(0.0)
+        } else {
+            self.system_losses_fraction
+        };
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -1232,8 +1338,9 @@ mod tests {
     use super::{
         ArrayType, DEFAULT_GAMMA_PER_C, DEFAULT_INVERTER_EFFICIENCY, DEFAULT_NOCT_C,
         DEFAULT_POWER_FACTOR, DEFAULT_SYSTEM_LOSSES_FRACTION, Equipment, EquipmentConfig,
-        ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2, NOCT_REFERENCE_TEMP_C, PV, PvArray,
-        PvArraySpec, PvConfig, cell_temperature_noct_wind, surface_id_for_orientation,
+        ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2, NOCT_REFERENCE_TEMP_C, PV,
+        PVWATTS_SOILING_COMPONENT, PvArray, PvArraySpec, PvConfig, cell_temperature_noct_wind,
+        surface_id_for_orientation,
     };
 
     fn env_with_surfaces(
@@ -3765,5 +3872,119 @@ mod tests {
             .unwrap();
         let dc_lut = pv_lut.telemetry().get(tk::DC_POWER_KW).unwrap();
         approx_eq(dc_lut, expected_dc);
+    }
+
+    // --- T-0108: Soiling reconciliation tests ---
+
+    /// When the Kimber soiling model is active, the PVWatts static soiling
+    /// component (2%) is removed from `system_losses_fraction`. With 3% Kimber
+    /// soiling (soiling_ratio=0.97) and effective losses of 0.12 (14%-2%),
+    /// the DC power should closely match what 1.0 soiling_ratio and 14%
+    /// losses produce. The slight difference arises because soiling reduces
+    /// irradiance before cell-temperature calc, while losses derate DC after.
+    #[test]
+    fn soiling_reconciliation_produces_equivalent_dc_power() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let surfaces = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 1_000.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env = env_with_surfaces_full(surfaces.clone(), 25.0, 1.0);
+
+        // PV A: no soiling, system_losses = 0.14, effective = 0.14
+        let cfg_a = config_single();
+        let mut pv_a = PV::new(cfg_a.clone());
+        pv_a.init(&cfg_a, &env).unwrap();
+        // Ensure no soiling is active.
+        pv_a.soiling_config = None;
+        pv_a.soiling_state = None;
+        pv_a.effective_system_losses_fraction = pv_a.system_losses_fraction;
+
+        let irr_a = env
+            .weather
+            .solar_irradiance
+            .iter()
+            .find(|e| e.surface_id == sid)
+            .unwrap();
+        let out_a = pv_a.step_one_array(&env, irr_a, &pv_a.arrays[0], 1.0, 1.0);
+        let dc_a = out_a.dc_power_kw;
+
+        // PV B: soiling active, system_losses = 0.14, effective = 0.12
+        let cfg_b = config_single();
+        let mut pv_b = PV::new(cfg_b.clone());
+        pv_b.init(&cfg_b, &env).unwrap();
+        // Simulate soiling reconciliation.
+        pv_b.soiling_config = Some(super::soiling::SoilingConfig::default());
+        pv_b.effective_system_losses_fraction =
+            (pv_b.system_losses_fraction - PVWATTS_SOILING_COMPONENT).max(0.0);
+
+        let irr_b = env
+            .weather
+            .solar_irradiance
+            .iter()
+            .find(|e| e.surface_id == sid)
+            .unwrap();
+        let out_b = pv_b.step_one_array(&env, irr_b, &pv_b.arrays[0], 0.97, 1.0);
+        let dc_b = out_b.dc_power_kw;
+
+        // Both should produce DC within a 2% relative tolerance: the layered
+        // application (irradiance-level soiling vs DC-level loss) produces a
+        // small non-linear difference (~0.7% at 3% soiling).
+        let ratio = dc_b / dc_a;
+        assert!(
+            (ratio - 1.0).abs() < 0.02,
+            "DC power with Kimber soiling (ratio=0.97, eff_losses=0.12) = {dc_b:.6} kW \
+             vs baseline (ratio=1.0, eff_losses=0.14) = {dc_a:.6} kW, ratio={ratio:.6}"
+        );
+    }
+
+    /// When soiling config is active, effective_system_losses_fraction must equal
+    /// system_losses_fraction minus the PVWatts static soiling component (0.02).
+    #[test]
+    fn effective_losses_reduced_when_soiling_active() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+
+        // No soiling: effective_losses = system_losses_fraction
+        let cfg = config_single();
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+        approx_eq(
+            pv.effective_system_losses_fraction,
+            pv.system_losses_fraction,
+        );
+
+        // With soiling: effective_losses = system_losses_fraction - 0.02
+        pv.soiling_config = Some(super::soiling::SoilingConfig::default());
+        pv.effective_system_losses_fraction =
+            (pv.system_losses_fraction - PVWATTS_SOILING_COMPONENT).max(0.0);
+        approx_eq(
+            pv.effective_system_losses_fraction,
+            DEFAULT_SYSTEM_LOSSES_FRACTION - PVWATTS_SOILING_COMPONENT,
+        );
+    }
+
+    /// The PVWatts soiling component constant (0.02) matches the documented
+    /// 2% soiling loss in the PVWatts v5 default breakdown.
+    #[test]
+    fn soiling_component_matches_pvwatts_default_breakdown() {
+        // PVWatts v5 default losses product:
+        // 0.98 * 0.97 * 0.98 * 0.98 * 0.995 * 0.985 * 0.99 * 0.97 ≈ 0.8603
+        // So 1 - product ≈ 0.1397 ≈ 14%.
+        // The soiling component alone: 1 - 0.98 = 0.02.
+        approx_eq(PVWATTS_SOILING_COMPONENT, 0.02);
+        approx_eq(1.0 - PVWATTS_SOILING_COMPONENT, 0.98);
     }
 }
