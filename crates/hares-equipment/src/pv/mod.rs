@@ -1647,7 +1647,7 @@ mod tests {
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
         let p_raw = {
-            let (mut pv_unlimited, env_unlimited) = make_inverter_pv(100.0);
+            let (mut pv_unlimited, env_unlimited) = make_inverter_pv(6.0);
             pv_unlimited.inverter_priority = InverterPriority::Watt;
             pv_unlimited.q_setpoint_kvar = 3.0;
             let mut ports_unlimited = PortSlots::default();
@@ -1702,7 +1702,7 @@ mod tests {
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
         assert!(s <= 3.0 + 1e-9, "S={s} exceeds inverter cap 3.0");
-        let (mut pv_unlimited, env_unlimited) = make_inverter_pv(100.0);
+        let (mut pv_unlimited, env_unlimited) = make_inverter_pv(6.0);
         pv_unlimited.inverter_priority = InverterPriority::Cpf;
         pv_unlimited.q_setpoint_kvar = 2.0;
         let mut ports_unlimited = PortSlots::default();
@@ -1730,7 +1730,7 @@ mod tests {
 
     #[test]
     fn inverter_under_capacity_no_clipping() {
-        let (mut pv, env) = make_inverter_pv(10.0);
+        let (mut pv, env) = make_inverter_pv(6.0);
         pv.inverter_priority = InverterPriority::Watt;
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -1778,7 +1778,7 @@ mod tests {
 
     #[test]
     fn reactive_setpoint_signal_sets_q() {
-        let (mut pv, env) = make_inverter_pv(10.0);
+        let (mut pv, env) = make_inverter_pv(6.0);
         pv.inverter_min_pf = None;
         pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
             .unwrap();
@@ -1790,7 +1790,7 @@ mod tests {
 
     #[test]
     fn power_factor_setpoint_signal_computes_q() {
-        let (mut pv, env) = make_inverter_pv(10.0);
+        let (mut pv, env) = make_inverter_pv(6.0);
         pv.inverter_min_pf = None;
         pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.9 })
             .unwrap();

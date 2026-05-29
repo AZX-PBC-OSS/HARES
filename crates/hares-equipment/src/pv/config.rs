@@ -97,6 +97,17 @@ impl PvConfig {
                 ));
             }
         }
+        if let Some(inv_cap) = self.inverter_capacity_kw {
+            // Typical residential DC-to-AC ratios: 1.0–1.5 (NREL SAM documentation;
+            // EnergyPlus PVWatts v8 default = 1.1, PVWatts.cc:88). [0.8, 2.0] is a
+            // generous acceptance window that rejects clearly pathological configs.
+            let dc_ac_ratio = self.capacity_kw / inv_cap;
+            if !(0.8..=2.0).contains(&dc_ac_ratio) {
+                return Err(HaresError::Equipment(format!(
+                    "PV DC-to-AC ratio {dc_ac_ratio:.2} is outside reasonable range [0.8, 2.0]"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -177,6 +188,33 @@ mod tests {
     #[test]
     fn pv_config_validate_passes_for_valid_config() {
         let cfg = minimal_pv_config();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn pv_config_validate_rejects_high_dc_ac_ratio() {
+        let mut cfg = minimal_pv_config();
+        cfg.capacity_kw = 10.0;
+        cfg.inverter_capacity_kw = Some(0.4);
+        // ratio = 25.0, well above the 2.0 upper bound
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn pv_config_validate_rejects_low_dc_ac_ratio() {
+        let mut cfg = minimal_pv_config();
+        cfg.capacity_kw = 1.0;
+        cfg.inverter_capacity_kw = Some(100.0);
+        // ratio = 0.01, well below the 0.8 lower bound
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn pv_config_validate_accepts_reasonable_dc_ac_ratio() {
+        let mut cfg = minimal_pv_config();
+        cfg.capacity_kw = 5.0;
+        cfg.inverter_capacity_kw = Some(4.0);
+        // ratio = 1.25, within [0.8, 2.0]
         assert!(cfg.validate().is_ok());
     }
 }
