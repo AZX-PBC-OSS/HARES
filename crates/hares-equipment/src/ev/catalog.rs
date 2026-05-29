@@ -315,11 +315,11 @@ static CATALOG: &[VehicleSpec] = &[
     VehicleSpec {
         id: VehicleId::Jeep4xe,
         label: "Jeep Wrangler 4xe",
-        capacity_kwh: 15.0,
+        capacity_kwh: 14.0, // Jeep Wrangler 4xe: 17.3 kWh gross; ~14 kWh usable EV-only (≈3 kWh reserved for hybrid mode). Source: Stellantis/Jeep press release 2021, Jeep 4xe owner documentation.
         max_l2_power_kw: 7.2,
         dcfc_power_kw: None,
         chemistry: BatteryChemistry::Nmc,
-        range_miles: 25.0,
+        range_miles: 21.0, // fueleconomy.gov 2024 Wrangler 4xe PHEV: 21 mi EPA all-electric range.
         fuel_economy_kwh_per_mi: 0.680, // fueleconomy.gov 2024 Wrangler 4xe: 68 kWh/100mi electric
         degradation_per_year: 0.015,
         vehicle_type: VehicleType::Phev,
@@ -1074,6 +1074,17 @@ mod tests {
         assert!(
             (250.0..=270.0).contains(&range),
             "IONIQ 5 LR AWD range {range} outside expected EPA band 250–270 mi",
+        );
+    }
+
+    #[test]
+    fn wrangler_4xe_phev_all_electric_range_is_epa_21_mi() {
+        // EPA all-electric range for the 2024–2025 Wrangler 4xe PHEV is 21 mi.
+        // Source: fueleconomy.gov; docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 5.
+        assert_eq!(
+            VehicleId::Jeep4xe.spec().range_miles,
+            21.0,
+            "Wrangler 4xe PHEV all-electric range must be exactly 21 mi (EPA)",
         );
     }
 
