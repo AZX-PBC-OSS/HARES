@@ -879,6 +879,7 @@ mod dhw_integration_tests {
                     supply_temp_c: 0.0,
                     return_temp_c: 0.0,
                     fluid_type: FluidType::Water,
+                    thermal_power_w: None,
                 })
                 .unwrap();
         }
@@ -1000,6 +1001,7 @@ mod dhw_integration_tests {
                 supply_temp_c: 0.0,
                 return_temp_c: 0.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
 

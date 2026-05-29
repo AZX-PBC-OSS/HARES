@@ -543,6 +543,7 @@ impl Equipment for ResistanceWH {
                 supply_temp_c: draw.outlet_temp_c,
                 return_temp_c: mains_temp_c,
                 fluid_type: self.fluid_type,
+                thermal_power_w: None,
             })?;
         }
 

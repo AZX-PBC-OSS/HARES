@@ -79,6 +79,10 @@ pub enum PortContribution {
         supply_temp_c: f64,
         return_temp_c: f64,
         fluid_type: FluidType,
+        /// Declared thermal power delivered to this loop [W].
+        /// None when the contributor does not quantify thermal energy
+        /// (e.g. static temperature/flow, or no thermal recovery active).
+        thermal_power_w: Option<f64>,
     },
     Custom {
         domain_id: DomainId,
@@ -325,6 +329,10 @@ pub struct FluidAccumulator {
     pub total_flow_kg_s: f64,
     pub mean_supply_temp_c: f64,
     pub mean_return_temp_c: f64,
+    /// Sum of declared `thermal_power_w` values from all fluid contributions
+    /// targeting this loop. None-aware: when a contributor sets
+    /// `thermal_power_w = None` that contribution contributes zero here.
+    pub total_thermal_power_w: f64,
 }
 
 impl FluidAccumulator {
@@ -335,6 +343,7 @@ impl FluidAccumulator {
             total_flow_kg_s: 0.0,
             mean_supply_temp_c: 0.0,
             mean_return_temp_c: 0.0,
+            total_thermal_power_w: 0.0,
         }
     }
 
@@ -343,6 +352,7 @@ impl FluidAccumulator {
         flow_rate_kg_s: f64,
         supply_temp_c: f64,
         return_temp_c: f64,
+        thermal_power_w: Option<f64>,
     ) -> Result<(), HaresError> {
         if flow_rate_kg_s < 0.0 {
             return Err(HaresError::Equipment("negative flow rate".to_string()));
@@ -358,6 +368,9 @@ impl FluidAccumulator {
                 / new_total_flow;
         }
         self.total_flow_kg_s = new_total_flow;
+        if let Some(tpw) = thermal_power_w {
+            self.total_thermal_power_w += tpw;
+        }
         Ok(())
     }
 
@@ -365,6 +378,7 @@ impl FluidAccumulator {
         self.total_flow_kg_s = 0.0;
         self.mean_supply_temp_c = 0.0;
         self.mean_return_temp_c = 0.0;
+        self.total_thermal_power_w = 0.0;
     }
 }
 
@@ -554,13 +568,19 @@ impl PortSlots {
                 supply_temp_c,
                 return_temp_c,
                 fluid_type,
+                thermal_power_w,
             } => {
                 if let Some(total) = self
                     .fluid
                     .iter_mut()
                     .find(|entry| entry.loop_id == *loop_id && entry.fluid_type == *fluid_type)
                 {
-                    total.add(*flow_rate_kg_s, *supply_temp_c, *return_temp_c)?;
+                    total.add(
+                        *flow_rate_kg_s,
+                        *supply_temp_c,
+                        *return_temp_c,
+                        *thermal_power_w,
+                    )?;
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared fluid loop: {loop_id:?} with fluid type {fluid_type:?}"
@@ -755,6 +775,7 @@ mod tests {
                 total_flow_kg_s: 1.2,
                 mean_supply_temp_c: 45.0,
                 mean_return_temp_c: 40.0,
+                total_thermal_power_w: 0.0,
             }],
             custom: vec![CustomAccumulator {
                 domain_id: DomainId(12),
@@ -794,8 +815,8 @@ mod tests {
     #[test]
     fn fluid_accumulator_zero_resets_state() {
         let mut fluid = FluidAccumulator::new(LoopId(2), FluidType::Glycol);
-        fluid.add(0.4, 50.0, 45.0).unwrap();
-        fluid.add(0.6, 46.0, 41.0).unwrap();
+        fluid.add(0.4, 50.0, 45.0, None).unwrap();
+        fluid.add(0.6, 46.0, 41.0, None).unwrap();
 
         approx_eq(fluid.total_flow_kg_s, 1.0);
         approx_eq(fluid.mean_supply_temp_c, 47.6);
@@ -833,6 +854,7 @@ mod tests {
                 supply_temp_c: 40.0,
                 return_temp_c: 35.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
         slots
@@ -842,6 +864,7 @@ mod tests {
                 supply_temp_c: 50.0,
                 return_temp_c: 45.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
         slots
@@ -868,7 +891,7 @@ mod tests {
     #[test]
     fn fluid_accumulator_zero_flow_on_fresh() {
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
-        fluid.add(0.0, 50.0, 40.0).unwrap();
+        fluid.add(0.0, 50.0, 40.0, None).unwrap();
         approx_eq(fluid.total_flow_kg_s, 0.0);
         approx_eq(fluid.mean_supply_temp_c, 0.0);
         approx_eq(fluid.mean_return_temp_c, 0.0);
@@ -916,6 +939,7 @@ mod tests {
             supply_temp_c: 40.0,
             return_temp_c: 35.0,
             fluid_type: FluidType::Water,
+            thermal_power_w: None,
         });
         assert!(result.is_err());
     }
@@ -958,6 +982,7 @@ mod tests {
                 supply_temp_c: 40.0,
                 return_temp_c: 35.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
         slots
@@ -967,6 +992,7 @@ mod tests {
                 supply_temp_c: 50.0,
                 return_temp_c: 45.0,
                 fluid_type: FluidType::Glycol,
+                thermal_power_w: None,
             })
             .unwrap();
         assert_eq!(slots.fluid.len(), 2);
@@ -1021,6 +1047,7 @@ mod tests {
                 supply_temp_c: 50.0,
                 return_temp_c: 30.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
         approx_eq(slots.fluid[0].total_flow_kg_s, 0.5);
@@ -1039,7 +1066,7 @@ mod tests {
     #[test]
     fn fluid_accumulator_rejects_negative_flow() {
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
-        let result = fluid.add(-1.0, 50.0, 40.0);
+        let result = fluid.add(-1.0, 50.0, 40.0, None);
         assert!(result.is_err());
     }
 
@@ -1212,5 +1239,54 @@ mod tests {
         approx_eq(acc.moisture_mass_flow_kg_s, -0.0005);
         acc.zero();
         approx_eq(acc.moisture_mass_flow_kg_s, 0.0);
+    }
+
+    // =======================================================================
+    // T-0084: Fluid accumulator thermal_power_w accumulation
+    // =======================================================================
+
+    #[test]
+    fn fluid_accumulator_sums_thermal_power_w() {
+        let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
+        fluid.add(0.5, 60.0, 40.0, Some(4186.0)).unwrap();
+        fluid.add(0.5, 60.0, 40.0, Some(4186.0)).unwrap();
+        approx_eq(fluid.total_thermal_power_w, 8372.0);
+    }
+
+    #[test]
+    fn fluid_accumulator_ignores_none_thermal_power_w() {
+        let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
+        fluid.add(0.5, 60.0, 40.0, None).unwrap();
+        fluid.add(0.5, 60.0, 40.0, Some(5000.0)).unwrap();
+        approx_eq(fluid.total_thermal_power_w, 5000.0);
+    }
+
+    #[test]
+    fn fluid_accumulator_zero_clears_thermal_power_w() {
+        let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
+        fluid.add(0.5, 60.0, 40.0, Some(4186.0)).unwrap();
+        approx_eq(fluid.total_thermal_power_w, 4186.0);
+        fluid.zero();
+        approx_eq(fluid.total_thermal_power_w, 0.0);
+        approx_eq(fluid.total_flow_kg_s, 0.0);
+    }
+
+    #[test]
+    fn fluid_port_contribution_routes_thermal_power_w_to_accumulator() {
+        let mut slots = PortSlots {
+            fluid: vec![FluidAccumulator::new(LoopId(7), FluidType::Water)],
+            ..Default::default()
+        };
+        slots
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(7),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 60.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: Some(4186.0),
+            })
+            .unwrap();
+        approx_eq(slots.fluid[0].total_thermal_power_w, 4186.0);
     }
 }

@@ -1097,6 +1097,7 @@ impl WetAppliance {
                 supply_temp_c: 0.0,
                 return_temp_c: 0.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })?;
         }
 

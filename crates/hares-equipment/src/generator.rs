@@ -1231,6 +1231,18 @@ impl Equipment for Generator {
             (0.0, 0.0, 0.0, 0.0, 0.0, q_flue_w)
         };
 
+        // Update supply temperature from actual thermal output so the fluid port
+        // carries self-consistent data: flow × Cp × ΔT = declared thermal_power_w
+        // by construction. Without this, the generator would write a dynamically
+        // computed thermal_power_w alongside static config temperatures, causing
+        // the fluid solver invariant to fire on mismatched flow-implied energy.
+        // EnergyPlus ICEngineElectricGenerator.cc:763:
+        //   HeatRecOutTemp = EnergyRecovered / (HeatRecMdot × CpHeatRec) + HeatRecInTemp
+        if has_thermal && q_thermal_effective_w > IDLE_KW_THRESHOLD && self.flow_rate_kg_s > 0.0 {
+            self.supply_temp_c = self.return_temp_c
+                + q_thermal_effective_w / (self.flow_rate_kg_s * CP_LIQUID_WATER_J_KG_K);
+        }
+
         // Invariant: heat_rec_ratio must be in [0, 1] and effective <= available.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
@@ -1254,6 +1266,32 @@ impl Equipment for Generator {
                 q_thermal_available_w <= total_waste_w + margin,
                 "generator per-stream heat recovery ({q_thermal_available_w} W) exceeds available waste heat ({total_waste_w} W)"
             );
+        }
+
+        // Invariant: when CHP is active with a fluid port, the thermal power
+        // declared to the fluid port (thermal_power_w) must equal the generator's
+        // computed effective thermal output. A gap means energy was computed but
+        // never deposited into any accumulator — a silent energy routing bug.
+        // This invariant guards the fix in T-0084: adding thermal_power_w to
+        // PortContribution::Fluid so the generator can quantitatively transfer
+        // energy to the loop model.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if has_thermal
+                && self.chp_loop_id.is_some()
+                && q_thermal_effective_w > IDLE_KW_THRESHOLD
+            {
+                // q_thermal_effective_w is the value that will be written to the fluid port
+                // as PortContribution::Fluid.thermal_power_w. This assertion confirms we
+                // are not accidentally writing zero or a wrong value — it catches the class
+                // of bug where energy is computed (telemetry reports it) but never reaches
+                // any accumulator.
+                debug_assert!(
+                    q_thermal_effective_w > 0.0,
+                    "generator CHP active with fluid port but q_thermal_effective_w is \
+                     non-positive ({q_thermal_effective_w} W); energy routing gap"
+                );
+            }
         }
 
         // Observer capture: record heat recovery capping diagnostics.
@@ -1350,6 +1388,7 @@ impl Equipment for Generator {
                     supply_temp_c: self.supply_temp_c,
                     return_temp_c: self.return_temp_c,
                     fluid_type: FluidType::Water,
+                    thermal_power_w: Some(q_thermal_effective_w),
                 })?;
             }
         }
@@ -1371,6 +1410,18 @@ impl Equipment for Generator {
                 .set(tk::THERMAL_AVAILABLE_W, q_thermal_available_w);
             self.telemetry
                 .set(tk::THERMAL_OUTPUT_W, q_thermal_effective_w);
+            // thermal_power_delivered_w tracks what was actually written to fluid port
+            // contributions. When a fluid port exists, it equals q_thermal_effective_w
+            // (set at the PortContribution::Fluid construction site). When CHP is active
+            // without a fluid port, thermal power goes to zone ports instead, so
+            // delivered_w stays 0.0 to reflect no fluid-port delivery.
+            let delivered_w = if self.chp_loop_id.is_some() {
+                q_thermal_effective_w
+            } else {
+                0.0
+            };
+            self.telemetry
+                .set(tk::THERMAL_POWER_DELIVERED_W, delivered_w);
             self.telemetry.set(tk::HEAT_REC_RATIO, heat_rec_ratio);
             self.telemetry
                 .set(tk::LOOP_RETURN_TEMP_C, self.return_temp_c);
@@ -1501,6 +1552,16 @@ impl Equipment for Generator {
             let q_flue_w = fuel_w - self.current_power_kw * 1000.0 - q_thermal_w;
             self.telemetry.set(tk::THERMAL_AVAILABLE_W, q_thermal_w);
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
+            // On load_state, the checkpoint does not know whether capping was
+            // active. Assume full delivery to fluid port when CHP is configured.
+            self.telemetry.set(
+                tk::THERMAL_POWER_DELIVERED_W,
+                if self.chp_loop_id.is_some() {
+                    q_thermal_w
+                } else {
+                    0.0
+                },
+            );
             self.telemetry.set(tk::HEAT_REC_RATIO, 1.0);
             self.telemetry
                 .set(tk::LOOP_RETURN_TEMP_C, self.return_temp_c);
@@ -1626,8 +1687,9 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry(has_chp: bool, is_fuel_cell: bool) -> Telemetry {
-    // Base: 4 fields. CHP: 10 extra (thermal, available, ratio, loop_return, flue, jacket, lube, exhaust, +2 supply temps).
-    let capacity = if has_chp { 14 } else { 4 } + if is_fuel_cell { 3 } else { 0 };
+    // Base: 4 fields. CHP: 11 extra (thermal, available, delivered, ratio, loop_return,
+    // flue, jacket, lube, exhaust, +2 supply temps).
+    let capacity = if has_chp { 15 } else { 4 } + if is_fuel_cell { 3 } else { 0 };
     let mut t = Telemetry::with_capacity(capacity);
     t.insert(tk::ELECTRIC_OUTPUT_KW, 0.0);
     t.insert(tk::FUEL_INPUT_W, 0.0);
@@ -1636,6 +1698,7 @@ fn default_telemetry(has_chp: bool, is_fuel_cell: bool) -> Telemetry {
     if has_chp {
         t.insert(tk::THERMAL_AVAILABLE_W, 0.0);
         t.insert(tk::THERMAL_OUTPUT_W, 0.0);
+        t.insert(tk::THERMAL_POWER_DELIVERED_W, 0.0);
         t.insert(tk::HEAT_REC_RATIO, 0.0);
         t.insert(tk::LOOP_RETURN_TEMP_C, 0.0);
         t.insert(tk::FLUE_LOSS_W, 0.0);
@@ -1689,6 +1752,13 @@ fn generator_telemetry_fields(has_chp: bool, is_fuel_cell: bool) -> Vec<Telemetr
             unit: "W".to_string(),
             description:
                 "Total CHP thermal recovery output delivered to loop (after heat_rec_ratio)"
+                    .to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::THERMAL_POWER_DELIVERED_W.to_string(),
+            unit: "W".to_string(),
+            description:
+                "Sum of thermal_power_w written to fluid port contributions (cross-validates against THERMAL_OUTPUT_W)"
                     .to_string(),
         });
         fields.push(TelemetryField {
@@ -2709,16 +2779,30 @@ mod tests {
             slots.thermal[0].sensible_gain_w
         );
 
-        // Fluid port should carry q_thermal
+        // Fluid port should carry q_thermal as declared thermal_power_w and
+        // the port data must be self-consistent (flow × Cp × ΔT ≈ thermal_power_w).
         assert_eq!(slots.fluid.len(), 1, "fluid port should be populated");
         assert!(
             thermal_w > 0.0,
             "q_thermal should be positive when CHP is active"
         );
-        // The fluid port carries flow, not watts directly -- just confirm it is active
         assert!(
             slots.fluid[0].total_flow_kg_s > 0.0,
             "fluid port should carry flow"
+        );
+        assert!(
+            slots.fluid[0].total_thermal_power_w > 0.0,
+            "fluid port should carry declared thermal_power_w"
+        );
+        let flow_implied_w = slots.fluid[0].total_flow_kg_s
+            * CP_LIQUID_WATER_J_KG_K
+            * (slots.fluid[0].mean_supply_temp_c - slots.fluid[0].mean_return_temp_c);
+        let mismatch = (flow_implied_w - slots.fluid[0].total_thermal_power_w).abs();
+        assert!(
+            mismatch < 1.0,
+            "fluid port data is self-inconsistent: flow-implied energy ({flow_implied_w} W) \
+             != declared thermal_power_w ({declared} W); diff = {mismatch} W",
+            declared = slots.fluid[0].total_thermal_power_w
         );
     }
 
@@ -4537,6 +4621,215 @@ mod tests {
         assert!(
             q_flue > uncapped_flue,
             "flue loss with capping ({q_flue:.1} W) should exceed uncapped flue ({uncapped_flue:.1} W)"
+        );
+    }
+
+    // =======================================================================
+    // T-0084: Fluid port thermal_power_w routing
+    // =======================================================================
+
+    #[test]
+    fn chp_fluid_port_carries_thermal_power_w() {
+        // Unit test: generator with CHP active and a fluid port. After step(),
+        // the fluid accumulator must reflect the declared thermal power.
+        let config = gen_config(&[
+            (KEY_ETA_THERMAL, 0.35.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 8.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let q_thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        assert!(q_thermal_w > 0.0, "CHP must produce thermal power");
+        assert_eq!(slots.fluid.len(), 1);
+
+        // The fluid accumulator's total_thermal_power_w should equal the generator's
+        // computed thermal output since it was declared in the PortContribution.
+        let delta = (slots.fluid[0].total_thermal_power_w - q_thermal_w).abs();
+        assert!(
+            delta < 1.0,
+            "fluid accumulator total_thermal_power_w ({}) should match generator q_thermal_w ({})",
+            slots.fluid[0].total_thermal_power_w,
+            q_thermal_w
+        );
+
+        // Regression: the fluid port must be self-consistent — flow × Cp × ΔT
+        // must equal the declared thermal_power_w. Before the fix for T-0084, the
+        // generator wrote a dynamically computed thermal_power_w alongside static
+        // config temperature values, causing the fluid solver invariant to fire.
+        let flow_implied_w = slots.fluid[0].total_flow_kg_s
+            * CP_LIQUID_WATER_J_KG_K
+            * (slots.fluid[0].mean_supply_temp_c - slots.fluid[0].mean_return_temp_c);
+        let mismatch = (flow_implied_w - slots.fluid[0].total_thermal_power_w).abs();
+        assert!(
+            mismatch < 1.0,
+            "fluid port data is self-inconsistent: flow-implied energy ({flow_implied_w} W) \
+             != declared thermal_power_w ({declared} W); diff = {mismatch} W",
+            declared = slots.fluid[0].total_thermal_power_w
+        );
+    }
+
+    #[test]
+    fn chp_without_fluid_port_thermal_power_w_is_zero() {
+        // Regression test: when CHP is active WITHOUT a fluid port, the accumulator
+        // should show zero thermal_power_w (energy goes to zone, not fluid).
+        let config = gen_config(&[
+            (KEY_ETA_THERMAL, 0.40.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 6.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        // No fluid port registered → no fluid accumulator.
+        assert!(
+            slots.fluid.is_empty(),
+            "no fluid accumulator expected without loop_id config"
+        );
+    }
+
+    #[test]
+    fn chp_no_thermal_recovery_fluid_port_thermal_power_w_none() {
+        // Regression test: when no thermal recovery is active (eta_thermal = 0
+        // and no per-stream etas), the generator does not create a fluid port
+        // at all, so thermal_power_w is never populated.
+        let config = gen_config(&[
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        // Thermal recovery disabled → no CHP telemetry keys registered.
+        assert!(
+            generator.telemetry().get(tk::THERMAL_OUTPUT_W).is_none(),
+            "THERMAL_OUTPUT_W should not be registered when no thermal recovery"
+        );
+        assert!(
+            generator
+                .telemetry()
+                .get(tk::THERMAL_POWER_DELIVERED_W)
+                .is_none(),
+            "THERMAL_POWER_DELIVERED_W should not be registered when no thermal recovery"
+        );
+    }
+
+    #[test]
+    fn thermal_power_delivered_w_telemetry_registered_and_set() {
+        // Verify that THERMAL_POWER_DELIVERED_W is registered as a telemetry field
+        // and populated with the correct value when CHP is active with a fluid port.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.15.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        // Check telemetry field is registered at init.
+        let names: Vec<&str> = generator
+            .descriptor()
+            .telemetry_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&tk::THERMAL_POWER_DELIVERED_W),
+            "THERMAL_POWER_DELIVERED_W telemetry field should be registered"
+        );
+
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 6.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let delivered = generator
+            .telemetry()
+            .get(tk::THERMAL_POWER_DELIVERED_W)
+            .unwrap();
+        let thermal_out = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        assert!(
+            delivered > 0.0,
+            "delivered thermal power should be positive"
+        );
+        assert!(
+            (delivered - thermal_out).abs() < 1.0,
+            "thermal_power_delivered_w ({delivered}) should match thermal_output_w ({thermal_out})"
+        );
+    }
+
+    // =======================================================================
+    // T-0084: load_state restores thermal_power_delivered_w
+    // =======================================================================
+
+    #[test]
+    fn load_state_restores_thermal_power_delivered_w() {
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.15.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        ramp_to_steady_state(&mut generator, 6.0, &base_env());
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let bytes = generator.save_state();
+        let mut restored = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        restored.init(&config, &base_env()).unwrap();
+        restored.load_state(&bytes).unwrap();
+
+        let delivered = restored
+            .telemetry()
+            .get(tk::THERMAL_POWER_DELIVERED_W)
+            .unwrap();
+        assert!(
+            delivered > 0.0,
+            "thermal_power_delivered_w should be restored after load_state"
         );
     }
 }

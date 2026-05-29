@@ -245,6 +245,7 @@ impl Equipment for ElectricBoiler {
                 supply_temp_c,
                 return_temp_c,
                 fluid_type: self.fluid_type,
+                thermal_power_w: None,
             })?;
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -549,6 +550,7 @@ impl Equipment for GasBoiler {
                 supply_temp_c,
                 return_temp_c,
                 fluid_type: self.fluid_type,
+                thermal_power_w: None,
             })?;
             self.hvac.write_zone_thermal_contributions(
                 ports,

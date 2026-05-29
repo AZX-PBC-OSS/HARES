@@ -7,6 +7,7 @@ use hares_types::{
     DomainId, DomainSolver, DomainUpdate, FLUID, FluidDomainPayload, FluidLoopState, FluidType,
     HaresError, LoopId, PortSlots,
 };
+use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
 
@@ -18,7 +19,11 @@ pub struct FluidSolverConfig {
 impl Default for FluidSolverConfig {
     fn default() -> Self {
         Self {
-            cp_water_j_kg_k: 4186.0,
+            // ASHRAE HoF 2021 Ch.1: 4.18 kJ/(kg·K) ≈ 4180 J/(kg·K).
+            // Must match CP_LIQUID_WATER_J_KG_K from hares-physics so that
+            // equipment supply temperature calculations (using the same Cp)
+            // produce flow-implied energy that matches declared thermal_power_w.
+            cp_water_j_kg_k: CP_LIQUID_WATER_J_KG_K,
         }
     }
 }
@@ -138,6 +143,38 @@ impl DomainSolver for FluidSolver {
                         * (e.mean_supply_temp_c - e.mean_return_temp_c)
                 })
                 .sum();
+            let total_declared_thermal_w: f64 =
+                entries.iter().map(|e| e.total_thermal_power_w).sum();
+
+            // System-level invariant: when equipment declares thermal power via
+            // PortContribution::Fluid.thermal_power_w, the total must match the
+            // loop's flow-implied energy balance (T-0084). A mismatch means
+            // equipment is declaring energy that the fluid solver cannot confirm
+            // from flow × Cp × ΔT — an energy routing gap.
+            //
+            // Tolerance is 1e-9 × max(|net_power_w|, |declared|, 1.0) —
+            // essentially machine epsilon for double-precision. This catches any
+            // real mismatch (e.g. equipment writing a dynamic thermal_power_w
+            // alongside static config temperatures) while tolerating only
+            // floating-point drift in the summation of Cp × flow × ΔT across
+            // multiple contributors. A tolerance this tight means the invariant
+            // is a hard equality check: the two quantities must come from the
+            // same computation path to pass.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            if total_declared_thermal_w > 0.0 {
+                let tol = 1e-9_f64
+                    * net_power_w
+                        .abs()
+                        .max(total_declared_thermal_w.abs())
+                        .max(1.0);
+                debug_assert!(
+                    (net_power_w - total_declared_thermal_w).abs() <= tol,
+                    "fluid loop {loop_id:?}: declared thermal power ({total_declared_thermal_w} W) \
+                     does not match flow-implied energy balance ({net_power_w} W); \
+                     diff = {} W, tol = {tol:e} W",
+                    (net_power_w - total_declared_thermal_w).abs()
+                );
+            }
 
             let (mean_supply_temp_c, mean_return_temp_c) = if total_flow.abs() <= MIN_FLOW_KG_S {
                 self.last_known_temps
@@ -183,9 +220,10 @@ mod tests {
     use std::time::Duration;
 
     use chrono::{FixedOffset, TimeZone};
+    use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
     use hares_types::{
-        DomainSolver, EnvironmentState, FluidDomainPayload, FluidType, GridState, LoopId,
-        PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+        DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidType, GridState,
+        LoopId, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
     };
 
     use crate::fluid_solver::{FluidSolver, FluidSolverConfig};
@@ -273,12 +311,13 @@ mod tests {
                 supply_temp_c: 60.0,
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
 
         let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
-        approx_eq(states[0].net_power_w, 0.5 * 4186.0 * 20.0);
+        approx_eq(states[0].net_power_w, 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0);
     }
 
     #[test]
@@ -302,6 +341,7 @@ mod tests {
                 supply_temp_c: 60.0,
                 return_temp_c: 50.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
         ports
@@ -311,13 +351,14 @@ mod tests {
                 supply_temp_c: 50.0,
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
 
         let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         let s = &states[0];
-        approx_eq(s.net_power_w, 4186.0 * (1.0 * 10.0 + 2.0 * 10.0));
+        approx_eq(s.net_power_w, CP_LIQUID_WATER_J_KG_K * (1.0 * 10.0 + 2.0 * 10.0));
         approx_eq(s.mean_supply_temp_c, (1.0 * 60.0 + 2.0 * 50.0) / 3.0);
         approx_eq(s.mean_return_temp_c, (1.0 * 50.0 + 2.0 * 40.0) / 3.0);
     }
@@ -343,6 +384,7 @@ mod tests {
                 supply_temp_c: 52.0,
                 return_temp_c: 45.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
@@ -394,6 +436,7 @@ mod tests {
                 supply_temp_c: 55.0,
                 return_temp_c: 45.0,
                 fluid_type: FluidType::Water,
+                thermal_power_w: None,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
@@ -421,5 +464,97 @@ mod tests {
             ],
         );
         assert!(result.is_err());
+    }
+
+    // =======================================================================
+    // T-0084: System-level invariant — declared thermal_power_w matches flow balance
+    // =======================================================================
+
+    #[test]
+    fn declared_thermal_power_w_matches_flow_energy_balance() {
+        // When equipment declares thermal_power_w that matches flow × Cp × ΔT,
+        // the fluid solver invariant should be satisfied (no panic).
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+        let mut ports = PortSlots {
+            fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            ..Default::default()
+        };
+        // 0.5 kg/s × Cp J/(kg·K) × 20 K
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 60.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: Some(0.5 * CP_LIQUID_WATER_J_KG_K * 20.0),
+            })
+            .unwrap();
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        let declared = 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0;
+        let diff = (states[0].net_power_w - declared).abs();
+        assert!(
+            diff < 1e-3,
+            "net_power_w ({}) should match declared thermal_power_w ({declared}); diff = {diff}",
+            states[0].net_power_w
+        );
+    }
+
+    #[test]
+    fn thermal_power_w_accumulator_reflects_mixed_contributions() {
+        // When one contributor declares thermal_power_w and another does not (None),
+        // total_thermal_power_w should equal only the declared contribution.
+        let mut ports = PortSlots {
+            fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            ..Default::default()
+        };
+        // Contributor A: declares thermal_power_w matching its flow energy
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.3,
+                supply_temp_c: 55.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: Some(0.3 * CP_LIQUID_WATER_J_KG_K * 15.0),
+            })
+            .unwrap();
+        // Contributor B: no thermal_power_w declaration (None)
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.2,
+                supply_temp_c: 55.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: None,
+            })
+            .unwrap();
+
+        // total_thermal_power_w should be from contributor A only.
+        let expected_declared = 0.3 * CP_LIQUID_WATER_J_KG_K * 15.0;
+        let diff = (ports.fluid[0].total_thermal_power_w - expected_declared).abs();
+        assert!(
+            diff < 1e-3,
+            "total_thermal_power_w ({}) should match only declared contribution ({expected_declared})",
+            ports.fluid[0].total_thermal_power_w
+        );
+    }
+
+    #[test]
+    fn thermal_power_w_persists_through_zero() {
+        // After accumulating, zeroing the accumulator must clear thermal_power_w.
+        let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
+        fluid.add(0.5, 60.0, 40.0, Some(CP_LIQUID_WATER_J_KG_K)).unwrap();
+        assert!(fluid.total_thermal_power_w > 0.0);
+        fluid.zero();
+        assert!((fluid.total_thermal_power_w - 0.0).abs() < 1e-9);
+        assert!((fluid.total_flow_kg_s - 0.0).abs() < 1e-9);
     }
 }

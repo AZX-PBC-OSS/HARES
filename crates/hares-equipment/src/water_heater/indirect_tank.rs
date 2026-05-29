@@ -455,6 +455,7 @@ impl Equipment for IndirectTank {
                 supply_temp_c: boiler_supply_c,
                 return_temp_c: return_temp_finite,
                 fluid_type: self.fluid_type,
+                thermal_power_w: None,
             })?;
         }
 
@@ -466,6 +467,7 @@ impl Equipment for IndirectTank {
                 supply_temp_c: draw.outlet_temp_c,
                 return_temp_c: mains_temp_c,
                 fluid_type: self.fluid_type,
+                thermal_power_w: None,
             })?;
         }
 

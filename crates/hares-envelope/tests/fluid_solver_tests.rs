@@ -92,6 +92,7 @@ fn make_ports_with_flow(
             supply_temp_c,
             return_temp_c,
             fluid_type,
+            thermal_power_w: None,
         })
         .expect("accumulate must not fail for valid contribution");
     ports

@@ -796,6 +796,7 @@ impl Equipment for HeatPumpWH {
                 supply_temp_c: draw.outlet_temp_c,
                 return_temp_c: self.mains_temp_c,
                 fluid_type: self.fluid_type,
+                thermal_power_w: None,
             })?;
         }
 

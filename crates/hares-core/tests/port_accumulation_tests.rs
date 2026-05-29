@@ -321,6 +321,7 @@ fn undeclared_fluid_loop_rejected() {
         supply_temp_c: 40.0,
         return_temp_c: 35.0,
         fluid_type: FluidType::Water,
+        thermal_power_w: None,
     });
     assert!(
         result.is_err(),
@@ -461,6 +462,7 @@ fn full_timestep_scenario_all_port_types() {
             supply_temp_c: 55.0,
             return_temp_c: 45.0,
             fluid_type: FluidType::Water,
+            thermal_power_w: None,
         })
         .unwrap();
 

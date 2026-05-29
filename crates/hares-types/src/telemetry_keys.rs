@@ -255,6 +255,11 @@ pub const PARSE_ERROR_COUNT: &str = "parse_error_count";
 pub const TOTAL_COMMANDS_PARSED: &str = "total_commands_parsed";
 
 // ── Generator ───────────────────────────────────────────────────────────────
+/// Sum of `thermal_power_w` values written to fluid port contributions.
+/// Tracks the actual energy declared to the loop, enabling cross-validation
+/// against `THERMAL_OUTPUT_W`. In debug / check_invariants builds an assertion
+/// guards that these two values match within tolerance.
+pub const THERMAL_POWER_DELIVERED_W: &str = "thermal_power_delivered_w";
 /// Heat recovery ratio: fraction of available thermal power actually delivered to the loop.
 /// 1.0 = no capping; < 1.0 = loop saturated and thermal output is capped.
 /// EnergyPlus ICEngineElectricGenerator.cc:782 — HRecRatio.

@@ -118,6 +118,8 @@ pub struct FluidPortCapture {
     pub total_flow_kg_s: f64,
     pub mean_supply_temp_c: f64,
     pub mean_return_temp_c: f64,
+    /// Sum of declared thermal_power_w values from all contributors to this loop.
+    pub total_thermal_power_w: f64,
 }
 
 /// Domain solver outputs + envelope component gains.

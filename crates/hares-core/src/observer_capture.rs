@@ -158,6 +158,7 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
             total_flow_kg_s: f.total_flow_kg_s,
             mean_supply_temp_c: f.mean_supply_temp_c,
             mean_return_temp_c: f.mean_return_temp_c,
+            total_thermal_power_w: f.total_thermal_power_w,
         })
         .collect();
 
@@ -340,6 +341,7 @@ mod tests {
                 total_flow_kg_s: 1.0,
                 mean_supply_temp_c: 40.0,
                 mean_return_temp_c: 30.0,
+                total_thermal_power_w: 0.0,
             }],
             ..Default::default()
         };
@@ -353,6 +355,7 @@ mod tests {
                 total_flow_kg_s: 3.0,
                 mean_supply_temp_c: 45.0,
                 mean_return_temp_c: 35.0,
+                total_thermal_power_w: 0.0,
             }],
             ..Default::default()
         };
@@ -375,6 +378,7 @@ mod tests {
                 total_flow_kg_s: 10.0,
                 mean_supply_temp_c: 50.0,
                 mean_return_temp_c: 40.0,
+                total_thermal_power_w: 0.0,
             }],
             ..Default::default()
         };
