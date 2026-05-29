@@ -56,9 +56,11 @@ impl PvConfig {
             ));
         }
         if let Some(tilt) = self.tilt_deg {
-            if !tilt.is_finite() || !(0.0..=180.0).contains(&tilt) {
+            // EnergyPlus PVWatts.cc:118-119 validates tilt ∈ [0, 90];
+            // panels at > 90° face the ground and collect no direct beam.
+            if !tilt.is_finite() || !(0.0..=90.0).contains(&tilt) {
                 return Err(HaresError::Equipment(
-                    "PV tilt_deg must be finite and within [0, 180]".to_string(),
+                    "PV tilt_deg must be finite and within [0, 90]".to_string(),
                 ));
             }
         }
@@ -162,6 +164,13 @@ mod tests {
     fn pv_config_validate_rejects_out_of_range_tilt() {
         let mut cfg = minimal_pv_config();
         cfg.tilt_deg = Some(181.0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn pv_config_validate_rejects_tilt_above_90() {
+        let mut cfg = minimal_pv_config();
+        cfg.tilt_deg = Some(91.0);
         assert!(cfg.validate().is_err());
     }
 
