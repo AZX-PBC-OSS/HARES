@@ -462,8 +462,8 @@ fn gas_boiler_omitting_flow_rate_and_return_temp_silently_applies_defaults() {
         "ticket #112: flow_rate_kg_s default must be 0.5 kg/s (currently silent)"
     );
     assert_eq!(
-        cfg.return_temp_c, 40.0,
-        "ticket #112: return_temp_c default must be 40.0 °C (currently silent)"
+        cfg.return_temp_c, 70.0,
+        "ticket #112: return_temp_c default must be 70.0 °C (currently silent)"
     );
 }
 
@@ -503,8 +503,8 @@ fn electric_boiler_omitting_flow_rate_and_return_temp_silently_applies_defaults(
         "ticket #112: flow_rate_kg_s default must be 0.5 kg/s (currently silent)"
     );
     assert_eq!(
-        cfg.return_temp_c, 40.0,
-        "ticket #112: return_temp_c default must be 40.0 °C (currently silent)"
+        cfg.return_temp_c, 70.0,
+        "ticket #112: return_temp_c default must be 70.0 °C (currently silent)"
     );
 }
 

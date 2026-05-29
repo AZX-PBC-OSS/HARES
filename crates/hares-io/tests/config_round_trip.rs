@@ -76,7 +76,7 @@ fn sample_gas_boiler_config() -> GasBoilerConfig {
         capacity_w: 18_000.0,
         afue: 0.88,
         flow_rate_kg_s: 0.6,
-        return_temp_c: 45.0,
+        return_temp_c: 70.0,
         fluid_type: hares_types::FluidType::Water,
         fan_power_w: Some(80.0),
         number_of_speeds: 1,

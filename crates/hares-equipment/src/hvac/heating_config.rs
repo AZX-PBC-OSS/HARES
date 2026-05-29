@@ -150,9 +150,10 @@ pub struct GasBoilerConfig {
     /// configuration default when the HPXML file omits this field.
     #[serde(default = "default_flow_rate_kg_s")]
     pub flow_rate_kg_s: f64,
-    /// Hydronic loop design return temperature [°C]. Default 40.0 °C, a
-    /// typical condensing-boiler return temperature well below the ~55 °C
-    /// flue-gas dewpoint (ASHRAE HVAC Systems and Equipment Ch.32 "Boilers").
+    /// Hydronic loop design return temperature [°C]. Default 70.0 °C, a
+    /// safe non-condensing return temperature that avoids sustained flue-gas
+    /// condensation and corrosion (ASHRAE HVAC Systems and Equipment Ch.32
+    /// "Boilers": non-condensing boilers require return ≥ 70 °C).
     /// Not sourced from HPXML; applied as a configuration default when the
     /// HPXML file omits this field.
     #[serde(default = "default_return_temp_c")]
@@ -219,6 +220,27 @@ impl GasBoilerConfig {
                 self.afue
             )));
         }
+        // ASHRAE HVAC Systems and Equipment Ch.32: non-condensing boilers require
+        // return temperature ≥ 70 °C to avoid flue-gas condensation and corrosion.
+        // Condensing boilers operate with return temperature below the ~55 °C
+        // flue-gas dewpoint. A contradictory (condensing, return_temp_c) pair is a
+        // configuration error — the mismatch would produce physically invalid
+        // results during simulation.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if !self.condensing && self.return_temp_c < 55.0 {
+                return Err(HaresError::Equipment(format!(
+                    "GasBoilerConfig: condensing=false requires return_temp_c >= 55 °C, got {} °C",
+                    self.return_temp_c
+                )));
+            }
+            if self.condensing && self.return_temp_c >= 70.0 {
+                return Err(HaresError::Equipment(format!(
+                    "GasBoilerConfig: condensing=true expects return_temp_c < 70 °C, got {} °C",
+                    self.return_temp_c
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -241,9 +263,10 @@ pub struct ElectricBoilerConfig {
     /// configuration default when the HPXML file omits this field.
     #[serde(default = "default_flow_rate_kg_s")]
     pub flow_rate_kg_s: f64,
-    /// Hydronic loop design return temperature [°C]. Default 40.0 °C, a
-    /// typical condensing-boiler return temperature well below the ~55 °C
-    /// flue-gas dewpoint (ASHRAE HVAC Systems and Equipment Ch.32 "Boilers").
+    /// Hydronic loop design return temperature [°C]. Default 70.0 °C, a
+    /// safe non-condensing return temperature that avoids sustained flue-gas
+    /// condensation and corrosion (ASHRAE HVAC Systems and Equipment Ch.32
+    /// "Boilers": non-condensing boilers require return ≥ 70 °C).
     /// Not sourced from HPXML; applied as a configuration default when the
     /// HPXML file omits this field.
     #[serde(default = "default_return_temp_c")]
@@ -385,12 +408,11 @@ fn default_flow_rate_kg_s() -> f64 {
 }
 
 fn default_return_temp_c() -> f64 {
-    // ASHRAE HVAC Systems and Equipment Ch.32 "Boilers": condensing-boiler
-    // efficiency peaks when return water temperature is below the flue-gas
-    // dewpoint (~55 °C / 130 °F for natural gas). 40.0 °C is a typical
-    // condensing-mode operating point. Engineering estimate; not a canonical
-    // standard default.
-    40.0
+    // ASHRAE HVAC Systems and Equipment Ch.32 "Boilers": non-condensing boilers
+    // must maintain return water temperature ≥ 70 °C to avoid sustained flue-gas
+    // condensation and corrosion. 70.0 °C is a safe non-condensing default.
+    // Engineering estimate; not a canonical standard default.
+    70.0
 }
 
 fn default_fluid_type() -> FluidType {
@@ -639,5 +661,64 @@ mod tests {
                 "error for afue={afue} should mention '{expected_substring}', got: {msg}",
             );
         }
+    }
+
+    #[test]
+    fn gas_boiler_default_condensing_and_return_temp_c_are_consistent() {
+        let cfg = GasBoilerConfig::default();
+        assert!(!cfg.condensing, "default must be non-condensing");
+        assert!(
+            cfg.return_temp_c >= 70.0,
+            "non-condensing default return temp must be >= 70 °C, got {}",
+            cfg.return_temp_c
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn gas_boiler_validate_rejects_contradictory_condensing_return_temp() {
+        let base = GasBoilerConfig {
+            capacity_w: 10_000.0,
+            afue: 0.90,
+            ..GasBoilerConfig::default()
+        };
+        // Non-condensing with condensing-level return temp
+        let cfg = GasBoilerConfig {
+            condensing: false,
+            return_temp_c: 40.0,
+            ..base.clone()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("condensing=false + return_temp_c=40.0 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("condensing=false") || msg.contains("return_temp_c"),
+            "error must mention condensing and return_temp_c, got: {msg}"
+        );
+        // Condensing with non-condensing return temp
+        let cfg2 = GasBoilerConfig {
+            condensing: true,
+            return_temp_c: 75.0,
+            ..base
+        };
+        let err2 = cfg2
+            .validate()
+            .expect_err("condensing=true + return_temp_c=75.0 must be rejected");
+        let msg2 = err2.to_string();
+        assert!(
+            msg2.contains("condensing=true") || msg2.contains("return_temp_c"),
+            "error must mention condensing and return_temp_c, got: {msg2}"
+        );
+    }
+
+    #[test]
+    fn electric_boiler_default_return_temp_c_matches_non_condensing() {
+        let cfg = ElectricBoilerConfig::default();
+        assert!(
+            cfg.return_temp_c >= 70.0,
+            "ElectricBoilerConfig default return temp must be >= 70 °C, got {}",
+            cfg.return_temp_c
+        );
     }
 }

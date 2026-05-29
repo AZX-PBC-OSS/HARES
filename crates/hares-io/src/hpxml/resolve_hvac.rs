@@ -879,12 +879,8 @@ fn try_build_gas_boiler_config(
     // These are water-loop sizing parameters derived from ASHRAE HVAC Systems
     // and Equipment, Chapter 13 "Hydronic Heating and Cooling" for residential
     // flow-rate sizing conventions, and Chapter 32 "Boilers" for return-water
-    // temperature in condensing-mode operation. Neither the HPXML data model
-    // nor a single primary source prescribes canonical defaults for these fields;
-    // 0.5 kg/s (~8 gpm for a typical 60 000 Btu/h residential boiler, from the
-    // historical US standard of 1 gpm per 10 000 Btu/h) and 40.0 °C (typical
-    // condensing-boiler return temperature, well below the ~55 °C flue-gas
-    // dewpoint) are engineering estimates pending calibration data.
+    // temperature. 70.0 °C is a safe non-condensing default that avoids
+    // sustained flue-gas condensation and corrosion per ASHRAE SE Ch.32.
     let flow_rate_kg_s = params
         .get("flow_rate_kg_s")
         .and_then(Value::as_f64)
@@ -905,11 +901,11 @@ fn try_build_gas_boiler_config(
             tracing::debug!(
                 equipment_id = name,
                 field = "return_temp_c",
-                value = 40.0_f64,
+                value = 70.0_f64,
                 "boiler return water temperature not specified; using engineering default \
-                 (40 °C, typical condensing-boiler return per ASHRAE SE Ch.32)"
+                 (70 °C, non-condensing return per ASHRAE SE Ch.32)"
             );
-            40.0
+            70.0
         });
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
@@ -961,8 +957,7 @@ fn try_build_electric_boiler_config(
     // These are water-loop sizing parameters derived from ASHRAE HVAC Systems
     // and Equipment, Chapter 13 "Hydronic Heating and Cooling" for residential
     // flow-rate sizing conventions, and Chapter 32 "Boilers" for return-water
-    // temperature in condensing-mode operation. See Gas Boiler path above for
-    // the full citation rationale.
+    // temperature. 70.0 °C is a safe non-condensing default per ASHRAE SE Ch.32.
     let flow_rate_kg_s = params
         .get("flow_rate_kg_s")
         .and_then(Value::as_f64)
@@ -983,11 +978,11 @@ fn try_build_electric_boiler_config(
             tracing::debug!(
                 equipment_id = name,
                 field = "return_temp_c",
-                value = 40.0_f64,
+                value = 70.0_f64,
                 "electric boiler return water temperature not specified; using engineering default \
-                 (40 °C, typical condensing-boiler return per ASHRAE SE Ch.32)"
+                 (70 °C, non-condensing return per ASHRAE SE Ch.32)"
             );
-            40.0
+            70.0
         });
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");

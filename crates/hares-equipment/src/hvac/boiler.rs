@@ -30,14 +30,23 @@ use super::{
 use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 
 /// Default condensing boiler outlet temperature [C] (150 F).
-/// ASHRAE typical hydronic condensing temperature.
+/// ASHRAE HVAC Systems and Equipment Ch.32 "Boilers": condensing boilers
+/// are designed for ~65.6 °C (150 °F) outlet temperature to maximize
+/// flue-gas condensation and latent-heat recovery.
 const DEFAULT_CONDENSING_OUTLET_TEMP_C: f64 = 65.56;
 
 /// Default non-condensing boiler outlet temperature [C] (180 F).
+/// ASHRAE HVAC Systems and Equipment Ch.32 "Boilers": traditional
+/// non-condensing cast-iron boilers typically operate at 82.2 °C (180 °F)
+/// supply temperature to prevent flue-gas condensation and corrosion of
+/// the heat exchanger.
 const DEFAULT_NON_CONDENSING_OUTLET_TEMP_C: f64 = 82.22;
 
-/// Default hydronic return water temperature [C] (104 F).
-const DEFAULT_RETURN_TEMP_C: f64 = 40.0;
+/// Default hydronic return water temperature [°C] (158 °F).
+/// ASHRAE HVAC Systems and Equipment Ch.32 "Boilers": non-condensing boilers
+/// must maintain return water temperature >= 70 °C to avoid sustained
+/// flue-gas condensation and corrosion.
+const DEFAULT_RETURN_TEMP_C: f64 = 70.0;
 
 /// Default gas boiler AFUE. DOE 10 CFR Part 430, federal minimum.
 const DEFAULT_GAS_BOILER_AFUE: f64 = 0.8;
