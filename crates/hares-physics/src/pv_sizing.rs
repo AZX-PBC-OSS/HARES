@@ -303,6 +303,23 @@ pub fn compute_usable_area(
 
     let lat = latitude.unwrap_or(35.0);
 
+    // Invariant: East-facing panels must not be worse than West-facing.
+    // Physical basis: afternoon ambient temperatures are higher than morning
+    // temperatures, reducing PV efficiency via negative temperature coefficient
+    // (typically -0.3% to -0.5%/°C). Lave & Kleissl (2010) find west-facing
+    // panels produce 1–3% less than east-facing annually at most US locations.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        let east_factor = azimuth_production_factor(90.0, lat);
+        let west_factor = azimuth_production_factor(270.0, lat);
+        assert!(
+            east_factor >= west_factor,
+            "East production factor ({:.4}) must be >= West ({:.4}) — afternoon heat penalty",
+            east_factor,
+            west_factor
+        );
+    }
+
     // Select the best plane.
     let (best_idx, best_az) = if roof_shape == RoofShape::Hip {
         // Hip: pick the most-southerly plane (smallest south_distance), breaking
@@ -367,7 +384,7 @@ pub fn compute_usable_area(
         {
             let low_lat_north = azimuth_production_factor(0.0, 25.0);
             let high_lat_north = azimuth_production_factor(0.0, 48.0);
-            debug_assert!(
+            assert!(
                 low_lat_north > high_lat_north,
                 "north-facing production factor must decrease with latitude (25°N: {:.4}, 48°N: {:.4})",
                 low_lat_north,
@@ -825,6 +842,52 @@ mod tests {
                 assert!(f <= 1.0, "factor >1 for az={az}, lat={lat}");
             }
         }
+    }
+
+    #[test]
+    fn east_not_worse_than_west_at_all_latitudes() {
+        // East-facing panels must never be worse than West-facing panels.
+        // Physical basis: afternoon ambient temperatures are higher than morning
+        // temperatures, reducing PV efficiency (Lave & Kleissl 2010).
+        for lat in [20.0, 25.0, 35.0, 48.0] {
+            let e = azimuth_production_factor(90.0, lat);
+            let w = azimuth_production_factor(270.0, lat);
+            assert!(
+                e >= w,
+                "East ({:.4}) must be >= West ({:.4}) at lat={lat}",
+                e,
+                w
+            );
+        }
+    }
+
+    #[test]
+    fn ne_not_worse_than_nw_at_all_latitudes() {
+        // NE-facing (45°) panels must never be worse than NW-facing (315°)
+        // panels. Same physical basis as east_vs_west.
+        for lat in [20.0, 25.0, 35.0, 48.0] {
+            let ne = azimuth_production_factor(45.0, lat);
+            let nw = azimuth_production_factor(315.0, lat);
+            assert!(
+                ne >= nw,
+                "NE ({:.4}) must be >= NW ({:.4}) at lat={lat}",
+                ne,
+                nw
+            );
+        }
+    }
+
+    #[test]
+    fn azimuth_factors_at_reference_latitude_35n() {
+        // At 35°N, the quadratic azimuth derating model gives:
+        //   k(35°) = 0.40 (north_derating piecewise: 0.35 + 0.005×10)
+        //   East/West (θ=90°, x=0.5): 1 - 0.40 × 0.25 = 0.90
+        //   NE/NW   (θ=135°, x=0.75): 1 - 0.40 × 0.5625 = 0.775
+        let lat = 35.0;
+        assert!((azimuth_production_factor(90.0, lat) - 0.90).abs() < 1e-10);
+        assert!((azimuth_production_factor(270.0, lat) - 0.90).abs() < 1e-10);
+        assert!((azimuth_production_factor(45.0, lat) - 0.775).abs() < 1e-10);
+        assert!((azimuth_production_factor(315.0, lat) - 0.775).abs() < 1e-10);
     }
 
     #[test]
