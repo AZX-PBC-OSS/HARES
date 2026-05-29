@@ -33,6 +33,7 @@ fn no_new_imperial_conversion_markers_in_equipment_src() {
             "BTU_PER_HR_PER_W",
             &[
                 "hvac/air_conditioner.rs",
+                "hvac/cooling_config.rs",
                 "hvac/heat_pump_config.rs",
                 "hvac/heat_pump/heater_config.rs",
             ],

@@ -544,7 +544,20 @@ impl CoolingCore {
                 .airflow_m3_s_per_w
                 .unwrap_or(super::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W);
             self.rated_shr = cfg.shr.unwrap_or(0.75).clamp(0.0, 1.0);
-            let cd = cfg.startup_cd.unwrap_or(0.22);
+            // Priority: explicit user Cd → SEER-derived Cd → EnergyPlus SEER2 default 0.20.
+            // EnergyPlus `StandardRatings.cc:177–180`: SEER2 Cd=0.20.
+            let derived = cfg.derived_cooling_startup_cd();
+            if cfg.startup_cd.is_none() {
+                if let Some(cd_val) = derived {
+                    tracing::debug!(
+                        equipment_name = %config.name,
+                        startup_cd = cd_val,
+                        seer_bucket = if cd_val < 0.11 { "SEER >= 13" } else { "SEER < 13" },
+                        "Room AC derived cycling degradation coefficient from EIR"
+                    );
+                }
+            }
+            let cd = derived.unwrap_or(0.20);
             self.hvac.runtime.plf_cooling_degradation_coeff = cd;
             self.hvac.runtime.startup.c_d = cd;
         } else {
@@ -1677,6 +1690,7 @@ mod tests {
         CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, EquipmentRegistry,
         HvacSetpointConfig, RoomAcConfig,
     };
+    use hares_physics::constants::BTU_PER_HR_PER_W;
 
     fn env(
         zone_temp_c: f64,
@@ -1804,6 +1818,122 @@ mod tests {
             super::SpeedControlMode::SingleSpeed
         );
         assert_eq!(eq.core.hvac.config.duct_dse, 1.0);
+    }
+
+    #[test]
+    fn room_ac_init_uses_explicit_startup_cd() {
+        // Explicit startup_cd takes priority over SEER-derived value.
+        let explicit_cd = 0.15;
+        let cfg = EquipmentConfig::from_typed(
+            "room_ac_explicit".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: BTU_PER_HR_PER_W / 10.0,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                startup_cd: Some(explicit_cd),
+                ..room_ac_defaults()
+            },
+        );
+        let mut eq = RoomAC::new(cfg.clone());
+        eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).unwrap();
+        assert!((eq.core.hvac.runtime.plf_cooling_degradation_coeff - explicit_cd).abs() < 1e-9);
+        assert!((eq.core.hvac.runtime.startup.c_d - explicit_cd).abs() < 1e-9);
+    }
+
+    #[test]
+    fn room_ac_init_uses_derived_cd_when_no_explicit() {
+        // No explicit startup_cd → derived from SEER. SEER < 13 → Cd = 0.20.
+        let eir = BTU_PER_HR_PER_W / 10.0;
+        let cfg = EquipmentConfig::from_typed(
+            "room_ac_derived".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                startup_cd: None,
+                ..room_ac_defaults()
+            },
+        );
+        let mut eq = RoomAC::new(cfg.clone());
+        eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).unwrap();
+        assert!((eq.core.hvac.runtime.plf_cooling_degradation_coeff - 0.20).abs() < 1e-9);
+        assert!((eq.core.hvac.runtime.startup.c_d - 0.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn room_ac_init_uses_static_fallback_when_no_derived() {
+        // EIR is zero → derived_cooling_startup_cd returns None → fallback 0.20.
+        // However, validation will reject zero EIR before Cd init is reached.
+        let cfg = EquipmentConfig::from_typed(
+            "room_ac_fallback".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 0.0,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(24.0),
+                    heating_setpoint_c: Some(18.0),
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                startup_cd: None,
+                ..room_ac_defaults()
+            },
+        );
+        let mut eq = RoomAC::new(cfg.clone());
+        assert!(
+            eq.init(&cfg, &env(26.0, 0.009, 18.0, 30.0)).is_err(),
+            "zero eir should fail validation before reaching Cd init"
+        );
+    }
+
+    fn room_ac_defaults() -> RoomAcConfig {
+        RoomAcConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 0.0,
+            eir: 0.0,
+            setpoint: HvacSetpointConfig {
+                cooling_setpoint_c: None,
+                heating_setpoint_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+            },
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            shr: None,
+            startup_cd: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
+        }
     }
 
     /// Regression: AC step() previously called update_control() internally,

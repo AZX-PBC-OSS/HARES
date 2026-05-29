@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use hares_physics::constants::BTU_PER_HR_PER_W;
+
 use super::core_config::default_one;
 use super::core_config::equipment_type_name;
 use super::heating_config::DuctConfig;
@@ -128,7 +130,7 @@ impl CentralAirConditionerConfig {
             | SpeedControlMode::TwoSpeedTime
             | SpeedControlMode::TwoSpeedAlternating => Some(0.11),
             SpeedControlMode::SingleSpeed | SpeedControlMode::MultiSpeedInterpolated => {
-                let seer = 3.412_141_633 / self.eir.max(1e-6);
+                let seer = BTU_PER_HR_PER_W / self.eir.max(1e-6);
                 Some(if seer < 13.0 { 0.20 } else { 0.07 })
             }
         })
@@ -365,6 +367,7 @@ impl RoomAcConfig {
                 "crankcase_heater_threshold_c",
                 self.crankcase_heater_threshold_c,
             ),
+            ("startup_cd", self.startup_cd),
         ] {
             if let Some(v) = value
                 && !v.is_finite()
@@ -379,6 +382,13 @@ impl RoomAcConfig {
         {
             return Err(HaresError::Equipment(
                 "RoomAcConfig: airflow_m3_s_per_w must be > 0".to_string(),
+            ));
+        }
+        if let Some(v) = self.startup_cd
+            && v < 0.0
+        {
+            return Err(HaresError::Equipment(
+                "RoomAcConfig: startup_cd must be >= 0".to_string(),
             ));
         }
         if let Some(v) = self.crankcase_heater_kw
@@ -396,6 +406,25 @@ impl RoomAcConfig {
             ));
         }
         Ok(())
+    }
+
+    /// Derive the cycling degradation coefficient (Cd) from the unit's EIR-based
+    /// SEER-equivalent rating.
+    ///
+    /// Returns `None` when `eir` is zero or non-finite, leaving the caller to
+    /// choose a static fallback.
+    ///
+    /// Thresholds match EnergyPlus `StandardRatings.cc:177–180`:
+    /// - SEER ≥ 13 → Cd = 0.07 (high-efficiency, lower cycling penalty)
+    /// - SEER < 13  → Cd = 0.20 (standard-efficiency)
+    pub fn derived_cooling_startup_cd(&self) -> Option<f64> {
+        self.startup_cd.or_else(|| {
+            if !self.eir.is_finite() || self.eir <= 0.0 {
+                return None;
+            }
+            let seer = BTU_PER_HR_PER_W / self.eir;
+            Some(if seer < 13.0 { 0.20 } else { 0.07 })
+        })
     }
 }
 
@@ -891,6 +920,123 @@ mod tests {
     }
 
     #[test]
+    fn room_ac_derived_cd_from_high_seer_eir() {
+        // SEER 14 → eir = BTU_PER_HR_PER_W / 14.0
+        let eir = BTU_PER_HR_PER_W / 14.0;
+        let cfg = RoomAcConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 3_500.0,
+            eir,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            shr: None,
+            startup_cd: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
+        };
+        assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.07));
+    }
+
+    #[test]
+    fn room_ac_derived_cd_from_low_seer_eir() {
+        // SEER 9 → eir = BTU_PER_HR_PER_W / 9.0
+        let eir = BTU_PER_HR_PER_W / 9.0;
+        let cfg = RoomAcConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 3_500.0,
+            eir,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            shr: None,
+            startup_cd: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
+        };
+        assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.20));
+    }
+
+    #[test]
+    fn room_ac_explicit_startup_cd_overrides_derived() {
+        let eir = BTU_PER_HR_PER_W / 14.0;
+        let cfg = RoomAcConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 3_500.0,
+            eir,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            shr: None,
+            startup_cd: Some(0.15),
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
+        };
+        assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.15));
+    }
+
+    #[test]
+    fn room_ac_derived_cd_returns_none_for_invalid_eir() {
+        let cfg = RoomAcConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 3_500.0,
+            eir: 0.0,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            shr: None,
+            startup_cd: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
+        };
+        assert_eq!(cfg.derived_cooling_startup_cd(), None);
+    }
+
+    #[test]
     fn dehumidifier_config_round_trips() {
         let cfg = DehumidifierConfig {
             equipment_id: Some(1),
@@ -988,5 +1134,61 @@ mod tests {
             "Dehumidifier",
             "DehumidifierConfig type name must be 'Dehumidifier'"
         );
+    }
+
+    #[test]
+    fn room_ac_rejects_nan_startup_cd() {
+        let cfg = RoomAcConfig {
+            startup_cd: Some(f64::NAN),
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 3_500.0,
+            eir: 10.0,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            shr: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn room_ac_rejects_negative_startup_cd() {
+        let cfg = RoomAcConfig {
+            startup_cd: Some(-0.5),
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 3_500.0,
+            eir: 10.0,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            shr: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
+        };
+        assert!(cfg.validate().is_err());
     }
 }
