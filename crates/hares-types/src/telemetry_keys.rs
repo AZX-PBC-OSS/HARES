@@ -154,6 +154,10 @@ pub const CURTAILMENT_KW: &str = "curtailment_kw";
 pub const INVERTER_CLIPPING_KW: &str = "inverter_clipping_kw";
 pub const SOILING_RATIO: &str = "soiling_ratio";
 pub const SHADING_FACTOR: &str = "shading_factor";
+/// PV LUT interpolation method: 0.0 = multilinear, 1.0 = nearest-neighbor.
+pub const PV_LUT_INTERP_METHOD: &str = "pv_lut_interp_method";
+/// Cumulative count of nearest-neighbor fallbacks in PV LUT interpolation.
+pub const PV_LUT_NN_FALLBACK_COUNT: &str = "pv_lut_nn_fallback_count";
 
 // ── HVAC capacity reporting ────────────────────────────────────────────────
 pub const HVAC_HEATING_CAPACITY_W: &str = "hvac_heating_capacity_w";

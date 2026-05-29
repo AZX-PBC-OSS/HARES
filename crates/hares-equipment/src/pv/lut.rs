@@ -48,6 +48,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arrow::array::Array;
 use hares_types::HaresError;
@@ -77,7 +78,16 @@ impl AxisNorm {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Interpolation method used for a single query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InterpolationMethod {
+    /// All 64 bracket corners were populated — true multi-linear.
+    Multilinear,
+    /// One or more corners missing — fell back to nearest-neighbor.
+    NearestNeighbor,
+}
+
+#[derive(Debug)]
 pub(crate) struct PvLut {
     solar_zenith_values: Vec<f64>,
     solar_azimuth_values: Vec<f64>,
@@ -93,6 +103,29 @@ pub(crate) struct PvLut {
     sam_inv_eff: f64,
     sam_losses: f64,
     sam_array_type: Option<u8>,
+    nn_warned: AtomicBool,
+}
+
+impl Clone for PvLut {
+    fn clone(&self) -> Self {
+        Self {
+            solar_zenith_values: self.solar_zenith_values.clone(),
+            solar_azimuth_values: self.solar_azimuth_values.clone(),
+            ghi_values: self.ghi_values.clone(),
+            dni_values: self.dni_values.clone(),
+            dhi_values: self.dhi_values.clone(),
+            temp_values: self.temp_values.clone(),
+            values: self.values.clone(),
+            nn_entries: self.nn_entries.clone(),
+            nn_norms: self.nn_norms.clone(),
+            latitude_deg: self.latitude_deg,
+            longitude_deg: self.longitude_deg,
+            sam_inv_eff: self.sam_inv_eff,
+            sam_losses: self.sam_losses,
+            sam_array_type: self.sam_array_type,
+            nn_warned: AtomicBool::new(false),
+        }
+    }
 }
 
 impl PvLut {
@@ -168,10 +201,7 @@ impl PvLut {
                             .unwrap_or(0.0);
                     }
                     "harvest_lut_sam_array_type" => {
-                        sam_array_type = kv
-                            .value
-                            .as_deref()
-                            .and_then(|v| v.parse::<u8>().ok());
+                        sam_array_type = kv.value.as_deref().and_then(|v| v.parse::<u8>().ok());
                     }
                     _ => {}
                 }
@@ -393,6 +423,7 @@ impl PvLut {
             sam_inv_eff,
             sam_losses,
             sam_array_type,
+            nn_warned: AtomicBool::new(false),
         })
     }
 
@@ -446,7 +477,7 @@ impl PvLut {
         dni: f64,
         dhi: f64,
         temp_c: f64,
-    ) -> f64 {
+    ) -> (f64, InterpolationMethod) {
         let solar_zenith_deg = solar_zenith_deg.clamp(
             *self
                 .solar_zenith_values
@@ -519,10 +550,26 @@ impl PvLut {
         }
 
         if total_weight > 0.0 {
-            return weighted_sum / total_weight;
+            return (
+                weighted_sum / total_weight,
+                InterpolationMethod::Multilinear,
+            );
         }
 
         // Sparse-grid fallback: nearest-neighbor with normalized distance.
+        // Emit a throttled warn! the first time this LUT falls back.
+        if self
+            .nn_warned
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            tracing::warn!(
+                "PV LUT nearest-neighbor fallback triggered: \
+                 LUT has sparse coverage and results may be inaccurate. \
+                 Re-generate the LUT with a denser grid for better accuracy.",
+            );
+        }
+
         let axes: [&[f64]; 6] = [
             &self.solar_zenith_values,
             &self.solar_azimuth_values,
@@ -548,7 +595,7 @@ impl PvLut {
                 best_val = ac;
             }
         }
-        best_val
+        (best_val, InterpolationMethod::NearestNeighbor)
     }
 }
 
@@ -617,6 +664,7 @@ impl PvLut {
             sam_inv_eff: 0.0,
             sam_losses: 0.0,
             sam_array_type: None,
+            nn_warned: AtomicBool::new(false),
         }
     }
 }

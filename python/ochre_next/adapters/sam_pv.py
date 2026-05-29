@@ -335,6 +335,16 @@ def _build_lut_table(
     using the Spencer (1971) model.  Irradiance and temperature are
     quantised to fixed bins; zenith and azimuth are binned at
     ``ZENITH_BIN_DEG`` / ``AZIMUTH_BIN_DEG`` resolution.
+
+    After building the sparse (weather-observed) grid, each observed cell
+    is expanded by one bin step along every axis.  Cells that differ from
+    an observed cell on a single axis are added if absent and filled by
+    nearest-neighbor from the sparse data.  This improves multi-linear
+    coverage (fewer missing corners) compared to the weather-file-only
+    grid, but does not guarantee all 2^6 = 64 corners are present for
+    every in-hull query.  Brackets that need simultaneous displacement on
+    two or more axes for a corner may still miss it.  See Known
+    Limitations in the ticket for the full constraint.
     """
     ac = pvwatts_output["ac"]
     gh = pvwatts_output["gh"]
@@ -359,6 +369,136 @@ def _build_lut_table(
         ac_kw = ac[i] / 1000.0
         aggregator.setdefault(key, []).append(ac_kw)
 
+    # Average AC power for each sparse bin (weather-observed data).
+    sparse_grid: dict[tuple[float, float, float, float, float, float], float] = {}
+    for key, vals in aggregator.items():
+        sparse_grid[key] = sum(vals) / len(vals)
+
+    # Collect sorted unique axis values from the sparse data.
+    zenith_axis = sorted({k[0] for k in sparse_grid})
+    azimuth_axis = sorted({k[1] for k in sparse_grid})
+    ghi_axis = sorted({k[2] for k in sparse_grid})
+    dni_axis = sorted({k[3] for k in sparse_grid})
+    dhi_axis = sorted({k[4] for k in sparse_grid})
+    temp_axis = sorted({k[5] for k in sparse_grid})
+
+    # Build index maps for each axis: value → sorted index.
+    zenith_idx: dict[float, int] = {v: i for i, v in enumerate(zenith_axis)}
+    azimuth_idx: dict[float, int] = {v: i for i, v in enumerate(azimuth_axis)}
+    ghi_idx: dict[float, int] = {v: i for i, v in enumerate(ghi_axis)}
+    dni_idx: dict[float, int] = {v: i for i, v in enumerate(dni_axis)}
+    dhi_idx: dict[float, int] = {v: i for i, v in enumerate(dhi_axis)}
+    temp_idx: dict[float, int] = {v: i for i, v in enumerate(temp_axis)}
+
+    # Pre-compute axis normalization factors for normalized nearest-neighbor
+    # distance (matches the Rust PvLut nearest-neighbor metric).
+    _axis_norm = {}
+    axes: dict[str, list[float]] = {
+        "zenith": zenith_axis,
+        "azimuth": azimuth_axis,
+        "ghi": ghi_axis,
+        "dni": dni_axis,
+        "dhi": dhi_axis,
+        "temp": temp_axis,
+    }
+    for name, axis in axes.items():
+        mn = axis[0]
+        mx = axis[-1]
+        rng = mx - mn
+        _axis_norm[name] = (mn, 1.0 / max(rng, 1e-12))
+
+    def _nn_fill(key: tuple[float, float, float, float, float, float]) -> float:
+        """Return the AC power of the nearest sparse-grid point."""
+        best_dist = float("inf")
+        best_val: float = 0.0
+        z_q, a_q, g_q, dn_q, dh_q, t_q = key
+        z_n = (z_q - _axis_norm["zenith"][0]) * _axis_norm["zenith"][1]
+        a_n = (a_q - _axis_norm["azimuth"][0]) * _axis_norm["azimuth"][1]
+        g_n = (g_q - _axis_norm["ghi"][0]) * _axis_norm["ghi"][1]
+        dn_n = (dn_q - _axis_norm["dni"][0]) * _axis_norm["dni"][1]
+        dh_n = (dh_q - _axis_norm["dhi"][0]) * _axis_norm["dhi"][1]
+        t_n = (t_q - _axis_norm["temp"][0]) * _axis_norm["temp"][1]
+        for (z_s, a_s, g_s, dn_s, dh_s, t_s), val in sparse_grid.items():
+            dz = z_n - (z_s - _axis_norm["zenith"][0]) * _axis_norm["zenith"][1]
+            da = a_n - (a_s - _axis_norm["azimuth"][0]) * _axis_norm["azimuth"][1]
+            dg = g_n - (g_s - _axis_norm["ghi"][0]) * _axis_norm["ghi"][1]
+            dd = dn_n - (dn_s - _axis_norm["dni"][0]) * _axis_norm["dni"][1]
+            dh = dh_n - (dh_s - _axis_norm["dhi"][0]) * _axis_norm["dhi"][1]
+            dt = t_n - (t_s - _axis_norm["temp"][0]) * _axis_norm["temp"][1]
+            dist = dz * dz + da * da + dg * dg + dd * dd + dh * dh + dt * dt
+            if dist < best_dist:
+                best_dist = dist
+                best_val = val
+        return best_val
+
+    def _axis_neighbors(values: list[float], idx: int):
+        """Yield (next_lower_idx, next_higher_idx) values within bounds."""
+        if idx > 0:
+            yield values[idx - 1]
+        if idx + 1 < len(values):
+            yield values[idx + 1]
+
+    # Expand each sparse grid point by adding cells one bin step away
+    # along each axis.  This improves multi-linear coverage compared to
+    # the weather-file-only sparse grid, but a bracket corner that
+    # requires simultaneous displacement on two or more axes may still
+    # be absent.  See Known Limitations in the ticket.
+    full_grid: dict[tuple[float, float, float, float, float, float], float] = dict(sparse_grid)
+    n_filled: int = 0
+    for (z, a, g, dn_v, dh, t), _ac in sparse_grid.items():
+        zi = zenith_idx[z]
+        ai = azimuth_idx[a]
+        gi = ghi_idx[g]
+        dni = dni_idx[dn_v]
+        dhi = dhi_idx[dh]
+        ti = temp_idx[t]
+
+        # Neighbouring bin values on each axis (one step away).
+        z_neighbors = list(_axis_neighbors(zenith_axis, zi))
+        a_neighbors = list(_axis_neighbors(azimuth_axis, ai))
+        g_neighbors = list(_axis_neighbors(ghi_axis, gi))
+        dn_neighbors = list(_axis_neighbors(dni_axis, dni))
+        dh_neighbors = list(_axis_neighbors(dhi_axis, dhi))
+        t_neighbors = list(_axis_neighbors(temp_axis, ti))
+
+        for nz in z_neighbors:
+            key = (nz, a, g, dn_v, dh, t)
+            if key not in full_grid:
+                full_grid[key] = _nn_fill(key)
+                n_filled += 1
+        for na in a_neighbors:
+            key = (z, na, g, dn_v, dh, t)
+            if key not in full_grid:
+                full_grid[key] = _nn_fill(key)
+                n_filled += 1
+        for ng in g_neighbors:
+            key = (z, a, ng, dn_v, dh, t)
+            if key not in full_grid:
+                full_grid[key] = _nn_fill(key)
+                n_filled += 1
+        for nd in dn_neighbors:
+            key = (z, a, g, nd, dh, t)
+            if key not in full_grid:
+                full_grid[key] = _nn_fill(key)
+                n_filled += 1
+        for ndh in dh_neighbors:
+            key = (z, a, g, dn_v, ndh, t)
+            if key not in full_grid:
+                full_grid[key] = _nn_fill(key)
+                n_filled += 1
+        for nt in t_neighbors:
+            key = (z, a, g, dn_v, dh, nt)
+            if key not in full_grid:
+                full_grid[key] = _nn_fill(key)
+                n_filled += 1
+
+    if n_filled > 0:
+        LOGGER.info(
+            "PV LUT grid infill: added %d cells to dense %d-cell sparse grid",
+            n_filled,
+            len(sparse_grid),
+        )
+
     zeniths: list[float] = []
     azimuths: list[float] = []
     ghis: list[float] = []
@@ -367,14 +507,14 @@ def _build_lut_table(
     temps: list[float] = []
     powers: list[float] = []
 
-    for (z, a, g, dn_v, dh, t), vals in sorted(aggregator.items()):
+    for (z, a, g, dn_v, dh, t), pw in sorted(full_grid.items()):
         zeniths.append(z)
         azimuths.append(a)
         ghis.append(g)
         dnis.append(dn_v)
         dhis.append(dh)
         temps.append(t)
-        powers.append(sum(vals) / len(vals))
+        powers.append(pw)
 
     return pa.table(
         {

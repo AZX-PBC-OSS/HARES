@@ -9,7 +9,7 @@ pub mod soiling;
 pub use array_config::{ArrayType, ModuleType, PvArray, PvArraySpec, surface_id_for_orientation};
 use array_config::{normalize_azimuth, parse_u32_from_f64};
 pub use config::PvConfig;
-use lut::PvLut;
+use lut::{InterpolationMethod, PvLut};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -115,6 +115,7 @@ struct ArrayStepOutput {
     ac_power_kw: f64,
     irradiance_w_m2: f64,
     cell_temp_c: f64,
+    interp_method: Option<InterpolationMethod>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -188,7 +189,7 @@ impl PV {
             telemetry_fields: telemetry_fields(),
         };
 
-        let mut telemetry = Telemetry::with_capacity(9);
+        let mut telemetry = Telemetry::with_capacity(12);
         telemetry.insert(tk::DC_POWER_KW, 0.0);
         telemetry.insert(tk::AC_POWER_KW, 0.0);
         telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
@@ -199,6 +200,8 @@ impl PV {
         telemetry.insert(tk::INVERTER_CLIPPING_KW, 0.0);
         telemetry.insert(tk::SOILING_RATIO, 1.0);
         telemetry.insert(tk::SHADING_FACTOR, 1.0);
+        telemetry.insert(tk::PV_LUT_INTERP_METHOD, 0.0);
+        telemetry.insert(tk::PV_LUT_NN_FALLBACK_COUNT, 0.0);
 
         Self {
             descriptor,
@@ -252,18 +255,15 @@ impl PV {
             let ghi = env.weather.ghi_w_m2.max(0.0);
             let dni = env.weather.dni_w_m2.max(0.0);
             let dhi = env.weather.dhi_w_m2.max(0.0);
-            let ac_power_kw = lut
-                .interpolate(
-                    solar_zenith_deg,
-                    solar_azimuth_deg,
-                    ghi,
-                    dni,
-                    dhi,
-                    ambient_temp_c,
-                )
-                .max(0.0)
-                * soiling_ratio
-                * shading_factor;
+            let (lut_ac_kw, interp_method) = lut.interpolate(
+                solar_zenith_deg,
+                solar_azimuth_deg,
+                ghi,
+                dni,
+                dhi,
+                ambient_temp_c,
+            );
+            let ac_power_kw = lut_ac_kw.max(0.0) * soiling_ratio * shading_factor;
 
             let cell_temp_c = cell_temperature_noct_wind(
                 ambient_temp_c,
@@ -368,6 +368,7 @@ impl PV {
                 ac_power_kw,
                 irradiance_w_m2,
                 cell_temp_c,
+                interp_method: Some(interp_method),
             };
         }
 
@@ -390,6 +391,7 @@ impl PV {
             ac_power_kw,
             irradiance_w_m2,
             cell_temp_c,
+            interp_method: None,
         }
     }
 
@@ -794,6 +796,7 @@ impl Equipment for PV {
         let mut total_irradiance_weighted = 0.0;
         let mut total_cell_temp_weighted = 0.0;
         let mut total_capacity_kw = 0.0;
+        let mut lut_nn_fallback = false;
 
         for array in &self.arrays {
             let surface_id = array.surface_id.ok_or_else(|| {
@@ -814,6 +817,9 @@ impl Equipment for PV {
                 })?;
 
             let output = self.step_one_array(env, irr, array, soiling_ratio, shading_factor);
+            if output.interp_method == Some(InterpolationMethod::NearestNeighbor) {
+                lut_nn_fallback = true;
+            }
             total_dc_power_kw += output.dc_power_kw;
             total_ac_power_kw += output.ac_power_kw;
             total_irradiance_weighted += output.irradiance_w_m2 * array.capacity_kw;
@@ -884,6 +890,15 @@ impl Equipment for PV {
             .set(tk::INVERTER_CLIPPING_KW, inverter_clipping_kw);
         self.telemetry.set(tk::SOILING_RATIO, soiling_ratio);
         self.telemetry.set(tk::SHADING_FACTOR, shading_factor);
+        self.telemetry
+            .set(tk::PV_LUT_INTERP_METHOD, f64::from(lut_nn_fallback));
+        if lut_nn_fallback {
+            let prev = self
+                .telemetry
+                .get(tk::PV_LUT_NN_FALLBACK_COUNT)
+                .unwrap_or(0.0);
+            self.telemetry.set(tk::PV_LUT_NN_FALLBACK_COUNT, prev + 1.0);
+        }
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Generation(final_p_kw.max(0.0))),
@@ -1075,6 +1090,18 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             unit: "-".to_string(),
             description: "PV shading factor (1.0 = unshaded, 0.0 = fully shaded)".to_string(),
         },
+        TelemetryField {
+            name: tk::PV_LUT_INTERP_METHOD.to_string(),
+            unit: "-".to_string(),
+            description: "PV LUT interpolation method: 0.0 = multilinear, 1.0 = nearest-neighbor"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::PV_LUT_NN_FALLBACK_COUNT.to_string(),
+            unit: "count".to_string(),
+            description: "Cumulative count of nearest-neighbor fallbacks in PV LUT interpolation"
+                .to_string(),
+        },
     ]
 }
 
@@ -1082,6 +1109,7 @@ fn telemetry_fields() -> Vec<TelemetryField> {
 mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use arrow::array::Float64Array;
@@ -1096,12 +1124,12 @@ mod tests {
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
 
-    use super::lut::PvLut;
+    use super::lut::{InterpolationMethod, PvLut};
     use super::{
-        DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_POWER_FACTOR, DEFAULT_SYSTEM_LOSSES_FRACTION,
-        Equipment, EquipmentConfig, ArrayType, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2,
-        NOCT_REFERENCE_TEMP_C, PV, PvArray, PvArraySpec, PvConfig, cell_temperature_noct_wind,
-        surface_id_for_orientation,
+        ArrayType, DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_POWER_FACTOR,
+        DEFAULT_SYSTEM_LOSSES_FRACTION, Equipment, EquipmentConfig, ModuleType,
+        NOCT_REFERENCE_IRRADIANCE_W_M2, NOCT_REFERENCE_TEMP_C, PV, PvArray, PvArraySpec, PvConfig,
+        cell_temperature_noct_wind, surface_id_for_orientation,
     };
 
     fn env_with_surfaces(
@@ -2021,7 +2049,7 @@ mod tests {
                 ([2, 0, 0, 0, 0, 0], 5.0), // zenith=80, azimuth=180, GHI=0
             ],
         );
-        let result = lut.interpolate(45.0, 180.0, 100.0, 500.0, 100.0, 25.0);
+        let (result, _) = lut.interpolate(45.0, 180.0, 100.0, 500.0, 100.0, 25.0);
         // query=(45,100) vs A=(10,1200) vs B=(80,0)
         // Norm zenith: (45-10)/(80-10)=0.5 for query, (10-10)/70=0 for A, (80-10)/70=1 for B
         // Norm GHI: (100-0)/1200=0.083 for query, (1200-0)/1200=1 for A, (0-0)/1200=0 for B
@@ -2029,6 +2057,161 @@ mod tests {
         // dist_B = (0.5-1)^2 + (0.083-0)^2 = 0.25 + 0.007 = 0.257
         // B wins (value=5.0)
         approx_eq(result, 5.0);
+    }
+
+    #[test]
+    fn lut_sparse_grid_falls_back_to_nearest_neighbor() {
+        // Sparse LUT: only 2 entries in a 6-point axis bracket — far fewer
+        // than the 2^6 = 64 corners needed for multi-linear.  Querying
+        // between the gap forces nearest-neighbor fallback.
+        let lut = PvLut::from_raw(
+            vec![20.0, 40.0, 60.0],
+            vec![160.0, 180.0, 200.0],
+            vec![200.0, 500.0, 800.0],
+            vec![150.0, 450.0, 750.0],
+            vec![50.0, 150.0, 250.0],
+            vec![15.0, 25.0, 35.0],
+            // Only 2 corners populated (~7% of 64) — multi-linear must fail.
+            vec![
+                ([0, 0, 0, 0, 0, 0], 1.5), // (20,160,200,150,50,15)
+                ([2, 2, 2, 2, 2, 2], 4.0), // (60,200,800,750,250,35)
+            ],
+        );
+        let (_val, method) = lut.interpolate(40.0, 180.0, 500.0, 450.0, 150.0, 25.0);
+        assert_eq!(
+            method,
+            InterpolationMethod::NearestNeighbor,
+            "sparse LUT with <64 corners must fall back to nearest-neighbor"
+        );
+    }
+
+    #[test]
+    fn lut_dense_grid_uses_multilinear_interpolation() {
+        // Dense LUT: all 64 corners of every 2-element bracket are
+        // populated.  Multi-linear interpolation must succeed.
+        let zens = vec![20.0, 70.0];
+        let azims = vec![180.0];
+        let ghis = vec![200.0, 800.0];
+        let dnis = vec![150.0, 600.0];
+        let dhis = vec![50.0, 200.0];
+        let temps = vec![25.0];
+        // Populate all 2^6 = 64 entries.
+        let mut entries = Vec::with_capacity(64);
+        for zi in [0usize, 1] {
+            for ai in [0usize] {
+                for gi in [0usize, 1] {
+                    for di in [0usize, 1] {
+                        for dhi in [0usize, 1] {
+                            for ti in [0usize] {
+                                let val =
+                                    (zi as f64) * 10.0 + (gi as f64) * 2.0 + (di as f64) * 0.5;
+                                entries.push(([zi, ai, gi, di, dhi, ti], val));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let lut = PvLut::from_raw(zens, azims, ghis, dnis, dhis, temps, entries);
+        let (_val, method) = lut.interpolate(45.0, 180.0, 500.0, 375.0, 125.0, 25.0);
+        assert_eq!(
+            method,
+            InterpolationMethod::Multilinear,
+            "dense LUT with all 64 corners must use multi-linear interpolation"
+        );
+    }
+
+    #[test]
+    fn lut_interpolation_method_telemetry_updated_on_fallback() {
+        // Verify that after a step with a sparse LUT (NN fallback),
+        // the telemetry method is set to 1.0 and the fallback count
+        // increments.
+        use std::collections::HashMap;
+        use std::path::Path;
+
+        let path = unique_temp_path("pv_lut_nn_telemetry", "parquet");
+        // Write a sparse Parquet LUT with only 2 entries in a 6-element grid.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("solar_zenith_deg", DataType::Float64, false),
+            Field::new("solar_azimuth_deg", DataType::Float64, false),
+            Field::new("ghi", DataType::Float64, false),
+            Field::new("dni", DataType::Float64, false),
+            Field::new("dhi", DataType::Float64, false),
+            Field::new("temp_c", DataType::Float64, false),
+            Field::new("ac_power_kw", DataType::Float64, false),
+        ]));
+        let zeniths = Float64Array::from(vec![20.0, 60.0]);
+        let azimuths = Float64Array::from(vec![180.0, 180.0]);
+        let ghis = Float64Array::from(vec![200.0, 800.0]);
+        let dnis = Float64Array::from(vec![150.0, 600.0]);
+        let dhis = Float64Array::from(vec![50.0, 200.0]);
+        let temps = Float64Array::from(vec![25.0, 25.0]);
+        let acs = Float64Array::from(vec![1.5, 4.0]);
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(zeniths),
+                Arc::new(azimuths),
+                Arc::new(ghis),
+                Arc::new(dnis),
+                Arc::new(dhis),
+                Arc::new(temps),
+                Arc::new(acs),
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let kv = vec![
+            KeyValue {
+                key: "harvest_lut_latitude_deg".into(),
+                value: Some("40.0".into()),
+            },
+            KeyValue {
+                key: "harvest_lut_longitude_deg".into(),
+                value: Some("-105.0".into()),
+            },
+        ];
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kv))
+            .build();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut typed = base_pv_typed_config();
+        typed.equipment_id = Some(30);
+        typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        typed.inverter_efficiency = Some(1.0);
+        typed.system_losses_fraction = Some(0.0);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let env = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 800.0,
+                diffuse_w_m2: 100.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+            1.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).expect("init pv with sparse lut");
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step pv with sparse lut");
+        assert!(
+            pv.telemetry().get(tk::PV_LUT_INTERP_METHOD).unwrap_or(0.0) >= 0.5,
+            "sparse LUT must set interp method to nearest-neighbor (1.0)"
+        );
+        assert!(
+            pv.telemetry()
+                .get(tk::PV_LUT_NN_FALLBACK_COUNT)
+                .unwrap_or(0.0)
+                > 0.0,
+            "sparse LUT must increment NN fallback count"
+        );
     }
 
     // --- Inverter model tests ---
@@ -2259,6 +2442,8 @@ mod tests {
         assert!(field_names.contains(&tk::DC_POWER_KW));
         assert!(field_names.contains(&tk::AC_POWER_KW));
         assert!(field_names.contains(&tk::CURTAILMENT_KW));
+        assert!(field_names.contains(&tk::PV_LUT_INTERP_METHOD));
+        assert!(field_names.contains(&tk::PV_LUT_NN_FALLBACK_COUNT));
     }
 
     // --- New tests for issue fixes ---
@@ -2682,8 +2867,8 @@ mod tests {
 
         // Query at exactly the entry points — interpolate returns the exact
         // entry value when the query matches a bracket point.
-        let power_overhead = lut.interpolate(20.0, 180.0, 800.0, 600.0, 200.0, 25.0);
-        let power_horizon = lut.interpolate(70.0, 180.0, 800.0, 600.0, 200.0, 25.0);
+        let (power_overhead, _) = lut.interpolate(20.0, 180.0, 800.0, 600.0, 200.0, 25.0);
+        let (power_horizon, _) = lut.interpolate(70.0, 180.0, 800.0, 600.0, 200.0, 25.0);
 
         approx_eq(power_overhead, 4.2);
         approx_eq(power_horizon, 1.3);
@@ -2719,8 +2904,8 @@ mod tests {
         );
 
         // At GHI=800: zenith=20° → 5.0 kW, zenith=70° → 2.0 kW
-        let p_low = lut.interpolate(20.0, 180.0, 800.0, 600.0, 200.0, 25.0);
-        let p_high = lut.interpolate(70.0, 180.0, 800.0, 600.0, 200.0, 25.0);
+        let (p_low, _) = lut.interpolate(20.0, 180.0, 800.0, 600.0, 200.0, 25.0);
+        let (p_high, _) = lut.interpolate(70.0, 180.0, 800.0, 600.0, 200.0, 25.0);
 
         approx_eq(p_low, 5.0);
         approx_eq(p_high, 2.0);
@@ -3016,8 +3201,7 @@ mod tests {
         let mut cfg = base_pv_typed_config();
         cfg.noct_c = None;
         cfg.array_type = Some("roof_mounted".to_string());
-        let cfg =
-            EquipmentConfig::from_typed("PV Roof".to_string(), "PV".to_string(), cfg);
+        let cfg = EquipmentConfig::from_typed("PV Roof".to_string(), "PV".to_string(), cfg);
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -3042,8 +3226,7 @@ mod tests {
         let mut cfg = base_pv_typed_config();
         cfg.noct_c = Some(42.0);
         cfg.array_type = Some("roof_mounted".to_string());
-        let cfg =
-            EquipmentConfig::from_typed("PV Explicit".to_string(), "PV".to_string(), cfg);
+        let cfg = EquipmentConfig::from_typed("PV Explicit".to_string(), "PV".to_string(), cfg);
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -3074,8 +3257,7 @@ mod tests {
         cfg.noct_c = None;
         cfg.array_type = Some("OpenRack".to_string());
         cfg.equipment_id = Some(1);
-        let cfg =
-            EquipmentConfig::from_typed("PV OpenRack".to_string(), "PV".to_string(), cfg);
+        let cfg = EquipmentConfig::from_typed("PV OpenRack".to_string(), "PV".to_string(), cfg);
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -3129,10 +3311,10 @@ mod tests {
         cfg.array_type = Some("OpenRack".to_string());
         cfg.sam_lut_path = Some(path.to_string_lossy().into_owned());
         cfg.inverter_efficiency = Some(1.0);
-        let cfg =
-            EquipmentConfig::from_typed("PV LUT AT".to_string(), "PV".to_string(), cfg);
+        let cfg = EquipmentConfig::from_typed("PV LUT AT".to_string(), "PV".to_string(), cfg);
         let mut pv = PV::new(cfg.clone());
-        pv.init(&cfg, &env).expect("init pv lut with array_type metadata");
+        pv.init(&cfg, &env)
+            .expect("init pv lut with array_type metadata");
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports)
             .expect("step pv lut with array_type metadata");
@@ -3204,8 +3386,7 @@ mod tests {
                 ),
             ]))
             .build();
-        let mut writer =
-            ArrowWriter::try_new(file, schema, Some(props)).expect("arrow writer");
+        let mut writer = ArrowWriter::try_new(file, schema, Some(props)).expect("arrow writer");
         writer.write(&batch).expect("write parquet batch");
         writer.close().expect("close parquet writer");
     }
