@@ -12,5 +12,8 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 
+[features]
+check_invariants = []
+
 [dev-dependencies]
 approx = "0.5"

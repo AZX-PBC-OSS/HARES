@@ -441,6 +441,8 @@ fn load_hvac_curve_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                 x1_bounds: (v.twb_bounds[0], v.twb_bounds[1]),
                 x2_bounds: (v.tdb_bounds[0], v.tdb_bounds[1]),
                 warn_on_clamp: true,
+                output_min: Some(0.0),
+                output_max: None,
             },
             cap_ff: v.cap_ff,
             eir_t: BiquadraticCurve {
@@ -448,6 +450,8 @@ fn load_hvac_curve_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                 x1_bounds: (v.twb_bounds[0], v.twb_bounds[1]),
                 x2_bounds: (v.tdb_bounds[0], v.tdb_bounds[1]),
                 warn_on_clamp: true,
+                output_min: None,
+                output_max: None,
             },
             eir_ff: v.eir_ff,
             eir_plr: v.eir_plr,
@@ -540,6 +544,8 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                     x1_bounds: (twb_min, twb_max),
                     x2_bounds: (tdb_min, tdb_max),
                     warn_on_clamp: true,
+                    output_min: Some(0.0),
+                    output_max: None,
                 },
                 cap_ff: [
                     get_row("a_cap_ff")[i],
@@ -551,6 +557,8 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                     x1_bounds: (twb_min, twb_max),
                     x2_bounds: (tdb_min, tdb_max),
                     warn_on_clamp: true,
+                    output_min: None,
+                    output_max: None,
                 },
                 eir_ff: [
                     get_row("a_eir_ff")[i],

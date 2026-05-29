@@ -160,12 +160,16 @@ impl Dehumidifier {
                 x1_bounds: DEFAULT_DB_BOUNDS_C,
                 x2_bounds: DEFAULT_RH_BOUNDS,
                 warn_on_clamp: false,
+                output_min: None,
+                output_max: None,
             },
             energy_factor_curve: BiquadraticCurve {
                 coeffs: DEFAULT_NORMALIZED_CURVE,
                 x1_bounds: DEFAULT_DB_BOUNDS_C,
                 x2_bounds: DEFAULT_RH_BOUNDS,
                 warn_on_clamp: false,
+                output_min: None,
+                output_max: None,
             },
             water_removal_curve_rated_value: 1.0,
             energy_factor_curve_rated_value: 1.0,
@@ -362,12 +366,16 @@ impl Dehumidifier {
             x1_bounds: DEFAULT_DB_BOUNDS_C,
             x2_bounds: DEFAULT_RH_BOUNDS,
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         self.energy_factor_curve = BiquadraticCurve {
             coeffs: DEFAULT_ENERGY_FACTOR_CURVE,
             x1_bounds: DEFAULT_DB_BOUNDS_C,
             x2_bounds: DEFAULT_RH_BOUNDS,
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         // Compute normalisation divisors at the EnergyPlus rated condition
         // (26.7°C / 60 %RH) so that rated_capacity_liters_per_day passes

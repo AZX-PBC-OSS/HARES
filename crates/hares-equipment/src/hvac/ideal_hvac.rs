@@ -66,6 +66,9 @@ impl BiquadraticCurveSet {
             x1_bounds: self.x1_bounds,
             x2_bounds: self.x2_bounds,
             warn_on_clamp: false,
+            // EnergyPlus CurveManager.cc:282–287: capacity output must be non-negative
+            output_min: Some(0.0),
+            output_max: None,
         }
         .evaluate(x1, x2)
     }
@@ -76,6 +79,8 @@ impl BiquadraticCurveSet {
             x1_bounds: self.x1_bounds,
             x2_bounds: self.x2_bounds,
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         }
         .evaluate(x1, x2)
     }

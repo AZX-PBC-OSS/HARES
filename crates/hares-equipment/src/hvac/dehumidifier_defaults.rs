@@ -91,6 +91,8 @@ mod tests {
             x1_bounds: DEFAULT_DB_BOUNDS_FROM_CURVE_C,
             x2_bounds: DEFAULT_RH_BOUNDS_FROM_CURVE,
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         let val = wr.evaluate(RATED_DB_C, RATED_RH);
         assert!(
@@ -109,6 +111,8 @@ mod tests {
             x1_bounds: DEFAULT_DB_BOUNDS_FROM_CURVE_C,
             x2_bounds: DEFAULT_RH_BOUNDS_FROM_CURVE,
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         let val = ef.evaluate(RATED_DB_C, RATED_RH);
         assert!(
@@ -129,6 +133,8 @@ mod tests {
             x1_bounds: DEFAULT_DB_BOUNDS_FROM_CURVE_C,
             x2_bounds: DEFAULT_RH_BOUNDS_FROM_CURVE,
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         let val_rated = wr.evaluate(RATED_DB_C, RATED_RH);
         let val_cold = wr.evaluate(10.0, 0.60);

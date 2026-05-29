@@ -48,6 +48,7 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::MAX_CAPACITY_FRACTION, 1.0);
     telemetry.insert(tk::CAP_RATIO, 0.0);
+    telemetry.insert(tk::CAP_RATIO_RAW, 0.0);
     telemetry.insert(tk::EIR_RATIO, 0.0);
     telemetry.insert(tk::BIQUADRATIC_CURVE_SOURCE, 0.0);
     telemetry.insert(tk::HEATING_LATENT_W, 0.0);
@@ -255,6 +256,13 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::CAP_RATIO.to_string(),
             unit: "-".to_string(),
             description: "Biquadratic capacity correction ratio at current conditions".to_string(),
+        },
+        TelemetryField {
+            name: tk::CAP_RATIO_RAW.to_string(),
+            unit: "-".to_string(),
+            description:
+                "Raw biquadratic capacity output before non-negative clamp"
+                    .to_string(),
         },
         TelemetryField {
             name: tk::EIR_RATIO.to_string(),

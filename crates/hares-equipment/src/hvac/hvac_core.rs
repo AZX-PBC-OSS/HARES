@@ -802,11 +802,25 @@ impl HvacEquipment {
             .copied()
             .or_else(|| self.config.biquadratic_coeffs.last().copied())
             .unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
+        // Capacity curves (even indices) in real curve sets (len > 1 means
+        // cap+EIR pairs are present, not a test fixture or identity fallback)
+        // use a non-negative output clamp so that cold-climate simulation
+        // never produces negative capacity ratios.
+        // EnergyPlus CurveManager.cc:282–287 optional output limits for
+        // biquadratic curves — HARES mirrors this at the curve-evaluation level.
+        let (output_min, output_max) =
+            if curve_index.is_multiple_of(2) && self.config.biquadratic_coeffs.len() > 1 {
+                (Some(0.0_f64), None)
+            } else {
+                (None, None)
+            };
         let curve = BiquadraticCurve {
             coeffs,
             x1_bounds: self.config.biquadratic_x1_bounds,
             x2_bounds: self.config.biquadratic_x2_bounds,
             warn_on_clamp: false,
+            output_min,
+            output_max,
         };
         curve.evaluate(t_indoor_c, t_outdoor_c)
     }

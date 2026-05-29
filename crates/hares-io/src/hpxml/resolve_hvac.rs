@@ -3833,6 +3833,8 @@ mod tests {
                     x1_bounds: (12.0, 24.0),
                     x2_bounds: (18.0, 50.0),
                     warn_on_clamp: false,
+                    output_min: Some(0.0),
+                    output_max: None,
                 },
                 cap_ff: [1.0, 0.0, 0.0],
                 eir_t: hares_physics::biquadratic::BiquadraticCurve {
@@ -3840,6 +3842,8 @@ mod tests {
                     x1_bounds: (12.0, 24.0),
                     x2_bounds: (18.0, 50.0),
                     warn_on_clamp: false,
+                    output_min: None,
+                    output_max: None,
                 },
                 eir_ff: [1.0, 0.0, 0.0],
                 eir_plr: [1.0, 0.0, 0.0],
@@ -3863,6 +3867,8 @@ mod tests {
                 x1_bounds: (12.0, 24.0),
                 x2_bounds: (18.0, 50.0),
                 warn_on_clamp: false,
+                output_min: Some(0.0),
+                output_max: None,
             },
             cap_ff: [1.0, 0.0, 0.0],
             eir_t: hares_physics::biquadratic::BiquadraticCurve {
@@ -3870,12 +3876,14 @@ mod tests {
                 x1_bounds: (12.0, 24.0),
                 x2_bounds: (18.0, 50.0),
                 warn_on_clamp: false,
+                output_min: None,
+                output_max: None,
             },
             eir_ff: [1.0, 0.0, 0.0],
             eir_plr: [1.0, 0.0, 0.0],
             ff_bounds: None,
             plf_bounds: None,
-        };
+        }; // --- end make_variant
         let curve_set = crate::defaults::HvacCurveSet {
             variants: vec![
                 make_variant("Variable_1", 0.8, 1.2),
@@ -3906,6 +3914,8 @@ mod tests {
                     x1_bounds: (12.0, 24.0),
                     x2_bounds: (18.0, 50.0),
                     warn_on_clamp: false,
+                    output_min: Some(0.0),
+                    output_max: None,
                 },
                 cap_ff: [0.7, 0.4, -0.1],
                 eir_t: hares_physics::biquadratic::BiquadraticCurve {
@@ -3913,6 +3923,8 @@ mod tests {
                     x1_bounds: (12.0, 24.0),
                     x2_bounds: (18.0, 50.0),
                     warn_on_clamp: false,
+                    output_min: None,
+                    output_max: None,
                 },
                 eir_ff: [1.3, -0.5, 0.2],
                 eir_plr: [1.0, 0.0, 0.0],

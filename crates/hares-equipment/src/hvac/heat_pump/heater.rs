@@ -37,6 +37,7 @@ use super::defrost::{
 use super::heater_config::{
     default_heater_telemetry, heater_telemetry_fields, operating_mode_code,
 };
+use hares_physics::biquadratic::biquadratic;
 use hares_physics::constants::KW_TO_W;
 use hares_physics::ground::SourceTemperature;
 
@@ -280,6 +281,10 @@ struct HeaterStep {
     fuel_w: f64,
     /// Biquadratic capacity correction ratio at current conditions.
     cap_ratio: f64,
+    /// Raw biquadratic capacity output before non-negative output clamp.
+    /// Captures the pre-clamp value so telemetry consumers can detect when
+    /// clamping occurred (e.g. cold-climate simulations below −30 °C outdoor).
+    cap_ratio_raw: f64,
     /// Biquadratic EIR correction ratio at current conditions (pre-PLF).
     eir_ratio: f64,
     /// Latent gain to zone [W]. Zero during normal heating; positive during
@@ -1343,6 +1348,7 @@ impl HeatPumpHeaterCore {
             self.hvac.control.max_capacity_fraction,
         );
         self.telemetry.set(tk::CAP_RATIO, step.cap_ratio);
+        self.telemetry.set(tk::CAP_RATIO_RAW, step.cap_ratio_raw);
         self.telemetry.set(tk::EIR_RATIO, step.eir_ratio);
         self.telemetry.set(tk::HEATING_LATENT_W, step.latent_gain_w);
         self.telemetry
@@ -1454,6 +1460,29 @@ impl HeatPumpHeaterCore {
             self.source_temp.compute(env),
             1.0,
         );
+
+        // Capture the raw biquadratic curve output before non-negative output
+        // clamping.  Used by CAP_RATIO_RAW telemetry to distinguish clamped-zero
+        // from genuine-near-zero capacity.  Input clamping is applied (same as
+        // evaluate_biquadratic) but output clamping is NOT applied here.
+        let raw_coeffs = self
+            .hvac
+            .config
+            .biquadratic_coeffs
+            .get(speed_index * 2)
+            .copied()
+            .or_else(|| self.hvac.config.biquadratic_coeffs.last().copied())
+            .unwrap_or([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let x1_raw = zone.temperature_c.clamp(
+            self.hvac.config.biquadratic_x1_bounds.0,
+            self.hvac.config.biquadratic_x1_bounds.1,
+        );
+        let x2_raw = self.source_temp.compute(env).clamp(
+            self.hvac.config.biquadratic_x2_bounds.0,
+            self.hvac.config.biquadratic_x2_bounds.1,
+        );
+        let mut cap_ratio_raw = biquadratic(&raw_coeffs, x1_raw, x2_raw);
+
         // OCHRE HVAC.py:1044-1050 -- interpolate biquadratic between bracket stages.
         if self.hvac.config.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
             && speed_frac > 0.0
@@ -1465,6 +1494,17 @@ impl HeatPumpHeaterCore {
                 1.0,
             );
             cap_ratio = cap_ratio * (1.0 - speed_frac) + cap_ratio_high * speed_frac;
+
+            let raw_coeffs_high = self
+                .hvac
+                .config
+                .biquadratic_coeffs
+                .get((speed_index + 1) * 2)
+                .copied()
+                .or_else(|| self.hvac.config.biquadratic_coeffs.last().copied())
+                .unwrap_or([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            let cap_ratio_raw_high = biquadratic(&raw_coeffs_high, x1_raw, x2_raw);
+            cap_ratio_raw = cap_ratio_raw * (1.0 - speed_frac) + cap_ratio_raw_high * speed_frac;
         }
 
         // Derive PLR: from solver's ideal capacity (coarse timestep) or
@@ -1906,6 +1946,7 @@ impl HeatPumpHeaterCore {
             defrost_capacity_multiplier,
             fuel_w: fuel_w.max(0.0),
             cap_ratio,
+            cap_ratio_raw,
             eir_ratio,
             latent_gain_w,
             pump_kw: pump_kw.max(0.0),
@@ -6269,6 +6310,55 @@ mod tests {
             ewt_deep > ewt_default,
             "deeper borehole (120 m) should yield higher entering water temperature \
              in heating mode than default (60 m); got deep={ewt_deep:.3}, default={ewt_default:.3}"
+        );
+    }
+
+    /// Verify that CAP_RATIO_RAW captures the negative pre-clamp biquadratic
+    /// value in cold-climate simulation while CAP_RATIO stays at 0.0 (clamped).
+    ///
+    /// At −35°C outdoor with MSHP variable-speed heating capacity coefficients
+    /// the unclamped curve evaluates to approximately −0.124 (at 21.1°C indoor)
+    /// and −0.103 (at 19°C indoor). The output_min=0.0 clamp forces
+    /// CAP_RATIO=0.0, while CAP_RATIO_RAW preserves the unclamped value.
+    /// This exercises the full init → compute_step → telemetry.set() path.
+    #[test]
+    fn cap_ratio_raw_captures_negative_pre_clamp_value_in_cold_climate() {
+        let mut cfg = heater_config_with(|_| {});
+        // MSHP variable-speed heating capacity curve coefficients from OCHRE
+        // `MSHP Heater.csv` column `Variable_1`, rows a_cap_t–f_cap_t and a_eir_t–f_eir_t.
+        // Capacity curve: 1.002928121 − 0.010386676·T_indoor + 0.025961538·T_outdoor.
+        cfg.test_extras_mut().insert(
+            "biquadratic_coeffs".to_string(),
+            "[[1.002928121,-0.010386676,0,0.025961538,0,0],\
+              [0.966475473,0.00591495,0.000191202,-0.012965668,0.00004225,-0.000524003]]"
+                .into(),
+        );
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // Zone at 19°C (below 21°C setpoint) so thermostat enters heating;
+        // outdoor −35°C forces the biquadratic into negative territory.
+        let cold_env = env(19.0, -35.0, 0.002);
+        eq.init(&cfg, &cold_env).unwrap();
+        eq.update_control(&cold_env);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&cold_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let cap_ratio = eq.telemetry().get(tk::CAP_RATIO).unwrap();
+        assert!(
+            cap_ratio >= 0.0,
+            "CAP_RATIO must be >= 0.0 with output_min=0.0 clamp at −35°C outdoor; got {cap_ratio}"
+        );
+
+        let cap_ratio_raw = eq.telemetry().get(tk::CAP_RATIO_RAW).unwrap();
+        assert!(
+            cap_ratio_raw < 0.0,
+            "CAP_RATIO_RAW must capture negative pre-clamp biquadratic value at −35°C outdoor; \
+             got {cap_ratio_raw}"
         );
     }
 }

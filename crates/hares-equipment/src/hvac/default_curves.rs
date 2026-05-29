@@ -555,4 +555,33 @@ mod tests {
             }
         }
     }
+
+    /// Regression: MSHP variable-speed heating capacity curve must evaluate to
+    /// ≥ 0.0 at −50 °C outdoor / 21.1 °C indoor when the non-negative output
+    /// clamp is applied.  Before the fix the unclamped biquadratic evaluated
+    /// to −0.5143 at this condition.
+    #[test]
+    fn mshp_heating_capacity_non_negative_at_extreme_cold() {
+        use hares_physics::biquadratic::BiquadraticCurve;
+
+        let curve = BiquadraticCurve {
+            coeffs: MSHP_VARIABLE_HEATING_CAPACITY,
+            x1_bounds: (-10.0, 50.0),
+            x2_bounds: (-50.0, 60.0),
+            warn_on_clamp: false,
+            output_min: Some(0.0),
+            output_max: None,
+        };
+        let result = curve.evaluate(21.1, -50.0);
+        assert!(
+            result >= 0.0,
+            "MSHP capacity at T_indoor=21.1°C, T_outdoor=-50°C must be ≥ 0.0 with output_min=0.0; \
+             got {result}"
+        );
+        let result_h1 = curve.evaluate(21.1, 8.3);
+        assert!(
+            result_h1 > 0.9,
+            "MSHP capacity at AHRI H1 (21.1°C / 8.3°C) must still be near 1.0; got {result_h1}"
+        );
+    }
 }

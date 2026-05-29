@@ -20,10 +20,15 @@ pub fn biquadratic(coeffs: &[f64; 6], x1: f64, x2: f64) -> f64 {
         + coeffs[5] * x1 * x2
 }
 
-/// Biquadratic curve with input clamping and optional out-of-bounds warning.
+/// Biquadratic curve with input clamping, optional output clamping, and optional
+/// out-of-bounds warning.
 ///
 /// EnergyPlus I/O Reference (Curve:Biquadratic) specifies minimum/maximum value
 /// fields for each axis; when inputs fall outside those bounds, E+ silently clamps.
+/// EnergyPlus `CurveManager.cc:282–287` also supports optional output limits
+/// (`minPresent` / `maxPresent`); HARES mirrors this through `output_min` and
+/// `output_max`.
+///
 /// HARES additionally offers an optional `tracing::warn!` to surface unexpected
 /// operating conditions during validation and init-time curve checks.
 /// Hot-path callers (equipment `step()`) set `warn_on_clamp: false` for zero
@@ -34,9 +39,18 @@ pub struct BiquadraticCurve {
     pub x1_bounds: (f64, f64),
     pub x2_bounds: (f64, f64),
     /// When `true`, `evaluate()` emits a `tracing::warn!` if either input is
-    /// clamped. Intended for init-time and validation paths only — not the
+    /// clamped or if the output is clamped to `[output_min, output_max]`.
+    /// Intended for init-time and validation paths only — not the
     /// per-timestep hot loop.
     pub warn_on_clamp: bool,
+    /// Optional lower bound on the curve output. When `Some(min)`, the result
+    /// of `evaluate()` is clamped to `>= min`. EnergyPlus `CurveManager.cc:282–287`
+    /// analog for `outputLimits.min`.
+    pub output_min: Option<f64>,
+    /// Optional upper bound on the curve output. When `Some(max)`, the result
+    /// of `evaluate()` is clamped to `<= max`. EnergyPlus `CurveManager.cc:282–287`
+    /// analog for `outputLimits.max`.
+    pub output_max: Option<f64>,
 }
 
 impl BiquadraticCurve {
@@ -56,7 +70,38 @@ impl BiquadraticCurve {
                 "biquadratic input outside bounds: inputs clamped to curve domain"
             );
         }
-        biquadratic(&self.coeffs, x1_clamped, x2_clamped)
+        let raw = biquadratic(&self.coeffs, x1_clamped, x2_clamped);
+        let clamped = match (self.output_min, self.output_max) {
+            (Some(lo), Some(hi)) => raw.clamp(lo, hi),
+            (Some(lo), None) => raw.max(lo),
+            (None, Some(hi)) => raw.min(hi),
+            (None, None) => raw,
+        };
+        if self.warn_on_clamp && (raw - clamped).abs() > f64::EPSILON {
+            tracing::warn!(
+                raw,
+                clamped,
+                output_min = self.output_min,
+                output_max = self.output_max,
+                "biquadratic output clamped to output limits"
+            );
+        }
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if let Some(min) = self.output_min {
+                debug_assert!(
+                    clamped >= min,
+                    "biquadratic output {clamped} below output_min {min}"
+                );
+            }
+            if let Some(max) = self.output_max {
+                debug_assert!(
+                    clamped <= max,
+                    "biquadratic output {clamped} above output_max {max}"
+                );
+            }
+        }
+        clamped
     }
 }
 
@@ -112,6 +157,8 @@ mod tests {
             x1_bounds: (10.0, 20.0),
             x2_bounds: (0.0, 5.0),
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
 
         let both_oob = curve.evaluate(40.0, -3.0);
@@ -160,6 +207,8 @@ mod tests {
             x1_bounds: (-10.0, 50.0), // proposed x1 bounds
             x2_bounds: (-50.0, 60.0), // proposed x2 bounds
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
 
         // With tight bounds, evaluating at -60°C outdoor must clamp to -50°C.
@@ -177,6 +226,8 @@ mod tests {
             x1_bounds: (-100.0, 100.0), // current default
             x2_bounds: (-100.0, 100.0), // current default
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         let current_at_neg60 = curve_current.evaluate(20.0, -60.0);
         let current_at_neg50 = curve_current.evaluate(20.0, proposed_x2_lower);
@@ -203,6 +254,8 @@ mod tests {
             x1_bounds: (-10.0, 50.0),
             x2_bounds: (-50.0, 60.0),
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         let at_pos70 = curve_tight.evaluate(20.0, 70.0);
         let at_pos60 = curve_tight.evaluate(20.0, proposed_x2_upper);
@@ -217,6 +270,8 @@ mod tests {
             x1_bounds: (-100.0, 100.0),
             x2_bounds: (-100.0, 100.0),
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         let current_at_pos70 = curve_current.evaluate(20.0, 70.0);
         let current_at_pos60 = curve_current.evaluate(20.0, proposed_x2_upper);
@@ -239,6 +294,8 @@ mod tests {
             x1_bounds: (-10.0, 50.0),
             x2_bounds: (-50.0, 60.0),
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         let at_neg20 = curve_tight.evaluate(-20.0, 35.0);
         let at_neg10 = curve_tight.evaluate(proposed_x1_lower, 35.0);
@@ -253,6 +310,8 @@ mod tests {
             x1_bounds: (-100.0, 100.0),
             x2_bounds: (-100.0, 100.0),
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
         let current_at_neg20 = curve_current.evaluate(-20.0, 35.0);
         let current_at_neg10 = curve_current.evaluate(proposed_x1_lower, 35.0);
@@ -272,6 +331,8 @@ mod tests {
             x1_bounds: (-10.0, 50.0),
             x2_bounds: (-50.0, 60.0),
             warn_on_clamp: true,
+            output_min: None,
+            output_max: None,
         };
 
         // Out-of-bounds on both axes: must still return the clamped result.
@@ -290,6 +351,8 @@ mod tests {
             x1_bounds: (-10.0, 50.0),
             x2_bounds: (-50.0, 60.0),
             warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
         };
 
         let at_neg20_x1 = curve.evaluate(-20.0, 35.0);
@@ -333,6 +396,8 @@ mod tests {
                 x1_bounds: twb_bounds,
                 x2_bounds: tdb_bounds,
                 warn_on_clamp: false,
+                output_min: None,
+                output_max: None,
             };
             let got = rated
                 * curve.evaluate(t_in, t_ext)
@@ -343,6 +408,95 @@ mod tests {
                 rel_error(got, expected) <= RELATIVE_ERROR_TOLERANCE,
                 "got={got}, expected={expected}, rel_err={}",
                 rel_error(got, expected)
+            );
+        }
+    }
+
+    #[test]
+    fn output_min_clamps_negative_to_zero() {
+        let coeffs = [1.002928121, -0.010386676, 0.0, 0.025961538, 0.0, 0.0];
+        let curve = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-10.0, 50.0),
+            x2_bounds: (-50.0, 60.0),
+            warn_on_clamp: false,
+            output_min: Some(0.0),
+            output_max: None,
+        };
+        let result = curve.evaluate(21.1, -50.0);
+        assert_eq!(
+            result, 0.0,
+            "MSHP capacity at -50°C outdoors must clamp to 0.0, not go negative; got {result}"
+        );
+        let result_warm = curve.evaluate(21.1, 8.3);
+        assert!(
+            result_warm > 0.9,
+            "MSHP capacity at AHRI H1 must be unclamped and positive; got {result_warm}"
+        );
+    }
+
+    #[test]
+    fn output_max_clamps_high_outputs() {
+        let coeffs = [1.0, 0.0, 0.0, 0.1, 0.0, 0.0];
+        let curve = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-10.0, 50.0),
+            x2_bounds: (-50.0, 60.0),
+            warn_on_clamp: false,
+            output_min: None,
+            output_max: Some(2.0),
+        };
+        let at_60 = curve.evaluate(20.0, 60.0);
+        assert_eq!(
+            at_60, 2.0,
+            "coeffs=[1,0,0,0.1,0,0] at x2=60 gives 7.0; clamped to 2.0; got {at_60}"
+        );
+        let at_5 = curve.evaluate(20.0, 5.0);
+        assert!(
+            (at_5 - 1.5).abs() < 1e-12,
+            "at x2=5 result=1.5 is within bounds; got {at_5}"
+        );
+    }
+
+    #[test]
+    fn output_min_none_preserves_unclamped_behavior() {
+        let coeffs = [1.0, 0.0, 0.0, -0.1, 0.0, 0.0];
+        let curve = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-10.0, 50.0),
+            x2_bounds: (-50.0, 60.0),
+            warn_on_clamp: false,
+            output_min: None,
+            output_max: None,
+        };
+        let negative = curve.evaluate(20.0, 50.0);
+        assert!(
+            negative < 0.0,
+            "EIR-style curve (no output_min) may return negative values; got {negative}"
+        );
+        assert!(
+            (negative - (-4.0)).abs() < 1e-12,
+            "coeffs=[1,0,0,-0.1,0,0] at x2=50 gives -4.0; got {negative}"
+        );
+    }
+
+    #[test]
+    fn capacity_curve_with_output_min_never_negative_over_full_x2_range() {
+        let coeffs = [1.002928121, -0.010386676, 0.0, 0.025961538, 0.0, 0.0];
+        let curve = BiquadraticCurve {
+            coeffs,
+            x1_bounds: (-10.0, 50.0),
+            x2_bounds: (-50.0, 60.0),
+            warn_on_clamp: false,
+            output_min: Some(0.0),
+            output_max: None,
+        };
+        for t_outdoor in [-50.0, -40.0, -30.2, -20.0, 0.0, 20.0, 40.0, 60.0] {
+            let result = curve.evaluate(21.1, t_outdoor);
+            assert!(
+                result >= 0.0,
+                "capacity curve with output_min=0.0 must not be negative \
+                 at T_indoor=21.1 T_outdoor={t_outdoor}; got {result}"
             );
         }
     }
