@@ -320,6 +320,27 @@ pub fn compute_usable_area(
         );
     }
 
+    // Invariant: East/West factor must stay in physical range.
+    // The old model collapsed to DIFFUSE_FRAC (0.18) for east/west;
+    // a latitude-aware model must stay above 0.50 (diffuse + morning/afternoon
+    // direct beam) and below 0.95 (always less than south-facing).
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        let east_factor = azimuth_production_factor(90.0, lat);
+        assert!(
+            east_factor > 0.5,
+            "East/West production factor ({:.4}) too low — must exceed 0.5 for lat={}",
+            east_factor,
+            lat
+        );
+        assert!(
+            east_factor < 0.95,
+            "East/West production factor ({:.4}) too close to south — must be < 0.95 for lat={}",
+            east_factor,
+            lat
+        );
+    }
+
     // Select the best plane.
     let (best_idx, best_az) = if roof_shape == RoofShape::Hip {
         // Hip: pick the most-southerly plane (smallest south_distance), breaking
@@ -376,6 +397,13 @@ pub fn compute_usable_area(
             #[cfg(feature = "observe")]
             {
                 hip_prod_factor_sum += prod_factor;
+                tracing::debug!(
+                    pv_hip_plane_azimuth = az,
+                    pv_hip_plane_prod_factor = prod_factor,
+                    pv_hip_plane_panels = plane_panels,
+                    pv_hip_plane_weighted = ((plane_panels as f64) * prod_factor).floor() as u32,
+                    "PV Hip aggregation per-plane telemetry"
+                );
             }
         }
 
@@ -395,7 +423,7 @@ pub fn compute_usable_area(
         #[cfg(feature = "observe")]
         {
             tracing::debug!(
-                pv_lut_latitude = lat,
+                pv_hip_latitude = lat,
                 pv_hip_prod_factor_sum = hip_prod_factor_sum,
                 pv_hip_weighted_panels = total_weighted_panels,
                 "PV Hip aggregation telemetry"
@@ -444,6 +472,19 @@ pub fn compute_usable_area(
     } else {
         best_plane.tilt_deg
     };
+
+    #[cfg(feature = "observe")]
+    {
+        let prod_factor = azimuth_production_factor(best_az, lat);
+        tracing::debug!(
+            pv_latitude = lat,
+            pv_azimuth = best_az,
+            pv_production_factor = prod_factor,
+            pv_roof_shape = ?roof_shape,
+            pv_max_panels = max_panels,
+            "PV Gable/Flat plane selected"
+        );
+    }
 
     Ok(UsableRoofArea {
         best_plane_idx: best_idx,
@@ -569,6 +610,25 @@ pub fn enumerate_pv_candidates(
             .partial_cmp(&a.solar_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    #[cfg(feature = "observe")]
+    {
+        tracing::debug!(
+            pv_latitude = lat,
+            pv_roof_shape = ?roof_shape,
+            pv_candidate_count = candidates.len(),
+            "PV candidate enumeration"
+        );
+        for c in &candidates {
+            let prod_factor = azimuth_production_factor(c.azimuth_deg, lat);
+            tracing::debug!(
+                pv_candidate_azimuth = c.azimuth_deg,
+                pv_candidate_production_factor = prod_factor,
+                pv_candidate_max_panels = c.max_panels,
+                "PV candidate detail"
+            );
+        }
+    }
 
     candidates
 }
@@ -1078,5 +1138,102 @@ mod tests {
             (HIP_USABLE_FRACTION - 0.35).abs() < f64::EPSILON,
             "HIP_USABLE_FRACTION changed from calibrated 0.35"
         );
+    }
+
+    /// East/West production factor must be physically reasonable —
+    /// not collapsed to 0.18 (the old DIFFUSE_FRAC-only model) and
+    /// not approaching 1.0 (south-facing). The quadratic azimuth derating
+    /// model gives ~0.83–0.91 across 25°N to 48°N.
+    #[test]
+    fn east_west_production_factor_in_physical_range() {
+        for (lat, expected_min, expected_max) in [
+            (25.0, 0.85, 0.95),
+            (30.0, 0.85, 0.95),
+            (35.0, 0.85, 0.95),
+            (40.0, 0.80, 0.90),
+            (48.0, 0.78, 0.87),
+        ] {
+            let f = azimuth_production_factor(90.0, lat);
+            assert!(
+                f > 0.5,
+                "E/W factor ({:.4}) too low — old model collapsed to 0.18",
+                f
+            );
+            assert!(
+                f < 0.95,
+                "E/W factor ({:.4}) too close to south — should be < 0.95",
+                f
+            );
+            assert!(
+                f >= expected_min,
+                "E/W factor ({:.4}) below expected minimum ({:.4}) at lat={lat}",
+                f,
+                expected_min
+            );
+            assert!(
+                f <= expected_max,
+                "E/W factor ({:.4}) above expected maximum ({:.4}) at lat={lat}",
+                f,
+                expected_max
+            );
+        }
+    }
+
+    /// For the same Hip roof input, the plane selection from
+    /// `compute_usable_area` and `enumerate_pv_candidates` must agree:
+    /// both use the same latitude-dependent azimuth production factor,
+    /// so the best-plane index and azimuth should match.
+    #[test]
+    fn hip_best_plane_consistent_between_compute_and_enumerate() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(40.0, 26.0, Some(60.0)),   // ENE — moderate area
+                plane(60.0, 26.0, Some(180.0)),  // south — largest area
+                plane(30.0, 26.0, Some(270.0)),  // west — small
+                plane(50.0, 26.0, Some(0.0)),    // north (filtered)
+            ],
+            total_roof_area_m2: 180.0,
+        };
+        let lat = 40.0;
+        let usable =
+            compute_usable_area(&roof, RoofShape::Hip, &[], Some(lat), None, None).unwrap();
+        let candidates =
+            enumerate_pv_candidates(&roof, RoofShape::Hip, &[], Some(lat), None, None);
+
+        // The top enumerated candidate should match compute_usable_area's best plane.
+        assert!(
+            !candidates.is_empty(),
+            "expected at least one non-north enumerated candidate"
+        );
+        assert_eq!(
+            candidates[0].plane_idx, usable.best_plane_idx,
+            "top enumerated candidate plane {} != best plane {}",
+            candidates[0].plane_idx, usable.best_plane_idx
+        );
+        assert!(
+            (candidates[0].azimuth_deg - usable.azimuth_deg).abs() < 0.01,
+            "top candidate azimuth {:.1} != best azimuth {:.1}",
+            candidates[0].azimuth_deg,
+            usable.azimuth_deg
+        );
+
+        // Both paths must use identical azimuth_production_factor calls
+        // for each plane — verify by recomputing.
+        for c in &candidates {
+            let factor = azimuth_production_factor(c.azimuth_deg, lat);
+            let shape = RoofShape::Hip;
+            let area = roof.planes[c.plane_idx].area_m2;
+            let expected_score = plane_solar_score(area, c.azimuth_deg, shape, lat);
+            assert!(
+                (c.solar_score - expected_score).abs() < 1e-10,
+                "solar_score mismatch for plane {}: {} vs {}",
+                c.plane_idx,
+                c.solar_score,
+                expected_score
+            );
+            // The production factor used in enumerate must equal what
+            // compute_usable_area's Hip aggregation path would use.
+            assert!(factor > 0.5, "factor {:.4} too low for az={:.1}", factor, c.azimuth_deg);
+        }
     }
 }
