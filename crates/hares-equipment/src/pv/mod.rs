@@ -7,7 +7,7 @@ pub mod shading;
 pub mod soiling;
 
 use array_config::parse_u32_from_f64;
-pub use array_config::{ModuleType, PvArray, surface_id_for_orientation};
+pub use array_config::{ModuleType, PvArray, PvArraySpec, surface_id_for_orientation};
 pub use config::PvConfig;
 use lut::PvLut;
 
@@ -340,31 +340,65 @@ impl PV {
         let c = config.require_typed::<PvConfig>("PV")?;
         c.validate()?;
 
-        let tilt_deg = c.tilt_deg.unwrap_or(30.0);
-        let azimuth_deg = c.azimuth_deg.unwrap_or(180.0);
-        let noct_c = c.noct_c.unwrap_or(DEFAULT_NOCT_C);
-        if !noct_c.is_finite() {
-            return Err(HaresError::Equipment(
-                "PV noct_c must be finite".to_string(),
-            ));
+        // Determine which path to use: multi-array or single-array.
+        if let Some(ref array_specs) = c.arrays {
+            // Multi-array path: create one PvArray per PvArraySpec.
+            self.arrays = array_specs
+                .iter()
+                .map(|spec| {
+                    let tilt_deg = spec.tilt_deg.unwrap_or(30.0);
+                    let azimuth_deg = spec.azimuth_deg.unwrap_or(180.0);
+                    let noct_c = spec.noct_c.unwrap_or(DEFAULT_NOCT_C);
+                    if !noct_c.is_finite() {
+                        return Err(HaresError::Equipment(
+                            "PV array noct_c must be finite".to_string(),
+                        ));
+                    }
+                    let module_type = spec
+                        .module_type
+                        .as_deref()
+                        .map(ModuleType::from_str)
+                        .unwrap_or(ModuleType::Standard);
+                    Ok(PvArray {
+                        tilt_deg,
+                        azimuth_deg,
+                        capacity_kw: spec.capacity_kw,
+                        noct_c,
+                        module_type,
+                        surface_id: None,
+                        sam_lut_path: spec.sam_lut_path.clone(),
+                        attached_boundary_id: spec.attached_boundary_id,
+                    })
+                })
+                .collect::<crate::Result<Vec<_>>>()?;
+        } else {
+            // Single-array path: existing behaviour, backward-compatible.
+            let tilt_deg = c.tilt_deg.unwrap_or(30.0);
+            let azimuth_deg = c.azimuth_deg.unwrap_or(180.0);
+            let noct_c = c.noct_c.unwrap_or(DEFAULT_NOCT_C);
+            if !noct_c.is_finite() {
+                return Err(HaresError::Equipment(
+                    "PV noct_c must be finite".to_string(),
+                ));
+            }
+
+            let module_type = c
+                .module_type
+                .as_deref()
+                .map(ModuleType::from_str)
+                .unwrap_or(ModuleType::Standard);
+
+            self.arrays = vec![PvArray {
+                tilt_deg,
+                azimuth_deg,
+                capacity_kw: c.capacity_kw,
+                noct_c,
+                module_type,
+                surface_id: None,
+                sam_lut_path: c.sam_lut_path.clone(),
+                attached_boundary_id: None,
+            }];
         }
-
-        let module_type = c
-            .module_type
-            .as_deref()
-            .map(ModuleType::from_str)
-            .unwrap_or(ModuleType::Standard);
-
-        self.arrays = vec![PvArray {
-            tilt_deg,
-            azimuth_deg,
-            capacity_kw: c.capacity_kw,
-            noct_c,
-            module_type,
-            surface_id: None,
-            sam_lut_path: c.sam_lut_path.clone(),
-            attached_boundary_id: None,
-        }];
 
         self.surface_resolution_deg = c
             .surface_resolution_deg
@@ -414,6 +448,22 @@ impl PV {
             }
         }
 
+        // Invariant check: arrays must exist and have positive capacity.
+        self.check_invariants()?;
+
+        // Observer capture: record multi-array breakdown.
+        #[cfg(feature = "observe")]
+        {
+            let per_array_capacity: Vec<f64> = self.arrays.iter().map(|a| a.capacity_kw).collect();
+            let total_capacity: f64 = per_array_capacity.iter().sum();
+            tracing::debug!(
+                array_count = self.arrays.len(),
+                total_capacity_kw = total_capacity,
+                ?per_array_capacity,
+                "PV initialised",
+            );
+        }
+
         self.soiling_config = None;
         self.soiling_state = None;
 
@@ -429,6 +479,39 @@ impl PV {
         self.telemetry.set(tk::INVERTER_CLIPPING_KW, 0.0);
         self.telemetry.set(tk::SOILING_RATIO, 1.0);
         self.core_output = CoreOutput::default();
+        Ok(())
+    }
+
+    /// Validate that the PV model is in a consistent state.
+    ///
+    /// Checks that at least one array exists and every array has positive
+    /// capacity. Gated behind `cfg(any(debug_assertions, feature =
+    /// "check_invariants"))` so it compiles to nothing in production release
+    /// builds without the feature flag.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn check_invariants(&self) -> crate::Result<()> {
+        if self.arrays.is_empty() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "pv_has_arrays".to_string(),
+                value: 0.0,
+                tolerance: 0.0,
+            });
+        }
+        for array in self.arrays.iter() {
+            if array.capacity_kw <= 0.0 {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "pv_array_capacity_positive".to_string(),
+                    value: array.capacity_kw,
+                    tolerance: 0.0,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Stub for unchecked builds — the body is eliminated by the compiler.
+    #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+    fn check_invariants(&self) -> crate::Result<()> {
         Ok(())
     }
 }
@@ -778,7 +861,7 @@ mod tests {
     use super::{
         DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_POWER_FACTOR, DEFAULT_SYSTEM_LOSSES_FRACTION,
         Equipment, EquipmentConfig, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2,
-        NOCT_REFERENCE_TEMP_C, PV, PvArray, PvConfig, cell_temperature_noct_wind,
+        NOCT_REFERENCE_TEMP_C, PV, PvArraySpec, PvConfig, cell_temperature_noct_wind,
         surface_id_for_orientation,
     };
 
@@ -850,6 +933,7 @@ mod tests {
             power_factor: Some(DEFAULT_POWER_FACTOR),
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
+            arrays: None,
         }
     }
 
@@ -1007,6 +1091,26 @@ mod tests {
             "PV".to_string(),
             PvConfig {
                 capacity_kw: 5.0,
+                arrays: Some(vec![
+                    PvArraySpec {
+                        capacity_kw: 3.0,
+                        tilt_deg: Some(30.0),
+                        azimuth_deg: Some(180.0),
+                        module_type: None,
+                        noct_c: Some(DEFAULT_NOCT_C),
+                        sam_lut_path: None,
+                        attached_boundary_id: None,
+                    },
+                    PvArraySpec {
+                        capacity_kw: 2.0,
+                        tilt_deg: Some(20.0),
+                        azimuth_deg: Some(90.0),
+                        module_type: None,
+                        noct_c: Some(DEFAULT_NOCT_C),
+                        sam_lut_path: None,
+                        attached_boundary_id: None,
+                    },
+                ]),
                 ..base_pv_typed_config()
             },
         );
@@ -1035,28 +1139,12 @@ mod tests {
 
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
-        pv.arrays = vec![
-            PvArray {
-                tilt_deg: 30.0,
-                azimuth_deg: 180.0,
-                capacity_kw: 3.0,
-                noct_c: DEFAULT_NOCT_C,
-                module_type: ModuleType::Standard,
-                surface_id: Some(sid0),
-                sam_lut_path: None,
-                attached_boundary_id: None,
-            },
-            PvArray {
-                tilt_deg: 20.0,
-                azimuth_deg: 90.0,
-                capacity_kw: 2.0,
-                noct_c: DEFAULT_NOCT_C,
-                module_type: ModuleType::Standard,
-                surface_id: Some(sid1),
-                sam_lut_path: None,
-                attached_boundary_id: None,
-            },
-        ];
+
+        assert_eq!(pv.arrays.len(), 2);
+        assert_eq!(pv.arrays[0].capacity_kw, 3.0);
+        assert_eq!(pv.arrays[1].capacity_kw, 2.0);
+        assert_eq!(pv.arrays[0].surface_id, Some(sid0));
+        assert_eq!(pv.arrays[1].surface_id, Some(sid1));
 
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -1133,6 +1221,7 @@ mod tests {
                 power_factor: Some(DEFAULT_POWER_FACTOR),
                 surface_resolution_deg: Some(5.0),
                 sam_lut_path: None,
+                arrays: None,
             },
         );
         let sid = surface_id_for_orientation(27.0, 200.0, 5.0).unwrap();

@@ -432,6 +432,7 @@ fn pv_config_from_py(pv: &PyPv) -> EquipmentConfig {
         power_factor: None,
         surface_resolution_deg: None,
         sam_lut_path: pv.sam_lut_path.clone(),
+        arrays: None,
     };
     EquipmentConfig::from_typed(pv.name.clone(), "PV".to_string(), cfg)
 }

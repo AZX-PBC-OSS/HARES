@@ -511,6 +511,7 @@ fn sample_pv_config() -> PvConfig {
         power_factor: Some(1.0),
         surface_resolution_deg: Some(5.0),
         sam_lut_path: None,
+        arrays: None,
     }
 }
 

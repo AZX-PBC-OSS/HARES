@@ -379,6 +379,7 @@ fn pv_cell_temperature_noct_model() {
             power_factor: None,
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
+            arrays: None,
         },
     );
 
@@ -475,6 +476,7 @@ fn pv_power_temperature_derating() {
                 power_factor: None,
                 surface_resolution_deg: Some(5.0),
                 sam_lut_path: None,
+                arrays: None,
             },
         );
         let mut env = base_env();

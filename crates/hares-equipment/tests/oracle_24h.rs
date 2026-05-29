@@ -320,6 +320,7 @@ fn oracle_pv_24h_constant_irradiance() {
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
+            arrays: None,
         },
     );
 

@@ -83,6 +83,7 @@ pub(super) fn resolve_pv(
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
+            arrays: None,
         };
 
         specs.push(build_typed_spec(
