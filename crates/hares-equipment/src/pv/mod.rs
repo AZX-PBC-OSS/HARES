@@ -266,10 +266,25 @@ impl PV {
         }
     }
 
+    fn total_dc_capacity(&self) -> f64 {
+        self.arrays.iter().map(|a| a.capacity_kw).sum()
+    }
+
     fn apply_inverter_limits(&self, p_kw: f64, q_kvar: f64) -> (f64, f64) {
         let inv_cap = match self.inverter_capacity_kw {
             Some(cap) => cap,
-            None => return (p_kw, q_kvar),
+            None => {
+                // When inverter capacity is not configured, default to total
+                // DC capacity (1:1 DC/AC ratio). OCHRE PV.py:122 defaults
+                // inverter_capacity to capacity. Defence: init_typed() always
+                // resolves this, so this branch is a safety net for code paths
+                // that bypass init.
+                let cap = self.total_dc_capacity();
+                if cap <= 0.0 {
+                    return (p_kw, q_kvar);
+                }
+                cap
+            }
         };
 
         let s = (p_kw * p_kw + q_kvar * q_kvar).sqrt();
@@ -448,7 +463,38 @@ impl PV {
         // Invariant check: arrays must exist and have positive capacity.
         self.check_invariants()?;
 
-        // Observer capture: record multi-array breakdown.
+        // Resolve inverter capacity default.
+        // OCHRE PV.py:122 defaults inverter_capacity to capacity (1:1 DC/AC
+        // ratio). HARES follows this to avoid unrealistic zero-clipping
+        // behaviour when the user omits inverter_capacity_kw. NREL SAM
+        // documentation notes typical residential DC-to-AC ratios of 1.0–1.5;
+        // EnergyPlus PVWatts v8 default is 1.1 (PVWatts.cc:88).
+        let total_dc = self.total_dc_capacity();
+        if self.inverter_capacity_kw.is_none() {
+            self.inverter_capacity_kw = Some(total_dc);
+        }
+        let inv_cap = self.inverter_capacity_kw.unwrap_or(total_dc);
+        let dc_ac_ratio = total_dc / inv_cap;
+
+        tracing::info!(
+            total_dc_kw = total_dc,
+            inverter_capacity_kw = inv_cap,
+            dc_ac_ratio = format_args!("{dc_ac_ratio:.2}"),
+            "PV DC/AC ratio",
+        );
+        if dc_ac_ratio < 1.0 {
+            tracing::warn!(
+                dc_ac_ratio = format_args!("{dc_ac_ratio:.2}"),
+                "PV inverter oversized relative to DC capacity; DC/AC ratio < 1.0",
+            );
+        } else if dc_ac_ratio > 1.5 {
+            tracing::warn!(
+                dc_ac_ratio = format_args!("{dc_ac_ratio:.2}"),
+                "PV DC/AC ratio > 1.5; aggressive clipping may occur during high-irradiance conditions",
+            );
+        }
+
+        // Observer capture: record array breakdown and inverter sizing.
         #[cfg(feature = "observe")]
         {
             let per_array_capacity: Vec<f64> = self.arrays.iter().map(|a| a.capacity_kw).collect();
@@ -457,6 +503,8 @@ impl PV {
                 array_count = self.arrays.len(),
                 total_capacity_kw = total_capacity,
                 ?per_array_capacity,
+                dc_ac_ratio = dc_ac_ratio,
+                inverter_capacity_kw = inv_cap,
                 "PV initialised",
             );
         }
@@ -607,6 +655,16 @@ impl Equipment for PV {
         let (final_p_kw, final_q_kvar) =
             self.apply_inverter_limits(total_ac_power_kw, reactive_power_kvar);
         let inverter_clipping_kw = (total_ac_power_kw - final_p_kw).max(0.0);
+
+        // Observer capture: record per-timestep inverter clipping events.
+        #[cfg(feature = "observe")]
+        if inverter_clipping_kw > 0.0 {
+            tracing::debug!(
+                clipped_kw = inverter_clipping_kw,
+                ac_power_kw = final_p_kw,
+                "PV inverter clipping",
+            );
+        }
 
         ports.accumulate(&PortContribution::Electrical {
             active_power_kw: -final_p_kw,
@@ -2251,5 +2309,100 @@ mod tests {
         );
         // Port contribution must reflect the clamped value.
         approx_eq(ports.electrical.generation_power_kw, -4.0);
+    }
+
+    /// When `inverter_capacity_kw` is None (the default), the system resolves
+    /// to a 1:1 DC/AC ratio — total DC array capacity becomes the inverter
+    /// rating. At cold ambient temperatures where DC power exceeds nameplate
+    /// capacity, output must be clipped. This verifies that the default is no
+    /// longer "no clipping."
+    #[test]
+    fn default_inverter_ratio_clips_cold_panels() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(1);
+        cfg.inverter_efficiency = Some(1.0);
+        cfg.system_losses_fraction = Some(0.0);
+        // inverter_capacity_kw stays None — tests the default 1:1 resolving.
+        let cfg =
+            EquipmentConfig::from_typed("PV default ratio".to_string(), "PV".to_string(), cfg);
+
+        // Cold ambient (-10 °C, wind 2 m/s) pushes cell temp to ~14 °C,
+        // giving positive temperature derating so DC (~5.25 kW) exceeds
+        // the default inverter capacity (5.0 kW).
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            -10.0,
+        );
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+
+        // After init, inverter_capacity_kw must be resolved to Some(total_dc).
+        assert!(pv.inverter_capacity_kw.is_some());
+        assert!((pv.inverter_capacity_kw.unwrap() - 5.0).abs() < 1e-9);
+
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let clipping_kw = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
+
+        // Default inverter capacity = total DC capacity (5.0 kW).
+        assert!(ac_kw <= 5.0 + 1e-9, "AC {ac_kw} exceeded 5.0 kW cap");
+        // Clipping must be positive (cold boost pushes DC above 5.0).
+        assert!(
+            clipping_kw > 0.0,
+            "inverter_clipping_kw must be > 0, got {clipping_kw:.3}"
+        );
+        approx_eq(ports.electrical.generation_power_kw, -5.0);
+    }
+
+    /// With `inverter_capacity_kw = Some(3.0)` and total DC = 5.0 kW, AC
+    /// output must be capped at the inverter rating. Cold ambient conditions
+    /// ensure the unconstrained DC-derived AC well exceeds the 3 kW cap.
+    #[test]
+    fn inverter_3kw_caps_5kw_array() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(2);
+        cfg.inverter_efficiency = Some(1.0);
+        cfg.system_losses_fraction = Some(0.0);
+        cfg.inverter_capacity_kw = Some(3.0);
+        let cfg = EquipmentConfig::from_typed("PV 5kW/3kW".to_string(), "PV".to_string(), cfg);
+
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            -10.0,
+        );
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let clipping_kw = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
+
+        // AC must be capped at the 3 kW inverter rating.
+        approx_eq(ac_kw, 3.0);
+        assert!(
+            clipping_kw > 0.0,
+            "expected clipping with 3kW inverter, got {clipping_kw:.3}"
+        );
+        approx_eq(ports.electrical.generation_power_kw, -3.0);
     }
 }
