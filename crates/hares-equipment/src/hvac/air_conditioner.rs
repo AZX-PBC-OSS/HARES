@@ -668,9 +668,11 @@ impl CoolingCore {
 
             self.apply_cooling_startup_cd(cfg.derived_cooling_startup_cd());
 
-            // EnergyPlus residential DX coil defaults (Engineering Reference §16.5).
+            // EnergyPlus Coil:Cooling:DX field N11 (Nominal Time for Condensate
+            // Removal to Begin), suggested value 1000 s (V26-1-0 IDD §Coil:Cooling:DX);
+            // zero means the latent degradation model is disabled.
             self.latent_degradation = LatentDegradationParams {
-                twet_rated_s: 1500.0,
+                twet_rated_s: 1000.0,
                 gamma_rated: 1.5,
                 max_cycling_rate: 3.0,
                 latent_time_constant_s: 45.0,
@@ -5043,7 +5045,7 @@ mod defaults_tests {
 
     // Single-stage AC initialised without explicit latent degradation params must
     // have the Henderson-Rengarajan model active with EnergyPlus residential DX
-    // defaults (twet=1500 s, gamma=1.5, Nmax=3 cyc/hr, tau=45 s).
+    // defaults (twet=1000 s, gamma=1.5, Nmax=3 cyc/hr, tau=45 s).
     // At part load (RTF < 1) the model must return SHR > steady-state SHR,
     // reflecting moisture re-evaporation during the off cycle.
     #[test]
@@ -5100,8 +5102,8 @@ mod defaults_tests {
             "latent degradation must be active after init for central AC"
         );
         assert!(
-            (eq.core.latent_degradation.twet_rated_s - 1500.0).abs() < 1e-9,
-            "twet_rated_s must be 1500 s (EnergyPlus residential default), got {}",
+            (eq.core.latent_degradation.twet_rated_s - 1000.0).abs() < 1e-9,
+            "twet_rated_s must be 1000 s (EnergyPlus Coil:Cooling:DX suggested default), got {}",
             eq.core.latent_degradation.twet_rated_s
         );
         assert!(

@@ -979,6 +979,42 @@ mod latent_degradation_tests {
         );
         assert!(result <= 1.0, "SHR must not exceed 1.0, got {result:.4}");
     }
+
+    // ------------------------------------------------------------------
+    // Test 12: Low RTF (0.10–0.35) with EnergyPlus residential defaults
+    //          (twet=1000s, gamma=1.5, Nmax=3 cyc/hr, tau=45s).
+    //          At very low RTF the toff_capped = min(toff_base, 2*twet/gamma)
+    //          = min(300/RTF, 1333 s) bound is active; the onset time to
+    //          exceeds the short on-cycle duration at these conditions,
+    //          yielding effective SHR = 1.0 (no latent removal during on-time).
+    //          This regression test confirms the model returns bounded,
+    //          physically valid results across the low-RTF range with the
+    //          corrected twet_rated_s = 1000 s.
+    // ------------------------------------------------------------------
+    #[test]
+    fn low_rtf_with_energyplus_residential_defaults_is_bounded() {
+        // EnergyPlus residential DX defaults: twet=1000s, gamma=1.5,
+        // Nmax=3 cyc/hr, tau=45s (Coil:Cooling:DX field N11 IDD V26-1-0).
+        let params = LatentDegradationParams {
+            twet_rated_s: 1000.0,
+            gamma_rated: 1.5,
+            max_cycling_rate: 3.0,
+            latent_time_constant_s: 45.0,
+        };
+        for rtf in [0.10, 0.15, 0.20, 0.25, 0.30, 0.35] {
+            let shr = effective_shr_with_latent_degradation(
+                STEADY_SHR, rtf, DB_C, WB_C, RATED_LAT_W, ACTUAL_LAT_W, &params, None,
+            );
+            assert!(
+                shr >= STEADY_SHR,
+                "SHR at RTF={rtf:.2} must be >= steady-state SHR {STEADY_SHR}, got {shr:.4}"
+            );
+            assert!(
+                shr <= 1.0,
+                "SHR at RTF={rtf:.2} must not exceed 1.0, got {shr:.4}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
