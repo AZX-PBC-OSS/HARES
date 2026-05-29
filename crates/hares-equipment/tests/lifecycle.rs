@@ -816,6 +816,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 stage_shrs: None,
                 crankcase_heater_kw: None,
                 crankcase_heater_threshold_c: None,
+                min_oat_cooling_c: 10.0,
             },
         ),
         "Ideal HVAC" => typed_alias_config(
@@ -1606,6 +1607,7 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
         stage_shrs: None,
         crankcase_heater_kw: None,
         crankcase_heater_threshold_c: None,
+        min_oat_cooling_c: 10.0,
     };
     let mut cfg = EquipmentConfig::from_typed(
         "Test GSHP Cooler".to_string(),

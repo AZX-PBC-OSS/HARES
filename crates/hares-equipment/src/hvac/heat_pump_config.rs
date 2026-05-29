@@ -467,7 +467,7 @@ impl HeatPumpHeaterConfig {
 /// See <https://serde.rs/attr-flatten.html> and <https://github.com/serde-rs/serde/issues/2384>.
 /// The `cooler_ignores_heater_only_field_hp_lockout` and
 /// `heater_ignores_cooler_only_field_stage_shrs` tests guard against key leakage.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HeatPumpCoolerConfig {
     #[serde(flatten)]
     pub common: HeatPumpCommonConfig,
@@ -484,11 +484,38 @@ pub struct HeatPumpCoolerConfig {
     /// OAT < this threshold and the compressor is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_threshold_c: Option<f64>,
+    /// Minimum outdoor air temperature for cooling compressor operation [°C].
+    /// Below this temperature the cooling compressor is locked out and the heat
+    /// pump relies on the economizer for free cooling.
+    ///
+    /// Default 10.0 °C per ASHRAE 90.1-2022 §6.5.1.4 economizer changeover
+    /// guidance. EnergyPlus `UnitarySystem.cc:12778` enforces this as
+    /// `OutsideDryBulbTemp > m_MinOATCompressorCooling`.
+    #[serde(default = "default_min_oat_cooling_c")]
+    pub min_oat_cooling_c: f64,
+}
+
+fn default_min_oat_cooling_c() -> f64 {
+    10.0
 }
 
 impl EquipmentTypedConfig for HeatPumpCoolerConfig {
     fn equipment_type_name() -> &'static str {
         super::core_config::equipment_type_name::ASHP_COOLER
+    }
+}
+
+// Manual Default impl: f64 fields must use the same default as serde
+// (10.0 °C for min_oat_cooling_c), not std::default (0.0).
+impl Default for HeatPumpCoolerConfig {
+    fn default() -> Self {
+        Self {
+            common: HeatPumpCommonConfig::default(),
+            stage_shrs: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            min_oat_cooling_c: default_min_oat_cooling_c(),
+        }
     }
 }
 
@@ -621,6 +648,16 @@ impl HeatPumpCoolerConfig {
                      for inverter compressors (AHRI 210/240, NREL field studies)"
                 );
             }
+        }
+
+        // Compile-time invariant: min_oat_cooling_c must be within a reasonable range.
+        // -10 °C to 30 °C covers all practical climates and equipment.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if !(-10.0..=30.0).contains(&self.min_oat_cooling_c) {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpCoolerConfig: min_oat_cooling_c must be in [-10, 30] °C, got {}",
+                self.min_oat_cooling_c
+            )));
         }
 
         Ok(())
@@ -781,6 +818,7 @@ mod tests {
             stage_shrs: Some(vec![0.78, 0.72]),
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
+            min_oat_cooling_c: 10.0,
         };
         let ec =
             EquipmentConfig::from_typed("test".to_string(), "ASHP Cooler".to_string(), cfg.clone());
@@ -952,6 +990,7 @@ mod tests {
             stage_shrs: Some(vec![0.78, 0.72]),
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
+            min_oat_cooling_c: 10.0,
         };
         let value = serde_json::to_value(&cfg).unwrap();
         let recovered: HeatPumpCoolerConfig = serde_json::from_value(value.clone()).unwrap();
@@ -1034,6 +1073,7 @@ mod tests {
             stage_shrs: None,
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
+            min_oat_cooling_c: 10.0,
         };
         let err = cfg_below.validate().unwrap_err();
         assert!(

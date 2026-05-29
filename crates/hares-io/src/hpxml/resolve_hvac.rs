@@ -1652,6 +1652,12 @@ fn try_build_heat_pump_cooler_config(
         } else {
             Some(12.78)
         },
+        // Minimum OAT for cooling compressor lockout [°C]. Default 10.0 °C per
+        // ASHRAE 90.1-2022 §6.5.1.4 economizer changeover guidance.
+        min_oat_cooling_c: params
+            .get("min_oat_cooling_c")
+            .and_then(Value::as_f64)
+            .unwrap_or(10.0),
     };
     Some(
         EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)

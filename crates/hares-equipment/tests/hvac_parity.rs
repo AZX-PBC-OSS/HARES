@@ -289,6 +289,7 @@ fn hp_cooler_cfg(
             stage_shrs: None,
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
+            min_oat_cooling_c: 10.0,
         },
     )
 }

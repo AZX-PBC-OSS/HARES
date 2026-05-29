@@ -1691,6 +1691,7 @@ mod tests {
                     stage_shrs: None,
                     crankcase_heater_kw: None,
                     crankcase_heater_threshold_c: None,
+                    min_oat_cooling_c: 10.0,
                 },
             ),
         ];
@@ -2225,6 +2226,7 @@ mod tests {
                     stage_shrs: None,
                     crankcase_heater_kw: None,
                     crankcase_heater_threshold_c: None,
+                    min_oat_cooling_c: 10.0,
                 },
             ),
         ];
@@ -2380,6 +2382,7 @@ mod tests {
                     stage_shrs: None,
                     crankcase_heater_kw: None,
                     crankcase_heater_threshold_c: None,
+                    min_oat_cooling_c: 10.0,
                 },
             ),
         ];
