@@ -255,6 +255,16 @@ pub const PARSE_ERROR_COUNT: &str = "parse_error_count";
 pub const TOTAL_COMMANDS_PARSED: &str = "total_commands_parsed";
 
 // ── Generator ───────────────────────────────────────────────────────────────
+/// Heat recovery ratio: fraction of available thermal power actually delivered to the loop.
+/// 1.0 = no capping; < 1.0 = loop saturated and thermal output is capped.
+/// EnergyPlus ICEngineElectricGenerator.cc:782 — HRecRatio.
+pub const HEAT_REC_RATIO: &str = "heat_rec_ratio";
+/// Unscaled thermal power available before heat recovery capping, in watts.
+/// EnergyPlus ICEngineElectricGenerator.cc:757 — q_thermal before HRecRatio.
+pub const THERMAL_AVAILABLE_W: &str = "thermal_available_w";
+/// Fluid loop return temperature, in °C, read at time of heat recovery computation.
+/// EnergyPlus ICEngineElectricGenerator.cc:751 — HeatRecInTemp.
+pub const LOOP_RETURN_TEMP_C: &str = "loop_return_temp_c";
 /// Jacket water heat recovery power in watts.
 /// EnergyPlus ERM 26.1 §Generators §Internal Combustion Engine:
 /// jacket water heat recovery is a manufacturer-supplied PLR-dependent curve.

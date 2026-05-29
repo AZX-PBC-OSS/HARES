@@ -543,6 +543,7 @@ fn sample_generator_config() -> GeneratorConfig {
         stack_cooler_r2: None,
         stack_cooler_r3: None,
         stack_nominal_temp_c: None,
+        heat_rec_max_temp_c: None,
     }
 }
 

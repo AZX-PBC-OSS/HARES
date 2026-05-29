@@ -579,6 +579,7 @@ fn generator_fuel_efficiency_at_half_load() {
             stack_cooler_r2: None,
             stack_cooler_r3: None,
             stack_nominal_temp_c: None,
+            heat_rec_max_temp_c: None,
         },
     );
 
@@ -675,6 +676,7 @@ fn generator_ramp_rate_is_kw_per_second() {
             stack_cooler_r2: None,
             stack_cooler_r3: None,
             stack_nominal_temp_c: None,
+            heat_rec_max_temp_c: None,
         },
     );
 
@@ -753,6 +755,7 @@ fn generator_capacity_min_enforced() {
             stack_cooler_r2: None,
             stack_cooler_r3: None,
             stack_nominal_temp_c: None,
+            heat_rec_max_temp_c: None,
         },
     );
 

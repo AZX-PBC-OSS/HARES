@@ -482,6 +482,7 @@ fn oracle_generator_24h_constant_load() {
             stack_cooler_r2: None,
             stack_cooler_r3: None,
             stack_nominal_temp_c: None,
+            heat_rec_max_temp_c: None,
         },
     );
 

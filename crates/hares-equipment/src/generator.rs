@@ -32,6 +32,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+
 use crate::config::EquipmentTypedConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -100,6 +102,11 @@ pub struct GeneratorConfig {
     /// FuelCell stack cooler nominal temperature (°C) for offset reference.
     /// EnergyPlus FuelCellElectricGenerator.cc:1862 — TstackNom.
     pub stack_nominal_temp_c: Option<f64>,
+    /// Maximum heat recovery fluid temperature (°C).
+    /// When set, thermal output is capped so the loop return temperature plus
+    /// the temperature rise from heat recovery does not exceed this value.
+    /// EnergyPlus ICEngineElectricGenerator.cc:768 — HeatRecMaxTemp.
+    pub heat_rec_max_temp_c: Option<f64>,
 }
 
 impl EquipmentTypedConfig for GeneratorConfig {
@@ -235,6 +242,13 @@ impl GeneratorConfig {
                 ));
             }
         }
+        if let Some(hrmt) = self.heat_rec_max_temp_c {
+            if !hrmt.is_finite() || hrmt <= 0.0 {
+                return Err(HaresError::Equipment(
+                    "generator heat_rec_max_temp_c must be finite and > 0".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -289,6 +303,8 @@ const KEY_STACK_COOLER_R2: &str = "stack_cooler_r2";
 const KEY_STACK_COOLER_R3: &str = "stack_cooler_r3";
 #[cfg(test)]
 const KEY_STACK_NOMINAL_TEMP_C: &str = "stack_nominal_temp_c";
+#[cfg(test)]
+const KEY_HEAT_REC_MAX_TEMP_C: &str = "heat_rec_max_temp_c";
 
 // ---------------------------------------------------------------------------
 // Physical defaults
@@ -741,6 +757,9 @@ pub struct Generator {
     stack_cooler_r3: f64,
     stack_nominal_temp_c: f64,
 
+    /// Maximum heat recovery fluid temperature (°C). None = no capping.
+    heat_rec_max_temp_c: Option<f64>,
+
     // Dynamic state
     current_power_kw: f64,
     mode: OperatingMode,
@@ -890,6 +909,7 @@ impl Generator {
                 .as_ref()
                 .and_then(|c| c.stack_nominal_temp_c)
                 .unwrap_or(DEFAULT_STACK_NOMINAL_TEMP_C),
+            heat_rec_max_temp_c: typed.as_ref().and_then(|c| c.heat_rec_max_temp_c),
             current_power_kw: 0.0,
             mode: OperatingMode::Off,
             power_setpoint_kw: None,
@@ -998,6 +1018,7 @@ impl Generator {
         self.stack_cooler_r2 = c.stack_cooler_r2.unwrap_or(self.stack_cooler_r2);
         self.stack_cooler_r3 = c.stack_cooler_r3.unwrap_or(self.stack_cooler_r3);
         self.stack_nominal_temp_c = c.stack_nominal_temp_c.unwrap_or(self.stack_nominal_temp_c);
+        self.heat_rec_max_temp_c = c.heat_rec_max_temp_c;
 
         self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind)?;
         self.efficiency.validate()?;
@@ -1144,10 +1165,85 @@ impl Equipment for Generator {
         let q_jacket_w = fuel_w * self.eta_jacket_water;
         let q_lube_w = fuel_w * self.eta_lube_oil;
         let q_exhaust_w = fuel_w * self.eta_exhaust;
-        let q_thermal_w = q_jacket_w + q_lube_w + q_exhaust_w;
+        let q_thermal_available_w = q_jacket_w + q_lube_w + q_exhaust_w;
         // Total waste heat = fuel - AC electrical; includes inverter loss and stack heat.
         let total_waste_w = fuel_w - electrical_w;
-        let q_flue_w = total_waste_w - q_thermal_w;
+        let q_flue_w = total_waste_w - q_thermal_available_w;
+
+        let has_thermal =
+            self.eta_jacket_water > 0.0 || self.eta_lube_oil > 0.0 || self.eta_exhaust > 0.0;
+
+        // Heat recovery temperature capping (EnergyPlus HRecRatio).
+        // EnergyPlus ICEngineElectricGenerator.cc:729-793 — CalcICEngineGenHeatRecovery.
+        // When the fluid loop cannot absorb all available heat without exceeding the
+        // maximum temperature setpoint, thermal output is scaled down by HRecRatio.
+        // Rejected heat is routed to q_flue (waste heat to zone / ambient).
+        let (
+            heat_rec_ratio,
+            q_thermal_effective_w,
+            q_jacket_eff_w,
+            q_lube_eff_w,
+            q_exhaust_eff_w,
+            q_flue_eff_w,
+        ) = if has_thermal && q_thermal_available_w > IDLE_KW_THRESHOLD {
+            if let Some(max_temp) = self.heat_rec_max_temp_c {
+                let cp = CP_LIQUID_WATER_J_KG_K;
+                let loop_return_c = self.return_temp_c;
+                let temp_rise = q_thermal_available_w / (self.flow_rate_kg_s * cp);
+                if (loop_return_c + temp_rise) > max_temp {
+                    // Max heat the loop can absorb without exceeding HeatRecMaxTemp.
+                    // EnergyPlus ICEngineElectricGenerator.cc:771:
+                    //   MinHeatRecMdot = EnergyRecovered / (Cp * (HeatRecMaxTemp - HeatRecInTemp))
+                    // HRecRatio = HeatRecMdot / MinHeatRecMdot
+                    //   = (flow_rate * Cp * (Tmax - Treturn)) / q_thermal_available
+                    let q_max_absorbable = self.flow_rate_kg_s * cp * (max_temp - loop_return_c);
+                    let ratio = (q_max_absorbable / q_thermal_available_w).clamp(0.0, 1.0);
+                    let q_rejected = q_thermal_available_w - q_thermal_available_w * ratio;
+                    (
+                        ratio,
+                        q_thermal_available_w * ratio,
+                        q_jacket_w * ratio,
+                        q_lube_w * ratio,
+                        q_exhaust_w * ratio,
+                        q_flue_w + q_rejected,
+                    )
+                } else {
+                    (
+                        1.0,
+                        q_thermal_available_w,
+                        q_jacket_w,
+                        q_lube_w,
+                        q_exhaust_w,
+                        q_flue_w,
+                    )
+                }
+            } else {
+                (
+                    1.0,
+                    q_thermal_available_w,
+                    q_jacket_w,
+                    q_lube_w,
+                    q_exhaust_w,
+                    q_flue_w,
+                )
+            }
+        } else {
+            (0.0, 0.0, 0.0, 0.0, 0.0, q_flue_w)
+        };
+
+        // Invariant: heat_rec_ratio must be in [0, 1] and effective <= available.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                (0.0..=1.0).contains(&heat_rec_ratio),
+                "heat_rec_ratio must be in [0, 1], got {heat_rec_ratio}"
+            );
+            debug_assert!(
+                q_thermal_effective_w
+                    <= q_thermal_available_w + 10.0 * f64::EPSILON * q_thermal_available_w.abs(),
+                "q_thermal_effective ({q_thermal_effective_w} W) must not exceed q_thermal_available ({q_thermal_available_w} W)"
+            );
+        }
 
         // Invariant: energy conservation within the generator.
         // q_jacket + q_lube + q_exhaust must not exceed fuel_w - electrical_w.
@@ -1155,16 +1251,31 @@ impl Equipment for Generator {
         {
             let margin = 10.0 * f64::EPSILON * fuel_w.abs().max(1.0);
             debug_assert!(
-                q_thermal_w <= total_waste_w + margin,
-                "generator per-stream heat recovery ({q_thermal_w} W) exceeds available waste heat ({total_waste_w} W)"
+                q_thermal_available_w <= total_waste_w + margin,
+                "generator per-stream heat recovery ({q_thermal_available_w} W) exceeds available waste heat ({total_waste_w} W)"
             );
         }
 
-        let has_thermal =
-            self.eta_jacket_water > 0.0 || self.eta_lube_oil > 0.0 || self.eta_exhaust > 0.0;
+        // Observer capture: record heat recovery capping diagnostics.
+        #[cfg(feature = "observe")]
+        {
+            if has_thermal && q_thermal_available_w > IDLE_KW_THRESHOLD {
+                let loop_return_c = self.return_temp_c;
+                tracing::debug!(
+                    q_thermal_available_w,
+                    q_thermal_effective_w,
+                    heat_rec_ratio,
+                    loop_return_temp_c = loop_return_c,
+                    q_jacket_water_w = q_jacket_eff_w,
+                    q_lube_oil_w = q_lube_eff_w,
+                    q_exhaust_water_w = q_exhaust_eff_w,
+                    "Generator heat recovery capping",
+                );
+            }
+        }
 
         // Energy routing to zone and fluid ports:
-        //   - CHP with fluid port: q_thermal → fluid, q_flue → zone (no double-count)
+        //   - CHP with fluid port: q_thermal_effective → fluid, q_flue_effective → zone (no double-count)
         //   - CHP without fluid port: all non-electrical loss → zone
         //   - No CHP: all non-electrical loss → zone (q_flue only, since q_thermal=0)
         //
@@ -1176,13 +1287,16 @@ impl Equipment for Generator {
         //   EnergyPlus ICEngineElectricGenerator.cc:596–649 — multi-stream heat recovery.
         let (zone_jacket_loss_w, zone_internal_gain_w) =
             if has_thermal && self.chp_loop_id.is_some() {
-                // Fluid port takes all q_thermal; zone only gets flue loss.
-                (0.0, q_flue_w)
+                // Fluid port takes all q_thermal_effective; zone only gets flue loss.
+                (0.0, q_flue_eff_w)
             } else {
                 // No fluid port: zone receives all waste heat, split by category.
                 // Jacket + lube → JacketLoss; exhaust + flue → InternalGain.
                 if has_thermal {
-                    (q_jacket_w + q_lube_w, q_exhaust_w + q_flue_w)
+                    (
+                        q_jacket_eff_w + q_lube_eff_w,
+                        q_exhaust_eff_w + q_flue_eff_w,
+                    )
                 } else {
                     // No heat recovery at all: all waste heat → InternalGain.
                     (0.0, total_waste_w)
@@ -1228,7 +1342,7 @@ impl Equipment for Generator {
         }
 
         // Write CHP fluid port when producing heat.
-        if q_thermal_w > IDLE_KW_THRESHOLD {
+        if q_thermal_effective_w > IDLE_KW_THRESHOLD {
             if let Some(loop_id) = self.chp_loop_id {
                 ports.accumulate(&PortContribution::Fluid {
                     loop_id,
@@ -1253,11 +1367,17 @@ impl Equipment for Generator {
             .set(tk::RAMP_LIMITED, if ramp_limited { 1.0 } else { 0.0 });
 
         if has_thermal {
-            self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
-            self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
-            self.telemetry.set(tk::JACKET_WATER_W, q_jacket_w);
-            self.telemetry.set(tk::LUBE_OIL_W, q_lube_w);
-            self.telemetry.set(tk::EXHAUST_WATER_W, q_exhaust_w);
+            self.telemetry
+                .set(tk::THERMAL_AVAILABLE_W, q_thermal_available_w);
+            self.telemetry
+                .set(tk::THERMAL_OUTPUT_W, q_thermal_effective_w);
+            self.telemetry.set(tk::HEAT_REC_RATIO, heat_rec_ratio);
+            self.telemetry
+                .set(tk::LOOP_RETURN_TEMP_C, self.return_temp_c);
+            self.telemetry.set(tk::FLUE_LOSS_W, q_flue_eff_w);
+            self.telemetry.set(tk::JACKET_WATER_W, q_jacket_eff_w);
+            self.telemetry.set(tk::LUBE_OIL_W, q_lube_eff_w);
+            self.telemetry.set(tk::EXHAUST_WATER_W, q_exhaust_eff_w);
             self.telemetry
                 .set(tk::SUPPLY_TEMP_JACKET_C, self.supply_temp_jacket_c);
             self.telemetry
@@ -1267,9 +1387,9 @@ impl Equipment for Generator {
             #[cfg(feature = "observe")]
             {
                 tracing::debug!(
-                    q_jacket_water_w = q_jacket_w,
-                    q_lube_oil_w = q_lube_w,
-                    q_exhaust_water_w = q_exhaust_w,
+                    q_jacket_water_w = q_jacket_eff_w,
+                    q_lube_oil_w = q_lube_eff_w,
+                    q_exhaust_water_w = q_exhaust_eff_w,
                     supply_temp_jacket_c = self.supply_temp_jacket_c,
                     supply_temp_exhaust_c = self.supply_temp_exhaust_c,
                     eta_jacket_water = self.eta_jacket_water,
@@ -1306,8 +1426,8 @@ impl Equipment for Generator {
                     fuel_type: FuelType::Gas,
                     consumption_w: fuel_w.max(0.0),
                 }),
-                thermal_output_w: if has_thermal && q_thermal_w > 0.0 {
-                    Some(q_thermal_w)
+                thermal_output_w: if has_thermal && q_thermal_effective_w > 0.0 {
+                    Some(q_thermal_effective_w)
                 } else {
                     None
                 },
@@ -1379,7 +1499,11 @@ impl Equipment for Generator {
             let q_exhaust_w = fuel_w * self.eta_exhaust;
             let q_thermal_w = q_jacket_w + q_lube_w + q_exhaust_w;
             let q_flue_w = fuel_w - self.current_power_kw * 1000.0 - q_thermal_w;
+            self.telemetry.set(tk::THERMAL_AVAILABLE_W, q_thermal_w);
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
+            self.telemetry.set(tk::HEAT_REC_RATIO, 1.0);
+            self.telemetry
+                .set(tk::LOOP_RETURN_TEMP_C, self.return_temp_c);
             self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
             self.telemetry.set(tk::JACKET_WATER_W, q_jacket_w);
             self.telemetry.set(tk::LUBE_OIL_W, q_lube_w);
@@ -1502,15 +1626,18 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry(has_chp: bool, is_fuel_cell: bool) -> Telemetry {
-    // Base: 4 fields. CHP: 7 extra (thermal, flue, jacket, lube, exhaust, +2 supply temps).
-    let capacity = if has_chp { 11 } else { 4 } + if is_fuel_cell { 3 } else { 0 };
+    // Base: 4 fields. CHP: 10 extra (thermal, available, ratio, loop_return, flue, jacket, lube, exhaust, +2 supply temps).
+    let capacity = if has_chp { 14 } else { 4 } + if is_fuel_cell { 3 } else { 0 };
     let mut t = Telemetry::with_capacity(capacity);
     t.insert(tk::ELECTRIC_OUTPUT_KW, 0.0);
     t.insert(tk::FUEL_INPUT_W, 0.0);
     t.insert(tk::ETA_ELECTRIC, 0.0);
     t.insert(tk::RAMP_LIMITED, 0.0);
     if has_chp {
+        t.insert(tk::THERMAL_AVAILABLE_W, 0.0);
         t.insert(tk::THERMAL_OUTPUT_W, 0.0);
+        t.insert(tk::HEAT_REC_RATIO, 0.0);
+        t.insert(tk::LOOP_RETURN_TEMP_C, 0.0);
         t.insert(tk::FLUE_LOSS_W, 0.0);
         t.insert(tk::JACKET_WATER_W, 0.0);
         t.insert(tk::LUBE_OIL_W, 0.0);
@@ -1552,9 +1679,29 @@ fn generator_telemetry_fields(has_chp: bool, is_fuel_cell: bool) -> Vec<Telemetr
     ];
     if has_chp {
         fields.push(TelemetryField {
+            name: tk::THERMAL_AVAILABLE_W.to_string(),
+            unit: "W".to_string(),
+            description: "Uncapped CHP thermal recovery available before heat_rec_ratio scaling"
+                .to_string(),
+        });
+        fields.push(TelemetryField {
             name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
-            description: "Total CHP thermal recovery output (sum of jacket, lube, exhaust)"
+            description:
+                "Total CHP thermal recovery output delivered to loop (after heat_rec_ratio)"
+                    .to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::HEAT_REC_RATIO.to_string(),
+            unit: "-".to_string(),
+            description:
+                "Heat recovery ratio: fraction of available thermal delivered to loop [0..1]"
+                    .to_string(),
+        });
+        fields.push(TelemetryField {
+            name: tk::LOOP_RETURN_TEMP_C.to_string(),
+            unit: "°C".to_string(),
+            description: "Fluid loop return temperature at time of heat recovery computation"
                 .to_string(),
         });
         fields.push(TelemetryField {
@@ -1708,6 +1855,7 @@ mod tests {
             stack_cooler_r2: None,
             stack_cooler_r3: None,
             stack_nominal_temp_c: None,
+            heat_rec_max_temp_c: None,
         };
         for (k, v) in overrides {
             match (*k, v) {
@@ -1758,6 +1906,9 @@ mod tests {
                 }
                 (KEY_STACK_NOMINAL_TEMP_C, ConfigValue::Float(value)) => {
                     cfg.stack_nominal_temp_c = Some(*value)
+                }
+                (KEY_HEAT_REC_MAX_TEMP_C, ConfigValue::Float(value)) => {
+                    cfg.heat_rec_max_temp_c = Some(*value)
                 }
                 (KEY_ZONE_ID, ConfigValue::Float(value)) => cfg.zone_id = Some(*value as u16),
                 (KEY_EQUIPMENT_ID, ConfigValue::Float(value)) => {
@@ -3567,6 +3718,7 @@ mod tests {
             stack_cooler_r2: None,
             stack_cooler_r3: None,
             stack_nominal_temp_c: None,
+            heat_rec_max_temp_c: None,
         }
     }
 
@@ -4050,5 +4202,341 @@ mod tests {
         assert!((fc2.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap() - 5.0 / 0.90).abs() < 1e-6);
         assert!(fc2.telemetry().get(tk::FUEL_CELL_INVERTER_LOSS_W).unwrap() > 0.0);
         assert!(fc2.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap() > 0.0);
+    }
+
+    // =======================================================================
+    // Heat recovery temperature capping
+    // =======================================================================
+
+    #[test]
+    fn heat_rec_capping_limits_outlet_to_max_temp() {
+        // EnergyPlus HRecRatio: when loop return temp + temp_rise > max_temp,
+        // thermal output is scaled down so the loop outlet stays at or below max.
+        // With return_temp_c = 75°C, max_temp = 80°C, flow = 0.1 kg/s, Cp = 4180 J/(kg·K):
+        // max absorbable = 0.1 * 4180 * (80 - 75) = 2090 W.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.20.into()),
+            (KEY_ETA_EXHAUST, 0.30.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.1.into()),
+            (KEY_RETURN_TEMP_C, 75.0.into()),
+            (KEY_HEAT_REC_MAX_TEMP_C, 80.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let q_available = generator.telemetry().get(tk::THERMAL_AVAILABLE_W).unwrap();
+        let q_effective = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let ratio = generator.telemetry().get(tk::HEAT_REC_RATIO).unwrap();
+        let loop_return = generator.telemetry().get(tk::LOOP_RETURN_TEMP_C).unwrap();
+
+        assert!(
+            q_available > 0.0,
+            "thermal_available should be positive: {q_available}"
+        );
+        assert!(
+            q_effective > 0.0,
+            "thermal_effective should be positive: {q_effective}"
+        );
+        assert!(
+            q_effective < q_available,
+            "thermal_effective ({q_effective}) should be less than thermal_available ({q_available}) when capping is active"
+        );
+        assert!(
+            ratio < 1.0,
+            "heat_rec_ratio should be less than 1.0 with capping, got {ratio}"
+        );
+        assert!(
+            ratio > 0.0,
+            "heat_rec_ratio should be greater than 0.0, got {ratio}"
+        );
+        assert!(
+            (loop_return - 75.0).abs() < 1e-9,
+            "loop_return_temp_c should be 75°C, got {loop_return}"
+        );
+
+        // Verify loop outlet temperature does not exceed max_temp.
+        // outlet = return + q_effective / (flow * Cp)
+        let cp = CP_LIQUID_WATER_J_KG_K;
+        let outlet_temp_c = loop_return + q_effective / (0.1 * cp);
+        assert!(
+            outlet_temp_c <= 80.0 + 1e-9,
+            "loop outlet temperature ({outlet_temp_c}) must not exceed max_temp (80°C)"
+        );
+
+        // Verify invariant: 0.0 <= ratio <= 1.0 (checked by debug_assert in step)
+        assert!((0.0..=1.0).contains(&ratio));
+        assert!(q_effective <= q_available);
+    }
+
+    #[test]
+    fn heat_rec_ratio_is_one_when_no_temperature_constraint() {
+        // Without heat_rec_max_temp_c, there is no capping.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.20.into()),
+            (KEY_ETA_EXHAUST, 0.30.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.1.into()),
+            (KEY_RETURN_TEMP_C, 60.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let q_available = generator.telemetry().get(tk::THERMAL_AVAILABLE_W).unwrap();
+        let q_effective = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let ratio = generator.telemetry().get(tk::HEAT_REC_RATIO).unwrap();
+
+        assert!(
+            (ratio - 1.0).abs() < f64::EPSILON,
+            "heat_rec_ratio should be 1.0 without max_temp, got {ratio}"
+        );
+        assert!(
+            (q_effective - q_available).abs() < 1.0,
+            "effective thermal should equal available thermal without capping"
+        );
+    }
+
+    #[test]
+    fn heat_rec_ratio_is_one_when_max_temp_is_none() {
+        // Explicitly set heat_rec_max_temp_c = None via config.
+        // This is the default; test verifies no-capping behaviour.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.20.into()),
+            (KEY_ETA_EXHAUST, 0.30.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.1.into()),
+            (KEY_RETURN_TEMP_C, 75.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let ratio = generator.telemetry().get(tk::HEAT_REC_RATIO).unwrap();
+        assert!(
+            (ratio - 1.0).abs() < f64::EPSILON,
+            "heat_rec_ratio should be 1.0 when max_temp is None, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn existing_chp_tests_produce_identical_results_without_max_temp() {
+        // Regression: without heat_rec_max_temp_c, thermal_output should match the
+        // uncapped formula (q_thermal = fuel_w * eta_thermal) exactly as before.
+        let config = gen_config(&[
+            (KEY_ETA_THERMAL, 0.40.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 6.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let thermal_avail = generator.telemetry().get(tk::THERMAL_AVAILABLE_W).unwrap();
+
+        // Q_thermal = P_fuel * eta_thermal (uncapped formula)
+        assert!(
+            (thermal_w - fuel_w * 0.40).abs() < 1.0,
+            "thermal_output should match legacy formula: got {thermal_w}, expected {}",
+            fuel_w * 0.40
+        );
+        // Available must equal effective when not capped.
+        assert!(
+            (thermal_w - thermal_avail).abs() < 1.0,
+            "thermal_available ({thermal_avail}) must equal thermal_output ({thermal_w}) when no capping"
+        );
+    }
+
+    #[test]
+    fn heat_rec_telemetry_fields_registered_when_chp_active() {
+        // New telemetry fields must be registered when CHP is active.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.15.into()),
+            (KEY_ETA_EXHAUST, 0.25.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_HEAT_REC_MAX_TEMP_C, 85.0.into()),
+        ]);
+        let generator = Generator::new(config, GeneratorKind::GasGenerator);
+        let names: Vec<&str> = generator
+            .descriptor()
+            .telemetry_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        for expected in &[
+            tk::THERMAL_AVAILABLE_W,
+            tk::HEAT_REC_RATIO,
+            tk::LOOP_RETURN_TEMP_C,
+        ] {
+            assert!(
+                names.contains(expected),
+                "missing telemetry field: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn heat_rec_ratio_is_zero_when_loop_already_saturated() {
+        // When the loop return temperature already equals or exceeds the max temp,
+        // the loop cannot absorb any heat without immediately exceeding the cap.
+        // EnergyPlus ICEngineElectricGenerator.cc:785: HRecRatio = 0.0 when
+        // HeatRecInTemp == HeatRecMaxTemp (MinHeatRecMdot = 0.0).
+        let cases = [
+            (80.0, "return_temp exactly at max_temp"),
+            (82.0, "return_temp above max_temp"),
+        ];
+        for &(return_temp, label) in &cases {
+            let config = gen_config(&[
+                (KEY_ETA_JACKET_WATER, 0.20.into()),
+                (KEY_ETA_EXHAUST, 0.30.into()),
+                (KEY_ZONE_ID, 1.0.into()),
+                (KEY_LOOP_ID, 7.0.into()),
+                (KEY_FLOW_RATE_KG_S, 0.1.into()),
+                (KEY_RETURN_TEMP_C, return_temp.into()),
+                (KEY_HEAT_REC_MAX_TEMP_C, 80.0.into()),
+                (KEY_DELTA_KW_PER_S, 100.0.into()),
+            ]);
+            let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+            generator.init(&config, &base_env()).unwrap();
+            generator
+                .apply_control(&ControlSignal::PowerSetpoint {
+                    active_power_kw: 10.0,
+                    reactive_power_kvar: None,
+                })
+                .unwrap();
+            let mut slots = ports_for(&generator);
+            generator
+                .step(&base_env(), Duration::from_secs(1), &mut slots)
+                .unwrap();
+
+            let q_available = generator.telemetry().get(tk::THERMAL_AVAILABLE_W).unwrap();
+            let q_effective = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+            let ratio = generator.telemetry().get(tk::HEAT_REC_RATIO).unwrap();
+
+            assert!(
+                q_available > 0.0,
+                "[{label}] thermal_available should be positive: {q_available}"
+            );
+            // Loop return is at or above max temp — all heat must be rejected.
+            assert!(
+                (ratio - 0.0).abs() < f64::EPSILON,
+                "[{label}] heat_rec_ratio should be 0.0 when loop is saturated, got {ratio}"
+            );
+            assert!(
+                q_effective < 1.0,
+                "[{label}] thermal_effective should be near zero ({q_effective}) when loop is saturated"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_heat_routed_to_flue_loss() {
+        // When thermal output is capped, the rejected heat must be added to q_flue.
+        // This verifies that energy balance holds: q_available = q_effective + q_rejected,
+        // and q_rejected appears in q_flue.
+        let config = gen_config(&[
+            (KEY_ETA_JACKET_WATER, 0.20.into()),
+            (KEY_ETA_EXHAUST, 0.30.into()),
+            (KEY_ZONE_ID, 1.0.into()),
+            (KEY_LOOP_ID, 7.0.into()),
+            (KEY_FLOW_RATE_KG_S, 0.1.into()),
+            (KEY_RETURN_TEMP_C, 75.0.into()),
+            (KEY_HEAT_REC_MAX_TEMP_C, 80.0.into()),
+            (KEY_DELTA_KW_PER_S, 100.0.into()),
+        ]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+        generator
+            .apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let q_available = generator.telemetry().get(tk::THERMAL_AVAILABLE_W).unwrap();
+        let q_effective = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let q_flue = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
+        let q_jacket = generator.telemetry().get(tk::JACKET_WATER_W).unwrap();
+        let q_exhaust = generator.telemetry().get(tk::EXHAUST_WATER_W).unwrap();
+
+        // Energy balance: fuel = electric + q_jacket + q_exhaust + q_flue
+        // (q_lube defaults to 0 here)
+        let balance = fuel_w - electric_w - q_jacket - q_exhaust - q_flue;
+        assert!(
+            balance.abs() < 1.0,
+            "energy balance violated: residual={balance:.3} W"
+        );
+
+        // Rejected heat appears in q_flue.
+        let q_rejected = q_available - q_effective;
+        assert!(
+            q_rejected > 0.0,
+            "rejected heat should be positive when capping is active"
+        );
+
+        // flue_loss with capping should be larger than without (contains rejected heat).
+        // The non-capped flue would be: fuel_w - electric_w - q_available
+        let uncapped_flue = fuel_w - electric_w - q_available;
+        assert!(
+            q_flue > uncapped_flue,
+            "flue loss with capping ({q_flue:.1} W) should exceed uncapped flue ({uncapped_flue:.1} W)"
+        );
     }
 }
