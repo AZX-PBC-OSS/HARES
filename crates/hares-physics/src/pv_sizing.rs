@@ -954,7 +954,9 @@ pub enum PvSizingError {
 /// Infer roof shape from building metadata.
 ///
 /// `facility_type` is the HPXML `ResidentialFacilityType` string.
-/// Falls back to `Gable` when evidence is ambiguous.
+/// Falls back to `Hip` when evidence is ambiguous (the most conservative
+/// shape — usable fraction 0.35 — to avoid overestimating PV capacity
+/// from HPXML datasets that omit minor roof planes).
 pub fn infer_roof_shape(
     roof: &RoofInfo,
     facility_type: Option<&str>,
@@ -999,7 +1001,36 @@ pub fn infer_roof_shape(
         return RoofShape::Hip;
     }
 
-    RoofShape::Gable
+    // Fallback: no classification rule matched. Default to Hip — the most
+    // conservative shape — to avoid overestimating PV capacity when HPXML
+    // datasets omit minor roof planes (common in NREL ResStock v3.1).
+    // Gable (0.75 usable) would overstate usable area by 2.14× vs Hip (0.35).
+    let n_planes = roof.planes.len();
+    let n_distinct_az = distinct_azimuths.len();
+
+    #[cfg(feature = "observe")]
+    {
+        tracing::debug!(
+            pv_roof_shape_fallback_reason = "no_classification_rule_matched",
+            pv_n_planes = n_planes,
+            pv_n_distinct_azimuths = n_distinct_az,
+            pv_has_tile_slate = has_tile_slate,
+            pv_latitude = latitude,
+            pv_facility_type = facility_type.map(|s| s.to_string()),
+            "roof_shape fallback: defaulting to Hip (conservative)\
+             — n_planes={n_planes}, n_distinct_az={n_distinct_az},\
+             tile_slate={has_tile_slate}",
+        );
+    }
+
+    tracing::warn!(
+        pv_n_planes = n_planes,
+        pv_n_distinct_azimuths = n_distinct_az,
+        pv_has_tile_slate = has_tile_slate,
+        "Roof shape could not be determined from available data; defaulting to Hip (conservative, 0.35 usable fraction)"
+    );
+
+    RoofShape::Hip
 }
 
 #[cfg(test)]
@@ -1310,15 +1341,65 @@ mod tests {
         );
     }
 
+    /// 2-plane hip roof (N=0°, S=180°) with asphalt shingle at latitude 40°.
+    /// None of the classification rules match: only 2 distinct azimuths,
+    /// no tile/slate material, latitude ≥ 30°. Falls through to the
+    /// conservative fallback — must return Hip (0.35 usable), not Gable (0.75).
     #[test]
-    fn infer_gable_default() {
+    fn infer_2plane_hip_fallback() {
         let roof = RoofInfo {
             planes: vec![plane(50.0, 26.0, Some(180.0)), plane(50.0, 26.0, Some(0.0))],
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
             infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
-            RoofShape::Gable
+            RoofShape::Hip
+        );
+    }
+
+    /// 2-plane gable roof (E=90°, W=270°) with asphalt shingle at latitude 40°.
+    /// No classification rule matches — same fallback case. Must return the
+    /// conservative fallback (Hip), not Gable.
+    #[test]
+    fn infer_2plane_gable_fallback() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(50.0, 26.0, Some(90.0)),
+                plane(50.0, 26.0, Some(270.0)),
+            ],
+            total_roof_area_m2: 100.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            RoofShape::Hip
+        );
+    }
+
+    /// Integration: exercise `compute_usable_area` end-to-end with 2-plane
+    /// hip-roof data and verify the capacity estimate uses the conservative
+    /// Hip usable fraction (0.35) instead of Gable (0.75).
+    #[test]
+    fn pv_capacity_2plane_hip() {
+        let roof = RoofInfo {
+            planes: vec![plane(60.0, 26.0, Some(180.0)), plane(40.0, 26.0, Some(0.0))],
+            total_roof_area_m2: 100.0,
+        };
+        // infer_roof_shape with this data at lat=40° will fall back to Hip.
+        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0));
+        assert_eq!(shape, RoofShape::Hip);
+
+        let usable = compute_usable_area(&roof, shape, &[], Some(40.0), None, None, None).unwrap();
+        // With Hip (0.35): south plane (60 m², not north-facing) → 60 × 0.35 = 21 m²
+        // 21 / 2.1 (panel_area) = 10 panels, 10 × 440 = 4400 W = 4.4 kW
+        // If shape were Gable (0.75): 60 × 0.75 / 2.1 = 21 panels, 9.24 kW
+        // The difference verifies we're using the conservative fraction.
+        let hip_expected_panels =
+            (60.0 * HIP_USABLE_FRACTION / DEFAULT_PANEL_AREA_M2).floor() as u32;
+        assert_eq!(usable.max_panels, hip_expected_panels);
+        assert!(
+            usable.max_capacity_kw < 6.0,
+            "capacity with Hip shape ({:.2} kW) must be well below Gable estimate (~9.24 kW)",
+            usable.max_capacity_kw
         );
     }
 
