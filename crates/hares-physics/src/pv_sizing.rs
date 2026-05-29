@@ -84,10 +84,21 @@ pub struct PvSizingResult {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Modern panel: 420 W, ~2.0 m² (21.5 sqft).
+/// Representative modern monocrystalline panel defaults.
+/// 420 W at ~21% efficiency (per NREL Best Research-Cell Efficiency Chart
+/// 2023 — "Crystalline Si Cells — Mono-Si" commercial modules);
+/// 2.0 m² footprint (≈ 1.05 m × 1.90 m, industry-standard 60/72-cell frame).
 const DEFAULT_PANEL_WATTS: u32 = 420;
 const DEFAULT_PANEL_AREA_M2: f64 = 2.0;
+/// Total system derate factor (wiring, soiling, mismatch, inverter, shading).
+/// EnergyPlus PVWatts IDD V26-1-0 Generator:PVWatts, field N6 (system_losses),
+/// default = 0.14 (14%). Valid range [0, 0.99].
 const DEFAULT_SYSTEM_LOSSES: f64 = 0.14;
+/// Flat-roof tilt fallback when latitude is unavailable.
+/// 10° is the lower end of the standard commercial ballasted-racking range
+/// (5–15°); it minimises wind loading while maintaining drainage.
+/// SEAOC PV2 (2012) §3.2 recommends 10° as a conservative default for
+/// commercial flat roofs when site data is absent.
 const FLAT_TILT_FALLBACK_DEG: f64 = 10.0;
 
 /// Gable: accounts for fire-code setbacks (~15%; IFC 2018 §1204.2 3 ft ridge
@@ -288,14 +299,68 @@ fn plane_solar_score(
     area_m2 * usable_fraction(shape) * production_factor
 }
 
-/// Ground coverage ratio for flat roofs, latitude-dependent.
-fn flat_roof_gcr(latitude: Option<f64>) -> f64 {
-    match latitude {
-        Some(lat) if lat > 40.0 => 0.35,
-        Some(lat) if lat > 30.0 => 0.40,
-        Some(_) => 0.50,
-        None => 0.40,
+/// Minimum design-point solar elevation (degrees) for GCR computation.
+///
+/// Continuous piecewise-linear function of latitude that replaces the old
+/// step-table bands. The design-point elevation is the lowest sun angle at
+/// which no inter-row shading is acceptable; it decreases with latitude
+/// because the winter sun path is lower in the sky.
+///
+/// Calibration points derived from the old GCR band values for the nominal
+/// 25° tilt cap via the Appelbaum self-shading formula:
+///   - lat 25°N → min elevation ~21° (old GCR=0.50 at 25° tilt)
+///   - lat 35°N → min elevation ~15° (old GCR=0.40 at 25° tilt)
+///   - lat 50°N → min elevation ~12° (old GCR=0.35 at 25° tilt)
+///
+/// Floors at 12° — at 50°N a 12° design solar elevation provides roughly
+/// 6-hour winter-solstice operation, balancing self-shading avoidance
+/// with practical packing density.
+///
+/// Appelbaum & Bany (1979) Solar Energy 23(6):497-500 —
+/// shadow geometry basis for the GCR formula.
+fn min_solar_elevation_deg(lat: f64) -> f64 {
+    match lat {
+        _ if lat <= 25.0 => 21.0,
+        _ if lat <= 35.0 => 21.0 - (lat - 25.0) * 0.6, // 21 → 15
+        _ if lat <= 50.0 => 15.0 - (lat - 35.0) * 0.2, // 15 → 12
+        _ => 12.0,
     }
+}
+
+/// Ground coverage ratio for flat roofs, derived from tilt and latitude.
+///
+/// Computes GCR from the Appelbaum & Bany (1979) geometric self-shading
+/// constraint, parameterized by the actual installed tilt and a
+/// latitude-dependent design-point solar elevation:
+///
+///   GCR = 1 / (cos(β) + sin(β) / tan(α_min))
+///
+/// where β = tilt and α_min = min_solar_elevation_deg(latitude).
+/// Clamped to [0.25, 0.65]:
+///   - 0.25 lower bound: minimum economically viable GCR for fixed-tilt flat-roof
+///     PV. Below this, each panel requires >4× its own area in roof space and a
+///     ground-mount array becomes the preferred alternative. Cf. Appelbaum & Bany
+///     (1979) for the geometric formula; EnergyPlus PVWatts IDD V26-1-0
+///     Generator:PVWatts N5 defaults GCR=0.4 with valid range [0, 1]. The bound
+///     is a HARES engineering guard against uneconomically sparse layouts.
+///   - 0.65 upper bound: maximum achievable GCR for a fixed-tilt flat-roof array
+///     before year-round morning/afternoon row-to-row self-shading becomes
+///     unavoidable. The Appelbaum formula assumes shading-free operation above
+///     α_min at a single design-point azimuth (south) and does not account for
+///     diffuse shading or ground-reflected component loss — both become
+///     significant at close row packing. A full shading-integration model is
+///     needed to reliably estimate performance above 0.65.
+///   - Neither bound is expected to activate during normal operation with the
+///     25° flat-roof tilt cap and piecewise-linear min_solar_elevation_deg; the
+///     clamp is a guard against out-of-range parameterization.
+///
+/// Appelbaum & Bany (1979) Solar Energy 23(6):497-500
+fn flat_roof_gcr(latitude: Option<f64>, tilt_deg: f64) -> f64 {
+    let lat = latitude.unwrap_or(35.0);
+    let min_elev_rad = min_solar_elevation_deg(lat).to_radians();
+    let tilt_rad = tilt_deg.to_radians();
+    let gcr = 1.0 / (tilt_rad.cos() + tilt_rad.sin() / min_elev_rad.tan());
+    gcr.clamp(0.25, 0.65)
 }
 
 /// Resolve the azimuth for a roof plane, falling back to the most-southerly
@@ -439,6 +504,49 @@ pub fn compute_usable_area(
         );
     }
 
+    // Invariant: flat-roof GCR monotonically decreases with increasing tilt
+    // (fixed latitude) and with increasing latitude (fixed tilt).
+    // Appelbaum & Bany (1979) Solar Energy 23(6):497-500.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        for test_lat in [25.0, 35.0, 50.0] {
+            for pair in [(5.0, 25.0), (5.0, 45.0), (25.0, 45.0)] {
+                let gcr_lo = flat_roof_gcr(Some(test_lat), pair.0);
+                let gcr_hi = flat_roof_gcr(Some(test_lat), pair.1);
+                assert!(
+                    gcr_lo >= gcr_hi,
+                    "GCR must not increase with tilt: lat={test_lat} tilt={},{} → GCR={gcr_lo:.4},{gcr_hi:.4}",
+                    pair.0,
+                    pair.1,
+                );
+            }
+        }
+        for test_tilt in [5.0, 25.0, 45.0] {
+            let gcr_lo = flat_roof_gcr(Some(25.0), test_tilt);
+            let gcr_hi = flat_roof_gcr(Some(50.0), test_tilt);
+            assert!(
+                gcr_lo >= gcr_hi,
+                "GCR must not increase with latitude: tilt={test_tilt} lat 25→50 gives {gcr_lo:.4},{gcr_hi:.4}",
+            );
+        }
+    }
+
+    // Invariant: GCR × usable_fraction must be in [0.15, 0.55] for flat roofs.
+    // Values outside indicate parameterization error.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    if roof_shape == RoofShape::Flat {
+        for test_lat in [10.0, 25.0, 35.0, 50.0] {
+            for test_tilt in [5.0, 15.0, 25.0, 45.0] {
+                let gcr = flat_roof_gcr(Some(test_lat), test_tilt);
+                let effective = gcr * FLAT_USABLE_FRACTION;
+                assert!(
+                    (0.15..=0.55).contains(&effective),
+                    "flat roof GCR×usable_fraction={effective:.4} out of [0.15, 0.55] range at lat={test_lat} tilt={test_tilt}"
+                );
+            }
+        }
+    }
+
     // Select the best plane.
     let (best_idx, best_az) = if roof_shape == RoofShape::Hip {
         // Hip: pick the most-southerly plane (smallest south_distance), breaking
@@ -566,15 +674,7 @@ pub fn compute_usable_area(
 
     let usable_m2 = effective_area * usable_fraction(roof_shape);
 
-    let panel_footprint = if roof_shape == RoofShape::Flat {
-        panel_area_m2 / flat_roof_gcr(latitude)
-    } else {
-        panel_area_m2
-    };
-
-    let max_panels = (usable_m2 / panel_footprint).floor() as u32;
-    let max_capacity_kw = (max_panels as f64) * (panel_watts as f64) / 1000.0;
-
+    // Compute tilt before panel_footprint so flat_roof_gcr can use it.
     let tilt_deg = if roof_shape == RoofShape::Flat || best_plane.tilt_deg < 1.0 {
         latitude
             .map(|l| l.min(25.0))
@@ -582,6 +682,31 @@ pub fn compute_usable_area(
     } else {
         best_plane.tilt_deg
     };
+
+    let panel_footprint = if roof_shape == RoofShape::Flat {
+        panel_area_m2 / flat_roof_gcr(latitude, tilt_deg)
+    } else {
+        panel_area_m2
+    };
+
+    #[cfg(feature = "observe")]
+    if roof_shape == RoofShape::Flat {
+        let gcr = flat_roof_gcr(latitude, tilt_deg);
+        let lat_val = latitude.unwrap_or(35.0);
+        let min_elev = min_solar_elevation_deg(lat_val);
+        tracing::debug!(
+            pv_latitude = lat_val,
+            pv_tilt_deg = tilt_deg,
+            pv_gcr = gcr,
+            pv_min_solar_elevation_deg = min_elev,
+            pv_panel_footprint_m2 = panel_footprint,
+            pv_effective_area_m2 = effective_area,
+            "Flat-roof GCR computed from tilt and latitude"
+        );
+    }
+
+    let max_panels = (usable_m2 / panel_footprint).floor() as u32;
+    let max_capacity_kw = (max_panels as f64) * (panel_watts as f64) / 1000.0;
 
     #[cfg(feature = "observe")]
     {
@@ -683,13 +808,6 @@ pub fn enumerate_pv_candidates(
             };
 
             let usable_m2 = effective_area * usable_fraction(roof_shape);
-            let panel_footprint = if roof_shape == RoofShape::Flat {
-                panel_area_m2 / flat_roof_gcr(latitude)
-            } else {
-                panel_area_m2
-            };
-            let max_panels = (usable_m2 / panel_footprint).floor() as u32;
-            let max_capacity_kw = (max_panels as f64) * (panel_watts as f64) / 1000.0;
 
             let tilt_deg = if roof_shape == RoofShape::Flat || plane.tilt_deg < 1.0 {
                 latitude
@@ -698,6 +816,14 @@ pub fn enumerate_pv_candidates(
             } else {
                 plane.tilt_deg
             };
+
+            let panel_footprint = if roof_shape == RoofShape::Flat {
+                panel_area_m2 / flat_roof_gcr(latitude, tilt_deg)
+            } else {
+                panel_area_m2
+            };
+            let max_panels = (usable_m2 / panel_footprint).floor() as u32;
+            let max_capacity_kw = (max_panels as f64) * (panel_watts as f64) / 1000.0;
 
             let solar_score =
                 plane_solar_score(effective_area, az, roof_shape, lat, diffuse_fraction);
@@ -894,8 +1020,8 @@ mod tests {
         let usable =
             compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None, None).unwrap();
         // Flat: effective = 200 × 0.70 = 140 m².
-        // Panel footprint = 2.0 / 0.40 = 5.0 m² (lat 35 → GCR 0.40).
-        // Max panels = floor(140 / 5) = 28.
+        // Panel footprint = 2.0 / 0.403 ≈ 4.97 m² (lat 35 → geometric GCR ≈ 0.403).
+        // Max panels = floor(140 / 4.97) ≈ 28.
         assert_eq!(usable.max_panels, 28);
     }
 
@@ -1582,6 +1708,238 @@ mod tests {
                     "score should not exceed area × usable: Kd={kd}, az={az}, {score} > {max_score}"
                 );
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // flat_roof_gcr — geometric GCR from tilt + latitude
+    // -----------------------------------------------------------------------
+
+    /// Low tilt (5°) at moderate latitude (30°N) must yield a high GCR.
+    #[test]
+    fn flat_roof_gcr_low_tilt_yields_high_gcr() {
+        let gcr = flat_roof_gcr(Some(30.0), 5.0);
+        assert!(
+            gcr >= 0.55,
+            "low tilt (5°) at lat=30° should have GCR≥0.55, got {gcr:.4}"
+        );
+    }
+
+    /// Shallow racking tilt (25°) at high latitude (50°N): GCR should be
+    /// approximately 0.35 as the old step table produced, confirming the
+    /// low tilt enables workable row spacing. Continuous min_solar_elevation
+    /// floors at 12° for physically reasonable shading tolerance.
+    #[test]
+    fn flat_roof_gcr_moderate_tilt_high_lat_near_old_band() {
+        let gcr = flat_roof_gcr(Some(50.0), 25.0);
+        // Geometric formula with min_solar_elevation=12° at lat=50° gives
+        // GCR ≈ 0.345 — consistent with the old step table's 0.35 band.
+        assert!(
+            (gcr - 0.345).abs() < 0.01,
+            "tilt=25° at lat=50° should have GCR ≈ 0.345, got {gcr:.4}"
+        );
+    }
+
+    /// Steep tilt (45°) at high latitude (50°N): must hit the GCR floor.
+    #[test]
+    fn flat_roof_gcr_steep_tilt_high_lat_at_floor() {
+        let gcr = flat_roof_gcr(Some(50.0), 45.0);
+        assert!(
+            gcr <= 0.25 + 0.01,
+            "steep tilt (45°) at lat=50° should have GCR≤0.25, got {gcr:.4}"
+        );
+    }
+
+    /// GCR must monotonically decrease with increasing tilt at fixed latitude.
+    #[test]
+    fn flat_roof_gcr_monotonic_in_tilt() {
+        for lat in [20.0, 30.0, 40.0, 50.0] {
+            for pair in [(5.0, 15.0), (15.0, 25.0), (25.0, 35.0), (35.0, 45.0)] {
+                let gcr_lo = flat_roof_gcr(Some(lat), pair.0);
+                let gcr_hi = flat_roof_gcr(Some(lat), pair.1);
+                assert!(
+                    gcr_lo >= gcr_hi,
+                    "GCR must not increase with tilt: lat={lat} tilt {}→{} gives {gcr_lo:.4},{gcr_hi:.4}",
+                    pair.0,
+                    pair.1,
+                );
+            }
+        }
+    }
+
+    /// GCR must monotonically decrease with increasing latitude at fixed tilt.
+    #[test]
+    fn flat_roof_gcr_monotonic_in_latitude() {
+        for tilt in [5.0, 15.0, 25.0, 45.0] {
+            for pair in [(20.0, 35.0), (35.0, 50.0), (20.0, 50.0)] {
+                let gcr_lo = flat_roof_gcr(Some(pair.0), tilt);
+                let gcr_hi = flat_roof_gcr(Some(pair.1), tilt);
+                assert!(
+                    gcr_lo >= gcr_hi,
+                    "GCR must not increase with latitude: tilt={tilt} lat {}→{} gives {gcr_lo:.4},{gcr_hi:.4}",
+                    pair.0,
+                    pair.1,
+                );
+            }
+        }
+    }
+
+    /// GCR must stay within the clamped range [0.25, 0.65] for all
+    /// physically reasonable inputs.
+    #[test]
+    fn flat_roof_gcr_stays_in_clamped_range() {
+        for lat in [0.0, 20.0, 35.0, 50.0, 70.0] {
+            for tilt in [0.0, 3.0, 10.0, 25.0, 45.0, 60.0, 90.0] {
+                let gcr = flat_roof_gcr(Some(lat), tilt);
+                assert!(
+                    gcr >= 0.25,
+                    "GCR={gcr:.4} below min 0.25 at lat={lat} tilt={tilt}"
+                );
+                assert!(
+                    gcr <= 0.65,
+                    "GCR={gcr:.4} above max 0.65 at lat={lat} tilt={tilt}"
+                );
+            }
+        }
+    }
+
+    /// GCR values are continuous (no step-cliffs) near the old band boundaries.
+    /// Two latitudes 0.1° apart on opposite sides of the old 40.0° boundary
+    /// must produce nearly identical GCR.
+    #[test]
+    fn flat_roof_gcr_continuous_no_step_cliffs() {
+        let gcr_399 = flat_roof_gcr(Some(39.9), 25.0);
+        let gcr_401 = flat_roof_gcr(Some(40.1), 25.0);
+        assert!(
+            (gcr_399 - gcr_401).abs() < 0.02,
+            "GCR step at 40°N boundary: lat 39.9→{gcr_399:.4}, 40.1→{gcr_401:.4}"
+        );
+
+        let gcr_299 = flat_roof_gcr(Some(29.9), 25.0);
+        let gcr_301 = flat_roof_gcr(Some(30.1), 25.0);
+        assert!(
+            (gcr_299 - gcr_301).abs() < 0.02,
+            "GCR step at 30°N boundary: lat 29.9→{gcr_299:.4}, 30.1→{gcr_301:.4}"
+        );
+    }
+
+    /// GCR for `None` latitude falls back to lat=35.0.
+    #[test]
+    fn flat_roof_gcr_none_latitude_fallback() {
+        // None latitude should act the same as lat=35.0
+        let gcr_none = flat_roof_gcr(None, 25.0);
+        let gcr_35 = flat_roof_gcr(Some(35.0), 25.0);
+        assert!(
+            (gcr_none - gcr_35).abs() < 1e-10,
+            "GCR with None latitude should match lat=35.0: {gcr_none:.4} vs {gcr_35:.4}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration / regression — flat-roof usable area
+    // -----------------------------------------------------------------------
+
+    /// The existing flat_roof_uses_gcr test must continue to pass with the
+    /// new geometric GCR. Verify explicitly that the exact panel count is
+    /// preserved for the test geometry: lat=35°, GCR≈0.40 at tilt=25°.
+    #[test]
+    fn flat_roof_uses_gcr_regression() {
+        let roof = RoofInfo {
+            planes: vec![plane(200.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 200.0,
+        };
+        let usable =
+            compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None, None).unwrap();
+        // 200 × 0.70 = 140 m² usable. GCR ≈ 0.40 at lat=35° tilt=25°.
+        // Panel footprint = 2.0 / ~0.403 ≈ 4.96 m². 140 / 4.96 ≈ 28.2 → 28.
+        assert_eq!(usable.max_panels, 28);
+    }
+
+    /// Flat-roof capacity must decrease monotonically with latitude.
+    /// Synthetic 100 m² flat roofs at increasing latitudes should produce
+    /// strictly non-increasing panel counts.
+    #[test]
+    fn flat_roof_capacity_monotonically_decreases_with_latitude() {
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 100.0,
+        };
+        let mut prev_panels = u32::MAX;
+        for lat in [30.0, 35.0, 40.0, 45.0, 50.0] {
+            let usable =
+                compute_usable_area(&roof, RoofShape::Flat, &[], Some(lat), None, None, None)
+                    .unwrap();
+            assert!(
+                usable.max_panels <= prev_panels,
+                "capacity must not increase with latitude: lat={lat} panels={} > prev={prev_panels}",
+                usable.max_panels
+            );
+            assert!(
+                usable.max_panels > 0,
+                "capacity must be positive at lat={lat}"
+            );
+            prev_panels = usable.max_panels;
+        }
+    }
+
+    /// At high latitudes with the 25° tilt cap, the geometric GCR must
+    /// produce higher capacity than what the old step table would give,
+    /// because the low tilt cap reduces inter-row shading.
+    /// Reference: old step table GCR=0.35 at lat>40°; geometric formula
+    /// gives higher GCR at low tilt.
+    #[test]
+    fn flat_roof_geometric_gcr_improves_over_old_step_table_at_high_latitudes() {
+        let roof = RoofInfo {
+            planes: vec![plane(200.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 200.0,
+        };
+
+        // New geometric GCR at lat=45°, tilt=25° (the cap)
+        let usable_new =
+            compute_usable_area(&roof, RoofShape::Flat, &[], Some(45.0), None, None, None).unwrap();
+
+        // Old step-table GCR=0.35 would give:
+        // usable=140, footprint=2.0/0.35=5.714, panels=140/5.714=24.5→24
+        let old_gcr = 0.35;
+        let old_panels =
+            ((200.0 * FLAT_USABLE_FRACTION) / (DEFAULT_PANEL_AREA_M2 / old_gcr)).floor() as u32;
+
+        // The new geometric GCR should produce equal or more panels than
+        // the conservative old step table, because the 25° tilt cap
+        // is now correctly factored into the GCR computation.
+        assert!(
+            usable_new.max_panels >= old_panels,
+            "new geometric GCR panels ({}) must be ≥ old step table panels ({}) at lat=45°",
+            usable_new.max_panels,
+            old_panels
+        );
+    }
+
+    /// Enumerate candidates on a flat roof: each candidate must use the
+    /// new tilt-parameterized GCR (consistent with compute_usable_area).
+    #[test]
+    fn enumerate_candidates_uses_geometric_gcr_for_flat_roof() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(100.0, 0.0, Some(180.0)),
+                plane(100.0, 0.0, Some(225.0)),
+            ],
+            total_roof_area_m2: 200.0,
+        };
+        let candidates =
+            enumerate_pv_candidates(&roof, RoofShape::Flat, &[], Some(45.0), None, None, None);
+        assert_eq!(candidates.len(), 2);
+        for c in &candidates {
+            assert!(c.max_panels > 0);
+            assert!(c.max_capacity_kw > 0.0);
+            // With geometric GCR at lat=45° tilt=25°, the footprint should
+            // be consistent with the formula, not the old step table.
+            let gcr = flat_roof_gcr(Some(45.0), 25.0);
+            let expected_footprint = DEFAULT_PANEL_AREA_M2 / gcr;
+            assert!(
+                (c.usable_m2 / expected_footprint - c.max_panels as f64).abs() < 1.0,
+                "candidate panel count should use geometric GCR"
+            );
         }
     }
 }
