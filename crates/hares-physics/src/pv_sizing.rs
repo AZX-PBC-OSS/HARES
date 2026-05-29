@@ -4,8 +4,6 @@
 //! pitch, azimuth) using production-factor-weighted usable area calculations.
 //! Ported from DER_Detection `solar/sizing.py`.
 
-use std::f64::consts::PI;
-
 /// Roof shape classification, determines usable-area fraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoofShape {
@@ -168,34 +166,58 @@ pub fn is_north_facing(azimuth_deg: f64) -> bool {
     az >= 315.0 || az <= 45.0
 }
 
-/// Snap to nearest 45° cardinal/intercardinal and return discrete production
-/// factor relative to due south (1.0). Keys use HPXML convention (0 = north).
-fn azimuth_production_factor_lut(azimuth_deg: f64) -> f64 {
-    let az = azimuth_deg.rem_euclid(360.0);
-    // Snap to nearest 45° point.
-    let snapped = ((az / 45.0).round() * 45.0) as u32 % 360;
-    match snapped {
-        180 => 1.00, // South
-        135 | 225 => 0.90,
-        90 => 0.80,
-        270 => 0.85,
-        45 => 0.65,
-        315 => 0.70,
-        0 => 0.45,
-        _ => 0.75,
+/// Latitude-dependent north-panel derating factor.
+///
+/// Fitted to NREL/TP-6A20-62641 (Dobos 2014) Table 4 orientation factors
+/// for fixed-tilt arrays at latitude tilt. Three-point calibration:
+///
+///   | Latitude | North vs South | Derating |
+///   |----------|---------------|----------|
+///   | 25°N     | 65%           | 0.35     |
+///   | 35°N     | 60%           | 0.40     |
+///   | 48°N     | 30%           | 0.70     |
+///
+/// Piecewise-linear interpolation captures the steepening penalty above
+/// 35°N where winter solar altitude drops sharply.
+fn north_derating(latitude: f64) -> f64 {
+    if latitude <= 25.0 {
+        0.30 + 0.01 * (latitude - 20.0)
+    } else if latitude <= 35.0 {
+        0.35 + 0.005 * (latitude - 25.0)
+    } else {
+        0.40 + 0.02308 * (latitude - 35.0)
     }
 }
 
-/// Continuous production factor with latitude-dependent roll-off.
+/// Continuous azimuth production factor, latitude-dependent.
 ///
-/// `production = diffuse_frac + (1 - diffuse_frac) × cos(θ)^n`
-/// where θ is deviation from south and n grows with latitude.
+/// Quadratic azimuth derating model:
+///   factor = 1.0 − k(lat) · (θ/180°)²
+/// where θ = south_distance(azimuth_deg) and k(lat) = north_derating(lat).
+///
+/// East/west panels (θ = 90°) retain ~80–91% of south-facing production
+/// (at 48°N and 25°N respectively). North-facing panels degrade from
+/// 65% (25°N) to 30% (48°N) of south-facing.
+///
+/// NREL/TP-6A20-62641 §4 (Dobos 2014) Table 4.
+/// The quadratic shape captures the empirical observation that azimuth
+/// derating accelerates more sharply approaching north than approaching
+/// east/west — direct beam reaches east/west panels at favourable
+/// incidence angles during morning/afternoon hours while north-facing
+/// panels receive diffuse-only radiation.
+fn azimuth_production_factor(azimuth_deg: f64, latitude: f64) -> f64 {
+    let theta_deg = south_distance(azimuth_deg);
+    let x = theta_deg / 180.0;
+    let k = north_derating(latitude);
+    (1.0 - k * x * x).max(0.0)
+}
+
+/// Solar production score for a roof plane, weighting area by usable
+/// fraction and latitude-dependent azimuth production factor.
+///
+/// score = area × usable_fraction(shape) × azimuth_production_factor(az, lat)
 fn plane_solar_score(area_m2: f64, azimuth_deg: f64, shape: RoofShape, latitude: f64) -> f64 {
-    const DIFFUSE_FRAC: f64 = 0.18;
-    let deviation_rad = (south_distance(azimuth_deg).to_radians()).min(PI / 2.0);
-    let exponent = 1.0 + 0.005 * (latitude - 35.0);
-    let production_factor =
-        DIFFUSE_FRAC + (1.0 - DIFFUSE_FRAC) * deviation_rad.cos().powf(exponent);
+    let production_factor = azimuth_production_factor(azimuth_deg, latitude);
     area_m2 * usable_fraction(shape) * production_factor
 }
 
@@ -322,14 +344,45 @@ pub fn compute_usable_area(
 
     if roof_shape == RoofShape::Hip {
         // Aggregate panel capacity across all viable planes, weighted by
-        // azimuth production factor.
+        // latitude-dependent azimuth production factor.
         let mut total_weighted_panels: u32 = 0;
+        #[cfg(feature = "observe")]
+        let mut hip_prod_factor_sum: f64 = 0.0;
+
         for &(idx, az) in &candidates {
             let plane = &roof.planes[idx];
             let plane_usable = plane.area_m2 * usable_fraction(RoofShape::Hip);
             let plane_panels = (plane_usable / panel_area_m2).floor() as u32;
-            let prod_factor = azimuth_production_factor_lut(az);
+            let prod_factor = azimuth_production_factor(az, lat);
             total_weighted_panels += ((plane_panels as f64) * prod_factor).floor() as u32;
+
+            #[cfg(feature = "observe")]
+            {
+                hip_prod_factor_sum += prod_factor;
+            }
+        }
+
+        // Invariant: north-facing production factor decreases with latitude.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let low_lat_north = azimuth_production_factor(0.0, 25.0);
+            let high_lat_north = azimuth_production_factor(0.0, 48.0);
+            debug_assert!(
+                low_lat_north > high_lat_north,
+                "north-facing production factor must decrease with latitude (25°N: {:.4}, 48°N: {:.4})",
+                low_lat_north,
+                high_lat_north
+            );
+        }
+
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                pv_lut_latitude = lat,
+                pv_hip_prod_factor_sum = hip_prod_factor_sum,
+                pv_hip_weighted_panels = total_weighted_panels,
+                "PV Hip aggregation telemetry"
+            );
         }
 
         let tilt_deg = best_plane.tilt_deg;
@@ -657,18 +710,121 @@ mod tests {
 
     #[test]
     fn hip_aggregates_multiple_planes() {
+        // Hip roof with south, ENE (60°), and north planes. North is filtered
+        // by is_north_facing but south and ENE contribute at latitude-dependent
+        // production factors.
         let roof = RoofInfo {
             planes: vec![
                 plane(60.0, 26.0, Some(180.0)), // south
-                plane(40.0, 26.0, Some(225.0)), // southwest
+                plane(40.0, 26.0, Some(60.0)),  // ENE — not north-facing
                 plane(40.0, 26.0, Some(0.0)),   // north (filtered)
             ],
             total_roof_area_m2: 140.0,
         };
         let usable =
             compute_usable_area(&roof, RoofShape::Hip, &[], Some(40.0), None, None).unwrap();
-        assert!(usable.max_panels > 0);
+        // South: 60×0.35=21 m² → 10 panels, factor=1.0 → +10
+        // ENE (θ=120°): 40×0.35=14 m² → 7 panels, k(40)=0.5154, x=0.667
+        //   factor=1-0.5154×0.444=0.771, weighted=floor(7×0.771)=5
+        // Total: 15
+        assert_eq!(usable.max_panels, 15);
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hip_panel_count_decreases_with_latitude() {
+        // Same Hip roof at 25°N vs 48°N. The ENE plane gets a higher
+        // production factor at low latitudes, so the weighted panel count
+        // should be higher at 25°N than at 48°N.
+        let roof = RoofInfo {
+            planes: vec![
+                plane(60.0, 26.0, Some(180.0)), // south
+                plane(40.0, 26.0, Some(60.0)),  // ENE
+                plane(40.0, 26.0, Some(0.0)),   // north (filtered)
+            ],
+            total_roof_area_m2: 140.0,
+        };
+        let low_lat =
+            compute_usable_area(&roof, RoofShape::Hip, &[], Some(25.0), None, None).unwrap();
+        let high_lat =
+            compute_usable_area(&roof, RoofShape::Hip, &[], Some(48.0), None, None).unwrap();
+        assert!(
+            low_lat.max_panels > high_lat.max_panels,
+            "max_panels at 25°N ({}) should exceed max_panels at 48°N ({})",
+            low_lat.max_panels,
+            high_lat.max_panels
+        );
+    }
+
+    #[test]
+    fn north_facing_factor_matches_pvwatts_at_35n() {
+        // At 35°N, a north-facing panel (azimuth 0°) should produce
+        // approximately 60% of a south-facing panel per NREL/TP-6A20-62641
+        // Table 4 (Dobos 2014).
+        let factor = azimuth_production_factor(0.0, 35.0);
+        // PVWatts Table 4: north ≈ 60% of south at 35°N tilt=latitude.
+        // Tolerance ±5% absolute to accommodate interpolation.
+        assert!((factor - 0.60).abs() < 0.05);
+        // Also verify the old LUT value of 0.45 is no longer in use.
+        assert!(factor > 0.55);
+    }
+
+    #[test]
+    fn north_factor_decreases_monotonically_with_latitude() {
+        // Invariant: north-facing production factor must decrease strictly
+        // as latitude increases. At the equator, orientation matters little;
+        // at high latitudes, north-facing panels produce almost nothing.
+        let latitudes = [20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0];
+        for window in latitudes.windows(2) {
+            let lo = azimuth_production_factor(0.0, window[0]);
+            let hi = azimuth_production_factor(0.0, window[1]);
+            assert!(
+                lo > hi,
+                "north factor at {}° ({:.4}) should exceed at {}° ({:.4})",
+                window[0],
+                lo,
+                window[1],
+                hi
+            );
+        }
+    }
+
+    #[test]
+    fn production_factor_identity_and_symmetry() {
+        // South is always 1.0.
+        assert!((azimuth_production_factor(180.0, 35.0) - 1.0).abs() < 1e-10);
+
+        // East and West are equal (quadratic model is symmetric about south).
+        let e = azimuth_production_factor(90.0, 35.0);
+        let w = azimuth_production_factor(270.0, 35.0);
+        assert!((e - w).abs() < 1e-10);
+
+        // Monotonic: larger south-distance (farther from south) → lower factor.
+        // South (θ=0°) → SE (θ=45°) → E (θ=90°) → NE (θ=135°) → N (θ=180°).
+        for lat in [25.0, 35.0, 48.0] {
+            let pairs = [(180.0, 135.0), (135.0, 90.0), (90.0, 45.0), (45.0, 0.0)];
+            for (a1, a2) in &pairs {
+                let f1 = azimuth_production_factor(*a1, lat);
+                let f2 = azimuth_production_factor(*a2, lat);
+                assert!(
+                    f1 > f2,
+                    "lat={lat} factor({a1})={f1:.4} should exceed factor({a2})={f2:.4}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn azimuth_production_factor_covers_full_circle() {
+        // Values should be in [0, 1] and symmetric about the south axis
+        // for any latitude.
+        for lat in [20.0, 35.0, 50.0] {
+            for az in (0..360).step_by(10) {
+                let f = azimuth_production_factor(az as f64, lat);
+                assert!(f >= 0.0, "negative factor for az={az}, lat={lat}");
+                assert!(f <= 1.0, "factor >1 for az={az}, lat={lat}");
+            }
+        }
     }
 
     #[test]
