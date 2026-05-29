@@ -3,6 +3,86 @@
 use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
 
+/// PV array mounting type matching SAM's `array_type` parameter.
+///
+/// SAM PVWatts v8 (`cmod_pvwattsv5.cpp:195-197`) selects the nominal
+/// operating cell temperature (NOCT) from the array type:
+///
+/// - OpenRack (array_type=0) → 45°C
+/// - RoofMounted (array_type=1) → 49°C
+/// - InsulatedBack (array_type=2) → 49°C
+///
+/// References:
+///   - PVWatts v8 Technical Reference, NREL/TP-7A40-80694
+///   - `vendors/EnergyPlus/third_party/ssc/ssc/cmod_pvwattsv5.cpp:195-197`
+///   - `vendors/EnergyPlus/third_party/ssc/shared/lib_pvwatts.h:26`
+///   - PVPMC: <https://pvpmc.sandia.gov/modeling-guide/2-dc-module-iv/cell-temperature/noct-cell-temperature/>
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArrayType {
+    /// Open rack / ground mount. NOCT = 45°C.
+    OpenRack,
+    /// Roof mounted. NOCT = 49°C.
+    RoofMounted,
+    /// Insulated back / building-integrated. NOCT = 49°C.
+    InsulatedBack,
+}
+
+impl ArrayType {
+    pub(crate) fn from_str(s: &str) -> Result<Self, HaresError> {
+        let normalized: String = s
+            .trim()
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace() && *c != '_')
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+
+        match normalized.as_str() {
+            "openrack" => Ok(Self::OpenRack),
+            "roofmounted" => Ok(Self::RoofMounted),
+            "insulatedback" => Ok(Self::InsulatedBack),
+            unrecognised => Err(HaresError::Equipment(format!(
+                "Unrecognised array_type '{s}'. Normalised to '{unrecognised}', but expected one of: \
+                 OpenRack, RoofMounted, InsulatedBack (case/whitespace/underscore-insensitive)"
+            ))),
+        }
+    }
+
+    /// Default NOCT (°C) for this array type per SAM PVWatts v8.
+    pub(crate) fn noct_c(self) -> f64 {
+        match self {
+            Self::OpenRack => 45.0,
+            Self::RoofMounted => 49.0,
+            Self::InsulatedBack => 49.0,
+        }
+    }
+
+    /// SAM `array_type` integer index (0=OpenRack, 1=RoofMounted, 2=InsulatedBack).
+    /// Used by the Python LUT adapter when writing `harvest_lut_sam_array_type`
+    /// Parquet metadata; without this adapter, the method is dormant but serves
+    /// as the canonical mapping definition for the crate.
+    // Why: the Python LUT adapter (python/ochre_next/adapters/sam_pv.py) is the
+    // intended consumer; until it is updated to write harvest_lut_sam_array_type,
+    // this method is unused on the Rust side.
+    #[allow(dead_code)]
+    pub(crate) fn to_sam_index(self) -> u8 {
+        match self {
+            Self::OpenRack => 0,
+            Self::RoofMounted => 1,
+            Self::InsulatedBack => 2,
+        }
+    }
+
+    /// Decode from SAM `array_type` integer index.
+    /// Used by `PvLut::sam_noct_c()` for LUT-path NOCT derivation.
+    pub(crate) fn from_sam_index(idx: u8) -> Self {
+        match idx {
+            0 => Self::OpenRack,
+            1 => Self::RoofMounted,
+            _ => Self::InsulatedBack,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleType {
     Standard,
@@ -44,6 +124,7 @@ pub struct PvArray {
     pub capacity_kw: f64,
     pub noct_c: f64,
     pub module_type: ModuleType,
+    pub array_type: ArrayType,
     pub surface_id: Option<u32>,
     pub sam_lut_path: Option<String>,
     /// Envelope boundary index this array is attached to (for roof shading).
@@ -98,6 +179,7 @@ impl Default for PvArray {
             capacity_kw: 1.0,
             noct_c: super::DEFAULT_NOCT_C,
             module_type: ModuleType::Standard,
+            array_type: ArrayType::OpenRack,
             surface_id: None,
             sam_lut_path: None,
             attached_boundary_id: None,
@@ -122,6 +204,8 @@ pub struct PvArraySpec {
     pub module_type: Option<String>,
     #[serde(default)]
     pub noct_c: Option<f64>,
+    #[serde(default)]
+    pub array_type: Option<String>,
     #[serde(default)]
     pub sam_lut_path: Option<String>,
     #[serde(default)]
@@ -216,6 +300,7 @@ pub fn surface_id_for_orientation(
 
 #[cfg(test)]
 mod tests {
+    use super::ArrayType;
     use super::ModuleType;
 
     #[test]
@@ -255,6 +340,7 @@ mod tests {
             azimuth_deg: Some(180.0),
             module_type: None,
             noct_c: None,
+            array_type: None,
             sam_lut_path: None,
             attached_boundary_id: None,
         }
@@ -345,6 +431,7 @@ mod tests {
             capacity_kw: 5.0,
             noct_c: 47.0,
             module_type: ModuleType::Standard,
+            array_type: ArrayType::OpenRack,
             surface_id: None,
             sam_lut_path: None,
             attached_boundary_id: None,

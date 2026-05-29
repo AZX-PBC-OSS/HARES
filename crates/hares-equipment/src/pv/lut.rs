@@ -92,6 +92,7 @@ pub(crate) struct PvLut {
     longitude_deg: f64,
     sam_inv_eff: f64,
     sam_losses: f64,
+    sam_array_type: Option<u8>,
 }
 
 impl PvLut {
@@ -134,6 +135,7 @@ impl PvLut {
         let mut longitude_deg: f64 = 0.0;
         let mut sam_inv_eff: f64 = 0.0;
         let mut sam_losses: f64 = 0.0;
+        let mut sam_array_type: Option<u8> = None;
         if let Some(kv_list) = file_kv {
             for kv in kv_list {
                 match kv.key.as_str() {
@@ -164,6 +166,12 @@ impl PvLut {
                             .as_deref()
                             .and_then(|v| v.parse::<f64>().ok())
                             .unwrap_or(0.0);
+                    }
+                    "harvest_lut_sam_array_type" => {
+                        sam_array_type = kv
+                            .value
+                            .as_deref()
+                            .and_then(|v| v.parse::<u8>().ok());
                     }
                     _ => {}
                 }
@@ -228,6 +236,7 @@ impl PvLut {
             longitude_deg,
             sam_inv_eff,
             sam_losses,
+            sam_array_type,
         )
     }
 
@@ -281,7 +290,7 @@ impl PvLut {
             rows.push((zenith, azimuth, ghi, dni, dhi, temp, ac));
         }
 
-        Self::from_rows(path, rows, 0.0, 0.0, 0.0, 0.0)
+        Self::from_rows(path, rows, 0.0, 0.0, 0.0, 0.0, None)
     }
 
     fn from_rows(
@@ -291,6 +300,7 @@ impl PvLut {
         longitude_deg: f64,
         sam_inv_eff: f64,
         sam_losses: f64,
+        sam_array_type: Option<u8>,
     ) -> Result<Self, HaresError> {
         if rows.is_empty() {
             return Err(HaresError::Equipment(format!(
@@ -382,6 +392,7 @@ impl PvLut {
             longitude_deg,
             sam_inv_eff,
             sam_losses,
+            sam_array_type,
         })
     }
 
@@ -403,6 +414,28 @@ impl PvLut {
     #[inline]
     pub(crate) fn sam_losses(&self) -> f64 {
         self.sam_losses
+    }
+
+    /// Raw SAM `array_type` index stored in LUT metadata. Callers that need
+    /// the NOCT value should use `sam_noct_c()` instead.
+    // Why: sam_noct_c() reads self.sam_array_type directly; this accessor is
+    // dormant until an external caller (e.g. a diagnostics layer) needs the
+    // raw index. Suppression retained to keep the public(crate) surface stable.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn sam_array_type(&self) -> Option<u8> {
+        self.sam_array_type
+    }
+
+    /// SAM's internal NOCT (°C) derived from this LUT's `array_type` metadata.
+    ///
+    /// Returns `None` when the LUT lacks `harvest_lut_sam_array_type` metadata
+    /// (legacy/pre-T-0087 LUTs or CSV format). In that case the caller should
+    /// fall back to the array's configured `noct_c`.
+    #[inline]
+    pub(crate) fn sam_noct_c(&self) -> Option<f64> {
+        self.sam_array_type
+            .map(|idx| super::array_config::ArrayType::from_sam_index(idx).noct_c())
     }
 
     pub(crate) fn interpolate(
@@ -583,6 +616,7 @@ impl PvLut {
             longitude_deg: 0.0,
             sam_inv_eff: 0.0,
             sam_losses: 0.0,
+            sam_array_type: None,
         }
     }
 }

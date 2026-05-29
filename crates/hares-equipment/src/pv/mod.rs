@@ -6,7 +6,7 @@ mod lut;
 pub mod shading;
 pub mod soiling;
 
-pub use array_config::{ModuleType, PvArray, PvArraySpec, surface_id_for_orientation};
+pub use array_config::{ArrayType, ModuleType, PvArray, PvArraySpec, surface_id_for_orientation};
 use array_config::{normalize_azimuth, parse_u32_from_f64};
 pub use config::PvConfig;
 use lut::PvLut;
@@ -29,7 +29,12 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 
 use crate::config::KEY_EQUIPMENT_ID;
 
-const DEFAULT_NOCT_C: f64 = 47.0;
+/// Nominal operating cell temperature for SAM PVWatts v8 open-rack (array_type=0).
+///
+/// SAM PVWatts v8 defaults: OpenRack = 45°C, RoofMounted = 49°C,
+/// InsulatedBack = 49°C (`cmod_pvwattsv5.cpp:195-197`, `lib_pvwatts.h:26`).
+/// HARES uses the open-rack default (most common residential configuration).
+const DEFAULT_NOCT_C: f64 = 45.0;
 const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.96;
 const DEFAULT_SURFACE_RESOLUTION_DEG: f64 = 5.0;
 const DEFAULT_T_REF_C: f64 = 25.0;
@@ -263,7 +268,7 @@ impl PV {
             let cell_temp_c = cell_temperature_noct_wind(
                 ambient_temp_c,
                 irradiance_w_m2,
-                array.noct_c,
+                lut.sam_noct_c().unwrap_or(array.noct_c),
                 env.weather.wind_speed_m_s,
             );
 
@@ -487,18 +492,25 @@ impl PV {
                     let tilt_deg = spec.tilt_deg.unwrap_or(base.tilt_deg);
                     let azimuth_deg =
                         normalize_azimuth(spec.azimuth_deg.unwrap_or(base.azimuth_deg));
-                    let noct_c = spec.noct_c.unwrap_or(base.noct_c);
                     let module_type = spec
                         .module_type
                         .as_deref()
                         .map(ModuleType::from_str)
                         .unwrap_or(base.module_type);
+                    let array_type = spec
+                        .array_type
+                        .as_deref()
+                        .map(ArrayType::from_str)
+                        .transpose()?
+                        .unwrap_or(base.array_type);
+                    let noct_c = spec.noct_c.unwrap_or(array_type.noct_c());
                     let array = PvArray {
                         tilt_deg,
                         azimuth_deg,
                         capacity_kw: spec.capacity_kw,
                         noct_c,
                         module_type,
+                        array_type,
                         surface_id: None,
                         sam_lut_path: spec.sam_lut_path.clone(),
                         attached_boundary_id: spec.attached_boundary_id,
@@ -512,12 +524,18 @@ impl PV {
             let base = PvArray::default();
             let tilt_deg = c.tilt_deg.unwrap_or(base.tilt_deg);
             let azimuth_deg = normalize_azimuth(c.azimuth_deg.unwrap_or(base.azimuth_deg));
-            let noct_c = c.noct_c.unwrap_or(base.noct_c);
             let module_type = c
                 .module_type
                 .as_deref()
                 .map(ModuleType::from_str)
                 .unwrap_or(base.module_type);
+            let array_type = c
+                .array_type
+                .as_deref()
+                .map(ArrayType::from_str)
+                .transpose()?
+                .unwrap_or(base.array_type);
+            let noct_c = c.noct_c.unwrap_or(array_type.noct_c());
 
             let array = PvArray {
                 tilt_deg,
@@ -525,6 +543,7 @@ impl PV {
                 capacity_kw: c.capacity_kw,
                 noct_c,
                 module_type,
+                array_type,
                 surface_id: None,
                 sam_lut_path: c.sam_lut_path.clone(),
                 attached_boundary_id: None,
@@ -1080,7 +1099,7 @@ mod tests {
     use super::lut::PvLut;
     use super::{
         DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_POWER_FACTOR, DEFAULT_SYSTEM_LOSSES_FRACTION,
-        Equipment, EquipmentConfig, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2,
+        Equipment, EquipmentConfig, ArrayType, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2,
         NOCT_REFERENCE_TEMP_C, PV, PvArray, PvArraySpec, PvConfig, cell_temperature_noct_wind,
         surface_id_for_orientation,
     };
@@ -1147,6 +1166,7 @@ mod tests {
             azimuth_deg: Some(180.0),
             module_type: None,
             noct_c: Some(DEFAULT_NOCT_C),
+            array_type: None,
             system_losses_fraction: Some(DEFAULT_SYSTEM_LOSSES_FRACTION),
             inverter_efficiency: Some(0.96),
             inverter_capacity_kw: None,
@@ -1331,7 +1351,7 @@ mod tests {
         // Force T_cell = T_ref + 40C at STC irradiance.
         // T_cell = T_amb + G * (NOCT-20)/800 * wind_corr.
         // At wind=1.0 m/s the wind correction is exactly 1.0.
-        // with G=1000, NOCT=47 => increment = 33.75C, so T_amb=31.25C gives 65.0C.
+        // with G=1000, NOCT=45 => increment = 31.25C, so T_amb=33.75C gives 65.0C.
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -1340,7 +1360,7 @@ mod tests {
                 reflected_w_m2: 0.0,
                 angle_of_incidence_rad: 0.0,
             }],
-            31.25,
+            33.75,
             1.0,
         );
         pv.init(&cfg, &env).unwrap();
@@ -1367,6 +1387,7 @@ mod tests {
                         azimuth_deg: Some(180.0),
                         module_type: None,
                         noct_c: Some(DEFAULT_NOCT_C),
+                        array_type: None,
                         sam_lut_path: None,
                         attached_boundary_id: None,
                     },
@@ -1376,6 +1397,7 @@ mod tests {
                         azimuth_deg: Some(90.0),
                         module_type: None,
                         noct_c: Some(DEFAULT_NOCT_C),
+                        array_type: None,
                         sam_lut_path: None,
                         attached_boundary_id: None,
                     },
@@ -1438,6 +1460,7 @@ mod tests {
                     azimuth_deg: Some(360.0),
                     module_type: None,
                     noct_c: Some(DEFAULT_NOCT_C),
+                    array_type: None,
                     sam_lut_path: None,
                     attached_boundary_id: None,
                 }]),
@@ -1521,6 +1544,7 @@ mod tests {
                 azimuth_deg: Some(200.0),
                 module_type: Some("thin_film".to_string()),
                 noct_c: Some(DEFAULT_NOCT_C),
+                array_type: None,
                 system_losses_fraction: Some(DEFAULT_SYSTEM_LOSSES_FRACTION),
                 inverter_efficiency: Some(0.96),
                 inverter_capacity_kw: None,
@@ -1564,7 +1588,7 @@ mod tests {
     #[test]
     fn temperature_model_uses_noct_factor_definition() {
         let noct_factor = (DEFAULT_NOCT_C - NOCT_REFERENCE_TEMP_C) / NOCT_REFERENCE_IRRADIANCE_W_M2;
-        approx_eq(noct_factor, 0.03375);
+        approx_eq(noct_factor, 0.03125);
     }
 
     #[test]
@@ -1759,7 +1783,7 @@ mod tests {
             EquipmentConfig::from_typed(format!("PV {module_type}"), "PV".to_string(), cfg)
         };
 
-        // T_amb = 31.25°C → T_cell = 31.25 + 1000*(47-20)/800 = 65°C (40°C above T_ref).
+        // T_amb = 33.75°C → T_cell = 33.75 + 1000*(45-20)/800 = 65°C (40°C above T_ref).
         // Use wind=1.0 so the wind correction factor is exactly 1.0.
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
@@ -1769,7 +1793,7 @@ mod tests {
                 reflected_w_m2: 0.0,
                 angle_of_incidence_rad: 0.0,
             }],
-            31.25,
+            33.75,
             1.0,
         );
 
@@ -2347,7 +2371,7 @@ mod tests {
         cfg.system_losses_fraction = Some(0.0);
         let cfg = EquipmentConfig::from_typed("PV Setpoint".to_string(), "PV".to_string(), cfg);
 
-        // Use wind=1.0 and T_amb=25°C so T_cell = 25 + 1000*(47-20)/800 = 58.75°C.
+        // Use wind=1.0 and T_amb=25°C so T_cell = 25 + 1000*(45-20)/800 = 56.25°C.
         // Temperature derating is slight but the unconstrained AC output is well above 2 kW.
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
@@ -2495,8 +2519,8 @@ mod tests {
 
         // Cold ambient (-10 °C) keeps cell temp well below 25 °C, giving positive
         // temp derating so DC > nameplate 5 kW and definitely above the 4 kW cap.
-        // wind=2 m/s: cell_temp ≈ -10 + 1000*(47-20)/800 * 9.5/(5.7+7.6) ≈ -10+19.2 = 9.2 °C
-        // temp_derate = 1 + (-0.0047)*(9.2-25) ≈ 1.074 → DC ≈ 5.37 kW > 4 kW cap.
+        // wind=2 m/s: cell_temp ≈ -10 + 1000*(45-20)/800 * 9.5/(5.7+7.6) ≈ -10+17.9 = 7.9 °C
+        // temp_derate = 1 + (-0.0047)*(7.9-25) ≈ 1.080 → DC ≈ 5.40 kW > 4 kW cap.
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -2901,6 +2925,7 @@ mod tests {
             capacity_kw: 5.0,
             noct_c: DEFAULT_NOCT_C,
             module_type: ModuleType::Standard,
+            array_type: ArrayType::OpenRack,
             surface_id: Some(1),
             sam_lut_path: None,
             attached_boundary_id: None,
@@ -2909,9 +2934,9 @@ mod tests {
         // At STC: irradiance=1000, temp=25, wind=1.0, losses=0, inv_eff=1.0
         let (dc, ac) = super::compute_direct_power(&array, 1000.0, 25.0, 1.0, 0.0, 1.0);
 
-        // T_cell = 25 + 1000*(47-20)/800 = 25 + 33.75 = 58.75
-        // temp_derate = 1 + (-0.0047)*(58.75-25) = 1 - 0.158625 = 0.841375
-        // DC = 5.0 * 1.0 * 0.841375 = 4.206875 kW
+        // T_cell = 25 + 1000*(45-20)/800 = 25 + 31.25 = 56.25
+        // temp_derate = 1 + (-0.0047)*(56.25-25) = 1 - 0.146875 = 0.853125
+        // DC = 5.0 * 1.0 * 0.853125 = 4.265625 kW
         let t_cell = cell_temperature_noct_wind(25.0, 1000.0, DEFAULT_NOCT_C, 1.0);
         let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
         let expected_dc = 5.0 * derate;
@@ -2919,5 +2944,269 @@ mod tests {
 
         approx_eq(dc, expected_dc);
         approx_eq(ac, expected_ac);
+    }
+
+    // --- T-0087: ArrayType and NOCT default tests ---
+
+    #[test]
+    fn default_noct_c_matches_sam_open_rack() {
+        // SAM PVWatts v8 `lib_pvwatts.h:26`: PVWATTS_INOCT = 45.0 + 273.15 [K].
+        // HARES uses the open-rack default as the most common residential
+        // configuration, matching SAM's array_type=0.
+        approx_eq(DEFAULT_NOCT_C, 45.0);
+    }
+
+    #[test]
+    fn array_type_noct_mapping_matches_sam() {
+        // SAM PVWatts v8 `cmod_pvwattsv5.cpp:195-197`:
+        //   array_type=0 (open rack)    → NOCT = 45°C
+        //   array_type=1 (roof mount)   → NOCT = 49°C
+        //   array_type=2 (insulated)    → NOCT = 49°C
+        assert_eq!(ArrayType::OpenRack.noct_c(), 45.0);
+        assert_eq!(ArrayType::RoofMounted.noct_c(), 49.0);
+        assert_eq!(ArrayType::InsulatedBack.noct_c(), 49.0);
+    }
+
+    #[test]
+    fn array_type_from_str_is_case_insensitive() {
+        assert_eq!(
+            ArrayType::from_str("OpenRack").unwrap(),
+            ArrayType::OpenRack
+        );
+        assert_eq!(
+            ArrayType::from_str("open_rack").unwrap(),
+            ArrayType::OpenRack
+        );
+        assert_eq!(
+            ArrayType::from_str("OPEN RACK").unwrap(),
+            ArrayType::OpenRack
+        );
+        assert_eq!(
+            ArrayType::from_str("RoofMounted").unwrap(),
+            ArrayType::RoofMounted
+        );
+        assert_eq!(
+            ArrayType::from_str("roof_mounted").unwrap(),
+            ArrayType::RoofMounted
+        );
+        assert_eq!(
+            ArrayType::from_str("ROOF MOUNTED").unwrap(),
+            ArrayType::RoofMounted
+        );
+        assert_eq!(
+            ArrayType::from_str("InsulatedBack").unwrap(),
+            ArrayType::InsulatedBack
+        );
+        assert_eq!(
+            ArrayType::from_str("insulated_back").unwrap(),
+            ArrayType::InsulatedBack
+        );
+        assert_eq!(
+            ArrayType::from_str("INSULATED BACK").unwrap(),
+            ArrayType::InsulatedBack
+        );
+        assert!(ArrayType::from_str("unknown").is_err());
+    }
+
+    #[test]
+    fn init_derives_noct_from_array_type() {
+        // When noct_c is None and array_type is RoofMounted, the derived
+        // NOCT should be 49°C (not the default 45°C).
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.noct_c = None;
+        cfg.array_type = Some("roof_mounted".to_string());
+        let cfg =
+            EquipmentConfig::from_typed("PV Roof".to_string(), "PV".to_string(), cfg);
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+        assert_eq!(pv.arrays.len(), 1);
+        assert_eq!(pv.arrays[0].noct_c, 49.0);
+        assert_eq!(pv.arrays[0].array_type, ArrayType::RoofMounted);
+    }
+
+    #[test]
+    fn explicit_noct_c_overrides_array_type() {
+        // When both noct_c and array_type are set, explicit noct_c wins.
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.noct_c = Some(42.0);
+        cfg.array_type = Some("roof_mounted".to_string());
+        let cfg =
+            EquipmentConfig::from_typed("PV Explicit".to_string(), "PV".to_string(), cfg);
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+        assert_eq!(pv.arrays.len(), 1);
+        // Explicit noct_c should win, not the array_type-derived 49°C.
+        assert_eq!(pv.arrays[0].noct_c, 42.0);
+    }
+
+    /// Regression: at STC (ambient=25°C, G=1000 W/m², wind=1 m/s) with
+    /// OpenRack (NOCT=45°C), the cell temperature from the SAM-NOCT model
+    /// should match 56.25°C within 0.5°C.
+    ///
+    /// SAM PVWatts v8: T_cell = T_amb + G/800 * (NOCT-20) at reference wind.
+    /// OpenRack (NOCT=45°C): T_cell = 25 + 1000/800 * 25 = 56.25°C.
+    #[test]
+    fn open_rack_cell_temp_matches_sam_at_stc() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut cfg = base_pv_typed_config();
+        cfg.noct_c = None;
+        cfg.array_type = Some("OpenRack".to_string());
+        cfg.equipment_id = Some(1);
+        let cfg =
+            EquipmentConfig::from_typed("PV OpenRack".to_string(), "PV".to_string(), cfg);
+        let env = env_with_surfaces_full(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+            1.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let cell_temp_c = pv.telemetry().get(tk::CELL_TEMP_C).unwrap_or(-1.0);
+        // SAM PVWatts v8 OpenRack at STC: T_cell = 56.25°C
+        let expected = 56.25;
+        assert!(
+            (cell_temp_c - expected).abs() < 0.5,
+            "cell temp {cell_temp_c:.2}°C should be within 0.5°C of SAM OpenRack NOCT {expected}°C"
+        );
+    }
+
+    /// PvLut with SAM array_type metadata uses the correct NOCT for cell
+    /// temperature ancillary calculation in the LUT path.
+    #[test]
+    fn lut_array_type_metadata_drives_cell_temp() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+        let mut env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 800.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            30.0,
+        );
+        env.weather.solar_altitude_deg = 60.0;
+        env.weather.solar_azimuth_deg = 180.0;
+        env.weather.wind_speed_m_s = 1.0;
+
+        let path = unique_temp_path("pv_lut", "parquet");
+        write_pv_lut_parquet_with_array_type(&path, 3.0, 0.96, 0.14, 1);
+
+        let mut cfg = base_pv_typed_config();
+        cfg.noct_c = Some(45.0); // OpenRack NOCT
+        cfg.array_type = Some("OpenRack".to_string());
+        cfg.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        cfg.inverter_efficiency = Some(1.0);
+        let cfg =
+            EquipmentConfig::from_typed("PV LUT AT".to_string(), "PV".to_string(), cfg);
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).expect("init pv lut with array_type metadata");
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step pv lut with array_type metadata");
+
+        // LUT has array_type=1 (RoofMounted, NOCT=49°C). The cell temp
+        // ancillary should use 49°C, not the configured 45°C.
+        let cell_temp_c = pv.telemetry().get(tk::CELL_TEMP_C).unwrap_or(-1.0);
+        // At 30°C ambient, 800 W/m², wind=1.0:
+        // NOCT=45 → T_cell = 30 + 800*(45-20)/800 = 55°C
+        // NOCT=49 → T_cell = 30 + 800*(49-20)/800 = 59°C
+        assert!(
+            cell_temp_c > 57.0,
+            "cell temp {cell_temp_c:.2}°C should reflect LUT RoofMounted NOCT (49°C), \
+             not config OpenRack (45°C); expected > 57°C"
+        );
+    }
+
+    /// Write a Parquet LUT with embedded SAM metadata including array_type.
+    fn write_pv_lut_parquet_with_array_type(
+        path: &std::path::Path,
+        ac_power_kw: f64,
+        sam_inv_eff: f64,
+        sam_losses: f64,
+        sam_array_type: u8,
+    ) {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::metadata::KeyValue;
+        use parquet::file::properties::WriterProperties;
+
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("solar_zenith_deg", DataType::Float64, false),
+            Field::new("solar_azimuth_deg", DataType::Float64, false),
+            Field::new("ghi", DataType::Float64, false),
+            Field::new("dni", DataType::Float64, false),
+            Field::new("dhi", DataType::Float64, false),
+            Field::new("temp_c", DataType::Float64, false),
+            Field::new("ac_power_kw", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                std::sync::Arc::new(Float64Array::from(vec![30.0])),
+                std::sync::Arc::new(Float64Array::from(vec![180.0])),
+                std::sync::Arc::new(Float64Array::from(vec![0.0])),
+                std::sync::Arc::new(Float64Array::from(vec![0.0])),
+                std::sync::Arc::new(Float64Array::from(vec![0.0])),
+                std::sync::Arc::new(Float64Array::from(vec![25.0])),
+                std::sync::Arc::new(Float64Array::from(vec![ac_power_kw])),
+            ],
+        )
+        .expect("record batch");
+        let file = std::fs::File::create(path).expect("create pv parquet lut");
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![
+                KeyValue::new(
+                    "harvest_lut_sam_inv_eff".to_string(),
+                    format!("{}", sam_inv_eff),
+                ),
+                KeyValue::new(
+                    "harvest_lut_sam_losses".to_string(),
+                    format!("{}", sam_losses),
+                ),
+                KeyValue::new(
+                    "harvest_lut_sam_array_type".to_string(),
+                    format!("{}", sam_array_type),
+                ),
+            ]))
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(file, schema, Some(props)).expect("arrow writer");
+        writer.write(&batch).expect("write parquet batch");
+        writer.close().expect("close parquet writer");
     }
 }

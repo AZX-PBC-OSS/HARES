@@ -505,6 +505,7 @@ fn sample_pv_config() -> PvConfig {
         azimuth_deg: Some(180.0),
         module_type: Some("mono-si".to_string()),
         noct_c: Some(45.0),
+        array_type: None,
         system_losses_fraction: Some(0.14),
         inverter_efficiency: Some(0.96),
         inverter_capacity_kw: Some(5.5),

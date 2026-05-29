@@ -77,6 +77,7 @@ pub(super) fn resolve_pv(
             azimuth_deg: child_f64(pv, "ArrayAzimuth"),
             module_type: child_text(pv, "ModuleType"),
             noct_c: None,
+            array_type: None,
             system_losses_fraction: child_f64(pv, "SystemLossesFraction"),
             inverter_efficiency: inverter_eff,
             inverter_capacity_kw,

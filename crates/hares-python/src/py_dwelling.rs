@@ -426,6 +426,7 @@ fn pv_config_from_py(pv: &PyPv) -> EquipmentConfig {
         azimuth_deg: Some(pv.azimuth),
         module_type: None,
         noct_c: None,
+        array_type: None,
         system_losses_fraction: None,
         inverter_efficiency: None,
         inverter_capacity_kw: None,

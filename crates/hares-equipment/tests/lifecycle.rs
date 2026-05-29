@@ -1049,6 +1049,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 azimuth_deg: Some(0.0),
                 module_type: None,
                 noct_c: None,
+                array_type: None,
                 system_losses_fraction: None,
                 inverter_efficiency: Some(0.96),
                 inverter_capacity_kw: Some(5.0),

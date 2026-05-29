@@ -314,6 +314,7 @@ fn oracle_pv_24h_constant_irradiance() {
             azimuth_deg: Some(180.0),
             module_type: Some("Standard".to_string()),
             noct_c: Some(noct_c),
+            array_type: None,
             system_losses_fraction: Some(system_losses),
             inverter_efficiency: Some(inverter_eff),
             inverter_capacity_kw: None,
