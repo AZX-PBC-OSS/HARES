@@ -58,6 +58,11 @@ pub(super) const DEFAULT_HEATER_POWER_W: f64 = 0.0;
 pub(super) const DEFAULT_HEATER_THRESHOLD_C: f64 = 0.0;
 pub(super) const DEFAULT_THERMAL_MASS_J_PER_K: f64 = 20_000.0;
 pub(super) const DEFAULT_UA_W_PER_K: f64 = 4.0;
+// Standard laboratory reference temperature (20 °C / 293.15 K). Used as EV battery
+// initial temperature when ambient conditions are unavailable at construction time.
+// This is a conventional engineering default, not a standard mandate. No ASHRAE or
+// SAE standard specifies an EV battery initialisation temperature for simulation.
+pub(super) const DEFAULT_BATTERY_TEMP_C: f64 = 20.0;
 pub(super) const DEFAULT_V2L_SOC_RESERVE: f64 = 0.2;
 pub(super) const DEFAULT_V2L_MAX_DISCHARGE_KW: f64 = 3.0;
 pub(super) const DEFAULT_V2G_SOC_RESERVE: f64 = 0.3;
@@ -180,7 +185,7 @@ pub struct EvConfig {
     pub soc_max: Option<f64>,
     /// Initial SOC [0, 1].
     pub initial_soc: Option<f64>,
-    /// Initial battery temperature (°C). Defaults to outdoor ambient.
+    /// Initial battery temperature (°C). Defaults to DEFAULT_BATTERY_TEMP_C (20.0 °C).
     pub battery_temp_c: Option<f64>,
     /// Minimum temperature for charging (°C).
     pub min_charge_temp_c: Option<f64>,

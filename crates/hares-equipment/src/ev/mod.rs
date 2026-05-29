@@ -164,7 +164,7 @@ impl Ev {
             .get_f64(KEY_FUEL_ECONOMY_KWH_PER_MI)
             .unwrap_or(DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
 
-        Self {
+        let ev = Self {
             descriptor,
             ports: vec![PortDeclaration::electrical()],
             telemetry: default_telemetry(charging_level),
@@ -213,7 +213,9 @@ impl Ev {
                 .get_f64(KEY_INITIAL_SOC)
                 .unwrap_or(DEFAULT_SOC)
                 .clamp(0.0, 1.0),
-            battery_temp_c: config.get_f64(KEY_BATTERY_TEMP_C).unwrap_or(20.0),
+            battery_temp_c: config
+                .get_f64(KEY_BATTERY_TEMP_C)
+                .unwrap_or(DEFAULT_BATTERY_TEMP_C),
             heater_active: false,
             connection_state: initial_connection_state,
             away_charger_power_kw: 0.0,
@@ -246,18 +248,19 @@ impl Ev {
             ocv_table: OcvTable::for_chemistry(chemistry),
             u_neg_table: UNegTable::for_chemistry(chemistry),
             last_daily_update_day: 0,
-        }
+        };
+        tracing::info!(
+            battery_temp_c = ev.battery_temp_c,
+            "EV battery_temp_c set via raw config"
+        );
+        ev
     }
 
     pub fn charging_strategy(&self) -> &ChargingStrategy {
         &self.charging_strategy
     }
 
-    fn init_typed(
-        &mut self,
-        config: &EquipmentConfig,
-        env: &EnvironmentState,
-    ) -> crate::Result<()> {
+    fn init_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         let c = config.require_typed::<EvConfig>("EV")?;
         c.validate()?;
 
@@ -335,7 +338,11 @@ impl Ev {
         let initial_soc = c.initial_soc.unwrap_or(DEFAULT_SOC);
         self.soc = initial_soc.clamp(0.0, 1.0);
 
-        self.battery_temp_c = c.battery_temp_c.unwrap_or(env.weather.outdoor_temp_c);
+        self.battery_temp_c = c.battery_temp_c.unwrap_or(DEFAULT_BATTERY_TEMP_C);
+        tracing::info!(
+            battery_temp_c = self.battery_temp_c,
+            "EV battery_temp_c set via typed config"
+        );
 
         if let Some(strat_str) = c.charging_strategy.as_deref() {
             self.charging_strategy = serde_json::from_str(strat_str)
@@ -684,8 +691,8 @@ impl Equipment for Ev {
         &self.ports
     }
 
-    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        self.init_typed(config, env)
+    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+        self.init_typed(config)
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {

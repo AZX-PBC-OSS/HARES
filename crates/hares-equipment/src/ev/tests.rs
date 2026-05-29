@@ -2859,3 +2859,63 @@ fn raw_and_typed_config_cold_derate_equivalence() {
         "raw ({raw_power}) and typed ({typed_power}) paths must produce the same charging power"
     );
 }
+
+/// Raw and typed init paths produce the same `battery_temp_c` when the
+/// config key is absent from both. This test would have failed before the
+/// fix because the raw path defaulted to 20.0 and the typed path defaulted
+/// to the environment's outdoor temperature.
+#[test]
+fn raw_and_typed_default_battery_temp_c_are_consistent() {
+    let env = sample_env();
+
+    // Raw path: no battery_temp_c key → DEFAULT_BATTERY_TEMP_C set in Ev::new()
+    let raw_config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), base_raw());
+    let raw_ev = Ev::new(raw_config);
+
+    // Typed path: None battery_temp_c → DEFAULT_BATTERY_TEMP_C set in init_typed()
+    let cfg = EvConfig {
+        battery_temp_c: None,
+        ..minimal_ev_config()
+    };
+    let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg);
+    let mut typed_ev = Ev::new(typed.clone());
+    typed_ev.init(&typed, &env).unwrap();
+
+    assert_eq!(raw_ev.battery_temp_c, DEFAULT_BATTERY_TEMP_C);
+    assert_eq!(typed_ev.battery_temp_c, DEFAULT_BATTERY_TEMP_C);
+    assert_eq!(
+        raw_ev.battery_temp_c, typed_ev.battery_temp_c,
+        "raw and typed paths must produce the same battery_temp_c when the key is absent"
+    );
+}
+
+/// Both paths honour an explicit `battery_temp_c` value when present in config.
+#[test]
+fn raw_and_typed_explicit_battery_temp_c_is_honoured() {
+    let env = sample_env();
+
+    // Raw path: explicit key → 35.0
+    let mut raw_data = base_raw();
+    raw_data.insert(
+        KEY_BATTERY_TEMP_C.to_string(),
+        crate::config::ConfigValue::Float(35.0),
+    );
+    let raw_config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw_data);
+    let raw_ev = Ev::new(raw_config);
+
+    // Typed path: explicit Some(35.0) → 35.0
+    let cfg = EvConfig {
+        battery_temp_c: Some(35.0),
+        ..minimal_ev_config()
+    };
+    let typed = EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg);
+    let mut typed_ev = Ev::new(typed.clone());
+    typed_ev.init(&typed, &env).unwrap();
+
+    assert_eq!(raw_ev.battery_temp_c, 35.0);
+    assert_eq!(typed_ev.battery_temp_c, 35.0);
+    assert_eq!(
+        raw_ev.battery_temp_c, typed_ev.battery_temp_c,
+        "raw and typed paths must produce the same battery_temp_c when an explicit value is present"
+    );
+}
