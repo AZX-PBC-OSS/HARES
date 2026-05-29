@@ -449,6 +449,7 @@ impl Equipment for GasBoiler {
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
         let typed = config.require_typed::<GasBoilerConfig>("Gas Boiler")?;
+        typed.validate()?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         if let Some(lid) = typed.loop_id {
             self.loop_id = LoopId(lid);
@@ -458,11 +459,6 @@ impl Equipment for GasBoiler {
         self.default_return_temp_c = typed.return_temp_c;
         self.pump_kw = typed.fan_power_w.unwrap_or(0.0) / 1_000.0;
         let fuel_efficiency = typed.afue;
-        if fuel_efficiency <= 0.0 || !fuel_efficiency.is_finite() {
-            return Err(HaresError::Equipment(format!(
-                "invalid Gas Boiler efficiency: {fuel_efficiency}"
-            )));
-        }
         // Condensing mode inferred from AFUE > 0.90 (OCHRE convention).
         // The typed config also carries `condensing: bool` (set by resolver) for
         // explicit override and round-trip fidelity; the runtime computation from

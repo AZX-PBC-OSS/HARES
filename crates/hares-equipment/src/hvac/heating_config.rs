@@ -69,6 +69,30 @@ impl Default for GasFurnaceConfig {
     }
 }
 
+impl GasFurnaceConfig {
+    /// Validate that `afue` is finite and within the physically meaningful
+    /// range [0.0, 1.0]. Values outside this range violate the Second Law of
+    /// Thermodynamics (AFUE > 1.0) or are physically meaningless (AFUE < 0.0).
+    /// References: HPXML 4.2 §3.8.2 AFUE data type with range [0, 1];
+    /// EnergyPlus `Boilers.cc:296` warns when boiler efficiency exceeds 1.0.
+    pub fn validate(&self) -> crate::Result<()> {
+        use hares_types::HaresError;
+        if !self.afue.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "GasFurnaceConfig: afue must be finite, got {}",
+                self.afue
+            )));
+        }
+        if self.afue < 0.0 || self.afue > 1.0 {
+            return Err(HaresError::Equipment(format!(
+                "GasFurnaceConfig: afue must be in [0.0, 1.0], got {}",
+                self.afue
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ElectricFurnaceConfig {
@@ -172,6 +196,30 @@ impl Default for GasBoilerConfig {
             setpoint: HvacSetpointConfig::default(),
             condensing: false,
         }
+    }
+}
+
+impl GasBoilerConfig {
+    /// Validate that `afue` is finite and within the physically meaningful
+    /// range [0.0, 1.0]. Values outside this range violate the Second Law of
+    /// Thermodynamics (AFUE > 1.0) or are physically meaningless (AFUE < 0.0).
+    /// References: HPXML 4.2 §3.8.2 AFUE data type with range [0, 1];
+    /// EnergyPlus `Boilers.cc:296` warns when boiler efficiency exceeds 1.0.
+    pub fn validate(&self) -> crate::Result<()> {
+        use hares_types::HaresError;
+        if !self.afue.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "GasBoilerConfig: afue must be finite, got {}",
+                self.afue
+            )));
+        }
+        if self.afue < 0.0 || self.afue > 1.0 {
+            return Err(HaresError::Equipment(format!(
+                "GasBoilerConfig: afue must be in [0.0, 1.0], got {}",
+                self.afue
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -515,5 +563,81 @@ mod tests {
             err.to_string().contains("unknown_key"),
             "error should name unknown key; got {err}"
         );
+    }
+
+    #[test]
+    fn gas_furnace_validate_accepts_valid_afue() {
+        for afue in [0.0_f64, 0.80, 1.0] {
+            let cfg = GasFurnaceConfig {
+                afue,
+                capacity_w: 10_000.0,
+                ..GasFurnaceConfig::default()
+            };
+            cfg.validate()
+                .unwrap_or_else(|e| panic!("afue={afue} should be valid, got {e}"));
+        }
+    }
+
+    #[test]
+    fn gas_furnace_validate_rejects_invalid_afue() {
+        for (afue, expected_substring) in [
+            (-0.1_f64, "[0.0, 1.0]"),
+            (1.1_f64, "[0.0, 1.0]"),
+            (f64::NAN, "finite"),
+            (f64::INFINITY, "finite"),
+            (f64::NEG_INFINITY, "finite"),
+        ] {
+            let cfg = GasFurnaceConfig {
+                afue,
+                capacity_w: 10_000.0,
+                ..GasFurnaceConfig::default()
+            };
+            let err = cfg
+                .validate()
+                .expect_err(&format!("afue={afue} should be invalid"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains(expected_substring),
+                "error for afue={afue} should mention '{expected_substring}', got: {msg}",
+            );
+        }
+    }
+
+    #[test]
+    fn gas_boiler_validate_accepts_valid_afue() {
+        for afue in [0.0_f64, 0.80, 1.0] {
+            let cfg = GasBoilerConfig {
+                afue,
+                capacity_w: 10_000.0,
+                ..GasBoilerConfig::default()
+            };
+            cfg.validate()
+                .unwrap_or_else(|e| panic!("afue={afue} should be valid, got {e}"));
+        }
+    }
+
+    #[test]
+    fn gas_boiler_validate_rejects_invalid_afue() {
+        for (afue, expected_substring) in [
+            (-0.1_f64, "[0.0, 1.0]"),
+            (1.1_f64, "[0.0, 1.0]"),
+            (f64::NAN, "finite"),
+            (f64::INFINITY, "finite"),
+            (f64::NEG_INFINITY, "finite"),
+        ] {
+            let cfg = GasBoilerConfig {
+                afue,
+                capacity_w: 10_000.0,
+                ..GasBoilerConfig::default()
+            };
+            let err = cfg
+                .validate()
+                .expect_err(&format!("afue={afue} should be invalid"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains(expected_substring),
+                "error for afue={afue} should mention '{expected_substring}', got: {msg}",
+            );
+        }
     }
 }

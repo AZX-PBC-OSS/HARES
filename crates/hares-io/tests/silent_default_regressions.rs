@@ -368,6 +368,54 @@ fn gas_boiler_with_afue_resolves() {
     assert!(specs.iter().any(|s| s.name == "Gas Boiler"));
 }
 
+// --- AFUE range validation [0.0, 1.0] --------------------------------------
+
+#[test]
+fn gas_furnace_rejects_afue_above_one() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="fur1"/>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <HeatingCapacity>60000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>AFUE</Units><Value>1.5</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    expect_invalid_field(
+        resolve(&xml),
+        "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
+        "Gas Furnace",
+        "1.5",
+    );
+}
+
+#[test]
+fn gas_boiler_rejects_afue_above_one() {
+    let xml = wrap_systems(
+        r#"<Systems>
+          <HVAC>
+            <HeatingSystem>
+              <SystemIdentifier id="boi1"/>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Boiler/></HeatingSystemType>
+              <HeatingCapacity>60000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>AFUE</Units><Value>1.5</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>
+          </HVAC>
+        </Systems>"#,
+    );
+    expect_invalid_field(
+        resolve(&xml),
+        "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
+        "Gas Boiler",
+        "1.5",
+    );
+}
+
 // --- Ticket #112: Gas/Electric Boiler flow_rate_kg_s and return_temp_c silent defaults -----
 //
 // When HPXML omits flow_rate_kg_s and return_temp_c, the resolver silently

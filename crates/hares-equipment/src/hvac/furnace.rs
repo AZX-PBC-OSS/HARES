@@ -419,6 +419,7 @@ impl Equipment for GasFurnace {
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
         let typed = config.require_typed::<GasFurnaceConfig>("Gas Furnace")?;
+        typed.validate()?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.fuel_efficiency = typed.afue;
         let airflow_m3_s = self.rated_capacity_w * self.hvac.config.airflow_m3_s_per_w;
@@ -427,12 +428,6 @@ impl Equipment for GasFurnace {
             .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
         self.hvac.config.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
         self.hvac.config.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
-        if self.fuel_efficiency <= 0.0 || !self.fuel_efficiency.is_finite() {
-            return Err(HaresError::Equipment(format!(
-                "invalid Gas Furnace fuel efficiency: {}",
-                self.fuel_efficiency
-            )));
-        }
         self.hvac.update_zone_heat_fractions();
         self.hvac.rebuild_thermal_ports(&mut self.ports);
         self.hvac.config.heating_capacities_w =

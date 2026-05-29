@@ -507,8 +507,17 @@ fn compute_duct_config(
 
 /// Extract AFUE from the params map, trying both the bare AFUE tag path
 /// and the AnnualHeatingEfficiency path.
-fn afue_from_params(params: &Map<String, Value>) -> Option<f64> {
-    params
+///
+/// Returns `Err(HpxmlError::MissingField)` if no AFUE value is found.
+/// Returns `Err(HpxmlError::InvalidField)` if the value is outside [0.0, 1.0]
+/// or non-finite. AFUE > 1.0 violates the Second Law of Thermodynamics;
+/// AFUE < 0.0 is physically meaningless.
+fn afue_from_params(
+    params: &Map<String, Value>,
+    name: &str,
+    system_kind: &'static str,
+) -> std::result::Result<f64, HpxmlError> {
+    let value = params
         .get("efficiency_afue")
         .and_then(Value::as_f64)
         .or_else(|| {
@@ -521,6 +530,22 @@ fn afue_from_params(params: &Map<String, Value>) -> Option<f64> {
                 None
             }
         })
+        .ok_or_else(|| HpxmlError::MissingField {
+            path: "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
+            system_kind,
+            system_id: name.to_string(),
+            reason: "AFUE is required to model combustion efficiency; no silent default permitted",
+        })?;
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(HpxmlError::InvalidField {
+            path: "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
+            system_kind,
+            system_id: name.to_string(),
+            value_received: format!("{value}"),
+            reason: "AFUE must be in [0.0, 1.0]; AFUE > 1.0 violates the Second Law of Thermodynamics",
+        });
+    }
+    Ok(value)
 }
 
 /// Extract COP/efficiency for resistance heaters from the params map.
@@ -734,12 +759,7 @@ fn try_build_gas_furnace_config(
             reason: "HeatingCapacity is required; provide it in HPXML or let the dwelling builder autosize it",
         });
     };
-    let afue = afue_from_params(params).ok_or_else(|| HpxmlError::MissingField {
-        path: "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
-        system_kind: "Gas Furnace",
-        system_id: name.to_string(),
-        reason: "AFUE is required to model combustion efficiency; no silent default permitted",
-    })?;
+    let afue = afue_from_params(params, name, "Gas Furnace")?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
     let airflow_m3_s_per_w =
@@ -850,12 +870,7 @@ fn try_build_gas_boiler_config(
             reason: "HeatingCapacity is required; provide it in HPXML or let the dwelling builder autosize it",
         });
     };
-    let afue = afue_from_params(params).ok_or_else(|| HpxmlError::MissingField {
-        path: "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
-        system_kind: "Gas Boiler",
-        system_id: name.to_string(),
-        reason: "AFUE is required to model combustion efficiency; no silent default permitted",
-    })?;
+    let afue = afue_from_params(params, name, "Gas Boiler")?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
 
