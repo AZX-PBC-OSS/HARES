@@ -50,6 +50,61 @@ pub struct PvArray {
     pub attached_boundary_id: Option<u32>,
 }
 
+impl PvArray {
+    /// Validate array fields for physical plausibility.
+    ///
+    /// Enforces:
+    /// - `tilt_deg ∈ [0, 180]`, finite, not NaN
+    /// - `azimuth_deg ∈ [0, 360)`, finite, not NaN
+    /// - `capacity_kw > 0`, finite, not NaN
+    /// - `noct_c` finite and positive (> 0)
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if !self.tilt_deg.is_finite() || !(0.0..=180.0).contains(&self.tilt_deg) {
+            return Err(HaresError::Equipment(format!(
+                "PvArray tilt_deg must be finite and within [0, 180], got {}",
+                self.tilt_deg
+            )));
+        }
+        if !self.azimuth_deg.is_finite() || !(0.0..360.0).contains(&self.azimuth_deg) {
+            return Err(HaresError::Equipment(format!(
+                "PvArray azimuth_deg must be finite and within [0, 360), got {}",
+                self.azimuth_deg
+            )));
+        }
+        if !self.capacity_kw.is_finite() || self.capacity_kw <= 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "PvArray capacity_kw must be finite and > 0, got {}",
+                self.capacity_kw
+            )));
+        }
+        if !self.noct_c.is_finite() || self.noct_c <= 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "PvArray noct_c must be finite and > 0, got {}",
+                self.noct_c
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for PvArray {
+    /// Sensible defaults for PV array geometry matching existing `init_typed()`
+    /// fallbacks: 30° tilt (typical residential roof pitch), 180° azimuth
+    /// (south-facing in northern hemisphere).
+    fn default() -> Self {
+        Self {
+            tilt_deg: 30.0,
+            azimuth_deg: 180.0,
+            capacity_kw: 1.0,
+            noct_c: super::DEFAULT_NOCT_C,
+            module_type: ModuleType::Standard,
+            surface_id: None,
+            sam_lut_path: None,
+            attached_boundary_id: None,
+        }
+    }
+}
+
 /// Per-array configuration specification (serde-compatible).
 ///
 /// This is the config-time representation; `PvArray` is the runtime
@@ -113,7 +168,7 @@ pub(super) fn parse_u32_from_f64(v: Option<f64>) -> Option<u32> {
     Some(rounded as u32)
 }
 
-fn normalize_azimuth(mut azimuth_deg: f64) -> f64 {
+pub(super) fn normalize_azimuth(mut azimuth_deg: f64) -> f64 {
     azimuth_deg = azimuth_deg.rem_euclid(360.0);
     if azimuth_deg == 360.0 {
         0.0
@@ -141,6 +196,15 @@ pub fn surface_id_for_orientation(
             "surface orientation values must be finite".to_string(),
         ));
     }
+
+    // Catch silent remapping in debug builds: if tilt is out of the expected
+    // range, clamp(0, 180) will silently remap to a valid surface_id that
+    // may not match the caller's intent. Azimuth is not asserted here because
+    // normalize_azimuth correctly handles any finite value (lossless).
+    debug_assert!(
+        (0.0..=180.0).contains(&tilt_deg),
+        "surface_id_for_orientation called with tilt_deg={tilt_deg} outside [0, 180]"
+    );
 
     let rounded_tilt = round_to_resolution(tilt_deg.clamp(0.0, 180.0), resolution_deg);
     let rounded_az = round_to_resolution(normalize_azimuth(azimuth_deg), resolution_deg);
@@ -268,5 +332,163 @@ mod tests {
         assert_eq!(spec.tilt_deg, None);
         assert_eq!(spec.azimuth_deg, None);
         assert_eq!(spec.module_type, None);
+    }
+
+    // --- PvArray validate() and Default tests ---
+
+    use super::PvArray;
+
+    fn valid_array() -> PvArray {
+        PvArray {
+            tilt_deg: 30.0,
+            azimuth_deg: 180.0,
+            capacity_kw: 5.0,
+            noct_c: 47.0,
+            module_type: ModuleType::Standard,
+            surface_id: None,
+            sam_lut_path: None,
+            attached_boundary_id: None,
+        }
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_negative_tilt() {
+        let mut array = valid_array();
+        array.tilt_deg = -10.0;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_tilt_above_180() {
+        let mut array = valid_array();
+        array.tilt_deg = 181.0;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_azimuth_outside_range() {
+        let mut array = valid_array();
+        array.azimuth_deg = 400.0;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_azimuth_360() {
+        // [0, 360) means 360.0 is excluded (maps to 0.0).
+        let mut array = valid_array();
+        array.azimuth_deg = 360.0;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_negative_azimuth() {
+        let mut array = valid_array();
+        array.azimuth_deg = -1.0;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_zero_capacity() {
+        let mut array = valid_array();
+        array.capacity_kw = 0.0;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_negative_capacity() {
+        let mut array = valid_array();
+        array.capacity_kw = -5.0;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_tilt_nan() {
+        let mut array = valid_array();
+        array.tilt_deg = f64::NAN;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_tilt_infinity() {
+        let mut array = valid_array();
+        array.tilt_deg = f64::INFINITY;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_azimuth_nan() {
+        let mut array = valid_array();
+        array.azimuth_deg = f64::NAN;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_capacity_nan() {
+        let mut array = valid_array();
+        array.capacity_kw = f64::NAN;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_noct_zero() {
+        let mut array = valid_array();
+        array.noct_c = 0.0;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_noct_negative() {
+        let mut array = valid_array();
+        array.noct_c = -1.0;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_rejects_noct_nan() {
+        let mut array = valid_array();
+        array.noct_c = f64::NAN;
+        assert!(array.validate().is_err());
+    }
+
+    #[test]
+    fn pv_array_validate_passes_for_valid_geometry() {
+        assert!(valid_array().validate().is_ok());
+    }
+
+    #[test]
+    fn pv_array_validate_passes_for_tilt_0() {
+        let mut array = valid_array();
+        array.tilt_deg = 0.0;
+        assert!(array.validate().is_ok());
+    }
+
+    #[test]
+    fn pv_array_validate_passes_for_tilt_180() {
+        let mut array = valid_array();
+        array.tilt_deg = 180.0;
+        assert!(array.validate().is_ok());
+    }
+
+    #[test]
+    fn pv_array_validate_passes_for_azimuth_0() {
+        let mut array = valid_array();
+        array.azimuth_deg = 0.0;
+        assert!(array.validate().is_ok());
+    }
+
+    #[test]
+    fn pv_array_validate_passes_for_azimuth_359_9() {
+        let mut array = valid_array();
+        array.azimuth_deg = 359.9;
+        assert!(array.validate().is_ok());
+    }
+
+    #[test]
+    fn pv_array_default_is_valid() {
+        let array = PvArray::default();
+        assert!(array.validate().is_ok());
+        assert_eq!(array.tilt_deg, 30.0);
+        assert_eq!(array.azimuth_deg, 180.0);
+        assert_eq!(array.module_type, ModuleType::Standard);
     }
 }

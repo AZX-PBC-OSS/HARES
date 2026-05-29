@@ -371,7 +371,10 @@ mod tests {
         ]);
         // capacity_kw = 10.0 but arrays sum to 5.0 → must be rejected
         let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("does not match sum of array capacities"));
+        assert!(
+            err.to_string()
+                .contains("does not match sum of array capacities")
+        );
     }
 
     #[test]
