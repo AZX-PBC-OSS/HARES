@@ -171,6 +171,7 @@ fn central_ac_airflow_and_duct_airflow_round_trip_without_collision() {
         plf_min: Some(0.7),
         plf_max: Some(1.0),
         charge_defect_ratio: None,
+        min_oat_compressor_cooling_c: None,
     };
 
     let serialized = serde_json::to_value(&cfg).expect("serialize central ac config");

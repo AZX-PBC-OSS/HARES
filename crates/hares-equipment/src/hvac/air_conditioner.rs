@@ -82,6 +82,13 @@ pub(super) struct CoolingCore {
     last_adp_c: f64,
     last_bypass_factor: f64,
 
+    /// Minimum outdoor air temperature for compressor operation [°C].
+    /// EnergyPlus `DXCoils.cc:731`: `minOATCompDXCooling = -25.0`.
+    pub(super) min_oat_cooling_c: f64,
+    /// Transient flag: true when the current step's cooling was suppressed
+    /// by the OAT lockout; consumed by step() for telemetry.
+    cooling_oat_locked_out: bool,
+
     // --- Ideal capacity (solver-driven) ---
     /// Cached from last update_control; true when timestep >= 5 min.
     use_ideal: bool,
@@ -484,6 +491,8 @@ impl CoolingCore {
             latent_degradation: LatentDegradationParams::default(),
             last_adp_c: 0.0,
             last_bypass_factor: 0.0,
+            min_oat_cooling_c: -25.0,
+            cooling_oat_locked_out: false,
             use_ideal: false,
             ideal_capacity_w: 0.0,
             ctrl_duty_cycle: 1.0,
@@ -657,6 +666,16 @@ impl CoolingCore {
         self.crankcase_threshold_c = crankcase_threshold_c;
         self.crankcase_capacity_curve = crankcase_capacity_curve;
 
+        // Minimum OAT lockout for cooling compressor operation.
+        // EnergyPlus `DXCoils.cc:731`: `minOATCompDXCooling = -25.0`.
+        self.min_oat_cooling_c = if self.is_room_ac {
+            let cfg = config.require_typed::<RoomAcConfig>("Room AC")?;
+            cfg.min_oat_compressor_cooling_c.unwrap_or(-25.0)
+        } else {
+            let cfg = config.require_typed::<CentralAirConditionerConfig>("Air Conditioner")?;
+            cfg.min_oat_compressor_cooling_c.unwrap_or(-25.0)
+        };
+
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.cycle_on_steps = 0;
@@ -670,6 +689,7 @@ impl CoolingCore {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        self.cooling_oat_locked_out = false;
         self.use_ideal = self.hvac.use_ideal_capacity(env);
 
         // Advance DR duration; auto-revert to Normal when expired.
@@ -689,6 +709,23 @@ impl CoolingCore {
         if self.dr_load_fraction <= 0.0 || self.ctrl_mode_override == Some(OperatingMode::Off) {
             self.hvac.runtime.duty_cycle = 0.0;
             self.operating_mode = OperatingMode::Off;
+            return OperatingMode::Off;
+        }
+
+        // Minimum OAT lockout for cooling compressor operation.
+        // EnergyPlus `DXCoils.cc:731, 9536`: compressor is locked out below
+        // `minOATCompDXCooling` to prevent liquid slugging and oil foaming.
+        self.cooling_oat_locked_out = env.weather.outdoor_temp_c < self.min_oat_cooling_c;
+        if self.cooling_oat_locked_out {
+            #[cfg(feature = "observe")]
+            tracing::debug!(
+                outdoor_temp_c = env.weather.outdoor_temp_c,
+                min_oat_cooling_c = self.min_oat_cooling_c,
+                "Cooling OAT lockout active"
+            );
+            self.hvac.runtime.duty_cycle = 0.0;
+            self.operating_mode = OperatingMode::Off;
+            self.hvac.update_prev_zone_temp(None);
             return OperatingMode::Off;
         }
 
@@ -748,6 +785,18 @@ impl CoolingCore {
             self.operating_mode = OperatingMode::Off;
             self.hvac.update_prev_zone_temp(None);
         }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                self.operating_mode != OperatingMode::Cooling
+                    || env.weather.outdoor_temp_c >= self.min_oat_cooling_c,
+                "Cooling active when OAT {:.1}°C < min_oat_cooling_c {:.1}°C",
+                env.weather.outdoor_temp_c,
+                self.min_oat_cooling_c
+            );
+        }
+
         self.operating_mode
     }
 
@@ -896,6 +945,14 @@ impl CoolingCore {
         self.telemetry.set(tk::SHR, self.hvac.config.shr);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+        self.telemetry.set(
+            tk::COOLING_OAT_LOCKOUT,
+            if self.cooling_oat_locked_out {
+                1.0
+            } else {
+                0.0
+            },
+        );
         self.telemetry
             .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
         // COP per AHRI/SEER convention: excludes fan power from denominator.
@@ -1598,6 +1655,7 @@ fn typed_ac_test_config(eir: f64) -> EquipmentConfig {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         },
     )
 }
@@ -1701,6 +1759,7 @@ mod tests {
                 crankcase_heater_kw: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
+                min_oat_compressor_cooling_c: None,
             },
         )
     }
@@ -2427,6 +2486,7 @@ mod tests {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
         let environment = env(26.0, 0.010, 18.0, 35.0);
@@ -2721,6 +2781,7 @@ mod tests {
                 crankcase_heater_kw: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
         let environment = env(27.0, 0.010, 19.0, 35.0);
@@ -2972,6 +3033,7 @@ mod tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_oat_compressor_cooling_c: None,
             },
         )
     }
@@ -3085,6 +3147,7 @@ mod tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
 
@@ -3235,6 +3298,200 @@ mod tests {
             );
         }
     }
+
+    // ── Minimum OAT compressor lockout tests ────────────────────────────
+
+    fn oat_lockout_env(outdoor_temp_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 28.0,
+                humidity_ratio: 0.010,
+                relative_humidity: 0.45,
+                wet_bulb_c: 19.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// Create and init an AirConditioner with a specific `min_oat_cooling_c` and speed mode.
+    fn init_ac_with_lockout(min_oat_cooling_c: f64, n_speeds: u8) -> AirConditioner {
+        let inner_cfg = CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 10_000.0,
+            eir: 0.25,
+            shr: None,
+            number_of_speeds: n_speeds,
+            stage_capacities_w: if n_speeds >= 4 {
+                Some(vec![3_000.0, 6_000.0, 8_000.0, 10_000.0])
+            } else {
+                None
+            },
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: None,
+            fan_power_w_per_cfm: None,
+            setpoint: HvacSetpointConfig {
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+            },
+            hysteresis_c: Some(1.0),
+            airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+            fraction_load_served: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: Some(min_oat_cooling_c),
+        };
+        let cfg =
+            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), inner_cfg);
+        let mut ac = AirConditioner::new(cfg.clone());
+        let init_env = oat_lockout_env(30.0);
+        ac.init(&cfg, &init_env).expect("init must succeed");
+        ac
+    }
+
+    /// Single-speed AC: update_control forces Off when OAT is below the
+    /// compressor lockout threshold, even though the thermostat calls for cooling.
+    #[test]
+    fn cooling_locked_out_below_min_oat_single_speed() {
+        let mut ac = init_ac_with_lockout(-25.0, 1);
+        let env_cold = oat_lockout_env(-30.0);
+        let mode = ac.update_control(&env_cold);
+        assert_eq!(mode, OperatingMode::Off, "lockout must suppress cooling");
+    }
+
+    /// Variable-speed AC: update_control forces Off below the lockout threshold.
+    #[test]
+    fn cooling_locked_out_below_min_oat_variable_speed() {
+        let mut ac = init_ac_with_lockout(-25.0, 4);
+        let env_cold = oat_lockout_env(-30.0);
+        let mode = ac.update_control(&env_cold);
+        assert_eq!(mode, OperatingMode::Off);
+    }
+
+    /// Cooling operates normally when OAT is at or above the lockout threshold.
+    #[test]
+    fn cooling_operates_when_oat_above_min() {
+        let mut ac = init_ac_with_lockout(-25.0, 1);
+        let env_warm = oat_lockout_env(30.0);
+        let mode = ac.update_control(&env_warm);
+        assert_eq!(mode, OperatingMode::Cooling);
+    }
+
+    /// At exactly the lockout threshold, cooling is not suppressed.
+    #[test]
+    fn cooling_operates_at_lockout_threshold() {
+        let mut ac = init_ac_with_lockout(-20.0, 1);
+        let env_at_threshold = oat_lockout_env(-20.0);
+        let mode = ac.update_control(&env_at_threshold);
+        assert_eq!(mode, OperatingMode::Cooling);
+    }
+
+    /// The lockout condition is evaluated each step. After a lockout step, a
+    /// subsequent warm step recovers to normal operation.
+    #[test]
+    fn lockout_flag_reset_on_warm_step() {
+        let mut ac = init_ac_with_lockout(-25.0, 1);
+
+        // Step 1: cold — lockout active, returns Off.
+        let mode = ac.update_control(&oat_lockout_env(-30.0));
+        assert_eq!(mode, OperatingMode::Off);
+
+        // Step 2: warm — cooling operates.
+        let mode = ac.update_control(&oat_lockout_env(30.0));
+        assert_eq!(mode, OperatingMode::Cooling);
+    }
+
+    /// Cooling telemetry flag is published in step() when lockout was active.
+    #[test]
+    fn cooling_oat_lockout_telemetry_published() {
+        let mut ac = init_ac_with_lockout(-25.0, 1);
+        let env_cold = oat_lockout_env(-30.0);
+
+        ac.update_control(&env_cold);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let dt = Duration::from_secs(60);
+        ac.step(&env_cold, dt, &mut ports).expect("step");
+
+        let val = ac.telemetry().get(tk::COOLING_OAT_LOCKOUT);
+        assert!(
+            (val.unwrap_or(0.0) - 1.0).abs() < 1e-9,
+            "COOLING_OAT_LOCKOUT must be 1.0 when lockout active, got {val:?}"
+        );
+    }
+
+    /// Cooling telemetry flag is 0.0 when lockout is not active.
+    #[test]
+    fn cooling_oat_lockout_telemetry_zero_when_normal() {
+        let mut ac = init_ac_with_lockout(-25.0, 1);
+        let env_warm = oat_lockout_env(30.0);
+
+        ac.update_control(&env_warm);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let dt = Duration::from_secs(60);
+        ac.step(&env_warm, dt, &mut ports).expect("step");
+
+        let val = ac.telemetry().get(tk::COOLING_OAT_LOCKOUT);
+        assert!(
+            (val.unwrap_or(1.0) - 0.0).abs() < 1e-9,
+            "COOLING_OAT_LOCKOUT must be 0.0 when not locked out"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3349,6 +3606,7 @@ mod dr_tests {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
         cfg.test_extras_mut().insert(
@@ -3746,6 +4004,7 @@ mod crankcase_tests {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
         cfg.test_extras_mut().insert(
@@ -3839,6 +4098,7 @@ mod crankcase_tests {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
         cfg.test_extras_mut().insert(
@@ -4298,6 +4558,7 @@ mod ideal_capacity_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
 
@@ -4364,6 +4625,7 @@ mod ideal_capacity_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
 
@@ -4425,6 +4687,7 @@ mod ideal_capacity_tests {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
 
@@ -4457,6 +4720,7 @@ mod ideal_capacity_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
 
@@ -4590,6 +4854,7 @@ mod defaults_tests {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
         cfg.test_extras_mut().insert(
@@ -4663,6 +4928,7 @@ mod defaults_tests {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
 
@@ -4739,6 +5005,7 @@ mod defaults_tests {
                 crankcase_heater_kw: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
+                min_oat_compressor_cooling_c: None,
             },
         );
 
@@ -4851,6 +5118,7 @@ mod speed_selection_parity_tests {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         };
         let mut cfg =
             EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);

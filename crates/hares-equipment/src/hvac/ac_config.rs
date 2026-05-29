@@ -20,7 +20,7 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
     [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub(super) fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(34);
+    let mut telemetry = Telemetry::with_capacity(35);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::LATENT_COOLING_W, 0.0);
@@ -57,6 +57,7 @@ pub(super) fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::TIME_AT_CURRENT_SPEED_S, 0.0);
     telemetry.insert(tk::MODE_DURATION_S, 0.0);
     telemetry.insert(tk::PUMP_POWER_KW, 0.0);
+    telemetry.insert(tk::COOLING_OAT_LOCKOUT, 0.0);
     telemetry
 }
 
@@ -226,6 +227,11 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::MODE_DURATION_S.to_string(),
             unit: "s".to_string(),
             description: "Seconds since the last thermostat mode change".to_string(),
+        },
+        TelemetryField {
+            name: tk::COOLING_OAT_LOCKOUT.to_string(),
+            unit: "-".to_string(),
+            description: "1.0 when cooling compressor is locked out by minimum outdoor temperature; 0.0 otherwise".to_string(),
         },
         TelemetryField {
             name: tk::PUMP_POWER_KW.to_string(),

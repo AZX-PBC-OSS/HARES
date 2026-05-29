@@ -81,6 +81,9 @@ pub const STARTUP_MULTIPLIER: &str = "startup_multiplier";
 pub const DUTY_CYCLE: &str = "duty_cycle";
 pub const TIME_AT_CURRENT_SPEED_S: &str = "time_at_current_speed_s";
 pub const MODE_DURATION_S: &str = "mode_duration_s";
+/// 1.0 when cooling compressor is locked out because outdoor air temperature
+/// is below the minimum safe operating threshold; 0.0 otherwise.
+pub const COOLING_OAT_LOCKOUT: &str = "cooling_oat_lockout";
 pub const DEFROST_ACTIVE: &str = "defrost_active";
 pub const DEFROST_TIME_FRACTION: &str = "defrost_time_fraction";
 pub const DEFROST_EXTRA_POWER_W: &str = "defrost_extra_power_w";

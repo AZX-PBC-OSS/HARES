@@ -19,7 +19,7 @@ use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig}
 use super::super::air_conditioner::AirConditioner;
 use super::super::heating_config::HvacSetpointConfig;
 use super::super::helpers::{equipment_id_from_config, zone_id_from_config};
-use super::constants::{DEFAULT_EQUIPMENT_ID, DEFAULT_ZONE_ID};
+use super::constants::{DEFAULT_EQUIPMENT_ID, DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_ZONE_ID};
 
 /// MSHP crankcase heater: 15 W rated, activates at or below 0 °C.
 /// Distinct from central AC default (50 W / 12.8 °C) per OCHRE conventions.
@@ -182,6 +182,12 @@ impl HpCooler {
             plf_min: hp_cfg.common.plf_min,
             plf_max: hp_cfg.common.plf_max,
             charge_defect_ratio: hp_cfg.common.charge_defect_ratio,
+            // Minimum OAT for compressor cooling: ASHP systems share one compressor
+            // between heating and cooling modes. The cooling coil uses the same lockout
+            // as the heating side (-17.78 °C / 0 °F per OCHRE/OpenStudio-HPXML default)
+            // rather than the standalone AC default (-25 °C).
+            // `DEFAULT_HP_LOCKOUT_TEMP_C` from `heat_pump/constants.rs:57`.
+            min_oat_compressor_cooling_c: Some(DEFAULT_HP_LOCKOUT_TEMP_C),
         };
 
         Ok(EquipmentConfig::from_typed(
@@ -359,7 +365,7 @@ impl GshpCooler {
             })
             .ok_or_else(|| {
                 HaresError::Equipment(
-                    "GSHP Cooler requires cooling_eir or stage_cooling_eirs".to_string(),
+                    "HeatPumpCoolerConfig requires cooling_eir or stage_cooling_eirs".to_string(),
                 )
             })?;
 
@@ -413,6 +419,8 @@ impl GshpCooler {
             plf_min: hp_cfg.common.plf_min,
             plf_max: hp_cfg.common.plf_max,
             charge_defect_ratio: hp_cfg.common.charge_defect_ratio,
+            // GSHP: compressor is indoors on a ground loop; OAT lockout does not apply.
+            min_oat_compressor_cooling_c: None,
         };
 
         Ok(EquipmentConfig::from_typed(
@@ -690,7 +698,7 @@ impl WshpCooler {
             })
             .ok_or_else(|| {
                 HaresError::Equipment(
-                    "WSHP Cooler requires cooling_eir or stage_cooling_eirs".to_string(),
+                    "HeatPumpCoolerConfig requires cooling_eir or stage_cooling_eirs".to_string(),
                 )
             })?;
 
@@ -742,6 +750,8 @@ impl WshpCooler {
             plf_min: hp_cfg.common.plf_min,
             plf_max: hp_cfg.common.plf_max,
             charge_defect_ratio: hp_cfg.common.charge_defect_ratio,
+            // WSHP: compressor is indoors on a water loop; OAT lockout does not apply.
+            min_oat_compressor_cooling_c: None,
         };
 
         Ok(EquipmentConfig::from_typed(
@@ -1546,6 +1556,43 @@ mod tests {
         assert_eq!(
             adjusted.heating_c, baseline.heating_c,
             "heating setpoint must not change when only cooling_delta_c is specified"
+        );
+    }
+
+    /// ASHP cooler uses the HP lockout default (-17.78 °C) rather than the
+    /// standalone AC default (-25 °C). Verified by supplying OAT at -20 °C
+    /// (between the two thresholds) and asserting the cooler locks out: an AC
+    /// default (-25 °C) would permit cooling, the HP default (-17.78 °C) blocks it.
+    #[test]
+    fn ashp_cooler_uses_hp_lockout_default() {
+        use crate::{HeatPumpCommonConfig, HeatPumpCoolerConfig};
+
+        let typed_hp = EquipmentConfig::from_typed(
+            "test".to_string(),
+            "ASHP Cooler".to_string(),
+            HeatPumpCoolerConfig {
+                common: HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(8_000.0),
+                    cooling_eir: Some(0.33),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut cooler = HpCooler::ashp_cooler(typed_hp.clone());
+        // Init with a warm env so the cooler's internals are fully set up.
+        cooler.init(&typed_hp, &cooling_env(28.0, 35.0)).unwrap();
+
+        // -20 °C is above the standalone AC default (-25 °C) but below the
+        // HP default (-17.78 °C). The HP default should lock out the compressor.
+        let env_cold = cooling_env(28.0, -20.0);
+        let mode = cooler.update_control(&env_cold);
+        assert_eq!(
+            mode,
+            super::OperatingMode::Off,
+            "ASHP cooler must lock out at {oat}C (HP default -17.78 °C, AC default -25 °C)",
+            oat = -20.0,
         );
     }
 }

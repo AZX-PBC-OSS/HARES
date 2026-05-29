@@ -582,6 +582,7 @@ fn hvac_port_contributions_are_correct_sign() {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         },
     );
     let mut cooler = registry
@@ -3389,6 +3390,7 @@ fn update_mode_cooling_transition() {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         },
     );
 
@@ -3506,6 +3508,7 @@ fn ac_core_output_carries_cop() {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         },
     );
 
@@ -3624,6 +3627,7 @@ fn speed_staging_keys_present_in_telemetry() {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         },
     );
 
@@ -3710,6 +3714,7 @@ fn single_speed_duty_cycle_equals_part_load_ratio() {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         },
     );
 
@@ -3788,6 +3793,7 @@ fn schedule_setpoint_keys_reflect_static_when_no_schedule_source() {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         },
     );
 
@@ -4174,6 +4180,7 @@ fn ac_sensible_thermal_port_strongly_negative_at_sf1() {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         },
     );
 
@@ -4240,6 +4247,7 @@ fn ac_electrical_halved_thermal_unscaled_at_half_sf() {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             },
         )
     };

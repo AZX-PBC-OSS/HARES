@@ -175,6 +175,7 @@ fn sample_central_ac_config() -> CentralAirConditionerConfig {
         plf_min: Some(0.7),
         plf_max: Some(1.0),
         charge_defect_ratio: None,
+        min_oat_compressor_cooling_c: None,
     }
 }
 
@@ -204,6 +205,7 @@ fn sample_room_ac_config() -> RoomAcConfig {
         crankcase_heater_kw: None,
         crankcase_heater_threshold_c: None,
         crankcase_capacity_curve_coeffs: None,
+        min_oat_compressor_cooling_c: None,
     }
 }
 

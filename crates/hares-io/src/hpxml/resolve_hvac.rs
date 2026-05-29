@@ -1170,6 +1170,7 @@ fn try_build_central_ac_config(
         plf_min: curve_bounds.plf_min,
         plf_max: curve_bounds.plf_max,
         charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
+        min_oat_compressor_cooling_c: None,
     };
     Some(
         EquipmentConfig::from_typed(name.to_string(), "Air Conditioner".to_string(), cfg)
@@ -1225,6 +1226,7 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
             .unwrap_or(Some(0.0)),
         crankcase_heater_threshold_c: None,
         crankcase_capacity_curve_coeffs: None,
+        min_oat_compressor_cooling_c: None,
     };
     Some(
         EquipmentConfig::from_typed(name.to_string(), "Room AC".to_string(), cfg)

@@ -98,6 +98,11 @@ pub struct CentralAirConditionerConfig {
     /// Correction factors: ANSI/RESNET/ACCA 310-2020.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charge_defect_ratio: Option<f64>,
+    /// Minimum outdoor air temperature for DX cooling compressor operation [°C].
+    /// Below this temperature the compressor is locked out to prevent liquid slugging
+    /// and oil foaming. EnergyPlus `DXCoils.cc:731`: `minOATCompDXCooling = -25.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_oat_compressor_cooling_c: Option<f64>,
 }
 
 impl EquipmentTypedConfig for CentralAirConditionerConfig {
@@ -322,6 +327,11 @@ pub struct RoomAcConfig {
     /// Outdoor-temperature capacity curve coefficients `[c0, c1, c2]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_capacity_curve_coeffs: Option<[f64; 3]>,
+    /// Minimum outdoor air temperature for DX cooling compressor operation [°C].
+    /// Below this temperature the compressor is locked out to prevent liquid slugging
+    /// and oil foaming. EnergyPlus `DXCoils.cc:731`: `minOATCompDXCooling = -25.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_oat_compressor_cooling_c: Option<f64>,
 }
 
 impl EquipmentTypedConfig for RoomAcConfig {
@@ -497,6 +507,7 @@ mod tests {
             plf_min: Some(0.7),
             plf_max: Some(1.0),
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         };
         let ec = typed_config(cfg.clone());
         assert!(ec.is_typed());
@@ -562,6 +573,7 @@ mod tests {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -599,6 +611,7 @@ mod tests {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -636,6 +649,7 @@ mod tests {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -673,6 +687,7 @@ mod tests {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -710,6 +725,7 @@ mod tests {
             plf_min: None,
             plf_max: None,
             charge_defect_ratio: None,
+            min_oat_compressor_cooling_c: None,
         };
 
         assert_eq!(
@@ -761,6 +777,7 @@ mod tests {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             }
         }
 
@@ -808,6 +825,7 @@ mod tests {
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
         };
         let ec = typed_config(cfg.clone());
         let recovered: RoomAcConfig = ec.typed().unwrap();
@@ -839,6 +857,7 @@ mod tests {
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -866,6 +885,7 @@ mod tests {
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
+            min_oat_compressor_cooling_c: None,
         };
         assert!(cfg.validate().is_err());
     }

@@ -674,6 +674,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 plf_min: None,
                 plf_max: None,
                 charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
             },
         ),
         "Room AC" => typed_alias_config(
@@ -699,6 +700,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 crankcase_heater_kw: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
+                min_oat_compressor_cooling_c: None,
             },
         ),
         "Dehumidifier" => typed_alias_config(
