@@ -31,7 +31,13 @@ const SECONDS_PER_HOUR: f64 = MINUTES_PER_HOUR * SECONDS_PER_MINUTE;
 const SECONDS_PER_DAY: f64 = HOURS_PER_DAY * SECONDS_PER_HOUR;
 const DEFAULT_RATED_WATER_REMOVAL_L_DAY: f64 = 30.0;
 const DEFAULT_TARGET_RH_FRACTION: f64 = 0.50;
-const DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION: f64 = 0.025;
+// Engineering choice: 2.5% total deadband (±1.25% half-width) is a common
+// residential dehumidifier hysteresis specification. No primary standard (ASHRAE
+// HoF, AHAM DH-1, or EnergyPlus) prescribes a specific default RH deadband value
+// for standalone dehumidifiers. This value is set below the typical 3–5%
+// factory-set range to prioritise tighter humidity control over cycle duration.
+// If a standards-mandated default is identified, that value should replace this.
+const DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION: f64 = 0.0125;
 const RH_MIN_FRACTION: f64 = 0.0;
 const RH_MAX_FRACTION: f64 = 1.0;
 // Default dry-bulb operating bounds. HPXML does not tag the AHAM DH-1 edition;
@@ -730,10 +736,10 @@ mod tests {
         let mut eq = Dehumidifier::new(cfg.clone());
         eq.init(&cfg, &env(0.40)).unwrap();
 
-        // target=0.50 -> min=0.475, max=0.525
+        // target=0.50 -> min=0.4875, max=0.5125
         assert_eq!(eq.update_control(&env(0.53)), OperatingMode::Cooling);
         assert_eq!(eq.update_control(&env(0.50)), OperatingMode::Cooling);
-        assert_eq!(eq.update_control(&env(0.48)), OperatingMode::Cooling);
+        assert_eq!(eq.update_control(&env(0.48)), OperatingMode::Off);
         assert_eq!(eq.update_control(&env(0.47)), OperatingMode::Off);
         assert_eq!(eq.update_control(&env(0.50)), OperatingMode::Off);
     }
@@ -838,8 +844,8 @@ mod tests {
         })
         .unwrap();
         approx_eq(eq.telemetry().get(tk::TARGET_RH).unwrap(), 0.55);
-        approx_eq(eq.telemetry().get(tk::MIN_RH).unwrap(), 0.525);
-        approx_eq(eq.telemetry().get(tk::MAX_RH).unwrap(), 0.575);
+        approx_eq(eq.telemetry().get(tk::MIN_RH).unwrap(), 0.5375);
+        approx_eq(eq.telemetry().get(tk::MAX_RH).unwrap(), 0.5625);
         assert_eq!(eq.update_control(&env(0.58)), OperatingMode::Cooling);
 
         eq.apply_control(&ControlSignal::ModeOverride {
@@ -1080,5 +1086,19 @@ mod tests {
             "water removal at rated condition must equal rated capacity \
              ({rated:.4} L/day) but got {wr:.4} L/day (rel_err={rel_err:.2e})"
         );
+    }
+
+    /// Default deadband is 2.5% total (±1.25%) at the default 50% RH target.
+    /// With a half-width of 0.0125, min_rh = 0.4875 and max_rh = 0.5125.
+    #[test]
+    fn default_deadband_produces_correct_min_max_in_telemetry() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.40)).unwrap();
+
+        let min = eq.telemetry().get(tk::MIN_RH).unwrap();
+        let max = eq.telemetry().get(tk::MAX_RH).unwrap();
+        approx_eq(min, 0.4875);
+        approx_eq(max, 0.5125);
     }
 }
