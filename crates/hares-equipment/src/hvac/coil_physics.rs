@@ -1003,7 +1003,14 @@ mod latent_degradation_tests {
         };
         for rtf in [0.10, 0.15, 0.20, 0.25, 0.30, 0.35] {
             let shr = effective_shr_with_latent_degradation(
-                STEADY_SHR, rtf, DB_C, WB_C, RATED_LAT_W, ACTUAL_LAT_W, &params, None,
+                STEADY_SHR,
+                rtf,
+                DB_C,
+                WB_C,
+                RATED_LAT_W,
+                ACTUAL_LAT_W,
+                &params,
+                None,
             );
             assert!(
                 shr >= STEADY_SHR,
