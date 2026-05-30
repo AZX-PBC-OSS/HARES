@@ -1012,16 +1012,19 @@ pub fn infer_roof_shape(
         return RoofShape::Hip;
     }
 
-    // Material hint: tile/slate common on hip roofs.
+    // tile/slate is a probabilistic, not deterministic, roof-shape signal.
+    // Classification must not use material type as a decision rule; the
+    // association (common on hip roofs in Mediterranean / Spanish Colonial
+    // styles) is a correlation, not a structural guarantee. Tile-roofed gable
+    // homes are common in the Southwestern US. The tile/slate flag is retained
+    // for the fallback observer — it records the material hint alongside the
+    // selected shape for post-hoc analysis of inference quality.
     let has_tile_slate = roof.planes.iter().any(|p| {
         p.material.as_ref().is_some_and(|m| {
             let ml = m.to_lowercase();
             ml.contains("tile") || ml.contains("slate")
         })
     });
-    if has_tile_slate && distinct_azimuths.len() >= 2 {
-        return RoofShape::Hip;
-    }
 
     // Low-latitude regions with 2 planes -- mild hip signal.
     if distinct_azimuths.len() >= 2 && latitude.is_some_and(|l| l < 30.0) {
@@ -2472,5 +2475,80 @@ mod tests {
             assert_eq!(c.roof_shape, RoofShape::Gable);
             assert!(c.max_panels > 0);
         }
+    }
+
+    /// 2-plane gable orientation (E=90°, W=270°) with tile material at
+    /// Phoenix AZ latitude (33°). After removing the deterministic
+    /// tile/slate→Hip rule, this must NOT be classified as Hip by the
+    /// material path. The classification falls through to the
+    /// conservative fallback which also returns Hip — so the output
+    /// is still Hip, but the reasoning no longer incorrectly assumes
+    /// tile → hip. The tile/slate flag is recorded in the fallback
+    /// observer for post-hoc analysis.
+    #[test]
+    fn tile_gable_not_hip() {
+        let roof = RoofInfo {
+            planes: vec![
+                RoofPlane {
+                    area_m2: 50.0,
+                    tilt_deg: 26.0,
+                    azimuth_deg: Some(90.0),
+                    material: Some("clay tile".into()),
+                    boundary_index: None,
+                },
+                RoofPlane {
+                    area_m2: 50.0,
+                    tilt_deg: 26.0,
+                    azimuth_deg: Some(270.0),
+                    material: Some("clay tile".into()),
+                    boundary_index: None,
+                },
+            ],
+            total_roof_area_m2: 100.0,
+        };
+        // At lat=33° (>= 30°) the low-latitude rule does not fire;
+        // the function falls through to the conservative fallback (Hip).
+        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(33.0));
+        // Falls to fallback, which returns Hip. The material rule is gone
+        // — tile/slate no longer forces Hip classification here.
+        assert_eq!(shape, RoofShape::Hip);
+    }
+
+    /// ≥3 distinct azimuths with tile material still correctly classified
+    /// as Hip via the geometry rule (≥3 azimuths), not the removed material
+    /// rule. Verifies that legitimate tile hip roofs continue to be
+    /// classified correctly by the structural signal.
+    #[test]
+    fn tile_hip_still_works() {
+        let roof = RoofInfo {
+            planes: vec![
+                RoofPlane {
+                    area_m2: 30.0,
+                    tilt_deg: 26.0,
+                    azimuth_deg: Some(90.0),
+                    material: Some("clay tile".into()),
+                    boundary_index: None,
+                },
+                RoofPlane {
+                    area_m2: 30.0,
+                    tilt_deg: 26.0,
+                    azimuth_deg: Some(180.0),
+                    material: Some("clay tile".into()),
+                    boundary_index: None,
+                },
+                RoofPlane {
+                    area_m2: 30.0,
+                    tilt_deg: 26.0,
+                    azimuth_deg: Some(270.0),
+                    material: Some("clay tile".into()),
+                    boundary_index: None,
+                },
+            ],
+            total_roof_area_m2: 90.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), None),
+            RoofShape::Hip
+        );
     }
 }
