@@ -13,7 +13,9 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use hares_physics::constants::{CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG};
+use hares_physics::constants::{
+    CP_DRY_AIR_J_KG_K, DRY_AIR_DENSITY_AT_20C_SEA_LEVEL_KG_M3, LATENT_HEAT_VAPORISATION_0C_J_KG,
+};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -45,7 +47,18 @@ pub struct VentilationConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
     pub flow_rate_m3_s: f64,
+    /// Total combined fan power [W] for exhaust + supply fans.
+    /// For balanced systems (HRV/ERV) when supply/exhaust fan power is not
+    /// provided separately, this is assumed to be the total and is split
+    /// equally between supply and exhaust fans. For exhaust-only systems
+    /// this is the single exhaust fan power.
     pub fan_power_w: Option<f64>,
+    /// Rated supply fan power [W] for balanced systems.
+    /// When both supply and exhaust fan power are provided, fan_power_w
+    /// is ignored. For exhaust-only systems this should be None or 0.
+    pub supply_fan_power_w: Option<f64>,
+    /// Rated exhaust fan power [W]. See supply_fan_power_w for interaction rules.
+    pub exhaust_fan_power_w: Option<f64>,
     pub sensible_effectiveness: Option<f64>,
     pub latent_effectiveness: Option<f64>,
     pub bypass_temp_min_c: Option<f64>,
@@ -54,7 +67,10 @@ pub struct VentilationConfig {
     pub defrost_effectiveness_fraction: Option<f64>,
     /// Ventilation type: "exhaust_fan", "hrv", or "erv"
     pub ventilation_type: Option<String>,
-    /// Whether the system is balanced (HRV/ERV) or one-directional (exhaust/supply)
+    /// Informational: whether the system is balanced (HRV/ERV) or one-directional
+    /// (exhaust/supply). Populated by HPXML parser for reporting/diagnostics.
+    /// Does not affect simulation behaviour — `init_typed` derives balanced state
+    /// from `ventilation_type`, not this field.
     pub balanced: Option<bool>,
     /// Daily hours of operation (0–24). Used by the EA-001 energy audit model.
     pub hours_in_operation: Option<f64>,
@@ -79,6 +95,18 @@ impl VentilationConfig {
                 return Err(HaresError::Equipment(
                     "ventilation fan_power_w must be finite and >= 0".to_string(),
                 ));
+            }
+        }
+        for (name, val) in [
+            ("supply_fan_power_w", self.supply_fan_power_w),
+            ("exhaust_fan_power_w", self.exhaust_fan_power_w),
+        ] {
+            if let Some(v) = val {
+                if !v.is_finite() || v < 0.0 {
+                    return Err(HaresError::Equipment(format!(
+                        "ventilation {name} must be finite and >= 0"
+                    )));
+                }
             }
         }
         for (name, val) in [
@@ -111,17 +139,88 @@ impl VentilationConfig {
 const KEY_EQUIPMENT_ID: &str = "equipment_id";
 use crate::config::KEY_ZONE_ID;
 
+/// Default rated fan power [W].
+///
+/// ASHRAE 62.2-2016 §4.1 Table 1: minimum fan efficacy 1.4 cfm/W for
+/// non-HRV/ERV mechanical exhaust. At the default 75 CFM whole-house
+/// ventilation rate, the minimum allowable fan power is 75/1.4 ≈ 54 W.
+/// 50 W exceeds this minimum and represents a reasonably efficient
+/// residential exhaust fan.
 const DEFAULT_FAN_POWER_W: f64 = 50.0;
-const DEFAULT_FLOW_RATE_M3_S: f64 = 0.035; // ~75 CFM, typical residential
+
+/// Default ventilation flow rate [m³/s].
+///
+/// ASHRAE 62.2-2016 §4.1 Eq.1: Q_fan = 0.01×A_floor + 7.5×(N_br+1) CFM.
+/// For a typical 3-bedroom 2000 ft² home the minimum is 50 CFM (0.024 m³/s).
+/// 0.035 m³/s (~75 CFM) provides a practical margin above the code minimum
+/// that matches common residential installer practice and the typical
+/// 0.35 ACH for a 350 m³ volume home.
+const DEFAULT_FLOW_RATE_M3_S: f64 = 0.035;
+
+/// Default sensible heat recovery effectiveness [—].
+///
+/// ASHRAE HoF 2021 Ch.25 Table 3: typical residential HRV sensible
+/// effectiveness at balanced flow is 0.65–0.80 under CSA-C439
+/// (now ASHRAE 84) test conditions. 0.70 is a conservative midpoint.
 const DEFAULT_SENSIBLE_EFFECTIVENESS: f64 = 0.70;
-const DEFAULT_LATENT_EFFECTIVENESS: f64 = 0.0; // HRV default (no latent recovery)
+
+/// Default latent heat recovery effectiveness [—].
+///
+/// HRV default: no latent recovery. An ERV configuration would
+/// set a positive value, typically 0.45–0.65 per the same ASHRAE
+/// HoF 2021 Ch.25 Table 3 range for ERV latent effectiveness.
+const DEFAULT_LATENT_EFFECTIVENESS: f64 = 0.0;
+
+/// Default bypass temperature minimum [°C].
+///
+/// ASHRAE 55-2017 §5.3 Fig.5.3.1: winter comfort zone lower
+/// bound (operative temperature ~20 °C at 1.0 clo, ~18 °C at the lower
+/// 80%-acceptability limit). When outdoor temperature exceeds this
+/// threshold and is within the comfort range, bypassing the HX core
+/// provides free cooling without over-cooling the zone.
 const DEFAULT_BYPASS_TEMP_MIN_C: f64 = 18.0;
+
+/// Default bypass temperature maximum [°C].
+///
+/// ASHRAE 55-2017 §5.3 Fig.5.3.1: summer comfort zone upper
+/// bound (operative temperature ~24 °C at 0.5 clo). Above this
+/// threshold outdoor air would add unwanted heating to the zone.
 const DEFAULT_BYPASS_TEMP_MAX_C: f64 = 24.0;
+
+/// Default outdoor air temperature below which defrost derating is
+/// applied [°C].
+///
+/// Residential HRV manufacturers typically set exhaust-air defrost
+/// initiation at −5 to −10 °C to prevent core frosting. −5 °C is the
+/// default outdoor-air defrost threshold in Canadian and northern
+/// U.S. residential compliance modelling. (EnergyPlus HeatExchanger:
+/// AirToAir:SensibleAndLatent uses a 1.7 °C default threshold for
+/// commercial systems; HARES uses −5 °C for residential HRV where
+/// higher indoor exhaust temperatures delay frost formation.)
 const DEFAULT_DEFROST_TEMP_C: f64 = -5.0;
+
+/// Default defrost effectiveness derating fraction [—].
+///
+/// During defrost the sensible effectiveness is derated to 50 % of
+/// rated. This corresponds to an exhaust-only defrost strategy where
+/// the supply fan is cycled off for approximately half the time
+/// (EnergyPlus HeatExchanger:AirToAir:SensibleAndLatent 'ExhaustOnly'
+/// frost control, IDD default initial defrost time fraction 0.083
+/// rising at 0.012 1/K below threshold). HARES uses a simplified
+/// constant 0.5 derating as a conservative first-order approximation.
 const DEFAULT_DEFROST_EFFECTIVENESS_FRACTION: f64 = 0.5;
 
-/// Standard air density [kg/m³] at sea level, 20°C.
-const AIR_DENSITY_KG_M3: f64 = 1.2;
+/// Fraction of rated supply fan power consumed during bypass [—].
+///
+/// Fan affinity laws: for a fixed-speed fan operating against a duct
+/// system, shaft power P ∝ ΔP³´² where ΔP is the system pressure drop.
+/// The HX core typically accounts for ~40 % of total system pressure
+/// drop in a residential HRV (ASHRAE HoF 2021 Ch.21 Fig.4: ~60–80 Pa
+/// core drop out of ~150 Pa total). Bypassing the core reduces ΔP to
+/// ~60 % of rated, so P_bypass / P_rated = 0.60³´² ≈ 0.46–0.54.
+/// 0.6 is a conservative value that slightly overestimates fan power
+/// during bypass, which is safe for energy-consumption estimates.
+const BYPASS_SUPPLY_FAN_POWER_FRACTION: f64 = 0.6;
 
 /// Ventilation type determines whether latent recovery is modeled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,7 +268,10 @@ pub struct Ventilation {
 
     ventilation_type: VentilationType,
     zone_id: ZoneId,
-    fan_power_w: f64,
+    /// Rated supply fan power [W] for balanced systems; 0 for exhaust-only.
+    supply_fan_power_w: f64,
+    /// Rated exhaust fan power [W].
+    exhaust_fan_power_w: f64,
     flow_rate_m3_s: f64,
     sensible_effectiveness: f64,
     latent_effectiveness: f64,
@@ -249,7 +351,10 @@ impl Ventilation {
             core_output: CoreOutput::default(),
             ventilation_type,
             zone_id,
-            fan_power_w: DEFAULT_FAN_POWER_W,
+            // Default type is HRV (balanced): pre-init split is 25 W / 25 W.
+            // init_typed() overrides with actual config values.
+            supply_fan_power_w: DEFAULT_FAN_POWER_W / 2.0,
+            exhaust_fan_power_w: DEFAULT_FAN_POWER_W / 2.0,
             flow_rate_m3_s: DEFAULT_FLOW_RATE_M3_S,
             sensible_effectiveness: DEFAULT_SENSIBLE_EFFECTIVENESS,
             latent_effectiveness: DEFAULT_LATENT_EFFECTIVENESS,
@@ -313,7 +418,31 @@ impl Ventilation {
             VentilationType::Erv => "ERV",
         });
         self.flow_rate_m3_s = c.flow_rate_m3_s;
-        self.fan_power_w = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W);
+
+        // Resolve fan power: prefer explicit supply/exhaust, fall back to fan_power_w.
+        match (c.supply_fan_power_w, c.exhaust_fan_power_w) {
+            (Some(s), Some(e)) => {
+                self.supply_fan_power_w = s;
+                self.exhaust_fan_power_w = e;
+            }
+            _ => {
+                let total = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W);
+                let is_balanced = self.ventilation_type == VentilationType::Hrv
+                    || self.ventilation_type == VentilationType::Erv;
+                if is_balanced {
+                    tracing::info!(
+                        total_fan_power_w = total,
+                        "fan_power_w used as total for balanced system; \
+                         splitting equally between supply and exhaust"
+                    );
+                    self.supply_fan_power_w = total / 2.0;
+                    self.exhaust_fan_power_w = total / 2.0;
+                } else {
+                    self.supply_fan_power_w = 0.0;
+                    self.exhaust_fan_power_w = total;
+                }
+            }
+        }
         self.sensible_effectiveness = c
             .sensible_effectiveness
             .unwrap_or(DEFAULT_SENSIBLE_EFFECTIVENESS)
@@ -330,16 +459,11 @@ impl Ventilation {
             .unwrap_or(DEFAULT_DEFROST_EFFECTIVENESS_FRACTION)
             .clamp(0.0, 1.0);
 
-        let schedule_frac = if let Some(hours) = c.hours_in_operation {
-            if !hours.is_finite() || !(0.0..=24.0).contains(&hours) {
-                return Err(HaresError::Equipment(
-                    "ventilation hours_in_operation must be finite and within [0, 24]".to_string(),
-                ));
-            }
-            (hours / 24.0).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
+        // hours_in_operation is already validated by c.validate() above.
+        let schedule_frac = c
+            .hours_in_operation
+            .map(|hours| (hours / 24.0).clamp(0.0, 1.0))
+            .unwrap_or(1.0);
         self.schedule_source = ScheduleSource::Constant(schedule_frac);
 
         self.mode = OperatingMode::Standby;
@@ -391,6 +515,8 @@ impl Equipment for Ventilation {
         if !is_running {
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::FAN_POWER_W, 0.0);
+            self.telemetry.set(tk::VENT_SUPPLY_FAN_POWER_W, 0.0);
+            self.telemetry.set(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
             self.telemetry.set(tk::SENSIBLE_RECOVERY_W, 0.0);
             self.telemetry.set(tk::LATENT_RECOVERY_W, 0.0);
             self.telemetry
@@ -418,11 +544,12 @@ impl Equipment for Ventilation {
 
         let schedule_frac = self.schedule_source.value_at(env)?.clamp(0.0, 1.0);
         let effective_flow_rate_m3_s = self.flow_rate_m3_s * schedule_frac;
-        let effective_fan_power_w = self.fan_power_w * schedule_frac;
 
         if effective_flow_rate_m3_s <= 0.0 {
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::FAN_POWER_W, 0.0);
+            self.telemetry.set(tk::VENT_SUPPLY_FAN_POWER_W, 0.0);
+            self.telemetry.set(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
             self.telemetry.set(tk::SENSIBLE_RECOVERY_W, 0.0);
             self.telemetry.set(tk::LATENT_RECOVERY_W, 0.0);
             self.telemetry
@@ -460,6 +587,31 @@ impl Equipment for Ventilation {
             && t_outdoor_c >= self.bypass_temp_min_c
             && t_outdoor_c <= self.bypass_temp_max_c;
 
+        let defrost_active = self.ventilation_type != VentilationType::ExhaustFan
+            && t_outdoor_c < self.defrost_temp_c;
+
+        // Effective fan power per fan, scaled by schedule and operating conditions.
+        let mut effective_supply_fan_power_w = self.supply_fan_power_w * schedule_frac;
+        let effective_exhaust_fan_power_w = self.exhaust_fan_power_w * schedule_frac;
+
+        if bypass_active {
+            // Supply fan sees reduced pressure drop when air bypasses the HX core.
+            effective_supply_fan_power_w *= BYPASS_SUPPLY_FAN_POWER_FRACTION;
+        }
+        if defrost_active {
+            // Known approximation: supply fan power is scaled by the defrost
+            // effectiveness fraction as a proxy for reduced supply-side operation.
+            // The ticket (directive 3) calls for scaling by "the actual mass flow
+            // fraction through each fan"; HARES does not yet model per-fan defrost
+            // flow fractions. A proper defrost flow fraction requires the T-0590
+            // defrost model (time-fraction-based frost control with supply/exhaust
+            // modulation). Until that lands, the effectiveness fraction is used as
+            // a conservative first-order proxy.
+            effective_supply_fan_power_w *= self.defrost_effectiveness_fraction;
+        }
+
+        let effective_fan_power_w = effective_supply_fan_power_w + effective_exhaust_fan_power_w;
+
         // Store effective values so the dwelling orchestration can propagate them
         // to ThermalSolverConfig.ventilation before the thermal solver integrates.
         self.effective_sensible_effectiveness = eff_s;
@@ -470,7 +622,7 @@ impl Equipment for Ventilation {
         let w_supply = w_outdoor + eff_l * (w_indoor - w_outdoor);
 
         // Mass flow rate [kg/s]
-        let m_dot_kg_s = effective_flow_rate_m3_s * AIR_DENSITY_KG_M3;
+        let m_dot_kg_s = effective_flow_rate_m3_s * DRY_AIR_DENSITY_AT_20C_SEA_LEVEL_KG_M3;
 
         // Sensible ventilation load to zone [W]:
         // Positive = heating the zone (supply warmer than outdoor but still cooler than indoor).
@@ -502,6 +654,10 @@ impl Equipment for Ventilation {
         // Telemetry
         self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
         self.telemetry.set(tk::FAN_POWER_W, effective_fan_power_w);
+        self.telemetry
+            .set(tk::VENT_SUPPLY_FAN_POWER_W, effective_supply_fan_power_w);
+        self.telemetry
+            .set(tk::VENT_EXHAUST_FAN_POWER_W, effective_exhaust_fan_power_w);
         self.telemetry
             .set(tk::SENSIBLE_RECOVERY_W, q_recovery_sensible_w);
         self.telemetry
@@ -600,9 +756,11 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut t = Telemetry::with_capacity(6);
+    let mut t = Telemetry::with_capacity(8);
     t.insert(tk::ELECTRIC_KW, 0.0);
     t.insert(tk::FAN_POWER_W, 0.0);
+    t.insert(tk::VENT_SUPPLY_FAN_POWER_W, 0.0);
+    t.insert(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
     t.insert(tk::SENSIBLE_RECOVERY_W, 0.0);
     t.insert(tk::LATENT_RECOVERY_W, 0.0);
     t.insert(tk::SUPPLY_TEMP_C, 20.0);
@@ -620,7 +778,17 @@ fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::FAN_POWER_W.to_string(),
             unit: "W".to_string(),
-            description: "Fan electrical power consumption".to_string(),
+            description: "Total fan electrical power consumption".to_string(),
+        },
+        TelemetryField {
+            name: tk::VENT_SUPPLY_FAN_POWER_W.to_string(),
+            unit: "W".to_string(),
+            description: "Supply-side fan electrical power".to_string(),
+        },
+        TelemetryField {
+            name: tk::VENT_EXHAUST_FAN_POWER_W.to_string(),
+            unit: "W".to_string(),
+            description: "Exhaust-side fan electrical power".to_string(),
         },
         TelemetryField {
             name: tk::SENSIBLE_RECOVERY_W.to_string(),
@@ -694,6 +862,8 @@ mod tests {
                 zone_id: Some(1),
                 flow_rate_m3_s: 0.035,
                 fan_power_w: Some(50.0),
+                supply_fan_power_w: None,
+                exhaust_fan_power_w: None,
                 sensible_effectiveness: Some(0.70),
                 latent_effectiveness: Some(0.0),
                 bypass_temp_min_c: None,
@@ -716,6 +886,8 @@ mod tests {
                 zone_id: Some(1),
                 flow_rate_m3_s: 0.035,
                 fan_power_w: Some(60.0),
+                supply_fan_power_w: None,
+                exhaust_fan_power_w: None,
                 sensible_effectiveness: Some(0.70),
                 latent_effectiveness: Some(0.50),
                 bypass_temp_min_c: None,
@@ -871,7 +1043,7 @@ mod tests {
         // Raw load = 0.042 * 1006 * 20 = 845 W
         // Recovery = 0.042 * 1006 * 0.70 * 20 = 591 W
         // Reduction = 591/845 = 70%
-        let m_dot = 0.035 * AIR_DENSITY_KG_M3;
+        let m_dot = 0.035 * DRY_AIR_DENSITY_AT_20C_SEA_LEVEL_KG_M3;
         let raw_load = m_dot * CP_DRY_AIR_J_KG_K * 20.0;
         let reduction = recovery / raw_load;
         assert!(
@@ -994,6 +1166,8 @@ mod tests {
                 zone_id: Some(1),
                 flow_rate_m3_s: 0.025,
                 fan_power_w: Some(30.0),
+                supply_fan_power_w: None,
+                exhaust_fan_power_w: None,
                 sensible_effectiveness: Some(0.0),
                 latent_effectiveness: Some(0.0),
                 bypass_temp_min_c: None,
@@ -1036,14 +1210,27 @@ mod tests {
 
     #[test]
     fn constant_half_schedule_halves_flow_and_power() {
-        let cfg = hrv_config();
-
         let e = env(0.0, 20.0);
-        let mut hrv = Ventilation::new(cfg.clone());
-        hrv.init(&cfg, &e).expect("init");
-        hrv.schedule_source = ScheduleSource::Constant(0.5);
 
-        // Run full-schedule reference first (separate instance)
+        // Half-schedule instance: hours_in_operation = 12 → schedule_frac = 0.5.
+        let half_config = VentilationConfig {
+            hours_in_operation: Some(12.0),
+            sensible_effectiveness: Some(0.70),
+            latent_effectiveness: Some(0.0),
+            fan_power_w: Some(50.0),
+            ventilation_type: Some("hrv".to_string()),
+            balanced: None,
+            ..minimal_ventilation_config()
+        };
+        let cfg_half = EquipmentConfig::from_typed(
+            "HRV-half".to_string(),
+            "HRV".to_string(),
+            half_config,
+        );
+        let mut hrv = Ventilation::new(cfg_half.clone());
+        hrv.init(&cfg_half, &e).expect("init");
+
+        // Full-schedule reference: hours_in_operation = None → schedule_frac = 1.0.
         let cfg_full = hrv_config();
         let mut hrv_full = Ventilation::new(cfg_full.clone());
         hrv_full.init(&cfg_full, &e).expect("init full");
@@ -1110,6 +1297,8 @@ mod tests {
             zone_id: None,
             flow_rate_m3_s: 0.035,
             fan_power_w: None,
+            supply_fan_power_w: None,
+            exhaust_fan_power_w: None,
             sensible_effectiveness: None,
             latent_effectiveness: None,
             bypass_temp_min_c: None,
@@ -1181,6 +1370,8 @@ mod tests {
             hours_in_operation: Some(8.0),
             ventilation_type: Some("erv".to_string()),
             fan_power_w: Some(40.0),
+            supply_fan_power_w: None,
+            exhaust_fan_power_w: None,
             sensible_effectiveness: Some(0.75),
             latent_effectiveness: Some(0.10),
             balanced: Some(true),
@@ -1197,7 +1388,10 @@ mod tests {
 
         assert_eq!(fan.ventilation_type, VentilationType::Erv);
         assert!((fan.flow_rate_m3_s - 0.035).abs() < 1e-9);
-        assert_eq!(fan.fan_power_w, 40.0);
+        assert!(
+            (fan.supply_fan_power_w + fan.exhaust_fan_power_w - 40.0).abs() < 1e-9,
+            "total fan power from config fan_power_w=40 should be 40W for balanced ERV"
+        );
         assert_eq!(fan.sensible_effectiveness, 0.75);
         assert_eq!(fan.latent_effectiveness, 0.10);
         assert!((fan.schedule_source.value_at(&env).unwrap() - (8.0 / 24.0)).abs() < 1e-9);
@@ -1213,6 +1407,8 @@ mod tests {
                 zone_id: Some(1),
                 flow_rate_m3_s: 0.025,
                 fan_power_w: Some(30.0),
+                supply_fan_power_w: None,
+                exhaust_fan_power_w: None,
                 sensible_effectiveness: Some(0.0),
                 latent_effectiveness: Some(0.0),
                 bypass_temp_min_c: None,
@@ -1316,6 +1512,308 @@ mod tests {
         assert!(
             (0.0..=1.0).contains(&eff_s),
             "sensible effectiveness in range"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_supply_fan_power() {
+        let mut cfg = minimal_ventilation_config();
+        cfg.supply_fan_power_w = Some(f64::NAN);
+        assert!(cfg.validate().is_err());
+        cfg.supply_fan_power_w = Some(f64::NEG_INFINITY);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_negative_supply_fan_power() {
+        let mut cfg = minimal_ventilation_config();
+        cfg.supply_fan_power_w = Some(-1.0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_negative_exhaust_fan_power() {
+        let mut cfg = minimal_ventilation_config();
+        cfg.exhaust_fan_power_w = Some(-5.0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn separate_supply_and_exhaust_fan_power_sum_to_total() {
+        let cfg = EquipmentConfig::from_typed(
+            "HRV-separate".to_string(),
+            "HRV".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.035,
+                fan_power_w: None,
+                supply_fan_power_w: Some(30.0),
+                exhaust_fan_power_w: Some(25.0),
+                sensible_effectiveness: Some(0.70),
+                latent_effectiveness: Some(0.0),
+                bypass_temp_min_c: None,
+                bypass_temp_max_c: None,
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("hrv".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
+        );
+        let e = env(5.0, 20.0);
+        let mut hrv = Ventilation::new(cfg.clone());
+        hrv.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let electric_kw = ports.electrical.net_active_kw();
+        let expected_kw = (30.0 + 25.0) / 1000.0;
+        assert!(
+            (electric_kw - expected_kw).abs() < 0.001,
+            "total fan power should be 55W = {expected_kw} kW, got {electric_kw}"
+        );
+
+        let supply_w = hrv
+            .telemetry()
+            .get(tk::VENT_SUPPLY_FAN_POWER_W)
+            .expect("supply_fan_power_w");
+        let exhaust_w = hrv
+            .telemetry()
+            .get(tk::VENT_EXHAUST_FAN_POWER_W)
+            .expect("exhaust_fan_power_w");
+        assert!(
+            (supply_w - 30.0).abs() < 0.01,
+            "supply fan power should be 30W, got {supply_w}"
+        );
+        assert!(
+            (exhaust_w - 25.0).abs() < 0.01,
+            "exhaust fan power should be 25W, got {exhaust_w}"
+        );
+    }
+
+    #[test]
+    fn fan_power_w_alone_retains_backward_compat_for_balanced_hrv() {
+        let cfg = hrv_config(); // fan_power_w = 50, balanced HRV
+        let e = env(5.0, 20.0);
+        let mut hrv = Ventilation::new(cfg.clone());
+        hrv.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let electric_kw = ports.electrical.net_active_kw();
+        assert!(
+            (electric_kw - 0.05).abs() < 0.001,
+            "total fan power should still be 50W = 0.05 kW with fan_power_w alone, got {electric_kw}"
+        );
+
+        let total_telemetry = hrv
+            .telemetry()
+            .get(tk::FAN_POWER_W)
+            .expect("fan_power_w telemetry");
+        assert!(
+            (total_telemetry - 50.0).abs() < 0.01,
+            "total fan power telemetry should be 50W, got {total_telemetry}"
+        );
+    }
+
+    #[test]
+    fn fan_power_w_alone_works_for_exhaust_only_system() {
+        let cfg = EquipmentConfig::from_typed(
+            "Exhaust".to_string(),
+            "Ventilation Fan".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.025,
+                fan_power_w: Some(60.0),
+                supply_fan_power_w: None,
+                exhaust_fan_power_w: None,
+                sensible_effectiveness: Some(0.0),
+                latent_effectiveness: Some(0.0),
+                bypass_temp_min_c: None,
+                bypass_temp_max_c: None,
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("exhaust_fan".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
+        );
+        let e = env(5.0, 20.0);
+        let mut fan = Ventilation::new(cfg.clone());
+        fan.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        fan.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let electric_kw = ports.electrical.net_active_kw();
+        assert!(
+            (electric_kw - 0.06).abs() < 0.001,
+            "exhaust fan power should be 60W = 0.06 kW, got {electric_kw}"
+        );
+
+        let supply_w = fan
+            .telemetry()
+            .get(tk::VENT_SUPPLY_FAN_POWER_W)
+            .expect("supply_fan_power_w");
+        assert!(
+            supply_w.abs() < 0.01,
+            "exhaust-only system should have zero supply fan power, got {supply_w}"
+        );
+    }
+
+    #[test]
+    fn supply_fan_power_scaled_during_bypass() {
+        let cfg = EquipmentConfig::from_typed(
+            "HRV-bypass".to_string(),
+            "HRV".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.035,
+                fan_power_w: None,
+                supply_fan_power_w: Some(40.0),
+                exhaust_fan_power_w: Some(40.0),
+                sensible_effectiveness: Some(0.70),
+                latent_effectiveness: Some(0.0),
+                bypass_temp_min_c: Some(18.0),
+                bypass_temp_max_c: Some(24.0),
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("hrv".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
+        );
+        let e_bypass = env(21.0, 22.0); // within bypass comfort range
+        let e_normal = env(10.0, 20.0); // outside bypass range
+
+        let mut hrv = Ventilation::new(cfg.clone());
+        hrv.init(&cfg, &e_normal).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+
+        // Normal operation: supply + exhaust both at rated
+        hrv.step(&e_normal, Duration::from_secs(300), &mut ports)
+            .expect("step normal");
+        let normal_total_kw = ports.electrical.net_active_kw();
+
+        // Bypass: supply fan power scaled down
+        let mut ports_bypass = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e_bypass, Duration::from_secs(300), &mut ports_bypass)
+            .expect("step bypass");
+        let bypass_total_kw = ports_bypass.electrical.net_active_kw();
+
+        assert!(
+            bypass_total_kw < normal_total_kw,
+            "bypass total power ({bypass_total_kw:.6} kW) should be less than normal ({normal_total_kw:.6} kW)"
+        );
+
+        let bypass_supply_w = hrv
+            .telemetry()
+            .get(tk::VENT_SUPPLY_FAN_POWER_W)
+            .expect("supply_fan_power_w during bypass");
+        let expected_supply_bypass = 40.0 * BYPASS_SUPPLY_FAN_POWER_FRACTION;
+        assert!(
+            (bypass_supply_w - expected_supply_bypass).abs() < 0.5,
+            "supply fan power during bypass should be ~{expected_supply_bypass}W, got {bypass_supply_w}"
+        );
+    }
+
+    #[test]
+    fn regression_split_vs_combined_total_matches() {
+        // Original model: fan_power_w = 80 (combined)
+        let cfg_combined = EquipmentConfig::from_typed(
+            "HRV-combined".to_string(),
+            "HRV".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.035,
+                fan_power_w: Some(80.0),
+                supply_fan_power_w: None,
+                exhaust_fan_power_w: None,
+                sensible_effectiveness: Some(0.70),
+                latent_effectiveness: Some(0.0),
+                bypass_temp_min_c: None,
+                bypass_temp_max_c: None,
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("hrv".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
+        );
+        let cfg_split = EquipmentConfig::from_typed(
+            "HRV-split".to_string(),
+            "HRV".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.035,
+                fan_power_w: None,
+                supply_fan_power_w: Some(40.0),
+                exhaust_fan_power_w: Some(40.0),
+                sensible_effectiveness: Some(0.70),
+                latent_effectiveness: Some(0.0),
+                bypass_temp_min_c: None,
+                bypass_temp_max_c: None,
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("hrv".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
+        );
+
+        let e = env(10.0, 20.0); // normal operation, no bypass/defrost
+        let mut combined = Ventilation::new(cfg_combined.clone());
+        combined.init(&cfg_combined, &e).expect("init combined");
+        let mut split = Ventilation::new(cfg_split.clone());
+        split.init(&cfg_split, &e).expect("init split");
+
+        let mut ports_combined = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let mut ports_split = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+
+        combined
+            .step(&e, Duration::from_secs(300), &mut ports_combined)
+            .expect("step combined");
+        split
+            .step(&e, Duration::from_secs(300), &mut ports_split)
+            .expect("step split");
+
+        let combined_kw = ports_combined.electrical.net_active_kw();
+        let split_kw = ports_split.electrical.net_active_kw();
+        assert!(
+            (combined_kw - split_kw).abs() < 0.001,
+            "combined model ({combined_kw:.6} kW) and split model ({split_kw:.6} kW) should match when supply+exhaust sum equals old total"
         );
     }
 }

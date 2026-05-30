@@ -558,6 +558,8 @@ fn sample_ventilation_config() -> VentilationConfig {
         zone_id: Some(1),
         flow_rate_m3_s: 0.05,
         fan_power_w: Some(60.0),
+        supply_fan_power_w: None,
+        exhaust_fan_power_w: None,
         sensible_effectiveness: Some(0.75),
         latent_effectiveness: Some(0.20),
         bypass_temp_min_c: Some(18.0),

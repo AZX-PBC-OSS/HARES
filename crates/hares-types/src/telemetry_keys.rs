@@ -222,6 +222,10 @@ pub const ENERGY_BALANCE_RESIDUAL_W: &str = "energy_balance_residual_w";
 // ── Ventilation / recovery ──────────────────────────────────────────────────
 pub const SENSIBLE_RECOVERY_W: &str = "sensible_recovery_w";
 pub const LATENT_RECOVERY_W: &str = "latent_recovery_w";
+/// Supply-side fan electrical power per timestep [W].
+pub const VENT_SUPPLY_FAN_POWER_W: &str = "vent_supply_fan_power_w";
+/// Exhaust-side fan electrical power per timestep [W].
+pub const VENT_EXHAUST_FAN_POWER_W: &str = "vent_exhaust_fan_power_w";
 
 // ── Dehumidifier ────────────────────────────────────────────────────────────
 pub const WATER_REMOVAL_L_DAY: &str = "water_removal_l_day";

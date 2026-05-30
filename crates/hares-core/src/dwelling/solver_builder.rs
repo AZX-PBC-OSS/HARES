@@ -1979,6 +1979,8 @@ mod tests {
             zone_id: None,
             flow_rate_m3_s: 0.035,
             fan_power_w: None,
+            supply_fan_power_w: None,
+            exhaust_fan_power_w: None,
             sensible_effectiveness: Some(0.75),
             latent_effectiveness: Some(0.65),
             bypass_temp_min_c: None,

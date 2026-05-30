@@ -735,6 +735,8 @@ pub(super) fn resolve_ventilation(
             zone_id: None,
             flow_rate_m3_s: flow_m3_s.unwrap_or(0.0),
             fan_power_w,
+            supply_fan_power_w: None,
+            exhaust_fan_power_w: None,
             sensible_effectiveness: (sensible_re > 0.0).then_some(sensible_re),
             latent_effectiveness: (latent_re > 0.0).then_some(latent_re),
             bypass_temp_min_c: None,

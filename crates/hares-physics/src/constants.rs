@@ -116,6 +116,13 @@ pub const ISA_PRESSURE_EXPONENT: f64 = 5.255_876_1;
 /// Prevents division by near-zero in moist air density formula.
 pub const MIN_HUMIDITY_RATIO_DENSITY: f64 = 1e-5;
 
+/// Dry-air density at sea-level standard pressure and 20°C [kg/m³].
+///
+/// ρ = p / (R_da × T) = 101 325 / (287.058 × 293.15) ≈ 1.2045 kg/m³.
+/// Rounded to 1.2 kg/m³ as the conventional nominal residential value.
+/// ISA 1976 for sea-level pressure; ASHRAE 2017 HOF Ch.1 for R_da.
+pub const DRY_AIR_DENSITY_AT_20C_SEA_LEVEL_KG_M3: f64 = 1.2;
+
 // --- Unit Conversions ---
 
 /// Watts per ton of refrigeration. 1 ton = 12,000 BTU/h.
