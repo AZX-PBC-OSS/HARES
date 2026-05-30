@@ -110,7 +110,7 @@ impl GasWaterHeaterConfig {
             f64::NEG_INFINITY,
             false,
         )?;
-        check_finite("gas_wh: deadband_c", self.deadband_c, 0.0, false)?;
+        check_finite("gas_wh: deadband_c", self.deadband_c, 0.0, true)?;
         check_finite(
             "gas_wh: max_tank_temp_c",
             self.max_tank_temp_c,
@@ -276,7 +276,7 @@ impl ElectricResistanceWaterHeaterConfig {
             f64::NEG_INFINITY,
             false,
         )?;
-        check_finite("resistance_wh: deadband_c", self.deadband_c, 0.0, false)?;
+        check_finite("resistance_wh: deadband_c", self.deadband_c, 0.0, true)?;
         check_finite(
             "resistance_wh: max_tank_temp_c",
             self.max_tank_temp_c,
@@ -503,7 +503,7 @@ impl IndirectTankConfig {
             f64::NEG_INFINITY,
             false,
         )?;
-        check_finite("indirect_tank: deadband_c", self.deadband_c, 0.0, false)?;
+        check_finite("indirect_tank: deadband_c", self.deadband_c, 0.0, true)?;
         check_finite(
             "indirect_tank: max_tank_temp_c",
             self.max_tank_temp_c,
@@ -637,7 +637,7 @@ impl HeatPumpWaterHeaterConfig {
             f64::NEG_INFINITY,
             false,
         )?;
-        check_finite("hpwh: deadband_c", self.deadband_c, 0.0, false)?;
+        check_finite("hpwh: deadband_c", self.deadband_c, 0.0, true)?;
         check_finite(
             "hpwh: max_tank_temp_c",
             self.max_tank_temp_c,
@@ -1008,5 +1008,180 @@ mod tests {
         let result: crate::Result<IndirectTankConfig> = ec.typed();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown field"));
+    }
+
+    // --- deadband validation tests ---
+
+    fn gas_wh_with_deadband(deadband_c: Option<f64>) -> GasWaterHeaterConfig {
+        GasWaterHeaterConfig {
+            fuel_type: FuelType::Gas,
+            deadband_c,
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            pilot_power_w: None,
+            flue_loss_fraction: None,
+            skin_loss_fraction: None,
+            ignition_type: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            conversion_efficiency: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            pilot_fraction_to_tank: None,
+        }
+    }
+
+    fn resistance_wh_with_deadband(deadband_c: Option<f64>) -> ElectricResistanceWaterHeaterConfig {
+        ElectricResistanceWaterHeaterConfig {
+            deadband_c,
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
+            max_combined_power_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+        }
+    }
+
+    fn hpwh_with_deadband(deadband_c: Option<f64>) -> HeatPumpWaterHeaterConfig {
+        HeatPumpWaterHeaterConfig {
+            deadband_c,
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: None,
+            backup_element_power_w: None,
+            ua_w_per_k: None,
+            setpoint_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            compressor_power_w: None,
+            backup_enable_offset_c: None,
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: None,
+            min_off_time_s: None,
+            hp_only_mode: None,
+            element_hp_control_mode: None,
+            fan_power_w: None,
+            parasitic_power_w: None,
+            backup_efficiency: None,
+            shr: None,
+            lost_heat_fraction: None,
+            wall_heat_fraction: None,
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+        }
+    }
+
+    fn indirect_tank_with_deadband(deadband_c: Option<f64>) -> IndirectTankConfig {
+        IndirectTankConfig {
+            deadband_c,
+            equipment_id: None,
+            zone_id: None,
+            boiler_loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            ua_w_per_k: None,
+            hx_ua_w_per_k: None,
+            setpoint_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            draw_flow_rate_kg_s: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            boiler_loop_flow_rate_kg_s: None,
+        }
+    }
+
+    #[test]
+    fn deadband_zero_rejected_for_storage_water_heaters() {
+        assert!(gas_wh_with_deadband(Some(0.0)).validate().is_err());
+        assert!(resistance_wh_with_deadband(Some(0.0)).validate().is_err());
+        assert!(hpwh_with_deadband(Some(0.0)).validate().is_err());
+        assert!(indirect_tank_with_deadband(Some(0.0)).validate().is_err());
+    }
+
+    #[test]
+    fn deadband_negative_rejected_for_storage_water_heaters() {
+        assert!(gas_wh_with_deadband(Some(-1.0)).validate().is_err());
+        assert!(resistance_wh_with_deadband(Some(-1.0)).validate().is_err());
+        assert!(hpwh_with_deadband(Some(-1.0)).validate().is_err());
+        assert!(indirect_tank_with_deadband(Some(-1.0)).validate().is_err());
+    }
+
+    #[test]
+    fn deadband_positive_accepted_for_storage_water_heaters() {
+        // 5.56°C = 10°F, OCHRE's default deadband (WaterHeater.py:76).
+        assert!(gas_wh_with_deadband(Some(5.56)).validate().is_ok());
+        assert!(resistance_wh_with_deadband(Some(5.56)).validate().is_ok());
+        assert!(hpwh_with_deadband(Some(5.56)).validate().is_ok());
+        assert!(indirect_tank_with_deadband(Some(5.56)).validate().is_ok());
+    }
+
+    #[test]
+    fn deadband_none_still_accepted() {
+        // deadband_c is optional; None should still pass validation.
+        assert!(gas_wh_with_deadband(None).validate().is_ok());
+        assert!(resistance_wh_with_deadband(None).validate().is_ok());
+        assert!(hpwh_with_deadband(None).validate().is_ok());
+        assert!(indirect_tank_with_deadband(None).validate().is_ok());
     }
 }
