@@ -1163,6 +1163,14 @@ impl Equipment for Battery {
         // -- Temperature-dependent capacity derating --
         let capacity_derate = self.capacity_derate_model.evaluate(self.cell_temp_c);
         self.capacity_kwh = self.capacity_kwh_nominal * capacity_derate;
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                self.capacity_kwh.is_finite() && self.capacity_kwh >= 0.0,
+                "capacity_kwh must be finite and non-negative, got {}",
+                self.capacity_kwh
+            );
+        }
 
         // -- Compute electrical model --
         let (power_kw, _ohmic_loss_w, terminal_v, current_a) =
@@ -1185,7 +1193,13 @@ impl Equipment for Battery {
         };
         let soc_before_charge = self.soc; // post-self-discharge, pre-charge/discharge
         let energy_delta_kwh = dc_power_kw * dt_hours;
-        self.soc += energy_delta_kwh / self.capacity_kwh;
+        // Guard against division by zero when battery has no effective capacity
+        // (fully degraded, SOH=0). The SOC cannot change without capacity to store
+        // energy. We guard the SOC update specifically rather than returning early
+        // from step() so that degradation tracking — which updates SOH — continues.
+        if self.capacity_kwh > 0.0 {
+            self.soc += energy_delta_kwh / self.capacity_kwh;
+        }
         self.soc = self.soc.clamp(eff_min_soc, eff_max_soc);
 
         // Recompute actual grid power and ohmic losses if SOC was clamped.
@@ -1311,6 +1325,15 @@ impl Equipment for Battery {
                 .update_daily(&self.u_neg_table, cell_temp_k, sum_sq_dod);
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
             self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                debug_assert!(
+                    self.capacity_kwh_nominal > 0.0 || soh <= 0.0,
+                    "capacity_kwh_nominal underflow: rated={}, soh={soh}, nominal={}",
+                    self.capacity_kwh_rated,
+                    self.capacity_kwh_nominal
+                );
+            }
             tracing::debug!(
                 soh,
                 capacity_kwh_nominal = self.capacity_kwh_nominal,
@@ -4621,5 +4644,163 @@ mod tests {
             "implied capacity {implied} kWh must be within 10% of declared 13.5 kWh (error: {:.1}%)",
             error * 100.0
         );
+    }
+
+    /// When capacity_kwh is zero (fully degraded battery, SOH=0), the SOC update
+    /// must be skipped — no division by zero, and SOC remains finite and unchanged.
+    #[test]
+    fn soc_update_noop_when_capacity_zero() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        let initial_soc = bat.soc;
+        // Simulate fully degraded battery: nominal capacity driven to zero
+        // (SOH=0 => capacity_kwh_nominal = 0). Also set current capacity_kwh to
+        // zero since step() recomputes it from capacity_kwh_nominal * derate.
+        bat.capacity_kwh_nominal = 0.0;
+        bat.capacity_kwh = 0.0;
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(300), &mut ports)
+            .unwrap();
+
+        assert!(bat.soc.is_finite(), "SOC must be finite, got {}", bat.soc);
+        assert!(
+            (bat.soc - initial_soc).abs() < f64::EPSILON,
+            "SOC should not change when capacity_kwh=0 (was {initial_soc}, now {})",
+            bat.soc
+        );
+
+        let telemetry_soc = bat.telemetry().get(tk::SOC).unwrap();
+        assert!(
+            telemetry_soc.is_finite(),
+            "telemetry SOC must be finite, got {telemetry_soc}"
+        );
+        assert!(
+            (telemetry_soc - initial_soc).abs() < f64::EPSILON,
+            "telemetry SOC should not change when capacity_kwh=0"
+        );
+    }
+
+    /// capacity_kwh_nominal must be > 0 when soh > 0 under default degradation
+    /// model parameters. The rated capacity times a positive SOH fraction should
+    /// produce a positive nominal capacity.
+    #[test]
+    fn nominal_capacity_positive_when_soh_positive() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // At init with fresh degradation state (capacity_fade = 0.0 => soh = 1.0),
+        // capacity_kwh_nominal must equal rated capacity and be positive.
+        assert!(
+            bat.capacity_kwh_nominal > 0.0,
+            "capacity_kwh_nominal must be > 0 at init (rated={}, nominal={})",
+            bat.capacity_kwh_rated,
+            bat.capacity_kwh_nominal
+        );
+        assert!(
+            (bat.capacity_kwh_nominal - bat.capacity_kwh_rated).abs() < 1e-12,
+            "nominal should equal rated at init (rated={}, nominal={})",
+            bat.capacity_kwh_rated,
+            bat.capacity_kwh_nominal
+        );
+
+        // Run a few days of cycling; soh should stay > 0, so capacity_kwh_nominal > 0.
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288;
+        let mut env = base_env();
+        for day in 0..30 {
+            for step in 0..steps_per_day {
+                env.current_time += ChronoDuration::seconds(300);
+                if step < steps_per_day / 2 {
+                    bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                        active_power_kw: 5.0,
+                        reactive_power_kvar: None,
+                    })
+                    .unwrap();
+                } else {
+                    bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                        active_power_kw: -5.0,
+                        reactive_power_kvar: None,
+                    })
+                    .unwrap();
+                }
+                let mut ports = default_ports();
+                bat.step(&env, dt, &mut ports).unwrap();
+            }
+            assert!(
+                bat.capacity_kwh_nominal > 0.0,
+                "day {day}: capacity_kwh_nominal must remain > 0 (rated={}, nominal={}, soh={})",
+                bat.capacity_kwh_rated,
+                bat.capacity_kwh_nominal,
+                1.0 - bat.degradation.capacity_fade_fraction()
+            );
+        }
+    }
+
+    /// Under extreme degradation (SOH → 0), the battery simulation must produce
+    /// no Inf or NaN in telemetry output. This also exercises the zero-capacity
+    /// guard path explicitly.
+    #[test]
+    fn no_inf_or_nan_in_telemetry_under_extreme_degradation() {
+        let config = battery_config(&[
+            (KEY_INITIAL_SOC, 0.5),
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+
+        // Force capacity_kwh to zero (fully degraded).
+        bat.capacity_kwh_nominal = 0.0;
+        bat.capacity_kwh = 0.0;
+
+        // Exercise both charge and discharge directions.
+        for &power_kw in &[5.0, -5.0] {
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: power_kw,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(300), &mut ports)
+                .unwrap();
+
+            let soc = bat.telemetry().get(tk::SOC).unwrap();
+            assert!(
+                soc.is_finite(),
+                "SOC must be finite at power_kw={power_kw}, got {soc}"
+            );
+            assert!(!soc.is_nan(), "SOC must not be NaN at power_kw={power_kw}");
+
+            // Also verify key telemetry fields are finite.
+            for key in &[
+                tk::SOC,
+                tk::CELL_TEMP_C,
+                tk::ACTIVE_POWER_KW,
+                tk::CAPACITY_FADE_PCT,
+            ] {
+                if let Some(v) = bat.telemetry().get(*key) {
+                    assert!(
+                        v.is_finite(),
+                        "telemetry key {key:?} must be finite at power_kw={power_kw}, got {v}"
+                    );
+                }
+            }
+        }
     }
 }
