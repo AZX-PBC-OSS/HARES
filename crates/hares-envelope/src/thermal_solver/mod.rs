@@ -766,9 +766,16 @@ impl ThermalSolver {
                     + a.radiant_for_category(ThermalCategory::InternalGain)
             })
             .unwrap_or(0.0);
-        let jacket_loss_w = indoor_acc
+        // Jacket losses (water heater skin loss, boiler shell loss) are
+        // deposited into the host equipment zone's accumulator, which may be
+        // a non-indoor zone (e.g. garage, basement). Sum across all zone
+        // accumulators to match the duct_loss_w pattern below.
+        let jacket_loss_w: f64 = ports
+            .thermal
+            .iter()
             .map(|a| a.sensible_for_category(ThermalCategory::JacketLoss))
-            .unwrap_or(0.0);
+            .sum();
+
         // Duct losses are deposited into the duct zone accumulator (e.g. attic),
         // not the indoor zone. Sum DuctLoss across all zone accumulators.
         let duct_loss_w: f64 = ports
@@ -845,7 +852,20 @@ impl ThermalSolver {
             int_surface_diag: self.int_surface_diag_buf.clone(),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             window_solar_diag: self.window_solar_diag_buf.clone(),
+            #[cfg(feature = "observe")]
+            jacket_loss_by_zone: Vec::new(),
         };
+
+        #[cfg(feature = "observe")]
+        {
+            self.component_gains.jacket_loss_by_zone.clear();
+            self.component_gains.jacket_loss_by_zone.extend(
+                ports
+                    .thermal
+                    .iter()
+                    .map(|a| (a.zone, a.sensible_for_category(ThermalCategory::JacketLoss))),
+            );
+        }
 
         std::mem::swap(
             &mut self.infiltration_by_zone_buf,
@@ -1030,7 +1050,7 @@ mod tests {
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
         DomainSolver, DomainUpdate, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        ThermalAccumulator, ThermalCategory, WeatherState, ZoneId, ZoneState,
     };
     use nalgebra::{DMatrix, DVector};
 
@@ -5690,6 +5710,341 @@ mod tests {
             "port_radiant_w should come from radiant_gain_w ({} W), got {} W",
             radiant,
             gains.port_radiant_w
+        );
+    }
+
+    /// `jacket_loss_w` sums `ThermalCategory::JacketLoss` across all zone
+    /// accumulators, not just the indoor zone. Water heaters and boilers in
+    /// unconditioned zones (garage, basement) deposit jacket losses into that
+    /// zone's accumulator; the diagnostic must capture them all.
+    #[test]
+    fn jacket_loss_w_sums_across_all_zones() {
+        let indoor = ZoneId(1);
+        let garage = ZoneId(2);
+
+        let env = EnvironmentState {
+            zones: vec![
+                ZoneState {
+                    id: indoor,
+                    temperature_c: 20.0,
+                    humidity_ratio: 0.008,
+                    relative_humidity: 0.45,
+                    wet_bulb_c: 15.0,
+                    volume_m3: 200.0,
+                },
+                ZoneState {
+                    id: garage,
+                    temperature_c: 10.0,
+                    humidity_ratio: 0.004,
+                    relative_humidity: 0.55,
+                    wet_bulb_c: 5.0,
+                    volume_m3: 100.0,
+                },
+            ],
+            ..env_for_temp(20.0, 5.0)
+        };
+
+        // Two independent 1R1C zones, each with one sensible input.
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(
+            2,
+            2,
+            &[-1.0 / (r * c), 0.0, 0.0, -1.0 / (r * c)],
+        );
+        // Inputs: [T_out, H_zone1, H_zone2]
+        let b_c = DMatrix::from_row_slice(
+            2,
+            3,
+            &[1.0 / (r * c), 1.0 / c, 0.0, 1.0 / (r * c), 0.0, 1.0 / c],
+        );
+        let mapping = OutputMapping {
+            output_count: 2,
+            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(indoor, 0), (garage, 1)]),
+            zone_output_indices: HashMap::from([(indoor, 0), (garage, 1)]),
+            zone_sensible_input_indices: HashMap::from([(indoor, 1), (garage, 2)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: indoor,
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
+        };
+
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, env.zones[0].temperature_c).unwrap();
+        solver.x[0] = 20.0;
+        solver.x[1] = 10.0;
+
+        let indoor_jacket = 300.0_f64;
+        let garage_jacket = 150.0_f64;
+
+        let ports = PortSlots {
+            thermal: vec![
+                ThermalAccumulator {
+                    zone: indoor,
+                    sensible_gain_w: indoor_jacket,
+                    radiant_gain_w: 0.0,
+                    latent_gain_w: 0.0,
+                    sensible_by_category: {
+                        let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
+                        a[ThermalCategory::JacketLoss.index()] = indoor_jacket;
+                        a
+                    },
+                    radiant_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                    latent_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                },
+                ThermalAccumulator {
+                    zone: garage,
+                    sensible_gain_w: garage_jacket,
+                    radiant_gain_w: 0.0,
+                    latent_gain_w: 0.0,
+                    sensible_by_category: {
+                        let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
+                        a[ThermalCategory::JacketLoss.index()] = garage_jacket;
+                        a
+                    },
+                    radiant_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                    latent_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                },
+            ],
+            ..Default::default()
+        };
+
+        solver.prepare_inputs(&ports, &env);
+        let gains = solver.component_gains();
+
+        let expected_total = indoor_jacket + garage_jacket;
+        assert!(
+            (gains.jacket_loss_w - expected_total).abs() < 1e-9,
+            "jacket_loss_w ({}) should be the sum of indoor ({} W) and garage ({} W) jacket losses = {} W",
+            gains.jacket_loss_w,
+            indoor_jacket,
+            garage_jacket,
+            expected_total,
+        );
+
+        // When only the indoor zone has jacket loss, it should still equal the zone contribution.
+        let ports_indoor_only = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: indoor,
+                sensible_gain_w: indoor_jacket,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                sensible_by_category: {
+                    let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
+                    a[ThermalCategory::JacketLoss.index()] = indoor_jacket;
+                    a
+                },
+                radiant_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                latent_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+            }],
+            ..Default::default()
+        };
+
+        solver.prepare_inputs(&ports_indoor_only, &env);
+        let gains = solver.component_gains();
+
+        assert!(
+            (gains.jacket_loss_w - indoor_jacket).abs() < 1e-9,
+            "jacket_loss_w ({}) should equal indoor-only jacket loss ({})",
+            gains.jacket_loss_w,
+            indoor_jacket,
+        );
+
+        // When only the unconditioned zone has jacket loss, it should still be captured.
+        let ports_garage_only = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: garage,
+                sensible_gain_w: garage_jacket,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                sensible_by_category: {
+                    let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
+                    a[ThermalCategory::JacketLoss.index()] = garage_jacket;
+                    a
+                },
+                radiant_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                latent_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+            }],
+            ..Default::default()
+        };
+
+        solver.prepare_inputs(&ports_garage_only, &env);
+        let gains = solver.component_gains();
+
+        assert!(
+            (gains.jacket_loss_w - garage_jacket).abs() < 1e-9,
+            "jacket_loss_w ({}) should capture garage-only jacket loss ({})",
+            gains.jacket_loss_w,
+            garage_jacket,
+        );
+    }
+
+    /// `jacket_loss_by_zone` captures per-zone jacket loss breakdown when
+    /// the `observe` feature is enabled, helping verify equipment in
+    /// unconditioned zones produces expected output.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn jacket_loss_by_zone_captures_all_zone_contributions() {
+        let indoor = ZoneId(1);
+        let garage = ZoneId(2);
+
+        let env = EnvironmentState {
+            zones: vec![
+                ZoneState {
+                    id: indoor,
+                    temperature_c: 20.0,
+                    humidity_ratio: 0.008,
+                    relative_humidity: 0.45,
+                    wet_bulb_c: 15.0,
+                    volume_m3: 200.0,
+                },
+                ZoneState {
+                    id: garage,
+                    temperature_c: 10.0,
+                    humidity_ratio: 0.004,
+                    relative_humidity: 0.55,
+                    wet_bulb_c: 5.0,
+                    volume_m3: 100.0,
+                },
+            ],
+            ..env_for_temp(20.0, 5.0)
+        };
+
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(
+            2,
+            2,
+            &[-1.0 / (r * c), 0.0, 0.0, -1.0 / (r * c)],
+        );
+        let b_c = DMatrix::from_row_slice(
+            2,
+            3,
+            &[1.0 / (r * c), 1.0 / c, 0.0, 1.0 / (r * c), 0.0, 1.0 / c],
+        );
+        let mapping = OutputMapping {
+            output_count: 2,
+            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(indoor, 0), (garage, 1)]),
+            zone_output_indices: HashMap::from([(indoor, 0), (garage, 1)]),
+            zone_sensible_input_indices: HashMap::from([(indoor, 1), (garage, 2)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: indoor,
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
+        };
+
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, env.zones[0].temperature_c).unwrap();
+        solver.x[0] = 20.0;
+        solver.x[1] = 10.0;
+
+        let indoor_jacket = 250.0_f64;
+        let garage_jacket = 180.0_f64;
+
+        let ports = PortSlots {
+            thermal: vec![
+                ThermalAccumulator {
+                    zone: indoor,
+                    sensible_gain_w: indoor_jacket,
+                    radiant_gain_w: 0.0,
+                    latent_gain_w: 0.0,
+                    sensible_by_category: {
+                        let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
+                        a[ThermalCategory::JacketLoss.index()] = indoor_jacket;
+                        a
+                    },
+                    radiant_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                    latent_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                },
+                ThermalAccumulator {
+                    zone: garage,
+                    sensible_gain_w: garage_jacket,
+                    radiant_gain_w: 0.0,
+                    latent_gain_w: 0.0,
+                    sensible_by_category: {
+                        let mut a = [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT];
+                        a[ThermalCategory::JacketLoss.index()] = garage_jacket;
+                        a
+                    },
+                    radiant_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                    latent_by_category: [0.0_f64; hares_types::THERMAL_CATEGORY_COUNT],
+                },
+            ],
+            ..Default::default()
+        };
+
+        solver.prepare_inputs(&ports, &env);
+        let gains = solver.component_gains();
+
+        let by_zone: std::collections::HashMap<ZoneId, f64> =
+            gains.jacket_loss_by_zone.iter().copied().collect();
+        assert!(
+            (by_zone.get(&indoor).copied().unwrap_or(0.0) - indoor_jacket).abs() < 1e-9,
+            "jacket_loss_by_zone[{}] equals {} W, expected {} W",
+            indoor,
+            by_zone.get(&indoor).copied().unwrap_or(0.0),
+            indoor_jacket,
+        );
+        assert!(
+            (by_zone.get(&garage).copied().unwrap_or(0.0) - garage_jacket).abs() < 1e-9,
+            "jacket_loss_by_zone[{}] equals {} W, expected {} W",
+            garage,
+            by_zone.get(&garage).copied().unwrap_or(0.0),
+            garage_jacket,
         );
     }
 }

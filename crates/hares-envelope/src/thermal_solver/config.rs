@@ -692,9 +692,16 @@ pub struct EnvelopeComponentGains {
     /// Equals the `InternalGain` category total for the indoor zone,
     /// including both convective and radiant components.
     pub internal_gain_w: f64,
-    /// Equipment jacket/shell losses to the indoor zone [W].
-    /// Equals `JacketLoss` category total (water heater skin loss, etc.).
+    /// Equipment jacket/shell losses summed across all zone accumulators [W].
+    /// Water heaters and boilers in unconditioned zones deposit losses into that
+    /// zone's accumulator; this field captures all zones (water heater skin loss,
+    /// boiler shell loss, etc.).
     pub jacket_loss_w: f64,
+    /// Per-zone jacket loss breakdown [W] — zone ID → sensible watts.
+    /// Gated by `observe` feature; complements the aggregate `jacket_loss_w`
+    /// for verifying equipment in unconditioned zones produces expected output.
+    #[cfg(feature = "observe")]
+    pub jacket_loss_by_zone: Vec<(ZoneId, f64)>,
     /// Duct distribution losses [W] -- heat deposited into the duct zone, removed from delivered capacity.
     pub duct_loss_w: f64,
     /// Dehumidifier sensible heat gain to the indoor zone [W].
