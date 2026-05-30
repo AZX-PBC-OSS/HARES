@@ -715,6 +715,35 @@ impl PortSlots {
     }
 }
 
+/// Validate that all `PortDeclaration`s with the same `loop_id` agree on
+/// `fluid_type`. A mismatch means two pieces of equipment are wired to the same
+/// fluid loop but disagree about the fluid — a configuration error that produces
+/// silently incorrect simulation results if not caught.
+///
+/// Returns `Err` on the first detected mismatch, naming the conflicting loop_id
+/// and fluid types.
+pub fn validate_fluid_type_consistency(decls: &[PortDeclaration]) -> Result<(), HaresError> {
+    use std::collections::HashMap;
+
+    let mut loop_fluid: HashMap<LoopId, FluidType> = HashMap::new();
+    for decl in decls {
+        if decl.port_type != PortType::Fluid {
+            continue;
+        }
+        let Some(loop_id) = decl.loop_id else { continue };
+        let Some(fluid_type) = decl.fluid_type else { continue };
+        if let Some(existing) = loop_fluid.insert(loop_id, fluid_type) {
+            if existing != fluid_type {
+                return Err(HaresError::Equipment(format!(
+                    "loop {loop_id:?} declared with conflicting fluid types: \
+                     {existing:?} and {fluid_type:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1448,5 +1477,44 @@ mod tests {
             })
             .unwrap();
         approx_eq(slots.fluid[0].total_thermal_power_w, 4186.0);
+    }
+
+    #[test]
+    fn validate_fluid_type_consistency_passes_for_single_loop_id() {
+        let decls = [PortDeclaration::fluid(LoopId(1), FluidType::Water)];
+        assert!(validate_fluid_type_consistency(&decls).is_ok());
+    }
+
+    #[test]
+    fn validate_fluid_type_consistency_rejects_mixed_fluid_types() {
+        let decls = [
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::fluid(LoopId(1), FluidType::Glycol),
+        ];
+        let err = validate_fluid_type_consistency(&decls).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("LoopId(1)"));
+        assert!(msg.contains("Water"));
+        assert!(msg.contains("Glycol"));
+    }
+
+    #[test]
+    fn validate_fluid_type_consistency_passes_for_different_loops() {
+        let decls = [
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::fluid(LoopId(2), FluidType::Glycol),
+        ];
+        assert!(validate_fluid_type_consistency(&decls).is_ok());
+    }
+
+    #[test]
+    fn validate_fluid_type_consistency_ignores_non_fluid_ports() {
+        let decls = [
+            PortDeclaration::thermal(ZoneId(1)),
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::electrical(),
+        ];
+        assert!(validate_fluid_type_consistency(&decls).is_ok());
     }
 }

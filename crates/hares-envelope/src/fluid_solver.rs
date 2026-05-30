@@ -53,6 +53,10 @@ pub struct FluidSolver {
     loop_states: HashMap<LoopId, FluidLoopState>,
     /// Last known (supply_temp_c, return_temp_c) per loop; used when flow is zero.
     last_known_temps: HashMap<LoopId, (f64, f64)>,
+    /// Count of loops where entries have mismatched fluid types.
+    /// Always 0 in a correctly configured simulation.
+    #[cfg(feature = "observe")]
+    pub loop_fluid_type_mismatch_count: u64,
 }
 
 impl FluidSolver {
@@ -75,6 +79,8 @@ impl FluidSolver {
             loop_types,
             loop_states: HashMap::new(),
             last_known_temps: HashMap::new(),
+            #[cfg(feature = "observe")]
+            loop_fluid_type_mismatch_count: 0,
         })
     }
 
@@ -151,6 +157,33 @@ impl DomainSolver for FluidSolver {
                 .get(&loop_id)
                 .copied()
                 .unwrap_or(entries[0].fluid_type);
+
+            // Runtime safety: verify all entries in the same loop agree on fluid_type.
+            // A mismatch is a configuration error that would silently produce wrong
+            // results in release builds; the invariant-check gate makes it a loud
+            // panic in debug/test; the observe gate counts mismatches per step.
+            #[cfg(any(
+                debug_assertions,
+                feature = "check_invariants",
+                feature = "observe"
+            ))]
+            {
+                let all_same = entries
+                    .windows(2)
+                    .all(|w| w[0].fluid_type == w[1].fluid_type);
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                if !all_same {
+                    let fts: Vec<_> = entries.iter().map(|e| e.fluid_type).collect();
+                    panic!(
+                        "fluid loop {loop_id:?}: entries have mismatched fluid types {fts:?}; \
+                         all entries contributing to the same loop must use the same fluid_type"
+                    );
+                }
+                #[cfg(feature = "observe")]
+                if !all_same {
+                    self.loop_fluid_type_mismatch_count += 1;
+                }
+            }
 
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             if !self.loop_types.contains_key(&loop_id) {
@@ -731,5 +764,54 @@ mod tests {
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         // Should fall back to water cp: 0.5 × 4180 × 20 = 41 800 W
         approx_eq(states[0].net_power_w, 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "mismatched fluid types")]
+    fn resolve_panics_on_mixed_fluid_types_in_same_loop() {
+        // When two accumulators share the same loop_id but differ on fluid_type,
+        // the invariant check in resolve() must detect the inconsistency.
+        // This verifies the runtime guard that catches the port-declaration
+        // loophole where from_declarations creates separate accumulators
+        // keyed by (loop_id, fluid_type) but the solver groups by loop_id alone.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+
+        // Build PortSlots with two FluidAccumulators for the same loop_id
+        // but different fluid types — simulating the config-error scenario.
+        let mut ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator::new(LoopId(1), FluidType::Water),
+                FluidAccumulator::new(LoopId(1), FluidType::Glycol),
+            ],
+            ..Default::default()
+        };
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 60.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: None,
+            })
+            .unwrap();
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.3,
+                supply_temp_c: 55.0,
+                return_temp_c: 45.0,
+                fluid_type: FluidType::Glycol,
+                thermal_power_w: None,
+            })
+            .unwrap();
+
+        // resolve() must panic when debug_assertions are enabled
+        // (which they are in test builds).
+        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
     }
 }

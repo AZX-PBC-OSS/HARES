@@ -44,7 +44,7 @@ use hares_types::{
     BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver, ElectricalSummary,
     EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, PortDeclaration,
     PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId, ZoneMap, ZoneRole,
-    telemetry_keys as tk, validate_core_contract,
+    telemetry_keys as tk, validate_core_contract, validate_fluid_type_consistency,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -1396,6 +1396,16 @@ impl Dwelling {
             });
         }
         let ports = PortSlots::from_declarations(&declarations);
+
+        // Reject equipment configurations where two pieces of equipment wired
+        // to the same fluid loop_id declare different fluid types. This is a
+        // configuration error that would silently produce incorrect simulation
+        // results — the fluid solver groups by loop_id alone and uses the
+        // first entry's fluid_type for all entries, discarding contributions
+        // from the mismatched accumulator.
+        validate_fluid_type_consistency(&declarations).map_err(|err| {
+            HaresError::Dwelling(format!("fluid type consistency validation failed: {err}"))
+        })?;
 
         let zone_types = environment.zone_types().to_vec();
         let indoor_zone = solvers.thermal.config().indoor_zone_id;

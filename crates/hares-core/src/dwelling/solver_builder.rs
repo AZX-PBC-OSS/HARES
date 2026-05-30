@@ -13,7 +13,7 @@ use hares_envelope::{
     ThermalSolverConfig, WindowSolarProperties, assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
-use hares_types::{EnvironmentState, HaresError, ZoneId};
+use hares_types::{EnvironmentState, FluidType, HaresError, LoopId, ZoneId};
 
 use super::Result;
 use super::conversions::{
@@ -534,6 +534,72 @@ pub(crate) fn compute_weather_averages(weather: &WeatherTimeSeries) -> WeatherAv
 }
 
 /// Solvers plus per-zone thermal capacitances [J/K] for gain preview.
+/// Extract declared `(loop_id, fluid_type)` pairs from equipment specs.
+///
+/// Fluid-loop equipment (boilers, water heaters, etc.) carries `loop_id` and
+/// `fluid_type` in its typed config. This function collects the unique pairs
+/// so `FluidSolver::new` can validate loop identity at construction time and
+/// reject configuration errors before the first timestep.
+fn extract_fluid_loops_from_specs(specs: &[EquipmentSpec]) -> Vec<(LoopId, FluidType)> {
+    let mut loops = Vec::new();
+
+    for spec in specs {
+        let Some(ref cfg) = spec.typed_config else {
+            continue;
+        };
+
+        // Boilers: typed config carries both loop_id and fluid_type.
+        match spec.name.as_str() {
+            "Gas Boiler" => {
+                if let Ok(typed) = cfg.typed::<hares_equipment::GasBoilerConfig>() {
+                    if let Some(lid) = typed.loop_id {
+                        loops.push((LoopId(lid), typed.fluid_type));
+                    }
+                }
+            }
+            "Electric Boiler" => {
+                if let Ok(typed) = cfg.typed::<hares_equipment::ElectricBoilerConfig>() {
+                    if let Some(lid) = typed.loop_id {
+                        loops.push((LoopId(lid), typed.fluid_type));
+                    }
+                }
+            }
+            // Water heaters: always fluid_type=Water, with optional loop_id
+            // from the typed config. Tankless uses DHW_DEMAND_LOOP when loop_id
+            // is absent, but that is a runtime assignment; here we only collect
+            // what's explicitly configured.
+            "Gas Water Heater"
+            | "Electric Resistance Water Heater"
+            | "Heat Pump Water Heater" => {
+                if let Ok(typed) = cfg.typed::<hares_equipment::GasWaterHeaterConfig>() {
+                    if let Some(lid) = typed.loop_id {
+                        loops.push((LoopId(lid), FluidType::Water));
+                    }
+                } else if let Ok(typed) =
+                    cfg.typed::<hares_equipment::ElectricResistanceWaterHeaterConfig>()
+                {
+                    if let Some(lid) = typed.loop_id {
+                        loops.push((LoopId(lid), FluidType::Water));
+                    }
+                } else if let Ok(typed) =
+                    cfg.typed::<hares_equipment::HeatPumpWaterHeaterConfig>()
+                {
+                    if let Some(lid) = typed.loop_id {
+                        loops.push((LoopId(lid), FluidType::Water));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Deduplicate: if the same (loop_id, fluid_type) appears from multiple
+    // specs, keep only one.
+    loops.sort_by_key(|&(lid, ft)| (lid.0, ft));
+    loops.dedup();
+    loops
+}
+
 pub(crate) struct SolverBundle {
     pub thermal: ThermalSolver,
     pub humidity: HumiditySolver,
@@ -1285,7 +1351,8 @@ pub(crate) fn build_default_solvers(
     let humidity_solver = HumiditySolver::new(HumiditySolverConfig::default(), env);
     let electrical_solver = ElectricalSolver::new(ElectricalSolverConfig::default())
         .map_err(|err| HaresError::Envelope(format!("electrical solver init failed: {err}")))?;
-    let fluid_solver = FluidSolver::new(FluidSolverConfig::default(), &[])
+    let fluid_loops = extract_fluid_loops_from_specs(equipment_specs);
+    let fluid_solver = FluidSolver::new(FluidSolverConfig::default(), &fluid_loops)
         .map_err(|err| HaresError::Envelope(format!("fluid solver init failed: {err}")))?;
 
     let zone_caps: Vec<(ZoneId, f64)> = env
@@ -2582,5 +2649,83 @@ mod tests {
         );
         assert_eq!(ext_cols, 0, "no exterior surface columns for fallback-R");
         assert_eq!(int_cols, 0, "no interior surface columns for fallback-R");
+    }
+
+    #[test]
+    fn validates_fluid_type_consistency_at_solver_init() {
+        use hares_envelope::fluid_solver::{FluidSolver, FluidSolverConfig};
+        use hares_equipment::{ElectricBoilerConfig, EquipmentConfig, GasBoilerConfig};
+        use hares_types::{FluidType, LoopId};
+
+        // Two equipment specs, same loop_id=1, different fluid types.
+        let gas_boiler = EquipmentConfig::from_typed(
+            "Gas Boiler".to_string(),
+            "Gas Boiler".to_string(),
+            GasBoilerConfig {
+                loop_id: Some(1),
+                fluid_type: FluidType::Water,
+                capacity_w: 10_000.0,
+                afue: 0.90,
+                ..GasBoilerConfig::default()
+            },
+        );
+        let electric_boiler = EquipmentConfig::from_typed(
+            "Electric Boiler".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                loop_id: Some(1),
+                fluid_type: FluidType::Glycol,
+                capacity_w: 8_000.0,
+                eir: 1.0,
+                ..ElectricBoilerConfig::default()
+            },
+        );
+
+        let specs = [
+            hares_io::EquipmentSpec {
+                name: "Gas Boiler".to_string(),
+                instance_name: None,
+                fuel_type: hares_types::FuelType::Gas,
+                parameters: serde_json::Map::new(),
+                zip_params: None,
+                typed_config: Some(gas_boiler),
+                system_id: None,
+                related_hvac_idref: None,
+                primary_role: None,
+            },
+            hares_io::EquipmentSpec {
+                name: "Electric Boiler".to_string(),
+                instance_name: None,
+                fuel_type: hares_types::FuelType::Electric,
+                parameters: serde_json::Map::new(),
+                zip_params: None,
+                typed_config: Some(electric_boiler),
+                system_id: None,
+                related_hvac_idref: None,
+                primary_role: None,
+            },
+        ];
+
+        let loops = super::extract_fluid_loops_from_specs(&specs);
+        assert_eq!(
+            loops.len(),
+            2,
+            "both (loop_id=1, Water) and (loop_id=1, Glycol) should be extracted"
+        );
+        assert!(loops.contains(&(LoopId(1), FluidType::Water)));
+        assert!(loops.contains(&(LoopId(1), FluidType::Glycol)));
+
+        // Passing both conflicting pairs to the fluid solver constructor
+        // must produce a hard error.
+        let result = FluidSolver::new(FluidSolverConfig::default(), &loops);
+        assert!(
+            result.is_err(),
+            "FluidSolver::new must reject same-loop-id with different fluid types"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("conflicting fluid types"),
+            "error must mention conflicting fluid types, got: {err_msg}"
+        );
     }
 }

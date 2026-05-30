@@ -246,7 +246,7 @@ pub struct LoopId(pub u16);
 pub struct ProtocolId(pub u16);
 
 /// Working fluid categories used by fluid ports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FluidType {
     Water,
     Glycol,
