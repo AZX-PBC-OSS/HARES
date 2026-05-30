@@ -184,6 +184,7 @@ pub(super) fn resolve_water_heaters(
                     element_power_w: heating_capacity_w,
                     element_priority_mode: None,
                     max_setpoint_ramp_rate_c_per_min: None,
+                    max_combined_power_w: None,
                     jacket_r_value_m2_k_w,
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,
@@ -785,6 +786,7 @@ mod tests {
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            max_combined_power_w: None,
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
         };

@@ -206,6 +206,16 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub element_priority_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jacket_r_value_m2_k_w: Option<f64>,
+    /// Maximum combined power draw for both elements (W). When set and the
+    /// priority mode is `Simultaneous`, the lower-element power is clamped so
+    /// that `upper_power + lower_power ≤ max_combined_power_w`. Typical 30 A /
+    /// 240 V residential branch circuits are limited to ~7,200 W.
+    /// When `None`, no power ceiling is enforced; a `tracing::warn!` is emitted
+    /// at init if both elements default to 4,500 W each in Simultaneous mode.
+    /// Default residential branch-circuit limit: NEC Table 210.24(1), 30 A
+    /// branch circuit at 240 V nominal = 7,200 W continuous (80% derate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_combined_power_w: Option<f64>,
     /// TMV fixture delivery temperature (°C). Default: 40.6°C (≈ 105°F) per OCHRE.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixture_delivery_temp_c: Option<f64>,
@@ -308,6 +318,12 @@ impl ElectricResistanceWaterHeaterConfig {
             self.jacket_r_value_m2_k_w,
             0.0,
             false,
+        )?;
+        check_finite(
+            "resistance_wh: max_combined_power_w",
+            self.max_combined_power_w,
+            0.0,
+            true,
         )?;
         check_finite(
             "resistance_wh: fixture_delivery_temp_c",
@@ -794,6 +810,7 @@ mod tests {
             max_setpoint_ramp_rate_c_per_min: Some(3.0),
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            max_combined_power_w: Some(7_200.0),
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
         };

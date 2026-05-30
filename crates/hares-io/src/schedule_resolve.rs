@@ -1773,6 +1773,7 @@ mod tests {
                     element_power_w: Some(4_500.0),
                     element_priority_mode: None,
                     max_setpoint_ramp_rate_c_per_min: None,
+                    max_combined_power_w: None,
                     jacket_r_value_m2_k_w: None,
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,

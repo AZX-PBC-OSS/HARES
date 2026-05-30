@@ -12,6 +12,7 @@ use hares_types::{
     telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -56,6 +57,7 @@ struct ResistanceWhState {
     tank_avg_temp_c: f64,
     upper_element_power_w: f64,
     lower_element_power_w: f64,
+    max_combined_power_w: Option<f64>,
     electric_kw: f64,
     draw_flow_rate_kg_s: f64,
     // --- Demand response state ---
@@ -75,6 +77,8 @@ pub struct ResistanceWH {
     lower_node: usize,
     upper_element_power_w: f64,
     lower_element_power_w: f64,
+    /// Maximum total element power (W) before clamping in Simultaneous mode.
+    max_combined_power_w: Option<f64>,
     setpoint_c: f64,
     deadband_c: f64,
     max_tank_temp_c: f64,
@@ -171,6 +175,7 @@ impl ResistanceWH {
             lower_node,
             upper_element_power_w: DEFAULT_ELEMENT_POWER_W,
             lower_element_power_w: DEFAULT_ELEMENT_POWER_W,
+            max_combined_power_w: None,
             setpoint_c: DEFAULT_SETPOINT_C,
             deadband_c: DEFAULT_DEADBAND_C,
             max_tank_temp_c: DEFAULT_MAX_TANK_TEMP_C,
@@ -316,6 +321,30 @@ impl ResistanceWH {
             Some("Simultaneous") | Some("simultaneous") => ElementPriorityMode::Simultaneous,
             _ => ElementPriorityMode::MasterSlave,
         };
+        self.max_combined_power_w = c.max_combined_power_w;
+        if self.element_priority == ElementPriorityMode::Simultaneous
+            && self.max_combined_power_w.is_none()
+            && self.upper_element_power_w >= DEFAULT_ELEMENT_POWER_W
+            && self.lower_element_power_w >= DEFAULT_ELEMENT_POWER_W
+        {
+            // NEC Table 210.24(1): 30 A branch circuit at 240 V nominal → 7,200 W
+            // continuous (80% derate for resistive loads per NEC 422.10(A)).
+            // Two 4,500 W elements = 9,000 W draws 37.5 A → exceeds the 30 A rating.
+            // In real installations, simultaneous-operation water heaters use
+            // interlocked wiring, lower-rated elements, or dedicated dual circuits.
+            warn!(
+                equipment_id = self.descriptor.id.0,
+                equipment_name = %self.descriptor.name,
+                upper_element_w = self.upper_element_power_w,
+                lower_element_w = self.lower_element_power_w,
+                combined_w = self.upper_element_power_w + self.lower_element_power_w,
+                branch_limit_w = 7_200.0,
+                "Simultaneous operation with 2×4,500 W elements (9,000 W) \
+                 exceeds typical 30 A / 240 V branch circuit rating (7,200 W). \
+                 Set max_combined_power_w to enforce a power ceiling, or switch \
+                 to MasterSlave priority mode (the default)."
+            );
+        }
         self.upper_element_on = false;
         self.lower_element_on = false;
 
@@ -438,7 +467,7 @@ impl Equipment for ResistanceWH {
         // OCHRE's WaterHeater.solve_ideal_capacity(). This produces time-averaged
         // power instead of full on/off cycling spikes.
         let use_ideal = env.time_res.num_seconds() >= 300;
-        let (upper_power_w, lower_power_w) = if use_ideal && mode == OperatingMode::Heating {
+        let (upper_power_w, mut lower_power_w) = if use_ideal && mode == OperatingMode::Heating {
             let dt_s = dt.as_secs_f64();
             let ambient_c = self.ambient_temp_c(env);
             let up = if self.upper_element_on && self.upper_element_power_w > 0.0 {
@@ -481,6 +510,21 @@ impl Equipment for ResistanceWH {
             };
             (up, lo)
         };
+
+        // Clamp combined power in Simultaneous mode when max_combined_power_w is set.
+        // Upper element has priority; lower element duty is limited by remaining
+        // capacity. This matches OCHRE's duty-clamping approach: upper element gets
+        // its full required power, and the lower element is bounded by whatever
+        // capacity remains under the ceiling. NEC Table 210.24(1): 30 A / 240 V
+        // branch circuit → 7,200 W continuous with 80% derate.
+        if self.element_priority == ElementPriorityMode::Simultaneous {
+            if let Some(max_w) = self.max_combined_power_w {
+                let combined = upper_power_w + lower_power_w;
+                if combined > max_w {
+                    lower_power_w = (max_w - upper_power_w).max(0.0);
+                }
+            }
+        }
 
         let mut heat_buf = [(0usize, 0.0f64); 2];
         let mut n = 0;
@@ -633,6 +677,7 @@ impl Equipment for ResistanceWH {
             tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
             upper_element_power_w: self.telemetry.get(tk::UPPER_ELEMENT_POWER_W).unwrap_or(0.0),
             lower_element_power_w: self.telemetry.get(tk::LOWER_ELEMENT_POWER_W).unwrap_or(0.0),
+            max_combined_power_w: self.max_combined_power_w,
             electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
             draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
             dr_level: self.dr_level,
@@ -652,6 +697,7 @@ impl Equipment for ResistanceWH {
         self.duty_cycle = decoded.duty_cycle;
         self.mode_override = decoded.mode_override;
         self.element_priority = decoded.element_priority;
+        self.max_combined_power_w = decoded.max_combined_power_w;
         self.dr_level = decoded.dr_level;
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
         self.dr_load_fraction = decoded.dr_load_fraction;
@@ -951,6 +997,7 @@ mod tests {
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            max_combined_power_w: None,
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
         }
@@ -1451,6 +1498,7 @@ mod tests {
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
                 jacket_r_value_m2_k_w: jacket,
+                max_combined_power_w: None,
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
             })
@@ -1695,6 +1743,7 @@ mod element_priority_tests {
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: Some(mode.to_string()),
                 jacket_r_value_m2_k_w: None,
+                max_combined_power_w: None,
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
             },
@@ -1953,6 +2002,207 @@ mod element_priority_tests {
             lower_w > upper_w,
             "lower element (cold node) must have higher duty than upper (near setpoint): \
              upper={upper_w:.1} W, lower={lower_w:.1} W"
+        );
+    }
+
+    /// Simultaneous mode with `max_combined_power_w` set: when both elements fire,
+    /// the upper element gets its full power (priority) and the lower element is
+    /// clamped to keep total power ≤ max_combined_power_w.
+    /// Default elements: 4,500 W each → 9,000 W combined.
+    /// max_combined_power_w = 7,200 W → lower limited to 7,200 - 4,500 = 2,700 W.
+    #[test]
+    fn simultaneous_max_combined_power_clamps_lower_element() {
+        let cfg = crate::ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(52.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(40.0),
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: Some("Simultaneous".to_string()),
+            jacket_r_value_m2_k_w: None,
+            max_combined_power_w: Some(7_200.0),
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+        };
+        let config = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            cfg,
+        );
+
+        let mut wh = ResistanceWH::new(config.clone());
+        wh.init(&config, &env_state()).unwrap();
+
+        let mut p = ports();
+        wh.step(&env_state(), Duration::from_secs(60), &mut p)
+            .unwrap();
+
+        let upper_w = wh
+            .telemetry()
+            .get(hares_types::telemetry_keys::UPPER_ELEMENT_POWER_W)
+            .unwrap_or(0.0);
+        let lower_w = wh
+            .telemetry()
+            .get(hares_types::telemetry_keys::LOWER_ELEMENT_POWER_W)
+            .unwrap_or(0.0);
+        let total_w = upper_w + lower_w;
+
+        assert!(upper_w > 0.0, "upper element must fire");
+        assert!(
+            lower_w > 0.0,
+            "lower element fires but must be clamped, not zero"
+        );
+        assert!(
+            total_w <= 7_200.0 + 1.0,
+            "total power {total_w:.1} W must not exceed max_combined_power_w=7200 W"
+        );
+        assert!(
+            lower_w < 4_500.0,
+            "lower element power {lower_w:.1} W must be below rated 4500 W, \
+             clamped to make room for upper element"
+        );
+    }
+
+    /// Regression: MasterSlave mode is unaffected by max_combined_power_w.
+    /// The clamping only engages for Simultaneous mode. MasterSlave already
+    /// enforces single-element operation by hardware interlock.
+    #[test]
+    fn master_slave_unaffected_by_max_combined_power() {
+        for max_w in [None, Some(7_200.0)] {
+            let cfg = crate::ElectricResistanceWaterHeaterConfig {
+                equipment_id: None,
+                zone_id: None,
+                loop_id: None,
+                tank_volume_m3: None,
+                tank_height_m: None,
+                energy_factor: None,
+                uniform_energy_factor: None,
+                heating_capacity_w: None,
+                ua_w_per_k: None,
+                setpoint_c: Some(52.0),
+                deadband_c: Some(2.0),
+                max_tank_temp_c: Some(300.0),
+                initial_tank_temp_c: Some(40.0),
+                tank_nodes: None,
+                avg_water_draw_l_per_day: None,
+                draw_flow_rate_kg_s: Some(0.0),
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
+                element_power_w: None,
+                max_setpoint_ramp_rate_c_per_min: None,
+                element_priority_mode: Some("MasterSlave".to_string()),
+                jacket_r_value_m2_k_w: None,
+                max_combined_power_w: max_w,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
+            };
+            let config = EquipmentConfig::from_typed(
+                "WH".to_string(),
+                "Resistance Water Heater".to_string(),
+                cfg,
+            );
+
+            let mut wh = ResistanceWH::new(config.clone());
+            wh.init(&config, &env_state()).unwrap();
+
+            let mut p = ports();
+            wh.step(&env_state(), Duration::from_secs(60), &mut p)
+                .unwrap();
+
+            let upper_w = wh
+                .telemetry()
+                .get(hares_types::telemetry_keys::UPPER_ELEMENT_POWER_W)
+                .unwrap_or(0.0);
+            let lower_w = wh
+                .telemetry()
+                .get(hares_types::telemetry_keys::LOWER_ELEMENT_POWER_W)
+                .unwrap_or(0.0);
+
+            assert!(
+                upper_w > 0.0,
+                "MasterSlave upper element must fire (max_w={max_w:?})"
+            );
+            assert_eq!(
+                lower_w, 0.0,
+                "MasterSlave lower element must be locked out (max_w={max_w:?})"
+            );
+        }
+    }
+
+    /// Save/load round-trip preserves `max_combined_power_w`.
+    #[test]
+    fn state_round_trip_preserves_max_combined_power_w() {
+        let cfg = crate::ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(52.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(40.0),
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: Some("Simultaneous".to_string()),
+            jacket_r_value_m2_k_w: None,
+            max_combined_power_w: Some(6_500.0),
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+        };
+        let config = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            cfg,
+        );
+
+        let mut wh = ResistanceWH::new(config.clone());
+        wh.init(&config, &env_state()).unwrap();
+        assert_eq!(wh.max_combined_power_w, Some(6_500.0));
+
+        let saved = wh.save_state();
+
+        let mut restored = ResistanceWH::new(config.clone());
+        restored.init(&config, &env_state()).unwrap();
+        restored.load_state(&saved).unwrap();
+
+        assert_eq!(
+            restored.max_combined_power_w,
+            Some(6_500.0),
+            "max_combined_power_w must survive save/load round-trip"
         );
     }
 }
