@@ -130,6 +130,15 @@ pub struct SolverCapture {
     pub electrical_update: DomainUpdate,
     pub fluid_update: DomainUpdate,
     pub envelope_gains: EnvelopeComponentGains,
+    /// ZIP load scale applied by the electrical solver: `Z·V² + I·V + P`.
+    pub zip_load_scale: f64,
+    /// Raw `load_power_kw` from port accumulator (before ZIP adjustment).
+    pub port_load_raw_kw: f64,
+    /// `load_power_kw * zip_load_scale` (ZIP-adjusted port load).
+    pub port_load_adjusted_kw: f64,
+    /// Corrected electrical balance residual after applying ZIP scaling
+    /// to both solver and port sides: `|net_active_kw() + port_net|`.
+    pub residual_kw: f64,
 }
 
 /// Final zone state after thermal + humidity updates are applied.

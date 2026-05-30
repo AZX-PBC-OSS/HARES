@@ -308,6 +308,40 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn electrical_balance_passes_with_zip_adjusted_port_load() {
+        // IEEE residential ZIP: Z=0.2, I=0.2, P=0.6 at V=0.95 pu.
+        // scale = 0.2·0.95² + 0.2·0.95 + 0.6 = 0.2·0.9025 + 0.19 + 0.6 = 0.9705
+        // p_load = 10 kW, p_gen = 0 kW.
+        let scale = 0.2_f64 * 0.95_f64.powi(2) + 0.2 * 0.95 + 0.6;
+        let p_load = 10.0_f64;
+        let p_gen = 0.0_f64;
+        let p_grid = p_load * scale + p_gen; // ZIP-adjusted solver output
+        let port_net = p_load * scale + p_gen; // ZIP-adjusted port accumulation
+        // When both sides use the same scaling, the residual is near-zero.
+        let result = checker().check_electrical(p_grid, &[-port_net]);
+        assert!(
+            result.is_ok(),
+            "ZIP-adjusted comparison should pass; residual should be < 0.001 kW"
+        );
+    }
+
+    #[test]
+    fn electrical_balance_fails_with_mismatched_zip_scaling() {
+        // Demonstrates the bug: comparing ZIP-adjusted grid against raw ports
+        // produces a false positive when scale ≠ 1.0.
+        let scale = 0.2_f64 * 0.95_f64.powi(2) + 0.2 * 0.95 + 0.6;
+        let p_load = 10.0_f64;
+        let p_gen = 0.0_f64;
+        let p_grid = p_load * scale + p_gen; // ZIP-adjusted solver output
+        let port_net_raw = p_load + p_gen; // raw (unadjusted) port
+        let result = checker().check_electrical(p_grid, &[-port_net_raw]);
+        assert!(
+            result.is_err(),
+            "Comparing ZIP-adjusted grid vs raw ports with scale={scale} should produce false positive"
+        );
+    }
+
     // ── moisture_balance ──────────────────────────────────────────────────────
 
     #[test]

@@ -2537,11 +2537,7 @@ mod tests {
         let mut zone_map = ZoneMap::new();
         zone_map.insert(ZoneRole::Indoor, ZoneId(1));
         config.zone_map = Some(zone_map);
-        let mut eq = ScheduledLoad::new(
-            config.clone(),
-            hares_types::EndUse::EV,
-            "Scheduled EV",
-        );
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::EV, "Scheduled EV");
         eq.init(&config, &base_env()).unwrap();
         assert!(
             eq.descriptor().zone.is_none(),

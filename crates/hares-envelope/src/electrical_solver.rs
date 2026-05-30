@@ -96,6 +96,18 @@ impl ElectricalSolver {
     pub fn net_reactive_kvar(&self) -> f64 {
         self.net_reactive_kvar
     }
+
+    /// Returns the ZIP load scale factor for the given per-unit voltage.
+    ///
+    /// Computes `Z·V² + I·V + P` where `V = voltage_pu / nominal_voltage_pu`.
+    /// Used internally by `resolve()` and exposed so callers (e.g. the electrical
+    /// balance invariant check) can apply the same scaling to port-side load
+    /// accumulation for a like-for-like comparison with `net_active_kw()`.
+    #[must_use]
+    pub fn zip_load_scale(&self, voltage_pu: f64) -> f64 {
+        let v = voltage_pu / self.config.nominal_voltage_pu;
+        self.config.zip.z * v * v + self.config.zip.i * v + self.config.zip.p
+    }
 }
 
 impl DomainSolver for ElectricalSolver {
@@ -114,8 +126,7 @@ impl DomainSolver for ElectricalSolver {
         let p_gen = ports.electrical.generation_power_kw;
         // ZIP correction uses voltage_pu directly per spec (nominal_voltage_pu
         // defaults to 1.0; non-unity nominal documented as a v2 extension).
-        let v = env.grid.voltage_pu / self.config.nominal_voltage_pu;
-        let load_scale = self.config.zip.z * v * v + self.config.zip.i * v + self.config.zip.p;
+        let load_scale = self.zip_load_scale(env.grid.voltage_pu);
 
         let p_load_adj = p_load * load_scale;
         let p_gen_adj = p_gen;
@@ -302,6 +313,73 @@ mod tests {
     }
 
     #[test]
+    fn electrical_balance_identity_holds_with_non_default_zip() {
+        // IEEE residential ZIP: Z=0.2, I=0.2, P=0.6 at V=0.95 pu.
+        // With the default (raw) comparison, this would produce a false-positive
+        // residual of p_load * (scale - 1). The corrected comparison adjusts
+        // port-side loads by the same scale factor.
+        let zip = ZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
+        let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
+            zip,
+            nominal_voltage_pu: 1.0,
+        })
+        .unwrap();
+        let env = env_with_voltage(0.95);
+        let mut ports = PortSlots::default();
+        ports
+            .accumulate(&PortContribution::Electrical {
+                active_power_kw: 1.5,
+                reactive_power_kvar: 0.2,
+            })
+            .unwrap();
+        ports
+            .accumulate(&PortContribution::Electrical {
+                active_power_kw: -0.5,
+                reactive_power_kvar: -0.1,
+            })
+            .unwrap();
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let p_grid = solver.net_active_kw();
+        // Raw comparison would fail: |p_grid - ports.electrical.net_active_kw()| > 0.001
+        let scale = solver.zip_load_scale(env.grid.voltage_pu);
+        let port_net_adj =
+            ports.electrical.load_power_kw * scale + ports.electrical.generation_power_kw;
+        assert!((p_grid - port_net_adj).abs() < 0.001);
+    }
+
+    #[test]
+    fn zip_adjusted_invariant_passes_non_default_config() {
+        // Regression test: runs the solver with a non-default ZIP config at
+        // non-nominal voltage, then verifies the corrected invariant check
+        // (ZIP-adjusted port vs ZIP-adjusted grid) produces a near-zero residual.
+        let zip = ZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
+        let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
+            zip,
+            nominal_voltage_pu: 1.0,
+        })
+        .unwrap();
+        let env = env_with_voltage(0.95);
+        let mut ports = PortSlots::default();
+        // 10 kW load, no generation
+        ports
+            .accumulate(&PortContribution::Electrical {
+                active_power_kw: 10.0,
+                reactive_power_kvar: 0.0,
+            })
+            .unwrap();
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        let p_grid = solver.net_active_kw();
+        let scale = solver.zip_load_scale(env.grid.voltage_pu);
+        let port_net =
+            ports.electrical.load_power_kw * scale + ports.electrical.generation_power_kw;
+        let residual = (p_grid - port_net).abs();
+        assert!(
+            residual < 0.001,
+            "ZIP-adjusted residual should be near-zero, got {residual}"
+        );
+    }
+
+    #[test]
     fn empty_electrical_slots_returns_zero() {
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig::default()).unwrap();
         let env = env_with_voltage(1.0);
@@ -385,5 +463,29 @@ mod tests {
         assert!(bad_sum.is_err());
         let bad_sign = ZipCoefficients::new(-0.1, 0.6, 0.5);
         assert!(bad_sign.is_err());
+    }
+
+    #[test]
+    fn zip_load_scale_matches_inline_formula() {
+        // Verify the public method returns the same value as the inline
+        // computation in resolve().
+        let zip = ZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
+        let solver = ElectricalSolver::new(ElectricalSolverConfig {
+            zip,
+            nominal_voltage_pu: 1.0,
+        })
+        .unwrap();
+        // V=0.95 pu, Z=0.2, I=0.2, P=0.6 → scale = 0.2·0.9025 + 0.2·0.95 + 0.6 = 0.9705
+        let scale = solver.zip_load_scale(0.95);
+        let expected = 0.2 * 0.95_f64.powi(2) + 0.2 * 0.95 + 0.6;
+        assert!((scale - expected).abs() <= 1e-10);
+    }
+
+    #[test]
+    fn zip_load_scale_unity_for_default_config() {
+        let solver = ElectricalSolver::new(ElectricalSolverConfig::default()).unwrap();
+        assert!((solver.zip_load_scale(0.95) - 1.0).abs() <= 1e-10);
+        assert!((solver.zip_load_scale(1.0) - 1.0).abs() <= 1e-10);
+        assert!((solver.zip_load_scale(1.05) - 1.0).abs() <= 1e-10);
     }
 }

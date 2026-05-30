@@ -842,7 +842,10 @@ mod tests {
     use super::*;
     use crate::config::ConfigPayload;
     use chrono::{FixedOffset, TimeZone};
-    use hares_types::{GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneMap, ZoneRole, ZoneState};
+    use hares_types::{
+        GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneMap, ZoneRole,
+        ZoneState,
+    };
 
     fn env(outdoor_c: f64, indoor_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -1858,10 +1861,7 @@ mod tests {
             Some(ZoneId(5)),
             "ventilation zone should be resolved from ZoneMap Indoor role (ZoneId(5))"
         );
-        let has_thermal_port_for_zone_5 = hrv
-            .ports()
-            .iter()
-            .any(|p| p.zone == Some(ZoneId(5)));
+        let has_thermal_port_for_zone_5 = hrv.ports().iter().any(|p| p.zone == Some(ZoneId(5)));
         assert!(
             has_thermal_port_for_zone_5,
             "ventilation ports should include thermal port for resolved ZoneId(5)"

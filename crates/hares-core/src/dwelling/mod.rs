@@ -3147,12 +3147,23 @@ impl Dwelling {
 
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
+            let zip_scale = self
+                .electrical_solver
+                .zip_load_scale(self.latest_env.grid.voltage_pu);
+            let port_load_raw = self.ports.electrical.load_power_kw;
+            let port_load_adj = port_load_raw * zip_scale;
+            let port_net = port_load_adj + self.ports.electrical.generation_power_kw;
+            let residual = (self.electrical_solver.net_active_kw() - port_net).abs();
             obs_phases.post_solvers = Some(observer_capture::capture_solvers(
                 &thermal_for_observer,
                 &self.humidity_update_buf,
                 &self.electrical_update_buf,
                 &self.fluid_update_buf,
                 &self.thermal_solver,
+                zip_scale,
+                port_load_raw,
+                port_load_adj,
+                residual,
             ));
         }
 
@@ -3375,7 +3386,8 @@ impl Dwelling {
         };
 
         // ORDERING: ports.zero() must come AFTER check_invariants() (called above)
-        // because the electrical balance check reads self.ports.electrical.net_active_kw().
+        // because the electrical balance check reads self.ports.electrical.load_power_kw
+        // and generation_power_kw to compute the ZIP-adjusted port net.
         self.ports.zero();
         let _ = self.clock.next();
 
@@ -3708,9 +3720,17 @@ impl Dwelling {
             });
         }
 
-        // Electrical balance: solver net must match port accumulation.
-        let bus_power = self.ports.electrical.net_active_kw();
-        checker.check_electrical(net_kw, &[-bus_power])?;
+        // Electrical balance: solver net must match ZIP-adjusted port accumulation.
+        // The solver applies ZIP load scaling (`net_active_kw() = P_load·scale + P_gen`).
+        // Adjust the port-side load accumulation by the same scale factor for a
+        // like-for-like comparison; without this, a non-default ZIP model at non-nominal
+        // voltage produces a false-positive residual of P_load·(scale − 1).
+        let scale = self
+            .electrical_solver
+            .zip_load_scale(self.latest_env.grid.voltage_pu);
+        let port_net =
+            self.ports.electrical.load_power_kw * scale + self.ports.electrical.generation_power_kw;
+        checker.check_electrical(net_kw, &[-port_net])?;
 
         // Thermal balance: deferred -- the multi-node RC state-space model
         // distributes thermal energy across zone-air and wall-mass nodes.
@@ -3719,7 +3739,7 @@ impl Dwelling {
         // captured. A proper system-level energy audit requires exposing
         // per-node capacitances and previous-step state vectors from
         // ThermalSolver, which exceeds the ~20-line API surface limit.
-        // See follow-up ticket for ThermalSolver::balance_inputs() API.
+        // See T-0177 for ThermalSolver::balance_inputs() API.
 
         // Moisture balance: mass conservation across the humidity solver.
         if let Some(update) = self

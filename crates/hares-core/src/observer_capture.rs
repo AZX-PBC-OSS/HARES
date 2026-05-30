@@ -172,13 +172,18 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
     }
 }
 
-/// Captures all four domain solver outputs + envelope component gains.
+/// Captures all four domain solver outputs + envelope component gains,
+/// plus electrical balance observability for ZIP-adjusted invariant checking.
 pub(crate) fn capture_solvers(
     thermal_update: &DomainUpdate,
     humidity_update: &DomainUpdate,
     electrical_update: &DomainUpdate,
     fluid_update: &DomainUpdate,
     thermal_solver: &ThermalSolver,
+    zip_load_scale: f64,
+    port_load_raw_kw: f64,
+    port_load_adjusted_kw: f64,
+    residual_kw: f64,
 ) -> SolverCapture {
     SolverCapture {
         thermal_update: thermal_update.clone(),
@@ -186,6 +191,10 @@ pub(crate) fn capture_solvers(
         electrical_update: electrical_update.clone(),
         fluid_update: fluid_update.clone(),
         envelope_gains: thermal_solver.component_gains().clone(),
+        zip_load_scale,
+        port_load_raw_kw,
+        port_load_adjusted_kw,
+        residual_kw,
     }
 }
 

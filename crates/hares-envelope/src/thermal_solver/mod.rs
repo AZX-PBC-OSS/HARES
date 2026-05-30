@@ -5747,11 +5747,7 @@ mod tests {
         // Two independent 1R1C zones, each with one sensible input.
         let r = 2.0;
         let c = 50_000.0;
-        let a_c = DMatrix::from_row_slice(
-            2,
-            2,
-            &[-1.0 / (r * c), 0.0, 0.0, -1.0 / (r * c)],
-        );
+        let a_c = DMatrix::from_row_slice(2, 2, &[-1.0 / (r * c), 0.0, 0.0, -1.0 / (r * c)]);
         // Inputs: [T_out, H_zone1, H_zone2]
         let b_c = DMatrix::from_row_slice(
             2,
@@ -5797,7 +5793,15 @@ mod tests {
             interior_convection_injections: Vec::new(),
         };
 
-        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, env.zones[0].temperature_c).unwrap();
+        let mut solver = ThermalSolver::new(
+            model,
+            wiring,
+            config,
+            60.0,
+            &env,
+            env.zones[0].temperature_c,
+        )
+        .unwrap();
         solver.x[0] = 20.0;
         solver.x[1] = 10.0;
 
@@ -5939,11 +5943,7 @@ mod tests {
 
         let r = 2.0;
         let c = 50_000.0;
-        let a_c = DMatrix::from_row_slice(
-            2,
-            2,
-            &[-1.0 / (r * c), 0.0, 0.0, -1.0 / (r * c)],
-        );
+        let a_c = DMatrix::from_row_slice(2, 2, &[-1.0 / (r * c), 0.0, 0.0, -1.0 / (r * c)]);
         let b_c = DMatrix::from_row_slice(
             2,
             3,
@@ -5988,7 +5988,15 @@ mod tests {
             interior_convection_injections: Vec::new(),
         };
 
-        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, env.zones[0].temperature_c).unwrap();
+        let mut solver = ThermalSolver::new(
+            model,
+            wiring,
+            config,
+            60.0,
+            &env,
+            env.zones[0].temperature_c,
+        )
+        .unwrap();
         solver.x[0] = 20.0;
         solver.x[1] = 10.0;
 
