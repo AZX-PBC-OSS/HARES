@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use hares_physics::constants::{UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -314,12 +315,49 @@ impl GasWH {
         self.hot_draw_temp_c = c.hot_draw_temp_c;
 
         self.flue_loss_fraction = c.flue_loss_fraction.unwrap_or(DEFAULT_FLUE_LOSS_FRACTION);
-        self.burner_efficiency_constant = c.conversion_efficiency.unwrap_or_else(|| {
-            c.energy_factor
-                .or(c.uniform_energy_factor)
-                .map(|v| v * c.performance_adjustment.unwrap_or(1.0))
-                .unwrap_or(DEFAULT_BURNER_EFFICIENCY)
-        });
+
+        // Fallback chain for burner efficiency:
+        // 1. conversion_efficiency — the physically meaningful parameter (direct use).
+        // 2. energy_factor — pre-2015 EF test procedure value (direct use).
+        // 3. uniform_energy_factor — post-2015 UEF test procedure value;
+        //    converted to EF-equivalent using the RESNET EF Calculator 2017 /
+        //    OCHRE HPXML parser (vendors/OCHRE/ochre/utils/hpxml.py:1115):
+        //      EF = UEF_TO_EF_GAS_SLOPE * UEF + UEF_TO_EF_GAS_INTERCEPT
+        //    UEF values are systematically higher than EF; raw UEF used as
+        //    burner efficiency overestimates efficiency by 1-3% for typical
+        //    gas storage water heaters.
+        // 4. DEFAULT_BURNER_EFFICIENCY (0.78) — a plausible gas WH efficiency.
+        let (efficiency, source) = if let Some(ce) = c.conversion_efficiency {
+            (ce, 1.0)
+        } else if let Some(ef) = c.energy_factor {
+            (ef * c.performance_adjustment.unwrap_or(1.0), 2.0)
+        } else if let Some(uef) = c.uniform_energy_factor {
+            let ef = UEF_TO_EF_GAS_SLOPE * uef + UEF_TO_EF_GAS_INTERCEPT;
+            (ef * c.performance_adjustment.unwrap_or(1.0), 3.0)
+        } else {
+            (DEFAULT_BURNER_EFFICIENCY, 0.0)
+        };
+
+        // source: 0=Default, 1=ConversionEfficiency, 2=EnergyFactor, 3=UniformEnergyFactor
+        self.burner_efficiency_constant = efficiency;
+
+        #[cfg(debug_assertions)]
+        {
+            assert!(
+                (0.0..=1.0).contains(&self.burner_efficiency_constant),
+                "burner_efficiency_constant must be in [0.0, 1.0], got {}",
+                self.burner_efficiency_constant
+            );
+            if 3.0 == source {
+                let converted = UEF_TO_EF_GAS_SLOPE * c.uniform_energy_factor.unwrap()
+                    + UEF_TO_EF_GAS_INTERCEPT;
+                assert!(
+                    converted <= 1.0,
+                    "UEF->EF converted value must not exceed 1.0, got {converted}"
+                );
+            }
+        }
+
         self.burner_efficiency_poly = None;
 
         self.fuel_type = c.fuel_type;
@@ -338,6 +376,9 @@ impl GasWH {
         self.descriptor.telemetry_fields = telemetry_fields(n_nodes);
         self.telemetry = default_telemetry();
         self.tank.register_node_telemetry(&mut self.telemetry);
+        self.telemetry
+            .set(tk::BURNER_EFFICIENCY, self.burner_efficiency_constant);
+        self.telemetry.set(tk::BURNER_EFFICIENCY_SOURCE, source);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -744,8 +785,10 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(12);
+    let mut telemetry = Telemetry::with_capacity(14);
     telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
+    telemetry.insert(tk::BURNER_EFFICIENCY, 0.0);
+    telemetry.insert(tk::BURNER_EFFICIENCY_SOURCE, 0.0);
     telemetry.insert(tk::BURNER_POWER_W, 0.0);
     telemetry.insert(tk::PILOT_POWER_W, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
@@ -766,6 +809,18 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             name: tk::TANK_AVG_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Volume-weighted average tank temperature".to_string(),
+        },
+        TelemetryField {
+            name: tk::BURNER_EFFICIENCY.to_string(),
+            unit: "fraction".to_string(),
+            description: "Resolved burner efficiency (conversion_efficiency, EF, or UEF-derived)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::BURNER_EFFICIENCY_SOURCE.to_string(),
+            unit: "enum".to_string(),
+            description: "0=Default, 1=ConversionEfficiency, 2=EnergyFactor, 3=UniformEnergyFactor"
+                .to_string(),
         },
         TelemetryField {
             name: tk::BURNER_POWER_W.to_string(),
@@ -988,6 +1043,22 @@ mod tests {
                     typed.ignition_type = Some(x.clone())
                 }
                 ("ignition_type", None) => typed.ignition_type = None,
+                ("energy_factor", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.energy_factor = Some(*x)
+                }
+                ("energy_factor", None) => typed.energy_factor = None,
+                ("uniform_energy_factor", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.uniform_energy_factor = Some(*x)
+                }
+                ("uniform_energy_factor", None) => typed.uniform_energy_factor = None,
+                ("conversion_efficiency", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.conversion_efficiency = Some(*x)
+                }
+                ("conversion_efficiency", None) => typed.conversion_efficiency = None,
+                ("performance_adjustment", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.performance_adjustment = Some(*x)
+                }
+                ("performance_adjustment", None) => typed.performance_adjustment = None,
                 _ => panic!("unsupported gas test override key/value: {k}"),
             }
         }
@@ -1609,6 +1680,200 @@ mod tests {
         assert!(
             (outlet - tank_avg).abs() < 1.0,
             "OUTLET_TEMP_C should equal tank avg temp with no draw: outlet={outlet}, tank_avg={tank_avg}"
+        );
+    }
+
+    #[test]
+    fn uef_converted_to_ef_for_known_pairs() {
+        // RESNET EF Calculator 2017 / OCHRE hpxml.py:1115: EF = 0.9066 * UEF + 0.0711
+        // UEF 0.70 → EF = 0.9066 * 0.70 + 0.0711 = 0.70572
+        let cfg_070 = config_with_extras(&[
+            ("uniform_energy_factor", Some(0.70.into())),
+            ("energy_factor", None),
+            ("conversion_efficiency", None),
+        ]);
+        let mut eq_070 = GasWH::new(cfg_070.clone());
+        eq_070.init(&cfg_070, &env(21.0)).unwrap();
+        assert!(
+            (eq_070.burner_efficiency_constant - 0.70572).abs() < 1e-4,
+            "UEF 0.70 should convert to EF ~0.70572, got {:.5}",
+            eq_070.burner_efficiency_constant
+        );
+
+        // UEF 0.58 → EF = 0.9066 * 0.58 + 0.0711 = 0.596928
+        let cfg_058 = config_with_extras(&[
+            ("uniform_energy_factor", Some(0.58.into())),
+            ("energy_factor", None),
+            ("conversion_efficiency", None),
+        ]);
+        let mut eq_058 = GasWH::new(cfg_058.clone());
+        eq_058.init(&cfg_058, &env(21.0)).unwrap();
+        assert!(
+            (eq_058.burner_efficiency_constant - 0.596928).abs() < 1e-4,
+            "UEF 0.58 should convert to EF ~0.59693, got {:.5}",
+            eq_058.burner_efficiency_constant
+        );
+    }
+
+    #[test]
+    fn conversion_efficiency_takes_priority_over_uef() {
+        // When conversion_efficiency, energy_factor, and uniform_energy_factor are all set,
+        // conversion_efficiency wins.
+        let cfg = config_with_extras(&[
+            ("conversion_efficiency", Some(0.80.into())),
+            ("energy_factor", Some(0.62.into())),
+            ("uniform_energy_factor", Some(0.70.into())),
+        ]);
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+        assert!(
+            (eq.burner_efficiency_constant - 0.80).abs() < 1e-9,
+            "conversion_efficiency (0.80) must win over EF and UEF, got {:.4}",
+            eq.burner_efficiency_constant
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::BURNER_EFFICIENCY_SOURCE)
+                .unwrap_or(-1.0),
+            1.0,
+            "source must be 1 (ConversionEfficiency)"
+        );
+    }
+
+    #[test]
+    fn energy_factor_takes_priority_over_uef() {
+        // When energy_factor and uniform_energy_factor are set but conversion_efficiency
+        // is not, energy_factor wins (used directly, no UEF conversion).
+        let cfg = config_with_extras(&[
+            ("energy_factor", Some(0.62.into())),
+            ("uniform_energy_factor", Some(0.70.into())),
+            ("conversion_efficiency", None),
+        ]);
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+        assert!(
+            (eq.burner_efficiency_constant - 0.62).abs() < 1e-9,
+            "energy_factor (0.62) must win over UEF (0.70), got {:.4}",
+            eq.burner_efficiency_constant
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::BURNER_EFFICIENCY_SOURCE)
+                .unwrap_or(-1.0),
+            2.0,
+            "source must be 2 (EnergyFactor)"
+        );
+    }
+
+    #[test]
+    fn uniform_energy_factor_with_performance_adjustment() {
+        // UEF 0.70 → EF = 0.70572, adjusted by performance_adjustment = 0.92
+        // Expected: 0.70572 * 0.92 = 0.6492624
+        let cfg = config_with_extras(&[
+            ("uniform_energy_factor", Some(0.70.into())),
+            ("energy_factor", None),
+            ("conversion_efficiency", None),
+            ("performance_adjustment", Some(0.92.into())),
+        ]);
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+        let expected = 0.70572 * 0.92;
+        assert!(
+            (eq.burner_efficiency_constant - expected).abs() < 1e-4,
+            "UEF 0.70 adjusted by 0.92 should be {expected:.5}, got {:.5}",
+            eq.burner_efficiency_constant
+        );
+    }
+
+    #[test]
+    fn uef_burner_efficiency_telemetry_populated() {
+        let cfg = config_with_extras(&[
+            ("uniform_energy_factor", Some(0.70.into())),
+            ("energy_factor", None),
+            ("conversion_efficiency", None),
+        ]);
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        let efficiency = eq
+            .telemetry()
+            .get(tk::BURNER_EFFICIENCY)
+            .expect("BURNER_EFFICIENCY must be present");
+        let source = eq
+            .telemetry()
+            .get(tk::BURNER_EFFICIENCY_SOURCE)
+            .expect("BURNER_EFFICIENCY_SOURCE must be present");
+
+        assert!(
+            (efficiency - 0.70572).abs() < 1e-4,
+            "BURNER_EFFICIENCY must be converted UEF, got {efficiency}"
+        );
+        assert_eq!(
+            source, 3.0,
+            "BURNER_EFFICIENCY_SOURCE must be 3 (UniformEnergyFactor), got {source}"
+        );
+    }
+
+    #[test]
+    fn skin_loss_fraction_uses_converted_uef() {
+        // UEF 0.58 → EF = 0.59693. Since 0.59693 < 0.7, skin_loss_fraction should be 0.64.
+        // Without UEF→EF conversion, raw UEF 0.58 would also produce 0.64 (coincidence here),
+        // but UEF 0.70 → EF = 0.70572 ≥ 0.7 → skin_loss_fraction = 0.91.
+        // Without conversion, raw UEF 0.70 would also be ≥ 0.7 → also 0.91 (coincidence).
+        // The meaningful test: UEF 0.7 would be the same either way, but we can test via
+        // skin_loss_fraction with the explicit value.
+        //
+        // Instead test: UEF 0.65 → EF = 0.9066*0.65 + 0.0711 = 0.66039.
+        // 0.66039 < 0.7 → skin_loss_fraction = 0.64.
+        // Without conversion: raw UEF 0.65 < 0.7 → also 0.64 (same).
+        //
+        // Test UEF 0.68 → EF = 0.9066*0.68 + 0.0711 = 0.68759.
+        // 0.68759 < 0.7 → skin_loss_fraction = 0.64.
+        // Without conversion: raw UEF 0.68 < 0.7 → also 0.64 (same).
+        //
+        // Test UEF 0.80 → EF = 0.9066*0.80 + 0.0711 = 0.79638.
+        // 0.79638 < 0.8 → skin_loss_fraction = 0.91.
+        // Without conversion: raw UEF 0.80 ≥ 0.8 → skin_loss_fraction = 0.96. DIFFERENT!
+        //
+        // UEF 0.80 is the clearest differentiator.
+        let cfg = config_with_extras(&[
+            ("uniform_energy_factor", Some(0.80.into())),
+            ("energy_factor", None),
+            ("conversion_efficiency", None),
+        ]);
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        // With conversion: burner_efficiency_constant = 0.79638 → skin_loss = 0.91
+        // Without conversion: burner_efficiency_constant = 0.80 → skin_loss = 0.96
+        assert_eq!(
+            eq.skin_loss_fraction, 0.91,
+            "UEF 0.80 → EF=0.796 < 0.8 → skin_loss_fraction=0.91, got {}",
+            eq.skin_loss_fraction
+        );
+    }
+
+    #[test]
+    fn default_efficiency_source_is_zero() {
+        // When no efficiency inputs are provided, source should be 0 (Default).
+        let cfg = config_with_extras(&[
+            ("conversion_efficiency", None),
+            ("energy_factor", None),
+            ("uniform_energy_factor", None),
+        ]);
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        assert!(
+            (eq.burner_efficiency_constant - super::DEFAULT_BURNER_EFFICIENCY).abs() < 1e-9,
+            "fallback should use DEFAULT_BURNER_EFFICIENCY"
+        );
+        assert_eq!(
+            eq.telemetry()
+                .get(tk::BURNER_EFFICIENCY_SOURCE)
+                .unwrap_or(-1.0),
+            0.0,
+            "source must be 0 (Default)"
         );
     }
 }

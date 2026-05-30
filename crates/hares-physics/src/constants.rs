@@ -174,6 +174,25 @@ pub const HOURS_PER_YEAR: f64 = 8_760.0;
 /// when converting `ElectricAuxiliaryEnergy` (kWh/yr) to watts for boilers.
 pub const BOILER_AUXILIARY_HOURS_PER_YEAR: f64 = 2_080.0;
 
+// --- Water Heater Performance Coefficients ---
+
+/// UEF→EF linear regression slope for gas storage water heaters.
+///
+/// Maguire & Roberts (2020) NREL/TP-5500-68035 — derived from regression
+/// analysis of ResStock waterheater.rb. Converts Uniform Energy Factor
+/// (UEF, post-2015 DOE test procedure) to Energy Factor (EF, pre-2015
+/// procedure) for gas-fired storage water heaters when only UEF is available.
+///
+/// EF = UEF_TO_EF_GAS_SLOPE × UEF + UEF_TO_EF_GAS_INTERCEPT
+pub const UEF_TO_EF_GAS_SLOPE: f64 = 0.9066;
+
+/// UEF→EF linear regression intercept for gas storage water heaters.
+///
+/// Maguire & Roberts (2020) NREL/TP-5500-68035. Paired with
+/// `UEF_TO_EF_GAS_SLOPE` to convert UEF to EF for gas-fired storage
+/// water heaters.
+pub const UEF_TO_EF_GAS_INTERCEPT: f64 = 0.0711;
+
 // --- Occupant Internal Gains ---
 
 /// Total sensible heat gain per occupant [W/person].

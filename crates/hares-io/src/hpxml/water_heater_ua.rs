@@ -22,6 +22,7 @@ const T_SETPOINT_EF_F: f64 = 135.0;
 const T_SETPOINT_UEF_F: f64 = 125.0;
 /// DOE EF test: daily draw volume, gal.
 const VOLUME_DRAWN_EF_GAL: f64 = 64.3;
+use hares_physics::constants::{UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE};
 use hares_physics::units as conv;
 
 /// Water heater type and fuel discriminant, sufficient for UA routing.
@@ -148,13 +149,6 @@ fn ua_for_electric_storage(inputs: &UaInputs) -> Result<UaResult, String> {
     })
 }
 
-/// UEF→EF linear regression slope for gas storage water heaters.
-/// Source: ResStock waterheater.rb; Maguire & Roberts (2020) NREL/TP-5500-68035.
-const GAS_UEF_TO_EF_SLOPE: f64 = 0.9066;
-/// UEF→EF linear regression intercept for gas storage water heaters.
-/// Source: ResStock waterheater.rb; Maguire & Roberts (2020) NREL/TP-5500-68035.
-const GAS_UEF_TO_EF_INTERCEPT: f64 = 0.0711;
-
 fn ua_for_gas_storage(inputs: &UaInputs) -> Result<UaResult, String> {
     let q_load = daily_load_btu(inputs)?;
 
@@ -178,7 +172,7 @@ fn ua_for_gas_storage(inputs: &UaInputs) -> Result<UaResult, String> {
         let ua = ((re / uef) - 1.0)
             / ((t - T_ENV_F) * (24.0 / q_load) - ((t - T_ENV_F) / (heating_capacity * uef)));
         let eta_c = re + (ua * (t - T_ENV_F)) / heating_capacity;
-        let ef_equiv = GAS_UEF_TO_EF_SLOPE * uef + GAS_UEF_TO_EF_INTERCEPT;
+        let ef_equiv = UEF_TO_EF_GAS_SLOPE * uef + UEF_TO_EF_GAS_INTERCEPT;
         (ua, eta_c, ef_equiv)
     } else {
         return Err("Gas storage WH requires EnergyFactor or UniformEnergyFactor".to_string());

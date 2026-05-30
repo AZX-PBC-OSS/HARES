@@ -12,7 +12,9 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+use hares_physics::constants::{
+    CP_LIQUID_WATER_J_KG_K, UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE,
+};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -183,14 +185,33 @@ impl TanklessWH {
         self.ports = build_ports(self.fuel_type);
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
-        self.efficiency_factor = c
-            .energy_factor
-            .or(c.uniform_energy_factor)
-            .unwrap_or(DEFAULT_EF)
-            .max(1e-6);
-        if let Some(perf_adj) = c.performance_adjustment {
-            self.efficiency_factor = (self.efficiency_factor * perf_adj.clamp(0.0, 1.0)).max(1e-6);
-        }
+
+        // Fallback chain for efficiency factor:
+        // 1. energy_factor — pre-2015 EF test procedure value (direct use).
+        // 2. uniform_energy_factor — post-2015 UEF test procedure value;
+        //    converted to EF-equivalent using the RESNET EF Calculator 2017 /
+        //    OCHRE HPXML parser (vendors/OCHRE/ochre/utils/hpxml.py:1115):
+        //      EF = UEF_TO_EF_GAS_SLOPE * UEF + UEF_TO_EF_GAS_INTERCEPT
+        // 3. DEFAULT_EF — 0.9, a plausible tankless WH efficiency.
+        let raw_ef = if let Some(ef) = c.energy_factor {
+            ef
+        } else if let Some(uef) = c.uniform_energy_factor {
+            UEF_TO_EF_GAS_SLOPE * uef + UEF_TO_EF_GAS_INTERCEPT
+        } else {
+            DEFAULT_EF
+        };
+        self.efficiency_factor = if let Some(perf_adj) = c.performance_adjustment {
+            (raw_ef * perf_adj.clamp(0.0, 1.0)).max(1e-6)
+        } else {
+            raw_ef.max(1e-6)
+        };
+
+        #[cfg(debug_assertions)]
+        assert!(
+            (0.0..=1.0).contains(&self.efficiency_factor),
+            "efficiency_factor must be in [0.0, 1.0], got {}",
+            self.efficiency_factor
+        );
         self.rated_thermal_power_w = c
             .heating_capacity_w
             .unwrap_or(DEFAULT_MAX_THERMAL_POWER_W)
