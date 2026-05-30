@@ -1267,7 +1267,15 @@ impl HeatPumpHeaterCore {
             step.thermal_output_w / compressor_only_w
         } else {
             0.0
-        };
+        }
+        // AHRI 210/240-2023: ASHP heating COP ~1.5–5.0; clamp to [0.0, 10.0]
+        // to exclude physically impossible values from telemetry.
+        .clamp(0.0, 10.0);
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            cop.is_finite() && (0.0..=10.0).contains(&cop),
+            "ASHP heating COP {cop} not in [0.0, 10.0]"
+        );
         self.telemetry.set(tk::COP, cop);
         // Runtime fraction = duty cycle (PLR) when on, 0 when off.
         let rtf = if self.operating_mode != OperatingMode::Off {
@@ -4565,6 +4573,40 @@ mod tests {
 
         let cop = eq.telemetry().get(tk::COP).unwrap_or(-1.0);
         assert_eq!(cop, 0.0, "heater off must give COP=0, got {cop}");
+    }
+
+    #[test]
+    fn ashp_cop_clamped_to_physical_range() {
+        // ASHP with pathological cap curve (c0=100 × rated capacity) and
+        // identity eir curve produces unbounded COP ~303. Verify the telemetry
+        // COP is clamped to the [0.0, 10.0] physical range.
+        let mut cfg = heater_config();
+        cfg.test_extras_mut().insert(
+            "biquadratic_coeffs".to_string(),
+            "[[100,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
+        );
+        // Zone below setpoint (18°C < 21°C) → heater runs, OAT above all
+        // lockouts → only HP runs.
+        let e = env(18.0, 5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+        eq.update_control(&e);
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let cop = eq.telemetry().get(tk::COP).unwrap_or(-1.0);
+        assert!(
+            cop.is_finite() && (0.0..=10.0).contains(&cop),
+            "ASHP heating COP must be in [0.0, 10.0], got {cop}"
+        );
+        // The unclamped COP would be ~303; clamping must have engaged.
+        assert!(
+            cop < 100.0,
+            "COP must have been clamped below 100 (raw ~303), got {cop}"
+        );
     }
 
     #[test]

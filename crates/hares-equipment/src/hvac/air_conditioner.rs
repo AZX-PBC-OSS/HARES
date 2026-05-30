@@ -1005,7 +1005,15 @@ impl CoolingCore {
             total_cooling_w / compressor_only_w
         } else {
             0.0
-        };
+        }
+        // AHRI 210/240-2023: AC cooling COP ~2.3–4.1 W/W; clamp to [0.0, 8.0]
+        // to exclude physically impossible values from telemetry.
+        .clamp(0.0, 8.0);
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            cop.is_finite() && (0.0..=8.0).contains(&cop),
+            "AC cooling COP {cop} not in [0.0, 8.0]"
+        );
         self.telemetry.set(tk::COP, cop);
         self.telemetry
             .set(tk::RUNTIME_FRACTION, self.last_cooling_rtf.clamp(0.0, 1.0));
@@ -3651,6 +3659,42 @@ mod tests {
         assert!(
             (val.unwrap_or(1.0) - 0.0).abs() < 1e-9,
             "COOLING_OAT_LOCKOUT must be 0.0 when not locked out"
+        );
+    }
+
+    #[test]
+    fn ac_cop_clamped_to_physical_range() {
+        // AC with pathological capacity curve (c0=100 × rated) and identity
+        // eir curve produces unbounded COP ~1033. Verify telemetry COP is
+        // clamped to [0.0, 8.0].
+        let mut cfg = ac_config();
+        cfg.test_extras_mut().insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[100,0,0,0,0,0]".into(),
+        );
+        cfg.test_extras_mut()
+            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        // Zone at 26°C (above 24°C setpoint) so AC runs, OAT 30°C.
+        let e = env(26.0, 0.009, 18.0, 30.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+        eq.update_control(&e);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let cop = eq.telemetry().get(tk::COP).unwrap_or(-1.0);
+        assert!(
+            cop.is_finite() && (0.0..=8.0).contains(&cop),
+            "AC cooling COP must be in [0.0, 8.0], got {cop}"
+        );
+        // Unclamped COP would be ~1033; clamping must have reduced it.
+        assert!(
+            cop < 100.0,
+            "COP must have been clamped below 100 (raw ~1033), got {cop}"
         );
     }
 }

@@ -651,7 +651,16 @@ impl Equipment for HeatPumpWH {
         // Use wet-bulb temperature for COP/capacity curves: HPWH performance depends
         // on available enthalpy in the ambient air, not dry-bulb temperature alone.
         let wet_bulb_c = self.zone_wet_bulb_c(env);
-        let cop = (self.cop_curve.evaluate(wet_bulb_c, tank_avg_temp_c) * self.cop_scale).max(0.1);
+        let cop_raw = self.cop_curve.evaluate(wet_bulb_c, tank_avg_temp_c) * self.cop_scale;
+        // Divisor floor: when the biquadratic COP curve evaluates to ≤ 0
+        // within valid input bounds, the raw COP would be zero or negative,
+        // producing divide-by-zero (Inf) in the compressor power calculation
+        // and downstream NaN that corrupts tank thermal state. Use a small
+        // non-zero floor for the physics computation to keep arithmetic safe.
+        let cop_for_physics = cop_raw.max(1e-6);
+        // AHRI 210/240-2023: HPWH COP clamp to [0.0, 8.0] to exclude
+        // physically impossible values from telemetry reporting.
+        let cop = cop_raw.clamp(0.0, 8.0);
         // Capacity multiplier modulates the rated delivered heat based on ambient
         // wet-bulb and tank temperature, matching EnergyPlus/OCHRE HPWH model.
         let cap_mult = self
@@ -662,7 +671,7 @@ impl Equipment for HeatPumpWH {
         // power_input_w = capacity_actual_w / cop_actual (electrical input required).
         let capacity_actual_w = self.compressor_power_w * cap_mult;
         let compressor_power_w = if self.compressor_on {
-            (capacity_actual_w / cop) * hp_duty
+            (capacity_actual_w / cop_for_physics) * hp_duty
         } else {
             0.0
         };
@@ -674,7 +683,7 @@ impl Equipment for HeatPumpWH {
 
         // OCHRE WaterHeater.py:660-664: delivered heat from HP and ER.
         // HP delivers capacity_actual_w * duty to tank; electrical draw is compressor_power_w.
-        let delivered_hp_w = compressor_power_w * cop;
+        let delivered_hp_w = compressor_power_w * cop_for_physics;
         let delivered_er_w = backup_power_w * self.backup_efficiency;
         let q_tank_delivered_w = delivered_hp_w + delivered_er_w;
 
@@ -811,6 +820,11 @@ impl Equipment for HeatPumpWH {
         self.telemetry.set(
             tk::TANK_AVG_TEMP_C,
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3()),
+        );
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            cop.is_finite() && (0.0..=8.0).contains(&cop),
+            "HPWH COP {cop} not in [0.0, 8.0]"
         );
         self.telemetry.set(tk::COP, cop);
         self.telemetry.set(tk::CAP_MULT, cap_mult);
@@ -1640,6 +1654,85 @@ mod tests {
         assert!(
             cop_high_wb > cop_low_wb,
             "COP at WB=20°C ({cop_high_wb:.4}) should exceed COP at WB=14°C ({cop_low_wb:.4})"
+        );
+    }
+
+    #[test]
+    fn hpwh_cop_clamped_to_physical_range() {
+        // HPWH with pathological COP curve (c0=100) and rated COP=100
+        // produces unbounded per-step COP ~100. Verify telemetry COP is
+        // clamped to [0.0, 8.0].
+        let typed = HeatPumpWaterHeaterConfig {
+            cop: Some(100.0),
+            cop_biquadratic_coeffs: Some([100.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            ..base_typed_config()
+        };
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        // Zone at 24°C (well above default COP curve ref), tank at 40°C.
+        eq.init(&cfg, &env(24.0)).unwrap();
+        let mut ports = ports();
+        eq.step(&env(24.0), Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let cop = eq.telemetry().get(tk::COP).unwrap_or(-1.0);
+        assert!(
+            cop.is_finite() && (0.0..=8.0).contains(&cop),
+            "HPWH COP must be in [0.0, 8.0], got {cop}"
+        );
+        // Unclamped COP would be ~100; clamping must have reduced it.
+        assert!(
+            cop < 50.0,
+            "COP must have been clamped below 50 (raw ~100), got {cop}"
+        );
+    }
+
+    /// HPWH with a zero-output biquadratic COP curve produces a near-zero
+    /// raw COP at every evaluation point. The divisor floor (1e-6) must prevent
+    /// divide-by-zero / NaN in the per-step energy balance and delivered heat.
+    /// Regression for the lower-bound path — without the fix, `cop == 0.0` is
+    /// used as a divisor, producing Inf → NaN that corrupts tank thermal state.
+    #[test]
+    fn hpwh_cop_zero_curve_prevents_nan_in_energy_balance() {
+        // All-zero biquadratic: evaluate() returns 0 for every input pair
+        // within bounds. cop_ratio becomes (rated_cop / max(0, 1e-6)) ≈ huge,
+        // but the product 0.0 * huge = 0.0, giving a raw COP of 0.0.
+        // The divisor floor in cop_for_physics must keep arithmetic safe.
+        let typed = HeatPumpWaterHeaterConfig {
+            cop_biquadratic_coeffs: Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            cop: Some(3.45),
+            ..base_typed_config()
+        };
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        // Tank starts at 40°C (from base_typed_config) with setpoint 52°C:
+        // call-for-heat is active and the compressor turns on during step().
+        eq.init(&cfg, &env(24.0)).unwrap();
+        let mut ports = ports();
+        let result = eq.step(&env(24.0), Duration::from_secs(60), &mut ports);
+        assert!(result.is_ok(), "step must succeed without NaN panic");
+
+        let cop = eq.telemetry().get(tk::COP).unwrap_or(f64::NAN);
+        assert!(
+            cop.is_finite() && (0.0..=8.0).contains(&cop),
+            "HPWH COP must be in [0.0, 8.0], got {cop}"
+        );
+        // With an all-zero biquadratic, the raw COP is 0.0; telemetry must
+        // report 0.0 (clamped to the physical range) rather than NaN.
+        assert!(
+            cop < 0.5,
+            "COP must be near zero for all-zero curve, got {cop}"
+        );
+
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(f64::NAN);
+        assert!(
+            electric_kw.is_finite(),
+            "ELECTRIC_KW must be finite (not NaN/Inf), got {electric_kw}"
+        );
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(f64::NAN);
+        assert!(
+            compressor_kw.is_finite(),
+            "COMPRESSOR_KW must be finite (not NaN/Inf), got {compressor_kw}"
         );
     }
 
