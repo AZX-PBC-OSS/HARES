@@ -211,6 +211,8 @@ pub const ZONE_HEAT_EXTRACTION_W: &str = "zone_heat_extraction_w";
 pub const WALL_SENSIBLE_GAIN_W: &str = "wall_sensible_gain_w";
 pub const UNMET_LOAD_W: &str = "unmet_load_w";
 pub const PARASITIC_ELECTRIC_W: &str = "parasitic_electric_w";
+pub const PILOT_HEAT_TO_WATER_W: &str = "pilot_heat_to_water_w";
+pub const PILOT_HEAT_TO_AMBIENT_W: &str = "pilot_heat_to_ambient_w";
 
 // ── Envelope energy balance ─────────────────────────────────────────────────
 /// Per-zone energy balance residual [W] from the zone-air first-law check.

@@ -423,6 +423,7 @@ fn gas_wh_fuel_not_electricity() {
             conversion_efficiency: None,
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
+            pilot_fraction_to_tank: None,
         },
     );
 
@@ -729,6 +730,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                     conversion_efficiency: None,
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,
+                    pilot_fraction_to_tank: None,
                 },
             ),
             FuelType::Gas,
@@ -792,6 +794,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                     conversion_efficiency: None,
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,
+                    pilot_fraction_to_tank: None,
                 },
             )
         };

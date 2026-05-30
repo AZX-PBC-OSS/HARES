@@ -155,6 +155,7 @@ pub(super) fn resolve_water_heaters(
                     conversion_efficiency,
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,
+                    pilot_fraction_to_tank: None,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -733,6 +734,7 @@ mod tests {
             conversion_efficiency: None,
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
+            pilot_fraction_to_tank: None,
         };
         let spec = typed_spec(
             "Gas Water Heater".to_string(),

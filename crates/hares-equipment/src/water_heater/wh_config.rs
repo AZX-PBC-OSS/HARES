@@ -72,6 +72,12 @@ pub struct GasWaterHeaterConfig {
     /// When `None`, defaults to the tank setpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hot_draw_temp_c: Option<f64>,
+    /// Fraction of standing pilot thermal power routed to the tank water.
+    /// The remainder is routed as ambient heat loss to the zone.
+    /// Default: 0.80 — matches EnergyPlus's typical OffCycParaFracToTank
+    /// (EnergyPlus WaterThermalTanks.cc:6213-6214).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pilot_fraction_to_tank: Option<f64>,
 }
 
 impl EquipmentTypedConfig for GasWaterHeaterConfig {
@@ -173,6 +179,12 @@ impl GasWaterHeaterConfig {
             false,
         )?;
         check_finite("gas_wh: hot_draw_temp_c", self.hot_draw_temp_c, 0.0, false)?;
+        check_range(
+            "gas_wh: pilot_fraction_to_tank",
+            self.pilot_fraction_to_tank,
+            0.0,
+            1.0,
+        )?;
         Ok(())
     }
 }
@@ -757,6 +769,7 @@ mod tests {
             conversion_efficiency: None,
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
+            pilot_fraction_to_tank: None,
         };
         let ec = EquipmentConfig::from_typed(
             "gas".to_string(),

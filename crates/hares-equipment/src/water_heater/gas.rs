@@ -33,7 +33,12 @@ const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE storage WH defaul
 const DEFAULT_BURNER_INPUT_W: f64 = 11_000.0;
 const DEFAULT_BURNER_EFFICIENCY: f64 = 0.78;
 const DEFAULT_FLUE_LOSS_FRACTION: f64 = 0.10;
-const DEFAULT_PILOT_POWER_W: f64 = 5.0;
+// Standing pilot thermal power in watts (post-conversion heat delivered to the
+// tank or ambient). Typical standing pilot gas consumption is 200–800 BTU/h
+// (60–230 W thermal). 150 W is a reasonable midpoint for residential gas storage
+// water heaters. ASHRAE HoF 2021 Ch.51 Table 2 range; DOE 10 CFR 430 Subpart C
+// App. E §2.6.
+const DEFAULT_PILOT_POWER_W: f64 = 150.0;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GasWhState {
     setpoint_c: f64,
@@ -49,6 +54,7 @@ struct GasWhState {
     flue_loss_w: f64,
     fan_electric_w: f64,
     draw_flow_rate_kg_s: f64,
+    pilot_fraction_to_tank: f64,
     // --- Demand response state ---
     dr_level: DRLevel,
     dr_setpoint_offset_c: f64,
@@ -89,6 +95,9 @@ pub struct GasWH {
     skin_loss_fraction: f64,
     /// Maximum safe tank temperature (°C); burner is locked out above this.
     max_tank_temp_c: f64,
+    /// Fraction of pilot thermal power routed to tank water; remainder to ambient zone.
+    /// Default 0.80 per EnergyPlus OffCycParaFracToTank (WaterThermalTanks.cc:6213-6214).
+    pilot_fraction_to_tank: f64,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
@@ -184,6 +193,7 @@ impl GasWH {
             // Default EF ~0.78 → skin_loss_fraction = 0.91
             skin_loss_fraction: default_skin_loss_fraction(DEFAULT_BURNER_EFFICIENCY),
             max_tank_temp_c: DEFAULT_MAX_TANK_TEMP_C,
+            pilot_fraction_to_tank: 0.80,
             dr_setpoint_offset_c: 0.0,
             dr_load_fraction: 1.0,
             dr_duration_remaining_s: None,
@@ -366,6 +376,7 @@ impl GasWH {
         self.skin_loss_fraction = c
             .skin_loss_fraction
             .unwrap_or_else(|| default_skin_loss_fraction(self.burner_efficiency_constant));
+        self.pilot_fraction_to_tank = c.pilot_fraction_to_tank.unwrap_or(0.80);
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
 
         self.dr_setpoint_offset_c = 0.0;
@@ -482,18 +493,41 @@ impl Equipment for GasWH {
         let flue_loss_w = gross_heat_w * self.flue_loss_fraction;
         let tank_heat_w = (gross_heat_w - flue_loss_w).max(0.0);
 
-        let heat_injections: Vec<(usize, f64)> = if tank_heat_w > 0.0 {
-            vec![(self.burner_node, tank_heat_w)]
-        } else {
-            vec![]
+        // Standing pilot heat: fraction goes to tank water, remainder to ambient.
+        // EnergyPlus WaterThermalTanks.cc models this as OffCycParaLoad with
+        // OffCycParaFracToTank routing a fraction to the tank.
+        let pilot_heat_to_water_w = self.pilot_power_w * self.pilot_fraction_to_tank;
+        let pilot_heat_to_ambient_w = self.pilot_power_w * (1.0 - self.pilot_fraction_to_tank);
+
+        let heat_injections: Vec<(usize, f64)> = {
+            let mut injections = vec![];
+            if tank_heat_w > 0.0 {
+                injections.push((self.burner_node, tank_heat_w));
+            }
+            if pilot_heat_to_water_w > 0.0 {
+                injections.push((self.burner_node, pilot_heat_to_water_w));
+            }
+            injections
         };
+
+        // Conservation invariant: pilot thermal power must equal sum of routed components.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let expected = pilot_heat_to_water_w + pilot_heat_to_ambient_w;
+            let actual = self.pilot_power_w;
+            assert!(
+                (expected - actual).abs() < 1e-6,
+                "pilot heat not conserved: {expected:.9} != {actual:.9}"
+            );
+        }
 
         // Compute standby skin loss to zone before tank.step() updates temperatures.
         // OCHRE WaterHeater.py:712-723: fraction of tank UA losses that enter the zone.
         let avg_temp_before =
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3());
         let standby_loss_w = self.tank.ua_w_per_k() * (avg_temp_before - ambient_c).max(0.0);
-        let skin_loss_to_zone_w = standby_loss_w * self.skin_loss_fraction;
+        let skin_loss_to_zone_w =
+            standby_loss_w * self.skin_loss_fraction + pilot_heat_to_ambient_w;
 
         let draw_l_per_min_source = self.draw_l_per_min_source.as_mut();
         let mains_temp_c_source = self.mains_temp_c_source.as_mut();
@@ -579,6 +613,10 @@ impl Equipment for GasWH {
         self.telemetry.set(tk::PILOT_POWER_W, self.pilot_power_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
         self.telemetry
+            .set(tk::PILOT_HEAT_TO_WATER_W, pilot_heat_to_water_w);
+        self.telemetry
+            .set(tk::PILOT_HEAT_TO_AMBIENT_W, pilot_heat_to_ambient_w);
+        self.telemetry
             .set(tk::PILOT_KW, self.pilot_power_w / 1_000.0);
         self.telemetry
             .set(tk::FUEL_INPUT_KW, fuel_input_w / 1_000.0);
@@ -655,6 +693,7 @@ impl Equipment for GasWH {
             dr_setpoint_offset_c: self.dr_setpoint_offset_c,
             dr_load_fraction: self.dr_load_fraction,
             dr_duration_remaining_s: self.dr_duration_remaining_s,
+            pilot_fraction_to_tank: self.pilot_fraction_to_tank,
         })
     }
 
@@ -670,6 +709,7 @@ impl Equipment for GasWH {
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
         self.tank.load_state(&decoded.tank_state)?;
+        self.pilot_fraction_to_tank = decoded.pilot_fraction_to_tank;
 
         self.telemetry
             .insert(tk::TANK_AVG_TEMP_C, decoded.tank_avg_temp_c);
@@ -692,6 +732,8 @@ impl Equipment for GasWH {
             tk::OPERATING_MODE,
             if decoded.burner_on { 1.0 } else { 0.0 },
         );
+        self.telemetry.insert(tk::PILOT_HEAT_TO_WATER_W, 0.0);
+        self.telemetry.insert(tk::PILOT_HEAT_TO_AMBIENT_W, 0.0);
         self.core_output = CoreOutput::default();
 
         Ok(())
@@ -785,7 +827,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(14);
+    let mut telemetry = Telemetry::with_capacity(16);
     telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
     telemetry.insert(tk::BURNER_EFFICIENCY, 0.0);
     telemetry.insert(tk::BURNER_EFFICIENCY_SOURCE, 0.0);
@@ -800,6 +842,8 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::UNMET_LOAD_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::OUTLET_TEMP_C, 0.0);
+    telemetry.insert(tk::PILOT_HEAT_TO_WATER_W, 0.0);
+    telemetry.insert(tk::PILOT_HEAT_TO_AMBIENT_W, 0.0);
     telemetry
 }
 
@@ -889,6 +933,16 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
         name: tk::SKIN_LOSS_W.to_string(),
         unit: "W".to_string(),
         description: "Tank jacket (skin) heat loss to zone".to_string(),
+    });
+    fields.push(TelemetryField {
+        name: tk::PILOT_HEAT_TO_WATER_W.to_string(),
+        unit: "W".to_string(),
+        description: "Pilot thermal power routed to tank water".to_string(),
+    });
+    fields.push(TelemetryField {
+        name: tk::PILOT_HEAT_TO_AMBIENT_W.to_string(),
+        unit: "W".to_string(),
+        description: "Pilot thermal power routed to ambient zone".to_string(),
     });
     fields
 }
@@ -997,6 +1051,7 @@ mod tests {
                 conversion_efficiency: None,
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
+                pilot_fraction_to_tank: None,
             },
         )
     }
@@ -1031,6 +1086,10 @@ mod tests {
                     typed.skin_loss_fraction = Some(*x)
                 }
                 ("skin_loss_fraction", None) => typed.skin_loss_fraction = None,
+                ("pilot_fraction_to_tank", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.pilot_fraction_to_tank = Some(*x)
+                }
+                ("pilot_fraction_to_tank", None) => typed.pilot_fraction_to_tank = None,
                 ("max_tank_temp_c", Some(crate::config::ConfigValue::Float(x))) => {
                     typed.max_tank_temp_c = Some(*x)
                 }
@@ -1335,7 +1394,7 @@ mod tests {
     }
 
     #[test]
-    fn pilot_defaults_to_five_w_without_pilot_or_ignition_type() {
+    fn pilot_defaults_to_standing_pilot_power_when_unconfigured() {
         let cfg = config_with_extras(&[("pilot_power_w", None)]);
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -1551,6 +1610,7 @@ mod tests {
                 conversion_efficiency: Some(0.80),
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
+                pilot_fraction_to_tank: None,
             },
         );
         let mut eq = GasWH::new(cfg.clone());
@@ -1605,6 +1665,7 @@ mod tests {
                 conversion_efficiency: Some(eta_c),
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
+                pilot_fraction_to_tank: None,
             },
         );
         let mut eq = GasWH::new(cfg.clone());
@@ -1874,6 +1935,147 @@ mod tests {
                 .unwrap_or(-1.0),
             0.0,
             "source must be 0 (Default)"
+        );
+    }
+
+    /// Pilot heat must be injected at the burner node regardless of whether the
+    /// main burner is firing. With pilot_power_w=100 W and fraction=0.80, the
+    /// telemetry must report 80 W to water and 20 W to ambient.
+    #[test]
+    fn pilot_heat_to_water_is_injected_at_burner_node_regardless_of_burner_state() {
+        let cfg = config_with_extras(&[
+            ("pilot_power_w", Some(100.0.into())),
+            ("pilot_fraction_to_tank", Some(0.80.into())),
+            ("initial_tank_temp_c", Some(52.0.into())), // at setpoint → burner off
+            ("setpoint_c", Some(52.0.into())),
+            ("flue_loss_fraction", Some(0.0.into())),
+            ("draw_flow_rate_kg_s", Some(0.0.into())),
+        ]);
+        let e = env(21.0);
+
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        let to_water = eq
+            .telemetry()
+            .get(tk::PILOT_HEAT_TO_WATER_W)
+            .expect("PILOT_HEAT_TO_WATER_W must be present");
+        let to_ambient = eq
+            .telemetry()
+            .get(tk::PILOT_HEAT_TO_AMBIENT_W)
+            .expect("PILOT_HEAT_TO_AMBIENT_W must be present");
+
+        assert!(
+            (to_water - 80.0).abs() < 1e-9,
+            "pilot heat to water should be 80.0 W (100.0 * 0.80), got {to_water}"
+        );
+        assert!(
+            (to_ambient - 20.0).abs() < 1e-9,
+            "pilot heat to ambient should be 20.0 W (100.0 * 0.20), got {to_ambient}"
+        );
+        // Burner should NOT be firing — tank is at setpoint.
+        assert_eq!(
+            eq.telemetry().get(tk::BURNER_POWER_W).unwrap_or(1.0),
+            0.0,
+            "burner must be off when tank is at setpoint"
+        );
+    }
+
+    /// Pilot energy is conserved: the sum of heat to water and heat to ambient
+    /// must equal the total pilot power. The tank temperature must rise by the
+    /// expected amount from the water-bound fraction.
+    #[test]
+    fn pilot_heat_routing_conserves_energy_and_heats_tank_correctly() {
+        let cfg = config_with_extras(&[
+            ("pilot_power_w", Some(100.0.into())),
+            ("pilot_fraction_to_tank", Some(0.80.into())),
+            ("initial_tank_temp_c", Some(30.0.into())),
+            ("setpoint_c", Some(52.0.into())),
+            ("flue_loss_fraction", Some(0.0.into())),
+            ("draw_flow_rate_kg_s", Some(0.0.into())),
+            ("skin_loss_fraction", Some(0.0.into())),
+            ("max_tank_temp_c", Some(300.0.into())),
+        ]);
+        let e = env(20.0);
+
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        let tank_avg_before = eq.telemetry().get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0);
+
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        let to_water = eq.telemetry().get(tk::PILOT_HEAT_TO_WATER_W).unwrap_or(0.0);
+        let to_ambient = eq
+            .telemetry()
+            .get(tk::PILOT_HEAT_TO_AMBIENT_W)
+            .unwrap_or(0.0);
+
+        // Conservation: pilot heat sum = pilot_power_w
+        let sum = to_water + to_ambient;
+        assert!(
+            (sum - 100.0).abs() < 1e-9,
+            "pilot heat must be conserved: {to_water} + {to_ambient} = {sum}, expected 100.0"
+        );
+
+        // Tank temperature must increase from pilot heat injection.
+        let tank_avg_after = eq.telemetry().get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0);
+        assert!(
+            tank_avg_after > tank_avg_before,
+            "tank temperature must rise from pilot heat injection: \
+             before={tank_avg_before:.3}°C, after={tank_avg_after:.3}°C"
+        );
+    }
+
+    /// When a gas WH sits in standby (no draw, burner off because tank is at
+    /// setpoint), continuous pilot heat injection into the tank water causes a
+    /// small upward temperature drift over a multi-timestep period.
+    #[test]
+    fn standby_tank_temp_drifts_upward_from_continuous_pilot_heat_injection() {
+        let cfg = config_with_extras(&[
+            ("pilot_power_w", Some(150.0.into())),
+            ("pilot_fraction_to_tank", Some(0.80.into())),
+            ("initial_tank_temp_c", Some(52.0.into())), // at setpoint → burner off
+            ("setpoint_c", Some(52.0.into())),
+            ("deadband_c", Some(5.0.into())),
+            ("flue_loss_fraction", Some(0.0.into())),
+            ("draw_flow_rate_kg_s", Some(0.0.into())),
+            ("max_tank_temp_c", Some(300.0.into())),
+        ]);
+        let e = env(20.0);
+
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        // Record the tank's volume-weighted average temperature before the
+        // standby period. After stepping, we call the telemetry which is updated
+        // in step().
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+        let temp_after_1m = eq.telemetry().get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0);
+
+        // Step for 1 hour (3600 s) in standby.
+        let mut p2 = ports();
+        eq.step(&e, Duration::from_secs(3600), &mut p2).unwrap();
+        let temp_after_1h = eq.telemetry().get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0);
+
+        // The tank should drift upward because 150 W * 0.80 = 120 W is injected
+        // continuously — even though the burner is off and no draw is occurring.
+        assert!(
+            temp_after_1h > temp_after_1m,
+            "standby tank temp must drift upward from continuous pilot heat: \
+             1m={temp_after_1m:.4}°C, 1h={temp_after_1h:.4}°C"
+        );
+        // The drift should be non-trivial (> 0.1°C) for 120 W over 1 hour.
+        assert!(
+            temp_after_1h - temp_after_1m > 0.1,
+            "pilot heat drift should be > 0.1°C over 1 hour for 120 W injection, \
+             got {:.4}°C",
+            temp_after_1h - temp_after_1m
         );
     }
 }

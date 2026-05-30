@@ -712,6 +712,7 @@ fn oracle_gas_wh_standby_ua_decay_24h() {
             conversion_efficiency: None,
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
+            pilot_fraction_to_tank: None,
         },
     );
 

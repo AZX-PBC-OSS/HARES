@@ -1813,6 +1813,7 @@ mod tests {
                     conversion_efficiency: None,
                     fixture_delivery_temp_c: None,
                     hot_draw_temp_c: None,
+                    pilot_fraction_to_tank: None,
                 },
             ),
             "Heat Pump Water Heater" => EquipmentConfig::from_typed(

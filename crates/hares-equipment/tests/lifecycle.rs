@@ -862,6 +862,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 conversion_efficiency: None,
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
+                pilot_fraction_to_tank: None,
             },
         ),
         "Resistance Water Heater" | "Electric Resistance Water Heater" => typed_alias_config(
