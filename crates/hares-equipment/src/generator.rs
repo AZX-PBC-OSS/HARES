@@ -33,6 +33,7 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 
 use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::config::EquipmentTypedConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
@@ -1101,7 +1102,7 @@ impl Equipment for Generator {
         }
 
         // Read Stage 1 accumulated net load (load + any earlier generation).
-        let net_load_kw = ports.electrical.net_active_kw();
+        let net_load_kw = power_w_to_kw(ports.electrical.net_active_w());
 
         let unconstrained_kw = self.determine_target_kw(net_load_kw);
         // Ramp rate only constrains power increases (OCHRE Generator.py:129).
@@ -1123,7 +1124,7 @@ impl Equipment for Generator {
         } else {
             output_kw
         };
-        let dc_power_w = dc_kw * 1000.0;
+        let dc_power_w = power_kw_to_w(dc_kw);
 
         // Capacity ratio uses DC power for fuel cells (stack rating),
         // AC power for combustion generators.
@@ -1138,7 +1139,7 @@ impl Equipment for Generator {
         } else {
             0.0
         };
-        let electrical_w = output_kw * 1000.0;
+        let electrical_w = power_kw_to_w(output_kw);
         // EnergyPlus FuelCellElectricGenerator.cc:2112-2116 — inverter model.
         let inverter_loss_w = if is_fuel_cell {
             dc_power_w - electrical_w
@@ -1343,7 +1344,7 @@ impl Equipment for Generator {
 
         // Write electrical port (negative = generation).
         ports.accumulate(&PortContribution::Electrical {
-            active_power_kw: -output_kw,
+            active_power_w: power_kw_to_w(-output_kw),
             reactive_power_kvar: 0.0,
         })?;
 
@@ -1532,7 +1533,7 @@ impl Equipment for Generator {
         let capacity_ratio = dc_kw / self.rated_power_kw;
         let eta = self.efficiency.evaluate(capacity_ratio);
         let fuel_w = if self.current_power_kw > IDLE_KW_THRESHOLD && eta > 0.0 {
-            (dc_kw * 1000.0) / eta
+            power_kw_to_w(dc_kw) / eta
         } else {
             0.0
         };
@@ -1549,7 +1550,7 @@ impl Equipment for Generator {
             let q_lube_w = fuel_w * self.eta_lube_oil;
             let q_exhaust_w = fuel_w * self.eta_exhaust;
             let q_thermal_w = q_jacket_w + q_lube_w + q_exhaust_w;
-            let q_flue_w = fuel_w - self.current_power_kw * 1000.0 - q_thermal_w;
+            let q_flue_w = fuel_w - power_kw_to_w(self.current_power_kw) - q_thermal_w;
             self.telemetry.set(tk::THERMAL_AVAILABLE_W, q_thermal_w);
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
             // On load_state, the checkpoint does not know whether capping was
@@ -1575,8 +1576,8 @@ impl Equipment for Generator {
                 .set(tk::SUPPLY_TEMP_EXHAUST_C, self.supply_temp_exhaust_c);
         }
         if is_fuel_cell {
-            let dc_power_w = dc_kw * 1000.0;
-            let inverter_loss_w = (dc_kw - self.current_power_kw) * 1000.0;
+            let dc_power_w = power_kw_to_w(dc_kw);
+            let inverter_loss_w = power_kw_to_w(dc_kw - self.current_power_kw);
             let stack_cooling_w = compute_stack_cooler_heat(
                 dc_power_w,
                 self.stack_temp_c,
@@ -2320,8 +2321,10 @@ mod tests {
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
-        assert!(slots.electrical.generation_power_kw < 0.0);
-        assert!((slots.electrical.generation_power_kw + generator.current_power_kw).abs() < 1e-9);
+        assert!(slots.electrical.generation_power_w < 0.0);
+        assert!(
+            (slots.electrical.generation_power_w + generator.current_power_kw * 1000.0).abs() < 1.0
+        );
     }
 
     // =======================================================================
@@ -2408,7 +2411,7 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
 
         let mut slots = ports_for(&generator);
-        slots.electrical.load_power_kw = 4.0;
+        slots.electrical.load_power_w = 4000.0;
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
@@ -2429,7 +2432,7 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
 
         let mut slots = ports_for(&generator);
-        slots.electrical.load_power_kw = 5.0;
+        slots.electrical.load_power_w = 5000.0;
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
@@ -2467,7 +2470,7 @@ mod tests {
 
         // Load of 2 kW is below capacity_min of 3 kW → clamp up to 3 kW.
         let mut slots = ports_for(&generator);
-        slots.electrical.load_power_kw = 2.0;
+        slots.electrical.load_power_w = 2000.0;
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
@@ -2479,7 +2482,7 @@ mod tests {
 
         // Load of 5 kW is above capacity_min → generator should run at requested load.
         slots.zero();
-        slots.electrical.load_power_kw = 5.0;
+        slots.electrical.load_power_w = 5000.0;
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
@@ -3501,7 +3504,7 @@ mod tests {
 
         // With net load present, generator should stay off because SC is disabled.
         let mut slots = ports_for(&generator);
-        slots.electrical.load_power_kw = 8.0;
+        slots.electrical.load_power_w = 8.0;
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
@@ -3519,7 +3522,7 @@ mod tests {
             })
             .unwrap();
         slots.zero();
-        slots.electrical.load_power_kw = 8.0;
+        slots.electrical.load_power_w = 8.0;
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
@@ -3562,7 +3565,7 @@ mod tests {
 
         assert!(generator.telemetry().get(tk::FUEL_INPUT_W).unwrap() < IDLE_KW_THRESHOLD);
         assert!(generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() < IDLE_KW_THRESHOLD);
-        assert!(slots.electrical.generation_power_kw.abs() < IDLE_KW_THRESHOLD);
+        assert!(slots.electrical.generation_power_w.abs() < IDLE_KW_THRESHOLD);
         assert!(slots.fuel.get(FuelType::Gas) < IDLE_KW_THRESHOLD);
     }
 

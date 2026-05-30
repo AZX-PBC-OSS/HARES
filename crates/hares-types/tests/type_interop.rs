@@ -133,39 +133,43 @@ fn electrical_contribution_routes_load_vs_generation() {
 
     slots
         .accumulate(&PortContribution::Electrical {
-            active_power_kw: 1.5,
+            active_power_w: 1_500.0,
             reactive_power_kvar: 0.0,
         })
         .expect("accumulate load must succeed");
 
-    approx_eq(slots.electrical.load_power_kw, 1.5, "load kW");
+    approx_eq(slots.electrical.load_power_w, 1_500.0, "load W");
     approx_eq(
-        slots.electrical.generation_power_kw,
+        slots.electrical.generation_power_w,
         0.0,
-        "generation kW must be zero",
+        "generation W must be zero",
     );
     approx_eq(
-        slots.electrical.net_active_kw(),
-        1.5,
+        slots.electrical.net_active_w(),
+        1_500.0,
         "net must equal load when no generation",
     );
 
     slots
         .accumulate(&PortContribution::Electrical {
-            active_power_kw: -1.0,
+            active_power_w: -1_000.0,
             reactive_power_kvar: 0.0,
         })
         .expect("accumulate generation must succeed");
 
     approx_eq(
-        slots.electrical.load_power_kw,
-        1.5,
+        slots.electrical.load_power_w,
+        1_500.0,
         "load unchanged after adding generation",
     );
-    approx_eq(slots.electrical.generation_power_kw, -1.0, "generation kW");
     approx_eq(
-        slots.electrical.net_active_kw(),
-        0.5,
+        slots.electrical.generation_power_w,
+        -1_000.0,
+        "generation W",
+    );
+    approx_eq(
+        slots.electrical.net_active_w(),
+        500.0,
         "net = load + generation",
     );
 }
@@ -193,7 +197,7 @@ fn zero_resets_all_slots_while_preserving_structure() {
         .expect("accumulate thermal");
     slots
         .accumulate(&PortContribution::Electrical {
-            active_power_kw: 2.0,
+            active_power_w: 2_000.0,
             reactive_power_kvar: 0.5,
         })
         .expect("accumulate electrical");
@@ -204,7 +208,7 @@ fn zero_resets_all_slots_while_preserving_structure() {
         "must have thermal gain before zero"
     );
     assert!(
-        slots.electrical.load_power_kw > 0.0,
+        slots.electrical.load_power_w > 0.0,
         "must have load before zero"
     );
 
@@ -232,9 +236,9 @@ fn zero_resets_all_slots_while_preserving_structure() {
             "category subtotal after zero",
         );
     }
-    approx_eq(slots.electrical.load_power_kw, 0.0, "load_power after zero");
+    approx_eq(slots.electrical.load_power_w, 0.0, "load_power after zero");
     approx_eq(
-        slots.electrical.generation_power_kw,
+        slots.electrical.generation_power_w,
         0.0,
         "generation_power after zero",
     );
@@ -243,7 +247,7 @@ fn zero_resets_all_slots_while_preserving_structure() {
         0.0,
         "reactive after zero",
     );
-    approx_eq(slots.electrical.net_active_kw(), 0.0, "net after zero");
+    approx_eq(slots.electrical.net_active_w(), 0.0, "net after zero");
 
     // Structure is preserved: the thermal accumulator for the declared zone still exists.
     assert_eq!(

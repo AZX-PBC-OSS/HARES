@@ -214,7 +214,7 @@ fn oracle_electric_baseboard_24h_cop1() {
         eq.update_control(&env);
         eq.step(&env, DT, &mut ports).unwrap();
 
-        total_electric_kw_s += ports.electrical.net_active_kw() * DT_S as f64;
+        total_electric_kw_s += ports.electrical.net_active_w() * DT_S as f64 / 1_000.0;
         total_heat_w_s += ports.thermal[0].sensible_gain_w * DT_S as f64;
     }
 
@@ -355,7 +355,7 @@ fn oracle_pv_24h_constant_irradiance() {
         let mut ports = default_ports();
         eq.step(&env, DT, &mut ports).unwrap();
 
-        total_gen_kw_s += (-ports.electrical.net_active_kw()) * DT_S as f64;
+        total_gen_kw_s += (-ports.electrical.net_active_w()) * DT_S as f64 / 1_000.0;
     }
 
     let total_gen_kwh = total_gen_kw_s / 3_600.0;
@@ -505,7 +505,7 @@ fn oracle_pv_24h_lut_parity() {
         let mut ports = default_ports();
         eq.step(&env, DT, &mut ports).unwrap();
 
-        total_gen_kw_s += (-ports.electrical.net_active_kw()) * DT_S as f64;
+        total_gen_kw_s += (-ports.electrical.net_active_w()) * DT_S as f64 / 1_000.0;
     }
 
     let total_gen_kwh = total_gen_kw_s / 3_600.0;
@@ -652,7 +652,7 @@ fn oracle_generator_24h_constant_load() {
         generator.step(&env, DT, &mut ports).unwrap();
 
         total_fuel_w_s += ports.fuel.get(FuelType::Gas) * DT_S as f64;
-        total_gen_kw_s += (-ports.electrical.net_active_kw()) * DT_S as f64;
+        total_gen_kw_s += (-ports.electrical.net_active_w()) * DT_S as f64 / 1_000.0;
     }
 
     let total_fuel_kwh = total_fuel_w_s / 3_600_000.0;

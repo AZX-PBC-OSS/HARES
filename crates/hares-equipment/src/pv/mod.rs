@@ -17,6 +17,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::Datelike;
+use hares_physics::units::power_kw_to_w;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -1062,7 +1063,7 @@ impl Equipment for PV {
         }
 
         ports.accumulate(&PortContribution::Electrical {
-            active_power_kw: -final_p_kw,
+            active_power_w: power_kw_to_w(-final_p_kw),
             reactive_power_kvar: -final_q_kvar,
         })?;
 
@@ -1578,7 +1579,7 @@ mod tests {
 
         approx_eq(pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(-1.0), 0.0);
         approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0), 0.0);
-        approx_eq(ports.electrical.generation_power_kw, 0.0);
+        approx_eq(ports.electrical.generation_power_w, 0.0);
     }
 
     #[test]
@@ -1681,8 +1682,8 @@ mod tests {
 
         assert!(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0) > 0.0);
         approx_eq(
-            ports.electrical.generation_power_kw,
-            -pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0),
+            ports.electrical.generation_power_w,
+            -pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0) * 1000.0,
         );
     }
 
@@ -1751,7 +1752,7 @@ mod tests {
 
         approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0), 1.5);
         assert!(pv.telemetry().get(tk::CURTAILMENT_KW).unwrap_or(0.0) > 0.0);
-        approx_eq(ports.electrical.generation_power_kw, -1.5);
+        approx_eq(ports.electrical.generation_power_w, -1500.0);
     }
 
     #[test]
@@ -1892,7 +1893,7 @@ mod tests {
         pv_calm
             .step(&env_calm, Duration::from_secs(60), &mut ports_calm)
             .unwrap();
-        let power_calm = -ports_calm.electrical.generation_power_kw;
+        let power_calm = -ports_calm.electrical.generation_power_w;
 
         // Windy day (8 m/s)
         let env_windy = env_with_surfaces_full(
@@ -1912,7 +1913,7 @@ mod tests {
         pv_windy
             .step(&env_windy, Duration::from_secs(60), &mut ports_windy)
             .unwrap();
-        let power_windy = -ports_windy.electrical.generation_power_kw;
+        let power_windy = -ports_windy.electrical.generation_power_w;
 
         assert!(
             power_windy > power_calm,
@@ -1962,7 +1963,7 @@ mod tests {
             "expected inverter_clipping_kw > 0, got {clipping_kw}"
         );
         // Port contribution must reflect clamped value.
-        approx_eq(ports.electrical.generation_power_kw, -3.0);
+        approx_eq(ports.electrical.generation_power_w, -3000.0);
     }
 
     /// With power_factor=0.9, reactive power must equal P * tan(acos(0.9)).
@@ -2810,9 +2811,9 @@ mod tests {
         );
         // Port contribution must also respect the limit (negative = generation).
         assert!(
-            -ports_limited.electrical.generation_power_kw <= 2.0 + 1e-9,
-            "port generation_power_kw must be ≤ 2.0 kW, got {}",
-            -ports_limited.electrical.generation_power_kw
+            -ports_limited.electrical.generation_power_w <= 2000.0 + 1e-3,
+            "port generation_power_w must be ≤ 2000.0 W (2.0 kW), got {}",
+            -ports_limited.electrical.generation_power_w
         );
     }
 
@@ -2949,7 +2950,7 @@ mod tests {
             "inverter_clipping_kw must be > 0, got {clipping_kw:.3}"
         );
         // Port contribution must reflect the clamped value.
-        approx_eq(ports.electrical.generation_power_kw, -4.0);
+        approx_eq(ports.electrical.generation_power_w, -4000.0);
     }
 
     /// When `inverter_capacity_kw` is None (the default), the system resolves
@@ -3002,7 +3003,7 @@ mod tests {
             clipping_kw > 0.0,
             "inverter_clipping_kw must be > 0, got {clipping_kw:.3}"
         );
-        approx_eq(ports.electrical.generation_power_kw, -5.0);
+        approx_eq(ports.electrical.generation_power_w, -5000.0);
     }
 
     /// With `inverter_capacity_kw = Some(3.0)` and total DC = 5.0 kW, AC
@@ -3044,7 +3045,7 @@ mod tests {
             clipping_kw > 0.0,
             "expected clipping with 3kW inverter, got {clipping_kw:.3}"
         );
-        approx_eq(ports.electrical.generation_power_kw, -3.0);
+        approx_eq(ports.electrical.generation_power_w, -3000.0);
     }
 
     // --- T-0085: solar-position-aware LUT tests ---

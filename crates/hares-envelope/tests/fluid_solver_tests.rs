@@ -11,7 +11,6 @@ use hares_types::{
     DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidType, GridState,
     LoopId, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
 };
-use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Helpers

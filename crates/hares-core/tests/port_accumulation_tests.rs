@@ -43,7 +43,7 @@ fn thermal(zone: ZoneId, sensible_w: f64, latent_w: f64) -> PortContribution {
 
 fn electrical(active_kw: f64) -> PortContribution {
     PortContribution::Electrical {
-        active_power_kw: active_kw,
+        active_power_w: active_kw * 1000.0,
         reactive_power_kvar: 0.0,
     }
 }
@@ -65,9 +65,9 @@ fn electrical_accumulates_across_equipment() {
     for _ in 0..3 {
         ports.accumulate(&electrical(1.0)).unwrap();
     }
-    approx_eq(ports.electrical.load_power_kw, 3.0);
-    approx_eq(ports.electrical.net_active_kw(), 3.0);
-    approx_eq(ports.electrical.generation_power_kw, 0.0);
+    approx_eq(ports.electrical.load_power_w, 3000.0);
+    approx_eq(ports.electrical.net_active_w(), 3000.0);
+    approx_eq(ports.electrical.generation_power_w, 0.0);
 }
 
 #[test]
@@ -75,9 +75,9 @@ fn generation_subtracts_from_net() {
     let mut ports = PortSlots::default();
     ports.accumulate(&electrical(3.0)).unwrap(); // 3 kW load
     ports.accumulate(&electrical(-5.0)).unwrap(); // 5 kW PV
-    approx_eq(ports.electrical.net_active_kw(), -2.0);
-    approx_eq(ports.electrical.load_power_kw, 3.0);
-    approx_eq(ports.electrical.generation_power_kw, -5.0);
+    approx_eq(ports.electrical.net_active_w(), -2000.0);
+    approx_eq(ports.electrical.load_power_w, 3000.0);
+    approx_eq(ports.electrical.generation_power_w, -5000.0);
 }
 
 #[test]
@@ -89,9 +89,9 @@ fn mixed_load_and_generation_multiple_sources() {
     ports.accumulate(&electrical(-3.0)).unwrap();
     ports.accumulate(&electrical(-0.75)).unwrap();
 
-    approx_eq(ports.electrical.load_power_kw, 3.5);
-    approx_eq(ports.electrical.generation_power_kw, -3.75);
-    approx_eq(ports.electrical.net_active_kw(), -0.25);
+    approx_eq(ports.electrical.load_power_w, 3500.0);
+    approx_eq(ports.electrical.generation_power_w, -3750.0);
+    approx_eq(ports.electrical.net_active_w(), -250.0);
 }
 
 #[test]
@@ -99,13 +99,13 @@ fn reactive_power_accumulates_algebraically() {
     let mut ports = PortSlots::default();
     ports
         .accumulate(&PortContribution::Electrical {
-            active_power_kw: 1.0,
+            active_power_w: 1000.0,
             reactive_power_kvar: 0.5,
         })
         .unwrap();
     ports
         .accumulate(&PortContribution::Electrical {
-            active_power_kw: 1.0,
+            active_power_w: 1000.0,
             reactive_power_kvar: -0.2,
         })
         .unwrap();
@@ -223,9 +223,9 @@ fn zero_after_reset_clears_all_accumulators() {
     let z = ports.thermal.iter().find(|t| t.zone == zone).unwrap();
     approx_eq(z.sensible_gain_w, 0.0);
     approx_eq(z.latent_gain_w, 0.0);
-    approx_eq(ports.electrical.net_active_kw(), 0.0);
-    approx_eq(ports.electrical.load_power_kw, 0.0);
-    approx_eq(ports.electrical.generation_power_kw, 0.0);
+    approx_eq(ports.electrical.net_active_w(), 0.0);
+    approx_eq(ports.electrical.load_power_w, 0.0);
+    approx_eq(ports.electrical.generation_power_w, 0.0);
     approx_eq(ports.electrical.reactive_power_kvar, 0.0);
     approx_eq(ports.fuel.get(FuelType::Gas), 0.0);
 }
@@ -247,7 +247,7 @@ fn zero_then_accumulate_starts_fresh() {
     let z = ports.thermal.iter().find(|t| t.zone == zone).unwrap();
     approx_eq(z.sensible_gain_w, 100.0);
     approx_eq(z.latent_gain_w, 10.0);
-    approx_eq(ports.electrical.load_power_kw, 2.0);
+    approx_eq(ports.electrical.load_power_w, 2000.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +360,7 @@ fn multi_timestep_accumulation_is_independent() {
     ports.accumulate(&gas(5_000.0)).unwrap();
 
     let t1_sensible = ports.thermal[0].sensible_gain_w;
-    let t1_electric = ports.electrical.load_power_kw;
+    let t1_electric = ports.electrical.load_power_w;
     let t1_gas = ports.fuel.get(FuelType::Gas);
 
     ports.zero();
@@ -371,11 +371,11 @@ fn multi_timestep_accumulation_is_independent() {
     ports.accumulate(&gas(2_500.0)).unwrap();
 
     approx_eq(t1_sensible, 300.0);
-    approx_eq(t1_electric, 2.0);
+    approx_eq(t1_electric, 2000.0);
     approx_eq(t1_gas, 5_000.0);
 
     approx_eq(ports.thermal[0].sensible_gain_w, 150.0);
-    approx_eq(ports.electrical.load_power_kw, 1.0);
+    approx_eq(ports.electrical.load_power_w, 1000.0);
     approx_eq(ports.fuel.get(FuelType::Gas), 2_500.0);
 }
 
@@ -467,9 +467,9 @@ fn full_timestep_scenario_all_port_types() {
         .unwrap();
 
     // Verify electrical net
-    approx_eq(ports.electrical.generation_power_kw, -4.5);
-    approx_eq(ports.electrical.load_power_kw, 1.5);
-    approx_eq(ports.electrical.net_active_kw(), -3.0);
+    approx_eq(ports.electrical.generation_power_w, -4500.0);
+    approx_eq(ports.electrical.load_power_w, 1500.0);
+    approx_eq(ports.electrical.net_active_w(), -3000.0);
 
     // Verify thermal
     let main = ports.thermal.iter().find(|t| t.zone == zone_main).unwrap();

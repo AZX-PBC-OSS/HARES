@@ -280,10 +280,10 @@ fn round_trip_efficiency_below_unity() {
     for _ in 0..n_steps {
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).expect("step");
-        let p_net = ports.electrical.net_active_kw();
+        let p_net = ports.electrical.net_active_w();
         // Only tally positive (charging) contribution.
         if p_net > 0.0 {
-            energy_in_kwh += p_net * (60.0 / 3600.0);
+            energy_in_kwh += p_net * (60.0 / 3600.0) / 1_000.0;
         }
     }
 
@@ -297,10 +297,10 @@ fn round_trip_efficiency_below_unity() {
     for _ in 0..n_steps {
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).expect("step");
-        let p_net = ports.electrical.net_active_kw();
+        let p_net = ports.electrical.net_active_w();
         // Only tally negative (discharging) contribution.
         if p_net < 0.0 {
-            energy_out_kwh += p_net.abs() * (60.0 / 3600.0);
+            energy_out_kwh += p_net.abs() * (60.0 / 3600.0) / 1_000.0;
         }
     }
 
@@ -341,7 +341,7 @@ fn self_consumption_charges_when_exporting() {
     // Simulate -5 kW generation from a prior Independent-stage PV unit.
     ports
         .accumulate(&PortContribution::Electrical {
-            active_power_kw: -5.0,
+            active_power_w: -5_000.0,
             reactive_power_kvar: 0.0,
         })
         .expect("accumulate PV generation");
@@ -378,7 +378,7 @@ fn self_consumption_discharges_when_importing() {
     // Simulate +3 kW net load from other equipment.
     ports
         .accumulate(&PortContribution::Electrical {
-            active_power_kw: 3.0,
+            active_power_w: 3_000.0,
             reactive_power_kvar: 0.0,
         })
         .expect("accumulate load");

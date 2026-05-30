@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
+
 use crate::hvac::heating_config::{ElectricFurnaceConfig, GasFurnaceConfig};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -172,19 +174,19 @@ impl Equipment for ElectricFurnace {
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let gross_capacity_w = self.rated_capacity_w * duty * sf;
-        let fan_kw = (self.fan_power_w * duty) / 1_000.0 * sf;
+        let fan_kw = power_w_to_kw(self.fan_power_w * duty) * sf;
         // Heating element power + fan power
-        let electric_kw = (gross_capacity_w * self.eir) / 1_000.0 + fan_kw;
+        let electric_kw = power_w_to_kw(gross_capacity_w * self.eir) + fan_kw;
 
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_kw,
+                active_power_w: power_kw_to_w(electric_kw),
                 reactive_power_kvar: 0.0,
             })?;
         }
 
         // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
-        let fan_heat_w = fan_kw * 1000.0;
+        let fan_heat_w = power_kw_to_w(fan_kw);
         let total_sensible_w = gross_capacity_w + fan_heat_w;
 
         if total_sensible_w > 0.0 {
@@ -473,7 +475,7 @@ impl Equipment for GasFurnace {
         // Fuel is computed from gross capacity: the furnace burns fuel regardless
         // of duct losses. zone_heat_fractions distributes gross output by DSE.
         let gross_capacity_w = self.rated_capacity_w * duty * sf;
-        let fan_kw = (self.fan_power_w * duty) / 1_000.0 * sf;
+        let fan_kw = power_w_to_kw(self.fan_power_w * duty) * sf;
         let fuel_input_w = if gross_capacity_w > 0.0 {
             gross_capacity_w / self.fuel_efficiency
         } else {
@@ -489,13 +491,13 @@ impl Equipment for GasFurnace {
 
         if fan_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: fan_kw,
+                active_power_w: power_kw_to_w(fan_kw),
                 reactive_power_kvar: 0.0,
             })?;
         }
 
         // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
-        let fan_heat_w = fan_kw * 1000.0;
+        let fan_heat_w = power_kw_to_w(fan_kw);
         let total_sensible_w = gross_capacity_w + fan_heat_w;
 
         if total_sensible_w > 0.0 {
@@ -518,7 +520,7 @@ impl Equipment for GasFurnace {
         // OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
         // Gas furnace: main = gas input converted to kW. Fan is separate (electric).
         // OCHRE uses gas_therms_per_hour / kwh_to_therms; HARES uses fuel_input_w / 1000.
-        let main_power_kw = fuel_input_w / 1000.0;
+        let main_power_kw = power_w_to_kw(fuel_input_w);
         let rtf = if self.operating_mode != OperatingMode::Off {
             self.hvac.runtime.duty_cycle.clamp(0.0, 1.0)
         } else {
@@ -1070,7 +1072,7 @@ mod tests {
         eq.update_control(&state);
         eq.step(&state, Duration::from_secs(60), &mut ports)
             .unwrap();
-        assert!((ports.electrical.net_active_kw() - 8.4).abs() < 1e-9);
+        assert!((ports.electrical.net_active_w() - 8400.0).abs() < 1.0);
         assert!((ports.thermal[0].sensible_gain_w - 8_000.0).abs() < 1e-9);
 
         state.current_time += ChronoDuration::minutes(1);
@@ -1087,7 +1089,7 @@ mod tests {
         const AFUE: f64 = 0.8;
         const FAN_POWER_W: f64 = 400.0;
         const EXPECTED_FUEL_INPUT_W: f64 = RATED_CAPACITY_W / AFUE;
-        const EXPECTED_FAN_KW: f64 = FAN_POWER_W / 1_000.0;
+        const EXPECTED_FAN_W: f64 = FAN_POWER_W;
         const EXPECTED_SENSIBLE_GAIN_W: f64 = RATED_CAPACITY_W + FAN_POWER_W;
 
         let cfg = EquipmentConfig::from_typed(
@@ -1114,7 +1116,7 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert!((ports.fuel.get(hares_types::FuelType::Gas) - EXPECTED_FUEL_INPUT_W).abs() < 1e-6);
-        assert!((ports.electrical.net_active_kw() - EXPECTED_FAN_KW).abs() < 1e-9);
+        assert!((ports.electrical.net_active_w() - EXPECTED_FAN_W).abs() < 1.0);
         assert!((ports.thermal[0].sensible_gain_w - EXPECTED_SENSIBLE_GAIN_W).abs() < 1e-6);
     }
 

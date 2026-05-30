@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use hares_physics::units::power_w_to_kw;
 use hares_types::{DomainId, DomainSolver, DomainUpdate, ELECTRICAL, EnvironmentState, PortSlots};
 use thiserror::Error;
 
@@ -122,8 +123,8 @@ impl DomainSolver for ElectricalSolver {
         _dt: Duration,
         out: &mut DomainUpdate,
     ) {
-        let p_load = ports.electrical.load_power_kw;
-        let p_gen = ports.electrical.generation_power_kw;
+        let p_load = power_w_to_kw(ports.electrical.load_power_w);
+        let p_gen = power_w_to_kw(ports.electrical.generation_power_w);
         // ZIP correction uses voltage_pu directly per spec (nominal_voltage_pu
         // defaults to 1.0; non-unity nominal documented as a v2 extension).
         let load_scale = self.zip_load_scale(env.grid.voltage_pu);
@@ -215,19 +216,19 @@ mod tests {
         let mut ports = PortSlots::default();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 1.0,
+                active_power_w: 1000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 2.0,
+                active_power_w: 2000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 3.0,
+                active_power_w: 3000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
@@ -248,7 +249,7 @@ mod tests {
         let mut ports = PortSlots::default();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 6.0,
+                active_power_w: 6000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
@@ -268,13 +269,13 @@ mod tests {
         let mut ports = PortSlots::default();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: -5.0,
+                active_power_w: -5000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 3.0,
+                active_power_w: 3000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
@@ -296,20 +297,20 @@ mod tests {
         let mut ports = PortSlots::default();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 1.5,
+                active_power_w: 1500.0,
                 reactive_power_kvar: 0.2,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: -0.5,
+                active_power_w: -500.0,
                 reactive_power_kvar: -0.1,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let p_grid = solver.net_active_kw();
-        let p_equipment_sum = ports.electrical.net_active_kw();
-        assert!((p_grid - p_equipment_sum).abs() < 0.001);
+        let p_equipment_sum = ports.electrical.net_active_w();
+        assert!((p_grid - p_equipment_sum / 1_000.0).abs() < 0.001);
     }
 
     #[test]
@@ -328,23 +329,23 @@ mod tests {
         let mut ports = PortSlots::default();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 1.5,
+                active_power_w: 1500.0,
                 reactive_power_kvar: 0.2,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: -0.5,
+                active_power_w: -500.0,
                 reactive_power_kvar: -0.1,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let p_grid = solver.net_active_kw();
-        // Raw comparison would fail: |p_grid - ports.electrical.net_active_kw()| > 0.001
+        // Raw comparison would fail: |p_grid - ports.electrical.net_active_w() / 1_000.0| > 0.001
         let scale = solver.zip_load_scale(env.grid.voltage_pu);
         let port_net_adj =
-            ports.electrical.load_power_kw * scale + ports.electrical.generation_power_kw;
-        assert!((p_grid - port_net_adj).abs() < 0.001);
+            ports.electrical.load_power_w * scale + ports.electrical.generation_power_w;
+        assert!((p_grid - port_net_adj / 1_000.0).abs() < 0.001);
     }
 
     #[test]
@@ -363,16 +364,15 @@ mod tests {
         // 10 kW load, no generation
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 10.0,
+                active_power_w: 10000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let p_grid = solver.net_active_kw();
         let scale = solver.zip_load_scale(env.grid.voltage_pu);
-        let port_net =
-            ports.electrical.load_power_kw * scale + ports.electrical.generation_power_kw;
-        let residual = (p_grid - port_net).abs();
+        let port_net = ports.electrical.load_power_w * scale + ports.electrical.generation_power_w;
+        let residual = (p_grid - port_net / 1_000.0).abs();
         assert!(
             residual < 0.001,
             "ZIP-adjusted residual should be near-zero, got {residual}"
@@ -406,7 +406,7 @@ mod tests {
         let mut ports = PortSlots::default();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 10.0,
+                active_power_w: 10000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
@@ -436,13 +436,13 @@ mod tests {
         let mut ports = PortSlots::default();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 10.0,
+                active_power_w: 10000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: -3.0,
+                active_power_w: -3000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();

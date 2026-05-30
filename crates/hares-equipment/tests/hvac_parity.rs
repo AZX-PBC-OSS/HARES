@@ -337,7 +337,7 @@ fn gas_furnace_energy_balance() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let fuel_w = ports.fuel.get(FuelType::Gas);
-    let fan_kw = ports.electrical.net_active_kw();
+    let fan_kw = ports.electrical.net_active_w() / 1000.0;
     let thermal_w = ports.thermal[0].sensible_gain_w;
 
     // AFUE relationship: fuel = capacity / AFUE = 15000 / 0.80 = 18750 W
@@ -471,7 +471,7 @@ fn electric_baseboard_cop_is_unity() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_w = ports.electrical.net_active_kw() * 1_000.0;
+    let electric_w = ports.electrical.net_active_w();
 
     assert!(
         thermal_w > 0.0,
@@ -523,8 +523,7 @@ fn ashp_heating_cop_above_unity_at_ahri_h1() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_kw();
-    let electric_w = electric_kw * 1_000.0;
+    let electric_w = ports.electrical.net_active_w();
 
     assert!(
         thermal_w > 0.0,
@@ -657,7 +656,7 @@ fn air_conditioner_sign_convention_and_shr_split() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_kw();
+    let electric_kw = ports.electrical.net_active_w() / 1000.0;
 
     // Cooling removes heat → thermal contribution must be negative
     assert!(
@@ -1028,7 +1027,7 @@ fn hvac_step_snapshot(
     eq.step(env, Duration::from_secs(60), &mut ports).unwrap();
     HvacStepSnapshot {
         mode,
-        electric_kw: ports.electrical.net_active_kw(),
+        electric_kw: ports.electrical.net_active_w() / 1000.0,
         sensible_w: ports.thermal[0].sensible_gain_w,
         runtime_fraction: eq.telemetry().get("runtime_fraction").unwrap_or(0.0),
     }
@@ -1108,7 +1107,7 @@ fn ashp_heating_at_extreme_cold() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_kw();
+    let electric_kw = ports.electrical.net_active_w() / 1000.0;
 
     // Either the HP or backup resistance must deliver positive heat
     assert!(
@@ -1161,7 +1160,7 @@ fn ac_deadband_no_output_when_zone_below_cooling_setpoint() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_kw();
+    let electric_kw = ports.electrical.net_active_w() / 1000.0;
 
     assert_ne!(
         mode,

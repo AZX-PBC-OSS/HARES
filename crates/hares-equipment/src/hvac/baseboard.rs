@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
+
 use crate::hvac::heating_config::ElectricBaseboardConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -140,11 +142,11 @@ impl Equipment for ElectricBaseboard {
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;
-        let electric_kw = thermal_output_w * self.eir / 1_000.0;
+        let electric_kw = power_w_to_kw(thermal_output_w * self.eir);
 
         if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_kw,
+                active_power_w: power_kw_to_w(electric_kw),
                 reactive_power_kvar: 0.0,
             })?;
             self.hvac.write_zone_thermal_contributions(
@@ -369,7 +371,7 @@ mod tests {
         };
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        assert!((ports.electrical.net_active_kw() - 3.0).abs() < 1e-9);
+        assert!((ports.electrical.net_active_w() - 3000.0).abs() < 1.0);
         assert!((ports.thermal[0].sensible_gain_w - 3_000.0).abs() < 1e-9);
     }
 

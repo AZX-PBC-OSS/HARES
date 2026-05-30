@@ -308,12 +308,12 @@ fn port_slots_are_zeroed_between_steps() {
 
         // After step() returns, ports must be zeroed (run_timestep line ~1135).
         assert_eq!(
-            dwelling.ports.electrical.load_power_kw, 0.0,
-            "electrical load_power_kw must be 0.0 after step {step_idx} (ports.zero() not called)"
+            dwelling.ports.electrical.load_power_w, 0.0,
+            "electrical load_power_w must be 0.0 after step {step_idx} (ports.zero() not called)"
         );
         assert_eq!(
-            dwelling.ports.electrical.generation_power_kw, 0.0,
-            "electrical generation_power_kw must be 0.0 after step {step_idx}"
+            dwelling.ports.electrical.generation_power_w, 0.0,
+            "electrical generation_power_w must be 0.0 after step {step_idx}"
         );
         for acc in &dwelling.ports.thermal {
             assert_eq!(

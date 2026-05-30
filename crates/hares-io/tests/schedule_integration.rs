@@ -203,7 +203,7 @@ fn io_injection_to_scheduled_load_step_column_source() {
         .expect("scheduled load step should pass");
 
     let expected_kw = schedule.columns[col_idx][0];
-    assert!((ports.electrical.net_active_kw() - expected_kw).abs() < 1e-12);
+    assert!((ports.electrical.net_active_w() - expected_kw * 1000.0).abs() < 1e-9);
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
         * month[month_idx].as_f64().expect("month fraction")
         * max_kw;
 
-    assert!((ports.electrical.net_active_kw() - expected_kw).abs() < 1e-12);
+    assert!((ports.electrical.net_active_w() - expected_kw * 1000.0).abs() < 1e-9);
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn io_injection_to_scheduled_load_step_constant_source() {
     eq.step(&env, Duration::from_secs(60), &mut ports)
         .expect("scheduled load step should pass");
 
-    assert!((ports.electrical.net_active_kw() - expected_kw).abs() < 1e-12);
+    assert!((ports.electrical.net_active_w() - expected_kw * 1000.0).abs() < 1e-9);
 }
 
 #[test]
@@ -329,7 +329,7 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
     eq.step(&env, Duration::from_secs(60), &mut ports)
         .expect("event load step should pass with wrap semantics");
 
-    assert!(ports.electrical.load_power_kw > 0.0);
+    assert!(ports.electrical.load_power_w > 0.0);
 }
 
 #[test]
@@ -422,10 +422,10 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
     eq.step(&env, Duration::from_secs(3600), &mut ports)
         .expect("ScheduledLoad step should succeed");
 
-    let electric_kw = ports.electrical.net_active_kw();
+    let electric_kw = ports.electrical.net_active_w();
     assert!(
         electric_kw > 0.0,
-        "Refrigerator must draw positive electrical power; got {electric_kw} kW"
+        "Refrigerator must draw positive electrical power; got {electric_kw} W"
     );
 
     // Refrigerators have 100% sensible gain fraction, so total_sensible_gain_w == electric_w.
@@ -438,9 +438,8 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         "Refrigerator must produce positive sensible heat gain; got {sensible_w} W"
     );
     assert!(
-        (sensible_w - electric_kw * 1000.0).abs() < 1e-6,
-        "Refrigerator total_sensible_gain_w ({sensible_w} W) should equal electric_w ({} W)",
-        electric_kw * 1000.0
+        (sensible_w - electric_kw).abs() < 1e-6,
+        "Refrigerator total_sensible_gain_w ({sensible_w} W) should equal electric_w ({electric_kw} W)"
     );
 }
 
@@ -654,7 +653,7 @@ fn daily_profile_produces_different_weekday_vs_weekend_power_at_noon() {
     eq_wd
         .step(&weekday_env, Duration::from_secs(3600), &mut ports_wd)
         .expect("weekday step should pass");
-    let weekday_kw = ports_wd.electrical.net_active_kw();
+    let weekday_kw = ports_wd.electrical.net_active_w();
 
     let mut eq_we = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
     eq_we
@@ -664,7 +663,7 @@ fn daily_profile_produces_different_weekday_vs_weekend_power_at_noon() {
     eq_we
         .step(&weekend_env, Duration::from_secs(3600), &mut ports_we)
         .expect("weekend step should pass");
-    let weekend_kw = ports_we.electrical.net_active_kw();
+    let weekend_kw = ports_we.electrical.net_active_w();
 
     assert!(
         (weekday_kw - weekend_kw).abs() > 1e-12,

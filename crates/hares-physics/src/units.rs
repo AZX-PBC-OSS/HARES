@@ -71,20 +71,24 @@ pub fn pressure_to_pascal(value: Pressure) -> f64 {
 
 // --- Area ---
 
+#[inline]
 pub fn area_ft2_to_m2(ft2: f64) -> f64 {
     UomArea::new::<square_foot>(ft2).get::<square_meter>()
 }
 
+#[inline]
 pub fn area_m2_to_ft2(m2: f64) -> f64 {
     UomArea::new::<square_meter>(m2).get::<square_foot>()
 }
 
 // --- Length ---
 
+#[inline]
 pub fn length_ft_to_m(ft: f64) -> f64 {
     UomLength::new::<foot>(ft).get::<meter>()
 }
 
+#[inline]
 pub fn length_in_to_m(inches: f64) -> f64 {
     UomLength::new::<inch>(inches).get::<meter>()
 }
@@ -95,16 +99,36 @@ pub fn length_in_to_m(inches: f64) -> f64 {
 
 const BTU_PER_HOUR_TO_WATT: f64 = 0.293_071_07;
 
+#[inline]
 pub fn power_btu_h_to_w(btu_h: f64) -> f64 {
     btu_h * BTU_PER_HOUR_TO_WATT
 }
 
+#[inline]
 pub fn power_w_to_btu_h(w: f64) -> f64 {
     w / BTU_PER_HOUR_TO_WATT
 }
 
+#[inline]
 pub fn power_btu_h_to_kbtu_h(btu_h: f64) -> f64 {
     btu_h * 0.001
+}
+
+// --- Power (kW ↔ W) ---
+// Exact SI prefix conversion. Defined here so no call site writes `* 1_000.0`
+// or `/ 1_000.0` inline — the conversion factor lives in one place.
+const WATTS_PER_KILOWATT: f64 = 1_000.0;
+
+/// Convert kilowatts to watts.  1 kW = 1000 W (exact SI).
+#[inline]
+pub fn power_kw_to_w(kw: f64) -> f64 {
+    kw * WATTS_PER_KILOWATT
+}
+
+/// Convert watts to kilowatts.  1000 W = 1 kW (exact SI).
+#[inline]
+pub fn power_w_to_kw(w: f64) -> f64 {
+    w / WATTS_PER_KILOWATT
 }
 
 // --- Energy: therms → kWh ---
@@ -112,6 +136,7 @@ pub fn power_btu_h_to_kbtu_h(btu_h: f64) -> f64 {
 use uom::si::energy::{btu_it, kilowatt_hour};
 
 /// Convert therms to kilowatt-hours. 1 therm = 100,000 BTU(IT) ≈ 29.3001 kWh.
+#[inline]
 pub fn energy_therms_to_kwh(therms: f64) -> f64 {
     UomEnergy::new::<btu_it>(therms * 100_000.0).get::<kilowatt_hour>()
 }
@@ -121,11 +146,13 @@ pub fn energy_therms_to_kwh(therms: f64) -> f64 {
 // U: BTU/(hr·ft²·°F) → W/(m²·K)
 // uom has HeatTransfer (U-value) with the exact unit, so we use that.
 
+#[inline]
 pub fn u_value_ip_to_si(u_ip: f64) -> f64 {
     UomHeatTransfer::new::<btu_it_per_hour_square_foot_degree_fahrenheit>(u_ip)
         .get::<watt_per_square_meter_kelvin>()
 }
 
+#[inline]
 pub fn r_value_ip_to_si(r_ip: f64) -> f64 {
     // R = 1/U, so convert U=1/r_ip from IP to SI, then invert.
     1.0 / u_value_ip_to_si(1.0 / r_ip)
@@ -139,22 +166,26 @@ const CONDUCTIVITY_BTU_HR_FT_F_TO_W_M_K: f64 = 1.730_734_67;
 // BTU·in/(hr·ft²·°F) → W/(m·K):  = above / 12.
 const CONDUCTIVITY_BTU_IN_HR_FT2_F_TO_W_M_K: f64 = 0.144_227_91;
 
+#[inline]
 pub fn conductivity_btu_h_ft_f_to_w_m_k(k: f64) -> f64 {
     k * CONDUCTIVITY_BTU_HR_FT_F_TO_W_M_K
 }
 
+#[inline]
 pub fn conductivity_btu_in_h_ft2_f_to_w_m_k(k: f64) -> f64 {
     k * CONDUCTIVITY_BTU_IN_HR_FT2_F_TO_W_M_K
 }
 
 // --- Density ---
 
+#[inline]
 pub fn density_lb_ft3_to_kg_m3(rho: f64) -> f64 {
     UomMassDensity::new::<pound_per_cubic_foot>(rho).get::<kilogram_per_cubic_meter>()
 }
 
 // --- Specific heat ---
 
+#[inline]
 pub fn specific_heat_btu_lb_f_to_j_kg_k(cp: f64) -> f64 {
     UomSpecificHeatCapacity::new::<btu_per_pound_degree_fahrenheit>(cp)
         .get::<joule_per_kilogram_kelvin>()
@@ -162,43 +193,52 @@ pub fn specific_heat_btu_lb_f_to_j_kg_k(cp: f64) -> f64 {
 
 // --- Volume ---
 
+#[inline]
 pub fn volume_ft3_to_m3(ft3: f64) -> f64 {
     UomVolume::new::<cubic_foot>(ft3).get::<cubic_meter>()
 }
 
+#[inline]
 pub fn volume_gal_to_m3(gal: f64) -> f64 {
     UomVolume::new::<gallon>(gal).get::<cubic_meter>()
 }
 
+#[inline]
 pub fn volume_gal_to_l(gal: f64) -> f64 {
     UomVolume::new::<gallon>(gal).get::<liter>()
 }
 
+#[inline]
 pub fn volume_m3_to_l(m3: f64) -> f64 {
     UomVolume::new::<cubic_meter>(m3).get::<liter>()
 }
 
+#[inline]
 pub fn volume_l_to_m3(l: f64) -> f64 {
     UomVolume::new::<liter>(l).get::<cubic_meter>()
 }
 
 // --- Temperature (plain f64) ---
 
+#[inline]
 pub fn temperature_f_to_c(f: f64) -> f64 {
     UomTemperature::new::<degree_fahrenheit>(f).get::<degree_celsius>()
 }
 
+#[inline]
 pub fn temperature_c_to_f(c: f64) -> f64 {
     UomTemperature::new::<degree_celsius>(c).get::<degree_fahrenheit>()
 }
 
 /// Temperature delta conversion: °C range → °F range (multiply by 9/5, no +32 offset).
+#[inline]
 pub fn temperature_delta_c_to_f(delta_c: f64) -> f64 {
     delta_c * 9.0 / 5.0
 }
 
 // --- Composite: BTU/(hr·°F) → W/K ---
 // Used for water-heater UA conversions.  1 BTU/(hr·°F) = BTU_PER_HOUR_TO_W * 9/5.
+#[inline]
 pub fn btu_hr_per_f_to_w_per_k(x: f64) -> f64 {
     x * BTU_PER_HOUR_TO_WATT * 9.0 / 5.0
 }
@@ -214,12 +254,14 @@ const HOURS_PER_YEAR: f64 = 8760.0;
 
 /// Convert power in watts to annual energy in kWh/year.
 /// W * 8760 h/year / 1000 Wh/kWh = kWh/year.
+#[inline]
 pub fn power_watt_to_kwh_per_year(w: f64) -> f64 {
     w * HOURS_PER_YEAR / 1000.0
 }
 
 /// Convert power in BTU(IT)/h to annual energy in therms/year.
 /// Btuh * 8760 h/year / 100000 BTU(IT)/therm = therms/year.
+#[inline]
 pub fn power_btuh_to_therms_per_year(btuh: f64) -> f64 {
     btuh * HOURS_PER_YEAR / 100_000.0
 }
@@ -285,6 +327,30 @@ mod tests {
     #[test]
     fn power_btu_h_to_kbtu_h_is_divide_by_1000() {
         approx_eq(power_btu_h_to_kbtu_h(12345.0), 12.345, 1e-12);
+    }
+
+    #[test]
+    fn power_kw_to_w_converts() {
+        approx_eq(power_kw_to_w(1.0), 1_000.0, 1e-12);
+        approx_eq(power_kw_to_w(0.5), 500.0, 1e-12);
+        approx_eq(power_kw_to_w(0.0), 0.0, 1e-12);
+    }
+
+    #[test]
+    fn power_w_to_kw_converts() {
+        approx_eq(power_w_to_kw(1_000.0), 1.0, 1e-12);
+        approx_eq(power_w_to_kw(500.0), 0.5, 1e-12);
+        approx_eq(power_w_to_kw(0.0), 0.0, 1e-12);
+    }
+
+    #[test]
+    fn power_kw_w_round_trip() {
+        let original_kw = 3.75;
+        approx_eq(
+            power_w_to_kw(power_kw_to_w(original_kw)),
+            original_kw,
+            1e-12,
+        );
     }
 
     #[test]

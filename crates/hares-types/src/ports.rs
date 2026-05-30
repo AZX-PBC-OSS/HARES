@@ -66,7 +66,7 @@ pub enum PortContribution {
         category: ThermalCategory,
     },
     Electrical {
-        active_power_kw: f64,
+        active_power_w: f64,
         reactive_power_kvar: f64,
     },
     Fuel {
@@ -259,8 +259,8 @@ impl ThermalAccumulator {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ElectricalAccumulator {
     pub reactive_power_kvar: f64,
-    pub load_power_kw: f64,
-    pub generation_power_kw: f64,
+    pub load_power_w: f64,
+    pub generation_power_w: f64,
     /// Total count of electrical contributions accumulated this timestep.
     /// Gated on `observe` so zero overhead in production builds. The
     /// hares-core observer layer reads this counter and cross-references it
@@ -271,9 +271,9 @@ pub struct ElectricalAccumulator {
 }
 
 impl ElectricalAccumulator {
-    /// Net active power: load (positive) + generation (negative).
-    pub fn net_active_kw(&self) -> f64 {
-        self.load_power_kw + self.generation_power_kw
+    /// Net active power [W]: load (positive) + generation (negative).
+    pub fn net_active_w(&self) -> f64 {
+        self.load_power_w + self.generation_power_w
     }
 
     pub fn zero(&mut self) {
@@ -605,15 +605,15 @@ impl PortSlots {
                 }
             }
             PortContribution::Electrical {
-                active_power_kw,
+                active_power_w,
                 reactive_power_kvar,
             } => {
                 // Defensive sign-convention validation: electrical power values
                 // must be finite. Non-finite (NaN, ±∞) values indicate an
                 // equipment bug upstream of the port boundary.
                 debug_assert!(
-                    active_power_kw.is_finite(),
-                    "PortContribution::Electrical received non-finite active_power_kw: {active_power_kw}"
+                    active_power_w.is_finite(),
+                    "PortContribution::Electrical received non-finite active_power_w: {active_power_w}"
                 );
                 debug_assert!(
                     reactive_power_kvar.is_finite(),
@@ -621,10 +621,40 @@ impl PortSlots {
                 );
 
                 self.electrical.reactive_power_kvar += reactive_power_kvar;
-                if *active_power_kw >= 0.0 {
-                    self.electrical.load_power_kw += active_power_kw;
+                if *active_power_w >= 0.0 {
+                    self.electrical.load_power_w += active_power_w;
                 } else {
-                    self.electrical.generation_power_kw += active_power_kw;
+                    self.electrical.generation_power_w += active_power_w;
+                }
+
+                // Defense against unit regression: if a callee re-introduces
+                // kW-scaled values into the W port (e.g. writes 15 W from a
+                // 15 kW piece of equipment) the accumulator will surge to
+                // factor-1000 the true value.
+
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    // Invariant: accumulated load power must be non-negative, and
+                    // generation must be non-positive. A sign violation indicates a
+                    // contributor mis-classified its contribution (e.g. a generator
+                    // writing a positive value to the electrical port).
+                    //
+                    // Absolute magnitude is not clamped — a single unrealistic
+                    // accumulation (e.g. a pathological COP→0 heat-pump test drawing
+                    // GW-scale electric power in one step) would be a false positive.
+                    // The guard exists to catch sign errors, NaN/Inf propagation,
+                    // and the factor-1000 unit regression pattern where a kW value
+                    // silently enters the W port.
+                    debug_assert!(
+                        self.electrical.load_power_w >= 0.0,
+                        "electrical load_power_w must be non-negative, got {}",
+                        self.electrical.load_power_w
+                    );
+                    debug_assert!(
+                        self.electrical.generation_power_w <= 0.0,
+                        "electrical generation_power_w must be non-positive, got {}",
+                        self.electrical.generation_power_w
+                    );
                 }
 
                 #[cfg(feature = "observe")]
@@ -730,8 +760,12 @@ pub fn validate_fluid_type_consistency(decls: &[PortDeclaration]) -> Result<(), 
         if decl.port_type != PortType::Fluid {
             continue;
         }
-        let Some(loop_id) = decl.loop_id else { continue };
-        let Some(fluid_type) = decl.fluid_type else { continue };
+        let Some(loop_id) = decl.loop_id else {
+            continue;
+        };
+        let Some(fluid_type) = decl.fluid_type else {
+            continue;
+        };
         if let Some(existing) = loop_fluid.insert(loop_id, fluid_type) {
             if existing != fluid_type {
                 return Err(HaresError::Equipment(format!(
@@ -888,7 +922,7 @@ mod tests {
             electrical: {
                 let mut e = ElectricalAccumulator::default();
                 e.reactive_power_kvar = 1.0;
-                e.load_power_kw = 4.0;
+                e.load_power_w = 4.0;
                 e
             },
             fuel: {
@@ -931,8 +965,8 @@ mod tests {
             "zero() must clear radiant per-category array"
         );
         approx_eq(slots.electrical.reactive_power_kvar, 0.0);
-        approx_eq(slots.electrical.load_power_kw, 0.0);
-        approx_eq(slots.electrical.generation_power_kw, 0.0);
+        approx_eq(slots.electrical.load_power_w, 0.0);
+        approx_eq(slots.electrical.generation_power_w, 0.0);
         approx_eq(slots.fuel.get(FuelType::Electric), 0.0);
         approx_eq(slots.fuel.get(FuelType::Gas), 0.0);
         approx_eq(slots.fluid[0].total_flow_kg_s, 0.0);
@@ -1243,20 +1277,20 @@ mod tests {
         let mut slots = PortSlots::default();
         slots
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 3.0,
+                active_power_w: 3000.0,
                 reactive_power_kvar: 0.4,
             })
             .unwrap();
         slots
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: -5.0,
+                active_power_w: -5000.0,
                 reactive_power_kvar: -0.1,
             })
             .unwrap();
-        approx_eq(slots.electrical.net_active_kw(), -2.0);
+        approx_eq(slots.electrical.net_active_w(), -2000.0);
         approx_eq(slots.electrical.reactive_power_kvar, 0.3);
-        approx_eq(slots.electrical.load_power_kw, 3.0);
-        approx_eq(slots.electrical.generation_power_kw, -5.0);
+        approx_eq(slots.electrical.load_power_w, 3000.0);
+        approx_eq(slots.electrical.generation_power_w, -5000.0);
     }
 
     #[test]
@@ -1264,12 +1298,12 @@ mod tests {
         let mut slots = PortSlots::default();
         slots
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 3.0,
+                active_power_w: 3000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
-        approx_eq(slots.electrical.load_power_kw, 3.0);
-        approx_eq(slots.electrical.generation_power_kw, 0.0);
+        approx_eq(slots.electrical.load_power_w, 3000.0);
+        approx_eq(slots.electrical.generation_power_w, 0.0);
     }
 
     #[test]
@@ -1277,20 +1311,20 @@ mod tests {
         let mut slots = PortSlots::default();
         slots
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: -5.0,
+                active_power_w: -5000.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
-        approx_eq(slots.electrical.load_power_kw, 0.0);
-        approx_eq(slots.electrical.generation_power_kw, -5.0);
+        approx_eq(slots.electrical.load_power_w, 0.0);
+        approx_eq(slots.electrical.generation_power_w, -5000.0);
     }
 
     #[test]
-    #[should_panic(expected = "non-finite active_power_kw")]
+    #[should_panic(expected = "non-finite active_power_w")]
     fn non_finite_active_power_triggers_debug_assert() {
         let mut slots = PortSlots::default();
         let _ = slots.accumulate(&PortContribution::Electrical {
-            active_power_kw: f64::NAN,
+            active_power_w: f64::NAN,
             reactive_power_kvar: 0.0,
         });
     }
@@ -1300,7 +1334,7 @@ mod tests {
     fn non_finite_reactive_power_triggers_debug_assert() {
         let mut slots = PortSlots::default();
         let _ = slots.accumulate(&PortContribution::Electrical {
-            active_power_kw: 0.0,
+            active_power_w: 0.0,
             reactive_power_kvar: f64::INFINITY,
         });
     }
@@ -1310,12 +1344,12 @@ mod tests {
         let mut slots = PortSlots::default();
         slots
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: 0.0,
+                active_power_w: 0.0,
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
-        approx_eq(slots.electrical.load_power_kw, 0.0);
-        approx_eq(slots.electrical.generation_power_kw, 0.0);
+        approx_eq(slots.electrical.load_power_w, 0.0);
+        approx_eq(slots.electrical.generation_power_w, 0.0);
     }
 
     #[test]
@@ -1516,5 +1550,93 @@ mod tests {
             PortDeclaration::electrical(),
         ];
         assert!(validate_fluid_type_consistency(&decls).is_ok());
+    }
+
+    // =======================================================================
+    // T-0132: PortContribution unit consistency — all power fields in W
+    // =======================================================================
+
+    #[test]
+    fn all_power_contributions_use_watts() {
+        // Verify that all PortContribution variants with power fields use
+        // W-scoped naming and physically plausible W-range values (tens to
+        // thousands of watts for residential equipment). This test exists
+        // to catch a factor-1000 error if a future contributor reintroduces
+        // a kW-scaled field.
+
+        // Electrical with a 1.5 kW load → 1500 W active_power_w.
+        let electrical = PortContribution::Electrical {
+            active_power_w: 1500.0,
+            reactive_power_kvar: 0.0,
+        };
+        match electrical {
+            PortContribution::Electrical { active_power_w, .. } => {
+                assert!(
+                    active_power_w > 100.0,
+                    "active_power_w should be in W range"
+                );
+                assert!(
+                    active_power_w < 100_000.0,
+                    "active_power_w exceeds plausible residential W"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Thermal — sensible_gain_w already uses W suffix.
+        let thermal = PortContribution::Thermal {
+            zone: ZoneId(1),
+            sensible_gain_w: 500.0,
+            radiant_gain_w: 300.0,
+            latent_gain_w: 100.0,
+            category: ThermalCategory::InternalGain,
+        };
+        match thermal {
+            PortContribution::Thermal {
+                sensible_gain_w, ..
+            } => {
+                assert!(
+                    sensible_gain_w < 100_000.0,
+                    "sensible_gain_w exceeds plausible W magnitude"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Fuel — consumption_w already uses W suffix.
+        let fuel = PortContribution::Fuel {
+            fuel_type: FuelType::Gas,
+            consumption_w: 5000.0,
+        };
+        match fuel {
+            PortContribution::Fuel { consumption_w, .. } => {
+                assert!(
+                    consumption_w < 1_000_000.0,
+                    "consumption_w exceeds plausible W magnitude"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Fluid — thermal_power_w already uses W suffix.
+        let fluid = PortContribution::Fluid {
+            loop_id: LoopId(1),
+            flow_rate_kg_s: 0.1,
+            supply_temp_c: 60.0,
+            return_temp_c: 40.0,
+            fluid_type: FluidType::Water,
+            thermal_power_w: Some(4186.0),
+        };
+        match fluid {
+            PortContribution::Fluid {
+                thermal_power_w, ..
+            } => {
+                assert!(
+                    thermal_power_w.is_some_and(|w| w > 0.0 && w < 1_000_000.0),
+                    "thermal_power_w should be in W range"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 }

@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_physics::biquadratic::BiquadraticCurve;
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -728,7 +729,7 @@ impl Equipment for HeatPumpWH {
 
         if electric_power_w > 0.0 || reactive_power_kvar != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_power_w / 1_000.0,
+                active_power_w: electric_power_w,
                 reactive_power_kvar,
             })?;
         }
@@ -829,10 +830,10 @@ impl Equipment for HeatPumpWH {
         self.telemetry.set(tk::COP, cop);
         self.telemetry.set(tk::CAP_MULT, cap_mult);
         self.telemetry
-            .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
+            .set(tk::ELECTRIC_KW, power_w_to_kw(electric_power_w));
         self.telemetry
-            .set(tk::COMPRESSOR_KW, compressor_power_w / 1_000.0);
-        self.telemetry.set(tk::ELEMENT_KW, backup_power_w / 1_000.0);
+            .set(tk::COMPRESSOR_KW, power_w_to_kw(compressor_power_w));
+        self.telemetry.set(tk::ELEMENT_KW, power_w_to_kw(backup_power_w));
         self.telemetry
             .set(tk::COMPRESSOR_POWER_W, compressor_power_w);
         self.telemetry
@@ -856,7 +857,7 @@ impl Equipment for HeatPumpWH {
         let core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(
-                    (electric_power_w / 1_000.0).max(0.0),
+                    power_w_to_kw(electric_power_w).max(0.0),
                 )),
                 reactive_power_kvar: None,
                 fuel_w: None,
@@ -957,9 +958,9 @@ impl Equipment for HeatPumpWH {
         self.telemetry.insert(tk::CAP_MULT, decoded.cap_mult);
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
-            .insert(tk::COMPRESSOR_KW, decoded.compressor_power_w / 1_000.0);
+            .insert(tk::COMPRESSOR_KW, power_w_to_kw(decoded.compressor_power_w));
         self.telemetry
-            .insert(tk::ELEMENT_KW, decoded.backup_element_power_w / 1_000.0);
+            .insert(tk::ELEMENT_KW, power_w_to_kw(decoded.backup_element_power_w));
         self.telemetry
             .insert(tk::COMPRESSOR_POWER_W, decoded.compressor_power_w);
         self.telemetry
@@ -1044,7 +1045,7 @@ impl Equipment for HeatPumpWH {
             ControlSignal::PowerLimit { max_power_kw, .. } => {
                 let rated_w = self.compressor_power_w + self.backup_element_power_w;
                 if rated_w > 0.0 {
-                    let max_fraction = (max_power_kw * 1000.0 / rated_w).clamp(0.0, 1.0);
+                    let max_fraction = (power_kw_to_w(*max_power_kw) / rated_w).clamp(0.0, 1.0);
                     self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
                 }
             }
@@ -1913,7 +1914,7 @@ mod tests {
         let comp = eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap();
         let backup = eq.telemetry().get(tk::BACKUP_ELEMENT_POWER_W).unwrap();
         assert!(comp > 0.0, "compressor must be running for this test");
-        let total_electric_w = p.electrical.net_active_kw() * 1000.0;
+        let total_electric_w = p.electrical.net_active_w();
         let expected_with_fan = comp + backup + 35.0;
         assert!(
             (total_electric_w - expected_with_fan).abs() < 1e-6,
@@ -2320,8 +2321,8 @@ mod tests {
         );
 
         // Electrical consumption should be the same (same backup element draw).
-        let elec_100 = p_100.electrical.load_power_kw;
-        let elec_80 = p_80.electrical.load_power_kw;
+        let elec_100 = p_100.electrical.load_power_w;
+        let elec_80 = p_80.electrical.load_power_w;
         assert!(
             (elec_100 - elec_80).abs() < 0.01,
             "electrical consumption should be the same: {elec_100:.4} vs {elec_80:.4}"
@@ -2777,7 +2778,7 @@ mod dr_tests {
             0.0,
             "backup element must be off during GridEmergency"
         );
-        let total_kw = p.electrical.net_active_kw();
+        let total_w = p.electrical.net_active_w();
         assert!(
             !eq.compressor_on,
             "compressor_on must be false during GridEmergency"
@@ -2804,8 +2805,8 @@ mod dr_tests {
         // When compressor is off, parasitic standby power (DEFAULT_PARASITIC_POWER_W = 1 W)
         // still draws. Total should be at most that parasitic amount.
         assert!(
-            total_kw <= 0.002,
-            "total electrical draw must be at most parasitic standby during GridEmergency, got {total_kw} kW"
+            total_w <= 2.0,
+            "total electrical draw must be at most parasitic standby during GridEmergency, got {total_w} W"
         );
     }
 

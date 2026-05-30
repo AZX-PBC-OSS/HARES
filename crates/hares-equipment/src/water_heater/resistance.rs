@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -582,7 +583,7 @@ impl Equipment for ResistanceWH {
             self.zip.apply(rated_electric_power_w, env.grid.voltage_pu);
         if electric_power_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_power_w / 1_000.0,
+                active_power_w: electric_power_w,
                 reactive_power_kvar,
             })?;
         }
@@ -618,9 +619,9 @@ impl Equipment for ResistanceWH {
         self.telemetry.set(tk::UPPER_ELEMENT_POWER_W, upper_power_w);
         self.telemetry.set(tk::LOWER_ELEMENT_POWER_W, lower_power_w);
         self.telemetry
-            .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
+            .set(tk::ELECTRIC_KW, power_w_to_kw(electric_power_w));
         self.telemetry
-            .set(tk::ELEMENT_KW, electric_power_w / 1_000.0);
+            .set(tk::ELEMENT_KW, power_w_to_kw(electric_power_w));
         self.telemetry.set(tk::ELECTRIC_POWER_W, electric_power_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
@@ -637,7 +638,7 @@ impl Equipment for ResistanceWH {
         let core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(
-                    (electric_power_w / 1_000.0).max(0.0),
+                    power_w_to_kw(electric_power_w).max(0.0),
                 )),
                 reactive_power_kvar: None,
                 fuel_w: None,
@@ -720,7 +721,7 @@ impl Equipment for ResistanceWH {
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry.insert(tk::ELEMENT_KW, decoded.electric_kw);
         self.telemetry
-            .insert(tk::ELECTRIC_POWER_W, decoded.electric_kw * 1_000.0);
+            .insert(tk::ELECTRIC_POWER_W, power_kw_to_w(decoded.electric_kw));
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -780,7 +781,7 @@ impl Equipment for ResistanceWH {
                 // Clamp element power to respect the limit by reducing ctrl_load_fraction.
                 let total_w = self.upper_element_power_w + self.lower_element_power_w;
                 if total_w > 0.0 {
-                    let max_fraction = (max_power_kw * 1000.0 / total_w).clamp(0.0, 1.0);
+                    let max_fraction = (power_kw_to_w(*max_power_kw) / total_w).clamp(0.0, 1.0);
                     self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
                 }
             }

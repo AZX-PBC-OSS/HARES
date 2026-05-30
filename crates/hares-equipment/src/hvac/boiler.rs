@@ -28,6 +28,7 @@ use super::{
 };
 
 use hares_physics::constants::cp_j_kg_k;
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 /// Default condensing boiler outlet temperature [C] (150 F).
 /// ASHRAE HVAC Systems and Equipment Ch.32 "Boilers": condensing boilers
@@ -230,7 +231,7 @@ impl Equipment for ElectricBoiler {
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;
-        let electric_kw = thermal_output_w * self.eir / 1_000.0;
+        let electric_kw = power_w_to_kw(thermal_output_w * self.eir);
 
         let return_temp_c =
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
@@ -251,7 +252,7 @@ impl Equipment for ElectricBoiler {
 
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_kw,
+                active_power_w: power_kw_to_w(electric_kw),
                 reactive_power_kvar: 0.0,
             })?;
         }
@@ -476,7 +477,7 @@ impl Equipment for GasBoiler {
         self.fluid_type = typed.fluid_type;
         self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
         self.default_return_temp_c = typed.return_temp_c;
-        self.pump_kw = typed.fan_power_w.unwrap_or(0.0) / 1_000.0;
+        self.pump_kw = power_w_to_kw(typed.fan_power_w.unwrap_or(0.0));
         let fuel_efficiency = typed.afue;
         // Condensing mode inferred from AFUE > 0.90 (OCHRE convention).
         // The typed config also carries `condensing: bool` (set by resolver) for
@@ -563,7 +564,7 @@ impl Equipment for GasBoiler {
         }
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_kw,
+                active_power_w: power_kw_to_w(electric_kw),
                 reactive_power_kvar: 0.0,
             })?;
         }
@@ -978,9 +979,9 @@ mod tests {
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let expected_electric_kw = THERMAL_OUTPUT_W * EIR / 1_000.0;
+        let expected_electric_w = THERMAL_OUTPUT_W * EIR;
         assert!(
-            (ports.electrical.net_active_kw() - expected_electric_kw).abs() < 1e-9,
+            (ports.electrical.net_active_w() - expected_electric_w).abs() < 1.0,
             "electric boiler electric input must equal thermal_output * EIR"
         );
         assert!(ports.fluid[0].total_flow_kg_s > 0.0);
@@ -1347,8 +1348,8 @@ mod tests {
             "space_fraction=0.5 must halve thermal output: full={thermal_full}, half={thermal_half}"
         );
 
-        let elec_full = ports_full.electrical.net_active_kw();
-        let elec_half = ports_half.electrical.net_active_kw();
+        let elec_full = ports_full.electrical.net_active_w();
+        let elec_half = ports_half.electrical.net_active_w();
         assert!(
             (elec_half - elec_full * 0.5).abs() < 1e-6,
             "space_fraction=0.5 must halve electrical consumption: full={elec_full}, half={elec_half}"

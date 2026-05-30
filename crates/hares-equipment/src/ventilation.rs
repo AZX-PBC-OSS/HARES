@@ -16,6 +16,7 @@ use std::time::Duration;
 use hares_physics::constants::{
     CP_DRY_AIR_J_KG_K, DRY_AIR_DENSITY_AT_20C_SEA_LEVEL_KG_M3, LATENT_HEAT_VAPORISATION_0C_J_KG,
 };
+use hares_physics::units::power_w_to_kw;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -663,11 +664,11 @@ impl Equipment for Ventilation {
             m_dot_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG * eff_l * (w_indoor - w_outdoor);
 
         // Fan electrical power [kW]
-        let fan_kw = effective_fan_power_w / 1000.0;
+        let fan_kw = power_w_to_kw(effective_fan_power_w);
 
         // Write ports
         ports.accumulate(&PortContribution::Electrical {
-            active_power_kw: fan_kw,
+            active_power_w: effective_fan_power_w,
             reactive_power_kvar: 0.0,
         })?;
 
@@ -1115,10 +1116,10 @@ mod tests {
         hrv.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        let electric_kw = ports.electrical.net_active_kw();
+        let electric_w = ports.electrical.net_active_w();
         assert!(
-            (electric_kw - 0.05).abs() < 0.001,
-            "fan power should be 50W = 0.05 kW, got {electric_kw}"
+            (electric_w - 50.0).abs() < 1.0,
+            "fan power should be 50 W, got {electric_w}"
         );
     }
 
@@ -1304,8 +1305,8 @@ mod tests {
         );
 
         // Electrical port should also be halved
-        let elec_half = ports_half.electrical.net_active_kw();
-        let elec_full = ports_full.electrical.net_active_kw();
+        let elec_half = ports_half.electrical.net_active_w();
+        let elec_full = ports_full.electrical.net_active_w();
         assert!(
             (elec_half - elec_full * 0.5).abs() < 0.001,
             "half-schedule should halve electrical draw: got {elec_half}, expected {}",
@@ -1596,11 +1597,11 @@ mod tests {
         hrv.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        let electric_kw = ports.electrical.net_active_kw();
-        let expected_kw = (30.0 + 25.0) / 1000.0;
+        let electric_w = ports.electrical.net_active_w();
+        let expected_w = 30.0 + 25.0;
         assert!(
-            (electric_kw - expected_kw).abs() < 0.001,
-            "total fan power should be 55W = {expected_kw} kW, got {electric_kw}"
+            (electric_w - expected_w).abs() < 1.0,
+            "total fan power should be {expected_w} W, got {electric_w}"
         );
 
         let supply_w = hrv
@@ -1635,10 +1636,10 @@ mod tests {
         hrv.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        let electric_kw = ports.electrical.net_active_kw();
+        let electric_w = ports.electrical.net_active_w();
         assert!(
-            (electric_kw - 0.05).abs() < 0.001,
-            "total fan power should still be 50W = 0.05 kW with fan_power_w alone, got {electric_kw}"
+            (electric_w - 50.0).abs() < 1.0,
+            "total fan power should still be 50 W with fan_power_w alone, got {electric_w}"
         );
 
         let total_telemetry = hrv
@@ -1685,10 +1686,10 @@ mod tests {
         fan.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        let electric_kw = ports.electrical.net_active_kw();
+        let electric_w = ports.electrical.net_active_w();
         assert!(
-            (electric_kw - 0.06).abs() < 0.001,
-            "exhaust fan power should be 60W = 0.06 kW, got {electric_kw}"
+            (electric_w - 60.0).abs() < 1.0,
+            "exhaust fan power should be 60 W, got {electric_w}"
         );
 
         let supply_w = fan
@@ -1738,7 +1739,7 @@ mod tests {
         // Normal operation: supply + exhaust both at rated
         hrv.step(&e_normal, Duration::from_secs(300), &mut ports)
             .expect("step normal");
-        let normal_total_kw = ports.electrical.net_active_kw();
+        let normal_total_kw = ports.electrical.net_active_w();
 
         // Bypass: supply fan power scaled down
         let mut ports_bypass = PortSlots {
@@ -1747,7 +1748,7 @@ mod tests {
         };
         hrv.step(&e_bypass, Duration::from_secs(300), &mut ports_bypass)
             .expect("step bypass");
-        let bypass_total_kw = ports_bypass.electrical.net_active_kw();
+        let bypass_total_kw = ports_bypass.electrical.net_active_w();
 
         assert!(
             bypass_total_kw < normal_total_kw,
@@ -1833,8 +1834,8 @@ mod tests {
             .step(&e, Duration::from_secs(300), &mut ports_split)
             .expect("step split");
 
-        let combined_kw = ports_combined.electrical.net_active_kw();
-        let split_kw = ports_split.electrical.net_active_kw();
+        let combined_kw = ports_combined.electrical.net_active_w();
+        let split_kw = ports_split.electrical.net_active_w();
         assert!(
             (combined_kw - split_kw).abs() < 0.001,
             "combined model ({combined_kw:.6} kW) and split model ({split_kw:.6} kW) should match when supply+exhaust sum equals old total"

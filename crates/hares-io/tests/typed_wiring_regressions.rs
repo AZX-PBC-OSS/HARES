@@ -220,7 +220,7 @@ fn central_ac_airflow_and_duct_airflow_round_trip_without_collision() {
         "cooling must remove sensible heat from the zone"
     );
     assert!(
-        ports.electrical.net_active_kw() > 0.0,
+        ports.electrical.net_active_w() > 0.0,
         "cooling must draw positive electric power"
     );
 }

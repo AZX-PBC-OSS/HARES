@@ -16,6 +16,8 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use hares_physics::units::power_kw_to_w;
+
 use crate::hvac::helpers::parse_fuel_type;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
@@ -418,7 +420,7 @@ impl EventBasedLoad {
 
         let is_fuel = self.fuel_type != FuelType::Electric;
         let fuel_consumption_w = if is_fuel {
-            active_power_kw * 1_000.0
+            power_kw_to_w(active_power_kw)
         } else {
             0.0
         };
@@ -435,13 +437,16 @@ impl EventBasedLoad {
         };
 
         // Thermal gains come from all input energy regardless of fuel type.
-        let gain_source_w = electric_power_kw * 1_000.0 + fuel_consumption_w;
+        // Use the same W value sent to the electrical port to avoid a redundant
+        // kW→W conversion at the electrical↔thermal boundary.
+        let active_power_w = power_kw_to_w(electric_power_kw);
+        let gain_source_w = active_power_w + fuel_consumption_w;
         let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
         let latent_gain_w = gain_source_w * self.latent_gain_fraction;
 
         if electric_power_kw != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_power_kw,
+                active_power_w,
                 reactive_power_kvar,
             })?;
         }
@@ -1044,7 +1049,7 @@ impl WetAppliance {
 
         let is_fuel = self.fuel_type != FuelType::Electric;
         let fuel_consumption_w = if is_fuel {
-            active_power_kw * 1_000.0
+            power_kw_to_w(active_power_kw)
         } else {
             0.0
         };
@@ -1060,13 +1065,14 @@ impl WetAppliance {
             (0.0, 0.0)
         };
 
-        let gain_source_w = electric_power_kw * 1_000.0 + fuel_consumption_w;
+        let active_power_w = power_kw_to_w(electric_power_kw);
+        let gain_source_w = active_power_w + fuel_consumption_w;
         let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
         let latent_gain_w = gain_source_w * self.latent_gain_fraction;
 
         if electric_power_kw != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_power_kw,
+                active_power_w,
                 reactive_power_kvar,
             })?;
         }
@@ -2024,13 +2030,13 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         set_schedule_payload(&mut env, vec![0.0, 0.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert_eq!(slots.electrical.load_power_kw, 0.0);
+        assert_eq!(slots.electrical.load_power_w, 0.0);
 
         env.current_time += ChronoDuration::minutes(1);
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         slots.zero();
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert!((slots.electrical.load_power_kw - 1.5).abs() < 1e-9);
+        assert!((slots.electrical.load_power_w - 1500.0).abs() < 1e-6);
     }
 
     #[test]
@@ -2044,25 +2050,25 @@ mod tests {
 
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert!((slots.electrical.load_power_kw - 0.5).abs() < 1e-9);
+        assert!((slots.electrical.load_power_w - 500.0).abs() < 1e-6);
 
         env.current_time += ChronoDuration::minutes(1);
         set_schedule_payload(&mut env, vec![0.0, 0.0]);
         slots.zero();
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert!((slots.electrical.load_power_kw - 1.2).abs() < 1e-9);
+        assert!((slots.electrical.load_power_w - 1200.0).abs() < 1e-6);
 
         env.current_time += ChronoDuration::minutes(1);
         set_schedule_payload(&mut env, vec![0.0, 0.0]);
         slots.zero();
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert!((slots.electrical.load_power_kw - 1.2).abs() < 1e-9);
+        assert!((slots.electrical.load_power_w - 1200.0).abs() < 1e-6);
 
         env.current_time += ChronoDuration::minutes(1);
         set_schedule_payload(&mut env, vec![0.0, 0.0]);
         slots.zero();
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert_eq!(slots.electrical.load_power_kw, 0.0);
+        assert_eq!(slots.electrical.load_power_w, 0.0);
     }
 
     #[test]
@@ -2099,7 +2105,7 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq2.step(&env, Duration::from_secs(60), &mut p2).unwrap();
 
-        assert!((p2.electrical.load_power_kw - 2.0 * p1.electrical.load_power_kw).abs() < 1e-9);
+        assert!((p2.electrical.load_power_w - 2.0 * p1.electrical.load_power_w).abs() < 1e-9);
     }
 
     #[test]
@@ -2139,7 +2145,7 @@ mod tests {
         eq_b.step(&env_b, Duration::from_secs(60), &mut ports_b)
             .unwrap();
 
-        assert!((ports_a.electrical.load_power_kw - ports_b.electrical.load_power_kw).abs() < 1e-9);
+        assert!((ports_a.electrical.load_power_w - ports_b.electrical.load_power_w).abs() < 1e-9);
         assert_eq!(
             eq_a.telemetry().get(tk::CYCLE_PHASE),
             eq_b.telemetry().get(tk::CYCLE_PHASE)
@@ -2171,7 +2177,7 @@ mod tests {
         let mut ports = PortSlots::from_declarations(eq.ports());
         set_schedule_payload(&mut env, vec![0.0, 0.0]);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        assert!((ports.electrical.load_power_kw - 0.75).abs() < 1e-9);
+        assert!((ports.electrical.load_power_w - 750.0).abs() < 1e-6);
     }
 
     #[test]
@@ -2302,7 +2308,7 @@ mod tests {
 
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert!(slots.electrical.load_power_kw > 0.0);
+        assert!(slots.electrical.load_power_w > 0.0);
     }
 
     #[test]
@@ -2397,7 +2403,7 @@ mod tests {
             eq_b.step(&env_step, Duration::from_secs(60), &mut slots_b)
                 .unwrap();
             assert_eq!(
-                slots_a.electrical.load_power_kw, slots_b.electrical.load_power_kw,
+                slots_a.electrical.load_power_w, slots_b.electrical.load_power_w,
                 "RNG divergence after load_state"
             );
             env_step.current_time += ChronoDuration::minutes(1);
@@ -2519,9 +2525,9 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         // Verify the equipment is now drawing at the configured power.
         assert!(
-            (ports.electrical.load_power_kw - 3.0).abs() < 1e-9,
-            "expected 3.0 kW before setpoint, got {}",
-            ports.electrical.load_power_kw
+            (ports.electrical.load_power_w - 3000.0).abs() < 1e-6,
+            "expected 3000.0 W before setpoint, got {}",
+            ports.electrical.load_power_w
         );
 
         // Apply a PowerSetpoint override for the next step only.
@@ -2538,9 +2544,9 @@ mod tests {
         ports.zero();
         eq.step(&env2, Duration::from_secs(60), &mut ports).unwrap();
         assert!(
-            (ports.electrical.load_power_kw - 0.5).abs() < 1e-9,
-            "expected 0.5 kW with PowerSetpoint override, got {}",
-            ports.electrical.load_power_kw
+            (ports.electrical.load_power_w - 500.0).abs() < 1e-6,
+            "expected 500.0 W with PowerSetpoint override, got {}",
+            ports.electrical.load_power_w
         );
 
         // Next step without any new signal: override is consumed, output reverts.
@@ -2550,9 +2556,9 @@ mod tests {
         ports.zero();
         eq.step(&env3, Duration::from_secs(60), &mut ports).unwrap();
         assert!(
-            (ports.electrical.load_power_kw - 3.0).abs() < 1e-9,
-            "expected 3.0 kW after setpoint consumed, got {}",
-            ports.electrical.load_power_kw
+            (ports.electrical.load_power_w - 3000.0).abs() < 1e-6,
+            "expected 3000.0 W after setpoint consumed, got {}",
+            ports.electrical.load_power_w
         );
     }
 
@@ -2627,7 +2633,7 @@ mod tests {
             "gas cooking range must report gas consumption"
         );
         assert_eq!(
-            slots.electrical.load_power_kw, 0.0,
+            slots.electrical.load_power_w, 0.0,
             "gas cooking range must not report electrical consumption"
         );
         // Thermal gains must still be emitted (gas energy heats the zone).
@@ -2654,7 +2660,7 @@ mod tests {
             "gas clothes dryer must report gas consumption"
         );
         assert_eq!(
-            slots.electrical.load_power_kw, 0.0,
+            slots.electrical.load_power_w, 0.0,
             "gas clothes dryer must not report electrical consumption"
         );
         let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
@@ -2676,7 +2682,7 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
         assert!(
-            slots.electrical.load_power_kw > 0.0,
+            slots.electrical.load_power_w > 0.0,
             "electric cooking range must report electrical consumption"
         );
         assert_eq!(
@@ -2830,7 +2836,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert_eq!(
-            slots.electrical.load_power_kw, 0.0,
+            slots.electrical.load_power_w, 0.0,
             "step 1: event must be blocked while delay is active"
         );
 
@@ -2840,9 +2846,9 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert!(
-            (slots.electrical.load_power_kw - 1.5).abs() < 1e-9,
-            "step 2: event must start once delay has expired, expected 1.5 kW, got {}",
-            slots.electrical.load_power_kw
+            (slots.electrical.load_power_w - 1500.0).abs() < 1e-6,
+            "step 2: event must start once delay has expired, expected 1500.0 W, got {}",
+            slots.electrical.load_power_w
         );
     }
 
@@ -2866,7 +2872,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert!(
-            slots.electrical.load_power_kw > 0.0,
+            slots.electrical.load_power_w > 0.0,
             "equipment must be Active after first step with open window"
         );
 
@@ -2902,7 +2908,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert_eq!(
-            slots.electrical.load_power_kw, 0.0,
+            slots.electrical.load_power_w, 0.0,
             "step 1: accumulated delay must still block the event"
         );
 
@@ -2912,9 +2918,9 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert!(
-            (slots.electrical.load_power_kw - 1.5).abs() < 1e-9,
-            "step 2: event must start after accumulated delay expires, expected 1.5 kW, got {}",
-            slots.electrical.load_power_kw
+            (slots.electrical.load_power_w - 1500.0).abs() < 1e-6,
+            "step 2: event must start after accumulated delay expires, expected 1500.0 W, got {}",
+            slots.electrical.load_power_w
         );
     }
 
@@ -2969,7 +2975,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert_eq!(
-            slots.electrical.load_power_kw, 0.0,
+            slots.electrical.load_power_w, 0.0,
             "step 1: WetAppliance cycle must be blocked while delay is active"
         );
 
@@ -2979,9 +2985,9 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert!(
-            (slots.electrical.load_power_kw - 0.5).abs() < 1e-9,
-            "step 2: WetAppliance cycle must start once delay expired, expected 0.5 kW, got {}",
-            slots.electrical.load_power_kw
+            (slots.electrical.load_power_w - 500.0).abs() < 1e-6,
+            "step 2: WetAppliance cycle must start once delay expired, expected 500.0 W, got {}",
+            slots.electrical.load_power_w
         );
     }
 
@@ -2998,7 +3004,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert!(
-            slots.electrical.load_power_kw > 0.0,
+            slots.electrical.load_power_w > 0.0,
             "WetAppliance must be active after first step with open window"
         );
 
@@ -3124,7 +3130,7 @@ mod tests {
         use super::super::config::ConfigValue;
 
         let kw_series = vec![0.0_f64, 2.0, 4.0, 0.0, 0.0, 6.0, 6.0, 0.0];
-        let expected_kw: &[f64] = &[0.0, 3.0, 3.0, 0.0, 0.0, 6.0, 6.0, 0.0];
+        let expected_w: &[f64] = &[0.0, 3000.0, 3000.0, 0.0, 0.0, 6000.0, 6000.0, 0.0];
 
         let mut raw: std::collections::HashMap<String, ConfigValue> =
             std::collections::HashMap::new();
@@ -3150,15 +3156,15 @@ mod tests {
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();
 
-        for (step, &expected) in expected_kw.iter().enumerate() {
+        for (step, &expected) in expected_w.iter().enumerate() {
             let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
             // schedule payload is not used in deterministic mode but must be present
             set_schedule_payload(&mut env, vec![1.0, 1.0]);
             eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-            let actual = slots.electrical.load_power_kw;
+            let actual = slots.electrical.load_power_w;
             assert!(
-                (actual - expected).abs() < 1e-9,
-                "step {step}: expected {expected} kW, got {actual} kW"
+                (actual - expected).abs() < 1e-6,
+                "step {step}: expected {expected} W, got {actual} W"
             );
             env.current_time += ChronoDuration::minutes(1);
         }
@@ -3185,7 +3191,7 @@ mod tests {
         eq_a.step(&env, Duration::from_secs(60), &mut slots_a)
             .unwrap();
         // After step 1 the delay is 60 s; event has not started.
-        assert_eq!(slots_a.electrical.load_power_kw, 0.0);
+        assert_eq!(slots_a.electrical.load_power_w, 0.0);
 
         let checkpoint = eq_a.save_state();
 
@@ -3205,13 +3211,13 @@ mod tests {
             .unwrap();
 
         assert!(
-            (slots_b.electrical.load_power_kw - 1.5).abs() < 1e-9,
+            (slots_b.electrical.load_power_w - 1500.0).abs() < 1e-6,
             "after load_state, delay must still be active for one more step and then expire; \
-             expected 1.5 kW on step 2, got {}",
-            slots_b.electrical.load_power_kw
+             expected 1500.0 W on step 2, got {}",
+            slots_b.electrical.load_power_w
         );
         assert_eq!(
-            slots_a.electrical.load_power_kw, slots_b.electrical.load_power_kw,
+            slots_a.electrical.load_power_w, slots_b.electrical.load_power_w,
             "checkpoint round-trip must produce identical behaviour to the original instance"
         );
     }
@@ -3238,7 +3244,7 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
         assert_eq!(
-            slots.electrical.load_power_kw, 0.0,
+            slots.electrical.load_power_w, 0.0,
             "PowerSetpoint on an idle load must not produce output"
         );
     }
@@ -3273,7 +3279,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert!(
-            slots.electrical.load_power_kw > 0.0,
+            slots.electrical.load_power_w > 0.0,
             "equipment must be active"
         );
 
@@ -3289,9 +3295,9 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
         assert!(
-            (slots.electrical.load_power_kw - 0.75).abs() < 1e-9,
+            (slots.electrical.load_power_w - 750.0).abs() < 1e-6,
             "active load with PowerSetpoint must output setpoint value; got {}",
-            slots.electrical.load_power_kw
+            slots.electrical.load_power_w
         );
     }
 
@@ -3587,7 +3593,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        let real_kw = slots.electrical.load_power_kw;
+        let real_kw = slots.electrical.load_power_w / 1000.0;
         let reactive_kvar = slots.electrical.reactive_power_kvar;
         assert!(real_kw > 0.0, "expected non-zero real power");
         assert!(
@@ -3696,7 +3702,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        let power_nominal = slots.electrical.load_power_kw;
+        let power_nominal = slots.electrical.load_power_w;
         let reactive_nominal = slots.electrical.reactive_power_kvar;
 
         // Sag voltage.
@@ -3705,7 +3711,7 @@ mod tests {
         slots.zero();
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        let power_sag = slots.electrical.load_power_kw;
+        let power_sag = slots.electrical.load_power_w;
         let reactive_sag = slots.electrical.reactive_power_kvar;
 
         assert!(power_nominal > 0.0, "expected non-zero real power");

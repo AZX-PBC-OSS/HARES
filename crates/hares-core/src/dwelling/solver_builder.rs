@@ -568,9 +568,7 @@ fn extract_fluid_loops_from_specs(specs: &[EquipmentSpec]) -> Vec<(LoopId, Fluid
             // from the typed config. Tankless uses DHW_DEMAND_LOOP when loop_id
             // is absent, but that is a runtime assignment; here we only collect
             // what's explicitly configured.
-            "Gas Water Heater"
-            | "Electric Resistance Water Heater"
-            | "Heat Pump Water Heater" => {
+            "Gas Water Heater" | "Electric Resistance Water Heater" | "Heat Pump Water Heater" => {
                 if let Ok(typed) = cfg.typed::<hares_equipment::GasWaterHeaterConfig>() {
                     if let Some(lid) = typed.loop_id {
                         loops.push((LoopId(lid), FluidType::Water));
@@ -581,8 +579,7 @@ fn extract_fluid_loops_from_specs(specs: &[EquipmentSpec]) -> Vec<(LoopId, Fluid
                     if let Some(lid) = typed.loop_id {
                         loops.push((LoopId(lid), FluidType::Water));
                     }
-                } else if let Ok(typed) =
-                    cfg.typed::<hares_equipment::HeatPumpWaterHeaterConfig>()
+                } else if let Ok(typed) = cfg.typed::<hares_equipment::HeatPumpWaterHeaterConfig>()
                 {
                     if let Some(lid) = typed.loop_id {
                         loops.push((LoopId(lid), FluidType::Water));

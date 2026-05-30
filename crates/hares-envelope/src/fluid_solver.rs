@@ -162,11 +162,7 @@ impl DomainSolver for FluidSolver {
             // A mismatch is a configuration error that would silently produce wrong
             // results in release builds; the invariant-check gate makes it a loud
             // panic in debug/test; the observe gate counts mismatches per step.
-            #[cfg(any(
-                debug_assertions,
-                feature = "check_invariants",
-                feature = "observe"
-            ))]
+            #[cfg(any(debug_assertions, feature = "check_invariants", feature = "observe"))]
             {
                 let all_same = entries
                     .windows(2)

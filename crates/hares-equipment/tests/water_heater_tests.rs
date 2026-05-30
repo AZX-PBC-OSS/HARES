@@ -351,7 +351,7 @@ fn gas_wh_consumes_gas_not_electricity() {
     step_wh(&mut wh, &env, &mut ports);
 
     let gas_w = ports.fuel.get(FuelType::Gas);
-    let electric_kw = ports.electrical.load_power_kw;
+    let electric_kw = ports.electrical.load_power_w;
 
     assert!(
         gas_w > 0.0,
@@ -359,7 +359,7 @@ fn gas_wh_consumes_gas_not_electricity() {
     );
     assert_eq!(
         electric_kw, 0.0,
-        "gas WH with no fan must draw zero electricity; got {electric_kw:.6} kW"
+        "gas WH with no fan must draw zero electricity; got {electric_kw:.6} W"
     );
 
     // Telemetry must be consistent with the port report.

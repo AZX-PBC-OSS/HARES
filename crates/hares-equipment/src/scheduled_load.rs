@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use chrono::Datelike;
 use hares_physics::constants::GAS_THERMS_PER_HOUR_TO_W;
+use hares_physics::units::power_kw_to_w;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
@@ -818,7 +819,7 @@ impl Equipment for ScheduledLoad {
 
         if electric_power_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_power_kw,
+                active_power_w: power_kw_to_w(electric_power_kw),
                 reactive_power_kvar,
             })?;
             self.last_non_zero_power_kw = electric_power_kw;
@@ -836,7 +837,7 @@ impl Equipment for ScheduledLoad {
             self.last_non_zero_gas_w = 0.0;
         }
 
-        let total_gain_source_w = electric_power_kw * 1_000.0 + gas_consumption_w;
+        let total_gain_source_w = power_kw_to_w(electric_power_kw) + gas_consumption_w;
         let total_sensible_w = total_gain_source_w * self.sensible_gain_fraction;
         let radiant_gain_w = total_gain_source_w * self.radiant_gain_fraction;
         let sensible_gain_w = total_sensible_w - radiant_gain_w;
@@ -948,7 +949,8 @@ impl Equipment for ScheduledLoad {
         // so the thermal gain reconstruction below is accurate -- it does not need a
         // separate voltage correction. The same ZIP-adjusted wattage drives sensible/latent
         // heat gains regardless of what the voltage was at the time of last non-zero output.
-        let total_gain_source_w = self.last_non_zero_power_kw * 1_000.0 + self.last_non_zero_gas_w;
+        let total_gain_source_w =
+            power_kw_to_w(self.last_non_zero_power_kw) + self.last_non_zero_gas_w;
         self.telemetry.insert(
             tk::TOTAL_SENSIBLE_GAIN_W,
             total_gain_source_w * self.sensible_gain_fraction,
@@ -1608,8 +1610,8 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         let expected_multiplier = 0.2 * 0.95 * 0.95 + 0.3 * 0.95 + 0.5;
-        let expected_kw = 2.0 * expected_multiplier;
-        assert!((ports.electrical.net_active_kw() - expected_kw).abs() < 1e-12);
+        let expected_w = 2000.0 * expected_multiplier;
+        assert!((ports.electrical.net_active_w() - expected_w).abs() < 1.0);
     }
 
     #[test]
@@ -1711,13 +1713,13 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert_eq!(ports.electrical.net_active_kw(), 0.0);
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
         assert_eq!(ports.thermal[0].sensible_gain_w, 0.0);
 
         env.current_time += ChronoDuration::minutes(15);
         ports.zero();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert_eq!(ports.electrical.net_active_kw(), 0.0);
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
     }
 
     #[test]
@@ -1740,7 +1742,7 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert!(
-            (ports.electrical.net_active_kw() - 5.0).abs() < 1e-12,
+            (ports.electrical.net_active_w() - 5000.0).abs() < 10.0,
             "step 1 should use setpoint 5.0"
         );
 
@@ -1749,7 +1751,7 @@ mod tests {
         ports.zero();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert!(
-            (ports.electrical.net_active_kw() - 3.0).abs() < 1e-12,
+            (ports.electrical.net_active_w() - 3000.0).abs() < 10.0,
             "step 2 should revert to schedule 3.0"
         );
     }
@@ -1783,7 +1785,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert!((ports.electrical.net_active_kw() - 1.0).abs() < 1e-12);
+        assert!((ports.electrical.net_active_w() - 1000.0).abs() < 10.0);
     }
 
     #[test]
@@ -1802,7 +1804,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert_eq!(ports.electrical.net_active_kw(), 0.0);
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
     }
 
     #[test]
@@ -1818,7 +1820,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert_eq!(ports.electrical.net_active_kw(), 0.0);
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
         assert_eq!(ports.thermal[0].sensible_gain_w, 0.0);
     }
 
@@ -1844,7 +1846,7 @@ mod tests {
         restored
             .step(&env, Duration::from_secs(900), &mut ports)
             .unwrap();
-        assert!((ports.electrical.net_active_kw() - 1.4).abs() < 1e-12);
+        assert!((ports.electrical.net_active_w() - 1400.0).abs() < 10.0);
     }
 
     #[test]
@@ -1872,7 +1874,7 @@ mod tests {
             ports.fuel.get(FuelType::Gas),
             0.1 * GAS_THERMS_PER_HOUR_TO_W
         );
-        assert!(ports.electrical.net_active_kw() > 0.0);
+        assert!(ports.electrical.net_active_w() > 0.0);
     }
 
     #[test]
@@ -1990,7 +1992,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert!((ports.electrical.net_active_kw() - 7.25).abs() < 1e-12);
+        assert!((ports.electrical.net_active_w() - 7250.0).abs() < 10.0);
     }
 
     #[test]
@@ -2058,7 +2060,7 @@ mod tests {
             b.step(&env, Duration::from_secs(900), &mut ports_b)
                 .unwrap();
             assert!(
-                (ports_a.electrical.net_active_kw() - ports_b.electrical.net_active_kw()).abs()
+                (ports_a.electrical.net_active_w() - ports_b.electrical.net_active_w()).abs()
                     < 1e-12
             );
         }
@@ -2170,7 +2172,7 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert_eq!(
-            ports.electrical.net_active_kw(),
+            ports.electrical.net_active_w(),
             0.0,
             "January output should be zero"
         );
@@ -2187,7 +2189,7 @@ mod tests {
         eq.step(&env_march, Duration::from_secs(900), &mut ports)
             .unwrap();
         assert!(
-            ports.electrical.net_active_kw() > 0.0,
+            ports.electrical.net_active_w() > 0.0,
             "March output should be non-zero"
         );
     }
@@ -2264,7 +2266,7 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         // v_norm = 0.95 / 0.95 = 1.0; zip_multiplier = 0.2*1 + 0.3*1 + 0.5 = 1.0
-        assert!((ports.electrical.net_active_kw() - 2.0).abs() < 1e-12);
+        assert!((ports.electrical.net_active_w() - 2000.0).abs() < 10.0);
     }
 
     #[test]
@@ -2711,7 +2713,7 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert_eq!(
-            ports.electrical.net_active_kw(),
+            ports.electrical.net_active_w(),
             0.0,
             "negative load fraction must be clamped to 0, producing zero power"
         );
@@ -2781,9 +2783,9 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         let expected_multiplier = 0.3 * 0.95_f64.powi(2) + 0.3 * 0.95 + 0.4;
-        let expected_kw = 2.0 * expected_multiplier;
+        let expected_w = 2000.0 * expected_multiplier;
         assert!(
-            (ports.electrical.net_active_kw() - expected_kw).abs() < 1e-12,
+            (ports.electrical.net_active_w() - expected_w).abs() < 10.0,
             "user override z=0.3,i=0.3,p=0.4 should override type-specific Lighting defaults"
         );
         assert_eq!(eq.zip.z, 0.3);
@@ -2840,11 +2842,11 @@ mod tests {
             .step(&env, Duration::from_secs(900), &mut ports_tv)
             .unwrap();
         assert!(
-            (ports_lighting.electrical.net_active_kw() - 1.0).abs() < 1e-12,
+            (ports_lighting.electrical.net_active_w() - 1000.0).abs() < 10.0,
             "at nominal voltage Lighting ZIP multiplier should equal 1.0"
         );
         assert!(
-            (ports_tv.electrical.net_active_kw() - 1.0).abs() < 1e-12,
+            (ports_tv.electrical.net_active_w() - 1000.0).abs() < 10.0,
             "at nominal voltage TV (default) should produce 1.0 kW"
         );
 
@@ -2859,19 +2861,20 @@ mod tests {
             .step(&env, Duration::from_secs(900), &mut ports_tv)
             .unwrap();
 
-        let lighting_kw = ports_lighting.electrical.net_active_kw();
-        let tv_kw = ports_tv.electrical.net_active_kw();
+        let lighting_w = ports_lighting.electrical.net_active_w();
+        let tv_w = ports_tv.electrical.net_active_w();
         let expected_lighting_mult = 0.54 * 0.9_f64.powi(2) + 0.5 * 0.9 - 0.04;
         assert!(
-            (lighting_kw - expected_lighting_mult).abs() < 1e-12,
-            "Lighting at 0.9 pu: expected {expected_lighting_mult}, got {lighting_kw}"
+            (lighting_w - 1000.0 * expected_lighting_mult).abs() < 10.0,
+            "Lighting at 0.9 pu: expected {}, got {lighting_w}",
+            1000.0 * expected_lighting_mult
         );
         assert!(
-            (tv_kw - 1.0).abs() < 1e-12,
-            "TV (default) at 0.9 pu: should still be 1.0, got {tv_kw}"
+            (tv_w - 1000.0).abs() < 10.0,
+            "TV (default) at 0.9 pu: should still be 1.0 kW, got {tv_w}"
         );
         assert!(
-            lighting_kw < tv_kw,
+            lighting_w < tv_w,
             "Lighting (voltage-sensitive) should draw less than TV (constant-power) at reduced voltage"
         );
     }
@@ -2887,7 +2890,7 @@ mod tests {
 
         let mut ports = PortSlots::default();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert!((ports.electrical.net_active_kw() - 2.0).abs() < 1e-12);
+        assert!((ports.electrical.net_active_w() - 2000.0).abs() < 10.0);
         assert!(
             (ports.electrical.reactive_power_kvar - 2.0).abs() < 1e-12,
             "Lighting with pf=1.0 and reactive_base=1.0 should produce kvar == kW"

@@ -6,6 +6,7 @@ use std::time::Duration;
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::biquadratic::cubic;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
+use hares_physics::units::power_w_to_kw;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -54,7 +55,6 @@ const RH_MAX_FRACTION: f64 = 1.0;
 const DEFAULT_DB_BOUNDS_C: (f64, f64) = (10.0, 40.0);
 const DEFAULT_RH_BOUNDS: (f64, f64) = (RH_MIN_FRACTION, RH_MAX_FRACTION);
 
-const WATTS_PER_KILOWATT: f64 = 1_000.0;
 const WATTS_PER_KILOWATT_HOUR: f64 = 3_600_000.0;
 const DEFAULT_NORMALIZED_CURVE: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
@@ -305,7 +305,7 @@ impl Dehumidifier {
             .set(tk::ELECTRIC_POWER_W, snapshot.electric_power_w);
         self.telemetry.set(
             tk::ELECTRIC_KW,
-            snapshot.electric_power_w / WATTS_PER_KILOWATT,
+            power_w_to_kw(snapshot.electric_power_w),
         );
         self.telemetry
             .set(tk::LATENT_REMOVAL_W, snapshot.latent_removal_w);
@@ -498,7 +498,7 @@ impl Equipment for Dehumidifier {
         self.check_invariants(snapshot.plf, snapshot.rtf)?;
         if snapshot.electric_power_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: snapshot.electric_power_w / WATTS_PER_KILOWATT,
+                active_power_w: snapshot.electric_power_w,
                 reactive_power_kvar: 0.0,
             })?;
         }
@@ -523,7 +523,7 @@ impl Equipment for Dehumidifier {
 
         let water_removed_l = snapshot.water_removal_l_day * dt.as_secs_f64() / SECONDS_PER_DAY;
         self.accumulated_water_removal_l += water_removed_l.max(0.0);
-        let electric_kw = (snapshot.electric_power_w / WATTS_PER_KILOWATT).max(0.0);
+        let electric_kw = power_w_to_kw(snapshot.electric_power_w).max(0.0);
         self.write_step_telemetry(snapshot);
         self.core_output = CoreOutput {
             flows: CoreFlows {
@@ -788,7 +788,7 @@ mod tests {
         telemetry_keys as tk,
     };
 
-    use super::{Dehumidifier, KG_PER_LITER_WATER, SECONDS_PER_DAY, WATTS_PER_KILOWATT};
+    use super::{Dehumidifier, KG_PER_LITER_WATER, SECONDS_PER_DAY};
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     const TOLERANCE_REL: f64 = 1e-9;
@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
         assert_eq!(eq.telemetry().get(tk::LATENT_REMOVAL_W), Some(0.0));
         assert_eq!(eq.telemetry().get(tk::SENSIBLE_GAIN_W), Some(0.0));
-        assert_eq!(slots.electrical.load_power_kw, 0.0);
+        assert_eq!(slots.electrical.load_power_w, 0.0);
         assert_eq!(slots.thermal[0].sensible_gain_w, 0.0);
         assert_eq!(slots.thermal[0].latent_gain_w, 0.0);
     }
@@ -947,10 +947,7 @@ mod tests {
         let sensible_gain_w = eq.telemetry().get(tk::SENSIBLE_GAIN_W).unwrap();
 
         approx_eq(sensible_gain_w, latent_removal_w + electric_power_w);
-        approx_eq(
-            slots.electrical.load_power_kw,
-            electric_power_w / WATTS_PER_KILOWATT,
-        );
+        approx_eq(slots.electrical.load_power_w, electric_power_w);
         approx_eq(slots.thermal[0].sensible_gain_w, sensible_gain_w);
         approx_eq(slots.thermal[0].latent_gain_w, -latent_removal_w);
     }
@@ -1043,7 +1040,7 @@ mod tests {
         eq.step(&env(0.90), Duration::from_secs(60), &mut slots)
             .unwrap();
         assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
-        assert_eq!(slots.electrical.load_power_kw, 0.0);
+        assert_eq!(slots.electrical.load_power_w, 0.0);
     }
 
     #[test]
@@ -1065,7 +1062,7 @@ mod tests {
             .unwrap();
         assert_eq!(eq.telemetry().get(tk::IS_ON), Some(1.0));
         assert!(eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap() > 0.0);
-        assert!(slots.electrical.load_power_kw > 0.0);
+        assert!(slots.electrical.load_power_w > 0.0);
     }
 
     #[test]
@@ -1087,7 +1084,7 @@ mod tests {
         eq.step(&env(0.90), Duration::from_secs(60), &mut slots)
             .unwrap();
         assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
-        assert_eq!(slots.electrical.load_power_kw, 0.0);
+        assert_eq!(slots.electrical.load_power_w, 0.0);
     }
 
     /// Regression test for ticket 001: the dehumidifier must use the same h_fg constant

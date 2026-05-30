@@ -38,8 +38,8 @@ use super::heater_config::{
     default_heater_telemetry, heater_telemetry_fields, operating_mode_code,
 };
 use hares_physics::biquadratic::biquadratic;
-use hares_physics::constants::KW_TO_W;
 use hares_physics::ground::SourceTemperature;
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 fn eir_from_backup_fuel(fuel: Option<FuelType>) -> f64 {
     match fuel {
@@ -1183,7 +1183,7 @@ impl HeatPumpHeaterCore {
         let scaled_electric_kw = step.electric_kw * self.hvac.config.space_fraction;
         if scaled_electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: scaled_electric_kw,
+                active_power_w: power_kw_to_w(scaled_electric_kw),
                 reactive_power_kvar: 0.0,
             })?;
         }
@@ -1201,7 +1201,7 @@ impl HeatPumpHeaterCore {
         // Heating mode: heat is extracted FROM the ground (negative Q in
         // Eskilson's convention). Q_ground = -(thermal_output - compressor_power).
         // Note: thermal_output_w is in W, compressor_kw is in kW.
-        let borehole_heat_w = -(step.thermal_output_w - step.compressor_kw * KW_TO_W);
+        let borehole_heat_w = -(step.thermal_output_w - power_kw_to_w(step.compressor_kw));
         self.source_temp
             .record_source_heat_rate(borehole_heat_w, dt_s);
 
@@ -1262,7 +1262,7 @@ impl HeatPumpHeaterCore {
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Gross thermal output (pre-DSE) over compressor-only electric input.
         // DSE losses are a distribution inefficiency, not a reduction in equipment COP.
-        let compressor_only_w = step.compressor_kw * 1000.0;
+        let compressor_only_w = power_kw_to_w(step.compressor_kw);
         let cop = if compressor_only_w > 1e-6 {
             step.thermal_output_w / compressor_only_w
         } else {
@@ -1796,7 +1796,7 @@ impl HeatPumpHeaterCore {
             && self.pan_heater_kw > 0.0
             && hp_on;
         let pan_heater_w = if self.pan_heater_on {
-            self.pan_heater_kw * 1000.0
+            power_kw_to_w(self.pan_heater_kw)
         } else {
             0.0
         };
@@ -1819,18 +1819,19 @@ impl HeatPumpHeaterCore {
         // zone_heat_fractions (set from duct_dse during init) distributes
         // this to conditioned and duct zones in write_zone_thermal_contributions.
         let mut thermal_output_w = hp_capacity_w + er_capacity_w + fan_power_w;
-        let mut electric_kw = (hp_electric_w
-            + er_electric_w
-            + fan_power_w
-            + pan_heater_w
-            + defrost_resistive_electric_w)
-            / 1000.0;
+        let mut electric_kw = power_w_to_kw(
+            hp_electric_w
+                + er_electric_w
+                + fan_power_w
+                + pan_heater_w
+                + defrost_resistive_electric_w,
+        );
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Track compressor-only kW separately so scaling stays consistent with electric_kw.
-        let mut compressor_kw = hp_electric_w / 1000.0;
-        let mut fan_kw = fan_power_w / 1000.0;
-        let mut backup_er_kw = er_electric_w / 1000.0;
-        let mut step_pan_heater_kw = pan_heater_w / 1000.0;
+        let mut compressor_kw = power_w_to_kw(hp_electric_w);
+        let mut fan_kw = power_w_to_kw(fan_power_w);
+        let mut backup_er_kw = power_w_to_kw(er_electric_w);
+        let mut step_pan_heater_kw = power_w_to_kw(pan_heater_w);
         let mut step_hp_capacity_w = hp_capacity_w;
         let mut step_er_capacity_w = er_capacity_w;
 
@@ -1845,8 +1846,8 @@ impl HeatPumpHeaterCore {
             let hp_thermal = hp_capacity_w + fan_power_w;
             let er_thermal = er_capacity_w;
             thermal_output_w = hp_thermal * effective_load + er_thermal;
-            let hp_electric = (hp_electric_w + fan_power_w + pan_heater_w) / 1000.0;
-            let er_electric = er_electric_w / 1000.0;
+            let hp_electric = power_w_to_kw(hp_electric_w + fan_power_w + pan_heater_w);
+            let er_electric = power_w_to_kw(er_electric_w);
             electric_kw = hp_electric * effective_load + er_electric;
             compressor_kw *= effective_load;
             fan_kw *= effective_load;
@@ -1861,7 +1862,7 @@ impl HeatPumpHeaterCore {
         // still triggers ER shedding when fuel_w would exceed the threshold, removing
         // the thermal contribution, but the electric draw is unaffected.
         if self.ctrl_power_limit_kw.is_finite() {
-            let total_kw = electric_kw + fuel_w / 1000.0;
+            let total_kw = electric_kw + power_w_to_kw(fuel_w);
             if total_kw > self.ctrl_power_limit_kw {
                 let hp_electric_kw = electric_kw - backup_er_kw;
                 let hp_only_total_kw = hp_electric_kw; // fuel ER already shed in this branch
@@ -2435,6 +2436,7 @@ mod tests {
         DefrostConfig, DefrostControl, Equipment, EquipmentConfig, HeatPumpCommonConfig,
         HeatPumpHeaterConfig,
     };
+    use hares_physics::units::power_kw_to_w;
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
         EnvironmentState {
@@ -3026,7 +3028,7 @@ mod tests {
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        assert!(ports.electrical.net_active_kw() > 0.0);
+        assert!(ports.electrical.net_active_w() > 0.0);
     }
 
     #[test]
@@ -3073,7 +3075,7 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert!(
-            ports.electrical.net_active_kw() > 0.0,
+            ports.electrical.net_active_w() > 0.0,
             "ModeOverride(HeatingHP) must force compressor power even when the thermostat would otherwise be off"
         );
         assert_eq!(
@@ -3100,18 +3102,18 @@ mod tests {
         assert_eq!(mode, OperatingMode::HeatingHP);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let port_kw = ports.electrical.net_active_kw();
+        let port_w = ports.electrical.net_active_w();
         let telemetry_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         let core_kw = match eq.core_output().flows.electric_kw {
             Some(hares_types::ElectricPower::Consumption(v)) => v,
             _ => 0.0,
         };
         assert!(
-            (telemetry_kw - port_kw).abs() < 1e-9,
+            (power_kw_to_w(telemetry_kw) - port_w).abs() < 1.0,
             "heat-pump telemetry electric_kw must match the scaled electrical port draw"
         );
         assert!(
-            (core_kw - port_kw).abs() < 1e-9,
+            (power_kw_to_w(core_kw) - port_w).abs() < 1.0,
             "heat-pump core_output electric_kw must match the scaled electrical port draw"
         );
         assert_eq!(
@@ -4834,9 +4836,9 @@ mod tests {
 
         // Electrical port must be zero (no compressor, no fan).
         assert!(
-            ports.electrical.load_power_kw.abs() < 1e-9,
+            ports.electrical.load_power_w.abs() < 1e-9,
             "gas backup must not contribute to electrical port, got {:.9} kW",
-            ports.electrical.load_power_kw
+            ports.electrical.load_power_w
         );
 
         // core_output.flows.fuel_w must be Some and match.

@@ -90,7 +90,7 @@ fn ports_with_electrical(load_kw: f64, gen_kw: f64) -> PortSlots {
     if load_kw != 0.0 {
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: load_kw,
+                active_power_w: load_kw * 1_000.0,
                 reactive_power_kvar: 0.0,
             })
             .expect("accumulate load");
@@ -98,7 +98,7 @@ fn ports_with_electrical(load_kw: f64, gen_kw: f64) -> PortSlots {
     if gen_kw != 0.0 {
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: gen_kw,
+                active_power_w: gen_kw * 1_000.0,
                 reactive_power_kvar: 0.0,
             })
             .expect("accumulate generation");
@@ -157,7 +157,7 @@ fn electrical_solver_net_with_load_and_pv() {
     );
 
     // Balance invariant: net must equal load_power + generation_power
-    let balance_error = (net_kw - ports.electrical.net_active_kw()).abs();
+    let balance_error = (net_kw - ports.electrical.net_active_w() / 1_000.0).abs();
     assert!(
         balance_error < 0.001,
         "electrical balance error {balance_error} kW exceeds 0.001 kW threshold"
@@ -212,7 +212,7 @@ fn electrical_balance_invariant_holds_for_multiple_sources() {
     for &kw in &[1.2_f64, 0.8, 0.5] {
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: kw,
+                active_power_w: kw * 1_000.0,
                 reactive_power_kvar: 0.0,
             })
             .expect("load");
@@ -220,7 +220,7 @@ fn electrical_balance_invariant_holds_for_multiple_sources() {
     for &kw in &[-2.1_f64, -0.7] {
         ports
             .accumulate(&PortContribution::Electrical {
-                active_power_kw: kw,
+                active_power_w: kw * 1_000.0,
                 reactive_power_kvar: 0.0,
             })
             .expect("gen");
@@ -228,7 +228,7 @@ fn electrical_balance_invariant_holds_for_multiple_sources() {
 
     let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
     let net_kw = update.custom_payload.expect("payload")[0];
-    let expected = ports.electrical.net_active_kw(); // 2.5 + (-2.8) = -0.3
+    let expected = ports.electrical.net_active_w() / 1_000.0; // 2.5 + (-2.8) = -0.3
 
     let balance_error = (net_kw - expected).abs();
     assert!(
@@ -368,7 +368,7 @@ fn electrical_and_humidity_resolvers_are_independent() {
     };
     ports
         .accumulate(&PortContribution::Electrical {
-            active_power_kw: 1.5,
+            active_power_w: 1500.0,
             reactive_power_kvar: 0.0,
         })
         .expect("electrical accumulate");
@@ -403,9 +403,9 @@ fn electrical_and_humidity_resolvers_are_independent() {
 
     // PortSlots must be unmodified by either resolve call.
     approx_eq(
-        ports.electrical.load_power_kw,
-        1.5,
-        1e-9,
+        ports.electrical.load_power_w,
+        1500.0,
+        1e-6,
         "ports.electrical unchanged after resolve calls",
     );
     approx_eq(

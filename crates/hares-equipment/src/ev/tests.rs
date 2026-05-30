@@ -200,7 +200,7 @@ fn no_power_when_disconnected() {
         ev.telemetry().get("connection_state"),
         Some(TELEMETRY_STATE_DISCONNECTED)
     );
-    assert_eq!(ports.electrical.load_power_kw, 0.0);
+    assert_eq!(ports.electrical.load_power_w, 0.0);
 }
 
 #[test]
@@ -766,19 +766,19 @@ fn v2l_does_not_export_to_grid() {
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
     assert!(
-        ports.electrical.generation_power_kw < 0.0,
-        "V2L discharge should appear in generation_power_kw, got {}",
-        ports.electrical.generation_power_kw
+        ports.electrical.generation_power_w < 0.0,
+        "V2L discharge should appear in generation_power_w, got {}",
+        ports.electrical.generation_power_w
     );
     assert!(
-        ports.electrical.generation_power_kw.abs() <= 3.0 + 1e-9,
+        ports.electrical.generation_power_w.abs() <= 3_000.0 + 10.0,
         "V2L must not exceed max_discharge_kw={}, got {}",
         3.0,
-        ports.electrical.generation_power_kw.abs()
+        ports.electrical.generation_power_w.abs()
     );
     assert_eq!(
-        ports.electrical.load_power_kw, 0.0,
-        "V2L discharge should not appear in load_power_kw"
+        ports.electrical.load_power_w, 0.0,
+        "V2L discharge should not appear in load_power_w"
     );
 }
 
@@ -1200,7 +1200,7 @@ fn ev_away_charge_increases_soc_no_residential_power() {
         Some(0.0),
         "residential power should be 0 during away charging"
     );
-    assert_eq!(ports.electrical.load_power_kw, 0.0);
+    assert_eq!(ports.electrical.load_power_w, 0.0);
 }
 
 #[test]
@@ -2581,9 +2581,9 @@ fn ev_departure_at_step_boundary() {
             ev.soc
         );
         assert!(
-            ports.electrical.load_power_kw >= 0.0,
-            "load_power_kw must be non-negative at step {step}: {}",
-            ports.electrical.load_power_kw
+            ports.electrical.load_power_w >= 0.0,
+            "load_power_w must be non-negative at step {step}: {}",
+            ports.electrical.load_power_w
         );
     }
     // With static env time 20:00, the BMS charges until hours_needed drops below

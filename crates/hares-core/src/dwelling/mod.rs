@@ -39,6 +39,7 @@ use hares_physics::constants::{
     OCCUPANT_RADIATIVE_FRACTION, OCCUPANT_SENSIBLE_GAIN_W,
 };
 use hares_physics::pv_sizing::RoofInfo;
+use hares_physics::units::power_w_to_kw;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 use hares_types::{
     BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver, ElectricalSummary,
@@ -3160,10 +3161,13 @@ impl Dwelling {
             let zip_scale = self
                 .electrical_solver
                 .zip_load_scale(self.latest_env.grid.voltage_pu);
-            let port_load_raw = self.ports.electrical.load_power_kw;
-            let port_load_adj = port_load_raw * zip_scale;
-            let port_net = port_load_adj + self.ports.electrical.generation_power_kw;
-            let residual = (self.electrical_solver.net_active_kw() - port_net).abs();
+            let port_load_raw_w = self.ports.electrical.load_power_w;
+            let port_load_adj_w = port_load_raw_w * zip_scale;
+            let port_net_w = port_load_adj_w + self.ports.electrical.generation_power_w;
+            let port_net_kw = power_w_to_kw(port_net_w);
+            let port_load_raw_kw = power_w_to_kw(port_load_raw_w);
+            let port_load_adj_kw = power_w_to_kw(port_load_adj_w);
+            let residual = (self.electrical_solver.net_active_kw() - port_net_kw).abs();
             obs_phases.post_solvers = Some(observer_capture::capture_solvers(
                 &thermal_for_observer,
                 &self.humidity_update_buf,
@@ -3171,8 +3175,8 @@ impl Dwelling {
                 &self.fluid_update_buf,
                 &self.thermal_solver,
                 zip_scale,
-                port_load_raw,
-                port_load_adj,
+                port_load_raw_kw,
+                port_load_adj_kw,
                 residual,
             ));
         }
@@ -3389,15 +3393,17 @@ impl Dwelling {
         let net_grid = self.electrical_solver.net_active_kw();
         self.prior_electrical_summary = ElectricalSummary {
             pv_generation_kw: -pv_kw,
-            base_load_kw: self.ports.electrical.load_power_kw - battery_kw.max(0.0) - ev_kw,
+            base_load_kw: power_w_to_kw(self.ports.electrical.load_power_w)
+                - battery_kw.max(0.0)
+                - ev_kw,
             net_grid_kw: net_grid,
             battery_power_kw: battery_kw,
             ev_power_kw: ev_kw,
         };
 
         // ORDERING: ports.zero() must come AFTER check_invariants() (called above)
-        // because the electrical balance check reads self.ports.electrical.load_power_kw
-        // and generation_power_kw to compute the ZIP-adjusted port net.
+        // because the electrical balance check reads self.ports.electrical.load_power_w
+        // and generation_power_w to compute the ZIP-adjusted port net.
         self.ports.zero();
         let _ = self.clock.next();
 
@@ -3738,8 +3744,8 @@ impl Dwelling {
         let scale = self
             .electrical_solver
             .zip_load_scale(self.latest_env.grid.voltage_pu);
-        let port_net =
-            self.ports.electrical.load_power_kw * scale + self.ports.electrical.generation_power_kw;
+        let port_net = power_w_to_kw(self.ports.electrical.load_power_w) * scale
+            + power_w_to_kw(self.ports.electrical.generation_power_w);
         checker.check_electrical(net_kw, &[-port_net])?;
 
         // Thermal balance: deferred -- the multi-node RC state-space model
@@ -4652,7 +4658,7 @@ mod tests {
             ports: &mut PortSlots,
         ) -> std::result::Result<(), hares_types::HaresError> {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: self.active_power_kw,
+                active_power_w: self.active_power_kw * 1000.0,
                 reactive_power_kvar: self.reactive_power_kvar,
             })?;
             Ok(())

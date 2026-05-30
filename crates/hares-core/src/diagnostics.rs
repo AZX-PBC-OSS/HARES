@@ -8,6 +8,8 @@ use std::io::Write;
 
 use hares_types::{EnvironmentState, PortSlots, ZoneId};
 
+use hares_physics::units::power_w_to_kw;
+
 /// Collects diagnostic data for a single timestep.
 #[derive(Debug, Default)]
 pub struct StepDiagnostics {
@@ -168,7 +170,7 @@ pub fn capture(
         .iter()
         .map(|t| (t.zone, t.latent_gain_w))
         .collect();
-    let electrical_net_kw = ports.electrical.net_active_kw();
+    let electrical_net_kw = power_w_to_kw(ports.electrical.net_active_w());
 
     StepDiagnostics {
         step,

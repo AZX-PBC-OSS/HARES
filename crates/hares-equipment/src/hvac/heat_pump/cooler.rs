@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use hares_physics::constants::KW_TO_W;
 use hares_physics::ground::SourceTemperature;
+use hares_physics::units::power_kw_to_w;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
@@ -582,7 +583,7 @@ impl Equipment for GshpCooler {
 
         if pump_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: pump_kw,
+                active_power_w: power_kw_to_w(pump_kw),
                 reactive_power_kvar: 0.0,
             })?;
         }
@@ -844,7 +845,7 @@ impl Equipment for WshpCooler {
 
         if pump_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: pump_kw,
+                active_power_w: power_kw_to_w(pump_kw),
                 reactive_power_kvar: 0.0,
             })?;
         }
@@ -1033,9 +1034,9 @@ mod tests {
         );
         // Compressor + fan draws electricity
         assert!(
-            ports.electrical.net_active_kw() > 0.0,
+            ports.electrical.net_active_w() > 0.0,
             "expected positive electrical draw, got {}",
-            ports.electrical.net_active_kw()
+            ports.electrical.net_active_w()
         );
     }
 
@@ -1110,7 +1111,7 @@ mod tests {
             "deadband: expected zero thermal output"
         );
         assert_eq!(
-            ports.electrical.net_active_kw(),
+            ports.electrical.net_active_w(),
             0.0,
             "deadband: expected zero electrical draw"
         );
@@ -1193,11 +1194,11 @@ mod tests {
             ports.thermal[0].sensible_gain_w
         );
         assert_eq!(
-            ports.electrical.net_active_kw(),
+            ports.electrical.net_active_w(),
             0.0,
             "cooler must draw 0 kW when zone_temp (24.4°C) <= turn-on threshold (25.2°C); \
              got {:.6} kW",
-            ports.electrical.net_active_kw()
+            ports.electrical.net_active_w()
         );
     }
 
@@ -1223,11 +1224,11 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert_eq!(
-            ports.electrical.net_active_kw(),
+            ports.electrical.net_active_w(),
             0.0,
             "MSHP crankcase must be inactive at 5 °C (threshold 0 °C); \
              central-AC default (12.8 °C) would produce 0.05 kW -- got {}",
-            ports.electrical.net_active_kw()
+            ports.electrical.net_active_w()
         );
     }
 
@@ -1383,11 +1384,11 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert_eq!(
-            ports.electrical.net_active_kw(),
+            ports.electrical.net_active_w(),
             0.0,
             "GSHP crankcase must be inactive at 5 °C OAT (threshold NEG_INFINITY); \
              central-AC default (12.8 °C) would produce 0.05 kW — got {}",
-            ports.electrical.net_active_kw()
+            ports.electrical.net_active_w()
         );
     }
 
@@ -1647,9 +1648,9 @@ mod tests {
             ports.thermal[0].sensible_gain_w
         );
         assert!(
-            ports.electrical.net_active_kw() > 0.0,
+            ports.electrical.net_active_w() > 0.0,
             "expected positive electrical draw during cooling, got {}",
-            ports.electrical.net_active_kw()
+            ports.electrical.net_active_w()
         );
     }
 
@@ -1701,9 +1702,9 @@ mod tests {
         // Crankcase heater (50 W default) activates at 5 °C (< 12.78 °C threshold).
         // The compressor is locked out but the crankcase heater prevents oil migration.
         assert!(
-            (ports.electrical.net_active_kw() - 0.05).abs() < 0.001,
-            "crankcase heater (0.05 kW) should be active at 5 °C OAT even when compressor is locked out, got {}",
-            ports.electrical.net_active_kw()
+            (ports.electrical.net_active_w() - 50.0).abs() < 1.0,
+            "crankcase heater (50 W) should be active at 5 °C OAT even when compressor is locked out, got {}",
+            ports.electrical.net_active_w()
         );
     }
 }

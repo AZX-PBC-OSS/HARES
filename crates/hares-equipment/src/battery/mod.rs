@@ -23,6 +23,7 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 
 use hares_physics::constants::SECONDS_PER_HOUR;
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -521,7 +522,7 @@ impl Battery {
         } else {
             target_ac_power_kw / self.discharge_efficiency
         };
-        let dc_power_w = dc_power_kw * 1000.0;
+        let dc_power_w = power_kw_to_w(dc_power_kw);
 
         // Quadratic terminal voltage (OCHRE method, Battery.py:295).
         //   V = Voc/2 + sqrt((Voc/2)^2 + P_dc * R)
@@ -553,10 +554,10 @@ impl Battery {
             target_ac_power_kw
         } else if actual_dc_power_w > 0.0 {
             // Charging: DC → AC = DC / charge_eta
-            actual_dc_power_w / self.charge_efficiency / 1000.0
+            power_w_to_kw(actual_dc_power_w / self.charge_efficiency)
         } else {
             // Discharging: DC → AC = DC * discharge_eta
-            actual_dc_power_w * self.discharge_efficiency / 1000.0
+            power_w_to_kw(actual_dc_power_w * self.discharge_efficiency)
         };
 
         (actual_ac_power_kw, ohmic_loss_w, terminal_v, current_a)
@@ -966,8 +967,8 @@ impl Battery {
         self.standby_power_w = c.standby_power_w.unwrap_or(DEFAULT_STANDBY_POWER_W);
         self.min_soc = c.min_soc.unwrap_or(DEFAULT_MIN_SOC);
         self.max_soc = c.max_soc.unwrap_or(DEFAULT_MAX_SOC);
-        self.import_limit_kw = c.import_limit_w.map(|w| w / 1000.0);
-        self.export_limit_kw = c.export_limit_w.map(|w| w / 1000.0);
+        self.import_limit_kw = c.import_limit_w.map(power_w_to_kw);
+        self.export_limit_kw = c.export_limit_w.map(power_w_to_kw);
         self.heater_power_w = c.heater_power_w.unwrap_or(DEFAULT_HEATER_POWER_W);
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
@@ -1120,7 +1121,7 @@ impl Equipment for Battery {
         }
 
         // -- Read Stage 1 accumulated electrical power --
-        let net_load_kw = ports.electrical.net_active_kw();
+        let net_load_kw = power_w_to_kw(ports.electrical.net_active_w());
 
         // -- Determine target power --
         let mut target_power_kw = if self.grid_connected {
@@ -1266,13 +1267,13 @@ impl Equipment for Battery {
         }
 
         // -- Standby power is always consumed --
-        let standby_kw = self.standby_power_w / 1000.0;
-        let heater_kw = heater_w / 1000.0;
+        let standby_kw = power_w_to_kw(self.standby_power_w);
+        let heater_kw = power_w_to_kw(heater_w);
         let port_power_kw = actual_power_kw + standby_kw + heater_kw;
 
         // -- Write electrical port contribution --
         ports.accumulate(&PortContribution::Electrical {
-            active_power_kw: port_power_kw,
+            active_power_w: power_kw_to_w(port_power_kw),
             reactive_power_kvar: 0.0,
         })?;
 
@@ -2048,7 +2049,7 @@ mod tests {
             let mut ports = default_ports();
             bat.step(&env, dt, &mut ports).unwrap();
             total_charge_energy +=
-                ports.electrical.net_active_kw() * dt.as_secs_f64() / SECONDS_PER_HOUR;
+                ports.electrical.net_active_w() * dt.as_secs_f64() / SECONDS_PER_HOUR;
         }
         let soc_after_charge = bat.soc;
 
@@ -2065,7 +2066,7 @@ mod tests {
             bat.step(&env, dt, &mut ports).unwrap();
             // Discharging produces negative power (generation)
             total_discharge_energy +=
-                (-ports.electrical.net_active_kw()) * dt.as_secs_f64() / SECONDS_PER_HOUR;
+                (-ports.electrical.net_active_w()) * dt.as_secs_f64() / SECONDS_PER_HOUR;
         }
 
         assert!(
@@ -2086,10 +2087,10 @@ mod tests {
         let env = base_env();
         bat.init(&config, &env).unwrap();
 
-        // Simulate Stage 1 PV surplus: generation_power_kw = -3.0 (negative = generation)
+        // Simulate Stage 1 PV surplus: generation_power_w = -3.0 (negative = generation)
         let mut ports = PortSlots::default();
-        ports.electrical.generation_power_kw = -3.0; // PV producing 3 kW
-        ports.electrical.load_power_kw = 1.0; // 1 kW base load
+        ports.electrical.generation_power_w = -3.0; // PV producing 3 kW
+        ports.electrical.load_power_w = 1.0; // 1 kW base load
         // net_active_kw = 1.0 + (-3.0) = -2.0 (surplus)
 
         bat.step(&env, Duration::from_secs(300), &mut ports)
@@ -2108,7 +2109,7 @@ mod tests {
 
         // Stage 1: net load = 2 kW (no PV, just loads)
         let mut ports = PortSlots::default();
-        ports.electrical.load_power_kw = 2.0;
+        ports.electrical.load_power_w = 2.0;
 
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
@@ -2132,7 +2133,7 @@ mod tests {
 
         // Stage 1: net load positive (no PV surplus) -- should NOT charge
         let mut ports = PortSlots::default();
-        ports.electrical.load_power_kw = 2.0;
+        ports.electrical.load_power_w = 2.0;
 
         let soc_before = bat.soc;
         bat.step(&env, Duration::from_secs(300), &mut ports)
@@ -2165,11 +2166,11 @@ mod tests {
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
 
-        let expected_standby_kw = 20.0 / 1000.0;
-        let actual = ports.electrical.net_active_kw();
+        let expected_standby_w = 20.0; // standby is defined in W
+        let actual = ports.electrical.net_active_w();
         assert!(
-            (actual - expected_standby_kw).abs() < 1e-9,
-            "idle battery should consume standby power: expected {expected_standby_kw}, got {actual}"
+            (actual - expected_standby_w).abs() < 1.0,
+            "idle battery should consume standby power: expected {expected_standby_w}, got {actual}"
         );
     }
 
@@ -2388,7 +2389,7 @@ mod tests {
 
         // PV surplus wants to charge
         let mut ports = PortSlots::default();
-        ports.electrical.generation_power_kw = -3.0;
+        ports.electrical.generation_power_w = -3.0;
 
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
@@ -2404,14 +2405,14 @@ mod tests {
         // Charging should be blocked (cell too cold), but heater draws power.
         // The battery's own contribution (heater + standby) is on top of the
         // pre-set Stage 1 values in the accumulator.
-        let heater_kw = 500.0 / 1000.0;
-        let standby_kw = 10.0 / 1000.0;
-        let battery_contribution_kw = heater_kw + standby_kw;
-        // load_power_kw should include battery's heater + standby draw
+        let heater_w = 500.0;
+        let standby_w = 10.0;
+        let battery_contribution_w = heater_w + standby_w;
+        // load_power_w should include battery's heater + standby draw
         assert!(
-            (ports.electrical.load_power_kw - battery_contribution_kw).abs() < 0.01,
+            (ports.electrical.load_power_w - battery_contribution_w).abs() < 10.0,
             "battery should draw heater + standby: load_power={}",
-            ports.electrical.load_power_kw
+            ports.electrical.load_power_w
         );
         // SOC should not change (charging blocked)
         assert!(
@@ -2435,7 +2436,7 @@ mod tests {
         bat.cell_temp_c = 20.0; // Well above threshold
 
         let mut ports = PortSlots::default();
-        ports.electrical.generation_power_kw = -3.0; // PV surplus
+        ports.electrical.generation_power_w = -3.0; // PV surplus
 
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
@@ -2534,7 +2535,7 @@ mod tests {
         let mut ports_warm = default_ports();
         bat.step(&env, Duration::from_secs(300), &mut ports_warm)
             .unwrap();
-        let warm_power = ports_warm.electrical.net_active_kw();
+        let warm_power = ports_warm.electrical.net_active_w();
 
         // Reset and step at cold temp (halfway in derating range)
         bat.init(&config, &env).unwrap();
@@ -2547,7 +2548,7 @@ mod tests {
         let mut ports_cold = default_ports();
         bat.step(&env, Duration::from_secs(300), &mut ports_cold)
             .unwrap();
-        let cold_power = ports_cold.electrical.net_active_kw();
+        let cold_power = ports_cold.electrical.net_active_w();
 
         // Cold discharge should be less than warm (more negative = more generation)
         assert!(
@@ -2578,9 +2579,9 @@ mod tests {
             .unwrap();
 
         // Only standby should be consumed, no discharge
-        let standby_kw = 10.0 / 1000.0;
+        let standby_w = 10.0;
         assert!(
-            (ports.electrical.net_active_kw() - standby_kw).abs() < 0.001,
+            (ports.electrical.net_active_w() - standby_w).abs() < 1.0,
             "discharge should be fully blocked below min temp"
         );
     }
@@ -3037,7 +3038,7 @@ mod tests {
         // Build ports with a thermal slot for zone 1.
         let mut ports = PortSlots::from_declarations(bat.ports());
         // PV surplus to request charging (heater activates because cell is cold and min_charge_temp=0°C)
-        ports.electrical.generation_power_kw = -3.0;
+        ports.electrical.generation_power_w = -3.0;
 
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
@@ -3136,7 +3137,7 @@ mod tests {
             .unwrap();
 
         // Actual discharge power (negative = generation) should be clamped to P_max
-        let actual_w = (-ports.electrical.net_active_kw() - bat.standby_power_w / 1000.0) * 1000.0;
+        let actual_w = -ports.electrical.net_active_w() - bat.standby_power_w;
         assert!(
             actual_w <= p_max_w * 1.001, // small tolerance for floating point
             "discharge must be clamped to P_max={p_max_w:.1} W, got {actual_w:.1} W"

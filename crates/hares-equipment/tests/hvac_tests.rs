@@ -418,8 +418,8 @@ fn gas_furnace_consumes_gas_fuel() {
     );
 
     // Electric port is fan-only: configured at 400 W = 0.4 kW.
-    let electric_kw = ports.electrical.net_active_kw();
-    let fan_w = electric_kw * 1_000.0;
+    let electric_w = ports.electrical.net_active_w();
+    let fan_w = electric_w;
     assert!(
         fan_w > 0.0,
         "expected fan-only electric draw to be positive, got {fan_w:.1} W",
@@ -448,9 +448,9 @@ fn electric_furnace_consumes_electricity() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     assert!(
-        ports.electrical.net_active_kw() > 1e-6,
-        "expected electric draw > 0 for electric furnace, got {:.4} kW",
-        ports.electrical.net_active_kw(),
+        ports.electrical.net_active_w() > 1e-6,
+        "expected electric draw > 0 for electric furnace, got {:.4} W",
+        ports.electrical.net_active_w(),
     );
     assert!(
         ports.fuel.get(FuelType::Gas).abs() < 1e-6,
@@ -533,25 +533,25 @@ fn ashp_heating_cop_above_unity() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_kw();
+    let electric_w = ports.electrical.net_active_w();
 
     assert!(
         thermal_w > 1e-6,
         "ASHP must deliver positive heat, got {thermal_w:.3} W"
     );
     assert!(
-        electric_kw > 1e-6,
-        "ASHP must draw positive electricity, got {electric_kw:.4} kW"
+        electric_w > 1e-6,
+        "ASHP must draw positive electricity, got {electric_w:.4} W"
     );
 
-    let cop = thermal_w / (electric_kw * 1_000.0);
+    let cop = thermal_w / electric_w;
     // AHRI 210/240-2023 Tier 1 minimum COP at 47°F (8.3°C) is 2.0.
     // At 7°C outdoor with default EIR=0.35, expected COP ≈ 2.86.
     assert!(
         cop > 2.0,
         "ASHP COP must exceed 2.0 at 7°C outdoor (near AHRI 47°F rating point); \
          AHRI 210/240-2023 minimum=2.0, got {cop:.3} \
-         (thermal={thermal_w:.1} W, electric={electric_kw:.4} kW)",
+         (thermal={thermal_w:.1} W, electric={electric_w:.4} W)",
     );
     assert!(
         cop < 5.0,
@@ -676,7 +676,7 @@ fn baseboard_electric_resistance_cop_unity() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_w = ports.electrical.net_active_kw() * 1_000.0;
+    let electric_w = ports.electrical.net_active_w();
 
     assert!(
         thermal_w > 1e-6,
@@ -908,11 +908,11 @@ fn electric_resistance_heaters_use_eir_as_input_ratio() {
         .unwrap();
 
     assert!(
-        (furnace_ports.electrical.net_active_kw() - EXPECTED_ELECTRIC_KW).abs() < 1e-9,
+        (furnace_ports.electrical.net_active_w() - EXPECTED_ELECTRIC_KW * 1_000.0).abs() < 10.0,
         "electric furnace input must equal thermal_output * EIR"
     );
     assert!(
-        (boiler_ports.electrical.net_active_kw() - EXPECTED_ELECTRIC_KW).abs() < 1e-9,
+        (boiler_ports.electrical.net_active_w() - EXPECTED_ELECTRIC_KW * 1_000.0).abs() < 10.0,
         "electric boiler input must equal thermal_output * EIR"
     );
     assert!(
@@ -988,7 +988,7 @@ fn simple_heaters_ideal_capacity_scales_output() {
         "electric furnace ideal capacity must scale delivered heat to the requested thermal output"
     );
     assert!(
-        (electric_furnace_ports.electrical.net_active_kw() - 5.0).abs() < 1e-6,
+        (electric_furnace_ports.electrical.net_active_w() - 5_000.0).abs() < 10.0,
         "electric furnace ideal capacity must scale input power with thermal output at unity EIR"
     );
 
@@ -1018,7 +1018,7 @@ fn simple_heaters_ideal_capacity_scales_output() {
         "electric boiler ideal capacity must scale loop thermal output to the requested value"
     );
     assert!(
-        (electric_boiler_ports.electrical.net_active_kw() - 5.0).abs() < 1e-6,
+        (electric_boiler_ports.electrical.net_active_w() - 5_000.0).abs() < 10.0,
         "electric boiler ideal capacity must scale input power with thermal output at unity EIR"
     );
 
@@ -1065,7 +1065,7 @@ fn simple_heaters_ideal_capacity_scales_output() {
         "electric baseboard ideal capacity must scale delivered heat to the requested thermal output"
     );
     assert!(
-        (baseboard_ports.electrical.net_active_kw() - 1.5).abs() < 1e-6,
+        (baseboard_ports.electrical.net_active_w() - 1_500.0).abs() < 10.0,
         "electric baseboard ideal capacity must scale input power with thermal output at unity EIR"
     );
 }
@@ -1302,9 +1302,9 @@ fn ashp_defaults_match_reference() {
         ports.thermal[0].sensible_gain_w,
     );
     assert!(
-        ports.electrical.net_active_kw() < 1e-6,
-        "ASHP must draw no power when below HP lockout; got {:.4} kW",
-        ports.electrical.net_active_kw(),
+        ports.electrical.net_active_w() < 1e-6,
+        "ASHP must draw no power when below HP lockout; got {:.4} W",
+        ports.electrical.net_active_w(),
     );
 
     // Behavioral: ASHP has no pan heater -- pan_heater_kw must remain 0 after any step
@@ -4088,7 +4088,7 @@ fn furnace_thermal_port_equals_rated_capacity_at_sf1() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let elec_kw = ports.electrical.net_active_kw();
+    let elec_w = ports.electrical.net_active_w();
 
     // At space_fraction=1.0, thermal and electrical should equal full rated capacity.
     assert!(
@@ -4097,10 +4097,10 @@ fn furnace_thermal_port_equals_rated_capacity_at_sf1() {
          (CAPACITY_W={CAPACITY_W:.1} W). got={thermal_w:.1} W"
     );
     assert!(
-        (elec_kw - CAPACITY_W * EIR / 1_000.0).abs() < 1e-6,
+        (elec_w - CAPACITY_W * EIR).abs() < 10.0,
         "electric furnace electrical port should equal capacity * EIR. \
-         expected={:.6} kW, got={elec_kw:.6} kW",
-        CAPACITY_W * EIR / 1_000.0
+         expected={:.1} W, got={elec_w:.1} W",
+        CAPACITY_W * EIR
     );
 }
 
@@ -4137,7 +4137,7 @@ fn baseboard_thermal_port_equals_rated_capacity_at_sf1() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let elec_kw = ports.electrical.net_active_kw();
+    let elec_w = ports.electrical.net_active_w();
 
     assert!(
         (thermal_w - CAPACITY_W).abs() < 1.0,
@@ -4145,10 +4145,10 @@ fn baseboard_thermal_port_equals_rated_capacity_at_sf1() {
          expected={CAPACITY_W:.1} W, got={thermal_w:.1} W"
     );
     assert!(
-        (elec_kw - CAPACITY_W / 1_000.0).abs() < 1e-6,
-        "baseboard electrical port should equal capacity/1000 at sf=1.0 with EIR=1. \
-         expected={:.6} kW, got={elec_kw:.6} kW",
-        CAPACITY_W / 1_000.0
+        (elec_w - CAPACITY_W).abs() < 10.0,
+        "baseboard electrical port should equal capacity at sf=1.0 with EIR=1. \
+         expected={:.1} W, got={elec_w:.1} W",
+        CAPACITY_W
     );
 }
 
@@ -4315,8 +4315,8 @@ fn ac_electrical_halved_thermal_unscaled_at_half_sf() {
         .step(&env, Duration::from_secs(60), &mut ports_half)
         .unwrap();
 
-    let elec_full = ports_full.electrical.net_active_kw();
-    let elec_half = ports_half.electrical.net_active_kw();
+    let elec_full = ports_full.electrical.net_active_w();
+    let elec_half = ports_half.electrical.net_active_w();
     let sens_full = ports_full.thermal[0].sensible_gain_w;
     let sens_half = ports_half.thermal[0].sensible_gain_w;
 
@@ -4330,8 +4330,8 @@ fn ac_electrical_halved_thermal_unscaled_at_half_sf() {
     let elec_ratio = elec_half / elec_full.max(1e-9);
     assert!(
         (elec_ratio - 0.5).abs() < 0.02,
-        "electrical port must be halved at sf=0.5 (elec_full={elec_full:.4} kW, \
-         elec_half={elec_half:.4} kW, ratio={elec_ratio:.4})"
+        "electrical port must be halved at sf=0.5 (elec_full={elec_full:.1} W, \
+         elec_half={elec_half:.1} W, ratio={elec_ratio:.4})"
     );
 
     // Sensible thermal port is NOT halved under the current architecture (matching

@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_physics::constants::{UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE};
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -576,7 +577,7 @@ impl Equipment for GasWH {
             self.zip.apply(rated_fan_electric_w, env.grid.voltage_pu);
         if fan_electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: fan_electric_w / 1_000.0,
+                active_power_w: fan_electric_w,
                 reactive_power_kvar: fan_reactive_kvar,
             })?;
         }
@@ -617,9 +618,9 @@ impl Equipment for GasWH {
         self.telemetry
             .set(tk::PILOT_HEAT_TO_AMBIENT_W, pilot_heat_to_ambient_w);
         self.telemetry
-            .set(tk::PILOT_KW, self.pilot_power_w / 1_000.0);
+            .set(tk::PILOT_KW, power_w_to_kw(self.pilot_power_w));
         self.telemetry
-            .set(tk::FUEL_INPUT_KW, fuel_input_w / 1_000.0);
+            .set(tk::FUEL_INPUT_KW, power_w_to_kw(fuel_input_w));
         self.telemetry.set(tk::FLUE_LOSS_W, flue_loss_w);
         self.telemetry.set(tk::SKIN_LOSS_W, skin_loss_to_zone_w);
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
@@ -638,7 +639,7 @@ impl Equipment for GasWH {
         let core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(
-                    (fan_electric_w / 1_000.0).max(0.0),
+                    power_w_to_kw(fan_electric_w).max(0.0),
                 )),
                 reactive_power_kvar: None,
                 fuel_w: Some(FuelPower {
@@ -720,9 +721,9 @@ impl Equipment for GasWH {
         self.telemetry
             .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
         self.telemetry
-            .insert(tk::PILOT_KW, decoded.pilot_power_w / 1_000.0);
+            .insert(tk::PILOT_KW, power_w_to_kw(decoded.pilot_power_w));
         self.telemetry
-            .insert(tk::FUEL_INPUT_KW, decoded.fuel_input_w / 1_000.0);
+            .insert(tk::FUEL_INPUT_KW, power_w_to_kw(decoded.fuel_input_w));
         self.telemetry.insert(tk::FLUE_LOSS_W, decoded.flue_loss_w);
         self.telemetry
             .insert(tk::FAN_ELECTRIC_W, decoded.fan_electric_w);
@@ -778,7 +779,8 @@ impl Equipment for GasWH {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
             ControlSignal::PowerLimit { max_power_kw, .. } if self.burner_input_w > 0.0 => {
-                let max_fraction = (max_power_kw * 1000.0 / self.burner_input_w).clamp(0.0, 1.0);
+                let max_fraction =
+                    (power_kw_to_w(*max_power_kw) / self.burner_input_w).clamp(0.0, 1.0);
                 self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
             }
             ControlSignal::DemandResponse { level, duration_s } => {

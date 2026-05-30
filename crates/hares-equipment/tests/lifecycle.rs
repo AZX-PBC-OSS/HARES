@@ -103,8 +103,8 @@ fn assert_equipment_lifecycle(
         .thermal
         .iter()
         .any(|a| a.sensible_gain_w.abs() > 0.0 || a.latent_gain_w.abs() > 0.0);
-    let has_electrical = ports.electrical.load_power_kw.abs() > 0.0
-        || ports.electrical.generation_power_kw.abs() > 0.0;
+    let has_electrical = ports.electrical.load_power_w.abs() > 0.0
+        || ports.electrical.generation_power_w.abs() > 0.0;
     let gas_w = ports.fuel.get(FuelType::Gas);
     let has_fuel = gas_w.abs() > 0.0 || ports.fuel.get(FuelType::Propane).abs() > 0.0;
 
@@ -114,8 +114,8 @@ fn assert_equipment_lifecycle(
          thermal={}, electrical_load={}, electrical_gen={}, gas={gas_w}",
         equipment.descriptor().name,
         ports.thermal.iter().map(|a| a.sensible_gain_w).sum::<f64>(),
-        ports.electrical.load_power_kw,
-        ports.electrical.generation_power_kw,
+        ports.electrical.load_power_w,
+        ports.electrical.generation_power_w,
     );
 
     // 5. telemetry() field count must match descriptor.telemetry_fields.len().
@@ -172,11 +172,11 @@ fn assert_equipment_lifecycle(
     );
 
     // Same restored state + same env → same deterministic port output.
-    let orig_net = port_output_step2.electrical.net_active_kw();
-    let rest_net = ports_after_restore.electrical.net_active_kw();
+    let orig_net = port_output_step2.electrical.net_active_w();
+    let rest_net = ports_after_restore.electrical.net_active_w();
     assert!(
-        (orig_net - rest_net).abs() < 1e-3,
-        "electrical net_active_kw after restore must match step-2 output within 1 W for '{}': \
+        (orig_net - rest_net).abs() < 1.0,
+        "electrical net_active_w after restore must match step-2 output within 1 W for '{}': \
          step2={orig_net}, after_restore={rest_net}",
         equipment.descriptor().name,
     );
@@ -496,14 +496,14 @@ fn scheduled_load_writes_positive_thermal_gain_to_port() {
 
     // Electrical port must also be populated.
     assert!(
-        ports.electrical.load_power_kw > 0.0,
+        ports.electrical.load_power_w > 0.0,
         "electrical load must be positive; got {}",
-        ports.electrical.load_power_kw
+        ports.electrical.load_power_w
     );
     assert!(
-        (ports.electrical.load_power_kw - 1.5).abs() < 0.001,
-        "electrical load must be ~1.5 kW; got {}",
-        ports.electrical.load_power_kw
+        (ports.electrical.load_power_w - 1_500.0).abs() < 1.0,
+        "electrical load must be ~1_500 W; got {}",
+        ports.electrical.load_power_w
     );
 }
 
@@ -1434,10 +1434,10 @@ fn all_registered_equipment_core_output_matches_capabilities_and_ports() {
                 .electric_kw
                 .expect("validated electric capability must have core electric output")
                 .net_consumption_kw();
-            let port_kw = ports.electrical.net_active_kw();
+            let port_w = ports.electrical.net_active_w();
             assert!(
-                (core_kw - port_kw).abs() < 1e-6,
-                "core_output vs electrical ports mismatch for '{class}': core={core_kw}, ports={port_kw}"
+                (core_kw - port_w / 1_000.0).abs() < 0.001,
+                "core_output vs electrical ports mismatch for '{class}': core={core_kw}, ports={port_w}"
             );
         }
     }
@@ -1581,9 +1581,10 @@ fn gshp_heater_pump_power_in_telemetry_and_ports() {
         "GSHP heater pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
     );
     assert!(
-        ports.electrical.load_power_kw >= pump_telemetry,
-        "electrical port load ({:.4} kW) must be at least the pump contribution ({pump_telemetry:.4} kW)",
-        ports.electrical.load_power_kw,
+        ports.electrical.load_power_w >= pump_telemetry * 1_000.0,
+        "electrical port load ({:.1} W) must be at least the pump contribution ({:.1} W)",
+        ports.electrical.load_power_w,
+        pump_telemetry * 1_000.0
     );
 }
 
@@ -1651,8 +1652,9 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
         "GSHP cooler pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
     );
     assert!(
-        ports.electrical.load_power_kw >= pump_telemetry,
-        "electrical port load ({:.4} kW) must be at least the pump contribution ({pump_telemetry:.4} kW)",
-        ports.electrical.load_power_kw,
+        ports.electrical.load_power_w >= pump_telemetry * 1_000.0,
+        "electrical port load ({:.1} W) must be at least the pump contribution ({:.1} W)",
+        ports.electrical.load_power_w,
+        pump_telemetry * 1_000.0
     );
 }

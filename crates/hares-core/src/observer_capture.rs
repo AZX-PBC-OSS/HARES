@@ -120,9 +120,9 @@ pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentCont
 
     EquipmentContribution {
         thermal,
-        electrical_load_kw: after.electrical.load_power_kw - before.electrical.load_power_kw,
-        electrical_gen_kw: after.electrical.generation_power_kw
-            - before.electrical.generation_power_kw,
+        electrical_load_kw: after.electrical.load_power_w - before.electrical.load_power_w,
+        electrical_gen_kw: after.electrical.generation_power_w
+            - before.electrical.generation_power_w,
         electrical_reactive_kvar: after.electrical.reactive_power_kvar
             - before.electrical.reactive_power_kvar,
         fuel_consumption_w,
@@ -164,8 +164,8 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
 
     PortsCapture {
         thermal,
-        electrical_load_kw: ports.electrical.load_power_kw,
-        electrical_gen_kw: ports.electrical.generation_power_kw,
+        electrical_load_kw: ports.electrical.load_power_w,
+        electrical_gen_kw: ports.electrical.generation_power_w,
         electrical_reactive_kvar: ports.electrical.reactive_power_kvar,
         fuel_consumption_w,
         fluid,
@@ -289,8 +289,8 @@ mod tests {
         let before = PortSlots {
             electrical: {
                 let mut e = ElectricalAccumulator::default();
-                e.load_power_kw = 1.0;
-                e.generation_power_kw = -2.0;
+                e.load_power_w = 1.0;
+                e.generation_power_w = -2.0;
                 e.reactive_power_kvar = 0.5;
                 e
             },
@@ -299,8 +299,8 @@ mod tests {
         let after = PortSlots {
             electrical: {
                 let mut e = ElectricalAccumulator::default();
-                e.load_power_kw = 4.0;
-                e.generation_power_kw = -2.0;
+                e.load_power_w = 4.0;
+                e.generation_power_w = -2.0;
                 e.reactive_power_kvar = 1.0;
                 e
             },

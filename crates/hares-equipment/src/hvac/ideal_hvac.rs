@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
+use hares_physics::units::power_kw_to_w;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -671,7 +672,7 @@ impl Equipment for IdealHvac {
         let fan_kw = fan_power_w / 1000.0;
         if fan_power_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: fan_kw,
+                active_power_w: power_kw_to_w(fan_kw),
                 reactive_power_kvar: 0.0,
             })?;
         }
@@ -2201,9 +2202,9 @@ mod tests {
 
         // Electrical port should have fan power.
         assert!(
-            (ports.electrical.load_power_kw - expected_fan_kw).abs() < 1e-9,
-            "electrical load should be {expected_fan_kw} kW, got {}",
-            ports.electrical.load_power_kw
+            (ports.electrical.load_power_w - expected_fan_w).abs() < 1.0,
+            "electrical load should be {expected_fan_w} W, got {}",
+            ports.electrical.load_power_w
         );
 
         // core_output should reflect fan consumption.
@@ -2568,9 +2569,9 @@ mod tests {
         );
 
         assert!(
-            ports.electrical.load_power_kw > 0.0,
+            ports.electrical.load_power_w > 0.0,
             "electrical consumption must be > 0, got {}",
-            ports.electrical.load_power_kw
+            ports.electrical.load_power_w
         );
     }
 

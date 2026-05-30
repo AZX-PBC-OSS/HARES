@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_physics::ground::SourceTemperature;
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -901,7 +902,7 @@ impl CoolingCore {
             // Fan waste heat partially offsets cooling capacity delivered to
             // the zone (OCHRE HVAC.py line 543: delivered_heat = heat_gain * shr + fan_power).
             // For cooling: heat_gain is negative, fan_power is positive.
-            let fan_heat_w = fan_kw * 1000.0;
+            let fan_heat_w = power_kw_to_w(fan_kw);
             self.hvac.write_zone_thermal_contributions(
                 ports,
                 -sensible_cooling_w + fan_heat_w,
@@ -949,14 +950,14 @@ impl CoolingCore {
             (compressor_kw + fan_kw + self.crankcase_heater_kw) * self.hvac.config.space_fraction;
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: electric_kw,
+                active_power_w: power_kw_to_w(electric_kw),
                 reactive_power_kvar: 0.0,
             })?;
         }
 
         // Telemetry reports delivered (post-DSE) values for the conditioned zone.
         let dse = self.hvac.config.duct_dse.clamp(0.0, 1.0);
-        let fan_heat_w = fan_kw * 1000.0;
+        let fan_heat_w = power_kw_to_w(fan_kw);
         // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
         // sensible_cooling_w + latent_cooling_w are pre-DSE (gross) values from compute_performance.
         let gross_cooling_w = sensible_cooling_w + latent_cooling_w;
@@ -999,7 +1000,7 @@ impl CoolingCore {
         self.telemetry
             .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
         // COP per AHRI/SEER convention: excludes fan power from denominator.
-        let compressor_only_w = compressor_kw * 1000.0;
+        let compressor_only_w = power_kw_to_w(compressor_kw);
         let total_cooling_w = sensible_cooling_w + latent_cooling_w;
         let cop = if compressor_only_w > 1e-6 {
             total_cooling_w / compressor_only_w
@@ -1208,7 +1209,7 @@ impl CoolingCore {
                 );
                 let mfr = flow_m3_s_for_fan * rho;
                 if mfr > 0.0 {
-                    (fan_power_w / 1000.0) / (mfr * SPECIFIC_HEAT_DRY_AIR_KJ_KG_K)
+                    power_w_to_kw(fan_power_w) / (mfr * SPECIFIC_HEAT_DRY_AIR_KJ_KG_K)
                 } else {
                     0.0
                 }
@@ -1361,7 +1362,7 @@ impl CoolingCore {
             coil_entering_db_c,
             zone.humidity_ratio,
             env.weather.pressure_kpa,
-            (total_capacity_w / 1000.0).max(0.0),
+            power_w_to_kw(total_capacity_w).max(0.0),
             flow_m3_s,
             ao,
         )?;
@@ -1416,8 +1417,8 @@ impl CoolingCore {
         let (sensible_cooling_w, latent_cooling_w) =
             self.hvac.sensible_latent_from_shr(total_capacity_w);
 
-        let compressor_kw = (total_capacity_w * stage_eir * eir_ratio).max(0.0) / 1000.0;
-        let fan_kw = self.hvac.fan_power_w(flow_m3_s) * plr / 1000.0;
+        let compressor_kw = power_w_to_kw((total_capacity_w * stage_eir * eir_ratio).max(0.0));
+        let fan_kw = power_w_to_kw(self.hvac.fan_power_w(flow_m3_s) * plr);
 
         Ok(PerformanceResult {
             sensible_cooling_w,
@@ -1730,6 +1731,7 @@ mod tests {
         HvacSetpointConfig, RoomAcConfig,
     };
     use hares_physics::constants::BTU_PER_HR_PER_W;
+    use hares_physics::units::power_kw_to_w;
 
     fn env(
         zone_temp_c: f64,
@@ -2062,7 +2064,7 @@ mod tests {
         eq.update_control(&env);
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        assert!((ports.electrical.net_active_kw() - 0.05).abs() < 1e-9);
+        assert!((ports.electrical.net_active_w() - 50.0).abs() < 1.0);
         assert_eq!(ports.thermal[0].sensible_gain_w, 0.0);
     }
 
@@ -2085,7 +2087,7 @@ mod tests {
         let sens = eq.telemetry().get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0);
         let lat = eq.telemetry().get(tk::LATENT_COOLING_W).unwrap_or(0.0);
         let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
-        let fan_heat_w = fan_kw * 1000.0;
+        let fan_heat_w = power_kw_to_w(fan_kw);
 
         // Telemetry reports gross cooling (sensible + latent) before fan-heat offset.
         // Port thermal sensible includes fan waste heat: gain = -sensible + fan_heat.
@@ -2832,9 +2834,9 @@ mod tests {
         };
 
         assert!(
-            (ports.electrical.net_active_kw() - electric_kw).abs() < 1e-9,
+            (ports.electrical.net_active_w() - power_kw_to_w(electric_kw)).abs() < 1e-3,
             "electrical port and telemetry must match: ports={} telemetry={electric_kw}",
-            ports.electrical.net_active_kw()
+            ports.electrical.net_active_w()
         );
         assert!(
             (core_electric_kw - electric_kw).abs() < 1e-9,
@@ -3335,11 +3337,11 @@ mod tests {
         rac.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
         assert_eq!(
-            ports.electrical.net_active_kw(),
+            ports.electrical.net_active_w(),
             0.0,
             "Room AC crankcase_heater_kw=None must default to 0 kW (no crankcase heater); \
              central-AC default would draw 0.05 kW at 5 °C. Got {}",
-            ports.electrical.net_active_kw()
+            ports.electrical.net_active_w()
         );
     }
 
@@ -4458,15 +4460,15 @@ mod crankcase_tests {
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
         let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        let port_kw = ports.electrical.net_active_kw();
-        // Crankcase (0.10 kW) must appear in both telemetry and port contribution.
+        let port_w = ports.electrical.net_active_w();
+        // Crankcase (0.10 kW = 100 W) must appear in both telemetry and port contribution.
         assert!(
             (electric_kw - 0.10).abs() < 1e-9,
             "telemetry electric_kw must equal crankcase rated 0.10 kW, got {electric_kw}"
         );
         assert!(
-            (port_kw - 0.10).abs() < 1e-9,
-            "port electrical draw must equal crankcase rated 0.10 kW, got {port_kw}"
+            (port_w - 100.0).abs() < 1.0,
+            "port electrical draw must equal crankcase rated 100 W (0.10 kW), got {port_w}"
         );
     }
 

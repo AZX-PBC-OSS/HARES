@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, Timelike};
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal,
@@ -549,7 +550,7 @@ impl Ev {
 
     fn l1_power_kw(&self) -> f64 {
         match self.l1_current_a {
-            Some(current_a) => (current_a * self.l1_voltage_v / 1_000.0).max(0.0),
+            Some(current_a) => power_w_to_kw(current_a * self.l1_voltage_v).max(0.0),
             None => self.rated_power_kw,
         }
     }
@@ -640,7 +641,7 @@ impl Ev {
             && would_charge_underated
             && self.battery_temp_c <= self.heater_threshold_c;
         let heater_kw = if self.heater_active {
-            self.heater_power_w / 1000.0
+            power_w_to_kw(self.heater_power_w)
         } else {
             0.0
         };
@@ -674,8 +675,8 @@ impl Ev {
             let dc_energy_kwh = dc_stored_kw * dt_hours;
             self.soc = (self.soc + dc_energy_kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
 
-            let ohmic_like_heat_w = (net_charge_kw - dc_stored_kw) * 1000.0;
-            let heater_w = heater_kw * 1000.0;
+            let ohmic_like_heat_w = power_kw_to_w(net_charge_kw - dc_stored_kw);
+            let heater_w = power_kw_to_w(heater_kw);
             self.battery_temp_c +=
                 ((ohmic_like_heat_w + heater_w) * dt_s) / self.thermal_mass_j_per_k;
         }
@@ -737,7 +738,7 @@ impl Equipment for Ev {
 
                 if is_v2l_discharge || self.active_power_kw > 0.0 {
                     ports.accumulate(&PortContribution::Electrical {
-                        active_power_kw: self.active_power_kw,
+                        active_power_w: power_kw_to_w(self.active_power_kw),
                         reactive_power_kvar: 0.0,
                     })?;
                 }

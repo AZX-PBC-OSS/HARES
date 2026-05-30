@@ -434,7 +434,7 @@ fn gas_wh_fuel_not_electricity() {
     step_wh(&mut wh, &env, &mut ports);
 
     let gas_w = ports.fuel.get(FuelType::Gas);
-    let elec_kw = ports.electrical.load_power_kw;
+    let elec_kw = ports.electrical.load_power_w;
 
     assert!(
         gas_w > 0.0,
@@ -744,7 +744,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
             wh.init(&at_floor_cfg, &env).unwrap();
             ports = PortSlots::from_declarations(wh.ports());
             step_wh(&mut wh, &env, &mut ports);
-            ports.electrical.load_power_kw > 0.0
+            ports.electrical.load_power_w > 0.0
         } else {
             let mut wh = GasWH::new(at_floor_cfg.clone());
             wh.init(&at_floor_cfg, &env).unwrap();
@@ -804,7 +804,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
             wh.init(&below_floor_cfg, &env).unwrap();
             ports = PortSlots::from_declarations(wh.ports());
             step_wh(&mut wh, &env, &mut ports);
-            ports.electrical.load_power_kw > 0.0
+            ports.electrical.load_power_w > 0.0
         } else {
             let mut wh = GasWH::new(below_floor_cfg.clone());
             wh.init(&below_floor_cfg, &env).unwrap();

@@ -901,7 +901,7 @@ fn battery_round_trip_efficiency_below_unity() {
     for _ in 0..n_steps {
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).unwrap();
-        let p = ports.electrical.net_active_kw();
+        let p = ports.electrical.net_active_w() / 1000.0;
         if p > 0.0 {
             energy_in_kwh += p * (60.0 / 3600.0);
         }
@@ -918,7 +918,7 @@ fn battery_round_trip_efficiency_below_unity() {
     for _ in 0..n_steps {
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).unwrap();
-        let p = ports.electrical.net_active_kw();
+        let p = ports.electrical.net_active_w() / 1000.0;
         if p < 0.0 {
             energy_out_kwh += p.abs() * (60.0 / 3600.0);
         }

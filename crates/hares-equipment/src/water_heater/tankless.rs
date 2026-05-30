@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use hares_physics::constants::{
     CP_LIQUID_WATER_J_KG_K, UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE,
 };
+use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -348,11 +349,11 @@ impl Equipment for TanklessWH {
             let (electric_w, reactive_kvar) = self.zip.apply(fuel_input_w, env.grid.voltage_pu);
             if electric_w > 0.0 || reactive_kvar != 0.0 {
                 ports.accumulate(&PortContribution::Electrical {
-                    active_power_kw: electric_w / 1_000.0,
+                    active_power_w: electric_w,
                     reactive_power_kvar: reactive_kvar,
                 })?;
             }
-            (electric_w / 1_000.0).max(0.0)
+            power_w_to_kw(electric_w).max(0.0)
         } else {
             if fuel_input_w > 0.0 {
                 ports.accumulate(&PortContribution::Fuel {
@@ -369,11 +370,11 @@ impl Equipment for TanklessWH {
             let (zip_parasitic_w, parasitic_kvar) =
                 self.zip.apply(self.parasitic_power_w, env.grid.voltage_pu);
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: zip_parasitic_w / 1_000.0,
+                active_power_w: zip_parasitic_w,
                 reactive_power_kvar: parasitic_kvar,
             })?;
             parasitic_electric_w_reported = zip_parasitic_w.max(0.0);
-            (zip_parasitic_w / 1_000.0).max(0.0)
+            power_w_to_kw(zip_parasitic_w).max(0.0)
         };
 
         self.telemetry.set(tk::OUTLET_TEMP_C, outlet_temp_c);
@@ -509,7 +510,7 @@ impl Equipment for TanklessWH {
                 // For gas units, max_power_kw caps fuel consumption; thermal limit
                 // = fuel_limit × efficiency. For electric units, it directly caps
                 // electrical input which equals thermal output / efficiency.
-                let limit_w = (max_power_kw * 1_000.0 * self.efficiency_factor).max(0.0);
+                let limit_w = (power_kw_to_w(*max_power_kw) * self.efficiency_factor).max(0.0);
                 self.power_limit_w = Some(limit_w);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
@@ -1046,7 +1047,7 @@ mod tests {
             "zero flow must produce zero fuel input"
         );
         assert_eq!(
-            ports.electrical.load_power_kw, 0.0,
+            ports.electrical.load_power_w, 0.0,
             "zero flow must produce zero electrical draw"
         );
     }
@@ -1284,11 +1285,11 @@ mod tests {
             "gas fuel port must be zero when burner is off"
         );
         // Parasitic electric draw must be non-zero even when off.
-        let parasitic_kw = 7.38 / 1_000.0;
+        let parasitic_w = 7.38;
         assert!(
-            (ports.electrical.load_power_kw - parasitic_kw).abs() < 1e-9,
-            "gas standby parasitic electric must be {parasitic_kw:.6} kW, got {}",
-            ports.electrical.load_power_kw
+            (ports.electrical.load_power_w - parasitic_w).abs() < 1.0,
+            "gas standby parasitic electric must be {parasitic_w:.3} W, got {}",
+            ports.electrical.load_power_w
         );
     }
 
@@ -1309,9 +1310,9 @@ mod tests {
         // Electrical port must include at least the parasitic draw.
         let parasitic_kw = 7.38 / 1_000.0;
         assert!(
-            ports.electrical.load_power_kw >= parasitic_kw - 1e-9,
+            ports.electrical.load_power_w >= parasitic_kw - 1e-9,
             "gas electrical draw must include at least parasitic_power_w ({parasitic_kw:.6} kW), got {}",
-            ports.electrical.load_power_kw
+            ports.electrical.load_power_w
         );
         // Fuel port must still have the burner consumption.
         assert!(
@@ -1343,9 +1344,9 @@ mod tests {
         let ports = step_once(&mut eq);
 
         assert!(
-            (ports.electrical.load_power_kw - 15.0 / 1_000.0).abs() < 1e-9,
-            "configured parasitic 15 W must appear in electrical port, got {} kW",
-            ports.electrical.load_power_kw
+            (ports.electrical.load_power_w - 15.0).abs() < 1.0,
+            "configured parasitic 15 W must appear in electrical port, got {}",
+            ports.electrical.load_power_w
         );
     }
 
@@ -1445,7 +1446,7 @@ mod tests {
         let ports = step_once(&mut eq);
 
         assert_eq!(
-            ports.electrical.load_power_kw, 0.0,
+            ports.electrical.load_power_w, 0.0,
             "electric tankless must draw zero when off (no parasitic)"
         );
     }
@@ -1584,9 +1585,9 @@ mod tests {
 
         let ports = step_once(&mut eq);
         assert!(
-            (ports.electrical.load_power_kw - 10.0 / 1_000.0).abs() < 1e-9,
-            "parasitic power must be 10W, got {} W",
-            ports.electrical.load_power_kw * 1_000.0
+            (ports.electrical.load_power_w - 10.0).abs() < 1.0,
+            "parasitic power must be 10 W, got {} W",
+            ports.electrical.load_power_w
         );
     }
 }
