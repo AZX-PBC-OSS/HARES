@@ -1172,6 +1172,10 @@ pub enum PvSizingError {
 /// Infer roof shape from building metadata.
 ///
 /// `facility_type` is the HPXML `ResidentialFacilityType` string.
+/// `wall_azimuths` provides fallback orientation when roof planes lack an
+/// explicit azimuth — used to resolve missing azimuths before counting
+/// distinct orientations for hip detection.
+///
 /// Falls back to `Hip` when evidence is ambiguous (the most conservative
 /// shape — usable fraction 0.35 — to avoid overestimating PV capacity
 /// from HPXML datasets that omit minor roof planes).
@@ -1179,6 +1183,7 @@ pub fn infer_roof_shape(
     roof: &RoofInfo,
     facility_type: Option<&str>,
     latitude: Option<f64>,
+    wall_azimuths: &[f64],
 ) -> RoofShape {
     // Apartments / multifamily 5+ → Flat.
     if let Some(ft) = facility_type {
@@ -1193,13 +1198,85 @@ pub fn infer_roof_shape(
         return RoofShape::Flat;
     }
 
+    // Compile-time invariant: each RoofPlane must either have azimuth_deg set
+    // or have a wall-fallback resolution path available.
+    // NOTE: tracing::debug! is used here rather than assert! because the
+    // condition is not a violation — unresolved planes are handled
+    // conservatively below by counting each as a unique direction. An
+    // assert! would panic on valid input that the algorithm already accepts.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    for plane in &roof.planes {
+        if plane.azimuth_deg.is_none() && wall_azimuths.is_empty() {
+            tracing::debug!(
+                pv_plane_index = roof.planes.iter().position(|p| std::ptr::eq(p, plane)),
+                "roof plane has no explicit azimuth and no wall fallback — orientation is unresolved"
+            );
+        }
+    }
+
+    // Resolve azimuth for every plane before counting distinct orientations.
+    // Planes without explicit azimuth_deg fall back to wall azimuths via
+    // resolve_azimuth(); planes that cannot be resolved (no explicit azimuth
+    // and no wall fallback) receive the hardcoded 180° default but are counted
+    // as unique orientations to avoid undercounting distinct directions.
+    let mut distinct_buckets: std::collections::HashSet<u32> =
+        std::collections::HashSet::with_capacity(roof.planes.len());
+    let mut unresolved_count: u32 = 0;
+    #[cfg(feature = "observe")]
+    let mut azimuth_sources: Vec<(&str, f64)> = Vec::with_capacity(roof.planes.len());
+
+    for (i, plane) in roof.planes.iter().enumerate() {
+        let source = if plane.azimuth_deg.is_some() {
+            "explicit"
+        } else if !wall_azimuths.is_empty() {
+            "resolved_from_wall"
+        } else {
+            "unresolved"
+        };
+        let az = resolve_azimuth(plane, wall_azimuths);
+
+        if source == "unresolved" {
+            // Conservatively treat each unresolved plane as a unique direction.
+            unresolved_count += 1;
+            tracing::debug!(
+                pv_plane_index = i,
+                pv_azimuth_source = source,
+                "roof plane azimuth is unresolved — counted as unique direction"
+            );
+        } else {
+            distinct_buckets.insert((az / 45.0).round() as u32);
+            if source == "resolved_from_wall" {
+                tracing::debug!(
+                    pv_plane_index = i,
+                    pv_resolved_azimuth = az,
+                    pv_azimuth_source = source,
+                    "roof plane azimuth resolved from wall fallback"
+                );
+            }
+        }
+
+        #[cfg(feature = "observe")]
+        azimuth_sources.push((source, az));
+    }
+
+    let distinct_azimuth_count = distinct_buckets.len() as u32 + unresolved_count;
+
     // Multiple planes with distinct azimuths → Hip.
-    let distinct_azimuths: std::collections::HashSet<u32> = roof
-        .planes
-        .iter()
-        .filter_map(|p| p.azimuth_deg.map(|a| (a / 45.0).round() as u32))
-        .collect();
-    if distinct_azimuths.len() >= 3 {
+    if distinct_azimuth_count >= 3 {
+        #[cfg(feature = "observe")]
+        {
+            let wall_resolved: Vec<_> = azimuth_sources
+                .iter()
+                .filter(|(s, _)| *s == "resolved_from_wall")
+                .map(|(_, az)| *az)
+                .collect();
+            tracing::debug!(
+                pv_distinct_azimuth_count = distinct_azimuth_count,
+                pv_unresolved_plane_count = unresolved_count,
+                pv_wall_resolved_azimuths = ?wall_resolved,
+                "hip classification: ≥3 distinct orientations after azimuth resolution"
+            );
+        }
         return RoofShape::Hip;
     }
 
@@ -1218,7 +1295,7 @@ pub fn infer_roof_shape(
     });
 
     // Low-latitude regions with 2 planes -- mild hip signal.
-    if distinct_azimuths.len() >= 2 && latitude.is_some_and(|l| l < 30.0) {
+    if distinct_azimuth_count >= 2 && latitude.is_some_and(|l| l < 30.0) {
         return RoofShape::Hip;
     }
 
@@ -1239,7 +1316,14 @@ pub fn infer_roof_shape(
     // (no-tile +1, tilt +1) and classify as Gable — sufficient evidence even
     // without the latitude signal. Tile or shallow-tilt roofs in this band
     // score ≤1 and fall through to the conservative Hip fallback below.
-    let plane_azimuths: Vec<f64> = roof.planes.iter().filter_map(|p| p.azimuth_deg).collect();
+    //
+    // Use resolved azimuths (via resolve_azimuth) so that planes with azimuth
+    // from wall fallback participate in the opposite-plane geometric check.
+    let plane_azimuths: Vec<f64> = roof
+        .planes
+        .iter()
+        .map(|p| resolve_azimuth(p, wall_azimuths))
+        .collect();
     if plane_azimuths.len() == 2 && roof.planes.len() == 2 {
         let (a1, a2) = (plane_azimuths[0], plane_azimuths[1]);
         let diff = (a1 - a2).abs();
@@ -1281,7 +1365,7 @@ pub fn infer_roof_shape(
     // datasets omit minor roof planes (common in NREL ResStock v3.1).
     // Gable (0.75 usable) would overstate usable area by 2.14× vs Hip (0.35).
     let n_planes = roof.planes.len();
-    let n_distinct_az = distinct_azimuths.len();
+    let n_distinct_az = distinct_azimuth_count;
 
     #[cfg(feature = "observe")]
     {
@@ -1652,7 +1736,7 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("apartment"), None),
+            infer_roof_shape(&roof, Some("apartment"), None, &[]),
             RoofShape::Flat
         );
     }
@@ -1664,7 +1748,7 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), None),
+            infer_roof_shape(&roof, Some("single-family detached"), None, &[]),
             RoofShape::Flat
         );
     }
@@ -1679,7 +1763,7 @@ mod tests {
             planes: vec![plane(100.0, default_tilt, Some(180.0))],
             total_roof_area_m2: 100.0,
         };
-        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0));
+        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]);
         assert_ne!(
             shape,
             RoofShape::Flat,
@@ -1697,7 +1781,7 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]),
             RoofShape::Gable
         );
     }
@@ -1715,7 +1799,7 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]),
             RoofShape::Gable
         );
     }
@@ -1732,7 +1816,7 @@ mod tests {
         };
         // Multi-signal classifier: opposing planes, no tile, lat ≥35°, tilt ≥10°
         // → gable_score = 3 → Gable.
-        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0));
+        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]);
         assert_eq!(shape, RoofShape::Gable);
 
         let usable =
@@ -1755,7 +1839,7 @@ mod tests {
             ],
             total_roof_area_m2: 90.0,
         };
-        assert_eq!(infer_roof_shape(&roof, None, None), RoofShape::Hip);
+        assert_eq!(infer_roof_shape(&roof, None, None, &[]), RoofShape::Hip);
     }
 
     #[test]
@@ -2764,7 +2848,7 @@ mod tests {
         };
         // At lat=33° (>= 30°) the low-latitude rule does not fire;
         // the function falls through to the conservative fallback (Hip).
-        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(33.0));
+        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(33.0), &[]);
         // Falls to fallback, which returns Hip. The material rule is gone
         // — tile/slate no longer forces Hip classification here.
         assert_eq!(shape, RoofShape::Hip);
@@ -2803,7 +2887,7 @@ mod tests {
             total_roof_area_m2: 90.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), None),
+            infer_roof_shape(&roof, Some("single-family detached"), None, &[]),
             RoofShape::Hip
         );
     }
@@ -2835,7 +2919,7 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), Some(25.0)),
+            infer_roof_shape(&roof, Some("single-family detached"), Some(25.0), &[]),
             RoofShape::Hip
         );
     }
@@ -2855,7 +2939,7 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]),
             RoofShape::Hip
         );
     }
@@ -2871,7 +2955,7 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]),
             RoofShape::Gable
         );
     }
@@ -2902,7 +2986,7 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]),
             RoofShape::Hip
         );
     }
@@ -2924,7 +3008,7 @@ mod tests {
             total_roof_area_m2: 130.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]),
             RoofShape::Hip
         );
     }
@@ -2943,8 +3027,91 @@ mod tests {
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
-            infer_roof_shape(&roof, Some("single-family detached"), Some(32.0)),
+            infer_roof_shape(&roof, Some("single-family detached"), Some(32.0), &[]),
             RoofShape::Gable
+        );
+    }
+
+    /// 4-face hip roof where one plane lacks explicit azimuth. With wall
+    /// fallback, the missing azimuth is resolved and the hip classification
+    /// (≥3 distinct azimuths) fires correctly.
+    #[test]
+    fn infer_hip_4plane_one_missing_azimuth_resolved_from_wall() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(40.0, 26.0, Some(90.0)),
+                plane(40.0, 26.0, Some(180.0)),
+                plane(40.0, 26.0, Some(270.0)),
+                plane(30.0, 26.0, None), // missing azimuth — resolved from wall
+            ],
+            total_roof_area_m2: 150.0,
+        };
+        // Only wall azimuth 0° is provided — resolve_azimuth returns 0° for the
+        // missing plane (the only available wall direction). The 45°-bucketed
+        // 0° direction is distinct from the existing 90°, 180°, and 270°
+        // buckets, giving 4 distinct → ≥3 → Hip.
+        let shape = infer_roof_shape(&roof, Some("single-family detached"), None, &[0.0]);
+        assert_eq!(
+            shape,
+            RoofShape::Hip,
+            "4-face hip with one missing azimuth resolved from wall must classify as Hip"
+        );
+    }
+
+    /// 3-face hip roof with one plane lacking azimuth and wall fallback
+    /// available. The resolved azimuth pushes the distinct count to ≥3,
+    /// correct hip classification.
+    #[test]
+    fn infer_hip_3plane_one_missing_azimuth_resolved_from_wall() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(40.0, 26.0, Some(90.0)),
+                plane(40.0, 26.0, Some(180.0)),
+                plane(30.0, 26.0, None), // missing azimuth
+            ],
+            total_roof_area_m2: 110.0,
+        };
+        // Without wall fallback: 2 explicit buckets + 1 unresolved = 3 → Hip.
+        // With wall fallback that adds a third distinct direction: still Hip.
+        // Test without wall fallback first — unresolved plane counts as unique.
+        let shape_no_walls =
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[]);
+        assert_eq!(
+            shape_no_walls,
+            RoofShape::Hip,
+            "3-face hip with one missing azimuth (unresolved) must classify as Hip"
+        );
+
+        // Test with wall fallback — resolved azimuth gives ≥3 distinct.
+        let shape_with_walls =
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[270.0]);
+        assert_eq!(
+            shape_with_walls,
+            RoofShape::Hip,
+            "3-face hip with wall-resolved azimuth must classify as Hip"
+        );
+    }
+
+    /// 2-face gable roof with one missing azimuth resolved from wall fallback.
+    /// The resolved azimuth pairs with the explicit azimuth to form opposing
+    /// directions, producing correct Gable classification. Verifies the
+    /// unresolved-conservative fallback does not incorrectly promote to Hip.
+    #[test]
+    fn infer_gable_2plane_one_missing_azimuth_resolved_from_wall() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(50.0, 26.0, Some(90.0)),
+                plane(50.0, 26.0, None), // missing azimuth — resolved from wall
+            ],
+            total_roof_area_m2: 100.0,
+        };
+        // Wall azimuth of 270° creates an E/W opposing pair (90° and 270°).
+        // At lat 40° with pitched tilt and no tile → score 3 → Gable.
+        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0), &[270.0]);
+        assert_eq!(
+            shape,
+            RoofShape::Gable,
+            "2-face gable with wall-resolved azimuth must classify as Gable, not Hip"
         );
     }
 
@@ -3103,7 +3270,7 @@ mod tests {
             planes: vec![plane(200.0, 0.0, Some(180.0))],
             total_roof_area_m2: 200.0,
         };
-        let shape = infer_roof_shape(&roof, Some("apartment"), Some(40.0));
+        let shape = infer_roof_shape(&roof, Some("apartment"), Some(40.0), &[]);
         assert_eq!(shape, RoofShape::Flat);
         assert_ne!(shape, RoofShape::FlatEastWest);
     }

@@ -1936,11 +1936,12 @@ fn gable_roof_without_pitch_not_classified_as_flat() {
     );
 
     // Extract roof info and verify shape classification.
-    let (roof_info, _wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&building);
+    let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&building);
     let shape = hares_physics::pv_sizing::infer_roof_shape(
         &roof_info,
         Some("single-family detached"),
         Some(40.0),
+        &wall_azimuths,
     );
     assert_ne!(
         shape,
