@@ -1031,6 +1031,60 @@ pub fn infer_roof_shape(
         return RoofShape::Hip;
     }
 
+    // ---- multi-signal Gable classification ----
+    // Gable roofs typically have two opposing planes (azimuth ≈180° apart).
+    // Classification requires both geometric evidence (opposing planes, pitched
+    // tilt) and supporting context (no tile/slate, latitude ≥35°) to avoid
+    // misclassifying 2-plane hip roofs with omitted minor planes.
+    //
+    // The model uses a weighted gate: opposing planes are necessary but not
+    // sufficient — supporting evidence (no tile material, higher latitude,
+    // pitched tilt) must accumulate to a confidence score ≥2.
+    //
+    // Latitude gap design: the low-latitude Hip gate fires at <30°N; the
+    // latitude Gable signal only fires at ≥35°N. The 30°–35°N band is
+    // intentionally neither a hard Hip zone nor a +1-signal zone. In this
+    // band, 2-plane opposing no-tile roofs with tilt ≥10° score 2
+    // (no-tile +1, tilt +1) and classify as Gable — sufficient evidence even
+    // without the latitude signal. Tile or shallow-tilt roofs in this band
+    // score ≤1 and fall through to the conservative Hip fallback below.
+    let plane_azimuths: Vec<f64> = roof.planes.iter().filter_map(|p| p.azimuth_deg).collect();
+    if plane_azimuths.len() == 2 && roof.planes.len() == 2 {
+        let (a1, a2) = (plane_azimuths[0], plane_azimuths[1]);
+        let diff = (a1 - a2).abs();
+        let short_diff = diff.min(360.0 - diff);
+        let is_opposite = (180.0 - short_diff).abs() <= 30.0;
+
+        if is_opposite {
+            let mut gable_score: u32 = 0;
+            // Absence of tile/slate strengthens Gable confidence — tile/slate is
+            // probabilistically correlated with hip roofs (Mediterranean /
+            // Spanish Colonial styles) but not deterministic.
+            if !has_tile_slate {
+                gable_score += 1;
+            }
+            // At latitudes ≥35°N, gable roofs dominate — hurricane-wind-driven
+            // hip adoption concentrates <35°N in the southeastern US.
+            // IBHS (2019) "Rating the States: An Assessment of Residential
+            // Building Code and Enforcement Systems" documents regional
+            // hip roof adoption rates for wind resistance.
+            if latitude.is_some_and(|l| l >= 35.0) {
+                gable_score += 1;
+            }
+            // Pitched tilt (≥10°) confirms sloped roof — flat roofs are already
+            // classified above. Very shallow tilt (<10°) could indicate a low-slope
+            // hip or an artifact, so exclude from Gable.
+            if roof.planes.iter().all(|p| p.tilt_deg >= 10.0) {
+                gable_score += 1;
+            }
+
+            if gable_score >= 2 {
+                return RoofShape::Gable;
+            }
+        }
+    }
+    // ---- end Gable classification ----
+
     // Fallback: no classification rule matched. Default to Hip — the most
     // conservative shape — to avoid overestimating PV capacity when HPXML
     // datasets omit minor roof planes (common in NREL ResStock v3.1).
@@ -1424,27 +1478,26 @@ mod tests {
         );
     }
 
-    /// 2-plane hip roof (N=0°, S=180°) with asphalt shingle at latitude 40°.
-    /// None of the classification rules match: only 2 distinct azimuths,
-    /// no tile/slate material, latitude ≥ 30°. Falls through to the
-    /// conservative fallback — must return Hip (0.35 usable), not Gable (0.75).
+    /// 2-plane N/S roof (N=0°, S=180°) at lat 40° with no tile and pitched
+    /// tilt — strong Gable evidence: opposing planes, no tile, lat ≥35°,
+    /// tilt ≥10°. Classified as Gable (0.75 usable).
     #[test]
-    fn infer_2plane_hip_fallback() {
+    fn infer_gable_2plane_ns() {
         let roof = RoofInfo {
             planes: vec![plane(50.0, 26.0, Some(180.0)), plane(50.0, 26.0, Some(0.0))],
             total_roof_area_m2: 100.0,
         };
         assert_eq!(
             infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
-            RoofShape::Hip
+            RoofShape::Gable
         );
     }
 
-    /// 2-plane gable roof (E=90°, W=270°) with asphalt shingle at latitude 40°.
-    /// No classification rule matches — same fallback case. Must return the
-    /// conservative fallback (Hip), not Gable.
+    /// 2-plane E/W roof (E=90°, W=270°) at lat 40° with no tile and pitched
+    /// tilt — strong Gable evidence: opposing planes, no tile, lat ≥35°,
+    /// tilt ≥10°. Classified as Gable (0.75 usable).
     #[test]
-    fn infer_2plane_gable_fallback() {
+    fn infer_gable_2plane_ew() {
         let roof = RoofInfo {
             planes: vec![
                 plane(50.0, 26.0, Some(90.0)),
@@ -1454,37 +1507,33 @@ mod tests {
         };
         assert_eq!(
             infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
-            RoofShape::Hip
+            RoofShape::Gable
         );
     }
 
     /// Integration: exercise `compute_usable_area` end-to-end with 2-plane
-    /// hip-roof data and verify the capacity estimate uses the conservative
-    /// Hip usable fraction (0.35) instead of Gable (0.75).
+    /// gable N/S roof data and verify the capacity estimate uses the Gable
+    /// usable fraction (0.75). The two opposing planes with no tile at lat 40°
+    /// accumulate sufficient evidence for Gable classification.
     #[test]
-    fn pv_capacity_2plane_hip() {
+    fn pv_capacity_2plane_gable() {
         let roof = RoofInfo {
             planes: vec![plane(60.0, 26.0, Some(180.0)), plane(40.0, 26.0, Some(0.0))],
             total_roof_area_m2: 100.0,
         };
-        // infer_roof_shape with this data at lat=40° will fall back to Hip.
+        // Multi-signal classifier: opposing planes, no tile, lat ≥35°, tilt ≥10°
+        // → gable_score = 3 → Gable.
         let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0));
-        assert_eq!(shape, RoofShape::Hip);
+        assert_eq!(shape, RoofShape::Gable);
 
         let usable =
             compute_usable_area(&roof, shape, &[], Some(40.0), None, None, None, false).unwrap();
-        // With Hip (0.35): south plane (60 m², not north-facing) → 60 × 0.35 = 21 m²
-        // 21 / 2.1 (panel_area) = 10 panels, 10 × 440 = 4400 W = 4.4 kW
-        // If shape were Gable (0.75): 60 × 0.75 / 2.1 = 21 panels, 9.24 kW
-        // The difference verifies we're using the conservative fraction.
-        let hip_expected_panels =
-            (60.0 * HIP_USABLE_FRACTION / DEFAULT_PANEL_AREA_M2).floor() as u32;
-        assert_eq!(usable.max_panels, hip_expected_panels);
-        assert!(
-            usable.max_capacity_kw < 6.0,
-            "capacity with Hip shape ({:.2} kW) must be well below Gable estimate (~9.24 kW)",
-            usable.max_capacity_kw
-        );
+        // Gable with 2 planes (no halving): south plane (60 m², not north-facing)
+        // → 60 × 0.75 = 45 m², 45 / 2.1 (panel_area) = 21 panels,
+        // 21 × 440 W / 1000 = 9.24 kW.
+        let gable_expected_panels =
+            (60.0 * GABLE_USABLE_FRACTION / DEFAULT_PANEL_AREA_M2).floor() as u32;
+        assert_eq!(usable.max_panels, gable_expected_panels);
     }
 
     #[test]
@@ -2477,16 +2526,14 @@ mod tests {
         }
     }
 
-    /// 2-plane gable orientation (E=90°, W=270°) with tile material at
-    /// Phoenix AZ latitude (33°). After removing the deterministic
-    /// tile/slate→Hip rule, this must NOT be classified as Hip by the
-    /// material path. The classification falls through to the
-    /// conservative fallback which also returns Hip — so the output
-    /// is still Hip, but the reasoning no longer incorrectly assumes
-    /// tile → hip. The tile/slate flag is recorded in the fallback
-    /// observer for post-hoc analysis.
+    /// 2-plane opposite E/W roof with tile material at Phoenix AZ latitude
+    /// (33°N). The multi-signal Gable classifier requires score ≥2; this
+    /// case scores 1 (tilt only — tile blocks +1, lat <35° blocks +1), so
+    /// it correctly falls to the conservative Hip fallback. Demonstrates
+    /// that opposing geometry alone is insufficient for Gable classification
+    /// when material (tile) and latitude signals both oppose it.
     #[test]
-    fn tile_gable_not_hip() {
+    fn infer_hip_tile_2plane_midlat() {
         let roof = RoofInfo {
             planes: vec![
                 RoofPlane {
@@ -2549,6 +2596,146 @@ mod tests {
         assert_eq!(
             infer_roof_shape(&roof, Some("single-family detached"), None),
             RoofShape::Hip
+        );
+    }
+
+    /// Tile roof with 2 opposite planes at low latitude (< 30°) — the
+    /// low-latitude hard rule dominates, returning Hip even though
+    /// geometry (opposing planes) and tile material pull in opposite
+    /// directions. Demonstrates that geometry does not override the
+    /// conservative low-latitude gate.
+    #[test]
+    fn infer_hip_2plane_tile_low_lat() {
+        let roof = RoofInfo {
+            planes: vec![
+                RoofPlane {
+                    area_m2: 50.0,
+                    tilt_deg: 26.0,
+                    azimuth_deg: Some(90.0),
+                    material: Some("clay tile".into()),
+                    boundary_index: None,
+                },
+                RoofPlane {
+                    area_m2: 50.0,
+                    tilt_deg: 26.0,
+                    azimuth_deg: Some(270.0),
+                    material: Some("clay tile".into()),
+                    boundary_index: None,
+                },
+            ],
+            total_roof_area_m2: 100.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), Some(25.0)),
+            RoofShape::Hip
+        );
+    }
+
+    /// 2-plane non-opposite roof (S=180°, SW=225°) at lat 40° — the
+    /// two azimuths are 45° apart, not approximately opposite. Gable
+    /// detection requires opposing planes; non-opposite geometry
+    /// suggests hip with omitted minor planes. Falls to conservative
+    /// Hip fallback.
+    #[test]
+    fn infer_hip_2plane_non_opposite() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(60.0, 26.0, Some(180.0)),
+                plane(40.0, 26.0, Some(225.0)),
+            ],
+            total_roof_area_m2: 100.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            RoofShape::Hip
+        );
+    }
+
+    /// 2-plane opposite roof with shallow tilt (8° < 10° threshold) at
+    /// lat 40°. Score = no-tile(+1) + lat≥35°(+1) + tilt(0) = 2 ≥ 2 → Gable.
+    /// Even without tilt support, the combination of opposing geometry + no
+    /// tile + high latitude provides sufficient evidence for Gable.
+    #[test]
+    fn infer_gable_2plane_shallow_tilt_no_tile_high_lat() {
+        let roof = RoofInfo {
+            planes: vec![plane(50.0, 8.0, Some(90.0)), plane(50.0, 8.0, Some(270.0))],
+            total_roof_area_m2: 100.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            RoofShape::Gable
+        );
+    }
+
+    /// 2-plane opposite roof with tile and shallow tilt at lat 40°.
+    /// Tile blocks +1, shallow tilt blocks +1 — only lat ≥35° contributes.
+    /// Score = 1 < 2 → Hip. The combination of tile (hip-associated)
+    /// and shallow tilt (could be low-slope hip) is too ambiguous.
+    #[test]
+    fn infer_hip_2plane_tile_shallow_tilt_high_lat() {
+        let roof = RoofInfo {
+            planes: vec![
+                RoofPlane {
+                    area_m2: 50.0,
+                    tilt_deg: 8.0,
+                    azimuth_deg: Some(90.0),
+                    material: Some("clay tile".into()),
+                    boundary_index: None,
+                },
+                RoofPlane {
+                    area_m2: 50.0,
+                    tilt_deg: 8.0,
+                    azimuth_deg: Some(270.0),
+                    material: Some("clay tile".into()),
+                    boundary_index: None,
+                },
+            ],
+            total_roof_area_m2: 100.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            RoofShape::Hip
+        );
+    }
+
+    /// 3-plane hip roof where only 2 planes have azimuth data. The third
+    /// plane's orientation is unknown, so the evidence is ambiguous — must
+    /// conservatively fall to Hip, not Gable. Guards against the
+    /// `plane_azimuths.len() == 2 && roof.planes.len() == 3` divergence
+    /// where the Hip guard (`distinct_azimuths.len() >= 3`) does not fire
+    /// because the third plane lacks azimuth.
+    #[test]
+    fn infer_hip_3plane_one_missing_azimuth_not_gable() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(50.0, 26.0, Some(90.0)),
+                plane(50.0, 26.0, Some(270.0)),
+                plane(30.0, 26.0, None),
+            ],
+            total_roof_area_m2: 130.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            RoofShape::Hip
+        );
+    }
+
+    /// 2-plane opposite roof with no tile and pitched tilt at lat=32°N
+    /// (inside the 30°–35° latitude gap). Score = no-tile(+1) + tilt(+1)
+    /// = 2 ≥ 2 → Gable. Verifies that reasonable evidence in the gap
+    /// band still produces Gable even without the latitude signal.
+    #[test]
+    fn infer_gable_2plane_no_tile_lat32_gap() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(50.0, 26.0, Some(90.0)),
+                plane(50.0, 26.0, Some(270.0)),
+            ],
+            total_roof_area_m2: 100.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), Some(32.0)),
+            RoofShape::Gable
         );
     }
 }
