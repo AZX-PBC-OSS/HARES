@@ -5673,6 +5673,7 @@ mod tests {
             fluid: vec![],
             custom: vec![],
             humidity: vec![],
+            ..Default::default()
         };
 
         solver.prepare_inputs(&ports, &env);

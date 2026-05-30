@@ -446,6 +446,9 @@ pub struct PortSlots {
     pub fluid: Vec<FluidAccumulator>,
     pub custom: Vec<CustomAccumulator>,
     pub humidity: Vec<HumidityAccumulator>,
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[serde(skip)]
+    pub write_log: std::collections::HashSet<String>,
 }
 
 impl PortSlots {
@@ -508,10 +511,15 @@ impl PortSlots {
             fluid,
             custom,
             humidity,
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            write_log: std::collections::HashSet::new(),
         }
     }
 
     pub fn zero(&mut self) {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        self.warn_unwritten();
+
         for thermal in &mut self.thermal {
             thermal.zero();
         }
@@ -528,6 +536,46 @@ impl PortSlots {
         }
     }
 
+    /// Check whether every declared port slot received at least one write
+    /// during the preceding timestep. Logs a warning for each declared port
+    /// that received zero contributions.
+    ///
+    /// Gated behind `debug_assertions` or the `check_invariants` feature so
+    /// it imposes zero overhead in release builds.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn warn_unwritten(&mut self) {
+        use tracing::warn;
+
+        // Derive expected keys from accumulator vectors built by
+        // from_declarations. Only vector-based accumulators are checked;
+        // Electrical and Fuel are singletons always present regardless of
+        // declarations, so we cannot distinguish "declared" from "default".
+        let mut expected: Vec<String> = Vec::new();
+        for acc in &self.thermal {
+            expected.push(format!("Thermal:{:?}", acc.zone));
+        }
+        for acc in &self.fluid {
+            expected.push(format!("Fluid:{:?}:{:?}", acc.loop_id, acc.fluid_type));
+        }
+        for acc in &self.custom {
+            expected.push(format!("Custom:{:?}", acc.domain_id));
+        }
+        for acc in &self.humidity {
+            expected.push(format!("Humidity:{:?}", acc.zone));
+        }
+
+        for key in &expected {
+            if !self.write_log.contains(key.as_str()) {
+                warn!(
+                    port = key.as_str(),
+                    "declared port received zero contributions during preceding timestep"
+                );
+            }
+        }
+
+        self.write_log.clear();
+    }
+
     pub fn accumulate(&mut self, contribution: &PortContribution) -> Result<(), HaresError> {
         match contribution {
             PortContribution::Thermal {
@@ -539,6 +587,10 @@ impl PortSlots {
             } => {
                 if let Some(total) = self.thermal.iter_mut().find(|entry| entry.zone == *zone) {
                     total.add(*sensible_gain_w, *radiant_gain_w, *latent_gain_w, *category);
+                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                    {
+                        self.write_log.insert(format!("Thermal:{zone:?}"));
+                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared thermal zone: {zone:?}"
@@ -555,12 +607,20 @@ impl PortSlots {
                 } else {
                     self.electrical.generation_power_kw += active_power_kw;
                 }
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    self.write_log.insert("Electrical".to_string());
+                }
             }
             PortContribution::Fuel {
                 fuel_type,
                 consumption_w,
             } => {
                 self.fuel.add(*fuel_type, *consumption_w)?;
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    self.write_log.insert(format!("Fuel:{fuel_type:?}"));
+                }
             }
             PortContribution::Fluid {
                 loop_id,
@@ -581,6 +641,11 @@ impl PortSlots {
                         *return_temp_c,
                         *thermal_power_w,
                     )?;
+                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                    {
+                        self.write_log
+                            .insert(format!("Fluid:{loop_id:?}:{fluid_type:?}"));
+                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared fluid loop: {loop_id:?} with fluid type {fluid_type:?}"
@@ -594,6 +659,10 @@ impl PortSlots {
                     .find(|entry| entry.domain_id == *domain_id)
                 {
                     total.add(*payload);
+                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                    {
+                        self.write_log.insert(format!("Custom:{domain_id:?}"));
+                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared custom domain: {domain_id:?}"
@@ -606,6 +675,10 @@ impl PortSlots {
             } => {
                 if let Some(total) = self.humidity.iter_mut().find(|entry| entry.zone == *zone) {
                     total.add(*moisture_mass_flow_kg_s);
+                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                    {
+                        self.write_log.insert(format!("Humidity:{zone:?}"));
+                    }
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared humidity zone: {zone:?}"
@@ -785,6 +858,8 @@ mod tests {
                 zone: ZoneId(1),
                 moisture_mass_flow_kg_s: 0.001,
             }],
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            write_log: std::collections::HashSet::new(),
         };
 
         slots.zero();

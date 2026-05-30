@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+check_invariants = []
+
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
@@ -13,6 +16,7 @@ bitflags = { workspace = true, features = ["serde"] }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 rand_distr = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

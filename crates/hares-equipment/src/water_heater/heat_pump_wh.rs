@@ -1525,6 +1525,7 @@ mod tests {
             )],
             custom: vec![],
             humidity: vec![],
+            ..Default::default()
         }
     }
 
@@ -2322,6 +2323,7 @@ mod mutual_exclusion_tests {
             )],
             custom: vec![],
             humidity: vec![],
+            ..Default::default()
         }
     }
 
@@ -2606,6 +2608,7 @@ mod dr_tests {
             )],
             custom: vec![],
             humidity: vec![],
+            ..Default::default()
         }
     }
 
@@ -2908,6 +2911,7 @@ mod new_feature_tests {
             )],
             custom: vec![],
             humidity: vec![],
+            ..Default::default()
         }
     }
 

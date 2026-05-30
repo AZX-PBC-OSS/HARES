@@ -858,7 +858,7 @@ impl HeatPumpHeaterCore {
         }
 
         self.hvac.update_zone_heat_fractions();
-        self.hvac.rebuild_thermal_ports(&mut self.ports);
+        self.hvac.rebuild_thermal_ports(&mut self.ports, false);
 
         // Backup heating from typed config.
         // For ASHP, backup capacity is required — either explicit in HPXML

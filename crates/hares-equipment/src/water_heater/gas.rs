@@ -1135,6 +1135,7 @@ mod tests {
             )],
             custom: vec![],
             humidity: vec![],
+            ..Default::default()
         }
     }
 

@@ -1053,6 +1053,7 @@ mod tests {
             )],
             custom: vec![],
             humidity: vec![],
+            ..Default::default()
         }
     }
 
@@ -1770,6 +1771,7 @@ mod element_priority_tests {
             )],
             custom: vec![],
             humidity: vec![],
+            ..Default::default()
         }
     }
 

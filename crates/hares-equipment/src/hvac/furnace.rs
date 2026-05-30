@@ -146,7 +146,7 @@ impl Equipment for ElectricFurnace {
             )));
         }
         self.hvac.update_zone_heat_fractions();
-        self.hvac.rebuild_thermal_ports(&mut self.ports);
+        self.hvac.rebuild_thermal_ports(&mut self.ports, false);
         self.hvac.config.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.config.eir_by_stage = vec![self.eir];
         self.hvac.runtime.startup.c_d = 0.0;
@@ -429,7 +429,7 @@ impl Equipment for GasFurnace {
         self.hvac.config.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
         self.hvac.config.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
         self.hvac.update_zone_heat_fractions();
-        self.hvac.rebuild_thermal_ports(&mut self.ports);
+        self.hvac.rebuild_thermal_ports(&mut self.ports, false);
         self.hvac.config.heating_capacities_w =
             if let Some(stages) = &typed.stage_heating_capacities_w {
                 stages.clone()

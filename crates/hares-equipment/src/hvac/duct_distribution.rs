@@ -138,12 +138,19 @@ impl HvacEquipment {
     /// Rebuild thermal port declarations to include all zones referenced by
     /// `zone_heat_fractions`. Call after `update_zone_heat_fractions()` in init
     /// so that the port list matches the zones that will receive contributions.
-    pub fn rebuild_thermal_ports(&self, ports: &mut Vec<PortDeclaration>) {
+    ///
+    /// `needs_humidity` gates the `PortType::Humidity` declaration. Only
+    /// equipment that writes `PortContribution::Humidity` (air conditioners,
+    /// heat pump coolers) should pass `true`; heating-only equipment passes
+    /// `false` to avoid spurious `HumidityAccumulator` allocations.
+    pub fn rebuild_thermal_ports(&self, ports: &mut Vec<PortDeclaration>, needs_humidity: bool) {
         use hares_types::PortType;
         ports.retain(|p| p.port_type != PortType::Thermal && p.port_type != PortType::Humidity);
         for &(zone, _) in &self.config.zone_heat_fractions {
             ports.push(PortDeclaration::thermal(zone));
-            ports.push(PortDeclaration::humidity(zone));
+            if needs_humidity {
+                ports.push(PortDeclaration::humidity(zone));
+            }
         }
     }
 }
@@ -591,7 +598,7 @@ mod tests {
             PortDeclaration::electrical(),
             PortDeclaration::thermal(ZoneId(1)),
         ];
-        hvac.rebuild_thermal_ports(&mut ports);
+        hvac.rebuild_thermal_ports(&mut ports, true);
 
         // Should have electrical + thermal(1) + thermal(3)
         let thermal_ports: Vec<_> = ports
@@ -617,5 +624,146 @@ mod tests {
             ports.iter().any(|p| p.port_type == PortType::Electrical),
             "electrical port must be preserved after rebuild"
         );
+    }
+
+    /// rebuild_thermal_ports with needs_humidity=false must produce only
+    /// Thermal declarations — no Humidity entries.
+    #[test]
+    fn rebuild_thermal_ports_without_humidity_omits_humidity_declarations() {
+        use hares_types::{PortDeclaration, PortType};
+
+        let mut hvac = make_hvac();
+        hvac.config.duct_dse = 1.0;
+        hvac.update_zone_heat_fractions();
+
+        let mut ports = vec![
+            PortDeclaration::electrical(),
+            PortDeclaration::thermal(ZoneId(1)),
+        ];
+        hvac.rebuild_thermal_ports(&mut ports, false);
+
+        let has_humidity = ports.iter().any(|p| p.port_type == PortType::Humidity);
+        assert!(
+            !has_humidity,
+            "needs_humidity=false must not produce Humidity declarations; got {:?}",
+            ports
+        );
+
+        let thermal_count = ports
+            .iter()
+            .filter(|p| p.port_type == PortType::Thermal)
+            .count();
+        assert_eq!(
+            thermal_count, 1,
+            "must retain exactly one Thermal declaration for the conditioned zone"
+        );
+    }
+
+    /// rebuild_thermal_ports with needs_humidity=true must include Humidity
+    /// declarations alongside Thermal for every zone_heat_fractions entry.
+    #[test]
+    fn rebuild_thermal_ports_with_humidity_includes_humidity_declarations() {
+        use hares_types::{PortDeclaration, PortType};
+
+        let mut hvac = make_hvac();
+        hvac.config.duct_dse = 0.85;
+        hvac.config.duct_zone_id = Some(ZoneId(3));
+        hvac.update_zone_heat_fractions();
+
+        let mut ports = vec![
+            PortDeclaration::electrical(),
+            PortDeclaration::thermal(ZoneId(1)),
+        ];
+        hvac.rebuild_thermal_ports(&mut ports, true);
+
+        let humidity_zones: Vec<_> = ports
+            .iter()
+            .filter(|p| p.port_type == PortType::Humidity)
+            .map(|p| p.zone)
+            .collect();
+        assert_eq!(
+            humidity_zones.len(),
+            2,
+            "must have Humidity for conditioned + duct zone; got {:?}",
+            humidity_zones
+        );
+        assert!(
+            humidity_zones.contains(&Some(ZoneId(1))),
+            "conditioned zone humidity port missing"
+        );
+        assert!(
+            humidity_zones.contains(&Some(ZoneId(3))),
+            "duct zone humidity port missing"
+        );
+
+        let thermal_count = ports
+            .iter()
+            .filter(|p| p.port_type == PortType::Thermal)
+            .count();
+        assert_eq!(
+            thermal_count, 2,
+            "must have Thermal for both zones alongside Humidity"
+        );
+    }
+
+    /// Regression test: every HvacEquipmentType that is known to write
+    /// PortContribution::Humidity passes needs_humidity=true (and therefore
+    /// produces Humidity port declarations). Every type that does not write
+    /// Humidity passes false and produces no Humidity declarations.
+    #[test]
+    fn hvac_equipment_types_declare_humidity_only_when_writing_it() {
+        use hares_types::{PortDeclaration, PortType};
+
+        use super::super::hvac_core::HvacEquipmentType;
+
+        // Equipment types that write PortContribution::Humidity (air conditioners
+        // and heat pump coolers). All other HVAC equipment is heating-only and
+        // does not write humidity.
+        let humidity_writers: &[HvacEquipmentType] = &[
+            HvacEquipmentType::AcCooler,
+            HvacEquipmentType::MiniSplitCool,
+            HvacEquipmentType::GshpHeatPumpCooling,
+            HvacEquipmentType::WshpHeatPumpCooling,
+        ];
+
+        // Heating-only types that call rebuild_thermal_ports (via furnace, boiler,
+        // or heat pump heater init). They never write PortContribution::Humidity.
+        let non_writers: &[HvacEquipmentType] = &[
+            HvacEquipmentType::GasFurnace,
+            HvacEquipmentType::ElectricFurnace,
+            HvacEquipmentType::AshpHeatPumpOnly,
+            HvacEquipmentType::AshpHeatPumpAux,
+            HvacEquipmentType::MiniSplitHeat,
+            HvacEquipmentType::GshpHeatPumpHeating,
+            HvacEquipmentType::WshpHeatPumpHeating,
+            HvacEquipmentType::Baseboard,
+            HvacEquipmentType::Other,
+        ];
+
+        for &eq_type in humidity_writers {
+            let mut hvac = HvacEquipment::new(eq_type, ZoneId(1));
+            hvac.config.zone_heat_fractions = vec![(ZoneId(1), 1.0)];
+            let mut ports = vec![PortDeclaration::thermal(ZoneId(1))];
+            hvac.rebuild_thermal_ports(&mut ports, true);
+
+            let has_humidity = ports.iter().any(|p| p.port_type == PortType::Humidity);
+            assert!(
+                has_humidity,
+                "{eq_type:?} writes Humidity but humidity port declaration missing"
+            );
+        }
+
+        for &eq_type in non_writers {
+            let mut hvac = HvacEquipment::new(eq_type, ZoneId(1));
+            hvac.config.zone_heat_fractions = vec![(ZoneId(1), 1.0)];
+            let mut ports = vec![PortDeclaration::thermal(ZoneId(1))];
+            hvac.rebuild_thermal_ports(&mut ports, false);
+
+            let has_humidity = ports.iter().any(|p| p.port_type == PortType::Humidity);
+            assert!(
+                !has_humidity,
+                "{eq_type:?} does not write Humidity but humidity port declaration present"
+            );
+        }
     }
 }
