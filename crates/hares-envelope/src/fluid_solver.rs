@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+use hares_physics::constants::{
+    CP_LIQUID_WATER_J_KG_K, CP_PROP_GLYCOL_50PCT_J_KG_K, CP_R134A_SAT_LIQUID_J_KG_K,
+};
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, FLUID, FluidDomainPayload, FluidLoopState, FluidType,
     HaresError, LoopId, PortSlots,
@@ -11,19 +13,35 @@ use hares_types::{
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FluidSolverConfig {
-    pub cp_water_j_kg_k: f64,
+    /// Specific heat capacity [J/(kg·K)] per fluid type.
+    ///
+    /// Falls back to `CP_LIQUID_WATER_J_KG_K` if a fluid type is not in the map.
+    pub fluid_specific_heats: HashMap<FluidType, f64>,
 }
 
 impl Default for FluidSolverConfig {
     fn default() -> Self {
+        let mut heats = HashMap::new();
+        // ASHRAE HoF 2021 Ch.1: 4.18 kJ/(kg·K) ≈ 4180 J/(kg·K).
+        // Must match CP_LIQUID_WATER_J_KG_K from hares-physics so that
+        // equipment supply temperature calculations (using the same Cp)
+        // produce flow-implied energy that matches declared thermal_power_w.
+        heats.insert(FluidType::Water, CP_LIQUID_WATER_J_KG_K);
+        // 50% propylene glycol at ~60°C: cp ≈ 3_800 J/(kg·K).
+        // EnergyPlus FluidProperties.cc DefaultPropGlyCpData, conc=0.5 row,
+        // temp index 19 (60°C) gives 3_686 J/(kg·K); table range over
+        // practical HVAC temperatures is 3_455–3_937 J/(kg·K). 3_800 is the
+        // mid-range engineering default for single-zone residential simulation.
+        heats.insert(FluidType::Glycol, CP_PROP_GLYCOL_50PCT_J_KG_K);
+        // R-134a saturated liquid cp at typical heat pump evaporator conditions
+        // (~35°C): cp ≈ 1_450 J/(kg·K).
+        // ASHRAE Handbook of Refrigeration 2010, Ch.30, Table 9: R-134a
+        // saturated liquid cp ≈ 1_430–1_490 J/(kg·K) at 30–40°C.
+        heats.insert(FluidType::Refrigerant, CP_R134A_SAT_LIQUID_J_KG_K);
         Self {
-            // ASHRAE HoF 2021 Ch.1: 4.18 kJ/(kg·K) ≈ 4180 J/(kg·K).
-            // Must match CP_LIQUID_WATER_J_KG_K from hares-physics so that
-            // equipment supply temperature calculations (using the same Cp)
-            // produce flow-implied energy that matches declared thermal_power_w.
-            cp_water_j_kg_k: CP_LIQUID_WATER_J_KG_K,
+            fluid_specific_heats: heats,
         }
     }
 }
@@ -134,14 +152,34 @@ impl DomainSolver for FluidSolver {
                 .copied()
                 .unwrap_or(entries[0].fluid_type);
 
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            if !self.loop_types.contains_key(&loop_id) {
+                tracing::warn!(
+                    loop_id = loop_id.0,
+                    ?fluid_type,
+                    "fluid loop not in declared loop type map; using cp fallback"
+                );
+            }
+
+            let cp = self
+                .config
+                .fluid_specific_heats
+                .get(&fluid_type)
+                .copied()
+                .unwrap_or(CP_LIQUID_WATER_J_KG_K);
+
+            #[cfg(feature = "observe")]
+            tracing::info!(
+                loop_id = loop_id.0,
+                ?fluid_type,
+                cp_used = cp,
+                "fluid solver cp resolution"
+            );
+
             let total_flow: f64 = entries.iter().map(|e| e.total_flow_kg_s).sum();
             let net_power_w: f64 = entries
                 .iter()
-                .map(|e| {
-                    self.config.cp_water_j_kg_k
-                        * e.total_flow_kg_s
-                        * (e.mean_supply_temp_c - e.mean_return_temp_c)
-                })
+                .map(|e| cp * e.total_flow_kg_s * (e.mean_supply_temp_c - e.mean_return_temp_c))
                 .sum();
             let total_declared_thermal_w: f64 =
                 entries.iter().map(|e| e.total_thermal_power_w).sum();
@@ -217,10 +255,11 @@ impl DomainSolver for FluidSolver {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use chrono::{FixedOffset, TimeZone};
-    use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+    use hares_physics::constants::{CP_LIQUID_WATER_J_KG_K, CP_PROP_GLYCOL_50PCT_J_KG_K};
     use hares_types::{
         DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidType, GridState,
         LoopId, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
@@ -561,5 +600,136 @@ mod tests {
         fluid.zero();
         assert!((fluid.total_thermal_power_w - 0.0).abs() < 1e-9);
         assert!((fluid.total_flow_kg_s - 0.0).abs() < 1e-9);
+    }
+
+    // -----------------------------------------------------------------------
+    // T-0129: fluid-type-specific cp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fluid_type_glycol_uses_own_cp() {
+        // Glycol (50% propylene glycol at 60°C) has cp ≈ 3800 J/(kg·K),
+        // lower than water's 4180 J/(kg·K). Verify net power is computed with
+        // the glycol-specific cp, not the water value.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Glycol)],
+        )
+        .unwrap();
+        let mut ports = PortSlots {
+            fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Glycol)],
+            ..Default::default()
+        };
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 60.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Glycol,
+                thermal_power_w: None,
+            })
+            .unwrap();
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        // cp = CP_PROP_GLYCOL_50PCT_J_KG_K J/(kg·K): 0.5 kg/s × cp × 20 K
+        approx_eq(
+            states[0].net_power_w,
+            0.5 * CP_PROP_GLYCOL_50PCT_J_KG_K * 20.0,
+        );
+        // With water cp (4180): 0.5 × 4180 × 20 = 41 800 W — verify the result
+        // differs from what water cp would produce.
+        assert!(
+            (states[0].net_power_w - 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0).abs() > 1e-6,
+            "glycol loop must use glycol cp, not water cp"
+        );
+    }
+
+    #[test]
+    fn mixed_fluid_types_each_use_own_cp() {
+        // Two different loops with different fluid types must each resolve
+        // using their own specific heat capacity.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[
+                (LoopId(1), FluidType::Water),
+                (LoopId(2), FluidType::Glycol),
+            ],
+        )
+        .unwrap();
+
+        let mut ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator::new(LoopId(1), FluidType::Water),
+                FluidAccumulator::new(LoopId(2), FluidType::Glycol),
+            ],
+            ..Default::default()
+        };
+        // Water loop: 1.0 kg/s, ΔT=10 K, cp=4180 → 41 800 W
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 1.0,
+                supply_temp_c: 60.0,
+                return_temp_c: 50.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: None,
+            })
+            .unwrap();
+        // Glycol loop: 0.5 kg/s, ΔT=20 K, cp=3800 → 38 000 W
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(2),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 60.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Glycol,
+                thermal_power_w: None,
+            })
+            .unwrap();
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        assert_eq!(states.len(), 2);
+        // Sort by loop_id for deterministic access
+        let water = states.iter().find(|s| s.loop_id == LoopId(1)).unwrap();
+        let glycol = states.iter().find(|s| s.loop_id == LoopId(2)).unwrap();
+        approx_eq(water.net_power_w, 1.0 * CP_LIQUID_WATER_J_KG_K * 10.0);
+        approx_eq(glycol.net_power_w, 0.5 * CP_PROP_GLYCOL_50PCT_J_KG_K * 20.0);
+    }
+
+    #[test]
+    fn unknown_fluid_type_falls_back_to_water_cp() {
+        // When a fluid type is not in the fluid_specific_heats map,
+        // the solver falls back to the water cp (CP_LIQUID_WATER_J_KG_K).
+        let mut heats = HashMap::new();
+        heats.insert(FluidType::Water, CP_LIQUID_WATER_J_KG_K);
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig {
+                fluid_specific_heats: heats,
+            },
+            &[(LoopId(1), FluidType::Glycol)], // Glycol not in map
+        )
+        .unwrap();
+        let mut ports = PortSlots {
+            fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Glycol)],
+            ..Default::default()
+        };
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 60.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Glycol,
+                thermal_power_w: None,
+            })
+            .unwrap();
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        // Should fall back to water cp: 0.5 × 4180 × 20 = 41 800 W
+        approx_eq(states[0].net_power_w, 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0);
     }
 }

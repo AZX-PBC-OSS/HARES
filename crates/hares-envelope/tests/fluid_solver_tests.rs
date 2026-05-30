@@ -11,6 +11,7 @@ use hares_types::{
     DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidType, GridState,
     LoopId, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
 };
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -104,10 +105,16 @@ fn make_ports_with_flow(
 
 /// P = ṁ × c_p × ΔT.
 ///
-/// With flow_rate=0.8 kg/s, supply=70 °C, return=50 °C (ΔT=20 K) and
+/// With flow_rate=0.8 kg/s, supply=70°C, return=50°C (ΔT=20 K) and
 /// c_p=4186 J/(kg·K), the expected net power is 0.8 × 4186 × 20 = 66 976 W.
+///
+/// This test uses c_p=4186 (a non-default value) rather than the project's
+/// water cp constant (4180) to exercise the explicit config path — verifying
+/// the solver respects a caller-supplied cp, not just the built-in default.
 #[test]
 fn net_power_from_flow_and_temp_delta() {
+    // Textbook water cp at ~15°C per NIST; deliberately different from
+    // CP_LIQUID_WATER_J_KG_K (4180) to test explicit config override.
     let cp = 4186.0;
     let flow = 0.8;
     let delta_t = 20.0;
@@ -115,7 +122,7 @@ fn net_power_from_flow_and_temp_delta() {
 
     let mut solver = FluidSolver::new(
         FluidSolverConfig {
-            cp_water_j_kg_k: cp,
+            fluid_specific_heats: [(FluidType::Water, cp)].into_iter().collect(),
         },
         &[(LoopId(1), FluidType::Water)],
     )

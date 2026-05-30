@@ -85,6 +85,31 @@ pub const CP_WATER_VAPOUR_KJ_KG_K: f64 = 1.86;
 /// standard in building energy simulation.
 pub const CP_LIQUID_WATER_J_KG_K: f64 = 4_180.0;
 
+// --- Glycol / Refrigerant ---
+
+/// Specific heat of 50% propylene glycol at 60°C [J/(kg·K)].
+///
+/// EnergyPlus FluidProperties.cc `DefaultPropGlyCpData`, concentration=0.5 row,
+/// temperature index 19 (60°C): 3686 J/(kg·K). The table range at 50%
+/// concentration over practical HVAC temperatures is 3_455–3_937 J/(kg·K)
+/// (0–125°C). The rounded value 3_800 J/(kg·K) is the mid-range engineering
+/// default used for single-zone residential simulation.
+///
+/// EnergyPlus FluidProperties.cc `DefaultEthGlyCpData`, concentration=0.5 row
+/// gives an identical value of 3686 J/(kg·K) at 60°C, confirming the
+/// approximation is reasonable for both glycol types.
+pub const CP_PROP_GLYCOL_50PCT_J_KG_K: f64 = 3_800.0;
+
+/// Specific heat of R-134a saturated liquid [J/(kg·K)] at typical residential
+/// vapour-compression conditions.
+///
+/// ASHRAE Handbook of Refrigeration 2010, Chapter 30 — Thermophysical Properties
+/// of Refrigerants, Table 9 (R-134a saturated properties): cp_liquid ≈ 1_430
+/// J/(kg·K) at 30°C, ≈ 1_460 J/(kg·K) at 35°C, ≈ 1_490 J/(kg·K) at 40°C.
+/// The rounded value 1_450 J/(kg·K) is the engineering default for the 35°C
+/// design point typical of residential heat pump evaporator conditions.
+pub const CP_R134A_SAT_LIQUID_J_KG_K: f64 = 1_450.0;
+
 // --- Atmosphere ---
 
 /// Sea-level standard pressure [Pa]. ISA 1976 / ICAO Doc 7488.
