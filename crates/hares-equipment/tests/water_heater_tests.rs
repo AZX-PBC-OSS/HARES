@@ -273,7 +273,7 @@ fn resistance_wh_off_at_setpoint() {
 fn tank_cools_without_draw_or_heating() {
     let env = make_env(21.0);
     // Setpoint well below initial → element never fires; tank cools passively.
-    let cfg = resistance_config(30.0, 2.0, 52.0, 0.0);
+    let cfg = resistance_config(40.0, 2.0, 52.0, 0.0);
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -303,7 +303,7 @@ fn draw_cools_tank_proportionally() {
     // Setpoint well below initial → element stays off; cold mains replaces hot water.
 
     let measure = |draw_kg_s: f64| -> f64 {
-        let cfg = resistance_config(30.0, 2.0, 52.0, draw_kg_s);
+        let cfg = resistance_config(40.0, 2.0, 52.0, draw_kg_s);
         let mut wh = ResistanceWH::new(cfg.clone());
         wh.init(&cfg, &env).unwrap();
         let mut ports = PortSlots::from_declarations(wh.ports());

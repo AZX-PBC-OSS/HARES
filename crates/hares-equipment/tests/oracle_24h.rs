@@ -675,7 +675,7 @@ fn oracle_gas_wh_standby_ua_decay_24h() {
     let initial_temp_c = 60.0;
     let ambient_c = 20.0;
     let ua_w_per_k = 2.0;
-    let setpoint_c = 10.0; // below initial so burner never fires
+    let setpoint_c = 40.0; // below initial so burner never fires
     let tank_volume_m3 = 0.15;
 
     let cfg = EquipmentConfig::from_typed(

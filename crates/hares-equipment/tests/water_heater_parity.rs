@@ -228,7 +228,7 @@ fn hpwh_cfg_with(
 fn standby_loss_over_24h() {
     let env = make_env(20.0);
     // Setpoint below initial: element never fires → only standby losses
-    let cfg = resistance_cfg(30.0, 2.0, 51.7, 0.0, 2.0);
+    let cfg = resistance_cfg(40.0, 2.0, 51.7, 0.0, 2.0);
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -251,8 +251,8 @@ fn standby_loss_over_24h() {
         .get("electric_kw")
         .expect("electric_power_w must exist");
 
-    // Element must be off (setpoint is 30°C < current tank temp for most of the run)
-    // It might fire briefly near 30°C, but long-run the tank settles far above ambient.
+    // Element must be off (setpoint is 40°C < current tank temp for most of the run)
+    // It might fire briefly near 40°C, but long-run the tank settles far above ambient.
     eprintln!(
         "[wh_parity] standby_loss: initial={initial_temp:.3}°C final={final_temp:.3}°C \
          drop={:.3}°C element_power={power:.1} W",
@@ -466,7 +466,7 @@ fn gas_wh_fuel_not_electricity() {
 fn tank_temp_never_below_mains_during_draw() {
     let env = make_env(20.0);
     // Fast draw, low setpoint so element stays off
-    let cfg = resistance_cfg(10.0, 2.0, 20.0, 0.10, 0.01);
+    let cfg = resistance_cfg(40.0, 2.0, 50.0, 0.10, 0.01);
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -524,7 +524,7 @@ fn standby_loss_ua_magnitude() {
             uniform_energy_factor: None,
             heating_capacity_w: None,
             ua_w_per_k: Some(ua_w_per_k),
-            setpoint_c: Some(10.0),
+            setpoint_c: Some(40.0),
             deadband_c: Some(2.0),
             max_tank_temp_c: Some(300.0),
             initial_tank_temp_c: Some(tank_temp_c),
