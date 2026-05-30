@@ -500,9 +500,10 @@ fn tankless_wh_requires_explicit_fuel_type() {
 
 // ── Test 7: energy_conservation_over_draw_cycle ───────────────────────────────
 
-/// Energy balance over a draw cycle for a 1-node resistance WH with UA=0.
+/// Energy balance over a draw cycle for a 1-node resistance WH with near-zero UA.
 ///
-/// With UA=0, the only energy flows are electrical input and draw loss:
+/// With UA=1e-6 W/K (≈ zero standby loss), the only significant energy flows
+/// are electrical input and draw loss:
 ///   ΔE_tank = E_in_electrical − E_draw_loss
 ///
 /// Draw loss per step is approximated as:
@@ -526,7 +527,8 @@ fn energy_conservation_over_draw_cycle() {
             energy_factor: None,
             uniform_energy_factor: None,
             heating_capacity_w: None,
-            ua_w_per_k: Some(0.0),
+            // 1e-6 W/K ≈ zero standby loss for conservation test
+            ua_w_per_k: Some(1e-6),
             setpoint_c: Some(80.0),
             deadband_c: Some(2.0),
             max_tank_temp_c: Some(300.0),
@@ -1162,7 +1164,7 @@ fn tmv_reduces_draw_volume_for_hot_tank() {
             energy_factor: None,
             uniform_energy_factor: None,
             heating_capacity_w: None,
-            ua_w_per_k: Some(0.0),
+            ua_w_per_k: Some(1e-6),
             setpoint_c: Some(tank_temp_c),
             deadband_c: Some(2.0),
             max_tank_temp_c: Some(300.0),
@@ -1226,7 +1228,7 @@ fn tmv_unmet_load_when_tank_cold() {
             energy_factor: None,
             uniform_energy_factor: None,
             heating_capacity_w: None,
-            ua_w_per_k: Some(0.0),
+            ua_w_per_k: Some(1e-6),
             setpoint_c: Some(52.0),
             deadband_c: Some(2.0),
             max_tank_temp_c: Some(300.0),
