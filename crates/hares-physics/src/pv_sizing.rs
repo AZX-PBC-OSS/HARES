@@ -406,6 +406,10 @@ fn resolve_azimuth(plane: &RoofPlane, wall_azimuths: &[f64]) -> f64 {
 /// flat-roof tilt selection. `diffuse_fraction` is the annual-average
 /// DHI/GHI ratio from weather data; when `None` the scoring falls back to
 /// the NREL PVWatts Table 4 empirical model.
+// Why: the parameter count reflects the complete set of tunable PV sizing
+// inputs; constructing a builder/params type would add indirection for no
+// benefit at this call site.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_usable_area(
     roof: &RoofInfo,
     roof_shape: RoofShape,
@@ -414,9 +418,17 @@ pub fn compute_usable_area(
     panel_watts: Option<u32>,
     panel_area_m2: Option<f64>,
     diffuse_fraction: Option<f64>,
+    roof_shape_user_override: bool,
 ) -> Result<UsableRoofArea, PvSizingError> {
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
+
+    if roof_shape_user_override {
+        tracing::debug!(
+            pv_roof_shape_override = ?roof_shape,
+            "PV roof shape is user-specified override, inference skipped"
+        );
+    }
 
     // Invariant: panel physical parameters must be in valid ranges.
     // No residential panel exceeds ~3.5 m²; the 5.0 m² upper bound allows
@@ -671,6 +683,7 @@ pub fn compute_usable_area(
                 pv_hip_weighted_panels = total_weighted_panels,
                 pv_panel_watts = panel_watts,
                 pv_panel_area_m2 = panel_area_m2,
+                pv_roof_shape_user_override = roof_shape_user_override,
                 "PV Hip aggregation telemetry"
             );
         }
@@ -746,6 +759,7 @@ pub fn compute_usable_area(
             pv_max_panels = max_panels,
             pv_panel_watts = panel_watts,
             pv_panel_area_m2 = panel_area_m2,
+            pv_roof_shape_user_override = roof_shape_user_override,
             "PV Gable/Flat plane selected"
         );
     }
@@ -841,6 +855,10 @@ pub fn size_pv_system(
 /// roof plane. Results are sorted by solar score (best first).
 ///
 /// This lets users see all placement options rather than just the single best.
+// Why: the parameter count reflects the complete set of tunable PV sizing
+// inputs; constructing a builder/params type would add indirection for no
+// benefit at this call site.
+#[allow(clippy::too_many_arguments)]
 pub fn enumerate_pv_candidates(
     roof: &RoofInfo,
     roof_shape: RoofShape,
@@ -849,10 +867,18 @@ pub fn enumerate_pv_candidates(
     panel_watts: Option<u32>,
     panel_area_m2: Option<f64>,
     diffuse_fraction: Option<f64>,
+    roof_shape_user_override: bool,
 ) -> Vec<PvCandidate> {
     let panel_watts = panel_watts.unwrap_or(DEFAULT_PANEL_WATTS);
     let panel_area_m2 = panel_area_m2.unwrap_or(DEFAULT_PANEL_AREA_M2);
     let lat = latitude.unwrap_or(35.0);
+
+    if roof_shape_user_override {
+        tracing::debug!(
+            pv_roof_shape_override = ?roof_shape,
+            "PV roof shape is user-specified override in candidate enumeration, inference skipped"
+        );
+    }
 
     let mut candidates: Vec<PvCandidate> = roof
         .planes
@@ -920,6 +946,7 @@ pub fn enumerate_pv_candidates(
             pv_latitude = lat,
             pv_roof_shape = ?roof_shape,
             pv_candidate_count = candidates.len(),
+            pv_roof_shape_user_override = roof_shape_user_override,
             "PV candidate enumeration"
         );
         for c in &candidates {
@@ -1072,9 +1099,17 @@ mod tests {
             planes: vec![plane(100.0, 26.0, Some(180.0))],
             total_roof_area_m2: 100.0,
         };
-        let usable =
-            compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None, None)
-                .unwrap();
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         // Single gable plane → halved, then ×0.75.
         assert!((usable.usable_m2 - 100.0 / 2.0 * 0.75).abs() < 0.01);
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
@@ -1090,9 +1125,17 @@ mod tests {
             ],
             total_roof_area_m2: 100.0,
         };
-        let usable =
-            compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None, None)
-                .unwrap();
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         // Two planes → no halving; south plane used directly.
         assert!((usable.usable_m2 - 50.0 * 0.75).abs() < 0.01);
     }
@@ -1103,7 +1146,8 @@ mod tests {
             planes: vec![plane(100.0, 26.0, Some(0.0))],
             total_roof_area_m2: 100.0,
         };
-        let result = compute_usable_area(&roof, RoofShape::Gable, &[], None, None, None, None);
+        let result =
+            compute_usable_area(&roof, RoofShape::Gable, &[], None, None, None, None, false);
         assert!(result.is_err());
     }
 
@@ -1113,8 +1157,17 @@ mod tests {
             planes: vec![plane(200.0, 0.0, Some(180.0))],
             total_roof_area_m2: 200.0,
         };
-        let usable =
-            compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None, None).unwrap();
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::Flat,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         // Flat: effective = 200 × 0.70 = 140 m².
         // Panel footprint = 2.1 / 0.403 ≈ 5.21 m² (lat 35 → geometric GCR ≈ 0.403).
         // Max panels = floor(140 / 5.21) ≈ 26.
@@ -1134,8 +1187,17 @@ mod tests {
             ],
             total_roof_area_m2: 140.0,
         };
-        let usable =
-            compute_usable_area(&roof, RoofShape::Hip, &[], Some(40.0), None, None, None).unwrap();
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::Hip,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         // South: 60×0.35=21 m² → 10 panels, factor=1.0 → +10
         // ENE (θ=120°): 40×0.35=14 m² → 6 panels, k(40)=0.5154, x=0.667
         //   factor=1-0.5154×0.444=0.771, weighted=floor(6×0.771)=4
@@ -1157,10 +1219,28 @@ mod tests {
             ],
             total_roof_area_m2: 140.0,
         };
-        let low_lat =
-            compute_usable_area(&roof, RoofShape::Hip, &[], Some(25.0), None, None, None).unwrap();
-        let high_lat =
-            compute_usable_area(&roof, RoofShape::Hip, &[], Some(48.0), None, None, None).unwrap();
+        let low_lat = compute_usable_area(
+            &roof,
+            RoofShape::Hip,
+            &[],
+            Some(25.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let high_lat = compute_usable_area(
+            &roof,
+            RoofShape::Hip,
+            &[],
+            Some(48.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         assert!(
             low_lat.max_panels > high_lat.max_panels,
             "max_panels at 25°N ({}) should exceed max_panels at 48°N ({})",
@@ -1388,7 +1468,8 @@ mod tests {
         let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0));
         assert_eq!(shape, RoofShape::Hip);
 
-        let usable = compute_usable_area(&roof, shape, &[], Some(40.0), None, None, None).unwrap();
+        let usable =
+            compute_usable_area(&roof, shape, &[], Some(40.0), None, None, None, false).unwrap();
         // With Hip (0.35): south plane (60 m², not north-facing) → 60 × 0.35 = 21 m²
         // 21 / 2.1 (panel_area) = 10 panels, 10 × 440 = 4400 W = 4.4 kW
         // If shape were Gable (0.75): 60 × 0.75 / 2.1 = 21 panels, 9.24 kW
@@ -1427,8 +1508,16 @@ mod tests {
             ],
             total_roof_area_m2: 180.0,
         };
-        let candidates =
-            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], Some(40.0), None, None, None);
+        let candidates = enumerate_pv_candidates(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        );
         // 3 non-north planes.
         assert_eq!(candidates.len(), 3);
         // Best first (south with most area).
@@ -1454,6 +1543,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
@@ -1582,10 +1672,27 @@ mod tests {
             total_roof_area_m2: 180.0,
         };
         let lat = 40.0;
-        let usable =
-            compute_usable_area(&roof, RoofShape::Hip, &[], Some(lat), None, None, None).unwrap();
-        let candidates =
-            enumerate_pv_candidates(&roof, RoofShape::Hip, &[], Some(lat), None, None, None);
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::Hip,
+            &[],
+            Some(lat),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let candidates = enumerate_pv_candidates(
+            &roof,
+            RoofShape::Hip,
+            &[],
+            Some(lat),
+            None,
+            None,
+            None,
+            false,
+        );
 
         // The top enumerated candidate should match compute_usable_area's best plane.
         assert!(
@@ -1798,6 +1905,7 @@ mod tests {
             None,
             None,
             Some(0.12),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1814,6 +1922,7 @@ mod tests {
             None,
             None,
             Some(0.28),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1994,8 +2103,17 @@ mod tests {
             planes: vec![plane(200.0, 0.0, Some(180.0))],
             total_roof_area_m2: 200.0,
         };
-        let usable =
-            compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None, None).unwrap();
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::Flat,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         // 200 × 0.70 = 140 m² usable. GCR ≈ 0.40 at lat=35° tilt=25°.
         // Panel footprint = 2.1 / ~0.403 ≈ 5.21 m². 140 / 5.21 ≈ 26.87 → 26.
         assert_eq!(usable.max_panels, 26);
@@ -2012,9 +2130,17 @@ mod tests {
         };
         let mut prev_panels = u32::MAX;
         for lat in [30.0, 35.0, 40.0, 45.0, 50.0] {
-            let usable =
-                compute_usable_area(&roof, RoofShape::Flat, &[], Some(lat), None, None, None)
-                    .unwrap();
+            let usable = compute_usable_area(
+                &roof,
+                RoofShape::Flat,
+                &[],
+                Some(lat),
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
             assert!(
                 usable.max_panels <= prev_panels,
                 "capacity must not increase with latitude: lat={lat} panels={} > prev={prev_panels}",
@@ -2041,8 +2167,17 @@ mod tests {
         };
 
         // New geometric GCR at lat=45°, tilt=25° (the cap)
-        let usable_new =
-            compute_usable_area(&roof, RoofShape::Flat, &[], Some(45.0), None, None, None).unwrap();
+        let usable_new = compute_usable_area(
+            &roof,
+            RoofShape::Flat,
+            &[],
+            Some(45.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         // Old step-table GCR=0.35 would give:
         // usable=140, footprint=2.0/0.35=5.714, panels=140/5.714=24.5→24
@@ -2072,8 +2207,16 @@ mod tests {
             ],
             total_roof_area_m2: 200.0,
         };
-        let candidates =
-            enumerate_pv_candidates(&roof, RoofShape::Flat, &[], Some(45.0), None, None, None);
+        let candidates = enumerate_pv_candidates(
+            &roof,
+            RoofShape::Flat,
+            &[],
+            Some(45.0),
+            None,
+            None,
+            None,
+            false,
+        );
         assert_eq!(candidates.len(), 2);
         for c in &candidates {
             assert!(c.max_panels > 0);
@@ -2105,8 +2248,17 @@ mod tests {
         let lat = 40.0;
 
         // Default path (None for panel params).
-        let result_default =
-            compute_usable_area(&roof, RoofShape::Gable, &[], Some(lat), None, None, None).unwrap();
+        let result_default = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(lat),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         // Explicit override equal to compile-time constants.
         let result_explicit = compute_usable_area(
@@ -2117,6 +2269,7 @@ mod tests {
             Some(DEFAULT_PANEL_WATTS),
             Some(DEFAULT_PANEL_AREA_M2),
             None,
+            false,
         )
         .unwrap();
 
@@ -2145,8 +2298,17 @@ mod tests {
         };
         let lat = 40.0;
 
-        let result_440w =
-            compute_usable_area(&roof, RoofShape::Gable, &[], Some(lat), None, None, None).unwrap();
+        let result_440w = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(lat),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         // Hypothetical low-wattage panel: 300 W, 1.6 m² (older/smaller module).
         let result_300w = compute_usable_area(
@@ -2157,6 +2319,7 @@ mod tests {
             Some(300),
             Some(1.6),
             None,
+            false,
         )
         .unwrap();
 
@@ -2191,5 +2354,123 @@ mod tests {
             (sizing_default.system_losses_fraction - sizing_explicit.system_losses_fraction).abs()
                 < 1e-10
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // roof_shape_user_override tests
+    // -----------------------------------------------------------------------
+
+    /// When `roof_shape_user_override` is `true` with `RoofShape::Hip`, the
+    /// Hip usable fraction (0.35) is applied regardless of the roof data that
+    /// inference would produce. A roof with single south-facing gable plane
+    /// would produce 37.5 m² usable with the Gable fraction (0.75), but with
+    /// the Hip override it drops to 17.5 m² (0.35).
+    #[test]
+    fn compute_usable_area_with_override_uses_specified_shape() {
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, 26.0, Some(180.0))],
+            total_roof_area_m2: 100.0,
+        };
+        // Gable override (not what the roof data suggests).
+        let usable_gable = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        // Hip override — same roof, same params, different shape.
+        let usable_hip = compute_usable_area(
+            &roof,
+            RoofShape::Hip,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        // Gable: single plane → halved → 50 × 0.75 = 37.5
+        assert!((usable_gable.usable_m2 - 100.0 / 2.0 * 0.75).abs() < 0.01);
+        assert_eq!(usable_gable.roof_shape, RoofShape::Gable);
+
+        // Hip: single plane, no halving in Hip path, but Hip selects best plane
+        // and aggregates. Single south plane → 100 × 0.35 = 35 m².
+        assert!((usable_hip.usable_m2 - 100.0 * HIP_USABLE_FRACTION).abs() < 0.01);
+        assert_eq!(usable_hip.roof_shape, RoofShape::Hip);
+
+        // The two capacities must differ — override changes the outcome.
+        assert_ne!(
+            usable_gable.max_capacity_kw, usable_hip.max_capacity_kw,
+            "Hip override must produce different capacity than Gable for same roof"
+        );
+        assert!(
+            usable_gable.max_capacity_kw > usable_hip.max_capacity_kw,
+            "Gable override should produce higher capacity than Hip override"
+        );
+    }
+
+    /// When `roof_shape_user_override` is `false`, the existing computation
+    /// path is followed with no change in behaviour — a regression guard.
+    #[test]
+    fn compute_usable_area_without_override_unchanged() {
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, 26.0, Some(180.0))],
+            total_roof_area_m2: 100.0,
+        };
+        // Default path (false) — same as existing single_south_gable test.
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!((usable.usable_m2 - 100.0 / 2.0 * 0.75).abs() < 0.01);
+        assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
+        assert_eq!(usable.roof_shape, RoofShape::Gable);
+    }
+
+    /// Enumerate candidates with an override — verifies the
+    /// `roof_shape_user_override` parameter flows through to
+    /// `enumerate_pv_candidates` and produces results using the
+    /// specified shape rather than what inference would suggest.
+    #[test]
+    fn enumerate_pv_candidates_with_override() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(60.0, 26.0, Some(180.0)),
+                plane(40.0, 26.0, Some(225.0)),
+                plane(30.0, 26.0, Some(90.0)),
+            ],
+            total_roof_area_m2: 130.0,
+        };
+        // With override=true, Gable shape: single-plane halving logic may apply.
+        // Without override, inference might pick Hip (3 distinct azimuths).
+        let candidates = enumerate_pv_candidates(
+            &roof,
+            RoofShape::Gable,
+            &[],
+            Some(40.0),
+            None,
+            None,
+            None,
+            true,
+        );
+        assert_eq!(candidates.len(), 3);
+        for c in &candidates {
+            assert_eq!(c.roof_shape, RoofShape::Gable);
+            assert!(c.max_panels > 0);
+        }
     }
 }

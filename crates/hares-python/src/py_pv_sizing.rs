@@ -7,7 +7,7 @@ use hares_physics::pv_sizing::{self, PvCandidate, PvSizingResult, RoofInfo, Roof
 use pyo3::prelude::*;
 
 /// Roof shape classification — determines usable-area fraction.
-#[pyclass(name = "RoofShape", eq, eq_int, skip_from_py_object)]
+#[pyclass(name = "RoofShape", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PyRoofShape {
     Gable,
@@ -21,6 +21,16 @@ impl From<RoofShape> for PyRoofShape {
             RoofShape::Gable => PyRoofShape::Gable,
             RoofShape::Hip => PyRoofShape::Hip,
             RoofShape::Flat => PyRoofShape::Flat,
+        }
+    }
+}
+
+impl From<PyRoofShape> for RoofShape {
+    fn from(s: PyRoofShape) -> Self {
+        match s {
+            PyRoofShape::Gable => RoofShape::Gable,
+            PyRoofShape::Hip => RoofShape::Hip,
+            PyRoofShape::Flat => RoofShape::Flat,
         }
     }
 }
@@ -325,6 +335,7 @@ pub(crate) fn pv_candidates_from_dwelling(
     panel_watts: Option<u32>,
     panel_area_m2: Option<f64>,
     pv_panel_defaults: &HashMap<String, PvPanelDefaults>,
+    roof_shape_user_override: bool,
 ) -> Vec<PyPvCandidate> {
     let (panel_watts, panel_area_m2, _) =
         resolve_panel_defaults(panel_watts, panel_area_m2, None, pv_panel_defaults);
@@ -336,6 +347,7 @@ pub(crate) fn pv_candidates_from_dwelling(
         panel_watts,
         panel_area_m2,
         diffuse_fraction,
+        roof_shape_user_override,
     )
     .into_iter()
     .map(|c| PyPvCandidate { inner: c })
@@ -360,6 +372,7 @@ pub(crate) fn size_pv_from_dwelling(
     panel_area_m2: Option<f64>,
     system_losses: Option<f64>,
     pv_panel_defaults: &HashMap<String, PvPanelDefaults>,
+    roof_shape_user_override: bool,
 ) -> Result<PyPvSizingResult, String> {
     let (panel_watts, panel_area_m2, system_losses) =
         resolve_panel_defaults(panel_watts, panel_area_m2, system_losses, pv_panel_defaults);
@@ -371,6 +384,7 @@ pub(crate) fn size_pv_from_dwelling(
         panel_watts,
         panel_area_m2,
         diffuse_fraction,
+        roof_shape_user_override,
     )
     .map_err(|e| e.to_string())?;
     let result = pv_sizing::size_pv_system(
@@ -421,6 +435,7 @@ mod tests {
             None,
             None,
             &HashMap::new(),
+            false,
         )
         .expect("default sizing");
 
@@ -438,6 +453,7 @@ mod tests {
             Some(1.6),
             Some(0.14),
             &HashMap::new(),
+            false,
         )
         .expect("custom sizing");
 
@@ -464,6 +480,7 @@ mod tests {
             None,
             None,
             &HashMap::new(),
+            false,
         );
         let candidates_custom = pv_candidates_from_dwelling(
             &roof,
@@ -474,6 +491,7 @@ mod tests {
             Some(470),
             Some(2.0),
             &HashMap::new(),
+            false,
         );
 
         assert_eq!(candidates_default.len(), candidates_custom.len());
@@ -515,6 +533,7 @@ mod tests {
             None,
             None,
             &store,
+            false,
         );
 
         // When all panel params are None, the store should be consulted.
@@ -531,6 +550,7 @@ mod tests {
             None,
             // Empty store → compile-time defaults (440W / 2.1 m²)
             &HashMap::new(),
+            false,
         );
         assert_ne!(
             candidates[0].inner.max_capacity_kw, def_candidates[0].inner.max_capacity_kw,

@@ -1302,19 +1302,36 @@ impl PyDwelling {
     ///     panel_area_m2: Optional panel area override (m²). When ``None``,
     ///         falls back to the loaded panel spec (DefaultsStore), or the
     ///         compile-time default (2.1 m²) when no spec is loaded.
-    #[pyo3(signature = (diffuse_fraction=None, *, panel_watts=None, panel_area_m2=None))]
+    ///     roof_shape: Optional roof shape classification override. When
+    ///         ``Some``, the provided shape is used directly and inference
+    ///         is skipped. When ``None`` (default), roof shape is inferred
+    ///         from building metadata.
+    #[pyo3(signature = (diffuse_fraction=None, *, panel_watts=None, panel_area_m2=None, roof_shape=None))]
     pub fn pv_candidates(
         &self,
         diffuse_fraction: Option<f64>,
         panel_watts: Option<u32>,
         panel_area_m2: Option<f64>,
+        roof_shape: Option<crate::py_pv_sizing::PyRoofShape>,
     ) -> PyResult<Vec<crate::py_pv_sizing::PyPvCandidate>> {
         let dwelling = lock_dwelling(&self.dwelling)?;
-        let roof_shape = hares_physics::pv_sizing::infer_roof_shape(
-            &dwelling.roof_info,
-            dwelling.facility_type.as_deref(),
-            dwelling.latitude_deg,
-        );
+        let (roof_shape, user_override) = match roof_shape {
+            Some(py_shape) => {
+                tracing::debug!(
+                    pv_roof_shape_override = ?py_shape,
+                    "PV roof shape is user-specified override, inference skipped"
+                );
+                (py_shape.into(), true)
+            }
+            None => (
+                hares_physics::pv_sizing::infer_roof_shape(
+                    &dwelling.roof_info,
+                    dwelling.facility_type.as_deref(),
+                    dwelling.latitude_deg,
+                ),
+                false,
+            ),
+        };
         Ok(crate::py_pv_sizing::pv_candidates_from_dwelling(
             &dwelling.roof_info,
             roof_shape,
@@ -1324,6 +1341,7 @@ impl PyDwelling {
             panel_watts,
             panel_area_m2,
             dwelling.pv_panel_defaults(),
+            user_override,
         ))
     }
 
@@ -1345,8 +1363,12 @@ impl PyDwelling {
     ///         falls back to the compile-time default (2.1 m²).
     ///     system_losses: Optional system losses fraction override (0–1).
     ///         When ``None``, falls back to the compile-time default (0.14).
+    ///     roof_shape: Optional roof shape classification override. When
+    ///         ``Some``, the provided shape is used directly and inference
+    ///         is skipped. When ``None`` (default), roof shape is inferred
+    ///         from building metadata.
     #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0, diffuse_fraction=None, *,
-        panel_watts=None, panel_area_m2=None, system_losses=None))]
+        panel_watts=None, panel_area_m2=None, system_losses=None, roof_shape=None))]
     // Why: PyO3 signature mirrors the full Rust API surface;
     // a builder type adds indirection at the binding layer.
     #[allow(clippy::too_many_arguments)]
@@ -1359,13 +1381,26 @@ impl PyDwelling {
         panel_watts: Option<u32>,
         panel_area_m2: Option<f64>,
         system_losses: Option<f64>,
+        roof_shape: Option<crate::py_pv_sizing::PyRoofShape>,
     ) -> PyResult<crate::py_pv_sizing::PyPvSizingResult> {
         let dwelling = lock_dwelling(&self.dwelling)?;
-        let roof_shape = hares_physics::pv_sizing::infer_roof_shape(
-            &dwelling.roof_info,
-            dwelling.facility_type.as_deref(),
-            dwelling.latitude_deg,
-        );
+        let (roof_shape, user_override) = match roof_shape {
+            Some(py_shape) => {
+                tracing::debug!(
+                    pv_roof_shape_override = ?py_shape,
+                    "PV roof shape is user-specified override, inference skipped"
+                );
+                (py_shape.into(), true)
+            }
+            None => (
+                hares_physics::pv_sizing::infer_roof_shape(
+                    &dwelling.roof_info,
+                    dwelling.facility_type.as_deref(),
+                    dwelling.latitude_deg,
+                ),
+                false,
+            ),
+        };
         crate::py_pv_sizing::size_pv_from_dwelling(
             &dwelling.roof_info,
             roof_shape,
@@ -1379,6 +1414,7 @@ impl PyDwelling {
             panel_area_m2,
             system_losses,
             dwelling.pv_panel_defaults(),
+            user_override,
         )
         .map_err(pyo3::exceptions::PyValueError::new_err)
     }
