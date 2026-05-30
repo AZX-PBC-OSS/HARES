@@ -1183,11 +1183,14 @@ mod tests {
     #[test]
     fn max_tank_temp_safety_forces_off_for_gas_wh() {
         let cfg = config_with_extras(&[
-            ("initial_tank_temp_c", Some(40.0.into())),
-            ("max_tank_temp_c", Some(35.0.into())),
+            ("initial_tank_temp_c", Some(30.0.into())),
+            ("max_tank_temp_c", Some(60.0.into())),
         ]);
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
+
+        // Manually set the tank temperature above the max to trigger the safety cutout.
+        eq.tank.node_temps_mut().fill(65.0);
 
         let mode = eq.update_control(&env(21.0));
         assert_eq!(

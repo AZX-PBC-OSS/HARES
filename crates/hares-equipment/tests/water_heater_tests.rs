@@ -666,9 +666,10 @@ fn setpoint_control_changes_target() {
 
 /// The safety cutout prevents any tank node from exceeding max_tank_temp_c.
 ///
-/// We use a single-node tank with setpoint above max_tank_temp_c so the
-/// thermostat keeps calling for heat, but the safety mechanism must cut out
-/// the element before the temperature exceeds the limit.
+/// We use a valid config for init (setpoint < max_tank_temp - deadband) and
+/// then lower the runtime max_tank_temp_c so the thermostat keeps calling for
+/// heat while the safety mechanism cuts out before the temperature exceeds the
+/// lowered limit.
 #[test]
 fn max_tank_temp_safety_limit() {
     let env = make_env(21.0);
@@ -689,7 +690,7 @@ fn max_tank_temp_safety_limit() {
             ua_w_per_k: None,
             setpoint_c: Some(80.0),
             deadband_c: Some(2.0),
-            max_tank_temp_c: Some(max_temp_c),
+            max_tank_temp_c: Some(90.0),
             initial_tank_temp_c: Some(40.0),
             tank_nodes: Some(1),
             avg_water_draw_l_per_day: None,
@@ -711,6 +712,11 @@ fn max_tank_temp_safety_limit() {
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
+
+    // Lower the runtime safety limit below the setpoint so the thermostat
+    // keeps calling for heat while the safety cutout enforces the cap.
+    wh.set_max_tank_temp_c(max_temp_c);
+
     let mut ports = PortSlots::from_declarations(wh.ports());
 
     for step in 0..60 {

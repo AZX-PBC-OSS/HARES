@@ -372,6 +372,13 @@ impl ResistanceWH {
         self.core_output = CoreOutput::default();
         Ok(())
     }
+
+    /// Override the runtime max_tank_temp_c safety limit.
+    /// Intended for tests that need to trigger the safety cutout at a specific
+    /// temperature below the configured setpoint.
+    pub fn set_max_tank_temp_c(&mut self, temp_c: f64) {
+        self.max_tank_temp_c = temp_c;
+    }
 }
 
 impl Equipment for ResistanceWH {
@@ -1281,13 +1288,15 @@ mod tests {
     /// must be forced off regardless of thermostat call.
     #[test]
     fn max_tank_temp_safety_forces_off_for_resistance_wh() {
-        // Set max_tank_temp_c below the initial temperature to immediately trigger safety.
         let mut typed = typed_config();
-        typed.max_tank_temp_c = Some(35.0);
+        typed.max_tank_temp_c = Some(60.0);
         let cfg = config_from_typed(typed);
 
         let mut eq = ResistanceWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
+
+        // Manually set the tank temperature above the max to trigger the safety cutout.
+        eq.tank.node_temps_mut().fill(65.0);
 
         let mode = eq.update_control(&env(21.0));
         assert_eq!(

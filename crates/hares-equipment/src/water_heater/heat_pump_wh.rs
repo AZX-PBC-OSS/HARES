@@ -1706,13 +1706,15 @@ mod tests {
     /// force Off regardless of call for heat or mode override.
     #[test]
     fn max_tank_temp_safety_forces_off_when_exceeded() {
-        // Set a very low max_tank_temp_c so the 40°C initial temp is already above it.
         let mut typed = base_typed_config();
-        typed.max_tank_temp_c = Some(35.0);
+        typed.max_tank_temp_c = Some(60.0);
         let cfg = equipment_config(typed);
 
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env(24.0)).unwrap();
+
+        // Manually set the tank temperature above the max to trigger the safety cutout.
+        eq.tank.node_temps_mut().fill(65.0);
 
         let mode = eq.update_control(&env(24.0));
         assert_eq!(

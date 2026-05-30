@@ -29,6 +29,33 @@ fn check_range(name: &str, value: Option<f64>, min: f64, max: f64) -> crate::Res
     Ok(())
 }
 
+fn check_setpoint_vs_max_temp(
+    prefix: &str,
+    setpoint_c: Option<f64>,
+    max_tank_temp_c: Option<f64>,
+    deadband_c: Option<f64>,
+) -> crate::Result<()> {
+    if let (Some(sp), Some(max_t)) = (setpoint_c, max_tank_temp_c) {
+        let lower_bound = deadband_c.map_or(max_t, |db| max_t - db);
+        if sp >= lower_bound {
+            let msg = if let Some(db) = deadband_c {
+                format!(
+                    "{prefix}: setpoint_c ({sp}) must be strictly less than \
+                     max_tank_temp_c ({max_t}) minus deadband_c ({db}); \
+                     setpoint_c = {sp}, max_tank_temp_c - deadband_c = {lower_bound}"
+                )
+            } else {
+                format!(
+                    "{prefix}: setpoint_c ({sp}) must be strictly less than \
+                     max_tank_temp_c ({max_t})"
+                )
+            };
+            return Err(HaresError::Equipment(msg));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GasWaterHeaterConfig {
@@ -180,6 +207,12 @@ impl GasWaterHeaterConfig {
             0.0,
             1.0,
         )?;
+        check_setpoint_vs_max_temp(
+            "gas_wh",
+            self.setpoint_c,
+            self.max_tank_temp_c,
+            self.deadband_c,
+        )?;
         Ok(())
     }
 }
@@ -265,12 +298,7 @@ impl ElectricResistanceWaterHeaterConfig {
             false,
         )?;
         check_finite("resistance_wh: ua_w_per_k", self.ua_w_per_k, 0.0, true)?;
-        check_range(
-            "resistance_wh: setpoint_c",
-            self.setpoint_c,
-            40.0,
-            85.0,
-        )?;
+        check_range("resistance_wh: setpoint_c", self.setpoint_c, 40.0, 85.0)?;
         check_finite("resistance_wh: deadband_c", self.deadband_c, 0.0, true)?;
         check_finite(
             "resistance_wh: max_tank_temp_c",
@@ -343,6 +371,12 @@ impl ElectricResistanceWaterHeaterConfig {
             self.hot_draw_temp_c,
             0.0,
             false,
+        )?;
+        check_setpoint_vs_max_temp(
+            "resistance_wh",
+            self.setpoint_c,
+            self.max_tank_temp_c,
+            self.deadband_c,
         )?;
         Ok(())
     }
@@ -492,12 +526,7 @@ impl IndirectTankConfig {
             0.0,
             true,
         )?;
-        check_range(
-            "indirect_tank: setpoint_c",
-            self.setpoint_c,
-            40.0,
-            85.0,
-        )?;
+        check_range("indirect_tank: setpoint_c", self.setpoint_c, 40.0, 85.0)?;
         check_finite("indirect_tank: deadband_c", self.deadband_c, 0.0, true)?;
         check_finite(
             "indirect_tank: max_tank_temp_c",
@@ -558,6 +587,12 @@ impl IndirectTankConfig {
             self.boiler_loop_flow_rate_kg_s,
             0.0,
             true,
+        )?;
+        check_setpoint_vs_max_temp(
+            "indirect_tank",
+            self.setpoint_c,
+            self.max_tank_temp_c,
+            self.deadband_c,
         )?;
         Ok(())
     }
@@ -716,6 +751,12 @@ impl HeatPumpWaterHeaterConfig {
             self.fixture_delivery_temp_c,
             0.0,
             false,
+        )?;
+        check_setpoint_vs_max_temp(
+            "hpwh",
+            self.setpoint_c,
+            self.max_tank_temp_c,
+            self.deadband_c,
         )?;
         Ok(())
     }
@@ -1412,9 +1453,7 @@ mod tests {
         }
     }
 
-    fn resistance_wh_with_setpoint(
-        setpoint_c: Option<f64>,
-    ) -> ElectricResistanceWaterHeaterConfig {
+    fn resistance_wh_with_setpoint(setpoint_c: Option<f64>) -> ElectricResistanceWaterHeaterConfig {
         ElectricResistanceWaterHeaterConfig {
             setpoint_c,
             equipment_id: None,
@@ -1568,5 +1607,286 @@ mod tests {
         assert!(resistance_wh_with_setpoint(None).validate().is_ok());
         assert!(hpwh_with_setpoint(None).validate().is_ok());
         assert!(indirect_tank_with_setpoint(None).validate().is_ok());
+    }
+
+    // --- setpoint vs max_tank_temp cross-field validation helpers ---
+
+    fn gas_wh_with_sp_max_db(
+        setpoint_c: Option<f64>,
+        max_tank_temp_c: Option<f64>,
+        deadband_c: Option<f64>,
+    ) -> GasWaterHeaterConfig {
+        GasWaterHeaterConfig {
+            fuel_type: FuelType::Gas,
+            setpoint_c,
+            deadband_c,
+            max_tank_temp_c,
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            pilot_power_w: None,
+            flue_loss_fraction: None,
+            skin_loss_fraction: None,
+            ignition_type: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            conversion_efficiency: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            pilot_fraction_to_tank: None,
+        }
+    }
+
+    fn resistance_wh_with_sp_max_db(
+        setpoint_c: Option<f64>,
+        max_tank_temp_c: Option<f64>,
+        deadband_c: Option<f64>,
+    ) -> ElectricResistanceWaterHeaterConfig {
+        ElectricResistanceWaterHeaterConfig {
+            setpoint_c,
+            deadband_c,
+            max_tank_temp_c,
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
+            max_combined_power_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+        }
+    }
+
+    fn hpwh_with_sp_max_db(
+        setpoint_c: Option<f64>,
+        max_tank_temp_c: Option<f64>,
+        deadband_c: Option<f64>,
+    ) -> HeatPumpWaterHeaterConfig {
+        HeatPumpWaterHeaterConfig {
+            setpoint_c,
+            deadband_c,
+            max_tank_temp_c,
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: None,
+            backup_element_power_w: None,
+            ua_w_per_k: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            compressor_power_w: None,
+            backup_enable_offset_c: None,
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: None,
+            min_off_time_s: None,
+            hp_only_mode: None,
+            element_hp_control_mode: None,
+            fan_power_w: None,
+            parasitic_power_w: None,
+            backup_efficiency: None,
+            shr: None,
+            lost_heat_fraction: None,
+            wall_heat_fraction: None,
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+        }
+    }
+
+    fn indirect_tank_with_sp_max_db(
+        setpoint_c: Option<f64>,
+        max_tank_temp_c: Option<f64>,
+        deadband_c: Option<f64>,
+    ) -> IndirectTankConfig {
+        IndirectTankConfig {
+            setpoint_c,
+            deadband_c,
+            max_tank_temp_c,
+            equipment_id: None,
+            zone_id: None,
+            boiler_loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            ua_w_per_k: None,
+            hx_ua_w_per_k: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            draw_flow_rate_kg_s: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            boiler_loop_flow_rate_kg_s: None,
+        }
+    }
+
+    // --- setpoint vs max_tank_temp cross-field validation tests ---
+
+    #[test]
+    fn setpoint_above_max_tank_temp_rejected() {
+        assert!(
+            gas_wh_with_sp_max_db(Some(70.0), Some(60.0), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            resistance_wh_with_sp_max_db(Some(70.0), Some(60.0), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            hpwh_with_sp_max_db(Some(70.0), Some(60.0), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            indirect_tank_with_sp_max_db(Some(70.0), Some(60.0), None)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn setpoint_equal_to_max_tank_temp_rejected() {
+        assert!(
+            gas_wh_with_sp_max_db(Some(60.0), Some(60.0), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            resistance_wh_with_sp_max_db(Some(60.0), Some(60.0), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            hpwh_with_sp_max_db(Some(60.0), Some(60.0), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            indirect_tank_with_sp_max_db(Some(60.0), Some(60.0), None)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn setpoint_at_max_minus_deadband_rejected() {
+        // sp=55.0, max=60.0, db=5.0 => sp == max-db => zero-width deadband => reject
+        assert!(
+            gas_wh_with_sp_max_db(Some(55.0), Some(60.0), Some(5.0))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            resistance_wh_with_sp_max_db(Some(55.0), Some(60.0), Some(5.0))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            hpwh_with_sp_max_db(Some(55.0), Some(60.0), Some(5.0))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            indirect_tank_with_sp_max_db(Some(55.0), Some(60.0), Some(5.0))
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn setpoint_below_max_minus_deadband_accepted() {
+        // sp=54.9, max=60.0, db=5.0 => sp < max-db => adequate deadband => pass
+        assert!(
+            gas_wh_with_sp_max_db(Some(54.9), Some(60.0), Some(5.0))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            resistance_wh_with_sp_max_db(Some(54.9), Some(60.0), Some(5.0))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            hpwh_with_sp_max_db(Some(54.9), Some(60.0), Some(5.0))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            indirect_tank_with_sp_max_db(Some(54.9), Some(60.0), Some(5.0))
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn setpoint_below_max_no_deadband_accepted() {
+        assert!(
+            gas_wh_with_sp_max_db(Some(55.0), Some(60.0), None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            resistance_wh_with_sp_max_db(Some(55.0), Some(60.0), None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            hpwh_with_sp_max_db(Some(55.0), Some(60.0), None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            indirect_tank_with_sp_max_db(Some(55.0), Some(60.0), None)
+                .validate()
+                .is_ok()
+        );
     }
 }
