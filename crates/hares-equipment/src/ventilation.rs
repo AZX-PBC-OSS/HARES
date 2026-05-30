@@ -1222,11 +1222,8 @@ mod tests {
             balanced: None,
             ..minimal_ventilation_config()
         };
-        let cfg_half = EquipmentConfig::from_typed(
-            "HRV-half".to_string(),
-            "HRV".to_string(),
-            half_config,
-        );
+        let cfg_half =
+            EquipmentConfig::from_typed("HRV-half".to_string(), "HRV".to_string(), half_config);
         let mut hrv = Ventilation::new(cfg_half.clone());
         hrv.init(&cfg_half, &e).expect("init");
 

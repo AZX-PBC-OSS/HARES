@@ -1669,6 +1669,24 @@ mod tests {
         );
     }
 
+    /// 4:12 pitch (~18.4°) is the default tilt when HPXML <Pitch> is absent.
+    /// A single-plane roof at 18.4° must NOT be classified as Flat — the
+    /// boundary for Flat is <1.0°.
+    #[test]
+    fn infer_not_flat_from_default_4_12_tilt() {
+        let default_tilt = (4.0_f64 / 12.0).atan().to_degrees(); // ~18.4°
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, default_tilt, Some(180.0))],
+            total_roof_area_m2: 100.0,
+        };
+        let shape = infer_roof_shape(&roof, Some("single-family detached"), Some(40.0));
+        assert_ne!(
+            shape,
+            RoofShape::Flat,
+            "default 4:12 tilt must not classify as Flat; got {shape:?}"
+        );
+    }
+
     /// 2-plane N/S roof (N=0°, S=180°) at lat 40° with no tile and pitched
     /// tilt — strong Gable evidence: opposing planes, no tile, lat ≥35°,
     /// tilt ≥10°. Classified as Gable (0.75 usable).
@@ -3143,10 +3161,7 @@ mod tests {
     #[test]
     fn east_west_all_north_planes_succeeds() {
         let roof = RoofInfo {
-            planes: vec![
-                plane(50.0, 0.0, Some(0.0)),
-                plane(50.0, 0.0, Some(0.0)),
-            ],
+            planes: vec![plane(50.0, 0.0, Some(0.0)), plane(50.0, 0.0, Some(0.0))],
             total_roof_area_m2: 100.0,
         };
         let result = compute_usable_area(

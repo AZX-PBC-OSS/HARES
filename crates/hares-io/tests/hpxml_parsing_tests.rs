@@ -1850,3 +1850,101 @@ fn resstock_2025_1_failing_buildings_parse_and_resolve() {
         );
     }
 }
+
+#[test]
+fn gable_roof_without_pitch_not_classified_as_flat() {
+    // When <Pitch> is absent for a gable roof with attic gable walls,
+    // extract_roof_info() + infer_roof_shape() must NOT classify as Flat.
+    let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+          <LatLong>
+            <Latitude>40.0</Latitude>
+          </LatLong>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">600</Area>
+            <Azimuth>180</Azimuth>
+          </Roof>
+        </Roofs>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id="GableS"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+            <Azimuth>180</Azimuth>
+          </Wall>
+          <Wall>
+            <SystemIdentifier id="GableN"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+            <Azimuth>0</Azimuth>
+          </Wall>
+          <Wall>
+            <SystemIdentifier id="MainWall"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">200</Area>
+            <Azimuth>180</Azimuth>
+          </Wall>
+        </Walls>
+        <Floors>
+          <Floor>
+            <SystemIdentifier id="AtticFloor"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>attic vented</ExteriorAdjacentTo>
+            <Area units="ft2">500</Area>
+          </Floor>
+        </Floors>
+        <Attics>
+          <Attic>
+            <AtticType><Attic><Vented>true</Vented></Attic></AtticType>
+          </Attic>
+        </Attics>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+
+    let building = parse_building(xml).expect("HPXML with gable roof should parse");
+
+    // Verify the roof boundary has a non-zero tilt (default or inferred).
+    let roof = building
+        .boundaries
+        .iter()
+        .find(|b| b.id == "Roof1")
+        .expect("roof expected");
+    assert!(
+        roof.tilt_deg.unwrap_or(0.0) > 1.0,
+        "roof without Pitch should have tilt > 1° (not flat)"
+    );
+
+    // Extract roof info and verify shape classification.
+    let (roof_info, _wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&building);
+    let shape = hares_physics::pv_sizing::infer_roof_shape(
+        &roof_info,
+        Some("single-family detached"),
+        Some(40.0),
+    );
+    assert_ne!(
+        shape,
+        hares_physics::pv_sizing::RoofShape::Flat,
+        "gable roof without Pitch must not classify as Flat; got {shape:?}"
+    );
+}

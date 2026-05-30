@@ -610,7 +610,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             parse_value_with_units(foundation.child("FloorArea"), ValueKind::Area)
         });
 
-    let mut boundaries = parse_boundaries(details)?;
+    let (mut boundaries, pitch_absent_ids) = parse_boundaries(details)?;
     let windows = parse_windows(details, &mut boundaries)?;
 
     // Subtract window and door areas from their attached walls.
@@ -655,6 +655,12 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             }
         }
     }
+
+    // Attempt geometric inference for roofs with missing Pitch. Uses gable
+    // end wall area and attic floor area to compute a better tilt estimate
+    // than the 4:12 default. Must run before zone volume computation because
+    // compute_attic_volume() consumes the roof tilt value.
+    infer_roof_tilt_from_geometry(&mut boundaries, &pitch_absent_ids);
 
     // Post-process foundation wall boundaries: override construction_type with
     // foundation_name, apply insulation details and area scaling.
@@ -1109,10 +1115,11 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     }
 
-    // Invariant: no Roof boundary with zero tilt produced from absent <Pitch>.
-    // A Roof without an explicit <Pitch> defaults to 0° (flat roof), which produces
-    // zero attic volume. This is correct for genuine flat roofs but incorrect for
-    // pitched roofs with missing pitch data.
+    // Invariant: Roof boundary with zero tilt must come from an explicit
+    // HPXML <Pitch> value of 0, not from a missing <Pitch> element. Missing
+    // <Pitch> now defaults to 4:12 (~18.4°) — see parse_boundary(). A 0°
+    // tilt here signals a deliberate flat-roof declaration and is valid,
+    // but unusual for single-family residential — flag for review.
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     {
         for bd in &boundaries {
@@ -1125,8 +1132,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                     area_m2 = bd.area_m2,
                     interior_zone = ?bd.interior_zone,
                     exterior_zone = ?bd.exterior_zone,
-                    "Roof boundary has tilt=0° (flat); if this is a pitched roof the \
-                     missing <Pitch> element will produce zero attic volume"
+                    "Roof boundary has tilt=0° (explicit flat roof); if this is a pitched roof \
+                     verify that <Pitch> is present in the HPXML input"
                 );
             }
         }
@@ -1189,8 +1196,9 @@ fn parse_hvac_setpoints(details: &XmlNode, hvac_type: &str, weekday: bool) -> Op
     super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday)
 }
 
-fn parse_boundaries(details: &XmlNode) -> Result<Vec<Boundary>, HpxmlError> {
+fn parse_boundaries(details: &XmlNode) -> Result<(Vec<Boundary>, Vec<String>), HpxmlError> {
     let mut out = Vec::new();
+    let mut pitch_absent_ids = Vec::new();
     let boundary_specs = [
         ("Walls", "Wall", BoundaryType::Wall),
         ("Roofs", "Roof", BoundaryType::Roof),
@@ -1208,18 +1216,22 @@ fn parse_boundaries(details: &XmlNode) -> Result<Vec<Boundary>, HpxmlError> {
 
     let enclosure = match details.child("Enclosure") {
         Some(node) => node,
-        None => return Ok(out),
+        None => return Ok((out, pitch_absent_ids)),
     };
 
     for (container, item_name, boundary_type) in boundary_specs {
         if let Some(group) = enclosure.child(container) {
             for node in group.children_named(item_name) {
-                out.push(parse_boundary(node, boundary_type.clone())?);
+                out.push(parse_boundary(
+                    node,
+                    boundary_type.clone(),
+                    &mut pitch_absent_ids,
+                )?);
             }
         }
     }
 
-    Ok(out)
+    Ok((out, pitch_absent_ids))
 }
 
 fn parse_windows(
@@ -1364,7 +1376,11 @@ fn parse_windows(
     Ok(windows)
 }
 
-fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundary, HpxmlError> {
+fn parse_boundary(
+    node: &XmlNode,
+    boundary_type: BoundaryType,
+    pitch_absent_ids: &mut Vec<String>,
+) -> Result<Boundary, HpxmlError> {
     let id = element_id(node).unwrap_or_else(|| "unknown".to_string());
     let area_m2 = parse_boundary_area(node, &boundary_type, &id)?;
     let r_value_layers_m2_k_w = parse_nominal_r_layers(node);
@@ -1400,18 +1416,44 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
 
     let tilt_deg = match boundary_type {
         BoundaryType::Roof => {
-            let pitch =
-                parse_value_with_units(node.child("Pitch"), ValueKind::Raw).unwrap_or_else(|| {
+            let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw);
+            // `pitch_source` is only used inside `#[cfg(feature = "observe")]`;
+            // without that feature the compiler warns it is unused.
+            #[allow(unused_variables)]
+            let (pitch_value, pitch_source) = match pitch {
+                Some(p) => (p, "explicit"),
+                None => {
                     tracing::warn!(
+                        boundary_id = id,
                         area_m2 = area_m2,
                         interior_zone = ?interior_zone,
                         exterior_zone = ?exterior_zone,
-                        "Roof boundary missing <Pitch> element; defaulting to 0° (flat roof). \
-                         This will produce zero attic volume if this is a pitched roof."
+                        "Roof boundary missing <Pitch> element; defaulting to 4:12 pitch \
+                         (~18.4°). HPXML v4.0 does not require <Pitch> — roof slope may be \
+                         implied by other building geometry. If inference from gable end \
+                         walls is possible it will be applied in a later pass."
                     );
-                    0.0
-                });
-            Some((pitch / 12.0).atan().to_degrees())
+                    // Default to typical residential roof pitch of 4:12 (~18.4°)
+                    // rather than 0° (flat). 4:12 is the most common US residential
+                    // roof pitch; EnergyPlus PVWatts uses a similar default tilt=20°
+                    // (vendors/EnergyPlus/src/EnergyPlus/PVWatts.hh:188).
+                    // HPXML v4.0: Roof/Pitch is optional (0..1 per hpxml-elements.md).
+                    pitch_absent_ids.push(id.clone());
+                    (4.0, "defaulted")
+                }
+            };
+            #[cfg(feature = "observe")]
+            {
+                tracing::info!(
+                    target: "observe",
+                    column = "pitch_source",
+                    boundary_id = id,
+                    pitch_source = pitch_source,
+                    pitch_value = pitch_value,
+                    tilt_deg = (pitch_value / 12.0).atan().to_degrees(),
+                );
+            }
+            Some((pitch_value / 12.0).atan().to_degrees())
         }
         BoundaryType::Wall | BoundaryType::FoundationWall | BoundaryType::RimJoist => Some(90.0),
         BoundaryType::Floor => Some(0.0),
@@ -3016,6 +3058,114 @@ fn compute_garage_volume(
         _ => 0.0,
     };
     rectangular + augmentation
+}
+
+/// Attempt to infer roof tilt from attic geometry for roofs that are missing
+/// an explicit HPXML `<Pitch>` element.
+///
+/// Uses the same geometric relationship as [`compute_attic_volume`]:
+/// `attic_height = sqrt(gable_area * tan(tilt))` and the gable triangular
+/// area formula `gable_area = W² * tan(tilt) / 4`, where W is the building
+/// width (the dimension the gable sits on). Solving for tilt:
+///
+/// ```text
+/// tan(tilt) = 4 * gable_area / W²
+/// tilt = atan(4 * gable_area / floor_area)   // assuming W = sqrt(floor_area)
+/// ```
+///
+/// The square-plan assumption is an approximation; the result is capped to
+/// the residential plausible range of 1:12–12:12 (4.8°–45°).
+///
+/// Only acts on boundary IDs listed in `pitch_absent_ids` (roofs that were
+/// parsed without an explicit `<Pitch>`). Roofs with explicit Pitch values
+/// are never modified.
+fn infer_roof_tilt_from_geometry(boundaries: &mut [Boundary], pitch_absent_ids: &[String]) {
+    if pitch_absent_ids.is_empty() {
+        return;
+    }
+
+    // Find attic floor area: Floor boundary between Conditioned and Attic.
+    let attic_floor_area = boundaries
+        .iter()
+        .find(|b| {
+            b.boundary_type == BoundaryType::Floor
+                && ((b.interior_zone.as_ref() == Some(&ZoneType::Conditioned)
+                    && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
+                    || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                        && b.exterior_zone.as_ref() == Some(&ZoneType::Conditioned)))
+        })
+        .map(|b| b.area_m2);
+    let Some(floor_area) = attic_floor_area else {
+        return;
+    };
+    if floor_area <= 0.0 {
+        return;
+    }
+
+    // Find gable end wall areas: Wall, interior=Attic, exterior=Outdoor.
+    let mut gable_areas: Vec<f64> = boundaries
+        .iter()
+        .filter(|b| {
+            b.boundary_type == BoundaryType::Wall
+                && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                && matches!(b.exterior_zone.as_ref(), Some(&ZoneType::Outdoor) | None)
+        })
+        .map(|b| b.area_m2)
+        .collect();
+    if gable_areas.is_empty() {
+        return;
+    }
+
+    // Use the median gable wall area — the most representative,
+    // following the same selection pattern as compute_attic_volume().
+    gable_areas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let gable_area = gable_areas[gable_areas.len() / 2];
+    if gable_area <= 0.0 {
+        return;
+    }
+
+    // tan(tilt) = 4 * gable_area / W², assuming square W = sqrt(floor_area)
+    let tan_tilt = 4.0 * gable_area / floor_area;
+    if tan_tilt <= 0.0 || !tan_tilt.is_finite() {
+        return;
+    }
+
+    let inferred_tilt_deg = tan_tilt.atan().to_degrees();
+
+    // Cap to plausible residential range: 1:12 (4.8°) to 12:12 (45°).
+    // Values outside this range indicate the square-plan assumption is
+    // not valid for this building.
+    if !(4.5..=46.0).contains(&inferred_tilt_deg) {
+        tracing::warn!(
+            inferred_tilt_deg,
+            gable_area_m2 = gable_area,
+            attic_floor_area_m2 = floor_area,
+            "geometric tilt inference produced implausible value; \
+             keeping 4:12 default for roofs with absent Pitch"
+        );
+        return;
+    }
+
+    // Apply the inferred tilt to all Roof boundaries that have absent Pitch.
+    for bd in boundaries.iter_mut() {
+        if bd.boundary_type == BoundaryType::Roof && pitch_absent_ids.iter().any(|id| id == &bd.id)
+        {
+            bd.tilt_deg = Some(inferred_tilt_deg);
+            #[cfg(feature = "observe")]
+            {
+                tracing::info!(
+                    target: "observe",
+                    column = "pitch_source",
+                    boundary_id = %bd.id,
+                    pitch_source = "inferred_from_geometry",
+                    inferred_tilt_deg = inferred_tilt_deg,
+                    gable_area_m2 = gable_area,
+                    attic_floor_area_m2 = floor_area,
+                    "inferred roof tilt from attic geometry"
+                );
+            }
+        }
+    }
 }
 
 /// Compute attic volume from gable wall areas, roof pitch, and garage geometry.
@@ -6697,8 +6847,11 @@ mod tests {
     // ── Roof Pitch tests ─────────────────────────────────────────────────
 
     #[test]
-    fn roof_missing_pitch_produces_zero_tilt() {
-        // A Roof element without <Pitch> defaults to tilt=0° (flat roof).
+    fn roof_missing_pitch_defaults_to_4_12_not_zero() {
+        // A Roof element without <Pitch> defaults to 4:12 pitch (~18.4°)
+        // rather than 0° (flat). This prevents misclassification of sloped
+        // roofs as flat roofs when Pitch data is absent from the HPXML input.
+        // HPXML v4.0: Roof/Pitch is optional (0..1 per hpxml-elements.md).
         let xml = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
   <Building>
@@ -6731,10 +6884,11 @@ mod tests {
             .iter()
             .find(|b| b.boundary_type == BoundaryType::Roof)
             .expect("must have a Roof boundary");
-        assert_eq!(
-            roof.tilt_deg,
-            Some(0.0),
-            "Roof without <Pitch> must default to 0° tilt (flat roof)"
+        let expected = (4.0_f64 / 12.0).atan().to_degrees();
+        let tilt = roof.tilt_deg.expect("roof must have tilt_deg");
+        assert!(
+            (tilt - expected).abs() < 0.01,
+            "Roof without <Pitch> must default to 4:12 tilt (~{expected}°), got {tilt}"
         );
     }
 
@@ -6855,6 +7009,147 @@ mod tests {
         assert!(
             attic_zone.volume_m3.unwrap() > 0.0,
             "Attic volume must be positive for a pitched roof"
+        );
+    }
+
+    #[test]
+    fn roof_missing_pitch_defaults_to_4_12_tilt() {
+        // When <Pitch> is absent, the boundary should default to 4:12 pitch
+        // (~18.4°), not 0° (flat). SAMPLE_XML has a <Roof> without <Pitch>.
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof)
+            .expect("roof expected");
+        let tilt = roof.tilt_deg.expect("roof must have tilt_deg");
+        let expected = (4.0_f64 / 12.0).atan().to_degrees();
+        assert!(
+            (tilt - expected).abs() < 0.01,
+            "roof without <Pitch> should default to 4:12 tilt (~{expected}°), got {tilt}"
+        );
+    }
+
+    #[test]
+    fn roof_with_explicit_pitch_uses_provided_value() {
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="R1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">600</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let building = parse_building(xml).expect("parse should succeed");
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof)
+            .expect("roof expected");
+        let tilt = roof.tilt_deg.expect("roof must have tilt_deg");
+        let expected = (6.0_f64 / 12.0).atan().to_degrees(); // ~26.6°
+        assert!(
+            (tilt - expected).abs() < 0.01,
+            "roof with Pitch=6 should have 6:12 tilt (~{expected}°), got {tilt}"
+        );
+    }
+
+    #[test]
+    fn roof_missing_pitch_gets_geometric_inference_with_gable_walls() {
+        // When <Pitch> is absent and gable end walls + attic floor exist,
+        // tilt should be inferred from geometry rather than the 4:12 default.
+        // Attic floor = 500 ft² ≈ 46.45 m², gable walls 100 ft² each ≈ 9.29 m².
+        // tan(tilt) = 4 * gable_area / floor_area = 4 * 9.29 / 46.45 ≈ 0.80
+        // tilt ≈ atan(0.80) ≈ 38.7°
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="R1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">600</Area>
+          </Roof>
+        </Roofs>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id="W1"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+            <Azimuth>0</Azimuth>
+          </Wall>
+          <Wall>
+            <SystemIdentifier id="W2"/>
+            <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+            <Azimuth>180</Azimuth>
+          </Wall>
+        </Walls>
+        <Floors>
+          <Floor>
+            <SystemIdentifier id="AtticFloor"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>attic vented</ExteriorAdjacentTo>
+            <Area units="ft2">500</Area>
+          </Floor>
+        </Floors>
+        <Attics>
+          <Attic>
+            <AtticType><Attic><Vented>true</Vented></Attic></AtticType>
+          </Attic>
+        </Attics>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let building = parse_building(xml).expect("parse should succeed");
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof)
+            .expect("roof expected");
+        let tilt = roof.tilt_deg.expect("roof must have tilt_deg");
+        // The gable inference should produce a tilt > the 4:12 default (~18.4°)
+        // since gable_area / floor_area ratio suggests a steeper roof.
+        let default_4_12 = (4.0_f64 / 12.0).atan().to_degrees();
+        assert!(
+            tilt > default_4_12 + 1.0,
+            "geometric inference should produce tilt > {default_4_12}° (4:12 default), got {tilt}"
+        );
+        // tan(tilt) = 4 * 9.2903 / 46.4515 ≈ 0.80, tilt ≈ 38.7°
+        let expected_approx = 38.7;
+        assert!(
+            (tilt - expected_approx).abs() < 2.0,
+            "geometric inference should produce tilt ~{expected_approx}°, got {tilt}"
         );
     }
 }
