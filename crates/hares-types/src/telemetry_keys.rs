@@ -45,6 +45,10 @@ pub const TANK_AVG_TEMP_C: &str = "tank_avg_temp_c";
 pub const OUTLET_TEMP_C: &str = "outlet_temp_c";
 pub const APPARATUS_DEW_POINT_C: &str = "apparatus_dew_point_c";
 pub const CURRENT_TARGET_C: &str = "current_target_c";
+/// Effective specific heat used in boiler supply temperature calculation
+/// [J/(kg·K)]. Depends on the boiler's configured `fluid_type` and is
+/// auditable in diagnostic CSV output.
+pub const BOILER_CP_USED_J_KG_K: &str = "boiler_cp_used_j_kg_k";
 
 // ── Setpoints ───────────────────────────────────────────────────────────────
 pub const HEATING_SETPOINT_C: &str = "heating_setpoint_c";

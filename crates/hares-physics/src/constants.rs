@@ -10,6 +10,8 @@
 //! is retained for informational comparison only and must NOT be used in any
 //! moisture mass balance computation.
 
+use hares_types::FluidType;
+
 // --- Dry Air ---
 
 /// Specific gas constant for dry air [J/(kg·K)].
@@ -109,6 +111,29 @@ pub const CP_PROP_GLYCOL_50PCT_J_KG_K: f64 = 3_800.0;
 /// The rounded value 1_450 J/(kg·K) is the engineering default for the 35°C
 /// design point typical of residential heat pump evaporator conditions.
 pub const CP_R134A_SAT_LIQUID_J_KG_K: f64 = 1_450.0;
+
+/// Specific heat capacity [J/(kg·K)] for the given working fluid type.
+///
+/// Sources:
+/// - Water: 4_180 J/(kg·K) — ASHRAE HoF 2021 Ch.1; EnergyPlus `CPHW`.
+/// - Glycol: 3_800 J/(kg·K) — EnergyPlus FluidProperties.cc
+///   `DefaultPropGlyCpData`, 50% concentration at 60°C (3_686 J/(kg·K)
+///   rounded to the mid-range engineering default for residential simulation).
+/// - Refrigerant: 1_450 J/(kg·K) — ASHRAE Handbook of Refrigeration 2010
+///   Ch.30 Table 9, R-134a saturated liquid at 35°C design point.
+///
+/// Matches the values used by `FluidSolverConfig::default()` in
+/// `hares-envelope::fluid_solver` so that equipment supply temperature
+/// calculations and fluid-solver energy balances use the same cp.
+#[must_use]
+#[inline]
+pub fn cp_j_kg_k(fluid_type: FluidType) -> f64 {
+    match fluid_type {
+        FluidType::Water => CP_LIQUID_WATER_J_KG_K,
+        FluidType::Glycol => CP_PROP_GLYCOL_50PCT_J_KG_K,
+        FluidType::Refrigerant => CP_R134A_SAT_LIQUID_J_KG_K,
+    }
+}
 
 // --- Atmosphere ---
 

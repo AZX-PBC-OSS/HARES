@@ -11,7 +11,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+use hares_physics::constants::cp_j_kg_k;
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -447,7 +447,7 @@ impl Equipment for IndirectTank {
         let boiler_flow_kg_s = self.boiler_loop_flow_rate_kg_s;
         if hx_power_w > 0.0 {
             let return_temp_c = boiler_supply_c
-                - hx_energy_j / (boiler_flow_kg_s * CP_LIQUID_WATER_J_KG_K * dt_s.max(1e-6));
+                - hx_energy_j / (boiler_flow_kg_s * cp_j_kg_k(self.fluid_type) * dt_s.max(1e-6));
             let return_temp_finite = return_temp_c.max(0.0).min(boiler_supply_c);
             ports.accumulate(&PortContribution::Fluid {
                 loop_id: self.boiler_loop_id,

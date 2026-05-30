@@ -27,7 +27,7 @@ use super::{
     },
 };
 
-use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
+use hares_physics::constants::cp_j_kg_k;
 
 /// Default condensing boiler outlet temperature [C] (150 F).
 /// ASHRAE HVAC Systems and Equipment Ch.32 "Boilers": condensing boilers
@@ -234,8 +234,17 @@ impl Equipment for ElectricBoiler {
 
         let return_temp_c =
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
+        let cp_used = cp_j_kg_k(self.fluid_type);
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                cp_used > 0.0 && cp_used.is_finite(),
+                "ElectricBoiler fluid_type {:?} returned invalid cp {cp_used}",
+                self.fluid_type
+            );
+        }
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
-            return_temp_c + thermal_output_w / (self.flow_rate_kg_s * CP_LIQUID_WATER_J_KG_K)
+            return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
         } else {
             return_temp_c
         };
@@ -267,6 +276,7 @@ impl Equipment for ElectricBoiler {
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
+        self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
@@ -524,8 +534,17 @@ impl Equipment for GasBoiler {
         };
         let fuel_input_w = thermal_output_w * eir;
 
+        let cp_used = cp_j_kg_k(self.fluid_type);
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                cp_used > 0.0 && cp_used.is_finite(),
+                "GasBoiler fluid_type {:?} returned invalid cp {cp_used}",
+                self.fluid_type
+            );
+        }
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
-            return_temp_c + thermal_output_w / (self.flow_rate_kg_s * CP_LIQUID_WATER_J_KG_K)
+            return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
         } else {
             return_temp_c
         };
@@ -587,6 +606,7 @@ impl Equipment for GasBoiler {
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry.set(tk::JACKET_LOSS_W, jacket_loss_w);
         self.telemetry.set(tk::EIR, eir);
+        self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
@@ -714,9 +734,10 @@ fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
 }
 
 fn electric_boiler_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(7);
+    let mut telemetry = Telemetry::with_capacity(8);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::BOILER_CP_USED_J_KG_K, cp_j_kg_k(FluidType::Water));
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
     telemetry.insert(tk::RETURN_TEMP_C, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
@@ -726,12 +747,13 @@ fn electric_boiler_default_telemetry() -> Telemetry {
 }
 
 fn gas_boiler_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(10);
+    let mut telemetry = Telemetry::with_capacity(11);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::JACKET_LOSS_W, 0.0);
     telemetry.insert(tk::EIR, 0.0);
+    telemetry.insert(tk::BOILER_CP_USED_J_KG_K, cp_j_kg_k(FluidType::Water));
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
     telemetry.insert(tk::RETURN_TEMP_C, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
@@ -766,6 +788,12 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Thermal output transferred to hydronic loop".to_string(),
+        },
+        TelemetryField {
+            name: tk::BOILER_CP_USED_J_KG_K.to_string(),
+            unit: "J/(kg*K)".to_string(),
+            description: "Effective specific heat used in supply temperature calculation"
+                .to_string(),
         },
         TelemetryField {
             name: tk::SUPPLY_TEMP_C.to_string(),
@@ -813,6 +841,12 @@ fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::EIR.to_string(),
             unit: "-".to_string(),
             description: "Instantaneous energy-input ratio after polynomial adjustment".to_string(),
+        },
+        TelemetryField {
+            name: tk::BOILER_CP_USED_J_KG_K.to_string(),
+            unit: "J/(kg*K)".to_string(),
+            description: "Effective specific heat used in supply temperature calculation"
+                .to_string(),
         },
         TelemetryField {
             name: tk::SUPPLY_TEMP_C.to_string(),
@@ -1408,6 +1442,198 @@ mod tests {
         assert!(
             (eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0) - 4_000.0).abs() < 1e-6,
             "IdealCapacity must scale electric-boiler thermal output to commanded value"
+        );
+    }
+
+    #[test]
+    fn test_supply_temp_glycol_vs_water() {
+        const CAPACITY_W: f64 = 8_000.0;
+        const FLOW_KG_S: f64 = 0.5;
+        const WATER_CP: f64 = 4_180.0;
+        const GLYCOL_CP: f64 = 3_800.0;
+
+        let water_cfg = EquipmentConfig::from_typed(
+            "EB-water".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                eir: 1.0,
+                capacity_w: CAPACITY_W,
+                flow_rate_kg_s: FLOW_KG_S,
+                fluid_type: FluidType::Water,
+                ..ElectricBoilerConfig::default()
+            },
+        );
+        let glycol_cfg = EquipmentConfig::from_typed(
+            "EB-glycol".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                eir: 1.0,
+                capacity_w: CAPACITY_W,
+                flow_rate_kg_s: FLOW_KG_S,
+                fluid_type: FluidType::Glycol,
+                ..ElectricBoilerConfig::default()
+            },
+        );
+
+        let env = env(18.0);
+        let mut water_eq = ElectricBoiler::new(water_cfg.clone());
+        let mut glycol_eq = ElectricBoiler::new(glycol_cfg.clone());
+        water_eq.init(&water_cfg, &env).unwrap();
+        glycol_eq.init(&glycol_cfg, &env).unwrap();
+
+        let mut water_ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        let mut glycol_ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Glycol,
+            )],
+            ..PortSlots::default()
+        };
+
+        water_eq.update_control(&env);
+        water_eq
+            .step(&env, Duration::from_secs(60), &mut water_ports)
+            .unwrap();
+        glycol_eq.update_control(&env);
+        glycol_eq
+            .step(&env, Duration::from_secs(60), &mut glycol_ports)
+            .unwrap();
+
+        let water_supply = water_eq.telemetry().get(tk::SUPPLY_TEMP_C).unwrap();
+        let glycol_supply = glycol_eq.telemetry().get(tk::SUPPLY_TEMP_C).unwrap();
+        let return_temp = water_eq.telemetry().get(tk::RETURN_TEMP_C).unwrap();
+
+        let dt_water = water_supply - return_temp;
+        let dt_glycol = glycol_supply - return_temp;
+
+        // ΔT_glycol / ΔT_water = cp_water / cp_glycol
+        let expected_ratio = WATER_CP / GLYCOL_CP;
+        let actual_ratio = dt_glycol / dt_water;
+        assert!(
+            (actual_ratio - expected_ratio).abs() < 1e-6,
+            "glycol ΔT ratio {actual_ratio} != expected {expected_ratio}: water_dt={dt_water}, glycol_dt={dt_glycol}"
+        );
+
+        // Glycol ΔT must be strictly larger (lower cp → larger temp rise)
+        assert!(
+            dt_glycol > dt_water,
+            "glycol ΔT ({dt_glycol}) must exceed water ΔT ({dt_water})"
+        );
+    }
+
+    #[test]
+    fn test_fluid_type_plumbed_to_cp() {
+        const CAPACITY_W: f64 = 5_000.0;
+        const EIR: f64 = 1.0;
+        const WATER_CP: f64 = 4_180.0;
+        const GLYCOL_CP: f64 = 3_800.0;
+
+        // Step 1: configure with Water, verify cp_used is water cp
+        let water_cfg = EquipmentConfig::from_typed(
+            "EB-cp-test".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                eir: EIR,
+                capacity_w: CAPACITY_W,
+                fluid_type: FluidType::Water,
+                ..ElectricBoilerConfig::default()
+            },
+        );
+        let env = env(18.0);
+        let mut eq = ElectricBoiler::new(water_cfg.clone());
+        eq.init(&water_cfg, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let cp_used = eq.telemetry().get(tk::BOILER_CP_USED_J_KG_K).unwrap();
+        assert!(
+            (cp_used - WATER_CP).abs() < 1e-6,
+            "Water config: cp_used={cp_used}, expected water cp={WATER_CP}"
+        );
+
+        // Step 2: re-init with Glycol, verify cp_used changes
+        let glycol_cfg = EquipmentConfig::from_typed(
+            "EB-cp-test".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                eir: EIR,
+                capacity_w: CAPACITY_W,
+                fluid_type: FluidType::Glycol,
+                ..ElectricBoilerConfig::default()
+            },
+        );
+        eq.init(&glycol_cfg, &env).unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Glycol,
+            )],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let cp_used = eq.telemetry().get(tk::BOILER_CP_USED_J_KG_K).unwrap();
+        assert!(
+            (cp_used - GLYCOL_CP).abs() < 1e-6,
+            "Glycol config: cp_used={cp_used}, expected glycol cp={GLYCOL_CP}"
+        );
+
+        // Step 3: re-init with Refrigerant, verify cp_used changes
+        let refrig_cfg = EquipmentConfig::from_typed(
+            "EB-cp-test".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                eir: EIR,
+                capacity_w: CAPACITY_W,
+                fluid_type: FluidType::Refrigerant,
+                ..ElectricBoilerConfig::default()
+            },
+        );
+        eq.init(&refrig_cfg, &env).unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Refrigerant,
+            )],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let cp_used = eq.telemetry().get(tk::BOILER_CP_USED_J_KG_K).unwrap();
+        assert!(
+            (cp_used - 1_450.0).abs() < 1e-6,
+            "Refrigerant config: cp_used={cp_used}, expected refrigerant cp=1450"
         );
     }
 }
