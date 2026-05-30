@@ -13,6 +13,7 @@ pub enum PyRoofShape {
     Gable,
     Hip,
     Flat,
+    FlatEastWest,
 }
 
 impl From<RoofShape> for PyRoofShape {
@@ -21,6 +22,7 @@ impl From<RoofShape> for PyRoofShape {
             RoofShape::Gable => PyRoofShape::Gable,
             RoofShape::Hip => PyRoofShape::Hip,
             RoofShape::Flat => PyRoofShape::Flat,
+            RoofShape::FlatEastWest => PyRoofShape::FlatEastWest,
         }
     }
 }
@@ -31,6 +33,7 @@ impl From<PyRoofShape> for RoofShape {
             PyRoofShape::Gable => RoofShape::Gable,
             PyRoofShape::Hip => RoofShape::Hip,
             PyRoofShape::Flat => RoofShape::Flat,
+            PyRoofShape::FlatEastWest => RoofShape::FlatEastWest,
         }
     }
 }

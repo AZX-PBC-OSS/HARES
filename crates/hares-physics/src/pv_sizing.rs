@@ -10,6 +10,14 @@ pub enum RoofShape {
     Gable,
     Hip,
     Flat,
+    /// East-west dual-tilt sawtooth configuration on flat roofs.
+    /// Rows alternate between east-facing (~90°) and west-facing (~270°),
+    /// forming a continuous envelope with no horizontal gaps.
+    /// GCR is significantly higher than south-facing flat-roof GCR
+    /// because self-shading only affects non-productive hours.
+    /// This variant is only available via user override — [`infer_roof_shape`]
+    /// never returns `FlatEastWest`.
+    FlatEastWest,
 }
 
 /// A single roof plane extracted from HPXML boundary data.
@@ -157,12 +165,41 @@ const HIP_USABLE_FRACTION: f64 = 0.35;
 /// for roof-mounted equipment (HVAC, vents). Row spacing handled via GCR.
 const FLAT_USABLE_FRACTION: f64 = 0.70;
 
+/// East-west dual-tilt sawtooth GCR: continuous row envelope with alternating
+/// east- and west-facing panels. Self-shading is minimal because each row type
+/// is shaded only during its non-productive hours (morning shade on west-facing
+/// panels, afternoon shade on east-facing panels).
+///
+/// 0.85 reflects typical commercial east-west installations with ~10° tilt
+/// and minimal maintenance/drainage gaps between rows.
+/// Kerekes, T., Koutroulis, E., Séra, D., Teodorescu, R., & Katsanevakis, M.
+///   (2012) "East-West oriented photovoltaic systems," 38th IEEE Photovoltaic
+///   Specialists Conference (PVSC), Austin, TX, pp. 815–820.
+///   §Results table: annual production at GCR ≥ 0.80 for 10° tilt east-west
+///   configurations confirms GCR ≥ 0.80 is practical for sub-45° latitudes.
+/// SolarEdge Technologies (2021) "East-West Design Guide."
+///   §Design Guidelines: flat-roof east-west tilted layout permits GCR
+///   exceeding 0.80 with ≤10° tilt and standard 1.2 m row width.
+const EAST_WEST_GCR: f64 = 0.85;
+
+/// East-west dual-tilt rows typically use 10° tilt for structural stability,
+/// drainage, and self-cleaning. Lower tilt reduces wind loading while
+/// maintaining sufficient slope for water runoff.
+/// SolarEdge Technologies (2021) "East-West Design Guide."
+///   §Mechanical Design — recommended tilt range 10–15° for flat-roof
+///   east-west systems to balance wind loading, self-cleaning, and GCR.
+/// Kerekes et al. (2012) "East-West oriented photovoltaic systems," 38th IEEE
+///   PVSC, pp. 815–820. §Simulation setup: 10° tilt used for all parametric
+///   GCR studies of east-west sawtooth layouts.
+const EAST_WEST_TILT_DEG: f64 = 10.0;
+
 /// Per-shape usable fraction of gross roof area.
 fn usable_fraction(shape: RoofShape) -> f64 {
     match shape {
         RoofShape::Gable => GABLE_USABLE_FRACTION,
         RoofShape::Hip => HIP_USABLE_FRACTION,
         RoofShape::Flat => FLAT_USABLE_FRACTION,
+        RoofShape::FlatEastWest => FLAT_USABLE_FRACTION,
     }
 }
 
@@ -454,6 +491,70 @@ pub fn compute_usable_area(
         return Err(PvSizingError::NoRoofPlanes);
     }
 
+    // FlatEastWest: return before the north-facing candidate filter.
+    // East-west dual-tilt systems fill the entire flat roof regardless of
+    // individual plane azimuths — the per-plane azimuth resolution and
+    // north-facing check are inapplicable. See T-1928 Known Limitations.
+    if roof_shape == RoofShape::FlatEastWest {
+        let effective_area = roof.total_roof_area_m2;
+        let usable_m2 = effective_area * FLAT_USABLE_FRACTION;
+        let tilt_deg = EAST_WEST_TILT_DEG;
+        let panel_footprint = panel_area_m2 / EAST_WEST_GCR;
+
+        let total_panels = (usable_m2 / panel_footprint).floor() as u32;
+        let per_orientation_panels = total_panels / 2;
+        let paired_panels = per_orientation_panels * 2;
+        let max_capacity_kw = (paired_panels as f64) * (panel_watts as f64) / 1000.0;
+
+        // best_plane_idx uses the largest-area plane for boundary reference.
+        // This matches enumerate_pv_candidates which selects the same plane
+        // for the FlatEastWest candidate boundary_index, ensuring consistency
+        // between the two functions. The "best plane" is not the solar-optimised
+        // choice here — orientation is ignored for east-west — but the convention
+        // provides a stable reference for callers that consume best_plane_idx.
+        let best_idx = roof
+            .planes
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| {
+                a.area_m2
+                    .partial_cmp(&b.area_m2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                pv_roof_shape = ?roof_shape,
+                pv_east_west_gcr = EAST_WEST_GCR,
+                pv_east_west_tilt_deg = tilt_deg,
+                pv_effective_area_m2 = effective_area,
+                pv_usable_m2 = usable_m2,
+                pv_panel_footprint_m2 = panel_footprint,
+                pv_total_panels = total_panels,
+                pv_per_orientation_panels = per_orientation_panels,
+                pv_paired_panels = paired_panels,
+                pv_max_capacity_kw = max_capacity_kw,
+                pv_roof_shape_user_override = roof_shape_user_override,
+                "PV East-West dual-tilt flat-roof sizing"
+            );
+        }
+
+        return Ok(UsableRoofArea {
+            best_plane_idx: best_idx,
+            usable_m2,
+            max_panels: paired_panels,
+            max_capacity_kw,
+            roof_shape,
+            // Primary azimuth is east (morning production slightly exceeds
+            // afternoon due to cooler ambient temperatures — Lave & Kleissl 2010).
+            azimuth_deg: 90.0,
+            tilt_deg,
+        });
+    }
+
     // Filter to non-north-facing candidates with resolved azimuths.
     let candidates: Vec<(usize, f64)> = roof
         .planes
@@ -702,6 +803,9 @@ pub fn compute_usable_area(
         });
     }
 
+    // FlatEastWest handled by early return above (before north-facing filter).
+    // The path below is Gable / Flat only.
+
     // Gable / Flat path.
     let area_m2 = best_plane.area_m2;
 
@@ -878,6 +982,93 @@ pub fn enumerate_pv_candidates(
             pv_roof_shape_override = ?roof_shape,
             "PV roof shape is user-specified override in candidate enumeration, inference skipped"
         );
+    }
+
+    // FlatEastWest: generate two candidates (east + west) instead of iterating
+    // over individual roof planes. Each orientation gets half the total capacity.
+    if roof_shape == RoofShape::FlatEastWest {
+        let effective_area = roof.total_roof_area_m2;
+        let usable_m2 = effective_area * FLAT_USABLE_FRACTION;
+        let tilt_deg = EAST_WEST_TILT_DEG;
+        let panel_footprint = panel_area_m2 / EAST_WEST_GCR;
+
+        let total_panels = (usable_m2 / panel_footprint).floor() as u32;
+        let per_orientation_panels = total_panels / 2;
+        let per_orientation_capacity_kw =
+            (per_orientation_panels as f64) * (panel_watts as f64) / 1000.0;
+
+        // Use the largest plane's index for both candidates.
+        let best_idx = roof
+            .planes
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| {
+                a.area_m2
+                    .partial_cmp(&b.area_m2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let boundary_index = roof.planes.get(best_idx).and_then(|p| p.boundary_index);
+
+        let east_score = plane_solar_score(
+            effective_area / 2.0,
+            90.0,
+            RoofShape::Flat,
+            lat,
+            diffuse_fraction,
+        );
+        let west_score = plane_solar_score(
+            effective_area / 2.0,
+            270.0,
+            RoofShape::Flat,
+            lat,
+            diffuse_fraction,
+        );
+
+        let mut candidates = vec![
+            PvCandidate {
+                plane_idx: best_idx,
+                azimuth_deg: 90.0,
+                tilt_deg,
+                usable_m2: usable_m2 / 2.0,
+                max_panels: per_orientation_panels,
+                max_capacity_kw: per_orientation_capacity_kw,
+                solar_score: east_score,
+                roof_shape,
+                boundary_index,
+            },
+            PvCandidate {
+                plane_idx: best_idx,
+                azimuth_deg: 270.0,
+                tilt_deg,
+                usable_m2: usable_m2 / 2.0,
+                max_panels: per_orientation_panels,
+                max_capacity_kw: per_orientation_capacity_kw,
+                solar_score: west_score,
+                roof_shape,
+                boundary_index,
+            },
+        ];
+
+        candidates.sort_by(|a, b| {
+            b.solar_score
+                .partial_cmp(&a.solar_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                pv_roof_shape = ?roof_shape,
+                pv_east_west_candidate_count = candidates.len(),
+                pv_east_west_per_orientation_panels = per_orientation_panels,
+                pv_roof_shape_user_override = roof_shape_user_override,
+                "PV East-West dual-tilt candidate enumeration"
+            );
+        }
+
+        return candidates;
     }
 
     let mut candidates: Vec<PvCandidate> = roof
@@ -2737,5 +2928,249 @@ mod tests {
             infer_roof_shape(&roof, Some("single-family detached"), Some(32.0)),
             RoofShape::Gable
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // East-west dual-tilt flat-roof tests
+    // -----------------------------------------------------------------------
+
+    /// East-west dual-tilt on a 200 m² flat roof: total area × 0.70 usable ×
+    /// EAST_WEST_GCR (0.85) yields higher capacity than south-facing flat.
+    #[test]
+    fn east_west_basic_capacity() {
+        let roof = RoofInfo {
+            planes: vec![plane(200.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 200.0,
+        };
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::FlatEastWest,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        // 200 × 0.70 = 140 m² usable.
+        // Panel footprint = 2.1 / 0.85 ≈ 2.4706 m².
+        // Total panels = floor(140 / 2.4706) = 56.
+        // Paired = 56 / 2 * 2 = 56.
+        assert_eq!(usable.max_panels, 56);
+        assert_eq!(usable.roof_shape, RoofShape::FlatEastWest);
+        assert!((usable.tilt_deg - 10.0).abs() < 0.01);
+        assert!((usable.azimuth_deg - 90.0).abs() < 0.01);
+        assert!(usable.max_capacity_kw > 0.0);
+    }
+
+    /// East-west yields more panels than south-facing flat for the same roof
+    /// because the continuous envelope GCR (0.85) substantially exceeds the
+    /// south-facing GCR (~0.40 at 35°N, 25° tilt).
+    #[test]
+    fn east_west_higher_than_south_facing_flat() {
+        let roof = RoofInfo {
+            planes: vec![plane(200.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 200.0,
+        };
+
+        let ew = compute_usable_area(
+            &roof,
+            RoofShape::FlatEastWest,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        let sf = compute_usable_area(
+            &roof,
+            RoofShape::Flat,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert!(
+            ew.max_panels > sf.max_panels,
+            "east-west panels ({}) should exceed south-facing flat panels ({})",
+            ew.max_panels,
+            sf.max_panels
+        );
+        assert!(
+            ew.max_capacity_kw > sf.max_capacity_kw,
+            "east-west capacity ({:.2} kW) should exceed south-facing flat ({:.2} kW)",
+            ew.max_capacity_kw,
+            sf.max_capacity_kw
+        );
+    }
+
+    /// East-west candidate enumeration produces exactly two candidates —
+    /// east (90°) and west (270°) — each with half the total usable area.
+    #[test]
+    fn east_west_enumerate_two_candidates() {
+        let roof = RoofInfo {
+            planes: vec![plane(200.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 200.0,
+        };
+        let candidates = enumerate_pv_candidates(
+            &roof,
+            RoofShape::FlatEastWest,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            None,
+            true,
+        );
+        assert_eq!(candidates.len(), 2);
+
+        let azs: Vec<f64> = candidates.iter().map(|c| c.azimuth_deg).collect();
+        assert!(azs.contains(&90.0), "east azimuth (90°) missing");
+        assert!(azs.contains(&270.0), "west azimuth (270°) missing");
+
+        // Each candidate gets roughly half the capacity.
+        for c in &candidates {
+            assert!(c.max_panels > 0);
+            assert!(c.max_capacity_kw > 0.0);
+            assert!((c.tilt_deg - 10.0).abs() < 0.01);
+            assert_eq!(c.roof_shape, RoofShape::FlatEastWest);
+        }
+    }
+
+    /// East-west 50/50 split: east and west candidates must have equal
+    /// panel counts (floor of total/2 each).
+    #[test]
+    fn east_west_equal_split() {
+        let roof = RoofInfo {
+            planes: vec![plane(200.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 200.0,
+        };
+        let candidates = enumerate_pv_candidates(
+            &roof,
+            RoofShape::FlatEastWest,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let east = candidates
+            .iter()
+            .find(|c| (c.azimuth_deg - 90.0).abs() < 1.0)
+            .unwrap();
+        let west = candidates
+            .iter()
+            .find(|c| (c.azimuth_deg - 270.0).abs() < 1.0)
+            .unwrap();
+        assert_eq!(east.max_panels, west.max_panels);
+        assert!((east.max_capacity_kw - west.max_capacity_kw).abs() < 1e-10);
+    }
+
+    /// FlatEastWest is never returned by infer_roof_shape — it is only
+    /// available via user override.
+    #[test]
+    fn infer_never_returns_flat_east_west() {
+        let roof = RoofInfo {
+            planes: vec![plane(200.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 200.0,
+        };
+        let shape = infer_roof_shape(&roof, Some("apartment"), Some(40.0));
+        assert_eq!(shape, RoofShape::Flat);
+        assert_ne!(shape, RoofShape::FlatEastWest);
+    }
+
+    /// East-west with a small roof: total panels may be odd, so paired
+    /// panels should be even (per_orientation = total/2, paired = 2×).
+    #[test]
+    fn east_west_paired_panels_even() {
+        let roof = RoofInfo {
+            planes: vec![plane(80.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 80.0,
+        };
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::FlatEastWest,
+            &[],
+            Some(35.0),
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        // 80 × 0.70 = 56; footprint = 2.1/0.85 = 2.471; total = 22; paired = 22
+        assert_eq!(usable.max_panels % 2, 0, "paired panels must be even");
+    }
+
+    /// East-west with no latitude provided uses the default panel spec and
+    /// produces a valid (nonzero) result.
+    #[test]
+    fn east_west_no_latitude_defaults() {
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, 0.0, None)],
+            total_roof_area_m2: 100.0,
+        };
+        let usable = compute_usable_area(
+            &roof,
+            RoofShape::FlatEastWest,
+            &[180.0],
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(usable.max_panels > 0);
+        assert!(usable.max_capacity_kw > 0.0);
+    }
+
+    /// FlatEastWest with all-north-azimuth planes and no wall azimuths must
+    /// succeed — east-west dual-tilt ignores individual plane orientations
+    /// and uses total roof area. Verifies fix for a bug where AllNorthFacing
+    /// was returned before the FlatEastWest path could execute.
+    #[test]
+    fn east_west_all_north_planes_succeeds() {
+        let roof = RoofInfo {
+            planes: vec![
+                plane(50.0, 0.0, Some(0.0)),
+                plane(50.0, 0.0, Some(0.0)),
+            ],
+            total_roof_area_m2: 100.0,
+        };
+        let result = compute_usable_area(
+            &roof,
+            RoofShape::FlatEastWest,
+            &[], // no wall azimuths — all planes resolve to 0°
+            Some(35.0),
+            None,
+            None,
+            None,
+            true,
+        );
+        assert!(
+            result.is_ok(),
+            "FlatEastWest must succeed even with all-north planes and no wall azimuths"
+        );
+        let usable = result.unwrap();
+        assert_eq!(usable.roof_shape, RoofShape::FlatEastWest);
+        assert!(usable.max_panels > 0);
+        assert!(usable.max_capacity_kw > 0.0);
+        // 100 × 0.70 = 70 m² usable; footprint = 2.1/0.85 ≈ 2.471;
+        // total panels = floor(70/2.471) = 28; paired = 28
+        assert_eq!(usable.max_panels, 28);
+        assert!((usable.tilt_deg - 10.0).abs() < 0.01);
+        assert!((usable.azimuth_deg - 90.0).abs() < 0.01);
     }
 }
