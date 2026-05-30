@@ -20,7 +20,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
+    PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId, ZoneRole,
 };
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -305,9 +305,18 @@ impl Ventilation {
             .get_f64(KEY_EQUIPMENT_ID)
             .map(|v| v as u32)
             .unwrap_or(0);
+        // Resolve zone: explicit config value first, then ZoneMap, then
+        // ZoneId(1) as last-resort default (overridden by init_typed() when
+        // ZoneMap is available after dwelling construction).
         let zone_id = config
             .get_f64(KEY_ZONE_ID)
             .map(|v| ZoneId(v as u16))
+            .or_else(|| {
+                config
+                    .zone_map
+                    .as_ref()
+                    .and_then(|zm| zm.get(ZoneRole::Indoor))
+            })
             .unwrap_or(ZoneId(1));
 
         let ventilation_type = match parse_ventilation_type(config.get_str("ventilation_type")) {
@@ -475,6 +484,21 @@ impl Ventilation {
         // correct rated defaults rather than the hard-coded new() values.
         self.effective_sensible_effectiveness = self.sensible_effectiveness;
         self.effective_latent_effectiveness = self.latent_effectiveness;
+
+        // Resolve zone from ZoneMap when available. Ventilation equipment
+        // routes thermal contributions to the indoor conditioned zone. The
+        // ZoneMap provides the correct ZoneId from the building envelope
+        // configuration, replacing the hardcoded ZoneId(1) default set in new().
+        if let Some(zone_map) = &config.zone_map {
+            if let Some(resolved_id) = zone_map.get(ZoneRole::Indoor) {
+                self.zone_id = resolved_id;
+                self.descriptor.zone = Some(resolved_id);
+                self.ports = vec![
+                    PortDeclaration::electrical(),
+                    PortDeclaration::thermal(resolved_id),
+                ];
+            }
+        }
 
         Ok(())
     }
@@ -818,7 +842,7 @@ mod tests {
     use super::*;
     use crate::config::ConfigPayload;
     use chrono::{FixedOffset, TimeZone};
-    use hares_types::{GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneState};
+    use hares_types::{GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneMap, ZoneRole, ZoneState};
 
     fn env(outdoor_c: f64, indoor_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -1811,6 +1835,36 @@ mod tests {
         assert!(
             (combined_kw - split_kw).abs() < 0.001,
             "combined model ({combined_kw:.6} kW) and split model ({split_kw:.6} kW) should match when supply+exhaust sum equals old total"
+        );
+    }
+
+    #[test]
+    fn ventilation_resolves_zone_via_zone_map_with_non_standard_numbering() {
+        // Regression: Ventilation should use ZoneMap to resolve the indoor
+        // conditioned zone rather than hardcoding ZoneId(1). This test uses
+        // ZoneId(5) for the conditioned zone to prove the mapping works
+        // independent of zone sort order.
+        let mut cfg = hrv_config();
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(5));
+        cfg.zone_map = Some(zone_map);
+
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(0.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+
+        assert_eq!(
+            hrv.descriptor().zone,
+            Some(ZoneId(5)),
+            "ventilation zone should be resolved from ZoneMap Indoor role (ZoneId(5))"
+        );
+        let has_thermal_port_for_zone_5 = hrv
+            .ports()
+            .iter()
+            .any(|p| p.zone == Some(ZoneId(5)));
+        assert!(
+            has_thermal_port_for_zone_5,
+            "ventilation ports should include thermal port for resolved ZoneId(5)"
         );
     }
 }

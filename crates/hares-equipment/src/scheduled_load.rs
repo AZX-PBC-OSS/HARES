@@ -10,8 +10,8 @@ use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
-    telemetry_keys as tk,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory,
+    ZoneRole, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -291,11 +291,6 @@ pub(crate) fn zip_coefficients_from_class(class_name: &str) -> Option<ZipCoeffic
     }
 }
 
-/// Zone ID assigned by convention to the garage zone (sort key 2 in building.rs).
-const GARAGE_ZONE_ID: ZoneId = ZoneId(2);
-/// Zone ID assigned by convention to the foundation/basement zone (sort key 3 in building.rs).
-const FOUNDATION_ZONE_ID: ZoneId = ZoneId(3);
-
 #[derive(Clone, Copy, Debug)]
 enum GasScheduleUnit {
     Watts,
@@ -364,25 +359,22 @@ pub struct ScheduledLoad {
 impl ScheduledLoad {
     #[must_use]
     pub fn new(config: EquipmentConfig, end_use: EndUse, equipment_type: &'static str) -> Self {
-        // OCHRE convention: equipment whose name contains "Exterior" or "Outdoor"
-        // has no zone assignment -- its heat gain goes to the outdoor environment,
-        // not the building envelope. "Garage" and "Basement" equipment auto-routes
-        // to the respective zone when no explicit zone_id is provided.
+        // EV charging occurs outside the building envelope.
+        // "Exterior"/"Outdoor" equipment has no zone assignment — its heat gain
+        // goes to the outdoor environment. Everything else either uses an
+        // explicit zone_id from the config or is resolved by the ZoneMap at
+        // init time via name-based auto-routing.
         let name_lower = config.name.to_ascii_lowercase();
         let zone = if end_use == EndUse::EV {
-            // EV charging occurs outside the building envelope.
             None
         } else if let Some(explicit) = parse_zone_id(&config) {
             Some(explicit)
         } else if name_lower.contains("exterior") || name_lower.contains("outdoor") {
             None
-        } else if name_lower.contains("garage") {
-            Some(GARAGE_ZONE_ID)
-        } else if name_lower.contains("basement") {
-            Some(FOUNDATION_ZONE_ID)
         } else {
-            // Indoor equipment defaults to the primary conditioned zone.
-            Some(ZoneId(1))
+            // Defer zone resolution to init_from_config(), which has access to
+            // the ZoneMap for name-based auto-routing (garage, basement, etc.).
+            None
         };
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(parse_u32(&config, KEY_EQUIPMENT_ID).unwrap_or_default()),
@@ -427,6 +419,71 @@ impl ScheduledLoad {
         }
         if self.gas_source.is_some() {
             self.ports.push(PortDeclaration::fuel());
+        }
+    }
+
+    /// Resolve zone by name from the [`ZoneMap`] when no explicit `zone_id`
+    /// was configured and the equipment name implies a specific zone role.
+    ///
+    /// Called once during `init()` after the [`ZoneMap`] has been injected
+    /// into the config by the dwelling. If a matching role has no zone in
+    /// the building (e.g. the building has no garage), the zone stays `None`
+    /// and a diagnostic is emitted.
+    fn resolve_zone_from_map(&mut self, config: &EquipmentConfig) {
+        // Zone already set explicitly — nothing to resolve.
+        if self.descriptor.zone.is_some() {
+            return;
+        }
+        let Some(zone_map) = &config.zone_map else {
+            return;
+        };
+        let name_lower = config.name.to_ascii_lowercase();
+        // EV charging occurs outside the building envelope — no zone assignment.
+        // This mirrors the exclusion in new().
+        if self.descriptor.end_use == EndUse::EV {
+            return;
+        }
+        // Outdoor/exterior equipment has no zone assignment — its heat gain
+        // goes to the outdoor environment. This matches the exclusion in new().
+        if name_lower.contains("exterior") || name_lower.contains("outdoor") {
+            return;
+        }
+        #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
+        let (resolved, role) = if name_lower.contains("garage") {
+            (zone_map.get(ZoneRole::Garage), ZoneRole::Garage)
+        } else if name_lower.contains("basement") {
+            (zone_map.get(ZoneRole::Basement), ZoneRole::Basement)
+        } else if name_lower.contains("crawlspace") {
+            (zone_map.get(ZoneRole::Crawlspace), ZoneRole::Crawlspace)
+        } else if name_lower.contains("attic") {
+            (zone_map.get(ZoneRole::Attic), ZoneRole::Attic)
+        } else {
+            // Indoor equipment defaults to the primary conditioned zone.
+            (zone_map.get(ZoneRole::Indoor), ZoneRole::Indoor)
+        };
+        // Why: clippy `single_match` fires when `observe` feature is off because
+        // the None arm has only cfg-gated tracing calls. The match arms remain
+        // semantically distinct regardless of feature gates.
+        #[allow(clippy::single_match)]
+        match resolved {
+            Some(id) => {
+                self.descriptor.zone = Some(id);
+                #[cfg(feature = "observe")]
+                tracing::debug!(
+                    equipment = %config.name,
+                    zone_role = %role,
+                    zone_id = %id,
+                    "zone resolved via ZoneMap",
+                );
+            }
+            None => {
+                #[cfg(feature = "observe")]
+                tracing::warn!(
+                    equipment = %config.name,
+                    zone_role = %role,
+                    "no zone mapping found for role; equipment will not contribute thermal gains",
+                );
+            }
         }
     }
 
@@ -561,6 +618,11 @@ impl ScheduledLoad {
             } else {
                 CoreCapabilities::empty()
             };
+        // Resolve zone from ZoneMap when zone was deferred at construction time.
+        // The ZoneMap is populated by the dwelling from HPXML zone configuration
+        // and provides stable ZoneRole → ZoneId mappings that do not assume
+        // a fixed zone sort order.
+        self.resolve_zone_from_map(config);
         self.telemetry = default_telemetry();
         self.core_output = CoreOutput::default();
         self.update_ports();
@@ -619,6 +681,16 @@ impl Equipment for ScheduledLoad {
                     self.zip.iq,
                     self.zip.pq,
                     reactive_sum,
+                );
+            }
+            // Verify that the assigned zone (if any) exists in the current
+            // environment state. A missing zone indicates a stale ZoneId from
+            // a misconfigured ZoneMap.
+            if let Some(zone) = self.descriptor.zone {
+                assert!(
+                    env.zones.iter().any(|z| z.id == zone),
+                    "ScheduledLoad '{}': assigned zone {zone} not found in environment state",
+                    self.descriptor.name,
                 );
             }
         }
@@ -1393,7 +1465,7 @@ mod tests {
     use hares_types::{
         BoundaryPolicy, ControlSignal, DomainUpdate, EnvironmentState, FuelType, GridState,
         PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, TelemetryField, WeatherState, ZoneId,
-        ZoneState,
+        ZoneMap, ZoneRole, ZoneState,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -2339,24 +2411,154 @@ mod tests {
 
     #[test]
     fn garage_name_auto_routes_to_garage_zone() {
-        let config = config_no_zone("Garage Lighting", "Garage Lighting", &[1.0]);
-        let eq = ScheduledLoad::new(config, hares_types::EndUse::LIGHTING, "Garage Lighting");
+        let mut config = base_config_for_zone_test("Garage Lighting", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(1));
+        zone_map.insert(ZoneRole::Garage, ZoneId(3));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::LIGHTING,
+            "Garage Lighting",
+        );
+        eq.init(&config, &base_env()).unwrap();
         assert_eq!(
             eq.descriptor().zone,
-            Some(ZoneId(2)),
-            "Garage equipment should auto-route to ZoneId(2)"
+            Some(ZoneId(3)),
+            "Garage equipment should auto-route via ZoneMap to ZoneId(3)"
         );
     }
 
     #[test]
-    fn basement_name_auto_routes_to_foundation_zone() {
-        let config = config_no_zone("Basement Lighting", "Basement Lighting", &[1.0]);
-        let eq = ScheduledLoad::new(config, hares_types::EndUse::LIGHTING, "Basement Lighting");
+    fn basement_name_auto_routes_to_basement_zone() {
+        let mut config = base_config_for_zone_test("Basement Lighting", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(1));
+        zone_map.insert(ZoneRole::Basement, ZoneId(4));
+        zone_map.insert(ZoneRole::Crawlspace, ZoneId(4));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::LIGHTING,
+            "Basement Lighting",
+        );
+        eq.init(&config, &base_env()).unwrap();
         assert_eq!(
             eq.descriptor().zone,
-            Some(ZoneId(3)),
-            "Basement equipment should auto-route to ZoneId(3)"
+            Some(ZoneId(4)),
+            "Basement equipment should auto-route via ZoneMap to ZoneId(4)"
         );
+    }
+
+    #[test]
+    fn indoor_equipment_defaults_to_indoor_zone_via_zone_map() {
+        let mut config = base_config_for_zone_test("Refrigerator", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(5));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::REFRIGERATION,
+            "Refrigerator",
+        );
+        eq.init(&config, &base_env()).unwrap();
+        assert_eq!(
+            eq.descriptor().zone,
+            Some(ZoneId(5)),
+            "Indoor equipment should resolve to ZoneMap Indoor role (ZoneId(5))"
+        );
+    }
+
+    #[test]
+    fn zone_map_missing_role_leaves_zone_none() {
+        let mut config = base_config_for_zone_test("Garage Lighting", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(1));
+        // No Garage entry — zone should remain None.
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::LIGHTING,
+            "Garage Lighting",
+        );
+        eq.init(&config, &base_env()).unwrap();
+        assert!(
+            eq.descriptor().zone.is_none(),
+            "Equipment should have no zone when ZoneMap lacks the matching role"
+        );
+    }
+
+    /// Regression test for Outdoor/Exterior equipment routed via ZoneMap.
+    /// Without the outdoor/exclusion guard in resolve_zone_from_map(), outdoor-named
+    /// equipment would be routed to the indoor zone because it doesn't match any
+    /// specific role keyword.
+    #[test]
+    fn outdoor_equipment_ignored_by_zone_map() {
+        let mut config = base_config_for_zone_test("Exterior Lighting", &[1.0]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(1));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::LIGHTING,
+            "Exterior Lighting",
+        );
+        eq.init(&config, &base_env()).unwrap();
+        assert!(
+            eq.descriptor().zone.is_none(),
+            "Exterior equipment should have no zone even when ZoneMap is present"
+        );
+    }
+
+    /// Regression test: EV equipment must not receive a zone from ZoneMap.
+    /// EV charging occurs outside the building envelope; the end-use-based
+    /// exclusion in resolve_zone_from_map() must prevent ZoneMap routing.
+    #[test]
+    fn ev_equipment_ignored_by_zone_map() {
+        let mut config = base_config_for_zone_test("Scheduled EV", &[3.5]);
+        config
+            .test_extras_mut()
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        let mut zone_map = ZoneMap::new();
+        zone_map.insert(ZoneRole::Indoor, ZoneId(1));
+        config.zone_map = Some(zone_map);
+        let mut eq = ScheduledLoad::new(
+            config.clone(),
+            hares_types::EndUse::EV,
+            "Scheduled EV",
+        );
+        eq.init(&config, &base_env()).unwrap();
+        assert!(
+            eq.descriptor().zone.is_none(),
+            "EV equipment must have no zone even when ZoneMap is present"
+        );
+    }
+
+    /// Creates a minimal `EquipmentConfig` without a `zone_id` key for
+    /// ZoneMap-based routing tests.
+    fn base_config_for_zone_test(name: &str, schedule: &[f64]) -> EquipmentConfig {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        raw.insert(
+            KEY_POWER_CONSTANT_KW.to_string(),
+            schedule.first().copied().unwrap_or(0.0).into(),
+        );
+        EquipmentConfig::raw(name.to_string(), name.to_string(), raw)
     }
 
     #[test]

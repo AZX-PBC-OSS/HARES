@@ -15,6 +15,7 @@ pub mod schedule;
 pub mod telemetry;
 pub mod telemetry_keys;
 pub mod text;
+pub mod zone_map;
 
 pub use control_signal::*;
 pub use domain_solver::*;
@@ -29,6 +30,7 @@ pub use ports::*;
 pub use schedule::*;
 pub use telemetry::*;
 pub use text::{normalize_ascii, parse_trimmed_f64};
+pub use zone_map::{ZoneMap, ZoneRole};
 
 #[cfg(test)]
 pub mod test_utils {

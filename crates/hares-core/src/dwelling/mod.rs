@@ -43,8 +43,8 @@ use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 use hares_types::{
     BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver, ElectricalSummary,
     EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, PortDeclaration,
-    PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId, telemetry_keys as tk,
-    validate_core_contract,
+    PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId, ZoneMap, ZoneRole,
+    telemetry_keys as tk, validate_core_contract,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -1289,6 +1289,37 @@ impl Dwelling {
             ));
         }
 
+        // Build zone-to-role map for equipment auto-routing.
+        // Maps semantic zone roles (Indoor, Garage, Basement, etc.) to concrete
+        // ZoneId values derived from the sorted building zone list.
+        let zone_map = {
+            let mut map = ZoneMap::new();
+            for (idx, zone) in building.zones.iter().enumerate() {
+                let id = ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX));
+                match &zone.zone_type {
+                    hares_io::hpxml::ZoneType::Conditioned => {
+                        map.insert(ZoneRole::Indoor, id);
+                    }
+                    hares_io::hpxml::ZoneType::Garage => {
+                        map.insert(ZoneRole::Garage, id);
+                    }
+                    hares_io::hpxml::ZoneType::Foundation => {
+                        map.insert(ZoneRole::Basement, id);
+                        map.insert(ZoneRole::Crawlspace, id);
+                    }
+                    hares_io::hpxml::ZoneType::Attic => {
+                        map.insert(ZoneRole::Attic, id);
+                    }
+                    // Not modelled thermal zones — intentionally excluded from ZoneMap.
+                    hares_io::hpxml::ZoneType::Outdoor
+                    | hares_io::hpxml::ZoneType::Ground
+                    | hares_io::hpxml::ZoneType::Adjacent => {}
+                    hares_io::hpxml::ZoneType::Other(_) => {}
+                }
+            }
+            map
+        };
+
         // Equipment names whose loads are handled outside the registry (e.g. directly in the
         // simulation loop) -- silently skip them rather than emitting a warning.
         const HANDLED_OUTSIDE_REGISTRY: &[&str] = &["Occupancy"];
@@ -1306,11 +1337,12 @@ impl Dwelling {
             }
             let mut eq = create_equipment_from_spec(&registry, spec)?;
 
-            let merged_cfg = merged_equipment_config(spec, &override_root);
+            let mut merged_cfg = merged_equipment_config(spec, &override_root);
             setpoints_reconciled_by_equipment.insert(
                 merged_cfg.name.clone(),
                 merged_cfg.setpoints_reconciled.clone(),
             );
+            merged_cfg.zone_map = Some(zone_map.clone());
             match eq.init(&merged_cfg, &initial_env) {
                 Ok(()) => equipment.push(eq),
                 Err(err) => {
@@ -6971,10 +7003,203 @@ occupancy = 1.0
         for key in &["away", "transition", "signals_count"] {
             let col = format!("actor:Occupant:{key}");
             let idx = column_index[&col];
-            assert!(
-                scratch[idx] >= 0.0,
-                "actor telemetry value for '{col}' must be present in scratch"
-            );
+            assert!(scratch[idx] >= 0.0,);
         }
+    }
+
+    #[test]
+    fn zone_map_from_multi_zone_building_routes_equipment_correctly() {
+        use chrono::TimeZone;
+        use hares_equipment::scheduled_load::ScheduledLoad;
+        use hares_io::hpxml::building::XmlNode;
+        use hares_io::hpxml::{Site, Zone, ZoneType};
+        use hares_types::{EndUse, ZoneMap, ZoneRole};
+        use std::collections::HashMap;
+
+        // Construct a multi-zone building: Conditioned, Garage, Foundation, Attic.
+        // ZoneId = idx + 1 (matching initial_zones() / zone_sort_key convention).
+        let building = Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+            },
+            zones: vec![
+                Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: vec![],
+                    duct_systems: vec![],
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                },
+                Zone {
+                    zone_type: ZoneType::Garage,
+                    floor_area_m2: Some(40.0),
+                    volume_m3: Some(90.0),
+                    attached_wall_ids: vec![],
+                    duct_systems: vec![],
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                },
+                Zone {
+                    zone_type: ZoneType::Foundation,
+                    floor_area_m2: Some(50.0),
+                    volume_m3: Some(120.0),
+                    attached_wall_ids: vec![],
+                    duct_systems: vec![],
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                },
+                Zone {
+                    zone_type: ZoneType::Attic,
+                    floor_area_m2: Some(60.0),
+                    volume_m3: Some(150.0),
+                    attached_wall_ids: vec![],
+                    duct_systems: vec![],
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                },
+            ],
+            boundaries: vec![],
+            windows: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: XmlNode {
+                name: String::new(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            },
+        };
+
+        // Build ZoneMap from building zones (same logic as from_preparsed()).
+        let mut zone_map = ZoneMap::new();
+        for (idx, zone) in building.zones.iter().enumerate() {
+            let id = ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX));
+            match &zone.zone_type {
+                ZoneType::Conditioned => {
+                    zone_map.insert(ZoneRole::Indoor, id);
+                }
+                ZoneType::Garage => {
+                    zone_map.insert(ZoneRole::Garage, id);
+                }
+                ZoneType::Foundation => {
+                    zone_map.insert(ZoneRole::Basement, id);
+                    zone_map.insert(ZoneRole::Crawlspace, id);
+                }
+                ZoneType::Attic => {
+                    zone_map.insert(ZoneRole::Attic, id);
+                }
+                ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent => {}
+                ZoneType::Other(_) => {}
+            }
+        }
+
+        // Verify ZoneMap has correct role-to-ZoneId mappings.
+        assert_eq!(
+            zone_map.get(ZoneRole::Indoor),
+            Some(ZoneId(1)),
+            "first zone (Conditioned) -> Indoor -> ZoneId(1)"
+        );
+        assert_eq!(
+            zone_map.get(ZoneRole::Garage),
+            Some(ZoneId(2)),
+            "second zone (Garage) -> ZoneId(2)"
+        );
+        assert_eq!(
+            zone_map.get(ZoneRole::Basement),
+            Some(ZoneId(3)),
+            "third zone (Foundation) -> Basement -> ZoneId(3)"
+        );
+        assert_eq!(
+            zone_map.get(ZoneRole::Crawlspace),
+            Some(ZoneId(3)),
+            "third zone (Foundation) -> Crawlspace -> ZoneId(3)"
+        );
+        assert_eq!(
+            zone_map.get(ZoneRole::Attic),
+            Some(ZoneId(4)),
+            "fourth zone (Attic) -> ZoneId(4)"
+        );
+
+        // Build a raw EquipmentConfig for a garage lighting load.
+        let mut raw: HashMap<String, ConfigValue> = HashMap::new();
+        raw.insert("power_schedule_source".to_string(), "constant".into());
+        raw.insert("power_constant_kw".to_string(), 1.0.into());
+        // sensible_gain_fraction is required by init(); set to zero since this
+        // test only verifies zone routing, not thermal output.
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+        let mut config = EquipmentConfig::raw(
+            "Garage Lighting".to_string(),
+            "Garage Lighting".to_string(),
+            raw,
+        );
+        config.zone_map = Some(zone_map);
+
+        let env = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: hares_types::WeatherState::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid UTC timestamp"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        };
+        let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Garage Lighting");
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(
+            eq.descriptor().zone,
+            Some(ZoneId(2)),
+            "Garage Lighting should auto-route via ZoneMap to garage zone (ZoneId(2))"
+        );
     }
 }

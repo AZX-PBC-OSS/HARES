@@ -169,6 +169,13 @@ pub struct EquipmentConfig {
     /// no reconciliation occurred (all setpoint pairs satisfied the gap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setpoints_reconciled: Option<Vec<SetpointReconciliation>>,
+    /// Zone-to-role map for auto-routing equipment thermal contributions.
+    /// Populated by the dwelling at construction time and injected before
+    /// `init()`.  Reconstructed every run from the HPXML-derived building
+    /// envelope; not persisted in checkpoints or serialized output.
+    /// `None` for synthetic or test configs that do not have a building envelope.
+    #[serde(skip, default)]
+    pub zone_map: Option<hares_types::ZoneMap>,
     #[cfg(test)]
     #[serde(skip, default)]
     test_extras: HashMap<String, ConfigValue>,
@@ -181,6 +188,7 @@ impl EquipmentConfig {
             ochre_class,
             payload,
             setpoints_reconciled: None,
+            zone_map: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
@@ -333,6 +341,7 @@ impl EquipmentConfig {
                 data,
             },
             setpoints_reconciled: None,
+            zone_map: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
@@ -346,6 +355,7 @@ impl EquipmentConfig {
             ochre_class,
             payload: ConfigPayload::Raw { data },
             setpoints_reconciled: None,
+            zone_map: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
