@@ -261,6 +261,13 @@ pub struct ElectricalAccumulator {
     pub reactive_power_kvar: f64,
     pub load_power_kw: f64,
     pub generation_power_kw: f64,
+    /// Total count of electrical contributions accumulated this timestep.
+    /// Gated on `observe` so zero overhead in production builds. The
+    /// hares-core observer layer reads this counter and cross-references it
+    /// with equipment EndUse to identify mis-signed generation contributions.
+    #[cfg(feature = "observe")]
+    #[serde(skip)]
+    pub electrical_contribution_count: usize,
 }
 
 impl ElectricalAccumulator {
@@ -601,12 +608,30 @@ impl PortSlots {
                 active_power_kw,
                 reactive_power_kvar,
             } => {
+                // Defensive sign-convention validation: electrical power values
+                // must be finite. Non-finite (NaN, ±∞) values indicate an
+                // equipment bug upstream of the port boundary.
+                debug_assert!(
+                    active_power_kw.is_finite(),
+                    "PortContribution::Electrical received non-finite active_power_kw: {active_power_kw}"
+                );
+                debug_assert!(
+                    reactive_power_kvar.is_finite(),
+                    "PortContribution::Electrical received non-finite reactive_power_kvar: {reactive_power_kvar}"
+                );
+
                 self.electrical.reactive_power_kvar += reactive_power_kvar;
                 if *active_power_kw >= 0.0 {
                     self.electrical.load_power_kw += active_power_kw;
                 } else {
                     self.electrical.generation_power_kw += active_power_kw;
                 }
+
+                #[cfg(feature = "observe")]
+                {
+                    self.electrical.electrical_contribution_count += 1;
+                }
+
                 #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 {
                     self.write_log.insert("Electrical".to_string());
@@ -831,10 +856,11 @@ mod tests {
                 radiant_by_category: [0.0, 0.0, 3.0, 0.0, 0.0, 0.0],
                 latent_by_category: [0.0, 0.0, 5.0, 0.0, 0.0, 0.0],
             }],
-            electrical: ElectricalAccumulator {
-                reactive_power_kvar: 1.0,
-                load_power_kw: 4.0,
-                generation_power_kw: 0.0,
+            electrical: {
+                let mut e = ElectricalAccumulator::default();
+                e.reactive_power_kvar = 1.0;
+                e.load_power_kw = 4.0;
+                e
             },
             fuel: {
                 let mut f = FuelAccumulator::default();
@@ -1202,6 +1228,65 @@ mod tests {
         approx_eq(slots.electrical.reactive_power_kvar, 0.3);
         approx_eq(slots.electrical.load_power_kw, 3.0);
         approx_eq(slots.electrical.generation_power_kw, -5.0);
+    }
+
+    #[test]
+    fn positive_active_power_routes_to_load() {
+        let mut slots = PortSlots::default();
+        slots
+            .accumulate(&PortContribution::Electrical {
+                active_power_kw: 3.0,
+                reactive_power_kvar: 0.0,
+            })
+            .unwrap();
+        approx_eq(slots.electrical.load_power_kw, 3.0);
+        approx_eq(slots.electrical.generation_power_kw, 0.0);
+    }
+
+    #[test]
+    fn negative_active_power_routes_to_generation() {
+        let mut slots = PortSlots::default();
+        slots
+            .accumulate(&PortContribution::Electrical {
+                active_power_kw: -5.0,
+                reactive_power_kvar: 0.0,
+            })
+            .unwrap();
+        approx_eq(slots.electrical.load_power_kw, 0.0);
+        approx_eq(slots.electrical.generation_power_kw, -5.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite active_power_kw")]
+    fn non_finite_active_power_triggers_debug_assert() {
+        let mut slots = PortSlots::default();
+        let _ = slots.accumulate(&PortContribution::Electrical {
+            active_power_kw: f64::NAN,
+            reactive_power_kvar: 0.0,
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite reactive_power_kvar")]
+    fn non_finite_reactive_power_triggers_debug_assert() {
+        let mut slots = PortSlots::default();
+        let _ = slots.accumulate(&PortContribution::Electrical {
+            active_power_kw: 0.0,
+            reactive_power_kvar: f64::INFINITY,
+        });
+    }
+
+    #[test]
+    fn zero_active_power_routes_to_load() {
+        let mut slots = PortSlots::default();
+        slots
+            .accumulate(&PortContribution::Electrical {
+                active_power_kw: 0.0,
+                reactive_power_kvar: 0.0,
+            })
+            .unwrap();
+        approx_eq(slots.electrical.load_power_kw, 0.0);
+        approx_eq(slots.electrical.generation_power_kw, 0.0);
     }
 
     #[test]
