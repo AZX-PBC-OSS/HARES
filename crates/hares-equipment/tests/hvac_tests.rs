@@ -212,6 +212,44 @@ fn furnace_heats_when_below_setpoint() {
 }
 
 // ---------------------------------------------------------------------------
+// Regression: zone_id=0 must not silently drop thermal output
+//
+// Before the fix, zone_id=0 was accepted as a valid ZoneId, but the thermal
+// solver's zone_sensible_input_indices had no entry for ZoneId(0), so the
+// heating contribution was silently dropped — the equipment reported
+// hvac_heating_w = 0 with no error. Now zone_id=0 is rejected by
+// zone_id_from_config, equipment defaults to ZoneId(1), and thermal output
+// is correctly routed.
+// ---------------------------------------------------------------------------
+#[test]
+fn zone_id_0_equipment_produces_nonzero_thermal_output() {
+    let cfg = EquipmentConfig::from_typed(
+        "furnace_z0".to_string(),
+        "Gas Furnace".to_string(),
+        GasFurnaceConfig {
+            zone_id: Some(0),
+            afue: 0.80,
+            capacity_w: 10_000.0,
+            ..GasFurnaceConfig::default()
+        },
+    );
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
+    let env = env_with_zone_temp(18.0);
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    assert!(
+        ports.thermal[0].sensible_gain_w > 1e-6,
+        "thermal output must be > 0 when zone_id=0 is rejected and equipment defaults to ZoneId(1), got {:.3} W",
+        ports.thermal[0].sensible_gain_w,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Regression: discrete defrost block must not fire when compressor is off
 //
 // When the FSM is in Defrosting and an external signal forces the compressor

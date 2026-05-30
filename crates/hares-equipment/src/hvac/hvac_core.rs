@@ -13,6 +13,7 @@ use super::core_config::{
     parse_speed_control_mode,
 };
 use super::default_curves::{BiquadraticCurveSource, maybe_substitute_defaults};
+use super::helpers::validate_zone_id;
 use super::speed_control::{SpeedControlMode, StartupConfig};
 use super::staging::{DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF};
 use super::thermostat::{
@@ -694,7 +695,13 @@ impl HvacEquipment {
         }
 
         if let Some(raw) = extract_numeric(config, "basement_zone_id") {
-            if raw.is_finite() && raw >= 0.0 && raw.fract() == 0.0 && raw <= u16::MAX as f64 {
+            if raw == 0.0 {
+                tracing::warn!(
+                    basement_zone_id = raw,
+                    "basement_zone_id=0 is not a valid thermal zone; zones are 1-indexed, rejecting"
+                );
+            }
+            if validate_zone_id(raw) {
                 self.config.basement_zone_id = Some(ZoneId(raw as u16));
             }
         }

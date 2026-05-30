@@ -31,11 +31,21 @@ fn validate_u16_id(raw: f64) -> bool {
     raw.is_finite() && raw >= 0.0 && raw.fract() == 0.0 && raw <= u16::MAX as f64
 }
 
+pub(super) fn validate_zone_id(raw: f64) -> bool {
+    raw.is_finite() && raw >= 1.0 && raw.fract() == 0.0 && raw <= u16::MAX as f64
+}
+
 pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
     let raw = config
         .get_f64(crate::config::KEY_ZONE_ID)
         .or_else(|| typed_f64(config, crate::config::KEY_ZONE_ID))?;
-    if !validate_u16_id(raw) {
+    if raw == 0.0 {
+        tracing::warn!(
+            zone_id = raw,
+            "zone_id=0 is not a valid thermal zone; zones are 1-indexed, rejecting"
+        );
+    }
+    if !validate_zone_id(raw) {
         return None;
     }
     Some(ZoneId(raw as u16))
@@ -44,7 +54,7 @@ pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
 /// Parse an optional `ZoneId` from a named config key.
 pub fn parse_zone_id_key(config: &EquipmentConfig, key: &str) -> Option<ZoneId> {
     let raw = config.get_f64(key).or_else(|| typed_f64(config, key))?;
-    if !validate_u16_id(raw) {
+    if !validate_zone_id(raw) {
         return None;
     }
     Some(ZoneId(raw as u16))
@@ -327,7 +337,7 @@ mod tests {
 
     use super::{
         equipment_id_from_config, loop_id_from_config, operating_mode_code, parse_fuel_type,
-        zone_id_from_config,
+        parse_zone_id_key, zone_id_from_config,
     };
 
     #[test]
@@ -455,6 +465,83 @@ mod tests {
         assert_eq!(
             loop_id_from_config(&boiler, &["loop_id", "hydronic_loop_id"]),
             Some(hares_types::LoopId(9))
+        );
+    }
+
+    #[test]
+    fn zone_id_0_rejected_by_zone_id_from_config() {
+        let config = EquipmentConfig::from_typed(
+            "Z0".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                zone_id: Some(0),
+                capacity_w: 10_000.0,
+                afue: 0.96,
+                ..GasFurnaceConfig::default()
+            },
+        );
+        assert_eq!(
+            zone_id_from_config(&config),
+            None,
+            "zone_id=0 must be rejected (zones are 1-indexed)"
+        );
+    }
+
+    #[test]
+    fn zone_id_1_accepted_by_zone_id_from_config() {
+        let config = EquipmentConfig::from_typed(
+            "Z1".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                zone_id: Some(1),
+                capacity_w: 10_000.0,
+                afue: 0.96,
+                ..GasFurnaceConfig::default()
+            },
+        );
+        assert_eq!(
+            zone_id_from_config(&config),
+            Some(hares_types::ZoneId(1)),
+            "zone_id=1 must be accepted"
+        );
+    }
+
+    #[test]
+    fn zone_id_0_rejected_by_parse_zone_id_key() {
+        let config = EquipmentConfig::from_typed(
+            "Z0".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                zone_id: Some(0),
+                capacity_w: 10_000.0,
+                afue: 0.96,
+                ..GasFurnaceConfig::default()
+            },
+        );
+        assert_eq!(
+            parse_zone_id_key(&config, "zone_id"),
+            None,
+            "parse_zone_id_key must reject zone_id=0"
+        );
+    }
+
+    #[test]
+    fn loop_id_0_still_accepted_by_loop_id_from_config() {
+        let config = EquipmentConfig::from_typed(
+            "L0".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                loop_id: Some(0),
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                eir: 1.0,
+                ..ElectricBoilerConfig::default()
+            },
+        );
+        assert_eq!(
+            loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]),
+            Some(hares_types::LoopId(0)),
+            "loop_id=0 must still be accepted (validate_u16_id permits 0)"
         );
     }
 }
