@@ -79,7 +79,9 @@ pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentCont
         })
         .collect();
 
-    let fuel_types = [FuelType::Gas, FuelType::Propane, FuelType::Oil];
+    use hares_types::ports::ALL_FUEL_TYPES;
+
+    let fuel_types = &ALL_FUEL_TYPES;
     let fuel_consumption_w: Vec<(FuelType, f64)> = fuel_types
         .iter()
         .map(|&ft| (ft, after.fuel.get(ft) - before.fuel.get(ft)))
@@ -139,12 +141,15 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
         .map(|t| (t.zone, t.sensible_gain_w, t.latent_gain_w))
         .collect();
 
-    let fuel_types = [
-        FuelType::Electric,
-        FuelType::Gas,
-        FuelType::Propane,
-        FuelType::Oil,
-    ];
+    let fuel_types = hares_types::ports::ALL_FUEL_TYPES;
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    debug_assert_eq!(
+        fuel_types.len(),
+        hares_types::ports::FUEL_TYPE_COUNT,
+        "ALL_FUEL_TYPES length must match FUEL_TYPE_COUNT; ensure new FuelType variants are added to ALL_FUEL_TYPES"
+    );
+
     let fuel_consumption_w: Vec<(FuelType, f64)> = fuel_types
         .iter()
         .map(|&ft| (ft, ports.fuel.get(ft)))
@@ -398,5 +403,82 @@ mod tests {
         };
         let contrib = diff_ports(&slots, &slots);
         assert!(contrib.fluid.is_empty());
+    }
+
+    #[test]
+    fn capture_ports_includes_all_fuel_types() {
+        let mut fuel = FuelAccumulator::default();
+        fuel.add(FuelType::Gas, 1000.0).unwrap();
+        fuel.add(FuelType::Wood, 2000.0).unwrap();
+        fuel.add(FuelType::Coal, 3000.0).unwrap();
+        fuel.add(FuelType::WoodPellet, 4000.0).unwrap();
+
+        let ports = PortSlots {
+            fuel,
+            ..Default::default()
+        };
+
+        let capture = capture_ports(&ports);
+
+        let find = |ft: FuelType| -> f64 {
+            capture
+                .fuel_consumption_w
+                .iter()
+                .find(|(t, _)| *t == ft)
+                .map_or(0.0, |(_, v)| *v)
+        };
+
+        approx_eq(find(FuelType::Gas), 1000.0);
+        approx_eq(find(FuelType::Wood), 2000.0);
+        approx_eq(find(FuelType::Coal), 3000.0);
+        approx_eq(find(FuelType::WoodPellet), 4000.0);
+        approx_eq(find(FuelType::Electric), 0.0);
+        approx_eq(find(FuelType::Propane), 0.0);
+        approx_eq(find(FuelType::Oil), 0.0);
+    }
+
+    #[test]
+    fn diff_ports_detects_wood_coal_woodpellet() {
+        let mut before_fuel = FuelAccumulator::default();
+        before_fuel.add(FuelType::Wood, 500.0).unwrap();
+        before_fuel.add(FuelType::Coal, 1000.0).unwrap();
+
+        let mut after_fuel = FuelAccumulator::default();
+        after_fuel.add(FuelType::Wood, 1500.0).unwrap();
+        after_fuel.add(FuelType::Coal, 1000.0).unwrap(); // unchanged
+        after_fuel.add(FuelType::WoodPellet, 750.0).unwrap();
+
+        let before = PortSlots {
+            fuel: before_fuel,
+            ..Default::default()
+        };
+        let after = PortSlots {
+            fuel: after_fuel,
+            ..Default::default()
+        };
+        let contrib = diff_ports(&before, &after);
+
+        // Wood: 1500 - 500 = 1000 (present)
+        // Coal: 1000 - 1000 = 0 (filtered)
+        // WoodPellet: 750 - 0 = 750 (present)
+        assert_eq!(contrib.fuel_consumption_w.len(), 2);
+
+        let wood = contrib
+            .fuel_consumption_w
+            .iter()
+            .find(|(ft, _)| *ft == FuelType::Wood);
+        approx_eq(wood.unwrap().1, 1000.0);
+
+        let pellet = contrib
+            .fuel_consumption_w
+            .iter()
+            .find(|(ft, _)| *ft == FuelType::WoodPellet);
+        approx_eq(pellet.unwrap().1, 750.0);
+
+        let coal = contrib
+            .fuel_consumption_w
+            .iter()
+            .find(|(ft, _)| *ft == FuelType::Coal);
+        assert!(coal.is_none(), "zero delta must be filtered out");
     }
 }

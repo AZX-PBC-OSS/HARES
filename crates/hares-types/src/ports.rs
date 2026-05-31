@@ -282,9 +282,23 @@ impl ElectricalAccumulator {
 }
 
 /// Number of fuel types excluding `FuelType::None`.
-const FUEL_TYPE_COUNT: usize = 7;
+pub const FUEL_TYPE_COUNT: usize = 7;
 
-fn fuel_index(fuel_type: FuelType) -> Option<usize> {
+/// All fuel types in their canonical ordinal order (index 0..FUEL_TYPE_COUNT).
+/// Use this as the single source of truth for iterating all real fuel types.
+pub const ALL_FUEL_TYPES: [FuelType; FUEL_TYPE_COUNT] = [
+    FuelType::Electric,
+    FuelType::Gas,
+    FuelType::Propane,
+    FuelType::Oil,
+    FuelType::Wood,
+    FuelType::Coal,
+    FuelType::WoodPellet,
+];
+
+/// Maps a `FuelType` to its array index in `FuelAccumulator::totals`.
+/// `FuelType::None` returns `None`.
+pub fn fuel_index(fuel_type: FuelType) -> Option<usize> {
     match fuel_type {
         FuelType::Electric => Some(0),
         FuelType::Gas => Some(1),
@@ -294,6 +308,21 @@ fn fuel_index(fuel_type: FuelType) -> Option<usize> {
         FuelType::Coal => Some(5),
         FuelType::WoodPellet => Some(6),
         FuelType::None => None,
+    }
+}
+
+/// Reverse lookup: maps a `FuelAccumulator` index (0..FUEL_TYPE_COUNT) back
+/// to the corresponding `FuelType`. Returns `None` for out-of-range indices.
+pub fn fuel_index_reverse(idx: usize) -> Option<FuelType> {
+    match idx {
+        0 => Some(FuelType::Electric),
+        1 => Some(FuelType::Gas),
+        2 => Some(FuelType::Propane),
+        3 => Some(FuelType::Oil),
+        4 => Some(FuelType::Wood),
+        5 => Some(FuelType::Coal),
+        6 => Some(FuelType::WoodPellet),
+        _ => None,
     }
 }
 
@@ -1068,10 +1097,16 @@ mod tests {
         fuel.add(FuelType::Gas, 200.0).unwrap();
         fuel.add(FuelType::Propane, 300.0).unwrap();
         fuel.add(FuelType::Oil, 400.0).unwrap();
+        fuel.add(FuelType::Wood, 500.0).unwrap();
+        fuel.add(FuelType::Coal, 600.0).unwrap();
+        fuel.add(FuelType::WoodPellet, 700.0).unwrap();
         approx_eq(fuel.get(FuelType::Electric), 100.0);
         approx_eq(fuel.get(FuelType::Gas), 200.0);
         approx_eq(fuel.get(FuelType::Propane), 300.0);
         approx_eq(fuel.get(FuelType::Oil), 400.0);
+        approx_eq(fuel.get(FuelType::Wood), 500.0);
+        approx_eq(fuel.get(FuelType::Coal), 600.0);
+        approx_eq(fuel.get(FuelType::WoodPellet), 700.0);
     }
 
     #[test]

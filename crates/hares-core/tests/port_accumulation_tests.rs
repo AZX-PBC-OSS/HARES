@@ -204,6 +204,68 @@ fn fuel_types_are_independent() {
     approx_eq(ports.fuel.get(FuelType::Oil), 2_000.0);
 }
 
+#[test]
+fn all_seven_fuel_types_accumulate_and_read_correctly() {
+    let mut ports = slots_for_zones(&[ZoneId(1)]);
+
+    ports
+        .accumulate(&PortContribution::Fuel {
+            fuel_type: FuelType::Electric,
+            consumption_w: 100.0,
+        })
+        .unwrap();
+    ports
+        .accumulate(&PortContribution::Fuel {
+            fuel_type: FuelType::Gas,
+            consumption_w: 200.0,
+        })
+        .unwrap();
+    ports
+        .accumulate(&PortContribution::Fuel {
+            fuel_type: FuelType::Propane,
+            consumption_w: 300.0,
+        })
+        .unwrap();
+    ports
+        .accumulate(&PortContribution::Fuel {
+            fuel_type: FuelType::Oil,
+            consumption_w: 400.0,
+        })
+        .unwrap();
+    ports
+        .accumulate(&PortContribution::Fuel {
+            fuel_type: FuelType::Wood,
+            consumption_w: 500.0,
+        })
+        .unwrap();
+    ports
+        .accumulate(&PortContribution::Fuel {
+            fuel_type: FuelType::Coal,
+            consumption_w: 600.0,
+        })
+        .unwrap();
+    ports
+        .accumulate(&PortContribution::Fuel {
+            fuel_type: FuelType::WoodPellet,
+            consumption_w: 700.0,
+        })
+        .unwrap();
+
+    approx_eq(ports.fuel.get(FuelType::Electric), 100.0);
+    approx_eq(ports.fuel.get(FuelType::Gas), 200.0);
+    approx_eq(ports.fuel.get(FuelType::Propane), 300.0);
+    approx_eq(ports.fuel.get(FuelType::Oil), 400.0);
+    approx_eq(ports.fuel.get(FuelType::Wood), 500.0);
+    approx_eq(ports.fuel.get(FuelType::Coal), 600.0);
+    approx_eq(ports.fuel.get(FuelType::WoodPellet), 700.0);
+
+    // zero resets Wood/Coal/WoodPellet too
+    ports.zero();
+    approx_eq(ports.fuel.get(FuelType::Wood), 0.0);
+    approx_eq(ports.fuel.get(FuelType::Coal), 0.0);
+    approx_eq(ports.fuel.get(FuelType::WoodPellet), 0.0);
+}
+
 // ---------------------------------------------------------------------------
 // zero() clears all accumulators
 // ---------------------------------------------------------------------------
