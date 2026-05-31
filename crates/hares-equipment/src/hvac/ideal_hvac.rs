@@ -532,6 +532,15 @@ impl Equipment for IdealHvac {
         if self.cached_ideal_target.is_none() {
             self.ideal_capacity_w = 0.0;
         }
+        // Set end_use based on FSM mode so that ByEndUse dispatch routing
+        // sees the correct value before step() runs. Deadband mode preserves
+        // the previous end_use — the equipment did not switch modes.
+        self.descriptor.end_use = match mode {
+            ThermostatMode::Heating => EndUse::HVAC_HEATING,
+            ThermostatMode::Cooling => EndUse::HVAC_COOLING,
+            ThermostatMode::Deadband => self.descriptor.end_use.clone(),
+        };
+
         match mode {
             ThermostatMode::Heating => OperatingMode::Heating,
             ThermostatMode::Cooling => OperatingMode::Cooling,
@@ -545,6 +554,15 @@ impl Equipment for IdealHvac {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                end_use_before_step = self.descriptor.end_use.as_str(),
+                fsm_mode = ?self.thermostat_fsm.mode,
+                "IdealHvac::step() end-use before step"
+            );
+        }
+
         let (t_indoor_c, t_outdoor_c) = if !self.use_ideal_cached {
             let t_out = env.weather.outdoor_temp_c;
             // zone_id is validated at init so this always finds the zone in
@@ -621,13 +639,6 @@ impl Equipment for IdealHvac {
                 self.set_mode(ThermostatMode::Deadband, env.current_time);
             }
         }
-
-        // Update end_use to reflect actual operating mode.
-        self.descriptor.end_use = if capacity_w >= 0.0 {
-            EndUse::HVAC_HEATING
-        } else {
-            EndUse::HVAC_COOLING
-        };
 
         // Fan power per OCHRE: fan_power = |capacity| * eir * fan_power_ratio.
         // In non-ideal mode, apply EIR temperature correction so electrical
@@ -761,6 +772,38 @@ impl Equipment for IdealHvac {
             },
             performance: CorePerformance::default(),
         };
+
+        #[cfg(feature = "observe")]
+        {
+            tracing::debug!(
+                end_use_after_step = self.descriptor.end_use.as_str(),
+                capacity_w = capacity_w,
+                fsm_mode = ?self.thermostat_fsm.mode,
+                "IdealHvac::step() end-use after step"
+            );
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // Deadband (capacity_w == 0.0) preserves the previous end_use —
+            // the invariant only applies when the equipment is actively
+            // delivering heating or cooling.
+            if capacity_w != 0.0 {
+                let expected_end_use = if capacity_w > 0.0 {
+                    EndUse::HVAC_HEATING
+                } else {
+                    EndUse::HVAC_COOLING
+                };
+                if self.descriptor.end_use != expected_end_use {
+                    tracing::error!(
+                        actual = self.descriptor.end_use.as_str(),
+                        expected = expected_end_use.as_str(),
+                        capacity_w = capacity_w,
+                        "IdealHvac invariant violated: descriptor.end_use does not match capacity sign"
+                    );
+                }
+            }
+        }
 
         Ok(())
     }
@@ -3151,6 +3194,146 @@ mod tests {
         assert!(
             (target.unwrap().1 - 26.0).abs() < 1e-9,
             "hot: must target cooling setpoint 26.0"
+        );
+    }
+
+    #[test]
+    fn end_use_is_heating_after_heating_step() {
+        let cfg = ideal_config("IH-heat-eu", 20.0, 26.0);
+        let env = env(15.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.ideal_capacity_w = 5000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_HEATING,
+            "end_use must be HVAC_HEATING after heating step"
+        );
+    }
+
+    #[test]
+    fn end_use_is_cooling_after_cooling_step() {
+        let cfg = ideal_config("IH-cool-eu", 20.0, 26.0);
+        let env = env(28.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.ideal_capacity_w = -5000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_COOLING,
+            "end_use must be HVAC_COOLING after cooling step"
+        );
+    }
+
+    #[test]
+    fn end_use_preserved_in_deadband_after_heating() {
+        let cfg = ideal_config("IH-db-heat-eu", 20.0, 26.0);
+        // Zone cold: enters heating.
+        let env_cold = env(15.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_cold).unwrap();
+        eq.update_control(&env_cold);
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_HEATING,
+            "end_use must be HVAC_HEATING after heating update_control"
+        );
+
+        eq.ideal_capacity_w = 5000.0;
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        // Zone warms to comfort range → deadband. Previous mode was heating,
+        // so end_use stays HVAC_HEATING.
+        let env_warm = env(23.0, 300, 60);
+        eq.update_control(&env_warm);
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_HEATING,
+            "end_use must stay HVAC_HEATING in deadband after heating"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_warm, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_HEATING,
+            "end_use must still be HVAC_HEATING after deadband step following heating"
+        );
+    }
+
+    #[test]
+    fn end_use_preserved_in_deadband_after_cooling() {
+        let cfg = ideal_config("IH-db-cool-eu", 20.0, 26.0);
+        // Zone hot: enters cooling.
+        let env_hot = env(28.0, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_hot).unwrap();
+        eq.update_control(&env_hot);
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_COOLING,
+            "end_use must be HVAC_COOLING after cooling update_control"
+        );
+
+        eq.ideal_capacity_w = -5000.0;
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_hot, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        // Zone cools to comfort range → deadband. Previous mode was cooling,
+        // so end_use stays HVAC_COOLING (not flipped to heating).
+        let env_cool = env(23.0, 300, 60);
+        eq.update_control(&env_cool);
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_COOLING,
+            "end_use must stay HVAC_COOLING in deadband after cooling"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_cool, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_COOLING,
+            "end_use must still be HVAC_COOLING after deadband step following cooling"
         );
     }
 }
