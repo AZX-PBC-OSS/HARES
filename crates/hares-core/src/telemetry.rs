@@ -28,6 +28,9 @@ pub struct DwellingTelemetry {
     pub outdoor_rh: f64,
     /// Per-actor telemetry: actor_name → channel_name → value.
     pub actor_telemetry: HashMap<String, HashMap<String, f64>>,
+    /// 0/1 flag indicating whether the dwelling has been marked as permanently
+    /// failed after a prior panic and will not be stepped again.
+    pub dwelling_failed: bool,
 }
 
 impl DwellingTelemetry {
@@ -174,6 +177,7 @@ mod tests {
             outdoor_temp_c: 10.0,
             outdoor_rh: 0.45,
             actor_telemetry: HashMap::new(),
+            dwelling_failed: false,
         }
     }
 

@@ -203,6 +203,7 @@ impl PyFleet {
                         SimError::Failed { bldg_id, .. } => *bldg_id,
                         SimError::Engine { bldg_id, .. } => *bldg_id,
                         SimError::Panic { bldg_id, .. } => *bldg_id,
+                        SimError::Skipped { bldg_id, .. } => *bldg_id,
                         SimError::ThreadPoolBuild(_) => -1,
                     };
                     failures.push((bldg_id, err.to_string()));
@@ -443,6 +444,7 @@ impl PySteppableFleet {
                         SimError::Failed { bldg_id, .. } => bldg_id,
                         SimError::Engine { bldg_id, .. } => bldg_id,
                         SimError::Panic { bldg_id, .. } => bldg_id,
+                        SimError::Skipped { bldg_id, .. } => bldg_id,
                         SimError::ThreadPoolBuild(_) => -1,
                     };
                     item.set_item("bldg_id", bldg_id)?;

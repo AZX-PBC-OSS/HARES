@@ -81,6 +81,8 @@ pub enum SimError {
     Engine { bldg_id: i64, message: String },
     #[error("dwelling {bldg_id} panicked: {message}")]
     Panic { bldg_id: i64, message: String },
+    #[error("dwelling {bldg_id} skipped due to prior failure: {message}")]
+    Skipped { bldg_id: i64, message: String },
 }
 
 /// Fleet runner for parallel dwelling simulation.
@@ -427,11 +429,33 @@ impl SteppableFleet {
                 .collect();
         }
 
+        // Invariant: no dwelling that was ALREADY failed before this step had
+        // step() called on it.  Capture pre-step failed state so that dwellings
+        // that become failed during this step (via a panic caught in
+        // step_dwellings_parallel) are not asserted — they were not failed when
+        // step() was called, and a Panic result is valid for them.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        let was_already_failed: Vec<bool> = self.dwellings.iter().map(|d| d.failed).collect();
+
         let results = if let Some(pool) = &self.step_pool {
             pool.install(|| step_dwellings_parallel(&mut self.dwellings))
         } else {
             step_dwellings_parallel(&mut self.dwellings)
         };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            for (i, (dwelling, result)) in self.dwellings.iter().zip(results.iter()).enumerate() {
+                if was_already_failed[i] {
+                    assert!(
+                        matches!(result, Err(SimError::Skipped { .. })),
+                        "invariant violation: dwelling {} was already marked failed before step but result was {:?}",
+                        dwelling.bldg_id,
+                        result
+                    );
+                }
+            }
+        }
 
         self.current_step = self.current_step.saturating_add(1);
         results
@@ -550,19 +574,28 @@ fn step_dwellings_parallel(
 
     dwellings
         .par_iter_mut()
-        .map(
-            |dwelling| match panic::catch_unwind(AssertUnwindSafe(|| dwelling.step())) {
+        .map(|dwelling| {
+            if dwelling.failed {
+                return Err(SimError::Skipped {
+                    bldg_id: dwelling.bldg_id,
+                    message: "dwelling permanently failed after prior panic".to_string(),
+                });
+            }
+            match panic::catch_unwind(AssertUnwindSafe(|| dwelling.step())) {
                 Ok(Ok(step_result)) => Ok(step_result),
                 Ok(Err(err)) => Err(SimError::Engine {
                     bldg_id: dwelling.bldg_id,
                     message: err.to_string(),
                 }),
-                Err(payload) => Err(SimError::Panic {
-                    bldg_id: dwelling.bldg_id,
-                    message: panic_hook::panic_payload_to_string(payload),
-                }),
-            },
-        )
+                Err(payload) => {
+                    dwelling.failed = true;
+                    Err(SimError::Panic {
+                        bldg_id: dwelling.bldg_id,
+                        message: panic_hook::panic_payload_to_string(payload),
+                    })
+                }
+            }
+        })
         .collect()
 }
 
@@ -1013,5 +1046,212 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("all dwellings failed"));
         assert!(err_msg.contains("3 failure"));
+    }
+
+    #[test]
+    fn steppable_fleet_skips_failed_dwelling() {
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+        assert_eq!(fleet.len(), 3);
+
+        // Mark dwelling 1 as permanently failed (simulating post-panic state).
+        fleet.dwellings[1].failed = true;
+
+        // Step: dwellings 0 and 2 should succeed, dwelling 1 should be skipped.
+        let results = fleet.step();
+        assert_eq!(results.len(), 3);
+
+        assert!(results[0].is_ok(), "dwelling 0 should succeed");
+        assert!(results[2].is_ok(), "dwelling 2 should succeed");
+
+        match &results[1] {
+            Err(SimError::Skipped { bldg_id, message }) => {
+                assert_eq!(*bldg_id, 2, "skipped dwelling should have bldg_id 2");
+                assert!(
+                    message.contains("prior panic"),
+                    "skip message should mention prior panic"
+                );
+            }
+            other => panic!("expected Skipped error for dwelling 1, got {:?}", other),
+        };
+
+        // Telemetry must reflect the failed flag.
+        let tel = fleet.telemetry(1).expect("telemetry for dwelling 1");
+        assert!(
+            tel.dwelling_failed,
+            "telemetry should mark dwelling 1 as failed"
+        );
+
+        // Subsequent step also skips the same dwelling.
+        let results2 = fleet.step();
+        assert!(
+            matches!(results2[1], Err(SimError::Skipped { .. })),
+            "dwelling 1 should stay skipped on every subsequent step"
+        );
+    }
+
+    #[test]
+    fn steppable_fleet_ipc_isolation_after_failure() {
+        // Integration test: verify that a failed dwelling does not prevent
+        // other dwellings from producing valid results over a full simulation.
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+        assert_eq!(fleet.len(), 3);
+
+        // Mark dwelling 1 as failed at the first step.
+        fleet.dwellings[1].failed = true;
+
+        let mut ok_steps = [0usize; 3];
+        let mut skipped_steps = [0usize; 3];
+
+        while !fleet.is_finished() {
+            let results = fleet.step();
+            assert_eq!(results.len(), 3);
+
+            for (i, result) in results.iter().enumerate() {
+                match result {
+                    Ok(_) => ok_steps[i] += 1,
+                    Err(SimError::Skipped { .. }) => skipped_steps[i] += 1,
+                    other => panic!(
+                        "unexpected result for dwelling {i}: expected Ok or Skipped, got {:?}",
+                        other
+                    ),
+                }
+            }
+        }
+
+        // Dwelling 0 and 2 produced results every step.
+        assert!(ok_steps[0] > 0, "dwelling 0 should have successful steps");
+        assert!(ok_steps[2] > 0, "dwelling 2 should have successful steps");
+        assert_eq!(
+            ok_steps[0], ok_steps[2],
+            "both non-failed dwellings stepped the same number of times"
+        );
+
+        // Dwelling 1 was skipped on every step, never succeeded.
+        assert_eq!(ok_steps[1], 0, "dwelling 1 should never produce an Ok step");
+        assert!(
+            skipped_steps[1] > 0,
+            "dwelling 1 should be skipped every step"
+        );
+
+        // Telemetry reflects the failure.
+        let tel = fleet.telemetry(1).expect("telemetry for dwelling 1");
+        assert!(tel.dwelling_failed);
+
+        // Non-failed dwellings are not flagged.
+        assert!(!fleet.telemetry(0).unwrap().dwelling_failed);
+        assert!(!fleet.telemetry(2).unwrap().dwelling_failed);
+    }
+
+    #[test]
+    fn construction_panic_is_not_a_runtime_failure() {
+        // Regression test: a dwelling that fails during from_config is
+        // never added to the fleet, so it cannot be marked as a runtime
+        // failure.  The AssertUnwindSafe wrapping at from_configs line 343
+        // is sound because construction failure (whether error or panic)
+        // prevents fleet inclusion.
+        let mut configs = build_valid_configs(2);
+        let mut bad = build_missing_configs(1);
+        bad[0].bldg_id = 999;
+        configs.extend(bad);
+
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(configs, 0).expect("partial success should build");
+        assert_eq!(fleet.len(), 2);
+        assert_eq!(build_errors.len(), 1);
+        assert_eq!(build_errors[0].bldg_id, 999);
+
+        // The two successfully-constructed dwellings are not marked failed.
+        for i in 0..fleet.len() {
+            assert!(
+                !fleet.dwellings[i].failed,
+                "dwelling {i} should not be marked failed at construction"
+            );
+        }
+
+        // The failed construction never produced a dwelling, so there is
+        // no runtime state to be corrupted.  The fleet has only the 2
+        // valid dwellings, and both step normally.
+        let results = fleet.step();
+        assert_eq!(results.len(), 2);
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "valid dwellings should step without error"
+        );
+    }
+
+    #[test]
+    fn dwelling_panic_during_step_is_caught_and_marks_dwelling_failed() {
+        // End-to-end test of the panic→failed→skipped path in
+        // step_dwellings_parallel.  A dwelling configured to panic during
+        // step() must:
+        //   (a) produce Err(SimError::Panic) from the panicking step
+        //   (b) produce Err(SimError::Skipped) on every subsequent step
+        //   (c) leave other dwellings unaffected
+        // The invariant check in SteppableFleet::step() must NOT misfire
+        // when the dwelling becomes failed during this step.
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+        assert_eq!(fleet.len(), 3);
+
+        // Configure dwelling 1 to panic on its next step() call.
+        // set_test_panic is #[cfg(debug_assertions)] gated — available in
+        // test builds.
+        fleet.dwellings[1].set_test_panic();
+
+        // First step: dwelling 1 panics, the panic is caught by
+        // step_dwellings_parallel, failed is set to true.
+        let results = fleet.step();
+        assert_eq!(results.len(), 3);
+
+        // (a) Panicking dwelling returns Panic.
+        match &results[1] {
+            Err(SimError::Panic { bldg_id, message }) => {
+                assert_eq!(*bldg_id, 2, "panicked dwelling should have bldg_id 2");
+                assert!(
+                    message.contains("test-induced panic"),
+                    "panic message should contain 'test-induced panic', got: {message}"
+                );
+            }
+            other => panic!("expected Panic error for dwelling 1, got {:?}", other),
+        }
+
+        // (c) Other dwellings continue normally.
+        assert!(results[0].is_ok(), "dwelling 0 should succeed");
+        assert!(results[2].is_ok(), "dwelling 2 should succeed");
+
+        // The failed flag must be set on the panicked dwelling only.
+        assert!(
+            fleet.dwellings[1].failed,
+            "dwelling 1 should be marked failed after panic"
+        );
+        assert!(!fleet.dwellings[0].failed);
+        assert!(!fleet.dwellings[2].failed);
+
+        // (b) Second step: dwelling 1 is now failed → Skipped.
+        let results2 = fleet.step();
+        assert_eq!(results2.len(), 3);
+
+        match &results2[1] {
+            Err(SimError::Skipped { bldg_id, message }) => {
+                assert_eq!(*bldg_id, 2);
+                assert!(message.contains("prior panic"));
+            }
+            other => panic!("expected Skipped error for dwelling 1, got {:?}", other),
+        }
+
+        assert!(results2[0].is_ok(), "dwelling 0 should succeed on step 2");
+        assert!(results2[2].is_ok(), "dwelling 2 should succeed on step 2");
+
+        // Telemetry reflects the failed state.
+        let tel = fleet.telemetry(1).expect("telemetry for dwelling 1");
+        assert!(tel.dwelling_failed);
+
+        assert!(!fleet.telemetry(0).unwrap().dwelling_failed);
+        assert!(!fleet.telemetry(2).unwrap().dwelling_failed);
     }
 }

@@ -767,6 +767,10 @@ fn register_pv_roof_shading(
 /// Top-level single-dwelling simulation orchestrator.
 pub struct Dwelling {
     pub bldg_id: i64,
+    /// Set when the dwelling panicked during [`step()`](Self::step) and must
+    /// never be stepped again.  A `failed` dwelling is permanently excluded
+    /// from fleet simulation; its state may be inconsistent.
+    pub failed: bool,
     equipment: Vec<Box<dyn Equipment>>,
     equipment_id_by_name: HashMap<String, EquipmentId>,
     pub thermal_solver: ThermalSolver,
@@ -814,6 +818,8 @@ pub struct Dwelling {
     custom_update_bufs: Vec<hares_types::DomainUpdate>,
     #[cfg(debug_assertions)]
     stage_snapshot: Option<StageSnapshot>,
+    #[cfg(debug_assertions)]
+    test_panic_on_step: bool,
     output_column_index: HashMap<String, usize>,
     /// Pre-resolved output column indices for each equipment piece, avoiding
     /// per-timestep name allocation in `record_step`.
@@ -1488,6 +1494,9 @@ impl Dwelling {
 
         let mut dwelling = Self {
             bldg_id: config.bldg_id,
+            failed: false,
+            #[cfg(debug_assertions)]
+            test_panic_on_step: false,
             equipment,
             equipment_id_by_name,
             thermal_solver: solvers.thermal,
@@ -1686,8 +1695,19 @@ impl Dwelling {
         self.simulation_results.clone()
     }
 
+    /// Test-only hook: causes the next [`step()`](Self::step) call to panic.
+    /// Only available in debug_assertions builds (tests). Has no effect in release.
+    #[cfg(debug_assertions)]
+    pub fn set_test_panic(&mut self) {
+        self.test_panic_on_step = true;
+    }
+
     /// Executes exactly one simulation timestep.
     pub fn step(&mut self) -> Result<StepResult> {
+        #[cfg(debug_assertions)]
+        if self.test_panic_on_step {
+            panic!("test-induced panic in Dwelling::step()");
+        }
         self.run_timestep(self.write_output)?;
         Ok(self.simulation_results.steps.last().unwrap().clone())
     }
@@ -2424,6 +2444,7 @@ impl Dwelling {
             outdoor_temp_c: self.latest_env.weather.outdoor_temp_c,
             outdoor_rh: self.latest_env.weather.outdoor_humidity_ratio,
             actor_telemetry,
+            dwelling_failed: self.failed,
         }
     }
 
@@ -2693,6 +2714,11 @@ impl Dwelling {
     }
 
     fn run_timestep(&mut self, record_output: bool) -> Result<()> {
+        if self.failed {
+            return Err(HaresError::Dwelling(
+                "dwelling permanently failed after prior panic, cannot step".to_string(),
+            ));
+        }
         if self.clock.current_step() >= self.clock.total_steps() {
             return Err(HaresError::Dwelling(
                 "simulation already reached configured end".to_string(),
