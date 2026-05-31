@@ -112,6 +112,8 @@ pub(super) struct CoolingCore {
     dr_duty_cycle: f64,
     dr_duration_remaining_s: Option<f64>,
     dr_level: DRLevel,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -255,6 +257,10 @@ impl Equipment for AirConditioner {
         &self.core.descriptor
     }
 
+    fn zone_id_explicit(&self) -> bool {
+        self.core.zone_id_explicit
+    }
+
     fn ports(&self) -> &[PortDeclaration] {
         &self.core.ports
     }
@@ -304,6 +310,10 @@ impl Equipment for AirConditioner {
 impl Equipment for RoomAC {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.core.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.core.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -434,7 +444,7 @@ impl CoolingCore {
     }
 
     fn new(config: EquipmentConfig, is_room_ac: bool) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let equipment_type = if is_room_ac {
             "Room AC"
         } else {
@@ -508,6 +518,7 @@ impl CoolingCore {
             dr_duty_cycle: 1.0,
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
+            zone_id_explicit,
         }
     }
 

@@ -124,6 +124,8 @@ pub struct IdealHvac {
     /// Biquadratic temperature-correction curves for the non-ideal fallback path.
     /// Default identity coefficients produce no correction (cap_ratio = eir_ratio = 1.0).
     curves: BiquadraticCurveSet,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 /// Serializable snapshot of [`IdealHvac`] mutable fields.
@@ -147,7 +149,7 @@ struct IdealHvacState {
 impl IdealHvac {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
@@ -199,6 +201,7 @@ impl IdealHvac {
             fan_power_ratio: 0.0,
             capacity_min_w: 0.0,
             curves: BiquadraticCurveSet::identity(),
+            zone_id_explicit,
         }
     }
 
@@ -319,6 +322,10 @@ impl IdealHvac {
 impl Equipment for IdealHvac {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {

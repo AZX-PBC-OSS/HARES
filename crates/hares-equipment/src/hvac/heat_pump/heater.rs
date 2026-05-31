@@ -191,6 +191,8 @@ struct HeatPumpHeaterCore {
     dr_duration_remaining_s: Option<f64>,
     /// Current DR level (for telemetry).
     dr_level: DRLevel,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -368,6 +370,10 @@ impl Equipment for HeatPumpHeaterCore {
         &self.descriptor
     }
 
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
+    }
+
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
@@ -417,7 +423,7 @@ delegate_equipment!(WshpHeater, core);
 
 impl HeatPumpHeaterCore {
     fn new(config: EquipmentConfig, variant: HeaterVariant) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let equipment_type = match variant {
             HeaterVariant::Ashp => "ASHP Heater",
             HeaterVariant::Minisplit => "MSHP Heater",
@@ -605,6 +611,7 @@ impl HeatPumpHeaterCore {
             dr_duty_cycle: 1.0,
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
+            zone_id_explicit,
         }
     }
 

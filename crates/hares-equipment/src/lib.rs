@@ -156,6 +156,12 @@ pub trait Equipment: Send + Sync {
         Vec::new()
     }
 
+    /// Returns whether the equipment's `zone_id` was explicitly set in its config
+    /// (true) or silently fell back to the default `ZoneId(1)` (false).
+    fn zone_id_explicit(&self) -> bool {
+        true
+    }
+
     /// Declares the core output capabilities this equipment type supports.
     ///
     /// Used to populate `EquipmentDescriptor::core_capabilities` at

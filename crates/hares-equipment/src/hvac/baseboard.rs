@@ -41,6 +41,8 @@ pub struct ElectricBaseboard {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,7 +60,7 @@ struct BaseboardState {
 impl ElectricBaseboard {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
@@ -92,6 +94,7 @@ impl ElectricBaseboard {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
+            zone_id_explicit,
         }
     }
 }
@@ -99,6 +102,10 @@ impl ElectricBaseboard {
 impl Equipment for ElectricBaseboard {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {

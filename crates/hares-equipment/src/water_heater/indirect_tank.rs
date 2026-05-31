@@ -99,12 +99,14 @@ pub struct IndirectTank {
     dr_level: DRLevel,
     boiler_loop_flow_rate_kg_s: f64,
     ctrl_load_fraction: f64,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 impl IndirectTank {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let boiler_loop_id =
             crate::hvac::helpers::loop_id_from_config(&config, &["boiler_loop_id", "loop_id"])
                 .unwrap_or_default();
@@ -178,6 +180,7 @@ impl IndirectTank {
             dr_level: DRLevel::Normal,
             boiler_loop_flow_rate_kg_s: DEFAULT_BOILER_LOOP_FLOW_RATE_KG_S,
             ctrl_load_fraction: 1.0,
+            zone_id_explicit,
         }
     }
 
@@ -340,6 +343,10 @@ impl IndirectTank {
 impl Equipment for IndirectTank {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {

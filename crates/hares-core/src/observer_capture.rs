@@ -61,6 +61,7 @@ pub(crate) fn capture_single_equipment(
         port_declarations: eq.ports().to_vec(),
         contribution,
         pre_step_ports,
+        zone_id_explicit: eq.zone_id_explicit(),
     }
 }
 

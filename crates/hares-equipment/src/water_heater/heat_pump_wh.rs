@@ -162,12 +162,14 @@ pub struct HeatPumpWH {
     dr_level: DRLevel,
     // Transient load fraction from LoadFraction control signal; reset each step.
     ctrl_load_fraction: f64,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 impl HeatPumpWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -285,6 +287,7 @@ impl HeatPumpWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
+            zone_id_explicit,
         }
     }
 
@@ -500,6 +503,10 @@ impl HeatPumpWH {
 impl Equipment for HeatPumpWH {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {

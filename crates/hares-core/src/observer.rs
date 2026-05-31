@@ -76,6 +76,8 @@ pub struct EquipmentObservation {
     pub contribution: EquipmentContribution,
     /// Snapshot of the aggregate port accumulators visible to this equipment before its `step()`.
     pub pre_step_ports: PortsCapture,
+    /// Whether zone_id was explicitly set in config (true) or fell back to ZoneId(1) (false).
+    pub zone_id_explicit: bool,
 }
 
 /// Per-equipment port contribution: the delta this equipment added to `PortSlots` during one step.

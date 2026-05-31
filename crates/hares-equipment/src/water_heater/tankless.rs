@@ -76,12 +76,14 @@ pub struct TanklessWH {
     dr_level: DRLevel,
     // Transient load fraction from LoadFraction control signal; reset each step.
     ctrl_load_fraction: f64,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 impl TanklessWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let typed = config
             .require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")
             .expect("Tankless Water Heater requires typed FuelType");
@@ -138,6 +140,7 @@ impl TanklessWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
+            zone_id_explicit,
         }
     }
 
@@ -264,6 +267,10 @@ impl TanklessWH {
 impl Equipment for TanklessWH {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {

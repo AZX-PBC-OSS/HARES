@@ -120,12 +120,14 @@ pub struct Dehumidifier {
     part_load_curve_coeffs: [f64; 4],
     /// Lower clamp for PLF (part-load factor).
     plf_min: f64,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 impl Dehumidifier {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
@@ -179,6 +181,7 @@ impl Dehumidifier {
             accumulated_water_removal_l: 0.0,
             part_load_curve_coeffs: DEFAULT_PLF_CURVE_COEFFS,
             plf_min: DEFAULT_PLF_MIN,
+            zone_id_explicit,
         }
     }
 
@@ -429,6 +432,10 @@ impl Equipment for Dehumidifier {
         &self.descriptor
     }
 
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
+    }
+
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
@@ -436,7 +443,18 @@ impl Equipment for Dehumidifier {
     fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
         let equipment_id = equipment_id_from_config(config)?;
         self.descriptor.id = EquipmentId(equipment_id);
-        self.zone_id = zone_id_from_config(config).unwrap_or(self.zone_id);
+        let new_zone = zone_id_from_config(config);
+        let explicit = new_zone.is_some();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if !explicit {
+            tracing::warn!(
+                equipment = %self.descriptor.name,
+                key = crate::config::KEY_ZONE_ID,
+                "zone_id not present in equipment config during init; preserving existing zone_id"
+            );
+        }
+        self.zone_id_explicit = explicit;
+        self.zone_id = new_zone.unwrap_or(self.zone_id);
         self.descriptor.zone = Some(self.zone_id);
         self.ports = vec![
             PortDeclaration::electrical(),
@@ -1531,6 +1549,38 @@ mod tests {
         assert!(
             (plr2 - rtf2).abs() > 1e-9,
             "PLR ({plr2}) and RTF ({rtf2}) must differ for the custom curve to exercise independent scalars"
+        );
+    }
+
+    #[test]
+    fn init_updates_zone_id_explicit_when_config_lacks_zone_id() {
+        let cfg_with_zone = config();
+        let mut dehu = Dehumidifier::new(cfg_with_zone);
+        assert!(
+            dehu.zone_id_explicit(),
+            "new() with explicit zone_id must set zone_id_explicit = true"
+        );
+
+        let cfg_without_zone = EquipmentConfig::from_typed(
+            "Test Dehumidifier".to_string(),
+            "Dehumidifier".to_string(),
+            crate::DehumidifierConfig {
+                equipment_id: Some(9),
+                zone_id: None,
+                capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                energy_factor: Some(2.0),
+                integrated_energy_factor: None,
+                fraction_served: None,
+                target_rh: Some(50.0),
+                part_load_curve_coeffs: None,
+                plf_min: None,
+            },
+        );
+        dehu.init(&cfg_without_zone, &env(50.0))
+            .expect("init must succeed");
+        assert!(
+            !dehu.zone_id_explicit(),
+            "init() with absent zone_id must set zone_id_explicit = false"
         );
     }
 }

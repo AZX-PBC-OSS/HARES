@@ -90,6 +90,8 @@ pub struct ElectricBoiler {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 pub struct GasBoiler {
@@ -115,6 +117,8 @@ pub struct GasBoiler {
     /// Cached from last update_control; true when timestep >= 5 min
     /// so ideal_target() can participate in the solver feedback loop.
     use_ideal: bool,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -136,7 +140,7 @@ struct BoilerState {
 impl ElectricBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let loop_id =
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {
@@ -176,6 +180,7 @@ impl ElectricBoiler {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
+            zone_id_explicit,
         }
     }
 }
@@ -183,6 +188,10 @@ impl ElectricBoiler {
 impl Equipment for ElectricBoiler {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -377,7 +386,7 @@ impl Equipment for ElectricBoiler {
 impl GasBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         let loop_id =
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {
@@ -426,6 +435,7 @@ impl GasBoiler {
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
+            zone_id_explicit,
         }
     }
 
@@ -462,6 +472,10 @@ impl GasBoiler {
 impl Equipment for GasBoiler {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {

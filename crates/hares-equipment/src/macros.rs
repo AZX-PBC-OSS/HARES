@@ -18,6 +18,10 @@ macro_rules! delegate_equipment {
                 self.$inner.descriptor()
             }
 
+            fn zone_id_explicit(&self) -> bool {
+                self.$inner.zone_id_explicit()
+            }
+
             fn ports(&self) -> &[hares_types::PortDeclaration] {
                 self.$inner.ports()
             }

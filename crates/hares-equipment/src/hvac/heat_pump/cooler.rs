@@ -36,6 +36,8 @@ pub struct HpCooler {
     /// Set by the system coordinator after the heater step so that the cooler
     /// can compute crankcase power using `max(cooling_rtf, heating_rtf)`.
     companion_heating_rtf: Option<f64>,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 impl HpCooler {
@@ -53,7 +55,7 @@ impl HpCooler {
                 MSHP_CRANKCASE_HEATER_THRESHOLD_C,
             );
         }
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
@@ -84,6 +86,7 @@ impl HpCooler {
             inner,
             is_mshp,
             companion_heating_rtf: None,
+            zone_id_explicit,
         }
     }
 
@@ -205,6 +208,10 @@ impl Equipment for HpCooler {
         &self.descriptor
     }
 
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
+    }
+
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }
@@ -296,6 +303,8 @@ pub struct GshpCooler {
     pump_efficiency: f64,
     pump_motor_efficiency: f64,
     pump_system_head_loss_m: f64,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 impl GshpCooler {
@@ -314,7 +323,7 @@ impl GshpCooler {
                 hares_physics::borehole::BoreholeConfig::default(),
             )),
         };
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
@@ -349,6 +358,7 @@ impl GshpCooler {
             pump_efficiency: 0.35,
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
+            zone_id_explicit,
         }
     }
 
@@ -442,6 +452,10 @@ impl GshpCooler {
 impl Equipment for GshpCooler {
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {
@@ -635,6 +649,8 @@ pub struct WshpCooler {
     pump_efficiency: f64,
     pump_motor_efficiency: f64,
     pump_system_head_loss_m: f64,
+    /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
+    zone_id_explicit: bool,
 }
 
 impl WshpCooler {
@@ -648,7 +664,7 @@ impl WshpCooler {
         inner.set_crankcase_defaults_if_unconfigured(&config, 0.0, f64::NEG_INFINITY);
         // Source temperature: constant entering water temperature.
         inner.core.source_temp = SourceTemperature::Constant(10.0);
-        let zone = zone_id_from_config_or_default(&config);
+        let (zone, zone_id_explicit) = zone_id_from_config_or_default(&config, &config.name);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
@@ -683,6 +699,7 @@ impl WshpCooler {
             pump_efficiency: 0.35,
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
+            zone_id_explicit,
         }
     }
 
@@ -773,6 +790,10 @@ impl WshpCooler {
 impl Equipment for WshpCooler {
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn zone_id_explicit(&self) -> bool {
+        self.zone_id_explicit
     }
 
     fn ports(&self) -> &[PortDeclaration] {

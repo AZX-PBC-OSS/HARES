@@ -53,26 +53,40 @@ pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
 
 /// Resolve `ZoneId` from config, falling back to `ZoneId(1)` when absent.
 ///
+/// Returns `(ZoneId, bool)` where the bool is `true` when `zone_id` was
+/// explicitly present in the config and `false` when the fallback was used.
+///
 /// When `zone_id` is missing from the equipment's typed config, HPXML parsing
 /// did not inject the conditioned-zone identifier. Logging the fallback makes
 /// this gap visible during development and integration testing.
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
-pub fn zone_id_from_config_or_default(config: &EquipmentConfig) -> ZoneId {
+pub fn zone_id_from_config_or_default(
+    config: &EquipmentConfig,
+    equipment_name: &str,
+) -> (ZoneId, bool) {
     match zone_id_from_config(config) {
-        Some(id) => id,
+        Some(id) => (id, true),
         None => {
             tracing::warn!(
+                equipment = %equipment_name,
+                key = crate::config::KEY_ZONE_ID,
                 "zone_id not present in equipment config; falling back to ZoneId(1) — \
                  HPXML parsing may not have propagated conditioned_zone_id"
             );
-            ZoneId(1)
+            (ZoneId(1), false)
         }
     }
 }
 
 #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
-pub fn zone_id_from_config_or_default(config: &EquipmentConfig) -> ZoneId {
-    zone_id_from_config(config).unwrap_or(ZoneId(1))
+pub fn zone_id_from_config_or_default(
+    config: &EquipmentConfig,
+    _equipment_name: &str,
+) -> (ZoneId, bool) {
+    match zone_id_from_config(config) {
+        Some(id) => (id, true),
+        None => (ZoneId(1), false),
+    }
 }
 
 /// Parse an optional `ZoneId` from a named config key.
@@ -361,7 +375,7 @@ mod tests {
 
     use super::{
         equipment_id_from_config, loop_id_from_config, operating_mode_code, parse_fuel_type,
-        parse_zone_id_key, zone_id_from_config,
+        parse_zone_id_key, zone_id_from_config, zone_id_from_config_or_default,
     };
 
     #[test]
@@ -566,6 +580,73 @@ mod tests {
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]),
             Some(hares_types::LoopId(0)),
             "loop_id=0 must still be accepted (validate_u16_id permits 0)"
+        );
+    }
+
+    #[test]
+    fn zone_id_none_when_zone_id_key_absent_from_config() {
+        let config = EquipmentConfig::from_typed(
+            "ZN".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                zone_id: None,
+                capacity_w: 10_000.0,
+                afue: 0.96,
+                ..GasFurnaceConfig::default()
+            },
+        );
+        assert_eq!(
+            zone_id_from_config(&config),
+            None,
+            "zone_id_from_config must return None when zone_id key is absent from the typed config"
+        );
+    }
+
+    #[test]
+    fn zone_id_from_config_or_default_falls_back_to_zone_1_with_explicit_false() {
+        let config = EquipmentConfig::from_typed(
+            "ZN".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                zone_id: None,
+                capacity_w: 10_000.0,
+                afue: 0.96,
+                ..GasFurnaceConfig::default()
+            },
+        );
+        let (zone_id, explicit) = zone_id_from_config_or_default(&config, &config.name);
+        assert_eq!(
+            zone_id,
+            hares_types::ZoneId(1),
+            "fallback must be ZoneId(1) when zone_id key is absent"
+        );
+        assert!(
+            !explicit,
+            "zone_id_explicit must be false when fallback is used"
+        );
+    }
+
+    #[test]
+    fn zone_id_from_config_or_default_returns_explicit_true_when_present() {
+        let config = EquipmentConfig::from_typed(
+            "Z5".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                zone_id: Some(5),
+                capacity_w: 10_000.0,
+                afue: 0.96,
+                ..GasFurnaceConfig::default()
+            },
+        );
+        let (zone_id, explicit) = zone_id_from_config_or_default(&config, &config.name);
+        assert_eq!(
+            zone_id,
+            hares_types::ZoneId(5),
+            "zone_id must be ZoneId(5) when present in config"
+        );
+        assert!(
+            explicit,
+            "zone_id_explicit must be true when zone_id is present in config"
         );
     }
 }
