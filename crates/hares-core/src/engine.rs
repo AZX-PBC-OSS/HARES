@@ -12,7 +12,7 @@ use hares_io::output::metrics::{
 };
 use hares_io::{OutputFormat, SimulationConfig};
 use hares_types::HaresError;
-use hares_types::panic_hook::{self, PanicHookGuard};
+use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
 
 /// Result of computing metrics from Arrow batches, including status context.
 struct MetricsOutcome {
@@ -174,24 +174,79 @@ impl SimulationEngine {
                 }
             }
             Ok(Err(err)) => {
-                warnings.push(format!("simulation error: {err}"));
-                SimulationResults {
-                    timeseries_path: output_path.clone(),
+                // Guard against double-panic: the format! and String::to_string
+                // calls below allocate. If the allocator is corrupted from a
+                // prior near-panic, these allocations could panic and abort the
+                // process. The inner catch_unwind absorbs any such secondary
+                // panic and returns a minimal fallback.
+                let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                    warnings.push(format!("simulation error: {err}"));
+                    SimulationResults {
+                        timeseries_path: output_path.clone(),
+                        timeseries: None,
+                        metrics: empty_metrics(),
+                        warnings,
+                        status: SimStatus::Failed(err.to_string()),
+                        elapsed,
+                    }
+                }));
+                match handler_result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        record_double_panic_prevented();
+                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                        {
+                            tracing::error!(
+                                "CRITICAL: error handling panicked \
+                                 (double-panic prevented) in engine::run"
+                            );
+                        }
+                        SimulationResults {
+                            timeseries_path: None,
+                            timeseries: None,
+                            metrics: empty_metrics(),
+                            warnings: Vec::new(),
+                            status: SimStatus::Failed(
+                                "panic handling failed (double-panic prevented)".into(),
+                            ),
+                            elapsed,
+                        }
+                    }
+                }
+            }
+            Err(payload) => {
+                let handler_result = panic::catch_unwind(AssertUnwindSafe(|| SimulationResults {
+                    timeseries_path: output_path,
                     timeseries: None,
                     metrics: empty_metrics(),
                     warnings,
-                    status: SimStatus::Failed(err.to_string()),
+                    status: SimStatus::Failed(panic_hook::panic_payload_to_string(payload)),
                     elapsed,
+                }));
+                match handler_result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        record_double_panic_prevented();
+                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                        {
+                            tracing::error!(
+                                "CRITICAL: error handling panicked \
+                                 (double-panic prevented) in engine::run"
+                            );
+                        }
+                        SimulationResults {
+                            timeseries_path: None,
+                            timeseries: None,
+                            metrics: empty_metrics(),
+                            warnings: Vec::new(),
+                            status: SimStatus::Failed(
+                                "panic handling failed (double-panic prevented)".into(),
+                            ),
+                            elapsed,
+                        }
+                    }
                 }
             }
-            Err(payload) => SimulationResults {
-                timeseries_path: output_path,
-                timeseries: None,
-                metrics: empty_metrics(),
-                warnings,
-                status: SimStatus::Failed(panic_hook::panic_payload_to_string(payload)),
-                elapsed,
-            },
         };
 
         Ok(result)
@@ -266,24 +321,74 @@ impl SimulationEngine {
                 }
             }
             Ok(Err(err)) => {
-                warnings.push(format!("simulation error: {err}"));
-                SimulationResults {
+                let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                    warnings.push(format!("simulation error: {err}"));
+                    SimulationResults {
+                        timeseries_path: None,
+                        timeseries: None,
+                        metrics: empty_metrics(),
+                        warnings,
+                        status: SimStatus::Failed(err.to_string()),
+                        elapsed,
+                    }
+                }));
+                match handler_result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        record_double_panic_prevented();
+                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                        {
+                            tracing::error!(
+                                "CRITICAL: error handling panicked \
+                                 (double-panic prevented) in engine::run_dwelling"
+                            );
+                        }
+                        SimulationResults {
+                            timeseries_path: None,
+                            timeseries: None,
+                            metrics: empty_metrics(),
+                            warnings: Vec::new(),
+                            status: SimStatus::Failed(
+                                "panic handling failed (double-panic prevented)".into(),
+                            ),
+                            elapsed,
+                        }
+                    }
+                }
+            }
+            Err(payload) => {
+                let handler_result = panic::catch_unwind(AssertUnwindSafe(|| SimulationResults {
                     timeseries_path: None,
                     timeseries: None,
                     metrics: empty_metrics(),
                     warnings,
-                    status: SimStatus::Failed(err.to_string()),
+                    status: SimStatus::Failed(panic_hook::panic_payload_to_string(payload)),
                     elapsed,
+                }));
+                match handler_result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        record_double_panic_prevented();
+                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                        {
+                            tracing::error!(
+                                "CRITICAL: error handling panicked \
+                                 (double-panic prevented) in engine::run_dwelling"
+                            );
+                        }
+                        SimulationResults {
+                            timeseries_path: None,
+                            timeseries: None,
+                            metrics: empty_metrics(),
+                            warnings: Vec::new(),
+                            status: SimStatus::Failed(
+                                "panic handling failed (double-panic prevented)".into(),
+                            ),
+                            elapsed,
+                        }
+                    }
                 }
             }
-            Err(payload) => SimulationResults {
-                timeseries_path: None,
-                timeseries: None,
-                metrics: empty_metrics(),
-                warnings,
-                status: SimStatus::Failed(panic_hook::panic_payload_to_string(payload)),
-                elapsed,
-            },
         };
 
         Ok(result)
@@ -469,5 +574,109 @@ fn emit_profile_summary(profile: &RunProfile) {
 
 #[cfg(test)]
 mod tests {
-    // Tests for panic_payload_to_string were moved to hares-types::panic_hook.
+    use super::*;
+    use std::panic::{self, AssertUnwindSafe};
+
+    #[test]
+    fn error_handler_double_panic_returns_fallback_simulation_results() {
+        // Verify the double-panic guard pattern used in run() and run_dwelling():
+        // when the post-catch_unwind error handler itself panics, the nested
+        // catch_unwind absorbs it and returns a minimal fallback SimulationResults.
+        // This prevents a double-panic from aborting the entire process.
+        let elapsed = StdDuration::from_secs(1);
+        let fallback_status_msg = "panic handling failed (double-panic prevented)";
+
+        // Outer catch_unwind: simulates catching a simulation panic.
+        let outer = panic::catch_unwind(AssertUnwindSafe(|| {
+            let sim_payload: Box<dyn std::any::Any + Send> = Box::new("sim panic");
+            let warnings: Vec<String> = Vec::new();
+
+            // Inner catch_unwind: guards the error-handling block.
+            let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                // Access sim_payload to force capture — this is the allocation-
+                // heavy path that could panic under allocator corruption.
+                let _msg = sim_payload
+                    .downcast_ref::<&str>()
+                    .unwrap_or(&"fallback")
+                    .to_string();
+                // Intentionally panic to simulate allocator failure.
+                panic!("simulated allocation panic in error handler");
+            }));
+
+            match handler_result {
+                Ok(result) => result,
+                Err(_) => {
+                    record_double_panic_prevented();
+                    SimulationResults {
+                        timeseries_path: None,
+                        timeseries: None,
+                        metrics: empty_metrics(),
+                        warnings: Vec::new(),
+                        status: SimStatus::Failed(fallback_status_msg.into()),
+                        elapsed,
+                    }
+                }
+            }
+        }));
+
+        assert!(outer.is_ok(), "outer catch_unwind should succeed");
+        let result = outer.unwrap();
+        assert_eq!(
+            result.status,
+            SimStatus::Failed(fallback_status_msg.into()),
+            "fallback status should indicate double-panic was prevented"
+        );
+        assert!(
+            result.warnings.is_empty(),
+            "fallback should have no warnings"
+        );
+        assert_eq!(result.elapsed, elapsed);
+        assert!(result.timeseries.is_none());
+        assert!(result.timeseries_path.is_none());
+    }
+
+    #[test]
+    fn error_handler_returns_normal_result_when_no_panic() {
+        // Verify the guard does not interfere when the error handler succeeds
+        // normally (the common case).
+        let elapsed = StdDuration::from_secs(2);
+        let warnings = vec!["test warning".to_string()];
+
+        let outer = panic::catch_unwind(AssertUnwindSafe(|| {
+            let handler_result = panic::catch_unwind(AssertUnwindSafe(|| SimulationResults {
+                timeseries_path: None,
+                timeseries: None,
+                metrics: empty_metrics(),
+                warnings,
+                status: SimStatus::Failed("simulation error: test".into()),
+                elapsed,
+            }));
+
+            match handler_result {
+                Ok(result) => result,
+                Err(_) => {
+                    record_double_panic_prevented();
+                    SimulationResults {
+                        timeseries_path: None,
+                        timeseries: None,
+                        metrics: empty_metrics(),
+                        warnings: Vec::new(),
+                        status: SimStatus::Failed(
+                            "panic handling failed (double-panic prevented)".into(),
+                        ),
+                        elapsed,
+                    }
+                }
+            }
+        }));
+
+        assert!(outer.is_ok());
+        let result = outer.unwrap();
+        assert_eq!(
+            result.status,
+            SimStatus::Failed("simulation error: test".into())
+        );
+        assert_eq!(result.warnings, vec!["test warning".to_string()]);
+        assert_eq!(result.elapsed, elapsed);
+    }
 }

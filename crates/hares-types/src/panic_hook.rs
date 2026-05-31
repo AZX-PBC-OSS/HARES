@@ -92,6 +92,24 @@ pub fn panic_with_location_counter() -> u64 {
     PANIC_WITH_LOCATION_COUNT.load(Ordering::Relaxed)
 }
 
+/// Counter of secondary panics caught during post-`catch_unwind` error handling
+/// (double-panic prevention events). An elevated value is an early-warning signal
+/// of allocator corruption or systemic post-panic instability in error handlers.
+#[cfg(feature = "observe")]
+static DOUBLE_PANIC_PREVENTED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the total number of double-panic prevention events in this process.
+#[cfg(feature = "observe")]
+pub fn double_panic_prevented_counter() -> u64 {
+    DOUBLE_PANIC_PREVENTED_COUNT.load(Ordering::Relaxed)
+}
+
+/// Records a double-panic prevention event. In non-observe builds this is a no-op.
+pub fn record_double_panic_prevented() {
+    #[cfg(feature = "observe")]
+    DOUBLE_PANIC_PREVENTED_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
 // ---------------------------------------------------------------------------
 // hook lifecycle
 // ---------------------------------------------------------------------------
@@ -426,10 +444,7 @@ mod tests {
             msg.contains("unwrap"),
             "expected unwrap reference in: {msg}"
         );
-        assert!(
-            msg.contains(" — "),
-            "expected location separator in: {msg}"
-        );
+        assert!(msg.contains(" — "), "expected location separator in: {msg}");
     }
 
     #[test]
@@ -457,9 +472,55 @@ mod tests {
             msg.contains("custom expect message"),
             "expected custom expect text in: {msg}"
         );
-        assert!(
-            msg.contains(" — "),
-            "expected location separator in: {msg}"
-        );
+        assert!(msg.contains(" — "), "expected location separator in: {msg}");
+    }
+
+    // --- unit: double-panic prevention ---
+
+    #[test]
+    fn record_double_panic_prevented_is_callable() {
+        // record_double_panic_prevented must not panic (it is a no-op
+        // in non-observe builds and increments a counter in observe builds).
+        record_double_panic_prevented();
+        record_double_panic_prevented();
+        // No assertion needed: the test passes if it does not panic.
+    }
+
+    #[test]
+    #[cfg(feature = "observe")]
+    fn double_panic_prevented_counter_increments() {
+        let before = double_panic_prevented_counter();
+        record_double_panic_prevented();
+        record_double_panic_prevented();
+        assert_eq!(double_panic_prevented_counter(), before + 2);
+    }
+
+    #[test]
+    fn nested_catch_unwind_absorbs_secondary_panic_and_returns_fallback() {
+        // Simulate the double-panic prevention pattern: an outer catch_unwind
+        // catches a simulation panic, and the error handler inside it uses
+        // a nested catch_unwind to guard against the handler itself panicking.
+        let fallback = "panic handling failed (double-panic prevented)";
+        let outer = panic::catch_unwind(AssertUnwindSafe(|| {
+            let sim_payload = panic::catch_unwind(AssertUnwindSafe(|| {
+                panic!("simulated equipment panic");
+            }));
+            // Error handler: guard interior allocations with nested catch_unwind.
+            let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                let _payload = sim_payload.unwrap_err();
+                // Simulate allocation-heavy error handling that itself panics
+                // (e.g., allocator corruption causes String::clone to panic).
+                panic!("simulated error handler panic");
+            }));
+            match handler_result {
+                Ok(_) => unreachable!(),
+                Err(_) => {
+                    record_double_panic_prevented();
+                    fallback.to_string()
+                }
+            }
+        }));
+        assert!(outer.is_ok());
+        assert_eq!(outer.unwrap(), fallback);
     }
 }

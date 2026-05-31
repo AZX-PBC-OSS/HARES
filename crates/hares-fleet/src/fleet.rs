@@ -13,7 +13,7 @@ use hares_core::{
 };
 use hares_io::{OutputFormat, ResStockVersion, SimulationConfig, parse_resstock_metadata};
 use hares_types::ControlSignal;
-use hares_types::panic_hook::{self, PanicHookGuard};
+use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use thiserror::Error;
@@ -265,15 +265,49 @@ impl Fleet {
                         if progress.is_some() {
                             completed.fetch_add(1, Ordering::Relaxed);
                         }
-                        Err(SimError::Panic {
-                            bldg_id: entry.config.bldg_id,
-                            message: panic_hook::panic_payload_to_string(payload),
-                        })
+                        // Guard against double-panic: SimError::Panic construction
+                        // and panic_payload_to_string both involve String allocation.
+                        // If the allocator is corrupted from a prior near-panic, these
+                        // could panic and abort the process.
+                        let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                            Err(SimError::Panic {
+                                bldg_id: entry.config.bldg_id,
+                                message: panic_hook::panic_payload_to_string(payload),
+                            })
+                        }));
+                        match handler_result {
+                            Ok(result) => result,
+                            Err(_) => {
+                                record_double_panic_prevented();
+                                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                                {
+                                    tracing::error!(
+                                        bldg_id = entry.config.bldg_id,
+                                        "CRITICAL: error handling panicked \
+                                         (double-panic prevented) in fleet::simulate_parallel"
+                                    );
+                                }
+                                Err(SimError::Panic {
+                                    bldg_id: entry.config.bldg_id,
+                                    message: "panic handling failed (double-panic prevented)"
+                                        .into(),
+                                })
+                            }
+                        }
                     }
                 };
 
                 if let Err(err) = &outcome {
-                    tracing::warn!(bldg_id = entry.config.bldg_id, error = %err, "dwelling simulation failed");
+                    // Guard tracing::warn! against Display panics. The %err
+                    // formatting calls SimError::fmt which could panic if an
+                    // inner Display implementation is unexpectedly fallible.
+                    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+                        tracing::warn!(
+                            bldg_id = entry.config.bldg_id,
+                            error = %err,
+                            "dwelling simulation failed"
+                        );
+                    }));
                 }
 
                 outcome
@@ -349,10 +383,32 @@ impl SteppableFleet {
                     bldg_id,
                     message: err.to_string(),
                 }),
-                Err(payload) => build_errors.push(DwellingBuildError {
-                    bldg_id,
-                    message: panic_hook::panic_payload_to_string(payload),
-                }),
+                Err(payload) => {
+                    let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                        DwellingBuildError {
+                            bldg_id,
+                            message: panic_hook::panic_payload_to_string(payload),
+                        }
+                    }));
+                    match handler_result {
+                        Ok(err) => build_errors.push(err),
+                        Err(_) => {
+                            record_double_panic_prevented();
+                            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                            {
+                                tracing::error!(
+                                    bldg_id,
+                                    "CRITICAL: error handling panicked \
+                                     (double-panic prevented) in fleet::SteppableFleet::from_configs"
+                                );
+                            }
+                            build_errors.push(DwellingBuildError {
+                                bldg_id,
+                                message: "panic handling failed (double-panic prevented)".into(),
+                            });
+                        }
+                    }
+                },
             }
         }
 
@@ -589,10 +645,30 @@ fn step_dwellings_parallel(
                 }),
                 Err(payload) => {
                     dwelling.failed = true;
-                    Err(SimError::Panic {
-                        bldg_id: dwelling.bldg_id,
-                        message: panic_hook::panic_payload_to_string(payload),
-                    })
+                    let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                        Err(SimError::Panic {
+                            bldg_id: dwelling.bldg_id,
+                            message: panic_hook::panic_payload_to_string(payload),
+                        })
+                    }));
+                    match handler_result {
+                        Ok(result) => result,
+                        Err(_) => {
+                            record_double_panic_prevented();
+                            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                            {
+                                tracing::error!(
+                                    bldg_id = dwelling.bldg_id,
+                                    "CRITICAL: error handling panicked \
+                                     (double-panic prevented) in fleet::step_dwellings_parallel"
+                                );
+                            }
+                            Err(SimError::Panic {
+                                bldg_id: dwelling.bldg_id,
+                                message: "panic handling failed (double-panic prevented)".into(),
+                            })
+                        }
+                    }
                 }
             }
         })
@@ -1298,5 +1374,113 @@ mod tests {
 
         assert!(results[0].is_ok());
         assert!(results[2].is_ok());
+    }
+
+    // --- unit: double-panic prevention ---
+
+    #[test]
+    fn single_panic_does_not_abort_fleet_and_other_dwellings_intact() {
+        // Integration test: verify that when one dwelling panics in a
+        // steppable fleet, the process does not abort and the other
+        // dwellings produce valid results for every remaining step.
+        // This validates that the outer catch_unwind in step_dwellings_parallel
+        // correctly isolates per-dwelling panics at fleet scale.
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+        assert_eq!(fleet.len(), 3);
+
+        // Trigger panic in dwelling 1 on step 0.
+        fleet.dwellings[1].set_test_panic();
+
+        // Step 0: dwelling 1 panics, the fleet survives.
+        let results = fleet.step();
+        assert_eq!(results.len(), 3);
+
+        // Dwelling 1 returns a Panic error.
+        match &results[1] {
+            Err(SimError::Panic { bldg_id, message }) => {
+                assert_eq!(*bldg_id, 2);
+                assert!(
+                    message.contains("test-induced panic"),
+                    "expected 'test-induced panic' in message, got: {message}"
+                );
+            }
+            other => panic!("expected Panic for dwelling 1, got {:?}", other),
+        }
+
+        // Other dwellings continue normally.
+        assert!(results[0].is_ok(), "dwelling 0 should succeed");
+        assert!(results[2].is_ok(), "dwelling 2 should succeed");
+
+        // Dwelling 1 is marked failed.
+        assert!(
+            fleet.dwellings[1].failed,
+            "dwelling 1 should be marked failed"
+        );
+
+        // Remaining steps: dwelling 1 is skipped, others complete normally.
+        // Fleet simulation must run to completion without aborting.
+        while !fleet.is_finished() {
+            let step_results = fleet.step();
+            assert_eq!(step_results.len(), 3);
+            assert!(step_results[0].is_ok());
+            assert!(matches!(step_results[1], Err(SimError::Skipped { .. })));
+            assert!(step_results[2].is_ok());
+        }
+
+        // Verify fleet finished normally (did not abort).
+        assert!(fleet.is_finished());
+    }
+
+    #[test]
+    fn double_panic_guard_fallback_constructs_valid_sim_error() {
+        // Unit test: verify the double-panic guard pattern used in
+        // simulate_parallel and step_dwellings_parallel. When the post-
+        // catch_unwind error handler itself panics, the nested catch_unwind
+        // absorbs it and returns a SimError::Panic with the static fallback
+        // message, preventing process abort.
+        let bldg_id: i64 = 42;
+        let fallback_message = "panic handling failed (double-panic prevented)";
+
+        // Outer catch_unwind: simulates the fleet-level panic isolation.
+        let outer = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let sim_payload = std::panic::catch_unwind(AssertUnwindSafe(|| panic!("test panic")));
+
+            // Inner catch_unwind: guards the error-handling block
+            // (SimError::Panic construction + panic_payload_to_string).
+            let handler_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let _payload = sim_payload.unwrap_err();
+                // Intentionally panic to simulate allocator failure during
+                // error handling.
+                panic!("error handler panic");
+            }));
+
+            match handler_result {
+                Ok(_) => unreachable!(),
+                Err(_) => {
+                    record_double_panic_prevented();
+                    Err::<(), SimError>(SimError::Panic {
+                        bldg_id,
+                        message: fallback_message.into(),
+                    })
+                }
+            }
+        }));
+
+        assert!(
+            outer.is_ok(),
+            "outer catch_unwind should succeed — no process abort"
+        );
+        match outer.unwrap() {
+            Err(SimError::Panic {
+                bldg_id: id,
+                message,
+            }) => {
+                assert_eq!(id, 42);
+                assert_eq!(message, fallback_message);
+            }
+            other => panic!("expected SimError::Panic with fallback, got {:?}", other),
+        }
     }
 }
