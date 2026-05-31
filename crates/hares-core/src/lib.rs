@@ -4,6 +4,7 @@ pub mod actor;
 pub mod actor_registry;
 pub mod actors;
 pub mod checkpoint;
+pub mod checksum;
 pub mod clock;
 pub mod diagnostics;
 pub mod dwelling;

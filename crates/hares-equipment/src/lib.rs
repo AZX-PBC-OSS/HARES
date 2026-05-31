@@ -15,6 +15,7 @@ pub mod pv;
 pub mod registry;
 pub(crate) mod schedule_helpers;
 pub mod scheduled_load;
+pub mod serial;
 pub mod ventilation;
 pub mod water_heater;
 
@@ -22,11 +23,9 @@ use std::time::Duration;
 
 use hares_types::{
     BmsMode, ChargingStrategy, ControlSignal, CoreCapabilities, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, GridExportRule, HaresError, OperatingMode, PlugInPolicy,
-    PortDeclaration, PortSlots, ensure_signal_supported,
+    EquipmentDescriptor, GridExportRule, HaresError, OperatingMode, PlugInPolicy, PortDeclaration,
+    PortSlots, ensure_signal_supported,
 };
-use serde::{Serialize, de::DeserializeOwned};
-
 /// Configuration seed for auto-registering an actor for this equipment.
 /// Equipment that wants a built-in actor overrides `actor_seed()`.
 #[derive(Clone, Debug)]
@@ -268,130 +267,8 @@ pub trait Equipment: Send + Sync {
     }
 }
 
-/// Serialize checkpoint state via postcard.
-///
-/// # Safety (panic-freedom)
-///
-/// `postcard::to_allocvec` only fails for types that use unsupported serde
-/// features (e.g. `i128`, nested enums with data in certain configurations).
-/// All HARES state types derive `Serialize` with postcard-compatible field
-/// types (primitives, `Vec`, `Option`, flat enums), so this path is infallible
-/// in practice.  The `#[cold]` hint marks the panic branch as unlikely so the
-/// compiler can optimise for the success path.
-#[must_use]
-pub fn save_postcard<T: Serialize>(state: &T) -> Vec<u8> {
-    match postcard::to_allocvec(state) {
-        Ok(bytes) => bytes,
-        Err(e) => panic_serialize(e),
-    }
-}
-
-/// Non-panicking variant for callers that need graceful error handling
-/// (e.g., checkpoint paths where a serialization failure should not
-/// terminate a long-running simulation).
-#[must_use = "serialization errors should be handled, not silently discarded"]
-pub fn try_save_postcard<T: Serialize>(state: &T) -> Result<Vec<u8>> {
-    postcard::to_allocvec(state)
-        .map_err(|e| HaresError::Equipment(format!("state serialization failed: {e}")))
-}
-
-#[cold]
-#[inline(never)]
-fn panic_serialize(e: postcard::Error) -> ! {
-    panic!("equipment state serialization failed: {e}")
-}
-
-/// Deserialize checkpoint state via postcard.
-pub fn load_postcard<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    postcard::from_bytes(bytes)
-        .map_err(|e| HaresError::Equipment(format!("equipment state deserialization failed: {e}")))
-}
-
-// ---------------------------------------------------------------------------
-// Versioned postcard checkpoint helpers
-// ---------------------------------------------------------------------------
-
-/// Format: `[version: u32 LE][postcard payload]`
-const VERSION_PREAMBLE_LEN: usize = std::mem::size_of::<u32>();
-
-/// Serialize state with a per-equipment version token prepended.
-///
-/// The version is written as a little-endian u32 before the postcard payload.
-/// On load, `load_versioned` validates the version before attempting
-/// deserialization so that a field-type or enum-variant change in the
-/// checkpoint struct is caught with a descriptive error rather than silent
-/// corruption or a generic postcard failure.
-pub fn save_versioned<T: Serialize>(state: &T, version: u32, equipment_type: &str) -> Vec<u8> {
-    #[cfg(feature = "observe")]
-    tracing::debug!(
-        equipment_type = %equipment_type,
-        checkpoint_version = version,
-        "saving versioned checkpoint blob",
-    );
-    #[cfg(not(feature = "observe"))]
-    let _ = equipment_type;
-    let mut blob = version.to_le_bytes().to_vec();
-    blob.extend_from_slice(&save_postcard(state));
-    blob
-}
-
-/// Load versioned state, validating the version token before deserialization.
-///
-/// Returns an `Err` with equipment type name, expected version, and found
-/// version when the blob's version does not match.
-pub fn load_versioned<T: DeserializeOwned>(
-    bytes: &[u8],
-    expected_version: u32,
-    equipment_type: &str,
-    equipment_id: EquipmentId,
-) -> Result<T> {
-    if bytes.len() < VERSION_PREAMBLE_LEN {
-        #[cfg(feature = "observe")]
-        tracing::debug!(
-            equipment_type = %equipment_type,
-            equipment_id = %equipment_id,
-            success = false,
-            "checkpoint load failed: blob too short for versioned deserialization",
-        );
-        return Err(HaresError::Equipment(format!(
-            "{} checkpoint blob too short for equipment {:?}: {} bytes",
-            equipment_type,
-            equipment_id,
-            bytes.len()
-        )));
-    }
-    let blob_version = u32::from_le_bytes(bytes[..VERSION_PREAMBLE_LEN].try_into().unwrap());
-    if blob_version != expected_version {
-        #[cfg(feature = "observe")]
-        tracing::debug!(
-            equipment_type = %equipment_type,
-            equipment_id = %equipment_id,
-            blob_version = blob_version,
-            expected_version = expected_version,
-            success = false,
-            "checkpoint load failed: version mismatch",
-        );
-        return Err(HaresError::Equipment(format!(
-            "{} checkpoint version mismatch for equipment {:?}: blob={} expected={}",
-            equipment_type, equipment_id, blob_version, expected_version
-        )));
-    }
-    let result = postcard::from_bytes(&bytes[VERSION_PREAMBLE_LEN..]).map_err(|e| {
-        HaresError::Equipment(format!(
-            "{} checkpoint deserialization failed for equipment {:?}: {e}",
-            equipment_type, equipment_id
-        ))
-    });
-    #[cfg(feature = "observe")]
-    tracing::debug!(
-        equipment_type = %equipment_type,
-        equipment_id = %equipment_id,
-        blob_version = blob_version,
-        success = result.is_ok(),
-        "checkpoint load complete",
-    );
-    result
-}
+/// Re-export postcard CRC32 serialisation helpers from the serial module.
+pub use serial::{load_postcard, load_versioned, save_postcard, save_versioned, try_save_postcard};
 
 #[cfg(test)]
 mod tests {
@@ -403,16 +280,15 @@ mod tests {
     use hares_types::{
         ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
         CorePerformance, CoreState, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
-        EquipmentId, EvConnectionState, ExecutionStage, FluidType, FuelType, GridState,
-        IdealCapacityMode, InverterPriority, LoopId, OperatingMode, PortDeclaration, PortSlots,
+        EquipmentId, EvConnectionState, ExecutionStage, FuelType, GridState,
+        IdealCapacityMode, InverterPriority, OperatingMode, PortDeclaration, PortSlots,
         ProtocolId, SurfaceIrradiance, Telemetry, TelemetryField, WeatherState, ZoneId, ZoneState,
     };
     use serde::{Deserialize, Serialize};
 
     use crate::config::ConfigPayload;
     use crate::{
-        Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, load_versioned,
-        save_postcard, save_versioned,
+        Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned,
     };
 
     #[derive(Clone)]
@@ -657,92 +533,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(equipment.descriptor().equipment_type, "Mock");
-    }
-
-    #[test]
-    fn postcard_helpers_round_trip() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct S {
-            a: u32,
-            b: f64,
-            c: ProtocolId,
-            d: LoopId,
-            e: FluidType,
-        }
-        let s = S {
-            a: 3,
-            b: 4.2,
-            c: ProtocolId(7),
-            d: LoopId(9),
-            e: FluidType::Water,
-        };
-        let bytes = save_postcard(&s);
-        let decoded: S = load_postcard(&bytes).unwrap();
-        assert_eq!(decoded, s);
-    }
-
-    #[test]
-    fn save_load_versioned_round_trip() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct S {
-            a: u32,
-            b: f64,
-        }
-        let s = S { a: 3, b: 4.2 };
-        let bytes = save_versioned(&s, 1, "S");
-        let decoded: S = load_versioned(&bytes, 1, "S", EquipmentId(0)).unwrap();
-        assert_eq!(decoded, s);
-    }
-
-    #[test]
-    fn version_mismatch_is_rejected_with_descriptive_error() {
-        #[derive(Serialize, Deserialize, Debug)]
-        struct S {
-            a: u32,
-        }
-        let s = S { a: 42 };
-        // Create blob with version 1, then corrupt the version byte
-        let mut bytes = save_versioned(&s, 1, "S");
-        // Overwrite version byte to 99
-        bytes[0] = 99;
-        let result = load_versioned::<S>(&bytes, 1, "S", EquipmentId(7));
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("S") && err_msg.contains("99") && err_msg.contains("1"),
-            "error should mention type name, blob version 99, and expected version 1; got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn versioned_blob_too_short_is_rejected() {
-        let result = load_versioned::<u32>(&[1, 2, 3], 1, "T", EquipmentId(0));
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("too short"),
-            "error should mention short blob; got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn save_load_versioned_preserves_postcard_payload() {
-        // Verify that the versioned format is exactly [4-byte LE version][postcard payload]
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct P {
-            x: u32,
-        }
-        let p = P { x: 0xDEADBEEF };
-        let version: u32 = 1;
-
-        let raw_postcard = save_postcard(&p);
-        let versioned = save_versioned(&p, version, "P");
-
-        // Check structure: version bytes + payload bytes
-        assert_eq!(&versioned[..4], &version.to_le_bytes());
-        assert_eq!(&versioned[4..], &raw_postcard);
-
-        // Round-trip validation
-        let decoded: P = load_versioned(&versioned, version, "P", EquipmentId(0)).unwrap();
-        assert_eq!(decoded, p);
     }
 
     #[test]

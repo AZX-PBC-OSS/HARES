@@ -72,6 +72,36 @@ fn regression_full_suite() {
         }
     }
 
+    // --- Checkpoint integrity round-trip (CRC32 + SHA-256) ---
+    if let Err(errs) = checkpoint_restart::run_checkpoint_integrity_roundtrip() {
+        for detail in errs {
+            failures.push(RegressionFailure {
+                suite: "checkpoint_integrity",
+                detail,
+            });
+        }
+    }
+
+    // --- Checkpoint SHA-256 corruption detection ---
+    if let Err(errs) = checkpoint_restart::run_checkpoint_sha256_corruption_regression() {
+        for detail in errs {
+            failures.push(RegressionFailure {
+                suite: "checkpoint_sha256_corruption",
+                detail,
+            });
+        }
+    }
+
+    // --- Equipment CRC32 corruption detection ---
+    if let Err(errs) = checkpoint_restart::run_equipment_crc_corruption_regression() {
+        for detail in errs {
+            failures.push(RegressionFailure {
+                suite: "equipment_crc_corruption",
+                detail,
+            });
+        }
+    }
+
     // --- Multi-instance independence ---
     if let Err(errs) = multi_instance::run_multi_instance_check() {
         for detail in errs {

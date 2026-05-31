@@ -14,6 +14,7 @@ rand_chacha = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 postcard = { workspace = true }
+crc = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 parquet = { workspace = true }
@@ -27,3 +28,4 @@ observe = []
 check_invariants = []
 
 [dev-dependencies]
+proptest = { workspace = true }

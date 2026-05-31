@@ -33,6 +33,7 @@ nalgebra = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 chrono-tz = "0.10"
+sha2 = { workspace = true }
 
 [dev-dependencies]
 parquet = { workspace = true }

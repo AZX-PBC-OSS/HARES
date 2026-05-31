@@ -3,6 +3,7 @@
 
 use chrono::Duration;
 use hares_core::Dwelling;
+use hares_core::DwellingCheckpoint;
 use hares_equipment::{load_versioned, save_versioned};
 use hares_types::EquipmentId;
 use serde::{Deserialize, Serialize};
@@ -168,7 +169,183 @@ pub fn run_per_equipment_version_rejection_regression() -> Result<(), Vec<String
             }
         }
         Ok(_) => Err(vec![
-            "version mismatch blob should have been rejected but was accepted".to_string(),
+            "corrupted version blob should have been rejected but was accepted".to_string(),
+        ]),
+    }
+}
+
+/// Regression: a checkpoint with CRC32 and SHA-256 enabled round-trips
+/// correctly through save/load and the restored state is identical.
+pub fn run_checkpoint_integrity_roundtrip() -> Result<(), Vec<String>> {
+    let schedule_path = helpers::unique_temp_path("hares-regr-ckpt-int-sched", "csv");
+    let weather_path = helpers::unique_temp_path("hares-regr-ckpt-int-weather", "epw");
+    helpers::write_schedule_csv(&schedule_path);
+    helpers::write_weather_epw(&weather_path);
+
+    let config = helpers::build_dwelling_config(
+        1,
+        schedule_path.clone(),
+        weather_path.clone(),
+        chrono::Duration::minutes(10),
+        42,
+    );
+
+    let mut dwelling = match Dwelling::from_config(config) {
+        Ok(d) => d,
+        Err(err) => {
+            helpers::cleanup_paths(&[schedule_path, weather_path]);
+            return Err(vec![format!("dwelling construction failed: {err}")]);
+        }
+    };
+
+    // Step a few times to produce non-trivial checkpoint state
+    for _ in 0..5 {
+        if let Err(err) = dwelling.step() {
+            helpers::cleanup_paths(&[schedule_path, weather_path]);
+            return Err(vec![format!("step before checkpoint failed: {err}")]);
+        }
+    }
+
+    let checkpoint = dwelling.save_checkpoint();
+    let cp_path = helpers::unique_temp_path("hares-regr-ckpt-int", "json");
+    if let Err(err) = checkpoint.save(&cp_path) {
+        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
+        return Err(vec![format!("checkpoint save failed: {err}")]);
+    }
+
+    let loaded_cp = match DwellingCheckpoint::load(&cp_path) {
+        Ok(cp) => cp,
+        Err(err) => {
+            helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
+            return Err(vec![format!("checkpoint load failed: {err}")]);
+        }
+    };
+
+    // Verify the loaded checkpoint matches the original
+    if loaded_cp.format_version != checkpoint.format_version {
+        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
+        return Err(vec![format!(
+            "format_version mismatch: saved={} loaded={}",
+            checkpoint.format_version, loaded_cp.format_version
+        )]);
+    }
+    if loaded_cp.timestep_index != checkpoint.timestep_index {
+        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
+        return Err(vec![format!(
+            "timestep_index mismatch: saved={} loaded={}",
+            checkpoint.timestep_index, loaded_cp.timestep_index
+        )]);
+    }
+
+    helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
+    eprintln!("[checkpoint_integrity_roundtrip] PASS");
+    Ok(())
+}
+
+/// Regression: corrupt one byte in a checkpoint file's JSON body and verify
+/// that `load()` rejects it with a checksum error.
+pub fn run_checkpoint_sha256_corruption_regression() -> Result<(), Vec<String>> {
+    let schedule_path = helpers::unique_temp_path("hares-regr-ckpt-sha-corrupt-sched", "csv");
+    let weather_path = helpers::unique_temp_path("hares-regr-ckpt-sha-corrupt-weather", "epw");
+    helpers::write_schedule_csv(&schedule_path);
+    helpers::write_weather_epw(&weather_path);
+
+    let config = helpers::build_dwelling_config(
+        1,
+        schedule_path.clone(),
+        weather_path.clone(),
+        chrono::Duration::minutes(5),
+        42,
+    );
+
+    let mut dwelling = match Dwelling::from_config(config) {
+        Ok(d) => d,
+        Err(err) => {
+            helpers::cleanup_paths(&[schedule_path, weather_path]);
+            return Err(vec![format!("dwelling construction failed: {err}")]);
+        }
+    };
+
+    if let Err(err) = dwelling.step() {
+        helpers::cleanup_paths(&[schedule_path, weather_path]);
+        return Err(vec![format!("step failed: {err}")]);
+    }
+
+    let checkpoint = dwelling.save_checkpoint();
+    let cp_path = helpers::unique_temp_path("hares-regr-ckpt-sha-corrupt", "json");
+    if let Err(err) = checkpoint.save(&cp_path) {
+        helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
+        return Err(vec![format!("checkpoint save failed: {err}")]);
+    }
+
+    // Corrupt one byte after the SHA-256 prefix line
+    let mut file_bytes = std::fs::read(&cp_path).map_err(|e| vec![e.to_string()])?;
+    let nl_pos = file_bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| vec!["corrupt: no newline in checkpoint file".to_string()])?;
+    if nl_pos + 5 < file_bytes.len() {
+        file_bytes[nl_pos + 3] ^= 0x01;
+    }
+    std::fs::write(&cp_path, &file_bytes).map_err(|e| vec![e.to_string()])?;
+
+    let result = DwellingCheckpoint::load(&cp_path);
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("SHA-256") || msg.contains("checksum") {
+                eprintln!("[checkpoint_sha256_corruption] PASS — load rejected with: {msg}");
+                helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
+                Ok(())
+            } else {
+                helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
+                Err(vec![format!(
+                    "error message missing checksum indication; got: {msg}"
+                )])
+            }
+        }
+        Ok(_) => {
+            helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
+            Err(vec![
+                "corrupted checkpoint should have been rejected by SHA-256, but load succeeded"
+                    .to_string(),
+            ])
+        }
+    }
+}
+
+/// Regression: corrupt a postcard equipment state blob and verify CRC32
+/// integrity check catches it with a descriptive error.
+pub fn run_equipment_crc_corruption_regression() -> Result<(), Vec<String>> {
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct FakeState {
+        val: f64,
+    }
+
+    let state = FakeState { val: 42.0 };
+    let mut blob = save_versioned(&state, 1, "FakeEquip");
+
+    // Corrupt a byte in the postcard payload portion (past the 4-byte version prefix)
+    if blob.len() > 6 {
+        blob[6] ^= 0x01;
+    }
+
+    let result = load_versioned::<FakeState>(&blob, 1, "FakeEquip", EquipmentId(99));
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("FakeEquip") && msg.contains("EquipmentId(99)") {
+                eprintln!("[equipment_crc_corruption] PASS — load rejected with equipment context");
+                Ok(())
+            } else {
+                Err(vec![format!(
+                    "error should name equipment type FakeEquip and id 99; got: {msg}"
+                )])
+            }
+        }
+        Ok(_) => Err(vec![
+            "CRC corruption in equipment blob should have been rejected but load succeeded"
+                .to_string(),
         ]),
     }
 }

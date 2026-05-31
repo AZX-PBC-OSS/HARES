@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::checksum;
 use hares_types::{HaresError, ZoneId};
 use serde::{Deserialize, Serialize};
 
@@ -30,23 +31,51 @@ pub struct DwellingCheckpoint {
 }
 
 impl DwellingCheckpoint {
-    /// Persist checkpoint atomically.
+    /// Persist checkpoint atomically with SHA-256 integrity checksum.
     pub fn save(&self, path: &Path) -> Result<(), HaresError> {
-        let bytes = serde_json::to_vec(self)
+        let json_bytes = serde_json::to_vec(self)
             .map_err(|err| HaresError::Io(format!("checkpoint serialize failed: {err}")))?;
+
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            checkpoint_path = %path.display(),
+            sha256 = %checksum::compute_sha256_hex(&json_bytes),
+            "checkpoint saved with integrity checksum",
+        );
+
+        let file_bytes = checksum::write_with_sha256(&json_bytes);
         let tmp_path = temp_checkpoint_path(path);
-        fs::write(&tmp_path, bytes)
+        fs::write(&tmp_path, &file_bytes)
             .map_err(|err| HaresError::Io(format!("checkpoint temp write failed: {err}")))?;
         fs::rename(&tmp_path, path)
             .map_err(|err| HaresError::Io(format!("checkpoint atomic rename failed: {err}")))?;
         Ok(())
     }
 
-    /// Load checkpoint from disk.
+    /// Load checkpoint from disk, verifying SHA-256 integrity before
+    /// deserialisation.
     pub fn load(path: &Path) -> Result<Self, HaresError> {
-        let bytes = fs::read(path)
+        let file_bytes = fs::read(path)
             .map_err(|err| HaresError::Io(format!("checkpoint read failed: {err}")))?;
-        let cp: DwellingCheckpoint = serde_json::from_slice(&bytes)
+
+        let json_bytes = checksum::verify_sha256(&file_bytes).map_err(|msg| {
+            #[cfg(feature = "observe")]
+            tracing::info!(
+                checkpoint_path = %path.display(),
+                sha256_pass = false,
+                "checkpoint integrity check FAILED: {msg}",
+            );
+            HaresError::Io(format!("checkpoint file '{}' {msg}", path.display()))
+        })?;
+
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            checkpoint_path = %path.display(),
+            sha256_pass = true,
+            "checkpoint integrity check passed",
+        );
+
+        let cp: DwellingCheckpoint = serde_json::from_slice(json_bytes)
             .map_err(|err| HaresError::Io(format!("checkpoint parse failed: {err}")))?;
         if cp.format_version != CHECKPOINT_VERSION {
             return Err(HaresError::Io(format!(
@@ -149,7 +178,7 @@ mod tests {
     #[test]
     fn version_mismatch_rejected() {
         let cp = DwellingCheckpoint {
-            format_version: CHECKPOINT_VERSION,
+            format_version: 1, // intentionally wrong — older than CHECKPOINT_VERSION
             bldg_id: 1,
             timestep_index: 0,
             equipment_states: vec![],
@@ -168,19 +197,51 @@ mod tests {
         let _guard = TempFile(path.clone());
         cp.save(&path).unwrap();
 
-        // Tamper: write a v1 checkpoint
-        let bytes = std::fs::read(&path).unwrap();
-        let tampered = String::from_utf8(bytes).unwrap().replacen(
-            &format!("\"format_version\":{CHECKPOINT_VERSION}"),
-            "\"format_version\":1",
-            1,
-        );
-        std::fs::write(&path, tampered).unwrap();
-
         let err = DwellingCheckpoint::load(&path).unwrap_err();
         assert!(
             err.to_string().contains("version mismatch"),
             "expected version mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sha256_corruption_rejected() {
+        let cp = DwellingCheckpoint {
+            format_version: CHECKPOINT_VERSION,
+            bldg_id: 1,
+            timestep_index: 0,
+            equipment_states: vec![],
+            rng_state: [0; 32],
+            envelope_state: vec![],
+            humidity_states: vec![(ZoneId(1), 0.005)],
+            fluid_states: vec![],
+            rng_stream: 0,
+            rng_word_pos: 0,
+            thermal_last_u: vec![],
+            lwr_t_prev_c: vec![],
+        };
+
+        let path = std::env::temp_dir().join(unique_temp_name(
+            "hares_core_checkpoint_sha256_corrupt",
+            "json",
+        ));
+        let _guard = TempFile(path.clone());
+        cp.save(&path).unwrap();
+
+        // Corrupt one byte in the JSON body (after the `sha256:` prefix line)
+        let mut file_bytes = std::fs::read(&path).unwrap();
+        let nl_pos = file_bytes.iter().position(|&b| b == b'\n').unwrap();
+        // Flip a bit in the JSON payload
+        if nl_pos + 10 < file_bytes.len() {
+            file_bytes[nl_pos + 5] ^= 0x01;
+        }
+        std::fs::write(&path, &file_bytes).unwrap();
+
+        let err = DwellingCheckpoint::load(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SHA-256") || msg.contains("checksum"),
+            "expected SHA-256 checksum error, got: {msg}"
         );
     }
 }
