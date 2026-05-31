@@ -21,7 +21,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 
 use super::WaterHeaterZip;
 use super::wh_config::TanklessWaterHeaterConfig;
-use crate::hvac::helpers::{equipment_id_from_config, zone_id_from_config};
+use crate::hvac::helpers::{equipment_id_from_config, zone_id_from_config_or_default};
 
 const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 const DEFAULT_EF: f64 = 0.9;
@@ -80,7 +80,7 @@ pub struct TanklessWH {
 impl TanklessWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let fuel_type = config
             .require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")
             .map(|typed| typed.fuel_type)

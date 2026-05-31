@@ -11,7 +11,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, ThermalCategory, ZoneId,
+    PortSlots, Telemetry, ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,9 @@ use super::latent_degradation::compute_coil_ao_by_stage;
 use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
-    helpers::{equipment_id_from_config, lookup_zone, operating_mode_code, zone_id_from_config},
+    helpers::{
+        equipment_id_from_config, lookup_zone, operating_mode_code, zone_id_from_config_or_default,
+    },
 };
 
 const CRANKCASE_HEATER_KW: f64 = 0.05;
@@ -432,7 +434,7 @@ impl CoolingCore {
     }
 
     fn new(config: EquipmentConfig, is_room_ac: bool) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let equipment_type = if is_room_ac {
             "Room AC"
         } else {

@@ -23,7 +23,9 @@ use super::ac_config::DehumidifierConfig;
 use super::dehumidifier_defaults::{
     DEFAULT_ENERGY_FACTOR_CURVE, DEFAULT_WATER_REMOVAL_CURVE, RATED_DB_C, RATED_RH,
 };
-use super::helpers::{equipment_id_from_config, zone_id_from_config};
+use super::helpers::{
+    equipment_id_from_config, zone_id_from_config, zone_id_from_config_or_default,
+};
 
 // Water density assumed as 1.0 kg/L (constant approximation).
 // EnergyPlus ZoneDehumidifier.cc:723 uses RhoH2O(max(InletAirTemp - 11.0, 1.0))
@@ -123,7 +125,7 @@ pub struct Dehumidifier {
 impl Dehumidifier {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
@@ -303,10 +305,8 @@ impl Dehumidifier {
             .set(tk::WATER_REMOVAL_L_DAY, snapshot.water_removal_l_day);
         self.telemetry
             .set(tk::ELECTRIC_POWER_W, snapshot.electric_power_w);
-        self.telemetry.set(
-            tk::ELECTRIC_KW,
-            power_w_to_kw(snapshot.electric_power_w),
-        );
+        self.telemetry
+            .set(tk::ELECTRIC_KW, power_w_to_kw(snapshot.electric_power_w));
         self.telemetry
             .set(tk::LATENT_REMOVAL_W, snapshot.latent_removal_w);
         self.telemetry

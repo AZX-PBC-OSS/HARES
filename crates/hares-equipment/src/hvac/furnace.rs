@@ -23,7 +23,8 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
-        equipment_id_from_config, operating_mode_code, update_heating_control, zone_id_from_config,
+        equipment_id_from_config, operating_mode_code, update_heating_control,
+        zone_id_from_config_or_default,
     },
 };
 
@@ -83,7 +84,7 @@ struct FurnaceState {
 impl ElectricFurnace {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
@@ -367,7 +368,7 @@ impl Equipment for ElectricFurnace {
 impl GasFurnace {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,

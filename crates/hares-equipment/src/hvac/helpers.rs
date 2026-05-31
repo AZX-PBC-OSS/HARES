@@ -51,6 +51,30 @@ pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
     Some(ZoneId(raw as u16))
 }
 
+/// Resolve `ZoneId` from config, falling back to `ZoneId(1)` when absent.
+///
+/// When `zone_id` is missing from the equipment's typed config, HPXML parsing
+/// did not inject the conditioned-zone identifier. Logging the fallback makes
+/// this gap visible during development and integration testing.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub fn zone_id_from_config_or_default(config: &EquipmentConfig) -> ZoneId {
+    match zone_id_from_config(config) {
+        Some(id) => id,
+        None => {
+            tracing::warn!(
+                "zone_id not present in equipment config; falling back to ZoneId(1) — \
+                 HPXML parsing may not have propagated conditioned_zone_id"
+            );
+            ZoneId(1)
+        }
+    }
+}
+
+#[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+pub fn zone_id_from_config_or_default(config: &EquipmentConfig) -> ZoneId {
+    zone_id_from_config(config).unwrap_or(ZoneId(1))
+}
+
 /// Parse an optional `ZoneId` from a named config key.
 pub fn parse_zone_id_key(config: &EquipmentConfig, key: &str) -> Option<ZoneId> {
     let raw = config.get_f64(key).or_else(|| typed_f64(config, key))?;

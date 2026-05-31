@@ -19,8 +19,8 @@ use crate::{Equipment, EquipmentConfig};
 use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig};
 use super::super::air_conditioner::AirConditioner;
 use super::super::heating_config::HvacSetpointConfig;
-use super::super::helpers::{equipment_id_from_config, zone_id_from_config};
-use super::constants::{DEFAULT_EQUIPMENT_ID, DEFAULT_ZONE_ID};
+use super::super::helpers::{equipment_id_from_config, zone_id_from_config_or_default};
+use super::constants::DEFAULT_EQUIPMENT_ID;
 
 /// MSHP crankcase heater: 15 W rated, activates at or below 0 °C.
 /// Distinct from central AC default (50 W / 12.8 °C) per OCHRE conventions.
@@ -53,7 +53,7 @@ impl HpCooler {
                 MSHP_CRANKCASE_HEATER_THRESHOLD_C,
             );
         }
-        let zone = zone_id_from_config(&config).unwrap_or(hares_types::ZoneId(DEFAULT_ZONE_ID));
+        let zone = zone_id_from_config_or_default(&config);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
@@ -313,7 +313,7 @@ impl GshpCooler {
                 hares_physics::borehole::BoreholeConfig::default(),
             )),
         };
-        let zone = zone_id_from_config(&config).unwrap_or(hares_types::ZoneId(DEFAULT_ZONE_ID));
+        let zone = zone_id_from_config_or_default(&config);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
@@ -646,7 +646,7 @@ impl WshpCooler {
         inner.set_crankcase_defaults_if_unconfigured(&config, 0.0, f64::NEG_INFINITY);
         // Source temperature: constant entering water temperature.
         inner.core.source_temp = SourceTemperature::Constant(10.0);
-        let zone = zone_id_from_config(&config).unwrap_or(hares_types::ZoneId(DEFAULT_ZONE_ID));
+        let zone = zone_id_from_config_or_default(&config);
         Self {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),

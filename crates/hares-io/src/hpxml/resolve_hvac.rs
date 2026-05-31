@@ -58,6 +58,13 @@ const HSPF2_TO_HSPF_FACTOR_DUCTLESS: f64 = 1.0 / 0.90;
 /// is still applied rather than silently discarding the value.
 const EER2_TO_EER_FACTOR: f64 = 1.0 / 0.96;
 
+fn zone_id_from_params(params: &Map<String, Value>) -> Option<u16> {
+    params
+        .get("zone_id")
+        .and_then(Value::as_u64)
+        .map(|v| v as u16)
+}
+
 fn airflow_defect_multiplier(params: &Map<String, Value>) -> f64 {
     params
         .get("airflow_defect_ratio")
@@ -780,9 +787,10 @@ fn try_build_gas_furnace_config(
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
+    let zone_id = zone_id_from_params(params);
     let cfg = GasFurnaceConfig {
         equipment_id: None,
-        zone_id: None,
+        zone_id,
         afue,
         capacity_w,
         number_of_speeds: n_speeds,
@@ -833,9 +841,10 @@ fn try_build_electric_furnace_config(
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
+    let zone_id = zone_id_from_params(params);
     let cfg = ElectricFurnaceConfig {
         equipment_id: None,
-        zone_id: None,
+        zone_id,
         eir: heating_efficiency,
         capacity_w,
         number_of_speeds: n_speeds,
@@ -911,9 +920,10 @@ fn try_build_gas_boiler_config(
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
+    let zone_id = zone_id_from_params(params);
     let cfg = GasBoilerConfig {
         equipment_id: None,
-        zone_id: None,
+        zone_id,
         loop_id: None,
         afue,
         capacity_w,
@@ -988,9 +998,10 @@ fn try_build_electric_boiler_config(
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
+    let zone_id = zone_id_from_params(params);
     let cfg = ElectricBoilerConfig {
         equipment_id: None,
-        zone_id: None,
+        zone_id,
         loop_id: None,
         eir: heating_efficiency,
         capacity_w,
@@ -1024,10 +1035,7 @@ fn try_build_electric_baseboard_config(
     let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
         return Ok(None);
     };
-    let zone_id = params
-        .get("zone_id")
-        .and_then(Value::as_u64)
-        .map(|v| v as u16);
+    let zone_id = zone_id_from_params(params);
     let heating_efficiency = resistance_efficiency_from_params(params, name, "Electric Baseboard")?;
 
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
@@ -1066,9 +1074,10 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
 
+    let zone_id = zone_id_from_params(params);
     let cfg = IdealHvacConfig {
         equipment_id: None,
-        zone_id: None,
+        zone_id,
         setpoint: HvacSetpointConfig {
             heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
             heating_setpoint_source,
@@ -1135,9 +1144,10 @@ fn try_build_central_ac_config(
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
 
+    let zone_id = zone_id_from_params(params);
     let cfg = CentralAirConditionerConfig {
         equipment_id: None,
-        zone_id: None,
+        zone_id,
         capacity_w,
         eir,
         shr,
@@ -1206,9 +1216,10 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let setpoints = extract_setpoints_reconciled(params);
+    let zone_id = zone_id_from_params(params);
     let cfg = RoomAcConfig {
         equipment_id: None,
-        zone_id: None,
+        zone_id,
         capacity_w,
         eir,
         setpoint: HvacSetpointConfig {
@@ -1336,10 +1347,11 @@ fn try_build_heat_pump_heater_config(
         "ASHP Heater"
     };
 
+    let zone_id = zone_id_from_params(params);
     let cfg = HeatPumpHeaterConfig {
         common: HeatPumpCommonConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id,
             heating_capacity_w,
             heating_eir,
             stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
@@ -1543,10 +1555,11 @@ fn try_build_heat_pump_cooler_config(
         "ASHP Cooler"
     };
 
+    let zone_id = zone_id_from_params(params);
     let cfg = HeatPumpCoolerConfig {
         common: HeatPumpCommonConfig {
             equipment_id: None,
-            zone_id: None,
+            zone_id,
             heating_capacity_w,
             heating_eir,
             stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
@@ -2026,10 +2039,8 @@ pub(super) fn resolve_hvac(
         if matches!(name.as_str(), "ASHP Heater" | "MSHP Heater") {
             insert_startup_degradation(&mut params, &name, true);
         }
-        if name == "Electric Baseboard" {
-            if let Some(zone_id) = conditioned_zone_id(building) {
-                params.insert("zone_id".to_string(), json!(zone_id));
-            }
+        if let Some(zone_id) = conditioned_zone_id(building) {
+            params.insert("zone_id".to_string(), json!(zone_id));
         }
         if name == "Gas Furnace" {
             apply_multispeed_furnace_parameters(&mut params, defaults, &name);
@@ -2167,6 +2178,9 @@ pub(super) fn resolve_hvac(
         apply_building_setpoint_profiles(building, &mut params, false, true);
         if name != "Room AC" {
             duct_params.insert_into_map(&mut params);
+        }
+        if let Some(zone_id) = conditioned_zone_id(building) {
+            params.insert("zone_id".to_string(), json!(zone_id));
         }
         let typed_config = match name.as_str() {
             "Air Conditioner" => try_build_central_ac_config(&name, &params, &duct_params),
@@ -2446,6 +2460,9 @@ pub(super) fn resolve_hvac(
         apply_building_setpoint_profiles(building, &mut params, true, true);
         if heat_pump_type != "mini-split" {
             duct_params.insert_into_map(&mut params);
+        }
+        if let Some(zone_id) = conditioned_zone_id(building) {
+            params.insert("zone_id".to_string(), json!(zone_id));
         }
 
         let is_mini_split = heat_pump_type == "mini-split";
@@ -5236,6 +5253,222 @@ mod tests {
     fn conditioned_zone_id_returns_none_when_no_conditioned_zone() {
         let b = empty_building(vec![foundation_zone(false)]);
         assert_eq!(conditioned_zone_id(&b), None);
+    }
+
+    #[test]
+    fn conditioned_zone_id_returns_correct_id_when_not_first_zone() {
+        let b = empty_building(vec![foundation_zone(false), conditioned_zone()]);
+        assert_eq!(
+            conditioned_zone_id(&b),
+            Some(2),
+            "Conditioned zone at index 1 → ZoneId 2"
+        );
+    }
+
+    #[test]
+    fn gas_furnace_builder_populates_zone_id_from_params() {
+        let mut params = minimal_furnace_params(0.96, 10_000.0);
+        params.insert("zone_id".to_string(), json!(2u16));
+        let duct_params = DuctDseParams::default();
+        let ec = try_build_gas_furnace_config("Gas Furnace", &params, &duct_params)
+            .expect("builder must succeed")
+            .expect("typed config must be present");
+        let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
+        assert_eq!(
+            cfg.zone_id,
+            Some(2),
+            "zone_id must be populated from params"
+        );
+    }
+
+    #[test]
+    fn central_ac_builder_populates_zone_id_from_params() {
+        let mut params = minimal_central_ac_params(14.0, 12_000.0);
+        params.insert("zone_id".to_string(), json!(2u16));
+        let duct_params = DuctDseParams::default();
+        let ec = try_build_central_ac_config("Air Conditioner", &params, &duct_params)
+            .expect("typed config must be present");
+        let cfg: CentralAirConditionerConfig = ec
+            .typed()
+            .expect("must deserialize to CentralAirConditionerConfig");
+        assert_eq!(
+            cfg.zone_id,
+            Some(2),
+            "zone_id must be populated from params"
+        );
+    }
+
+    #[test]
+    fn heat_pump_heater_builder_populates_zone_id_from_params() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(12_000.0));
+        params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
+        params.insert("efficiency_hspf".to_string(), json!(8.5));
+        params.insert("zone_id".to_string(), json!(2u16));
+        let duct_params = DuctDseParams::default();
+        let ec = try_build_heat_pump_heater_config("ASHP Heater", &params, &duct_params, false)
+            .expect("typed config must be present");
+        let cfg: HeatPumpHeaterConfig = ec
+            .typed()
+            .expect("must deserialize to HeatPumpHeaterConfig");
+        assert_eq!(
+            cfg.common.zone_id,
+            Some(2),
+            "zone_id must be populated from params for heat pump heater"
+        );
+    }
+
+    #[test]
+    fn heat_pump_cooler_builder_populates_zone_id_from_params() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(12_000.0));
+        params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
+        params.insert("efficiency_seer".to_string(), json!(14.0));
+        params.insert("zone_id".to_string(), json!(2u16));
+        let duct_params = DuctDseParams::default();
+        let ec = try_build_heat_pump_cooler_config("ASHP Cooler", &params, &duct_params, false)
+            .expect("typed config must be present");
+        let cfg: HeatPumpCoolerConfig = ec
+            .typed()
+            .expect("must deserialize to HeatPumpCoolerConfig");
+        assert_eq!(
+            cfg.common.zone_id,
+            Some(2),
+            "zone_id must be populated from params for heat pump cooler"
+        );
+    }
+
+    #[test]
+    fn room_ac_builder_populates_zone_id_from_params() {
+        let mut params = Map::new();
+        params.insert("cooling_capacity_w".to_string(), json!(5_000.0));
+        params.insert("efficiency_eer".to_string(), json!(10.0));
+        params.insert("zone_id".to_string(), json!(3u16));
+        let ec =
+            try_build_room_ac_config("Room AC", &params).expect("typed config must be present");
+        let cfg: RoomAcConfig = ec.typed().expect("must deserialize to RoomAcConfig");
+        assert_eq!(
+            cfg.zone_id,
+            Some(3),
+            "zone_id must be populated from params for Room AC"
+        );
+    }
+
+    #[test]
+    fn ideal_hvac_builder_populates_zone_id_from_params() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(20_000.0));
+        params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
+        params.insert("heating_efficiency".to_string(), json!(1.0));
+        params.insert("cooling_efficiency_seer".to_string(), json!(14.0));
+        params.insert("zone_id".to_string(), json!(2u16));
+        let ec = try_build_ideal_hvac_config("Ideal HVAC", &params)
+            .expect("typed config must be present");
+        let cfg: IdealHvacConfig = ec.typed().expect("must deserialize to IdealHvacConfig");
+        assert_eq!(
+            cfg.zone_id,
+            Some(2),
+            "zone_id must be populated from params for Ideal HVAC"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_hvac integration: zone_id propagation through full chain
+    // -----------------------------------------------------------------------
+
+    fn furnace_xml(capacity_btu_h: &str, afue: &str) -> XmlNode {
+        XmlNode {
+            name: "HeatingSystem".into(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![
+                XmlNode {
+                    name: "HeatingSystemType".into(),
+                    attrs: HashMap::new(),
+                    text: String::new(),
+                    children: vec![XmlNode {
+                        name: "Furnace".into(),
+                        attrs: HashMap::new(),
+                        text: String::new(),
+                        children: vec![],
+                    }],
+                },
+                XmlNode {
+                    name: "HeatingSystemFuel".into(),
+                    attrs: HashMap::new(),
+                    text: "natural gas".into(),
+                    children: vec![],
+                },
+                XmlNode {
+                    name: "HeatingCapacity".into(),
+                    attrs: HashMap::new(),
+                    text: capacity_btu_h.into(),
+                    children: vec![],
+                },
+                XmlNode {
+                    name: "AnnualHeatingEfficiency".into(),
+                    attrs: HashMap::new(),
+                    text: String::new(),
+                    children: vec![
+                        XmlNode {
+                            name: "Units".into(),
+                            attrs: HashMap::new(),
+                            text: "AFUE".into(),
+                            children: vec![],
+                        },
+                        XmlNode {
+                            name: "Value".into(),
+                            attrs: HashMap::new(),
+                            text: afue.into(),
+                            children: vec![],
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn resolve_hvac_propagates_zone_id_for_conditioned_zone_at_index_1() {
+        use hares_equipment::hvac::heating_config::GasFurnaceConfig;
+
+        let mut building = empty_building(vec![foundation_zone(false), conditioned_zone()]);
+        building.details_xml = XmlNode {
+            name: String::new(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![XmlNode {
+                name: "Systems".into(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![XmlNode {
+                    name: "HVAC".into(),
+                    attrs: HashMap::new(),
+                    text: String::new(),
+                    children: vec![furnace_xml("36000", "0.80")],
+                }],
+            }],
+        };
+
+        let defaults = DefaultsStore::empty();
+        let mut specs = Vec::new();
+        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+
+        let gas_furnace = specs
+            .iter()
+            .find(|s| s.name == "Gas Furnace")
+            .expect("must resolve Gas Furnace");
+
+        let typed = gas_furnace
+            .typed_config
+            .as_ref()
+            .expect("must have typed config");
+        let cfg: GasFurnaceConfig = typed.typed().expect("must deserialize to GasFurnaceConfig");
+        assert_eq!(
+            cfg.zone_id,
+            Some(2),
+            "resolve_hvac must propagate conditioned_zone_id when conditione zone is at index 1"
+        );
     }
 
     // -----------------------------------------------------------------------

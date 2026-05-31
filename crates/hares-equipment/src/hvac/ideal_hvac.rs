@@ -28,7 +28,7 @@ use super::{
         build_setpoint_source, extract_numeric, extract_text, load_bounds_pair,
         parse_biquadratic_list,
     },
-    helpers::{equipment_id_from_config, operating_mode_code, zone_id_from_config},
+    helpers::{equipment_id_from_config, operating_mode_code, zone_id_from_config_or_default},
 };
 
 /// Biquadratic curve pair (capacity + EIR) with shared input bounds.
@@ -147,7 +147,7 @@ struct IdealHvacState {
 impl IdealHvac {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,

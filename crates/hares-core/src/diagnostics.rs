@@ -52,6 +52,10 @@ pub struct EnvelopeDiag {
 #[derive(Debug)]
 pub struct EquipmentDiag {
     pub name: String,
+    /// Zone mapping is populated at dwelling init via `write_equipment_init`,
+    /// not per-step in `capture()`. Per-step zone routing is verified through
+    /// the per-zone thermal gain columns in the diagnostic CSV.
+    pub zone_id: Option<ZoneId>,
     pub mode: f64,
     pub electric_kw: f64,
     pub sensible_gain_w: f64,
@@ -148,6 +152,18 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
             .unwrap_or_default(),
     );
     let _ = writeln!(w, "{}", vals.join(","));
+}
+
+/// Write equipment zone-id mapping at init for diagnostic traceability.
+///
+/// Emitted when `output_verbosity >= 4` to surface the zone routing
+/// resolved from HPXML for each HVAC equipment. The mapping is written
+/// as a comment block after the CSV header so downstream tools can
+/// verify per-zone thermal attribution without inspecting config internals.
+pub fn write_equipment_init(w: &mut impl Write, equipment: &[(String, u16)]) {
+    for (name, zone_id) in equipment {
+        let _ = writeln!(w, "# eq zone_id: {name} -> ZoneId({zone_id})");
+    }
 }
 
 /// Capture diagnostics from the current environment and port state.

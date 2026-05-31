@@ -22,7 +22,9 @@ use super::{
     WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
     weighted_average_tank_temp,
 };
-use crate::hvac::helpers::{equipment_id_from_config, loop_id_from_config, zone_id_from_config};
+use crate::hvac::helpers::{
+    equipment_id_from_config, loop_id_from_config, zone_id_from_config_or_default,
+};
 
 use super::wh_config::GasWaterHeaterConfig;
 use super::{
@@ -116,7 +118,7 @@ pub struct GasWH {
 impl GasWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)

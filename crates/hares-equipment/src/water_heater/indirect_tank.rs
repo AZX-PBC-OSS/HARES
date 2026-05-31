@@ -29,7 +29,7 @@ use super::{
     WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
     weighted_average_tank_temp,
 };
-use crate::hvac::helpers::{equipment_id_from_config, zone_id_from_config};
+use crate::hvac::helpers::{equipment_id_from_config, zone_id_from_config_or_default};
 
 use super::wh_config::IndirectTankConfig;
 use super::{
@@ -103,7 +103,7 @@ pub struct IndirectTank {
 impl IndirectTank {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let boiler_loop_id =
             crate::hvac::helpers::loop_id_from_config(&config, &["boiler_loop_id", "loop_id"])
                 .unwrap_or_default();

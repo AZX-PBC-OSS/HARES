@@ -87,6 +87,25 @@ fn make_env_at_minute(
     env
 }
 
+fn make_env_two_zones(
+    zone1_temp_c: f64,
+    zone2_temp_c: f64,
+    outdoor_temp_c: f64,
+    zone1_wb_c: f64,
+    zone2_wb_c: f64,
+) -> EnvironmentState {
+    let mut env = make_env(zone1_temp_c, outdoor_temp_c, zone1_wb_c);
+    env.zones.push(ZoneState {
+        id: ZoneId(2),
+        temperature_c: zone2_temp_c,
+        humidity_ratio: 0.010,
+        relative_humidity: 0.50,
+        wet_bulb_c: zone2_wb_c,
+        volume_m3: 200.0,
+    });
+    env
+}
+
 fn make_ports() -> PortSlots {
     PortSlots {
         thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -1594,6 +1613,69 @@ fn gas_furnace_dse_multi_zone_energy_conservation() {
         (total_w - 10_000.0).abs() < 10.0,
         "total delivered heat must conserve energy: zone1 + zone2 = 10000 W; \
          got zone1={zone1_w:.2} W + zone2={zone2_w:.2} W = {total_w:.2} W"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Non-zone-1 conditioned zone heat routing: furnace with zone_id=2, no duct
+// zone must deliver 100% of its sensible output to ZoneId(2) and zero to
+// ZoneId(1). This is the simulation-level counterpart to the config-layer
+// test `resolve_hvac_propagates_zone_id_for_conditioned_zone_at_index_1`
+// in crates/hares-io/src/hpxml/resolve_hvac.rs.
+//
+// Setup: capacity=10000 W, zone_id=2, no DSE/duct_zone_id, fan_power=0 W.
+// Expected: ZoneId(1)=0 W, ZoneId(2)=10000 W.
+// ---------------------------------------------------------------------------
+#[test]
+fn gas_furnace_zone_2_routes_heat_to_zone_2_not_zone_1() {
+    let c = EquipmentConfig::from_typed(
+        "furnace".to_string(),
+        "Gas Furnace".to_string(),
+        GasFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(2),
+            afue: 0.80,
+            capacity_w: 10_000.0,
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            ducts: DuctConfig::default(),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            setpoint: HvacSetpointConfig::default(),
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
+
+    // Zone 2 at 18°C is below the 20°C default heating setpoint → furnace on.
+    let env = make_env_two_zones(20.0, 18.0, -5.0, 15.0, 12.0);
+    eq.init(&c, &env).unwrap();
+    let mode = eq.update_control(&env);
+    assert_eq!(
+        mode,
+        OperatingMode::Heating,
+        "furnace must enter Heating mode when zone 2 (18°C) is below 20°C setpoint"
+    );
+
+    let mut ports = make_ports_two_zones();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let zone1_w = ports.thermal[0].sensible_gain_w;
+    let zone2_w = ports.thermal[1].sensible_gain_w;
+
+    assert!(
+        zone1_w.abs() < 1.0,
+        "furnace with zone_id=2 must not deliver heat to ZoneId(1); got {zone1_w:.2} W"
+    );
+    assert!(
+        zone2_w > 0.0,
+        "furnace with zone_id=2 must deliver heat to ZoneId(2); got {zone2_w:.2} W"
+    );
+    assert!(
+        (zone2_w - 10_000.0).abs() < 10.0,
+        "furnace with zone_id=2 must deliver full capacity to ZoneId(2): 10000 W; \
+         got {zone2_w:.2} W"
     );
 }
 

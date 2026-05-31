@@ -1612,6 +1612,17 @@ impl Dwelling {
             let mut writer = std::io::BufWriter::new(file);
             let n_zones = dwelling.latest_env.zones.len();
             diagnostics::write_header(&mut writer, n_zones);
+            // Emit equipment zone-id mapping so zone routing is traceable.
+            let equipment_zones: Vec<(String, u16)> = dwelling
+                .equipment
+                .iter()
+                .filter_map(|eq| {
+                    eq.descriptor()
+                        .zone
+                        .map(|z| (eq.descriptor().name.clone(), z.0))
+                })
+                .collect();
+            diagnostics::write_equipment_init(&mut writer, &equipment_zones);
             Some(writer)
         } else {
             None

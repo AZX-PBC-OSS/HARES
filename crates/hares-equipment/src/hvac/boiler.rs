@@ -9,7 +9,7 @@ use hares_types::{
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FLUID, FluidDomainPayload, FluidType, FuelPower, FuelType, HaresError, LoopId,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId,
+    ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ use super::{
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
         equipment_id_from_config, loop_id_from_config, operating_mode_code, update_heating_control,
-        zone_id_from_config,
+        zone_id_from_config_or_default,
     },
 };
 
@@ -136,7 +136,7 @@ struct BoilerState {
 impl ElectricBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let loop_id =
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {
@@ -376,7 +376,7 @@ impl Equipment for ElectricBoiler {
 impl GasBoiler {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let loop_id =
             loop_id_from_config(&config, &["loop_id", "hydronic_loop_id"]).unwrap_or_default();
         let descriptor = EquipmentDescriptor {

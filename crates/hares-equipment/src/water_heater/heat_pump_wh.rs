@@ -29,7 +29,9 @@ use super::hpwh_compressor::{
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::wh_config::HeatPumpWaterHeaterConfig;
 use super::{WaterHeaterZip, hysteresis_call, parse_usize, weighted_average_tank_temp};
-use crate::hvac::helpers::{equipment_id_from_config, loop_id_from_config, zone_id_from_config};
+use crate::hvac::helpers::{
+    equipment_id_from_config, loop_id_from_config, zone_id_from_config_or_default,
+};
 
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
@@ -164,7 +166,7 @@ pub struct HeatPumpWH {
 impl HeatPumpWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let zone = zone_id_from_config_or_default(&config);
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -833,7 +835,8 @@ impl Equipment for HeatPumpWH {
             .set(tk::ELECTRIC_KW, power_w_to_kw(electric_power_w));
         self.telemetry
             .set(tk::COMPRESSOR_KW, power_w_to_kw(compressor_power_w));
-        self.telemetry.set(tk::ELEMENT_KW, power_w_to_kw(backup_power_w));
+        self.telemetry
+            .set(tk::ELEMENT_KW, power_w_to_kw(backup_power_w));
         self.telemetry
             .set(tk::COMPRESSOR_POWER_W, compressor_power_w);
         self.telemetry
@@ -959,8 +962,10 @@ impl Equipment for HeatPumpWH {
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
             .insert(tk::COMPRESSOR_KW, power_w_to_kw(decoded.compressor_power_w));
-        self.telemetry
-            .insert(tk::ELEMENT_KW, power_w_to_kw(decoded.backup_element_power_w));
+        self.telemetry.insert(
+            tk::ELEMENT_KW,
+            power_w_to_kw(decoded.backup_element_power_w),
+        );
         self.telemetry
             .insert(tk::COMPRESSOR_POWER_W, decoded.compressor_power_w);
         self.telemetry
