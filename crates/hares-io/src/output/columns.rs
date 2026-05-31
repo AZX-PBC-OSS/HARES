@@ -107,7 +107,19 @@ pub fn equipment_name_to_end_use(name: &str) -> EndUse {
         "Refrigerator" | "Freezer" => EndUse::REFRIGERATION,
 
         // Ventilation
-        "Ventilation Fan" | "HRV" | "ERV" | "Ceiling Fan" => EndUse::VENTILATION,
+        "Ventilation Fan" | "HRV" | "ERV" => EndUse::VENTILATION,
+
+        // Ceiling Fan (separate from whole-house ventilation per HPXML 4.2)
+        "Ceiling Fan" => EndUse::CEILING_FAN,
+
+        // Cooking
+        "Gas Grill" => EndUse::COOKING,
+
+        // Pool / Spa
+        "Pool Pump" => EndUse::POOL_PUMP,
+        "Pool Heater" => EndUse::POOL_HEATER,
+        "Spa Pump" => EndUse::SPA_PUMP,
+        "Spa Heater" => EndUse::SPA_HEATER,
 
         // Everything else (event loads, protocol bridge, etc.)
         _ => EndUse::OTHER,
@@ -152,6 +164,30 @@ pub fn end_use_display_name(end_use: &EndUse) -> &str {
     if *end_use == EndUse::GENERATOR {
         return "Generator";
     }
+    if *end_use == EndUse::COOKING {
+        return "Cooking";
+    }
+    if *end_use == EndUse::LAUNDRY {
+        return "Laundry";
+    }
+    if *end_use == EndUse::DISHWASHER {
+        return "Dishwasher";
+    }
+    if *end_use == EndUse::POOL_PUMP {
+        return "Pool Pump";
+    }
+    if *end_use == EndUse::POOL_HEATER {
+        return "Pool Heater";
+    }
+    if *end_use == EndUse::SPA_PUMP {
+        return "Spa Pump";
+    }
+    if *end_use == EndUse::SPA_HEATER {
+        return "Spa Heater";
+    }
+    if *end_use == EndUse::CEILING_FAN {
+        return "Ceiling Fan";
+    }
     if *end_use == EndUse::DEHUMIDIFIER {
         return "Dehumidifier";
     }
@@ -177,6 +213,14 @@ pub fn display_name_to_end_use_key(display_name: &str) -> Option<String> {
         "PV" => Some("pv".to_string()),
         "EV" => Some("ev".to_string()),
         "Generator" => Some("generator".to_string()),
+        "Cooking" => Some("cooking".to_string()),
+        "Laundry" => Some("laundry".to_string()),
+        "Dishwasher" => Some("dishwasher".to_string()),
+        "Pool Pump" => Some("pool_pump".to_string()),
+        "Pool Heater" => Some("pool_heater".to_string()),
+        "Spa Pump" => Some("spa_pump".to_string()),
+        "Spa Heater" => Some("spa_heater".to_string()),
+        "Ceiling Fan" => Some("ceiling_fan".to_string()),
         "Dehumidifier" => Some("dehumidifier".to_string()),
         "Other" => Some("other".to_string()),
         _ => None,
@@ -994,6 +1038,16 @@ mod tests {
             equipment_name_to_end_use("Gas Water Heater"),
             EndUse::WATER_HEATING
         );
+        assert_eq!(
+            equipment_name_to_end_use("Ceiling Fan"),
+            EndUse::CEILING_FAN
+        );
+        assert_eq!(equipment_name_to_end_use("Gas Grill"), EndUse::COOKING);
+        assert_eq!(equipment_name_to_end_use("Pool Pump"), EndUse::POOL_PUMP);
+        assert_eq!(
+            equipment_name_to_end_use("Pool Heater"),
+            EndUse::POOL_HEATER
+        );
         assert_eq!(equipment_name_to_end_use("Clothes Washer"), EndUse::OTHER);
     }
 
@@ -1033,17 +1087,43 @@ mod tests {
             display_name_to_end_use_key("Battery"),
             Some("battery".to_string())
         );
-        assert_eq!(
-            display_name_to_end_use_key("PV"),
-            Some("pv".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("EV"),
-            Some("ev".to_string())
-        );
+        assert_eq!(display_name_to_end_use_key("PV"), Some("pv".to_string()));
+        assert_eq!(display_name_to_end_use_key("EV"), Some("ev".to_string()));
         assert_eq!(
             display_name_to_end_use_key("Generator"),
             Some("generator".to_string())
+        );
+        assert_eq!(
+            display_name_to_end_use_key("Cooking"),
+            Some("cooking".to_string())
+        );
+        assert_eq!(
+            display_name_to_end_use_key("Laundry"),
+            Some("laundry".to_string())
+        );
+        assert_eq!(
+            display_name_to_end_use_key("Dishwasher"),
+            Some("dishwasher".to_string())
+        );
+        assert_eq!(
+            display_name_to_end_use_key("Pool Pump"),
+            Some("pool_pump".to_string())
+        );
+        assert_eq!(
+            display_name_to_end_use_key("Pool Heater"),
+            Some("pool_heater".to_string())
+        );
+        assert_eq!(
+            display_name_to_end_use_key("Spa Pump"),
+            Some("spa_pump".to_string())
+        );
+        assert_eq!(
+            display_name_to_end_use_key("Spa Heater"),
+            Some("spa_heater".to_string())
+        );
+        assert_eq!(
+            display_name_to_end_use_key("Ceiling Fan"),
+            Some("ceiling_fan".to_string())
         );
         assert_eq!(
             display_name_to_end_use_key("Dehumidifier"),
@@ -1064,8 +1144,16 @@ mod tests {
     #[test]
     fn end_use_display_name_round_trips_all_standard_variants() {
         let standard = &[
-            (&hares_types::EndUse::HVAC_HEATING, "HVAC Heating", "hvac_heating"),
-            (&hares_types::EndUse::HVAC_COOLING, "HVAC Cooling", "hvac_cooling"),
+            (
+                &hares_types::EndUse::HVAC_HEATING,
+                "HVAC Heating",
+                "hvac_heating",
+            ),
+            (
+                &hares_types::EndUse::HVAC_COOLING,
+                "HVAC Cooling",
+                "hvac_cooling",
+            ),
             (
                 &hares_types::EndUse::WATER_HEATING,
                 "Water Heating",
@@ -1078,11 +1166,31 @@ mod tests {
                 "Refrigeration",
                 "refrigeration",
             ),
-            (&hares_types::EndUse::VENTILATION, "Ventilation", "ventilation"),
+            (
+                &hares_types::EndUse::VENTILATION,
+                "Ventilation",
+                "ventilation",
+            ),
             (&hares_types::EndUse::BATTERY, "Battery", "battery"),
             (&hares_types::EndUse::PV, "PV", "pv"),
             (&hares_types::EndUse::EV, "EV", "ev"),
             (&hares_types::EndUse::GENERATOR, "Generator", "generator"),
+            (&hares_types::EndUse::COOKING, "Cooking", "cooking"),
+            (&hares_types::EndUse::LAUNDRY, "Laundry", "laundry"),
+            (&hares_types::EndUse::DISHWASHER, "Dishwasher", "dishwasher"),
+            (&hares_types::EndUse::POOL_PUMP, "Pool Pump", "pool_pump"),
+            (
+                &hares_types::EndUse::POOL_HEATER,
+                "Pool Heater",
+                "pool_heater",
+            ),
+            (&hares_types::EndUse::SPA_PUMP, "Spa Pump", "spa_pump"),
+            (&hares_types::EndUse::SPA_HEATER, "Spa Heater", "spa_heater"),
+            (
+                &hares_types::EndUse::CEILING_FAN,
+                "Ceiling Fan",
+                "ceiling_fan",
+            ),
             (
                 &hares_types::EndUse::DEHUMIDIFIER,
                 "Dehumidifier",

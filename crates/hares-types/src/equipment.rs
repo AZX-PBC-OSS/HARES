@@ -62,6 +62,30 @@ impl EndUse {
     pub const EV: Self = Self::new("ev");
     /// Standard backup generator end use.
     pub const GENERATOR: Self = Self::new("generator");
+    /// Standard cooking end use (gas range, gas grill, stove).
+    /// HPXML: Cooking Range (non-ventilation cooking loads).
+    pub const COOKING: Self = Self::new("cooking");
+    /// Standard laundry end use (clothes washer + clothes dryer).
+    /// HPXML: Clothes Washer, Clothes Dryer.
+    pub const LAUNDRY: Self = Self::new("laundry");
+    /// Standard dishwasher end use.
+    /// HPXML: Dishwasher.
+    pub const DISHWASHER: Self = Self::new("dishwasher");
+    /// Standard pool pump end use.
+    /// HPXML: Pool Pump.
+    pub const POOL_PUMP: Self = Self::new("pool_pump");
+    /// Standard pool heater end use.
+    /// HPXML: Pool Heater.
+    pub const POOL_HEATER: Self = Self::new("pool_heater");
+    /// Standard spa/hot-tub pump end use.
+    /// HPXML: Hot Tub Pump (spa pump).
+    pub const SPA_PUMP: Self = Self::new("spa_pump");
+    /// Standard spa/hot-tub heater end use.
+    /// HPXML: Hot Tub Heater (spa heater).
+    pub const SPA_HEATER: Self = Self::new("spa_heater");
+    /// Standard ceiling fan end use.
+    /// HPXML: Ceiling Fan (fans distinct from whole-house ventilation).
+    pub const CEILING_FAN: Self = Self::new("ceiling_fan");
     /// Returns true if this end use represents HVAC equipment.
     ///
     /// HVAC end uses cover space heating, cooling, and dehumidification —
@@ -120,6 +144,14 @@ impl EndUse {
                 | "pv"
                 | "ev"
                 | "generator"
+                | "cooking"
+                | "laundry"
+                | "dishwasher"
+                | "pool_pump"
+                | "pool_heater"
+                | "spa_pump"
+                | "spa_heater"
+                | "ceiling_fan"
                 | "dehumidifier"
                 | "other"
         )
@@ -1274,6 +1306,14 @@ mod tests {
         assert_eq!(EndUse::PV.as_str(), "pv");
         assert_eq!(EndUse::EV.as_str(), "ev");
         assert_eq!(EndUse::GENERATOR.as_str(), "generator");
+        assert_eq!(EndUse::COOKING.as_str(), "cooking");
+        assert_eq!(EndUse::LAUNDRY.as_str(), "laundry");
+        assert_eq!(EndUse::DISHWASHER.as_str(), "dishwasher");
+        assert_eq!(EndUse::POOL_PUMP.as_str(), "pool_pump");
+        assert_eq!(EndUse::POOL_HEATER.as_str(), "pool_heater");
+        assert_eq!(EndUse::SPA_PUMP.as_str(), "spa_pump");
+        assert_eq!(EndUse::SPA_HEATER.as_str(), "spa_heater");
+        assert_eq!(EndUse::CEILING_FAN.as_str(), "ceiling_fan");
         assert_eq!(EndUse::DEHUMIDIFIER.as_str(), "dehumidifier");
         assert_eq!(EndUse::OTHER.as_str(), "other");
     }
@@ -1307,6 +1347,14 @@ mod tests {
         assert!(EndUse::HVAC_HEATING.is_standard());
         assert!(EndUse::BATTERY.is_standard());
         assert!(EndUse::OTHER.is_standard());
+        assert!(EndUse::COOKING.is_standard());
+        assert!(EndUse::LAUNDRY.is_standard());
+        assert!(EndUse::DISHWASHER.is_standard());
+        assert!(EndUse::POOL_PUMP.is_standard());
+        assert!(EndUse::POOL_HEATER.is_standard());
+        assert!(EndUse::SPA_PUMP.is_standard());
+        assert!(EndUse::SPA_HEATER.is_standard());
+        assert!(EndUse::CEILING_FAN.is_standard());
     }
 
     #[test]
@@ -2544,4 +2592,19 @@ mod tests {
         assert!(FuelPower::new(FuelType::Gas, f64::NAN).is_err());
         assert!(FuelPower::new(FuelType::Gas, f64::INFINITY).is_err());
     }
+
+    // all_standard test deferred to T-1267: `EndUse::all_standard()` does not yet
+    // exist. Uncomment when T-1267 lands and `all_standard()` is available.
+    // #[test]
+    // fn all_standard_includes_new_end_use_constants() {
+    //     let all = EndUse::all_standard();
+    //     assert!(all.contains(&EndUse::COOKING));
+    //     assert!(all.contains(&EndUse::LAUNDRY));
+    //     assert!(all.contains(&EndUse::DISHWASHER));
+    //     assert!(all.contains(&EndUse::POOL_PUMP));
+    //     assert!(all.contains(&EndUse::POOL_HEATER));
+    //     assert!(all.contains(&EndUse::SPA_PUMP));
+    //     assert!(all.contains(&EndUse::SPA_HEATER));
+    //     assert!(all.contains(&EndUse::CEILING_FAN));
+    // }
 }

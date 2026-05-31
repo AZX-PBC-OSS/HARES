@@ -357,6 +357,41 @@ pub struct ScheduledLoad {
     power_source: ScheduleSource,
 }
 
+/// Warns if a scheduled load template uses `EndUse::OTHER` when a more
+/// specific standard end-use constant exists. This is a construction-time
+/// invariant check gated behind `debug_assertions` or `check_invariants`.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn check_other_end_use_for_known_template(equipment_type: &str) {
+    // Template names that now have dedicated `EndUse` constants per HPXML 4.2.
+    // This is a best-effort guard — a false positive (template renamed) is a
+    // compile-time cue to update the check; a missing entry here means
+    // the invariant is silently not checked for that template.
+    let known = matches!(
+        equipment_type,
+        "Pool Pump"
+            | "Pool Heater"
+            | "Spa Pump"
+            | "Spa Heater"
+            | "Gas Grill"
+            | "Ceiling Fan"
+            | "Refrigerator"
+            | "Freezer"
+            | "MELs"
+            | "TV"
+            | "Well Pump"
+    );
+    if known {
+        tracing::warn!(
+            equipment_type = %equipment_type,
+            "ScheduledLoad template '{equipment_type}' uses EndUse::OTHER but a more \
+             specific standard end-use constant exists (POOL_PUMP, POOL_HEATER, \
+             SPA_PUMP, SPA_HEATER, COOKING, CEILING_FAN, REFRIGERATION, PLUG_LOADS, \
+             or LIGHTING). Update the registry entry to use the correct EndUse \
+             constant so energy can be disaggregated by HPXML-aligned end-use."
+        );
+    }
+}
+
 impl ScheduledLoad {
     #[must_use]
     pub fn new(config: EquipmentConfig, end_use: EndUse, equipment_type: &'static str) -> Self {
@@ -377,6 +412,13 @@ impl ScheduledLoad {
             // the ZoneMap for name-based auto-routing (garage, basement, etc.).
             None
         };
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if end_use == EndUse::OTHER {
+                check_other_end_use_for_known_template(equipment_type);
+            }
+        }
+
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(parse_u32(&config, KEY_EQUIPMENT_ID).unwrap_or_default()),
             name: config.name,
@@ -1039,26 +1081,35 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     );
     registry.register(
         "Pool Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Pool Pump"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::POOL_PUMP, "Pool Pump"))),
     );
     registry.register(
         "Pool Heater",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Pool Heater"))),
+        Box::new(|config| {
+            Box::new(ScheduledLoad::new(
+                config,
+                EndUse::POOL_HEATER,
+                "Pool Heater",
+            ))
+        }),
     );
     registry.register(
         "Spa Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Spa Pump"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::SPA_PUMP, "Spa Pump"))),
     );
     registry.register(
         "Spa Heater",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Spa Heater"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::SPA_HEATER, "Spa Heater"))),
     );
 
     // Gas appliances
     registry.register(
         "Gas Grill",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Gas Grill"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::COOKING, "Gas Grill"))),
     );
+    // Gas Fireplace has no direct HPXML EndUse equivalent — it is neither Cooking,
+    // Heating (it's decorative/ambient), nor an appliance category in HPXML 4.2 §3.
+    // Keep as OTHER until the HPXML data dictionary gains a Fireplace end-use.
     registry.register(
         "Gas Fireplace",
         Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Gas Fireplace"))),
@@ -1074,7 +1125,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         Box::new(|config| {
             Box::new(ScheduledLoad::new(
                 config,
-                EndUse::VENTILATION,
+                EndUse::CEILING_FAN,
                 "Ceiling Fan",
             ))
         }),
@@ -2112,6 +2163,54 @@ mod tests {
     }
 
     #[test]
+    fn pool_pump_template_uses_pool_pump_end_use() {
+        let config = config_with_extras("pp", "Pool Pump", &[1.0], &[]);
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::POOL_PUMP, "Pool Pump");
+        assert_eq!(eq.descriptor().end_use, hares_types::EndUse::POOL_PUMP);
+        assert_ne!(eq.descriptor().end_use, hares_types::EndUse::OTHER);
+    }
+
+    #[test]
+    fn pool_heater_template_uses_pool_heater_end_use() {
+        let config = config_with_extras("ph", "Pool Heater", &[1.0], &[]);
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::POOL_HEATER, "Pool Heater");
+        assert_eq!(eq.descriptor().end_use, hares_types::EndUse::POOL_HEATER);
+        assert_ne!(eq.descriptor().end_use, hares_types::EndUse::OTHER);
+    }
+
+    #[test]
+    fn spa_pump_template_uses_spa_pump_end_use() {
+        let config = config_with_extras("sp", "Spa Pump", &[1.0], &[]);
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::SPA_PUMP, "Spa Pump");
+        assert_eq!(eq.descriptor().end_use, hares_types::EndUse::SPA_PUMP);
+        assert_ne!(eq.descriptor().end_use, hares_types::EndUse::OTHER);
+    }
+
+    #[test]
+    fn spa_heater_template_uses_spa_heater_end_use() {
+        let config = config_with_extras("sh", "Spa Heater", &[1.0], &[]);
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::SPA_HEATER, "Spa Heater");
+        assert_eq!(eq.descriptor().end_use, hares_types::EndUse::SPA_HEATER);
+        assert_ne!(eq.descriptor().end_use, hares_types::EndUse::OTHER);
+    }
+
+    #[test]
+    fn gas_grill_template_uses_cooking_end_use() {
+        let config = config_with_extras("gg", "Gas Grill", &[1.0], &[]);
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::COOKING, "Gas Grill");
+        assert_eq!(eq.descriptor().end_use, hares_types::EndUse::COOKING);
+        assert_ne!(eq.descriptor().end_use, hares_types::EndUse::OTHER);
+    }
+
+    #[test]
+    fn ceiling_fan_template_uses_ceiling_fan_end_use() {
+        let config = config_with_extras("cf", "Ceiling Fan", &[1.0], &[]);
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::CEILING_FAN, "Ceiling Fan");
+        assert_eq!(eq.descriptor().end_use, hares_types::EndUse::CEILING_FAN);
+        assert_ne!(eq.descriptor().end_use, hares_types::EndUse::VENTILATION);
+    }
+
+    #[test]
     fn load_fraction_scales_gas_output() {
         let config = config_with_extras(
             "s",
@@ -2123,7 +2222,7 @@ mod tests {
                 (KEY_GAS_CONSTANT, 0.2.into()),
             ],
         );
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::OTHER, "Gas Grill");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::COOKING, "Gas Grill");
         let env = base_env();
         eq.init(&config, &env).unwrap();
         eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.5 })
@@ -2155,7 +2254,7 @@ mod tests {
         );
         let mut eq = ScheduledLoad::new(
             config.clone(),
-            hares_types::EndUse::VENTILATION,
+            hares_types::EndUse::CEILING_FAN,
             "Ceiling Fan",
         );
         let mut env = base_env();

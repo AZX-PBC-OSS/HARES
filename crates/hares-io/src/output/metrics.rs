@@ -1694,19 +1694,14 @@ mod tests {
         );
 
         // Battery is not HVAC.
-        let battery_schema = schema_from_columns(&[
-            TOTAL_ELECTRIC_POWER_KW,
-            "Battery Electric Power (kW)",
-        ]);
+        let battery_schema =
+            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "Battery Electric Power (kW)"]);
         assert!(
             !schema_has_equipment_for(&battery_schema, &hares_types::EndUse::HVAC_HEATING),
             "must NOT detect Battery as HVAC_HEATING equipment"
         );
         assert!(
-            !schema_has_equipment_for(
-                &battery_schema,
-                &hares_types::EndUse::HVAC_COOLING
-            ),
+            !schema_has_equipment_for(&battery_schema, &hares_types::EndUse::HVAC_COOLING),
             "must NOT detect Battery as HVAC_COOLING equipment"
         );
 
