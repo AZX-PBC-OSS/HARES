@@ -26,7 +26,7 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use crate::config::KEY_EQUIPMENT_ID;
 
@@ -1132,20 +1132,29 @@ impl Equipment for PV {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&PvCheckpoint {
-            power_limit_kw: self.power_limit_kw,
-            curtailment_fraction: self.curtailment_fraction,
-            q_setpoint_kvar: self.q_setpoint_kvar,
-            inverter_priority: self.inverter_priority,
-            power_factor: self.power_factor,
-            soiling_config: self.soiling_config.clone(),
-            soiling_state: self.soiling_state.clone(),
-            shading_model: self.shading_model.clone(),
-        })
+        save_versioned(
+            &PvCheckpoint {
+                power_limit_kw: self.power_limit_kw,
+                curtailment_fraction: self.curtailment_fraction,
+                q_setpoint_kvar: self.q_setpoint_kvar,
+                inverter_priority: self.inverter_priority,
+                power_factor: self.power_factor,
+                soiling_config: self.soiling_config.clone(),
+                soiling_state: self.soiling_state.clone(),
+                shading_model: self.shading_model.clone(),
+            },
+            Self::checkpoint_version(),
+            "PV",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: PvCheckpoint = load_postcard(state)?;
+        let decoded: PvCheckpoint = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "PV",
+            self.descriptor().id,
+        )?;
         self.power_limit_kw = decoded.power_limit_kw;
         self.curtailment_fraction = decoded.curtailment_fraction;
         self.q_setpoint_kvar = decoded.q_setpoint_kvar;

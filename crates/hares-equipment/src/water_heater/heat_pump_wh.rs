@@ -16,7 +16,7 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 pub use super::hpwh_compressor::ElementHpControlMode;
 use super::hpwh_compressor::{
@@ -913,47 +913,56 @@ impl Equipment for HeatPumpWH {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&HpwhState {
-            setpoint_c: self.setpoint_c,
-            target_setpoint_c: self.target_setpoint_c,
-            deadband_c: self.deadband_c,
-            compressor_on: self.compressor_on,
-            backup_on: self.backup_on,
-            duty_cycle: self.duty_cycle,
-            hp_duty_cycle: self.hp_duty_cycle,
-            er_duty_cycle: self.er_duty_cycle,
-            mode_override: self.mode_override,
-            element_hp_control: self.element_hp_control,
-            tank_state: self.tank.save_state(),
-            tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
-            cop: self.telemetry.get(tk::COP).unwrap_or(0.0),
-            cap_mult: self.telemetry.get(tk::CAP_MULT).unwrap_or(1.0),
-            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-            compressor_power_w: self.telemetry.get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0),
-            backup_element_power_w: self
-                .telemetry
-                .get(tk::BACKUP_ELEMENT_POWER_W)
-                .unwrap_or(0.0),
-            zone_heat_extraction_w: self
-                .telemetry
-                .get(tk::ZONE_HEAT_EXTRACTION_W)
-                .unwrap_or(0.0),
-            wall_sensible_gain_w: self.telemetry.get(tk::WALL_SENSIBLE_GAIN_W).unwrap_or(0.0),
-            unmet_load_w: self.telemetry.get(tk::UNMET_LOAD_W).unwrap_or(0.0),
-            draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
-            compressor_on_since_s: self.compressor_on_since_s,
-            compressor_off_since_s: self.compressor_off_since_s,
-            min_on_time_s: self.min_on_time_s,
-            min_off_time_s: self.min_off_time_s,
-            dr_level: self.dr_level,
-            dr_setpoint_offset_c: self.dr_setpoint_offset_c,
-            dr_load_fraction: self.dr_load_fraction,
-            dr_duration_remaining_s: self.dr_duration_remaining_s,
-        })
+        save_versioned(
+            &HpwhState {
+                setpoint_c: self.setpoint_c,
+                target_setpoint_c: self.target_setpoint_c,
+                deadband_c: self.deadband_c,
+                compressor_on: self.compressor_on,
+                backup_on: self.backup_on,
+                duty_cycle: self.duty_cycle,
+                hp_duty_cycle: self.hp_duty_cycle,
+                er_duty_cycle: self.er_duty_cycle,
+                mode_override: self.mode_override,
+                element_hp_control: self.element_hp_control,
+                tank_state: self.tank.save_state(),
+                tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
+                cop: self.telemetry.get(tk::COP).unwrap_or(0.0),
+                cap_mult: self.telemetry.get(tk::CAP_MULT).unwrap_or(1.0),
+                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                compressor_power_w: self.telemetry.get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0),
+                backup_element_power_w: self
+                    .telemetry
+                    .get(tk::BACKUP_ELEMENT_POWER_W)
+                    .unwrap_or(0.0),
+                zone_heat_extraction_w: self
+                    .telemetry
+                    .get(tk::ZONE_HEAT_EXTRACTION_W)
+                    .unwrap_or(0.0),
+                wall_sensible_gain_w: self.telemetry.get(tk::WALL_SENSIBLE_GAIN_W).unwrap_or(0.0),
+                unmet_load_w: self.telemetry.get(tk::UNMET_LOAD_W).unwrap_or(0.0),
+                draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
+                compressor_on_since_s: self.compressor_on_since_s,
+                compressor_off_since_s: self.compressor_off_since_s,
+                min_on_time_s: self.min_on_time_s,
+                min_off_time_s: self.min_off_time_s,
+                dr_level: self.dr_level,
+                dr_setpoint_offset_c: self.dr_setpoint_offset_c,
+                dr_load_fraction: self.dr_load_fraction,
+                dr_duration_remaining_s: self.dr_duration_remaining_s,
+            },
+            Self::checkpoint_version(),
+            "HeatPumpWH",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: HpwhState = load_postcard(state)?;
+        let decoded: HpwhState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "HeatPumpWH",
+            self.descriptor().id,
+        )?;
         self.setpoint_c = decoded.setpoint_c;
         self.target_setpoint_c = decoded.target_setpoint_c;
         self.deadband_c = decoded.deadband_c;

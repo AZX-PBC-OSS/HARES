@@ -68,9 +68,7 @@ pub fn run_fleet_scale_check() -> Result<(), Vec<String>> {
         failures.push(format!("... and {} more failures", fail_count - 5));
     }
 
-    eprintln!(
-        "[fleet_scale] {FLEET_SIZE} dwellings: {ok_count} ok, {fail_count} failed"
-    );
+    eprintln!("[fleet_scale] {FLEET_SIZE} dwellings: {ok_count} ok, {fail_count} failed");
 
     helpers::cleanup_paths(&[schedule_path, weather_path]);
 

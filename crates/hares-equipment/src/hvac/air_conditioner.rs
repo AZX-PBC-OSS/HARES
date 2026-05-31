@@ -19,7 +19,7 @@ use hares_types::telemetry_keys as tk;
 
 #[cfg(test)]
 use crate::HvacSetpointConfig;
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use super::ac_config::{
     CentralAirConditionerConfig, RoomAcConfig, default_telemetry, load_curve_pair, telemetry_fields,
@@ -155,6 +155,8 @@ struct AirConditionerState {
     time_at_current_speed_s: f64,
 }
 
+const AC_CHECKPOINT_VERSION: u32 = 1;
+
 #[derive(Clone, Copy)]
 struct PerformanceResult {
     sensible_cooling_w: f64,
@@ -253,6 +255,10 @@ impl RoomAC {
 }
 
 impl Equipment for AirConditioner {
+    fn checkpoint_version() -> u32 {
+        AC_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.core.descriptor
     }
@@ -308,6 +314,10 @@ impl Equipment for AirConditioner {
 }
 
 impl Equipment for RoomAC {
+    fn checkpoint_version() -> u32 {
+        AC_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.core.descriptor
     }
@@ -1462,48 +1472,57 @@ impl CoolingCore {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&AirConditionerState {
-            mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.runtime.duty_cycle,
-            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
-            mode_start_at: self.hvac.thermostat_fsm.mode_start_at,
-            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
-            operating_mode: self.operating_mode,
-            run_time_s: self.run_time_s,
-            cycle_on_steps: self.cycle_on_steps,
-            cycle_off_steps: self.cycle_off_steps,
-            crankcase_heater_on: self.crankcase_heater_on,
-            startup_c_d: self.hvac.runtime.startup.c_d,
-            startup_time_since_start_min: self.hvac.runtime.startup.time_since_start_min,
-            plf_state: self.hvac.runtime.plf_state,
-            last_speed_index: self.hvac.runtime.last_speed_index,
-            last_speed_frac: self.hvac.runtime.last_speed_frac,
-            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-            sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
-            latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
-            shr: self.telemetry.get(tk::SHR).unwrap_or(self.hvac.config.shr),
-            operating_mode_code: self.telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0),
-            ctrl_duty_cycle: self.ctrl_duty_cycle,
-            ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
-                Some(self.ctrl_power_limit_kw)
-            } else {
-                None
+        save_versioned(
+            &AirConditionerState {
+                mode: self.hvac.thermostat_fsm.mode,
+                duty_cycle: self.hvac.runtime.duty_cycle,
+                last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+                mode_start_at: self.hvac.thermostat_fsm.mode_start_at,
+                runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                operating_mode: self.operating_mode,
+                run_time_s: self.run_time_s,
+                cycle_on_steps: self.cycle_on_steps,
+                cycle_off_steps: self.cycle_off_steps,
+                crankcase_heater_on: self.crankcase_heater_on,
+                startup_c_d: self.hvac.runtime.startup.c_d,
+                startup_time_since_start_min: self.hvac.runtime.startup.time_since_start_min,
+                plf_state: self.hvac.runtime.plf_state,
+                last_speed_index: self.hvac.runtime.last_speed_index,
+                last_speed_frac: self.hvac.runtime.last_speed_frac,
+                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
+                latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
+                shr: self.telemetry.get(tk::SHR).unwrap_or(self.hvac.config.shr),
+                operating_mode_code: self.telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0),
+                ctrl_duty_cycle: self.ctrl_duty_cycle,
+                ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
+                    Some(self.ctrl_power_limit_kw)
+                } else {
+                    None
+                },
+                ctrl_mode_override: self.ctrl_mode_override,
+                dr_level: self.dr_level,
+                dr_setpoint_offset_c: self.dr_setpoint_offset_c,
+                dr_load_fraction: self.dr_load_fraction,
+                dr_duty_cycle: self.dr_duty_cycle,
+                dr_duration_remaining_s: self.dr_duration_remaining_s,
+                last_adp_c: self.last_adp_c,
+                last_bypass_factor: self.last_bypass_factor,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
+                time_at_current_speed_s: self.hvac.runtime.time_at_current_speed_s,
             },
-            ctrl_mode_override: self.ctrl_mode_override,
-            dr_level: self.dr_level,
-            dr_setpoint_offset_c: self.dr_setpoint_offset_c,
-            dr_load_fraction: self.dr_load_fraction,
-            dr_duty_cycle: self.dr_duty_cycle,
-            dr_duration_remaining_s: self.dr_duration_remaining_s,
-            last_adp_c: self.last_adp_c,
-            last_bypass_factor: self.last_bypass_factor,
-            thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
-            time_at_current_speed_s: self.hvac.runtime.time_at_current_speed_s,
-        })
+            AC_CHECKPOINT_VERSION,
+            "AirConditioner",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: AirConditionerState = load_postcard(state)?;
+        let decoded: AirConditionerState = load_versioned(
+            state,
+            AC_CHECKPOINT_VERSION,
+            "AirConditioner",
+            self.descriptor.id,
+        )?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;

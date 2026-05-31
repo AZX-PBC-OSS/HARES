@@ -3,6 +3,9 @@
 
 use chrono::Duration;
 use hares_core::Dwelling;
+use hares_equipment::{load_versioned, save_versioned};
+use hares_types::EquipmentId;
+use serde::{Deserialize, Serialize};
 
 use super::helpers;
 
@@ -26,11 +29,13 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
 
     // --- Uninterrupted reference run ---
-    let mut dwelling_ref = match Dwelling::new(config.clone()) {
+    let mut dwelling_ref = match Dwelling::from_config(config.clone()) {
         Ok(d) => d,
         Err(err) => {
             helpers::cleanup_paths(&[schedule_path, weather_path]);
-            return Err(vec![format!("reference dwelling construction failed: {err}")]);
+            return Err(vec![format!(
+                "reference dwelling construction failed: {err}"
+            )]);
         }
     };
 
@@ -43,7 +48,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     };
 
     // --- Interrupted run: step to checkpoint, save, recreate, load, continue ---
-    let mut dwelling_a = match Dwelling::new(config.clone()) {
+    let mut dwelling_a = match Dwelling::from_config(config.clone()) {
         Ok(d) => d,
         Err(err) => {
             helpers::cleanup_paths(&[schedule_path, weather_path]);
@@ -77,7 +82,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
         }
     };
 
-    let mut dwelling_b = match Dwelling::new(config) {
+    let mut dwelling_b = match Dwelling::from_config(config) {
         Ok(d) => d,
         Err(err) => {
             helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
@@ -111,7 +116,8 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
             let ref_step = &ref_tail[i];
             let rst_step = &restarted_steps[i];
 
-            let power_diff = (ref_step.net_electric_power_kw - rst_step.net_electric_power_kw).abs();
+            let power_diff =
+                (ref_step.net_electric_power_kw - rst_step.net_electric_power_kw).abs();
             if power_diff > 1e-9 {
                 failures.push(format!(
                     "step[{}] power divergence after checkpoint: ref={:.9} restart={:.9} diff={:.2e}",
@@ -132,5 +138,37 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
         Ok(())
     } else {
         Err(failures)
+    }
+}
+
+/// Regression: a postcard blob with a wrong per-equipment version is rejected
+/// with a descriptive error naming the equipment type and expected/found versions.
+pub fn run_per_equipment_version_rejection_regression() -> Result<(), Vec<String>> {
+    #[derive(Serialize, Deserialize)]
+    struct FakeState {
+        val: f64,
+    }
+
+    let state = FakeState { val: 42.0 };
+    let mut blob = save_versioned(&state, 1, "FakeEquip");
+    // Corrupt version byte
+    blob[0] = 99;
+
+    let result = load_versioned::<FakeState>(&blob, 1, "FakeEquip", EquipmentId(42));
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("FakeEquip") && msg.contains("99") && msg.contains("1") {
+                eprintln!("[per_equipment_version_rejection] PASS");
+                Ok(())
+            } else {
+                Err(vec![format!(
+                    "error message missing expected detail; got: {msg}"
+                )])
+            }
+        }
+        Ok(_) => Err(vec![
+            "version mismatch blob should have been rejected but was accepted".to_string(),
+        ]),
     }
 }

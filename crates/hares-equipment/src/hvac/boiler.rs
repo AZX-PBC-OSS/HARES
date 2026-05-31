@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use hares_types::telemetry_keys as tk;
 
 use crate::hvac::heating_config::{ElectricBoilerConfig, GasBoilerConfig};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
@@ -328,24 +328,33 @@ impl Equipment for ElectricBoiler {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&BoilerState {
-            mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.runtime.duty_cycle,
-            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
-            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
-            operating_mode: self.operating_mode,
-            run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-            fuel_input_w: 0.0,
-            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
-            eir: self.eir,
-            supply_temp_c: self.telemetry.get(tk::SUPPLY_TEMP_C).unwrap_or(0.0),
-            return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
-        })
+        save_versioned(
+            &BoilerState {
+                mode: self.hvac.thermostat_fsm.mode,
+                duty_cycle: self.hvac.runtime.duty_cycle,
+                last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+                runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                operating_mode: self.operating_mode,
+                run_time_s: self.run_time_s,
+                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                fuel_input_w: 0.0,
+                thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+                eir: self.eir,
+                supply_temp_c: self.telemetry.get(tk::SUPPLY_TEMP_C).unwrap_or(0.0),
+                return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
+            },
+            Self::checkpoint_version(),
+            "ElectricBoiler",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: BoilerState = load_postcard(state)?;
+        let decoded: BoilerState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "ElectricBoiler",
+            self.descriptor().id,
+        )?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
@@ -667,24 +676,33 @@ impl Equipment for GasBoiler {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&BoilerState {
-            mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.runtime.duty_cycle,
-            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
-            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
-            operating_mode: self.operating_mode,
-            run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-            fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
-            eir: self.telemetry.get(tk::EIR).unwrap_or(self.eir_max),
-            supply_temp_c: self.telemetry.get(tk::SUPPLY_TEMP_C).unwrap_or(0.0),
-            return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
-        })
+        save_versioned(
+            &BoilerState {
+                mode: self.hvac.thermostat_fsm.mode,
+                duty_cycle: self.hvac.runtime.duty_cycle,
+                last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+                runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                operating_mode: self.operating_mode,
+                run_time_s: self.run_time_s,
+                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
+                thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+                eir: self.telemetry.get(tk::EIR).unwrap_or(self.eir_max),
+                supply_temp_c: self.telemetry.get(tk::SUPPLY_TEMP_C).unwrap_or(0.0),
+                return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
+            },
+            Self::checkpoint_version(),
+            "GasBoiler",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: BoilerState = load_postcard(state)?;
+        let decoded: BoilerState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "GasBoiler",
+            self.descriptor().id,
+        )?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;

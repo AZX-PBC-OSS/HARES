@@ -4,8 +4,8 @@ use std::{f64::consts::PI, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Result, load_postcard, save_postcard};
-use hares_types::{HaresError, telemetry_keys as tk};
+use crate::{Result, load_versioned, save_versioned};
+use hares_types::{EquipmentId, HaresError, telemetry_keys as tk};
 
 use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 
@@ -13,6 +13,9 @@ use hares_physics::water_density_kg_m3;
 
 const MIN_NODES: usize = 1;
 const MAX_NODES: usize = 12;
+
+/// Version of the `StratifiedTankState` postcard checkpoint format.
+const STRATIFIED_TANK_CHECKPOINT_VERSION: u32 = 1;
 
 /// Configuration for a stratified tank.
 #[derive(Debug, Clone)]
@@ -526,13 +529,22 @@ impl StratifiedTank {
     }
 
     pub fn save_state(&self) -> Vec<u8> {
-        save_postcard(&StratifiedTankState {
-            node_temps_c: self.node_temps_c.clone(),
-        })
+        save_versioned(
+            &StratifiedTankState {
+                node_temps_c: self.node_temps_c.clone(),
+            },
+            STRATIFIED_TANK_CHECKPOINT_VERSION,
+            "StratifiedTank",
+        )
     }
 
     pub fn load_state(&mut self, state: &[u8]) -> Result<()> {
-        let decoded: StratifiedTankState = load_postcard(state)?;
+        let decoded: StratifiedTankState = load_versioned(
+            state,
+            STRATIFIED_TANK_CHECKPOINT_VERSION,
+            "StratifiedTank",
+            EquipmentId(0),
+        )?;
         if decoded.node_temps_c.len() != self.n_nodes() {
             return Err(HaresError::Equipment(format!(
                 "state node count {} does not match tank node count {}",

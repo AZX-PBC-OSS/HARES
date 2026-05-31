@@ -17,7 +17,7 @@ use hares_types::telemetry_keys as tk;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::hvac::heating_config::{ElectricFurnaceConfig, GasFurnaceConfig};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
@@ -316,25 +316,34 @@ impl Equipment for ElectricFurnace {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&FurnaceState {
-            mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.runtime.duty_cycle,
-            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
-            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
-            operating_mode: self.operating_mode,
-            run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
-            fuel_input_w: 0.0,
-            speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
-            runtime_fraction: self.telemetry.get(tk::RUNTIME_FRACTION).unwrap_or(0.0),
-            main_power_kw: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
-            duct_loss_w: self.telemetry.get(tk::DUCT_LOSS_W).unwrap_or(0.0),
-        })
+        save_versioned(
+            &FurnaceState {
+                mode: self.hvac.thermostat_fsm.mode,
+                duty_cycle: self.hvac.runtime.duty_cycle,
+                last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+                runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                operating_mode: self.operating_mode,
+                run_time_s: self.run_time_s,
+                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+                fuel_input_w: 0.0,
+                speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
+                runtime_fraction: self.telemetry.get(tk::RUNTIME_FRACTION).unwrap_or(0.0),
+                main_power_kw: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
+                duct_loss_w: self.telemetry.get(tk::DUCT_LOSS_W).unwrap_or(0.0),
+            },
+            Self::checkpoint_version(),
+            "ElectricFurnace",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: FurnaceState = load_postcard(state)?;
+        let decoded: FurnaceState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "ElectricFurnace",
+            self.descriptor().id,
+        )?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
@@ -639,25 +648,34 @@ impl Equipment for GasFurnace {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&FurnaceState {
-            mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.runtime.duty_cycle,
-            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
-            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
-            operating_mode: self.operating_mode,
-            run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
-            fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
-            speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
-            runtime_fraction: self.telemetry.get(tk::RUNTIME_FRACTION).unwrap_or(0.0),
-            main_power_kw: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
-            duct_loss_w: self.telemetry.get(tk::DUCT_LOSS_W).unwrap_or(0.0),
-        })
+        save_versioned(
+            &FurnaceState {
+                mode: self.hvac.thermostat_fsm.mode,
+                duty_cycle: self.hvac.runtime.duty_cycle,
+                last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+                runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                operating_mode: self.operating_mode,
+                run_time_s: self.run_time_s,
+                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+                fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
+                speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
+                runtime_fraction: self.telemetry.get(tk::RUNTIME_FRACTION).unwrap_or(0.0),
+                main_power_kw: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
+                duct_loss_w: self.telemetry.get(tk::DUCT_LOSS_W).unwrap_or(0.0),
+            },
+            Self::checkpoint_version(),
+            "GasFurnace",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: FurnaceState = load_postcard(state)?;
+        let decoded: FurnaceState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "GasFurnace",
+            self.descriptor().id,
+        )?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
@@ -1248,6 +1266,40 @@ mod tests {
         let state = eq.save_state();
 
         let mut restored = ElectricFurnace::new(cfg.clone());
+        restored.init(&cfg, &env).unwrap();
+        restored.load_state(&state).unwrap();
+        assert_eq!(
+            restored.telemetry().get(tk::ELECTRIC_KW),
+            eq.telemetry().get(tk::ELECTRIC_KW)
+        );
+    }
+
+    #[test]
+    fn gas_furnace_state_round_trip_preserves_mode_and_outputs() {
+        let cfg = EquipmentConfig::from_typed(
+            "GF".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                afue: 0.8,
+                capacity_w: 10_000.0,
+                fan_power_w: Some(0.0),
+                zone_id: Some(1),
+                ..GasFurnaceConfig::default()
+            },
+        );
+        let mut eq = GasFurnace::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let state = eq.save_state();
+
+        let mut restored = GasFurnace::new(cfg.clone());
         restored.init(&cfg, &env).unwrap();
         restored.load_state(&state).unwrap();
         assert_eq!(

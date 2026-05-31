@@ -50,7 +50,7 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 
 use crate::protocol_bridge::handler::{EquipmentCommand, ProtocolHandler};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 pub use config::ProtocolBridgeConfig;
 pub use handler::JsonHandler;
@@ -249,15 +249,24 @@ impl Equipment for ProtocolBridge {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&ProtocolBridgeCheckpoint {
-            dispatch_count: self.dispatch_count,
-            total_commands_parsed: self.total_commands_parsed,
-            parse_error_count: self.parse_error_count,
-        })
+        save_versioned(
+            &ProtocolBridgeCheckpoint {
+                dispatch_count: self.dispatch_count,
+                total_commands_parsed: self.total_commands_parsed,
+                parse_error_count: self.parse_error_count,
+            },
+            Self::checkpoint_version(),
+            "ProtocolBridge",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let cp: ProtocolBridgeCheckpoint = load_postcard(state)?;
+        let cp: ProtocolBridgeCheckpoint = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "ProtocolBridge",
+            self.descriptor().id,
+        )?;
         self.dispatch_count = cp.dispatch_count;
         self.total_commands_parsed = cp.total_commands_parsed;
         self.parse_error_count = cp.parse_error_count;

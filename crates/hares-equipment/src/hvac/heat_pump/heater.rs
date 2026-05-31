@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
-use crate::{Equipment, EquipmentConfig, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, load_versioned, save_versioned};
 
 use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
@@ -241,6 +241,8 @@ struct HeaterState {
     time_at_current_speed_s: f64,
 }
 
+const HEATER_CHECKPOINT_VERSION: u32 = 1;
+
 #[derive(Clone, Copy)]
 struct HeaterControl {
     hp_on: bool,
@@ -366,6 +368,10 @@ impl WshpHeater {
 }
 
 impl Equipment for HeatPumpHeaterCore {
+    fn checkpoint_version() -> u32 {
+        HEATER_CHECKPOINT_VERSION
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -2235,55 +2241,64 @@ impl HeatPumpHeaterCore {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&HeaterState {
-            mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.runtime.duty_cycle,
-            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
-            mode_start_at: self.hvac.thermostat_fsm.mode_start_at,
-            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
-            operating_mode: self.operating_mode,
-            run_time_s: self.run_time_s,
-            cycle_on_steps: self.cycle_on_steps,
-            cycle_off_steps: self.cycle_off_steps,
-            defrost_active: self.defrost_active,
-            defrost_time_fraction: self.defrost_time_fraction,
-            defrost_accumulator_s: self.defrost_accumulator_s,
-            defrost_cycle_tracker: self.defrost_cycle_tracker.clone(),
-            pan_heater_on: self.pan_heater_on,
-            last_er_off_at: self.last_er_off_at,
-            last_speed_index: self.hvac.runtime.last_speed_index,
-            last_speed_frac: self.hvac.runtime.last_speed_frac,
-            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
-            speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
-            operating_mode_code: self.telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0),
-            prev_base_setpoint: self.prev_base_setpoint,
-            er_lockout_remaining_s: self.er_lockout_remaining_s,
-            prev_zone_temp_c: self.prev_zone_temp_c,
-            er_soft_lockout: self.er_soft_lockout,
-            soft_lockout_elapsed_s: self.soft_lockout_elapsed_s,
-            ctrl_duty_cycle: self.ctrl_duty_cycle,
-            ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
-                Some(self.ctrl_power_limit_kw)
-            } else {
-                None
+        save_versioned(
+            &HeaterState {
+                mode: self.hvac.thermostat_fsm.mode,
+                duty_cycle: self.hvac.runtime.duty_cycle,
+                last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+                mode_start_at: self.hvac.thermostat_fsm.mode_start_at,
+                runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                operating_mode: self.operating_mode,
+                run_time_s: self.run_time_s,
+                cycle_on_steps: self.cycle_on_steps,
+                cycle_off_steps: self.cycle_off_steps,
+                defrost_active: self.defrost_active,
+                defrost_time_fraction: self.defrost_time_fraction,
+                defrost_accumulator_s: self.defrost_accumulator_s,
+                defrost_cycle_tracker: self.defrost_cycle_tracker.clone(),
+                pan_heater_on: self.pan_heater_on,
+                last_er_off_at: self.last_er_off_at,
+                last_speed_index: self.hvac.runtime.last_speed_index,
+                last_speed_frac: self.hvac.runtime.last_speed_frac,
+                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+                speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
+                operating_mode_code: self.telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0),
+                prev_base_setpoint: self.prev_base_setpoint,
+                er_lockout_remaining_s: self.er_lockout_remaining_s,
+                prev_zone_temp_c: self.prev_zone_temp_c,
+                er_soft_lockout: self.er_soft_lockout,
+                soft_lockout_elapsed_s: self.soft_lockout_elapsed_s,
+                ctrl_duty_cycle: self.ctrl_duty_cycle,
+                ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
+                    Some(self.ctrl_power_limit_kw)
+                } else {
+                    None
+                },
+                ctrl_mode_override: self.ctrl_mode_override,
+                dr_level: self.dr_level,
+                dr_setpoint_offset_c: self.dr_setpoint_offset_c,
+                dr_load_fraction: self.dr_load_fraction,
+                dr_duty_cycle: self.dr_duty_cycle,
+                dr_duration_remaining_s: self.dr_duration_remaining_s,
+                max_oat_supplemental_c: self.max_oat_supplemental_c,
+                hp_available: self.hp_available,
+                er_was_on: self.er_was_on,
+                thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
+                time_at_current_speed_s: self.hvac.runtime.time_at_current_speed_s,
             },
-            ctrl_mode_override: self.ctrl_mode_override,
-            dr_level: self.dr_level,
-            dr_setpoint_offset_c: self.dr_setpoint_offset_c,
-            dr_load_fraction: self.dr_load_fraction,
-            dr_duty_cycle: self.dr_duty_cycle,
-            dr_duration_remaining_s: self.dr_duration_remaining_s,
-            max_oat_supplemental_c: self.max_oat_supplemental_c,
-            hp_available: self.hp_available,
-            er_was_on: self.er_was_on,
-            thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
-            time_at_current_speed_s: self.hvac.runtime.time_at_current_speed_s,
-        })
+            HEATER_CHECKPOINT_VERSION,
+            "Heater",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: HeaterState = load_postcard(state)?;
+        let decoded: HeaterState = load_versioned(
+            state,
+            HEATER_CHECKPOINT_VERSION,
+            "Heater",
+            self.descriptor.id,
+        )?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;

@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 
-use chrono::Duration;
 use hares_core::Dwelling;
 
 use super::helpers;
@@ -64,6 +63,11 @@ wall_area_m2 = 200.0
 
 [materials]
 wall_r_value_m2_k_w = 2.5
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 25.0
 
 [weather]
 outdoor_temp_c = 15.0

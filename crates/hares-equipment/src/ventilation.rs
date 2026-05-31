@@ -32,7 +32,7 @@ use crate::config::EquipmentTypedConfig;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, restore_schedule_source_state,
 };
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 // ---------------------------------------------------------------------------
 // Typed config
@@ -728,16 +728,25 @@ impl Equipment for Ventilation {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&VentilationCheckpoint {
-            mode: self.mode,
-            dr_level: self.dr_level,
-            dr_duration_remaining_s: self.dr_duration_remaining_s,
-            schedule_source_state: capture_schedule_source_state(&self.schedule_source),
-        })
+        save_versioned(
+            &VentilationCheckpoint {
+                mode: self.mode,
+                dr_level: self.dr_level,
+                dr_duration_remaining_s: self.dr_duration_remaining_s,
+                schedule_source_state: capture_schedule_source_state(&self.schedule_source),
+            },
+            Self::checkpoint_version(),
+            "Ventilation",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let cp: VentilationCheckpoint = load_postcard(state)?;
+        let cp: VentilationCheckpoint = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "Ventilation",
+            self.descriptor().id,
+        )?;
         self.mode = cp.mode;
         self.dr_level = cp.dr_level;
         self.dr_duration_remaining_s = cp.dr_duration_remaining_s;

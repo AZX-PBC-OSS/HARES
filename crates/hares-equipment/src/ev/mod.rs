@@ -15,7 +15,7 @@ use hares_types::{
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 pub mod catalog;
 mod charging_curve;
@@ -823,35 +823,44 @@ impl Equipment for Ev {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&EvCheckpoint {
-            soc: self.soc,
-            connection_state: self.connection_state,
-            away_charger_power_kw: self.away_charger_power_kw,
-            active_power_kw: self.active_power_kw,
-            power_limit_kw: self.power_limit_kw,
-            power_setpoint_kw: self.power_setpoint_kw,
-            soc_target: self.soc_target,
-            soc_target_min: self.soc_target_min,
-            soc_target_max: self.soc_target_max,
-            battery_temp_c: self.battery_temp_c,
-            heater_active: self.heater_active,
-            ready_soc: self.ready_soc,
-            ready_by_hour: self.ready_by_hour,
-            ready_by_soc: self.ready_by_soc,
-            v2l_enabled: self.v2l_enabled,
-            v2l_soc_reserve: self.v2l_soc_reserve,
-            v2l_max_discharge_kw: self.v2l_max_discharge_kw,
-            v2g_enabled: self.v2g_enabled,
-            v2g_soc_reserve: self.v2g_soc_reserve,
-            v2g_max_discharge_kw: self.v2g_max_discharge_kw,
-            degradation: self.degradation.clone(),
-            rainflow: self.rainflow.clone(),
-            last_daily_update_day: self.last_daily_update_day,
-        })
+        save_versioned(
+            &EvCheckpoint {
+                soc: self.soc,
+                connection_state: self.connection_state,
+                away_charger_power_kw: self.away_charger_power_kw,
+                active_power_kw: self.active_power_kw,
+                power_limit_kw: self.power_limit_kw,
+                power_setpoint_kw: self.power_setpoint_kw,
+                soc_target: self.soc_target,
+                soc_target_min: self.soc_target_min,
+                soc_target_max: self.soc_target_max,
+                battery_temp_c: self.battery_temp_c,
+                heater_active: self.heater_active,
+                ready_soc: self.ready_soc,
+                ready_by_hour: self.ready_by_hour,
+                ready_by_soc: self.ready_by_soc,
+                v2l_enabled: self.v2l_enabled,
+                v2l_soc_reserve: self.v2l_soc_reserve,
+                v2l_max_discharge_kw: self.v2l_max_discharge_kw,
+                v2g_enabled: self.v2g_enabled,
+                v2g_soc_reserve: self.v2g_soc_reserve,
+                v2g_max_discharge_kw: self.v2g_max_discharge_kw,
+                degradation: self.degradation.clone(),
+                rainflow: self.rainflow.clone(),
+                last_daily_update_day: self.last_daily_update_day,
+            },
+            Self::checkpoint_version(),
+            "Ev",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let cp: EvCheckpoint = load_postcard(state)?;
+        let cp: EvCheckpoint = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "Ev",
+            self.descriptor().id,
+        )?;
         self.soc = cp.soc;
         self.connection_state = cp.connection_state;
         self.away_charger_power_kw = cp.away_charger_power_kw;

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use super::ac_config::DehumidifierConfig;
 use super::dehumidifier_defaults::{
@@ -573,18 +573,27 @@ impl Equipment for Dehumidifier {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&DehumidifierState {
-            is_on: self.is_on,
-            accumulated_water_removal_l: self.accumulated_water_removal_l,
-            target_rh: self.target_rh,
-            min_rh: self.min_rh,
-            max_rh: self.max_rh,
-            mode_override: self.mode_override,
-        })
+        save_versioned(
+            &DehumidifierState {
+                is_on: self.is_on,
+                accumulated_water_removal_l: self.accumulated_water_removal_l,
+                target_rh: self.target_rh,
+                min_rh: self.min_rh,
+                max_rh: self.max_rh,
+                mode_override: self.mode_override,
+            },
+            Self::checkpoint_version(),
+            "Dehumidifier",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: DehumidifierState = load_postcard(state)?;
+        let decoded: DehumidifierState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "Dehumidifier",
+            self.descriptor().id,
+        )?;
         self.is_on = decoded.is_on;
         self.accumulated_water_removal_l = decoded.accumulated_water_removal_l;
         self.target_rh = decoded.target_rh;

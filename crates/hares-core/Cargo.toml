@@ -42,6 +42,10 @@ hares-fleet = { workspace = true }
 rayon = { workspace = true }
 tempfile = { workspace = true }
 
+[[test]]
+name = "regression"
+path = "../../tests/regression/mod.rs"
+
 [[bench]]
 name = "single_building"
 path = "../../benches/single_building.rs"

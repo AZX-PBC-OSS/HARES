@@ -2491,11 +2491,7 @@ impl Dwelling {
             format_version: CHECKPOINT_VERSION,
             bldg_id: self.bldg_id,
             timestep_index: self.clock.current_step(),
-            equipment_states: self
-                .equipment
-                .iter()
-                .map(|eq| (eq.descriptor().id, eq.save_state()))
-                .collect(),
+            equipment_states: self.equipment.iter().map(|eq| eq.save_state()).collect(),
             rng_state: self.rng.get_seed(),
             envelope_state,
             humidity_states,
@@ -2522,15 +2518,15 @@ impl Dwelling {
         restored_rng.set_word_pos(cp.rng_word_pos);
         self.rng = restored_rng;
 
-        let states_by_id: HashMap<_, _> = cp.equipment_states.into_iter().collect();
-        for eq in &mut self.equipment {
-            let state = states_by_id.get(&eq.descriptor().id).ok_or_else(|| {
-                HaresError::Io(format!(
-                    "checkpoint missing equipment state for id {:?}",
-                    eq.descriptor().id
-                ))
-            })?;
-            eq.load_state(state)?;
+        if cp.equipment_states.len() != self.equipment.len() {
+            return Err(HaresError::Io(format!(
+                "checkpoint equipment count mismatch: checkpoint has {} equipment states, dwelling has {} equipment",
+                cp.equipment_states.len(),
+                self.equipment.len()
+            )));
+        }
+        for (eq, state) in self.equipment.iter_mut().zip(cp.equipment_states) {
+            eq.load_state(&state)?;
         }
 
         self.thermal_solver
@@ -2538,7 +2534,7 @@ impl Dwelling {
             .map_err(|err| HaresError::Envelope(format!("restore thermal state failed: {err}")))?;
 
         let checkpoint_zones: HashMap<ZoneId, f64> = cp.humidity_states.into_iter().collect();
-        for zone in &self.latest_env.zones {
+        for zone in &mut self.latest_env.zones {
             let humidity = checkpoint_zones.get(&zone.id).ok_or_else(|| {
                 HaresError::Io(format!(
                     "checkpoint missing humidity state for zone {:?}",
@@ -2548,6 +2544,7 @@ impl Dwelling {
             self.humidity_solver
                 .humidity_ratios
                 .insert(zone.id, *humidity);
+            zone.humidity_ratio = *humidity;
         }
         self.fluid_solver
             .restore_from_payload(&cp.fluid_states)

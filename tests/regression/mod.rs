@@ -9,12 +9,11 @@ mod parity;
 #[path = "../bestest/mod.rs"]
 mod bestest;
 
+mod checkpoint_restart;
 mod determinism;
 mod fleet_scale;
-mod checkpoint_restart;
+mod helpers;
 mod multi_instance;
-mod aggregation_check;
-
 use std::fmt;
 
 #[derive(Debug)]
@@ -63,21 +62,21 @@ fn regression_full_suite() {
         }
     }
 
-    // --- Multi-instance independence ---
-    if let Err(errs) = multi_instance::run_multi_instance_check() {
+    // --- Per-equipment checkpoint version rejection ---
+    if let Err(errs) = checkpoint_restart::run_per_equipment_version_rejection_regression() {
         for detail in errs {
             failures.push(RegressionFailure {
-                suite: "multi_instance",
+                suite: "checkpoint_version_rejection",
                 detail,
             });
         }
     }
 
-    // --- Weighted aggregation ---
-    if let Err(errs) = aggregation_check::run_aggregation_check() {
+    // --- Multi-instance independence ---
+    if let Err(errs) = multi_instance::run_multi_instance_check() {
         for detail in errs {
             failures.push(RegressionFailure {
-                suite: "aggregation",
+                suite: "multi_instance",
                 detail,
             });
         }

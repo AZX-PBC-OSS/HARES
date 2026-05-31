@@ -18,7 +18,7 @@ use hares_physics::constants::{
 };
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use super::WaterHeaterZip;
 use super::wh_config::TanklessWaterHeaterConfig;
@@ -445,24 +445,33 @@ impl Equipment for TanklessWH {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&TanklessState {
-            setpoint_c: self.setpoint_c,
-            duty_cycle: self.duty_cycle,
-            mode_override: self.mode_override,
-            outlet_temp_c: self.telemetry.get(tk::OUTLET_TEMP_C).unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
-            fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
-            parasitic_electric_w: self.telemetry.get(tk::PARASITIC_ELECTRIC_W).unwrap_or(0.0),
-            draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
-            dr_level: self.dr_level,
-            dr_setpoint_offset_c: self.dr_setpoint_offset_c,
-            dr_load_fraction: self.dr_load_fraction,
-            dr_duration_remaining_s: self.dr_duration_remaining_s,
-        })
+        save_versioned(
+            &TanklessState {
+                setpoint_c: self.setpoint_c,
+                duty_cycle: self.duty_cycle,
+                mode_override: self.mode_override,
+                outlet_temp_c: self.telemetry.get(tk::OUTLET_TEMP_C).unwrap_or(0.0),
+                thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+                fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
+                parasitic_electric_w: self.telemetry.get(tk::PARASITIC_ELECTRIC_W).unwrap_or(0.0),
+                draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
+                dr_level: self.dr_level,
+                dr_setpoint_offset_c: self.dr_setpoint_offset_c,
+                dr_load_fraction: self.dr_load_fraction,
+                dr_duration_remaining_s: self.dr_duration_remaining_s,
+            },
+            Self::checkpoint_version(),
+            "TanklessWH",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: TanklessState = load_postcard(state)?;
+        let decoded: TanklessState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "TanklessWH",
+            self.descriptor().id,
+        )?;
         self.setpoint_c = decoded.setpoint_c;
         self.duty_cycle = decoded.duty_cycle;
         self.mode_override = decoded.mode_override;

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use hares_types::telemetry_keys as tk;
 
 use crate::hvac::heating_config::{IdealCapacityModeConfig, IdealHvacConfig};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use super::hvac_core::{DEFAULT_BIQUADRATIC_COEFFS, IDEAL_CAPACITY_TIME_RES_THRESHOLD_S};
 use super::thermostat::{ThermostatFsm, ThermostatMode, lookup_zone_temp};
@@ -817,21 +817,30 @@ impl Equipment for IdealHvac {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&IdealHvacState {
-            runtime_setpoints: self.thermostat_fsm.runtime_setpoints,
-            ideal_capacity_w: self.ideal_capacity_w,
-            current_target_c: self.current_target_c,
-            mode: self.thermostat_fsm.mode,
-            last_mode_switch_at: self.thermostat_fsm.last_mode_switch_at,
-            mode_start_at: self.thermostat_fsm.mode_start_at,
-            load_fraction: self.load_fraction,
-            last_sim_time: self.last_sim_time,
-            thermostat_hysteresis_c: self.thermostat_fsm.thermostat.hysteresis_c,
-        })
+        save_versioned(
+            &IdealHvacState {
+                runtime_setpoints: self.thermostat_fsm.runtime_setpoints,
+                ideal_capacity_w: self.ideal_capacity_w,
+                current_target_c: self.current_target_c,
+                mode: self.thermostat_fsm.mode,
+                last_mode_switch_at: self.thermostat_fsm.last_mode_switch_at,
+                mode_start_at: self.thermostat_fsm.mode_start_at,
+                load_fraction: self.load_fraction,
+                last_sim_time: self.last_sim_time,
+                thermostat_hysteresis_c: self.thermostat_fsm.thermostat.hysteresis_c,
+            },
+            Self::checkpoint_version(),
+            "IdealHvac",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: IdealHvacState = load_postcard(state)?;
+        let decoded: IdealHvacState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "IdealHvac",
+            self.descriptor().id,
+        )?;
         self.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.ideal_capacity_w = decoded.ideal_capacity_w;
         self.current_target_c = decoded.current_target_c;

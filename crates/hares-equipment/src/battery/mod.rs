@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use hares_physics::constants::SECONDS_PER_HOUR;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 pub use config::BatteryConfig;
 pub use ocv::{OcvTable, UNegTable};
@@ -1411,34 +1411,43 @@ impl Equipment for Battery {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&BatteryCheckpoint {
-            soc: self.soc,
-            cell_temp_c: self.cell_temp_c,
-            heater_active: self.heater_active,
-            mode: self.mode,
-            degradation: self.degradation.clone(),
-            rainflow: self.rainflow.clone(),
-            self_consumption_enabled: self.self_consumption_enabled,
-            solar_only_charging: self.solar_only_charging,
-            grid_connected: self.grid_connected,
-            power_setpoint_kw: self.power_setpoint_kw,
-            soc_target: self.soc_target,
-            soc_target_min: self.soc_target_min,
-            soc_target_max: self.soc_target_max,
-            last_daily_update_day: self.last_daily_update_day,
-            import_limit_kw: self.import_limit_kw,
-            export_limit_kw: self.export_limit_kw,
-            dr_level: self.dr_level,
-            dr_duration_remaining_s: self.dr_duration_remaining_s,
-            external_power_limit_kw: self.external_power_limit_kw,
-        })
+        save_versioned(
+            &BatteryCheckpoint {
+                soc: self.soc,
+                cell_temp_c: self.cell_temp_c,
+                heater_active: self.heater_active,
+                mode: self.mode,
+                degradation: self.degradation.clone(),
+                rainflow: self.rainflow.clone(),
+                self_consumption_enabled: self.self_consumption_enabled,
+                solar_only_charging: self.solar_only_charging,
+                grid_connected: self.grid_connected,
+                power_setpoint_kw: self.power_setpoint_kw,
+                soc_target: self.soc_target,
+                soc_target_min: self.soc_target_min,
+                soc_target_max: self.soc_target_max,
+                last_daily_update_day: self.last_daily_update_day,
+                import_limit_kw: self.import_limit_kw,
+                export_limit_kw: self.export_limit_kw,
+                dr_level: self.dr_level,
+                dr_duration_remaining_s: self.dr_duration_remaining_s,
+                external_power_limit_kw: self.external_power_limit_kw,
+            },
+            Self::checkpoint_version(),
+            "Battery",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         // `capacity_kwh_rated` is static config set by init(), not stored in the
         // checkpoint. The caller must call init() before load_state() so that
         // `capacity_kwh_rated` is available for recomputing `capacity_kwh_nominal`.
-        let cp: BatteryCheckpoint = load_postcard(state)?;
+        let cp: BatteryCheckpoint = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "Battery",
+            self.descriptor().id,
+        )?;
         self.soc = cp.soc;
         self.cell_temp_c = cp.cell_temp_c;
         self.heater_active = cp.heater_active;

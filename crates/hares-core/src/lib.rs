@@ -20,6 +20,7 @@ pub mod telemetry;
 
 pub use actor::{Actor, ActorInterest};
 pub use actor_registry::{ActorConfig, ActorFactory, ActorRegistry};
+pub use checkpoint::DwellingCheckpoint;
 pub use clock::SimClock;
 pub use dwelling::{
     BatteryLutData, Dwelling, DwellingConfig, SimulationResults as DwellingSimulationResults,

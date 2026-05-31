@@ -20,7 +20,7 @@ use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
     parse_usize, parse_zone_id, restore_schedule_source_state,
 };
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use crate::config::KEY_EQUIPMENT_ID;
 const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
@@ -944,19 +944,31 @@ impl Equipment for ScheduledLoad {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&ScheduledLoadState {
-            last_non_zero_power_kw: self.last_non_zero_power_kw,
-            last_non_zero_gas_w: self.last_non_zero_gas_w,
-            last_reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
-            load_fraction: self.load_fraction,
-            mode_override: self.mode_override,
-            power_source_state: capture_schedule_source_state(&self.power_source),
-            gas_source_state: self.gas_source.as_ref().map(capture_schedule_source_state),
-        })
+        save_versioned(
+            &ScheduledLoadState {
+                last_non_zero_power_kw: self.last_non_zero_power_kw,
+                last_non_zero_gas_w: self.last_non_zero_gas_w,
+                last_reactive_power_kvar: self
+                    .telemetry
+                    .get(tk::REACTIVE_POWER_KVAR)
+                    .unwrap_or(0.0),
+                load_fraction: self.load_fraction,
+                mode_override: self.mode_override,
+                power_source_state: capture_schedule_source_state(&self.power_source),
+                gas_source_state: self.gas_source.as_ref().map(capture_schedule_source_state),
+            },
+            Self::checkpoint_version(),
+            "ScheduledLoad",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: ScheduledLoadState = load_postcard(state)?;
+        let decoded: ScheduledLoadState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "ScheduledLoad",
+            self.descriptor().id,
+        )?;
         self.last_non_zero_power_kw = decoded.last_non_zero_power_kw;
         self.last_non_zero_gas_w = decoded.last_non_zero_gas_w;
         self.load_fraction = decoded.load_fraction;

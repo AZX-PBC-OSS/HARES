@@ -36,7 +36,7 @@ use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::config::EquipmentTypedConfig;
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 // ---------------------------------------------------------------------------
 // Typed config
@@ -1508,16 +1508,25 @@ impl Equipment for Generator {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&GeneratorCheckpoint {
-            current_power_kw: self.current_power_kw,
-            mode: self.mode,
-            power_setpoint_kw: self.power_setpoint_kw,
-            self_consumption_enabled: self.self_consumption_enabled,
-        })
+        save_versioned(
+            &GeneratorCheckpoint {
+                current_power_kw: self.current_power_kw,
+                mode: self.mode,
+                power_setpoint_kw: self.power_setpoint_kw,
+                self_consumption_enabled: self.self_consumption_enabled,
+            },
+            Self::checkpoint_version(),
+            "Generator",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let cp: GeneratorCheckpoint = load_postcard(state)?;
+        let cp: GeneratorCheckpoint = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "Generator",
+            self.descriptor().id,
+        )?;
         self.current_power_kw = cp.current_power_kw;
         self.mode = cp.mode;
         self.power_setpoint_kw = cp.power_setpoint_kw;

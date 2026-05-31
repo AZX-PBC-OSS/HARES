@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use hares_types::{
     BmsMode, ChargingStrategy, ControlSignal, CoreCapabilities, EnvironmentState,
-    EquipmentDescriptor, GridExportRule, HaresError, OperatingMode, PlugInPolicy, PortDeclaration,
-    PortSlots, ensure_signal_supported,
+    EquipmentDescriptor, EquipmentId, GridExportRule, HaresError, OperatingMode, PlugInPolicy,
+    PortDeclaration, PortSlots, ensure_signal_supported,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -118,6 +118,15 @@ pub trait Equipment: Send + Sync {
 
     fn save_state(&self) -> Vec<u8>;
     fn load_state(&mut self, state: &[u8]) -> Result<()>;
+
+    /// Version of this equipment's postcard checkpoint format.
+    /// Override when the checkpoint struct for this equipment changes shape.
+    fn checkpoint_version() -> u32
+    where
+        Self: Sized,
+    {
+        1
+    }
 
     /// Equipment-specific control application (no capability check).
     ///
@@ -298,6 +307,92 @@ pub fn load_postcard<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
         .map_err(|e| HaresError::Equipment(format!("equipment state deserialization failed: {e}")))
 }
 
+// ---------------------------------------------------------------------------
+// Versioned postcard checkpoint helpers
+// ---------------------------------------------------------------------------
+
+/// Format: `[version: u32 LE][postcard payload]`
+const VERSION_PREAMBLE_LEN: usize = std::mem::size_of::<u32>();
+
+/// Serialize state with a per-equipment version token prepended.
+///
+/// The version is written as a little-endian u32 before the postcard payload.
+/// On load, `load_versioned` validates the version before attempting
+/// deserialization so that a field-type or enum-variant change in the
+/// checkpoint struct is caught with a descriptive error rather than silent
+/// corruption or a generic postcard failure.
+pub fn save_versioned<T: Serialize>(state: &T, version: u32, equipment_type: &str) -> Vec<u8> {
+    #[cfg(feature = "observe")]
+    tracing::debug!(
+        equipment_type = %equipment_type,
+        checkpoint_version = version,
+        "saving versioned checkpoint blob",
+    );
+    #[cfg(not(feature = "observe"))]
+    let _ = equipment_type;
+    let mut blob = version.to_le_bytes().to_vec();
+    blob.extend_from_slice(&save_postcard(state));
+    blob
+}
+
+/// Load versioned state, validating the version token before deserialization.
+///
+/// Returns an `Err` with equipment type name, expected version, and found
+/// version when the blob's version does not match.
+pub fn load_versioned<T: DeserializeOwned>(
+    bytes: &[u8],
+    expected_version: u32,
+    equipment_type: &str,
+    equipment_id: EquipmentId,
+) -> Result<T> {
+    if bytes.len() < VERSION_PREAMBLE_LEN {
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            equipment_type = %equipment_type,
+            equipment_id = %equipment_id,
+            success = false,
+            "checkpoint load failed: blob too short for versioned deserialization",
+        );
+        return Err(HaresError::Equipment(format!(
+            "{} checkpoint blob too short for equipment {:?}: {} bytes",
+            equipment_type,
+            equipment_id,
+            bytes.len()
+        )));
+    }
+    let blob_version = u32::from_le_bytes(bytes[..VERSION_PREAMBLE_LEN].try_into().unwrap());
+    if blob_version != expected_version {
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            equipment_type = %equipment_type,
+            equipment_id = %equipment_id,
+            blob_version = blob_version,
+            expected_version = expected_version,
+            success = false,
+            "checkpoint load failed: version mismatch",
+        );
+        return Err(HaresError::Equipment(format!(
+            "{} checkpoint version mismatch for equipment {:?}: blob={} expected={}",
+            equipment_type, equipment_id, blob_version, expected_version
+        )));
+    }
+    let result = postcard::from_bytes(&bytes[VERSION_PREAMBLE_LEN..]).map_err(|e| {
+        HaresError::Equipment(format!(
+            "{} checkpoint deserialization failed for equipment {:?}: {e}",
+            equipment_type, equipment_id
+        ))
+    });
+    #[cfg(feature = "observe")]
+    tracing::debug!(
+        equipment_type = %equipment_type,
+        equipment_id = %equipment_id,
+        blob_version = blob_version,
+        success = result.is_ok(),
+        "checkpoint load complete",
+    );
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::linear_temp_derate;
@@ -315,7 +410,10 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use crate::config::ConfigPayload;
-    use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+    use crate::{
+        Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, load_versioned,
+        save_postcard, save_versioned,
+    };
 
     #[derive(Clone)]
     struct MockEquipment {
@@ -400,9 +498,13 @@ mod tests {
             struct State {
                 state_value: f64,
             }
-            save_postcard(&State {
-                state_value: self.state_value,
-            })
+            save_versioned(
+                &State {
+                    state_value: self.state_value,
+                },
+                Self::checkpoint_version(),
+                "Mock",
+            )
         }
 
         fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
@@ -410,7 +512,12 @@ mod tests {
             struct State {
                 state_value: f64,
             }
-            let decoded: State = load_postcard(state)?;
+            let decoded: State = load_versioned(
+                state,
+                Self::checkpoint_version(),
+                "Mock",
+                self.descriptor().id,
+            )?;
             self.state_value = decoded.state_value;
             Ok(())
         }
@@ -572,6 +679,70 @@ mod tests {
         let bytes = save_postcard(&s);
         let decoded: S = load_postcard(&bytes).unwrap();
         assert_eq!(decoded, s);
+    }
+
+    #[test]
+    fn save_load_versioned_round_trip() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct S {
+            a: u32,
+            b: f64,
+        }
+        let s = S { a: 3, b: 4.2 };
+        let bytes = save_versioned(&s, 1, "S");
+        let decoded: S = load_versioned(&bytes, 1, "S", EquipmentId(0)).unwrap();
+        assert_eq!(decoded, s);
+    }
+
+    #[test]
+    fn version_mismatch_is_rejected_with_descriptive_error() {
+        #[derive(Serialize, Deserialize, Debug)]
+        struct S {
+            a: u32,
+        }
+        let s = S { a: 42 };
+        // Create blob with version 1, then corrupt the version byte
+        let mut bytes = save_versioned(&s, 1, "S");
+        // Overwrite version byte to 99
+        bytes[0] = 99;
+        let result = load_versioned::<S>(&bytes, 1, "S", EquipmentId(7));
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("S") && err_msg.contains("99") && err_msg.contains("1"),
+            "error should mention type name, blob version 99, and expected version 1; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn versioned_blob_too_short_is_rejected() {
+        let result = load_versioned::<u32>(&[1, 2, 3], 1, "T", EquipmentId(0));
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("too short"),
+            "error should mention short blob; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn save_load_versioned_preserves_postcard_payload() {
+        // Verify that the versioned format is exactly [4-byte LE version][postcard payload]
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct P {
+            x: u32,
+        }
+        let p = P { x: 0xDEADBEEF };
+        let version: u32 = 1;
+
+        let raw_postcard = save_postcard(&p);
+        let versioned = save_versioned(&p, version, "P");
+
+        // Check structure: version bytes + payload bytes
+        assert_eq!(&versioned[..4], &version.to_le_bytes());
+        assert_eq!(&versioned[4..], &raw_postcard);
+
+        // Round-trip validation
+        let decoded: P = load_versioned(&versioned, version, "P", EquipmentId(0)).unwrap();
+        assert_eq!(decoded, p);
     }
 
     #[test]

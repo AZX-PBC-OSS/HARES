@@ -4,11 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hares_types::{EquipmentId, HaresError, ZoneId};
+use hares_types::{HaresError, ZoneId};
 use serde::{Deserialize, Serialize};
 
 /// Bump whenever checkpoint schema or state encoding changes.
-pub const CHECKPOINT_VERSION: u32 = 3;
+pub const CHECKPOINT_VERSION: u32 = 4;
 
 /// Serializable snapshot of all state required to resume a dwelling run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -16,7 +16,7 @@ pub struct DwellingCheckpoint {
     pub format_version: u32,
     pub bldg_id: i64,
     pub timestep_index: u64,
-    pub equipment_states: Vec<(EquipmentId, Vec<u8>)>,
+    pub equipment_states: Vec<Vec<u8>>,
     pub rng_state: [u8; 32],
     pub envelope_state: Vec<f64>,
     /// Per-zone humidity ratios. Each entry is `(ZoneId, humidity_ratio)`.
@@ -75,7 +75,7 @@ fn temp_checkpoint_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{CHECKPOINT_VERSION, DwellingCheckpoint};
-    use hares_types::{EquipmentId, ZoneId};
+    use hares_types::ZoneId;
 
     fn unique_temp_name(base: &str, ext: &str) -> String {
         let nanos = std::time::SystemTime::now()
@@ -99,7 +99,7 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 7,
             timestep_index: 12,
-            equipment_states: vec![(EquipmentId(1), vec![1, 2, 3])],
+            equipment_states: vec![vec![1, 2, 3]],
             rng_state: [42; 32],
             envelope_state: vec![1.0, 2.0],
             humidity_states: vec![(ZoneId(1), 0.005)],

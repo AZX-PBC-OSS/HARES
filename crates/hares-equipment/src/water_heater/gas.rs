@@ -16,7 +16,7 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
@@ -697,30 +697,39 @@ impl Equipment for GasWH {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&GasWhState {
-            setpoint_c: self.setpoint_c,
-            deadband_c: self.deadband_c,
-            burner_on: self.burner_on,
-            duty_cycle: self.duty_cycle,
-            mode_override: self.mode_override,
-            tank_state: self.tank.save_state(),
-            tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
-            burner_power_w: self.telemetry.get(tk::BURNER_POWER_W).unwrap_or(0.0),
-            pilot_power_w: self.telemetry.get(tk::PILOT_POWER_W).unwrap_or(0.0),
-            fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
-            flue_loss_w: self.telemetry.get(tk::FLUE_LOSS_W).unwrap_or(0.0),
-            fan_electric_w: self.telemetry.get(tk::FAN_ELECTRIC_W).unwrap_or(0.0),
-            draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
-            dr_level: self.dr_level,
-            dr_setpoint_offset_c: self.dr_setpoint_offset_c,
-            dr_load_fraction: self.dr_load_fraction,
-            dr_duration_remaining_s: self.dr_duration_remaining_s,
-            pilot_fraction_to_tank: self.pilot_fraction_to_tank,
-        })
+        save_versioned(
+            &GasWhState {
+                setpoint_c: self.setpoint_c,
+                deadband_c: self.deadband_c,
+                burner_on: self.burner_on,
+                duty_cycle: self.duty_cycle,
+                mode_override: self.mode_override,
+                tank_state: self.tank.save_state(),
+                tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
+                burner_power_w: self.telemetry.get(tk::BURNER_POWER_W).unwrap_or(0.0),
+                pilot_power_w: self.telemetry.get(tk::PILOT_POWER_W).unwrap_or(0.0),
+                fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
+                flue_loss_w: self.telemetry.get(tk::FLUE_LOSS_W).unwrap_or(0.0),
+                fan_electric_w: self.telemetry.get(tk::FAN_ELECTRIC_W).unwrap_or(0.0),
+                draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
+                dr_level: self.dr_level,
+                dr_setpoint_offset_c: self.dr_setpoint_offset_c,
+                dr_load_fraction: self.dr_load_fraction,
+                dr_duration_remaining_s: self.dr_duration_remaining_s,
+                pilot_fraction_to_tank: self.pilot_fraction_to_tank,
+            },
+            Self::checkpoint_version(),
+            "GasWH",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: GasWhState = load_postcard(state)?;
+        let decoded: GasWhState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "GasWH",
+            self.descriptor().id,
+        )?;
         self.setpoint_c = decoded.setpoint_c;
         self.deadband_c = decoded.deadband_c;
         self.burner_on = decoded.burner_on;

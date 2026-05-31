@@ -20,10 +20,22 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
     let duration = Duration::hours(SIM_DURATION_HOURS);
 
-    let buildings: Vec<(&str, Box<dyn Fn(i64, Duration, u64) -> hares_core::DwellingConfig>)> = vec![
-        ("beopt_1", Box::new(|id, dur, s| helpers::build_beopt_dwelling_config(id, dur, s))),
-        ("beopt_2", Box::new(|id, dur, s| helpers::build_beopt_dwelling_config(id, dur, s))),
-        ("resstock", Box::new(|id, dur, s| helpers::build_resstock_dwelling_config(id, dur, s))),
+    let buildings: Vec<(
+        &str,
+        Box<dyn Fn(i64, Duration, u64) -> hares_core::DwellingConfig>,
+    )> = vec![
+        (
+            "beopt_1",
+            Box::new(|id, dur, s| helpers::build_beopt_dwelling_config(id, dur, s)),
+        ),
+        (
+            "beopt_2",
+            Box::new(|id, dur, s| helpers::build_beopt_dwelling_config(id, dur, s)),
+        ),
+        (
+            "resstock",
+            Box::new(|id, dur, s| helpers::build_resstock_dwelling_config(id, dur, s)),
+        ),
     ];
 
     for (label, builder) in &buildings {
@@ -32,7 +44,9 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
         for &n_threads in &THREAD_COUNTS {
             let config = builder(1, duration, SEED);
 
-            std::env::set_var("RAYON_NUM_THREADS", n_threads.to_string());
+            unsafe {
+                std::env::set_var("RAYON_NUM_THREADS", n_threads.to_string());
+            }
 
             match engine.run(config) {
                 Ok(result) => {

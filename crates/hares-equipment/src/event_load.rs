@@ -26,7 +26,7 @@ use crate::schedule_helpers::{
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use crate::scheduled_load::{ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE};
 use crate::scheduled_load::{ZipCoefficients, parse_zip_coefficients, zip_coefficients_from_class};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use crate::config::KEY_EQUIPMENT_ID;
 const KEY_BUILDING_ID: &str = "building_id";
@@ -772,25 +772,34 @@ impl Equipment for EventBasedLoad {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&EventBasedLoadState {
-            phase: self.phase,
-            remaining_phase_s: self.remaining_phase_s,
-            load_fraction: self.load_fraction,
-            forced_mode: self.forced_mode,
-            rng_seed: self.rng_seed,
-            rng_draws: self.rng_draws,
-            event_window_source_state: capture_schedule_source_state(&self.event_window_source),
-            event_probability_source_state: capture_schedule_source_state(
-                &self.event_probability_source,
-            ),
-            delay_remaining_s: self.delay_remaining_s,
-            event_cursor: self.event_cursor,
-            current_step: self.current_step,
-        })
+        save_versioned(
+            &EventBasedLoadState {
+                phase: self.phase,
+                remaining_phase_s: self.remaining_phase_s,
+                load_fraction: self.load_fraction,
+                forced_mode: self.forced_mode,
+                rng_seed: self.rng_seed,
+                rng_draws: self.rng_draws,
+                event_window_source_state: capture_schedule_source_state(&self.event_window_source),
+                event_probability_source_state: capture_schedule_source_state(
+                    &self.event_probability_source,
+                ),
+                delay_remaining_s: self.delay_remaining_s,
+                event_cursor: self.event_cursor,
+                current_step: self.current_step,
+            },
+            Self::checkpoint_version(),
+            "EventBasedLoad",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: EventBasedLoadState = load_postcard(state)?;
+        let decoded: EventBasedLoadState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "EventBasedLoad",
+            self.descriptor().id,
+        )?;
         self.phase = decoded.phase;
         self.remaining_phase_s = decoded.remaining_phase_s;
         self.load_fraction = decoded.load_fraction;
@@ -1426,27 +1435,36 @@ impl Equipment for WetAppliance {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&WetApplianceState {
-            active: self.active,
-            phase_index: self.phase_index,
-            elapsed_in_phase_s: self.elapsed_in_phase_s,
-            load_fraction: self.load_fraction,
-            forced_mode: self.forced_mode,
-            hot_water_draw_rate_kg_s: self.hot_water_draw_rate_kg_s,
-            rng_seed: self.rng_seed,
-            rng_draws: self.rng_draws,
-            event_window_source_state: capture_schedule_source_state(&self.event_window_source),
-            event_probability_source_state: capture_schedule_source_state(
-                &self.event_probability_source,
-            ),
-            delay_remaining_s: self.delay_remaining_s,
-            event_cursor: self.event_cursor,
-            current_step: self.current_step,
-        })
+        save_versioned(
+            &WetApplianceState {
+                active: self.active,
+                phase_index: self.phase_index,
+                elapsed_in_phase_s: self.elapsed_in_phase_s,
+                load_fraction: self.load_fraction,
+                forced_mode: self.forced_mode,
+                hot_water_draw_rate_kg_s: self.hot_water_draw_rate_kg_s,
+                rng_seed: self.rng_seed,
+                rng_draws: self.rng_draws,
+                event_window_source_state: capture_schedule_source_state(&self.event_window_source),
+                event_probability_source_state: capture_schedule_source_state(
+                    &self.event_probability_source,
+                ),
+                delay_remaining_s: self.delay_remaining_s,
+                event_cursor: self.event_cursor,
+                current_step: self.current_step,
+            },
+            Self::checkpoint_version(),
+            "WetAppliance",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: WetApplianceState = load_postcard(state)?;
+        let decoded: WetApplianceState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "WetAppliance",
+            self.descriptor().id,
+        )?;
         self.active = decoded.active;
         if decoded.phase_index >= self.phases.len() {
             return Err(HaresError::Equipment(format!(
@@ -2480,7 +2498,11 @@ mod tests {
             event_cursor: 0,
             current_step: 0,
         };
-        let bytes = crate::save_postcard(&bad_state);
+        let bytes = crate::save_versioned(
+            &bad_state,
+            WetAppliance::checkpoint_version(),
+            "WetAppliance",
+        );
 
         let err = eq.load_state(&bytes);
         assert!(
@@ -2587,7 +2609,11 @@ mod tests {
             event_cursor: 0,
             current_step: 0,
         };
-        let bytes = crate::save_postcard(&good_state);
+        let bytes = crate::save_versioned(
+            &good_state,
+            WetAppliance::checkpoint_version(),
+            "WetAppliance",
+        );
 
         let result = eq.load_state(&bytes);
         assert!(

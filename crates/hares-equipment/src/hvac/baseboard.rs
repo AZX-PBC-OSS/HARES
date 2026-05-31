@@ -17,7 +17,7 @@ use hares_types::telemetry_keys as tk;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::hvac::heating_config::ElectricBaseboardConfig;
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
@@ -203,20 +203,29 @@ impl Equipment for ElectricBaseboard {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        save_postcard(&BaseboardState {
-            mode: self.hvac.thermostat_fsm.mode,
-            duty_cycle: self.hvac.runtime.duty_cycle,
-            last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
-            runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
-            operating_mode: self.operating_mode,
-            run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
-        })
+        save_versioned(
+            &BaseboardState {
+                mode: self.hvac.thermostat_fsm.mode,
+                duty_cycle: self.hvac.runtime.duty_cycle,
+                last_mode_switch_at: self.hvac.thermostat_fsm.last_mode_switch_at,
+                runtime_setpoints: self.hvac.thermostat_fsm.runtime_setpoints,
+                operating_mode: self.operating_mode,
+                run_time_s: self.run_time_s,
+                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+            },
+            Self::checkpoint_version(),
+            "Baseboard",
+        )
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
-        let decoded: BaseboardState = load_postcard(state)?;
+        let decoded: BaseboardState = load_versioned(
+            state,
+            Self::checkpoint_version(),
+            "Baseboard",
+            self.descriptor().id,
+        )?;
         self.hvac.thermostat_fsm.mode = decoded.mode;
         self.hvac.runtime.duty_cycle = decoded.duty_cycle;
         self.hvac.thermostat_fsm.last_mode_switch_at = decoded.last_mode_switch_at;
