@@ -139,6 +139,7 @@ impl Dehumidifier {
                     | ControlCapabilities::MODE_OVERRIDE,
                 core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
                 telemetry_fields: telemetry_fields(),
+                zone_type: None,
             },
             ports: vec![
                 PortDeclaration::electrical(),

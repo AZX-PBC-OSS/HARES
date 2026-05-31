@@ -11,6 +11,7 @@ use hares_types::{
     telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use hares_physics::constants::{
     CP_LIQUID_WATER_J_KG_K, UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE,
@@ -81,10 +82,19 @@ impl TanklessWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let zone = zone_id_from_config_or_default(&config);
-        let fuel_type = config
+        let typed = config
             .require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")
-            .map(|typed| typed.fuel_type)
             .expect("Tankless Water Heater requires typed FuelType");
+        let fuel_type = typed.fuel_type;
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if typed.zone_id.is_none() && typed.zone_type.is_some() {
+            warn!(
+                water_heater = %config.name,
+                zone_type = ?typed.zone_type,
+                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
+            );
+        }
 
         let ports = build_ports(fuel_type);
 
@@ -105,6 +115,7 @@ impl TanklessWH {
                     | ControlCapabilities::DEMAND_RESPONSE,
                 core_capabilities: core_capabilities_for_fuel(fuel_type),
                 telemetry_fields: telemetry_fields(),
+                zone_type: typed.zone_type.clone(),
             },
             ports,
             telemetry: default_telemetry(),
@@ -691,6 +702,7 @@ mod tests {
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
             avg_water_draw_l_per_day: None,
+            zone_type: None,
         }
     }
 

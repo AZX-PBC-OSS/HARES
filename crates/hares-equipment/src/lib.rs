@@ -339,6 +339,7 @@ mod tests {
                         unit: "-".to_string(),
                         description: "mock value".to_string(),
                     }],
+                    zone_type: None,
                 },
                 ports: vec![PortDeclaration::electrical()],
                 telemetry: Telemetry::with_capacity(2),

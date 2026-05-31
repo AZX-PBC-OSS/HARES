@@ -1138,6 +1138,10 @@ pub struct EquipmentDescriptor {
     pub control_capabilities: ControlCapabilities,
     pub core_capabilities: CoreCapabilities,
     pub telemetry_fields: Vec<TelemetryField>,
+    /// HPXML-resolved zone type label (e.g. "conditioned", "garage").
+    /// Set by water heater constructors when a `<Location>` was parsed;
+    /// `None` for equipment types that do not have a zone location concept.
+    pub zone_type: Option<String>,
 }
 
 #[cfg(test)]
@@ -1163,6 +1167,7 @@ mod tests {
                 unit: "kW".to_string(),
                 description: "Active electrical power".to_string(),
             }],
+            zone_type: None,
         };
 
         let json = serde_json::to_string(&descriptor).expect("serialize descriptor");
@@ -1249,6 +1254,7 @@ mod tests {
             control_capabilities: ControlCapabilities::empty(),
             core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: vec![],
+            zone_type: None,
         };
         let json = serde_json::to_string(&descriptor).expect("serialize");
         let decoded: EquipmentDescriptor = serde_json::from_str(&json).expect("deserialize");
@@ -1322,6 +1328,7 @@ mod tests {
             control_capabilities: ControlCapabilities::POWER_SETPOINT,
             core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: vec![],
+            zone_type: None,
         };
 
         let json =
@@ -2343,6 +2350,7 @@ mod tests {
                 | CoreCapabilities::HAS_SOC
                 | CoreCapabilities::HAS_MODE,
             telemetry_fields: vec![],
+            zone_type: None,
         };
         let out = CoreOutput {
             flows: CoreFlows {
@@ -2382,6 +2390,7 @@ mod tests {
                 | CoreCapabilities::REACTIVE
                 | CoreCapabilities::HAS_MODE,
             telemetry_fields: vec![],
+            zone_type: None,
         };
         let out = CoreOutput::default();
         let err = validate_core_contract(&desc, &out).expect_err("missing fields must error");
@@ -2404,6 +2413,7 @@ mod tests {
             control_capabilities: ControlCapabilities::empty(),
             core_capabilities: CoreCapabilities::ELECTRIC,
             telemetry_fields: vec![],
+            zone_type: None,
         };
         let out = CoreOutput {
             flows: CoreFlows {
@@ -2443,6 +2453,7 @@ mod tests {
             control_capabilities: ControlCapabilities::empty(),
             core_capabilities: CoreCapabilities::REACTIVE,
             telemetry_fields: vec![],
+            zone_type: None,
         };
         let out = CoreOutput {
             flows: CoreFlows {
@@ -2478,6 +2489,7 @@ mod tests {
             control_capabilities: ControlCapabilities::empty(),
             core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::REACTIVE,
             telemetry_fields: vec![],
+            zone_type: None,
         };
         let out = CoreOutput {
             flows: CoreFlows {

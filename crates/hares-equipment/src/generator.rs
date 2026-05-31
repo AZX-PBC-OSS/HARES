@@ -818,6 +818,7 @@ impl Generator {
                 | CoreCapabilities::FUEL
                 | CoreCapabilities::HAS_MODE,
             telemetry_fields: generator_telemetry_fields(has_chp, kind == GeneratorKind::FuelCell),
+            zone_type: None,
         };
 
         let efficiency = typed.as_ref().map_or_else(

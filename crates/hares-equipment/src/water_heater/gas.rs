@@ -14,6 +14,7 @@ use hares_types::{
     ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -159,6 +160,7 @@ impl GasWH {
                     | CoreCapabilities::FUEL
                     | CoreCapabilities::HAS_MODE,
                 telemetry_fields: telemetry_fields(n_nodes),
+                zone_type: None,
             },
             ports: vec![
                 PortDeclaration::fuel(),
@@ -261,9 +263,19 @@ impl GasWH {
         let c = config.require_typed::<GasWaterHeaterConfig>("Gas Water Heater")?;
         c.validate()?;
 
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if c.zone_id.is_none() && c.zone_type.is_some() {
+            warn!(
+                water_heater = %config.name,
+                zone_type = ?c.zone_type,
+                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
+            );
+        }
+
         self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
         let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
         self.descriptor.zone = zone;
+        self.descriptor.zone_type = c.zone_type.clone();
         self.ports[2].zone = zone;
         self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
         self.ports[3].loop_id = Some(self.loop_id);

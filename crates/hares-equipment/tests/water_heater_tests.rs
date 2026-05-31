@@ -185,6 +185,7 @@ fn tankless_config(
             draw_flow_rate_source,
             mains_temp_c_source,
             avg_water_draw_l_per_day: None,
+            zone_type: None,
         },
     )
 }

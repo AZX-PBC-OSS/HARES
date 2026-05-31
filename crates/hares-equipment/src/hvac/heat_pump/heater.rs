@@ -482,6 +482,7 @@ impl HeatPumpHeaterCore {
                     | CoreCapabilities::HAS_SETPOINT
                     | CoreCapabilities::HAS_COP,
                 telemetry_fields: heater_telemetry_fields(),
+                zone_type: None,
             },
             ports: vec![
                 PortDeclaration::electrical(),

@@ -401,6 +401,7 @@ pub struct TanklessWaterHeaterConfig {
     pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub mains_temp_c_source: Option<ScheduleSourceConfig>,
     pub avg_water_draw_l_per_day: Option<f64>,
+    pub zone_type: Option<String>,
 }
 
 impl EquipmentTypedConfig for TanklessWaterHeaterConfig {
@@ -900,6 +901,7 @@ mod tests {
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
             avg_water_draw_l_per_day: Some(227.0),
+            zone_type: None,
         };
         let ec = EquipmentConfig::from_typed(
             "tankless".to_string(),

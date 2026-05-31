@@ -107,6 +107,7 @@ impl ModeTrackingEquipment {
             control_capabilities: ControlCapabilities::MODE_OVERRIDE,
             core_capabilities: hares_types::CoreCapabilities::empty(),
             telemetry_fields: vec![],
+            zone_type: None,
         };
         let mut telemetry = Telemetry::with_capacity(2);
         telemetry.insert("last_mode_code", OperatingMode::Off.as_code());

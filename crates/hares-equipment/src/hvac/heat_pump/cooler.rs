@@ -78,6 +78,7 @@ impl HpCooler {
                     | CoreCapabilities::HAS_SETPOINT
                     | CoreCapabilities::HAS_COP,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
+                zone_type: None,
             },
             ports: inner.ports().to_vec(),
             inner,
@@ -338,6 +339,7 @@ impl GshpCooler {
                     | CoreCapabilities::HAS_SETPOINT
                     | CoreCapabilities::HAS_COP,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
+                zone_type: None,
             },
             ports: inner.ports().to_vec(),
             inner,
@@ -671,6 +673,7 @@ impl WshpCooler {
                     | CoreCapabilities::HAS_SETPOINT
                     | CoreCapabilities::HAS_COP,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
+                zone_type: None,
             },
             ports: inner.ports().to_vec(),
             inner,

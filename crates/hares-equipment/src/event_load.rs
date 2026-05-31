@@ -245,6 +245,7 @@ impl EventBasedLoad {
                 | ControlCapabilities::EVENT_DELAY,
             core_capabilities: CoreCapabilities::ELECTRIC,
             telemetry_fields: event_load_telemetry_fields(),
+            zone_type: None,
         };
         let ports = ports_for_zone(descriptor.zone);
         let rng_seed = derive_rng_seed(&config);
@@ -885,6 +886,7 @@ impl WetAppliance {
                 | ControlCapabilities::EVENT_DELAY,
             core_capabilities: CoreCapabilities::ELECTRIC,
             telemetry_fields: wet_appliance_telemetry_fields(),
+            zone_type: None,
         };
         let ports = ports_for_zone(descriptor.zone);
         let rng_seed = derive_rng_seed(&config);

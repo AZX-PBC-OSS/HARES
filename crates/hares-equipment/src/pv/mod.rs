@@ -246,6 +246,7 @@ impl PV {
                 | ControlCapabilities::INVERTER_PRIORITY_MODE,
             core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::REACTIVE,
             telemetry_fields: telemetry_fields(),
+            zone_type: None,
         };
 
         let mut telemetry = Telemetry::with_capacity(12);

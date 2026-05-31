@@ -128,6 +128,7 @@ impl ProtocolBridge {
             control_capabilities: ControlCapabilities::PROTOCOL_NATIVE,
             core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: telemetry_fields(),
+            zone_type: None,
         };
 
         let ports = Vec::new();

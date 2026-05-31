@@ -1613,13 +1613,17 @@ impl Dwelling {
             let n_zones = dwelling.latest_env.zones.len();
             diagnostics::write_header(&mut writer, n_zones);
             // Emit equipment zone-id mapping so zone routing is traceable.
-            let equipment_zones: Vec<(String, u16)> = dwelling
+            let equipment_zones: Vec<(String, u16, Option<String>)> = dwelling
                 .equipment
                 .iter()
                 .filter_map(|eq| {
-                    eq.descriptor()
-                        .zone
-                        .map(|z| (eq.descriptor().name.clone(), z.0))
+                    eq.descriptor().zone.map(|z| {
+                        (
+                            eq.descriptor().name.clone(),
+                            z.0,
+                            eq.descriptor().zone_type.clone(),
+                        )
+                    })
                 })
                 .collect();
             diagnostics::write_equipment_init(&mut writer, &equipment_zones);
@@ -4510,6 +4514,7 @@ mod tests {
                             description: "last applied SOC target".to_string(),
                         },
                     ],
+                    zone_type: None,
                 },
                 telemetry: Telemetry::with_capacity(2),
                 last_power_kw: 0.0,
@@ -4627,6 +4632,7 @@ mod tests {
                             description: "reactive electrical power".to_string(),
                         },
                     ],
+                    zone_type: None,
                 },
                 telemetry: Telemetry::with_capacity(2),
                 active_power_kw,
@@ -4724,6 +4730,7 @@ mod tests {
                     control_capabilities: ControlCapabilities::MODE_OVERRIDE,
                     core_capabilities: CoreCapabilities::HAS_MODE,
                     telemetry_fields: vec![],
+                    zone_type: None,
                 },
                 mode_override: None,
                 update_calls,
@@ -5351,6 +5358,7 @@ occupancy = 1.0
                         unit: "W".to_string(),
                         description: "ideal capacity from solver".to_string(),
                     }],
+                    zone_type: None,
                 },
                 telemetry: Telemetry::with_capacity(1),
                 ideal_capacity_w: 0.0,

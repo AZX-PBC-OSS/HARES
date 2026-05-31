@@ -143,6 +143,7 @@ impl Ev {
                 | CoreCapabilities::HAS_SOC
                 | CoreCapabilities::HAS_MODE,
             telemetry_fields: telemetry_fields(),
+            zone_type: None,
         };
 
         let charging_level = charging_level_from_config(&config);

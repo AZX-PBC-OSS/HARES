@@ -75,6 +75,7 @@ impl ElectricBaseboard {
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: telemetry_fields(),
+            zone_type: None,
         };
 
         Self {

@@ -21,6 +21,7 @@ use hares_types::{
     telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -144,6 +145,7 @@ impl IndirectTank {
                     | ControlCapabilities::DEMAND_RESPONSE,
                 core_capabilities: CoreCapabilities::HAS_MODE | CoreCapabilities::THERMAL,
                 telemetry_fields: fields,
+                zone_type: None,
             },
             ports: vec![
                 PortDeclaration::fluid(boiler_loop_id, FluidType::Water),
@@ -225,8 +227,19 @@ impl IndirectTank {
         c.validate()?;
 
         self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if c.zone_id.is_none() && c.zone_type.is_some() {
+            warn!(
+                water_heater = %config.name,
+                zone_type = ?c.zone_type,
+                "zone_id not resolved from HPXML Location; falling back to ZoneId(1)"
+            );
+        }
+
         let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
         self.descriptor.zone = zone;
+        self.descriptor.zone_type = c.zone_type.clone();
         self.ports[2].zone = zone;
 
         let boiler_loop_id = c.boiler_loop_id.map(LoopId).unwrap_or(self.boiler_loop_id);

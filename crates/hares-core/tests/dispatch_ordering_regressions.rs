@@ -133,6 +133,7 @@ impl StubPowerEquipment {
                 unit: "kW".to_string(),
                 description: "stub AC output".to_string(),
             }],
+            zone_type: None,
         };
         let mut telemetry = Telemetry::with_capacity(1);
         telemetry.insert(tk::AC_POWER_KW, 0.0);

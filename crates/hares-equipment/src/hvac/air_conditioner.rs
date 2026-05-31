@@ -466,6 +466,7 @@ impl CoolingCore {
                     | CoreCapabilities::HAS_SETPOINT
                     | CoreCapabilities::HAS_COP,
                 telemetry_fields: telemetry_fields(),
+                zone_type: None,
             },
             ports: vec![
                 PortDeclaration::electrical(),

@@ -155,6 +155,7 @@ impl ElectricBoiler {
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: electric_boiler_telemetry_fields(),
+            zone_type: None,
         };
 
         Self {
@@ -396,6 +397,7 @@ impl GasBoiler {
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: gas_boiler_telemetry_fields(),
+            zone_type: None,
         };
 
         Self {

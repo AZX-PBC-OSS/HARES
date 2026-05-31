@@ -126,6 +126,7 @@ impl ZoneTemperatureSniffer {
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::empty(),
                 telemetry_fields: vec![],
+                zone_type: None,
             },
             core_output: CoreOutput::default(),
             telemetry: Telemetry::with_capacity(0),

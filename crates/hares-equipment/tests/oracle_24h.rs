@@ -781,6 +781,7 @@ fn oracle_tankless_wh_24h_constant_draw() {
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
             avg_water_draw_l_per_day: None,
+            zone_type: None,
         },
     );
 

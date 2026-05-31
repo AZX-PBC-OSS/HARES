@@ -101,6 +101,7 @@ impl ElectricFurnace {
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: electric_furnace_telemetry_fields(),
+            zone_type: None,
         };
 
         Self {
@@ -387,6 +388,7 @@ impl GasFurnace {
                 | CoreCapabilities::HAS_SPEED
                 | CoreCapabilities::HAS_SETPOINT,
             telemetry_fields: gas_furnace_telemetry_fields(),
+            zone_type: None,
         };
 
         Self {

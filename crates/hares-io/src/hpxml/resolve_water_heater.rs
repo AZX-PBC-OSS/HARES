@@ -8,7 +8,7 @@ use hares_equipment::{
 };
 use hares_types::{FuelType, normalize_ascii};
 
-use super::building::XmlNode;
+use super::building::{Building, XmlNode};
 use super::data_patches::HpxmlDataPatches;
 use super::equipment::EquipmentSpec;
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
@@ -42,12 +42,29 @@ fn resolve_bedroom_count(n_bedrooms: Option<f64>, data_patches: Option<&HpxmlDat
         .unwrap_or(2.0)
 }
 
+/// Resolve the numeric `zone_id` (1-indexed) corresponding to an HPXML
+/// `<Location>` string (e.g. "garage", "conditioned space"), by matching
+/// against the zone types in the parsed `Building`.
+///
+/// Returns `None` when the location string does not match any zone in the
+/// building (should not happen for well-formed HPXML but is not a hard error).
+fn zone_id_for_location(building: &Building, location_text: &str) -> Option<u16> {
+    let zone_type = super::building::parse_zone_label(location_text);
+    let key = super::building::zone_key(&zone_type);
+    building
+        .zones
+        .iter()
+        .position(|z| super::building::zone_key(&z.zone_type) == key)
+        .map(|idx| (idx as u16) + 1)
+}
+
 pub(super) fn resolve_water_heaters(
-    details: &XmlNode,
+    building: &Building,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
     data_patches: Option<&HpxmlDataPatches>,
 ) -> std::result::Result<(), super::HpxmlError> {
+    let details = &building.details_xml;
     let (avg_water_draw_l_per_day, n_bedrooms) =
         parse_avg_water_draw_and_bedrooms(details, data_patches);
 
@@ -62,6 +79,9 @@ pub(super) fn resolve_water_heaters(
             let zone_type = super::building::parse_zone_label(location);
             super::building::zone_key(&zone_type)
         });
+        let zone_id = location
+            .as_deref()
+            .and_then(|loc| zone_id_for_location(building, loc));
 
         let energy_factor = child_f64(wh, "EnergyFactor");
         let uniform_energy_factor = child_f64(wh, "UniformEnergyFactor");
@@ -126,7 +146,7 @@ pub(super) fn resolve_water_heaters(
                     .or_else(|| conversion_efficiency.map(|_| 0.0));
                 let cfg = GasWaterHeaterConfig {
                     equipment_id: None,
-                    zone_id: None,
+                    zone_id,
                     loop_id: None,
                     fuel_type: fuel,
                     tank_volume_m3,
@@ -162,7 +182,7 @@ pub(super) fn resolve_water_heaters(
             "Electric Resistance Water Heater" => {
                 let cfg = ElectricResistanceWaterHeaterConfig {
                     equipment_id: None,
-                    zone_id: None,
+                    zone_id,
                     loop_id: None,
                     tank_volume_m3,
                     tank_height_m,
@@ -199,7 +219,7 @@ pub(super) fn resolve_water_heaters(
                 let perf_adj = child_f64(wh, "PerformanceAdjustment").unwrap_or(default_perf_adj);
                 let cfg = TanklessWaterHeaterConfig {
                     equipment_id: None,
-                    zone_id: None,
+                    zone_id,
                     loop_id: None,
                     fuel_type: fuel,
                     energy_factor,
@@ -214,6 +234,7 @@ pub(super) fn resolve_water_heaters(
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
                     avg_water_draw_l_per_day,
+                    zone_type: zone_name.clone(),
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -252,7 +273,7 @@ pub(super) fn resolve_water_heaters(
                 };
                 let cfg = HeatPumpWaterHeaterConfig {
                     equipment_id: None,
-                    zone_id: None,
+                    zone_id,
                     loop_id: None,
                     tank_volume_m3,
                     tank_height_m,
@@ -294,7 +315,7 @@ pub(super) fn resolve_water_heaters(
             "Indirect Tank" => {
                 let cfg = IndirectTankConfig {
                     equipment_id: None,
-                    zone_id: None,
+                    zone_id,
                     boiler_loop_id: None,
                     tank_volume_m3,
                     tank_height_m,
@@ -694,6 +715,58 @@ mod tests {
 
     use crate::defaults::DefaultsStore;
 
+    use super::super::building::{Building, Site, SiteType, Zone, ZoneType};
+
+    /// Build a minimal [`Building`] wrapping the details node from a parsed HPXML.
+    /// Used by tests that only exercise water-heater parsing and do not provide
+    /// a complete building envelope. Zones are empty so `zone_id_for_location`
+    /// returns `None`, preserving the pre-fix behaviour for tests that don't set
+    /// zone topology.
+    fn building_for_test(root: &XmlNode) -> Building {
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .cloned()
+            .unwrap_or_else(|| root.clone());
+        Building {
+            site: Site {
+                elevation_m: None,
+                site_type: Some(SiteType::Suburban),
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+            },
+            zones: vec![],
+            boundaries: vec![],
+            windows: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: details,
+        }
+    }
+
     #[test]
     fn propane_storage_water_heater_maps_to_gas_class() {
         let name = canonical_water_heater_name("storage water heater", FuelType::Propane)
@@ -856,12 +929,10 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let spec = specs
@@ -921,12 +992,10 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
@@ -981,16 +1050,19 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut patches = HpxmlDataPatches::default();
         patches.number_of_bedrooms = Some(5.0);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, Some(&patches))
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            Some(&patches),
+        )
+        .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
             .iter()
@@ -1044,12 +1116,10 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
@@ -1105,12 +1175,10 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
@@ -1164,16 +1232,19 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut patches = HpxmlDataPatches::default();
         patches.number_of_bedrooms = Some(1.0);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, Some(&patches))
-            .expect("water heaters must resolve");
+        resolve_water_heaters(
+            &building,
+            &DefaultsStore::empty(),
+            &mut specs,
+            Some(&patches),
+        )
+        .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
             .iter()
@@ -1228,12 +1299,10 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let cfg: TanklessWaterHeaterConfig = specs
@@ -1319,12 +1388,10 @@ mod tests {
         "#
         );
         let root = parse_xml_document(&xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let spec = specs
@@ -1372,12 +1439,10 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
 
         let spec = specs
@@ -1430,11 +1495,9 @@ mod tests {
 
     fn parse_gas_wh_config(xml: &str) -> GasWaterHeaterConfig {
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1551,11 +1614,9 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1608,11 +1669,9 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1674,11 +1733,9 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1725,11 +1782,9 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("water heaters must resolve");
         let spec = specs
             .iter()
@@ -1797,12 +1852,10 @@ mod tests {
             </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("xml must parse");
-        let details = root
-            .path(&["Building", "BuildingDetails"])
-            .expect("building details must exist");
+        let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs, None)
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
             .expect("combi boiler with storage tank must resolve successfully");
 
         let spec = specs
@@ -1825,5 +1878,169 @@ mod tests {
                 .expect("avg draw should be derived")
                 > 0.0
         );
+    }
+
+    #[test]
+    fn zone_id_for_location_maps_each_zone_type() {
+        let building = Building {
+            site: Site {
+                elevation_m: None,
+                site_type: Some(SiteType::Suburban),
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+            },
+            zones: vec![
+                Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: None,
+                    volume_m3: None,
+                    attached_wall_ids: vec![],
+                    duct_systems: vec![],
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                },
+                Zone {
+                    zone_type: ZoneType::Garage,
+                    floor_area_m2: None,
+                    volume_m3: None,
+                    attached_wall_ids: vec![],
+                    duct_systems: vec![],
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                },
+                Zone {
+                    zone_type: ZoneType::Attic,
+                    floor_area_m2: None,
+                    volume_m3: None,
+                    attached_wall_ids: vec![],
+                    duct_systems: vec![],
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                },
+            ],
+            boundaries: vec![],
+            windows: vec![],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: XmlNode {
+                name: String::new(),
+                attrs: std::collections::HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            },
+        };
+
+        // Conditioned zone is at index 0 → zone_id 1
+        assert_eq!(
+            zone_id_for_location(&building, "conditioned space"),
+            Some(1)
+        );
+        // Garage zone is at index 1 → zone_id 2
+        assert_eq!(zone_id_for_location(&building, "garage"), Some(2));
+        // Attic zone is at index 2 → zone_id 3
+        assert_eq!(zone_id_for_location(&building, "attic vented"), Some(3));
+        // Foundation not in building → None
+        assert_eq!(zone_id_for_location(&building, "unfinished basement"), None);
+        // Unknown location → None
+        assert_eq!(zone_id_for_location(&building, "rooftop"), None);
+    }
+
+    #[test]
+    fn water_heater_in_garage_receives_correct_zone_id() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site>
+                      <SiteType>suburban</SiteType>
+                    </Site>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure>
+                    <Walls />
+                    <Garages>
+                      <Garage>
+                        <SystemIdentifier id="g1"/>
+                      </Garage>
+                    </Garages>
+                  </Enclosure>
+                  <WaterHeating>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>electricity</FuelType>
+                      <WaterHeaterType>storage water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.92</EnergyFactor>
+                      <TankVolume>50</TankVolume>
+                      <PerformanceAdjustment>0.93</PerformanceAdjustment>
+                      <Location>garage</Location>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = crate::hpxml::building::parse_building(xml).expect("building must parse");
+        let mut specs = Vec::new();
+        resolve_water_heaters(&building, &DefaultsStore::empty(), &mut specs, None)
+            .expect("water heaters must resolve");
+
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Electric Resistance Water Heater")
+            .expect("WH spec must be emitted");
+        let cfg: ElectricResistanceWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed resistance config");
+
+        // Garage is zone 2 (conditioned is zone 1).
+        assert_eq!(
+            cfg.zone_id,
+            Some(2),
+            "water heater in garage must have zone_id=2"
+        );
+        assert_eq!(cfg.zone_type.as_deref(), Some("garage"));
     }
 }

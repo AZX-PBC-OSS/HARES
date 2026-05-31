@@ -390,6 +390,7 @@ impl ScheduledLoad {
                 | ControlCapabilities::POWER_SETPOINT,
             core_capabilities: CoreCapabilities::ELECTRIC,
             telemetry_fields: scheduled_load_telemetry_fields(),
+            zone_type: None,
         };
         Self {
             descriptor,

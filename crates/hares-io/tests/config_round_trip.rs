@@ -385,6 +385,7 @@ fn sample_tankless_water_heater_config() -> TanklessWaterHeaterConfig {
             boundary: BoundaryPolicy::Clamp,
         }),
         avg_water_draw_l_per_day: Some(220.0),
+        zone_type: None,
     }
 }
 

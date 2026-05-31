@@ -423,6 +423,7 @@ impl Battery {
                 | CoreCapabilities::HAS_SOC
                 | CoreCapabilities::HAS_MODE,
             telemetry_fields: battery_telemetry_fields(),
+            zone_type: None,
         };
 
         Self {

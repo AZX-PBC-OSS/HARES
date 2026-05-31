@@ -347,6 +347,7 @@ impl Ventilation {
                 | ControlCapabilities::LOAD_FRACTION,
             core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
             telemetry_fields: telemetry_fields(),
+            zone_type: None,
         };
 
         let ports = vec![

@@ -157,12 +157,24 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
 /// Write equipment zone-id mapping at init for diagnostic traceability.
 ///
 /// Emitted when `output_verbosity >= 4` to surface the zone routing
-/// resolved from HPXML for each HVAC equipment. The mapping is written
+/// resolved from HPXML for each equipment instance. The mapping is written
 /// as a comment block after the CSV header so downstream tools can
 /// verify per-zone thermal attribution without inspecting config internals.
-pub fn write_equipment_init(w: &mut impl Write, equipment: &[(String, u16)]) {
-    for (name, zone_id) in equipment {
-        let _ = writeln!(w, "# eq zone_id: {name} -> ZoneId({zone_id})");
+/// The optional `zone_type` is the HPXML `<Location>` label for water heater
+/// equipment.
+pub fn write_equipment_init(w: &mut impl Write, equipment: &[(String, u16, Option<String>)]) {
+    for (name, zone_id, zone_type) in equipment {
+        match zone_type {
+            Some(zt) => {
+                let _ = writeln!(
+                    w,
+                    "# eq zone_id: {name} -> ZoneId({zone_id}), zone_type={zt}"
+                );
+            }
+            None => {
+                let _ = writeln!(w, "# eq zone_id: {name} -> ZoneId({zone_id})");
+            }
+        }
     }
 }
 
