@@ -13,7 +13,7 @@ use super::building::XmlNode;
 pub(crate) fn parse_fuel(raw: Option<&str>) -> Result<FuelType, super::HpxmlError> {
     let normalized = normalize_ascii(raw.unwrap_or("electricity"));
     match normalized.as_str() {
-        "electricity" | "electric" | "none" => Ok(FuelType::Electric),
+        "electricity" | "electric" => Ok(FuelType::Electric),
         "natural gas" | "natural_gas" | "gas" => Ok(FuelType::Gas),
         "propane" => Ok(FuelType::Propane),
         "oil" | "fuel oil" | "fuel_oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
@@ -529,6 +529,14 @@ mod tests {
     fn parse_fuel_solar_returns_err() {
         let result = parse_fuel(Some("solar"));
         assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("unsupported FuelType"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_fuel_none_is_not_electric() {
+        let result = parse_fuel(Some("none"));
+        assert!(result.is_err(), "\"none\" is not a valid HPXML fuel type and must be rejected");
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("unsupported FuelType"), "got: {err}");
     }

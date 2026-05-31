@@ -499,7 +499,7 @@ where
 /// [`FuelType`] enum. Returns `Err` for unrecognised fuel type strings.
 fn parse_water_heater_fuel_from_str(raw: &str) -> Result<FuelType, super::HpxmlError> {
     match normalize_ascii(raw).as_str() {
-        "electricity" | "electric" | "none" => Ok(FuelType::Electric),
+        "electricity" | "electric" => Ok(FuelType::Electric),
         "natural gas" | "natural_gas" | "gas" => Ok(FuelType::Gas),
         "propane" => Ok(FuelType::Propane),
         "oil" | "fuel oil" | "fuel_oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
@@ -1351,6 +1351,17 @@ mod tests {
             err.to_string()
                 .contains("unsupported water-heater FuelType")
         );
+    }
+
+    #[test]
+    fn parse_water_heater_fuel_none_is_rejected() {
+        let result = parse_water_heater_fuel_from_str("none");
+        assert!(
+            result.is_err(),
+            "\"none\" is not a valid HPXML fuel type and must be rejected"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("unsupported water-heater FuelType"), "got: {err}");
     }
 
     #[test]
