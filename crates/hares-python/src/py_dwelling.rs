@@ -17,6 +17,7 @@ use hares_equipment::{
 use hares_io::{
     OutputFormat, ResampleOverrides, SimulationConfig, output::metrics::MetricsCalculator,
 };
+use hares_types::panic_hook::{self, PanicHookGuard};
 use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -604,6 +605,14 @@ impl PyDwelling {
     }
 
     pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let _guard = PanicHookGuard::new();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                panic_hook::is_installed(),
+                "custom panic hook must be installed before simulation"
+            );
+        }
         let sim_result: Result<Result<(), HaresError>, _> = py.detach(|| {
             std::panic::catch_unwind(AssertUnwindSafe(|| {
                 let mut dwelling = lock_dwelling_hares(&self.dwelling)?;
@@ -614,7 +623,12 @@ impl PyDwelling {
         match sim_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(to_py_err(e)),
-            Err(payload) => return Err(PyRuntimeError::new_err(panic_payload_to_string(payload))),
+            Err(payload) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "HARES internal panic: {}",
+                    panic_hook::panic_payload_to_string(payload)
+                )));
+            }
         }
 
         let dwelling = lock_dwelling(&self.dwelling)?;
@@ -625,12 +639,25 @@ impl PyDwelling {
     }
 
     pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let _guard = PanicHookGuard::new();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                panic_hook::is_installed(),
+                "custom panic hook must be installed before step"
+            );
+        }
         let step_result: Result<Result<hares_core::StepResult, HaresError>, _> =
             py.detach(|| std::panic::catch_unwind(AssertUnwindSafe(|| self.step_core())));
         let step = match step_result {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => return Err(to_py_err(e)),
-            Err(payload) => return Err(PyRuntimeError::new_err(panic_payload_to_string(payload))),
+            Err(payload) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "HARES internal panic: {}",
+                    panic_hook::panic_payload_to_string(payload)
+                )));
+            }
         };
 
         if self.zone_keys.is_none() {
@@ -1951,15 +1978,6 @@ fn python_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     Err(PyValueError::new_err(format!(
         "cannot convert Python object of type '{type_name}' to JSON for overrides",
     )))
-}
-
-fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
-    let msg = payload
-        .downcast_ref::<String>()
-        .map(|s| s.as_str())
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("unknown panic");
-    format!("HARES internal panic: {msg}")
 }
 
 fn to_py_err(err: HaresError) -> PyErr {

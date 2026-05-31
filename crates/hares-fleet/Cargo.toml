@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+check_invariants = []
+
 [dependencies]
 hares-core = { workspace = true }
 hares-io = { workspace = true }

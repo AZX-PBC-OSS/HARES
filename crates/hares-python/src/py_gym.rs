@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use hares_types::panic_hook::{self, PanicHookGuard};
 use pyo3::Python;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -85,6 +86,14 @@ pub fn batch_step_py(
 
     // Release GIL -- Rayon threads run step_core()/observation() without
     // touching Python. Both methods use only Mutex<Dwelling> internally.
+    let _guard = PanicHookGuard::new();
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            panic_hook::is_installed(),
+            "custom panic hook must be installed before batch step"
+        );
+    }
     let results: Vec<StepResult> = py.detach(|| {
         ptrs.par_iter()
             .enumerate()
@@ -100,14 +109,10 @@ pub fn batch_step_py(
                 }));
                 let step_result = match step_result {
                     Ok(inner) => inner,
-                    Err(payload) => {
-                        let msg = payload
-                            .downcast_ref::<String>()
-                            .map(|s| s.as_str())
-                            .or_else(|| payload.downcast_ref::<&str>().copied())
-                            .unwrap_or("unknown panic");
-                        Err(format!("HARES internal panic: {msg}"))
-                    }
+                    Err(payload) => Err(format!(
+                        "HARES internal panic: {}",
+                        panic_hook::panic_payload_to_string(payload)
+                    )),
                 };
                 match step_result {
                     Ok(step) => {

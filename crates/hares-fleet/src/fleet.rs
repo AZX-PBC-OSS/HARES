@@ -13,6 +13,7 @@ use hares_core::{
 };
 use hares_io::{OutputFormat, ResStockVersion, SimulationConfig, parse_resstock_metadata};
 use hares_types::ControlSignal;
+use hares_types::panic_hook::{self, PanicHookGuard};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use thiserror::Error;
@@ -232,6 +233,19 @@ impl Fleet {
         let completed = AtomicUsize::new(0);
         let progress = self.progress.clone();
 
+        // Outer guard ensures the custom hook is installed before any worker
+        // starts. Each worker's engine.run() installs its own guard as well,
+        // but this one covers the gap before worker guards are constructed and
+        // serves as defense-in-depth in case a worker path skips the guard.
+        let _guard = PanicHookGuard::new();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                panic_hook::is_installed(),
+                "custom panic hook must be installed before fleet simulation"
+            );
+        }
+
         self.entries
             .par_iter()
             .map(|entry| {
@@ -251,7 +265,7 @@ impl Fleet {
                         }
                         Err(SimError::Panic {
                             bldg_id: entry.config.bldg_id,
-                            message: panic_payload_to_string(payload),
+                            message: panic_hook::panic_payload_to_string(payload),
                         })
                     }
                 };
@@ -314,6 +328,15 @@ impl SteppableFleet {
         let mut dwellings = Vec::with_capacity(configs.len());
         let mut build_errors = Vec::new();
 
+        let _guard = PanicHookGuard::new();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                panic_hook::is_installed(),
+                "custom panic hook must be installed before dwelling construction"
+            );
+        }
+
         for config in configs {
             let bldg_id = config.bldg_id;
             let build_result =
@@ -326,7 +349,7 @@ impl SteppableFleet {
                 }),
                 Err(payload) => build_errors.push(DwellingBuildError {
                     bldg_id,
-                    message: panic_payload_to_string(payload),
+                    message: panic_hook::panic_payload_to_string(payload),
                 }),
             }
         }
@@ -516,6 +539,15 @@ fn run_entry(entry: &FleetEntry) -> std::result::Result<DwellingOutcome, SimErro
 fn step_dwellings_parallel(
     dwellings: &mut [Dwelling],
 ) -> Vec<std::result::Result<StepResult, SimError>> {
+    let _guard = PanicHookGuard::new();
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            panic_hook::is_installed(),
+            "custom panic hook must be installed before dwelling stepping"
+        );
+    }
+
     dwellings
         .par_iter_mut()
         .map(
@@ -527,7 +559,7 @@ fn step_dwellings_parallel(
                 }),
                 Err(payload) => Err(SimError::Panic {
                     bldg_id: dwelling.bldg_id,
-                    message: panic_payload_to_string(payload),
+                    message: panic_hook::panic_payload_to_string(payload),
                 }),
             },
         )
@@ -584,16 +616,6 @@ fn remap_weather_path(path: &Path, hpxml_dir: &Path, weather_dir: &Path) -> Path
         Some(file_name) => weather_dir.join(file_name),
         None => weather_dir.to_path_buf(),
     }
-}
-
-fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(msg) = payload.downcast_ref::<&'static str>() {
-        return (*msg).to_string();
-    }
-    if let Some(msg) = payload.downcast_ref::<String>() {
-        return msg.clone();
-    }
-    "simulation panicked with non-string payload".to_string()
 }
 
 #[cfg(test)]
@@ -796,6 +818,36 @@ mod tests {
         let success_count = results.iter().filter(|result| result.is_ok()).count();
         assert_eq!(panic_count, 1);
         assert_eq!(success_count, 2);
+    }
+
+    #[test]
+    fn panic_error_message_includes_file_and_line() {
+        let panic_on = 2usize;
+        let fleet =
+            Fleet::from_buildings(build_valid_configs(3)).with_progress(move |done, _total| {
+                if done == panic_on {
+                    panic!("injected callback panic");
+                }
+            });
+
+        let results = fleet.simulate(3);
+        assert_eq!(results.len(), 3);
+
+        let panic_msg = results
+            .iter()
+            .find_map(|result| match result {
+                Err(SimError::Panic { message, .. }) => Some(message.clone()),
+                _ => None,
+            })
+            .expect("one result should be a Panic error");
+
+        // Verifies the end-to-end chain: PanicHookGuard (installed in calling thread)
+        // → custom hook fires in Rayon worker → thread-local PANIC_INFO populated
+        // → catch_unwind captures payload → panic_payload_to_string enriches with file:line.
+        assert!(
+            panic_msg.contains("fleet.rs") && panic_msg.contains(" — "),
+            "panic message should contain file:line location enrichment, got: {panic_msg}"
+        );
     }
 
     #[test]

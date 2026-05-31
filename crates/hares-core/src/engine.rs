@@ -1,6 +1,5 @@
 //! Simulation engine main loop.
 
-use std::any::Any;
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -13,6 +12,7 @@ use hares_io::output::metrics::{
 };
 use hares_io::{OutputFormat, SimulationConfig};
 use hares_types::HaresError;
+use hares_types::panic_hook::{self, PanicHookGuard};
 
 /// Result of computing metrics from Arrow batches, including status context.
 struct MetricsOutcome {
@@ -113,6 +113,14 @@ impl SimulationEngine {
 
         let simulation_timer = KernelTimer::start(KERNEL_SIMULATE);
         let simulation_started = Instant::now();
+        let _guard = PanicHookGuard::new();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                panic_hook::is_installed(),
+                "custom panic hook must be installed before simulation"
+            );
+        }
         let sim_outcome = panic::catch_unwind(AssertUnwindSafe(|| dwelling.simulate()));
         simulation_timer.stop();
         profile.record(KERNEL_SIMULATE, simulation_started.elapsed());
@@ -181,7 +189,7 @@ impl SimulationEngine {
                 timeseries: None,
                 metrics: empty_metrics(),
                 warnings,
-                status: SimStatus::Failed(panic_payload_to_string(payload)),
+                status: SimStatus::Failed(panic_hook::panic_payload_to_string(payload)),
                 elapsed,
             },
         };
@@ -208,6 +216,14 @@ impl SimulationEngine {
     ) -> Result<SimulationResults, HaresError> {
         let run_started = Instant::now();
 
+        let _guard = PanicHookGuard::new();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                panic_hook::is_installed(),
+                "custom panic hook must be installed before simulation"
+            );
+        }
         let sim_outcome = panic::catch_unwind(AssertUnwindSafe(|| dwelling.simulate()));
         let elapsed = run_started.elapsed();
 
@@ -265,7 +281,7 @@ impl SimulationEngine {
                 timeseries: None,
                 metrics: empty_metrics(),
                 warnings,
-                status: SimStatus::Failed(panic_payload_to_string(payload)),
+                status: SimStatus::Failed(panic_hook::panic_payload_to_string(payload)),
                 elapsed,
             },
         };
@@ -397,16 +413,6 @@ fn empty_metrics() -> SimulationMetrics {
     }
 }
 
-fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
-    if let Some(msg) = payload.downcast_ref::<&'static str>() {
-        return (*msg).to_string();
-    }
-    if let Some(msg) = payload.downcast_ref::<String>() {
-        return msg.clone();
-    }
-    "simulation panicked with non-string payload".to_string()
-}
-
 #[derive(Debug, Default)]
 struct RunProfile {
     segments: BTreeMap<&'static str, StdDuration>,
@@ -463,14 +469,5 @@ fn emit_profile_summary(profile: &RunProfile) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn panic_payload_conversion_handles_string_types() {
-        let string_payload = panic_payload_to_string(Box::new("boom"));
-        assert_eq!(string_payload, "boom");
-
-        let owned_payload = panic_payload_to_string(Box::new(String::from("owned")));
-        assert_eq!(owned_payload, "owned");
-    }
+    // Tests for panic_payload_to_string were moved to hares-types::panic_hook.
 }
