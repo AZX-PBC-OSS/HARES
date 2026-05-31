@@ -1949,3 +1949,71 @@ fn gable_roof_without_pitch_not_classified_as_flat() {
         "gable roof without Pitch must not classify as Flat; got {shape:?}"
     );
 }
+
+// ===========================================================================
+// Regression: T-0136 — unrecognized fuel type must fail loudly
+//
+// Before the fix, parse_fuel() silently defaulted unrecognized fuel strings
+// to FuelType::Electric. After the fix, an unrecognized FuelType in HPXML
+// must produce an error during equipment resolution.
+// ===========================================================================
+
+#[test]
+fn unrecognized_fuel_type_on_heating_system_returns_error() {
+    let xml = minimal_xml_with_systems(
+        r#"<Systems><HVAC>
+            <HeatingSystem>
+                <HeatingSystemType><Furnace/></HeatingSystemType>
+                <HeatingSystemFuel>district heating</HeatingSystemFuel>
+                <HeatingCapacity>36000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                    <Units>AFUE</Units>
+                    <Value>0.80</Value>
+                </AnnualHeatingEfficiency>
+            </HeatingSystem>
+        </HVAC></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse XML structure");
+    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
+
+    assert!(
+        result.is_err(),
+        "resolve_equipment must return Err for unrecognized FuelType 'district heating'"
+    );
+    let err = result.unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unsupported FuelType"),
+        "error message must name the unrecognized fuel, got: {msg}"
+    );
+}
+
+#[test]
+fn unrecognized_fuel_type_on_cooling_system_returns_error() {
+    let xml = minimal_xml_with_systems(
+        r#"<Systems><HVAC>
+            <CoolingSystem>
+                <CoolingSystemType>central air conditioner</CoolingSystemType>
+                <CoolingSystemFuel>solar</CoolingSystemFuel>
+                <CoolingCapacity>36000</CoolingCapacity>
+                <AnnualCoolingEfficiency>
+                    <Units>SEER</Units>
+                    <Value>14.0</Value>
+                </AnnualCoolingEfficiency>
+            </CoolingSystem>
+        </HVAC></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse XML structure");
+    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
+
+    assert!(
+        result.is_err(),
+        "resolve_equipment must return Err for unrecognized FuelType 'solar'"
+    );
+    let err = result.unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unsupported FuelType"),
+        "error message must name the unrecognized fuel, got: {msg}"
+    );
+}

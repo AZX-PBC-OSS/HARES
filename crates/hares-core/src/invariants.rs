@@ -209,6 +209,22 @@ impl InvariantChecker {
         }
         Ok(())
     }
+
+    /// Verifies that the fuel accumulator contains no electric contributions.
+    ///
+    /// Electric power must route through `ElectricalAccumulator` — never through
+    /// the fuel accumulator. A non-zero electric slot in the fuel accumulator
+    /// indicates equipment is mistakenly treating electricity as a fuel.
+    pub fn check_fuel_electric_absent(&self, electric_fuel_w: f64) -> Result<(), HaresError> {
+        if electric_fuel_w > 0.0 {
+            return Err(HaresError::InvariantViolation {
+                check_name: "electric_fuel_in_fuel_accumulator".to_string(),
+                value: electric_fuel_w,
+                tolerance: 0.0,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
@@ -237,6 +253,10 @@ impl InvariantChecker {
         &self,
         _: &[ControlCapabilities],
     ) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_fuel_electric_absent(&self, _: f64) -> Result<(), HaresError> {
         Ok(())
     }
 }
@@ -482,5 +502,32 @@ mod tests {
         let caps: [ControlCapabilities; 0] = [];
         let result = checker().check_protocol_native_registration(&caps);
         assert!(result.is_err());
+    }
+
+    // ── check_fuel_electric_absent ───────────────────────────────────────────
+
+    #[test]
+    fn fuel_electric_absent_passes_when_zero() {
+        let result = checker().check_fuel_electric_absent(0.0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn fuel_electric_absent_fails_when_positive() {
+        let result = checker().check_fuel_electric_absent(100.0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "electric_fuel_in_fuel_accumulator"
+        ));
+    }
+
+    #[test]
+    fn fuel_electric_absent_passes_when_negative() {
+        // Negative contributions shouldn't appear for fuel but the check
+        // only flags positive values to avoid false alarms.
+        let result = checker().check_fuel_electric_absent(-50.0);
+        assert!(result.is_ok());
     }
 }

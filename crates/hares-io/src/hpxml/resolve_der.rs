@@ -252,7 +252,7 @@ pub(super) fn resolve_generators(
 
     for generator in generators.children_named("Generator") {
         let generator_id = element_id(generator).unwrap_or_else(|| "unknown".to_string());
-        let fuel = parse_fuel(child_text(generator, "FuelType").as_deref());
+        let fuel = parse_fuel(child_text(generator, "FuelType").as_deref())?;
         let annual_output_kwh = child_f64(generator, "AnnualOutputkWh");
         let annual_consumption_kbtu = child_f64(generator, "AnnualConsumptionkBtu");
         let eta_electric = if let (Some(out_kwh), Some(cons_kbtu)) =

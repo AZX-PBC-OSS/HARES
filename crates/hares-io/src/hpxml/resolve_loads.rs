@@ -8,6 +8,7 @@ use hares_equipment::hvac::cooling_config::DehumidifierConfig;
 use hares_equipment::{EquipmentConfig, EvConfig, VentilationConfig};
 use hares_types::FuelType;
 
+use super::HpxmlError;
 use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec, build_typed_spec};
 use super::resolve_pool::resolve_pool_and_spa_loads;
@@ -40,7 +41,7 @@ pub(super) fn resolve_scheduled_loads(
     building: &Building,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
-) {
+) -> std::result::Result<(), HpxmlError> {
     let details = &building.details_xml;
 
     // Occupancy
@@ -130,7 +131,7 @@ pub(super) fn resolve_scheduled_loads(
                     params.insert("annual_gas_therms".to_string(), json!(load_therms));
                 }
                 if let Some(fuel_name) = child_text(node, "FuelType") {
-                    fuel = parse_fuel(Some(&fuel_name));
+                    fuel = parse_fuel(Some(&fuel_name))?;
                 }
 
                 // Appliance-specific parameters
@@ -665,6 +666,7 @@ pub(super) fn resolve_scheduled_loads(
 
     // Pools, HotTubs, and Spas — delegated to resolve_pool module.
     resolve_pool_and_spa_loads(details, defaults, specs);
+    Ok(())
 }
 
 pub(super) fn resolve_ventilation(

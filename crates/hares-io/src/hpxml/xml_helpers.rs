@@ -10,22 +10,21 @@ use hares_types::{normalize_ascii, parse_trimmed_f64};
 
 use super::building::XmlNode;
 
-pub(crate) fn parse_fuel(raw: Option<&str>) -> FuelType {
+pub(crate) fn parse_fuel(raw: Option<&str>) -> Result<FuelType, super::HpxmlError> {
     let normalized = normalize_ascii(raw.unwrap_or("electricity"));
     match normalized.as_str() {
-        "electricity" | "electric" | "none" => FuelType::Electric,
-        "natural gas" | "natural_gas" | "gas" => FuelType::Gas,
-        "propane" => FuelType::Propane,
+        "electricity" | "electric" | "none" => Ok(FuelType::Electric),
+        "natural gas" | "natural_gas" | "gas" => Ok(FuelType::Gas),
+        "propane" => Ok(FuelType::Propane),
         "oil" | "fuel oil" | "fuel_oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
-        | "fuel oil 5/6" | "kerosene" | "diesel" => FuelType::Oil,
-        "wood" => FuelType::Wood,
-        "wood pellets" | "wood_pellets" => FuelType::WoodPellet,
+        | "fuel oil 5/6" | "kerosene" | "diesel" => Ok(FuelType::Oil),
+        "wood" => Ok(FuelType::Wood),
+        "wood pellets" | "wood_pellets" => Ok(FuelType::WoodPellet),
         "coal" | "anthracite coal" | "anthracite_coal" | "bituminous coal" | "bituminous_coal"
-        | "coke" => FuelType::Coal,
-        other => {
-            tracing::warn!(fuel = %other, "unrecognized fuel string; defaulting to Electric");
-            FuelType::Electric
-        }
+        | "coke" => Ok(FuelType::Coal),
+        other => Err(super::HpxmlError::Parse(
+            format!("unsupported FuelType '{other}'").into(),
+        )),
     }
 }
 
@@ -84,9 +83,10 @@ pub(crate) fn child_temperature_c(node: &XmlNode) -> Option<f64> {
         tracing::warn!(
             unit = %units,
             value,
-            "unrecognized temperature unit in child_temperature_c; treating as Celsius"
+            "unrecognized temperature unit in child_temperature_c; HPXML spec units \
+             are F, C, degF, degC, Fahrenheit, Celsius — ignoring value"
         );
-        Some(value)
+        None
     }
 }
 
@@ -387,10 +387,9 @@ mod tests {
     }
 
     #[test]
-    fn child_temperature_c_unrecognized_unit_returns_raw() {
+    fn child_temperature_c_unrecognized_unit_returns_none() {
         let node = temp_node("Parent", "300", Some("kelvin"));
-        let c = child_temperature_c(&node).unwrap();
-        assert!((c - 300.0).abs() < 1e-12);
+        assert!(child_temperature_c(&node).is_none());
     }
 
     #[test]
@@ -493,5 +492,44 @@ mod tests {
             month_count, 1,
             "month_multipliers should appear exactly once in output, found {month_count}"
         );
+    }
+
+    // ── parse_fuel ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_fuel_none_returns_electric() {
+        let result = parse_fuel(None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), FuelType::Electric);
+    }
+
+    #[test]
+    fn parse_fuel_valid_strings() {
+        assert_eq!(parse_fuel(Some("electricity")).unwrap(), FuelType::Electric);
+        assert_eq!(parse_fuel(Some("natural gas")).unwrap(), FuelType::Gas);
+        assert_eq!(parse_fuel(Some("propane")).unwrap(), FuelType::Propane);
+        assert_eq!(parse_fuel(Some("fuel oil")).unwrap(), FuelType::Oil);
+        assert_eq!(parse_fuel(Some("wood")).unwrap(), FuelType::Wood);
+        assert_eq!(
+            parse_fuel(Some("wood pellets")).unwrap(),
+            FuelType::WoodPellet
+        );
+        assert_eq!(parse_fuel(Some("coal")).unwrap(), FuelType::Coal);
+    }
+
+    #[test]
+    fn parse_fuel_unrecognized_returns_err() {
+        let result = parse_fuel(Some("district heating"));
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("unsupported FuelType"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_fuel_solar_returns_err() {
+        let result = parse_fuel(Some("solar"));
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("unsupported FuelType"), "got: {err}");
     }
 }

@@ -331,10 +331,14 @@ pub fn rebuild_hvac_typed_config(
         "ASHP Heater" | "MSHP Heater" => {
             let is_mini_split = name.starts_with("MSHP");
             try_build_heat_pump_heater_config(name, params, duct_params, is_mini_split)
+                .ok()
+                .flatten()
         }
         "ASHP Cooler" | "MSHP Cooler" => {
             let is_mini_split = name.starts_with("MSHP");
             try_build_heat_pump_cooler_config(name, params, duct_params, is_mini_split)
+                .ok()
+                .flatten()
         }
         "Dehumidifier" => try_build_dehumidifier_config(name, params),
         other => {
@@ -1288,7 +1292,7 @@ fn try_build_heat_pump_heater_config(
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
     is_mini_split: bool,
-) -> Option<EquipmentConfig> {
+) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
     let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
     let cooling_capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64);
     let n_speeds = if is_mini_split {
@@ -1305,7 +1309,8 @@ fn try_build_heat_pump_heater_config(
     let backup_fuel = params
         .get("backup_fuel")
         .and_then(Value::as_str)
-        .map(|s| super::xml_helpers::parse_fuel(Some(s)));
+        .map(|s| super::xml_helpers::parse_fuel(Some(s)))
+        .transpose()?;
     let fraction_heating_load_served = params
         .get("fraction_heating_load_served")
         .and_then(Value::as_f64);
@@ -1484,10 +1489,10 @@ fn try_build_heat_pump_heater_config(
             d
         },
     };
-    Some(
+    Ok(Some(
         EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)
             .with_setpoints_reconciled(setpoints),
-    )
+    ))
 }
 
 /// Build a `HeatPumpCoolerConfig` typed config from combined heat-pump params.
@@ -1496,7 +1501,7 @@ fn try_build_heat_pump_cooler_config(
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
     is_mini_split: bool,
-) -> Option<EquipmentConfig> {
+) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
     let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
     let cooling_capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64);
     let n_speeds = if is_mini_split {
@@ -1513,7 +1518,8 @@ fn try_build_heat_pump_cooler_config(
     let backup_fuel = params
         .get("backup_fuel")
         .and_then(Value::as_str)
-        .map(|s| super::xml_helpers::parse_fuel(Some(s)));
+        .map(|s| super::xml_helpers::parse_fuel(Some(s)))
+        .transpose()?;
     let fraction_heating_load_served = params
         .get("fraction_heating_load_served")
         .and_then(Value::as_f64);
@@ -1672,10 +1678,10 @@ fn try_build_heat_pump_cooler_config(
             .and_then(Value::as_f64)
             .unwrap_or(10.0),
     };
-    Some(
+    Ok(Some(
         EquipmentConfig::from_typed(name.to_string(), ochre_class.to_string(), cfg)
             .with_setpoints_reconciled(setpoints),
-    )
+    ))
 }
 
 /// OCHRE `get_duct_info` threshold for "insulated floor" (IP R-value 5.3 → SI).
@@ -1952,7 +1958,7 @@ pub(super) fn resolve_hvac(
             child_text(heating, "HeatingSystemFuel")
                 .as_deref()
                 .or(child_text(heating, "FuelType").as_deref()),
-        );
+        )?;
         let Some(system_type) = parse_named_type(heating, "HeatingSystemType") else {
             tracing::warn!("HeatingSystem has empty or self-closing HeatingSystemType; skipping");
             continue;
@@ -2098,7 +2104,7 @@ pub(super) fn resolve_hvac(
             child_text(cooling, "CoolingSystemFuel")
                 .as_deref()
                 .or(Some("electricity")),
-        );
+        )?;
         let Some(system_type) = child_text(cooling, "CoolingSystemType") else {
             tracing::warn!("CoolingSystem has empty or missing CoolingSystemType; skipping");
             continue;
@@ -2481,13 +2487,13 @@ pub(super) fn resolve_hvac(
             &heater_params,
             &duct_params,
             is_mini_split,
-        );
+        )?;
         let cooler_typed = try_build_heat_pump_cooler_config(
             cooler_name,
             &cooler_params,
             &duct_params,
             is_mini_split,
-        );
+        )?;
 
         let mut heater_spec = build_spec(
             heater_name.to_string(),
@@ -4987,7 +4993,10 @@ mod tests {
         .expect("MSHP cooler typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
-        let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
+        let cfg: HeatPumpCoolerConfig = ec
+            .expect("equipment config should be present")
+            .typed()
+            .expect("typed cooler config");
         assert!(cfg.common.is_mini_split);
         assert_eq!(cfg.common.number_of_speeds, 4);
     }
@@ -5009,7 +5018,10 @@ mod tests {
         .expect("ASHP cooler typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
-        let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
+        let cfg: HeatPumpCoolerConfig = ec
+            .expect("equipment config should be present")
+            .typed()
+            .expect("typed cooler config");
         assert_eq!(cfg.common.number_of_speeds, 2);
         assert_eq!(cfg.stage_shrs, Some(vec![0.81, 0.74]));
     }
@@ -5034,7 +5046,10 @@ mod tests {
         .expect("ASHP heater typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
-        let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
+        let cfg: HeatPumpHeaterConfig = ec
+            .expect("equipment config should be present")
+            .typed()
+            .expect("typed heater config");
         assert_eq!(cfg.hp_lockout_temp_c, Some(-12.0));
         assert_eq!(cfg.er_lockout_temp_c, Some(2.0));
         assert_eq!(cfg.max_oat_supplemental_c, Some(18.0));
@@ -5309,6 +5324,7 @@ mod tests {
         let ec = try_build_heat_pump_heater_config("ASHP Heater", &params, &duct_params, false)
             .expect("typed config must be present");
         let cfg: HeatPumpHeaterConfig = ec
+            .expect("equipment config should be present")
             .typed()
             .expect("must deserialize to HeatPumpHeaterConfig");
         assert_eq!(
@@ -5329,6 +5345,7 @@ mod tests {
         let ec = try_build_heat_pump_cooler_config("ASHP Cooler", &params, &duct_params, false)
             .expect("typed config must be present");
         let cfg: HeatPumpCoolerConfig = ec
+            .expect("equipment config should be present")
             .typed()
             .expect("must deserialize to HeatPumpCoolerConfig");
         assert_eq!(
@@ -6172,7 +6189,10 @@ mod tests {
         .expect("MSHP heater typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
-        let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
+        let cfg: HeatPumpHeaterConfig = ec
+            .expect("equipment config should be present")
+            .typed()
+            .expect("typed heater config");
         assert!(cfg.common.is_mini_split);
         assert_eq!(cfg.common.number_of_speeds, 4);
     }
@@ -6193,7 +6213,10 @@ mod tests {
         .expect("MSHP heater typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
-        let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
+        let cfg: HeatPumpHeaterConfig = ec
+            .expect("equipment config should be present")
+            .typed()
+            .expect("typed heater config");
         assert!(cfg.common.is_mini_split);
         assert_eq!(cfg.common.number_of_speeds, 4);
     }

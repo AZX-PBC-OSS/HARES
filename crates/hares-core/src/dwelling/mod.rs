@@ -3763,6 +3763,11 @@ impl Dwelling {
             + power_w_to_kw(self.ports.electrical.generation_power_w);
         checker.check_electrical(net_kw, &[-port_net])?;
 
+        // Fuel accumulator must not contain electric contributions: electric
+        // power routes through ElectricalAccumulator, never through the fuel
+        // accumulator.
+        checker.check_fuel_electric_absent(self.ports.fuel.get(hares_types::FuelType::Electric))?;
+
         // Thermal balance: deferred -- the multi-node RC state-space model
         // distributes thermal energy across zone-air and wall-mass nodes.
         // A zone-air-only balance (C_zone × ΔT / dt vs. component gains)

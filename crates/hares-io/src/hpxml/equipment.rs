@@ -57,7 +57,7 @@ pub fn resolve_equipment(
     resolve_batteries(details, defaults, &mut specs)?;
     resolve_ev(details, defaults, &mut specs)?;
     resolve_generators(details, defaults, &mut specs)?;
-    resolve_scheduled_loads(building, defaults, &mut specs);
+    resolve_scheduled_loads(building, defaults, &mut specs)?;
     resolve_ventilation(details, defaults, &mut specs);
 
     apply_overrides(&mut specs, overrides);
