@@ -273,7 +273,7 @@ pub fn building_to_boundary_inputs(
                     .find(|w| w.id == bd.id)
                     .and_then(|w| w.u_factor_w_m2_k);
                 if let Some(u) = u_factor.filter(|&u| u > 0.0) {
-                    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u);
+                    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u)?;
                     (r_glass, r_int, r_ext)
                 } else {
                     tracing::warn!(
@@ -767,12 +767,13 @@ mod tests {
         SetpointReconciliation,
         hvac::heating_config::{DuctConfig, GasFurnaceConfig, HvacSetpointConfig},
     };
-    use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
+    use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
     use hares_types::FuelType;
 
     use super::{
-        building_to_zone_inputs, chrono_to_std_duration, duration_to_u32_secs, find_zone_idx,
-        mass_multiplier_for_zone, merged_equipment_config, zone_has_furniture_boundaries,
+        building_to_boundary_inputs, building_to_zone_inputs, chrono_to_std_duration,
+        duration_to_u32_secs, find_zone_idx, mass_multiplier_for_zone, merged_equipment_config,
+        zone_has_furniture_boundaries,
     };
     use hares_types::HaresError;
 
@@ -1764,6 +1765,86 @@ mod tests {
             .expect("DefaultsStore must be loadable from project defaults/ directory")
     }
 
+    /// Window U-factor >= ~10 produces negative r_glass in
+    /// `window_u_factor_decomposition` because the EnergyPlus film-resistance
+    /// correlations yield r_int + r_ext > 1/U. The error must propagate through
+    /// `building_to_boundary_inputs` as `HaresError::Physics`, not silently
+    /// clamp to zero.
+    ///
+    /// Regression: T-0145 — negative r_glass was previously clamped with
+    /// `.max(0.0)` before the `< 0.0` check, making the error path dead.
+    #[test]
+    fn window_u_factor_too_high_propagates_physics_error() {
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "Win1".to_string(),
+                boundary_type: BoundaryType::Window,
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: Vec::new(),
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(90.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![Window {
+                id: "Win1".to_string(),
+                area_m2: 4.0,
+                azimuth_deg: Some(180.0),
+                u_factor_w_m2_k: Some(10.0),
+                shgc: Some(0.6),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let result = building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+        let err = result.expect_err("U=10 window must produce physics error");
+        assert!(
+            matches!(err, HaresError::Physics(_)),
+            "error must be HaresError::Physics, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("r_glass"),
+            "error message must mention r_glass, got: {msg}"
+        );
+        assert!(
+            msg.contains("EnergyPlus"),
+            "error message must mention EnergyPlus correlation range, got: {msg}"
+        );
+    }
+
     // ── chrono_to_std_duration tests ──────────────────────────────────
 
     #[test]
@@ -1829,8 +1910,7 @@ mod tests {
     #[test]
     fn duration_to_u32_secs_exceeds_u32_range_returns_io_error() {
         let d = chrono::Duration::seconds(u32::MAX as i64 + 1);
-        let err =
-            duration_to_u32_secs(d).expect_err("duration exceeding u32 range must error");
+        let err = duration_to_u32_secs(d).expect_err("duration exceeding u32 range must error");
         assert!(
             matches!(err, HaresError::Io(_)),
             "error must be HaresError::Io, got {:?}",

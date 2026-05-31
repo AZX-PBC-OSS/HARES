@@ -16,8 +16,8 @@ use hares_physics::{
     water_mains::{Hemisphere, water_mains_temperature_c},
 };
 use hares_types::{
-    DomainId, EnvironmentState, GridState, SCHEDULE_DOMAIN_ID, SurfaceIrradiance, WeatherState,
-    ZoneId, ZoneState,
+    DomainId, EnvironmentState, GridState, HaresError, SCHEDULE_DOMAIN_ID, SurfaceIrradiance,
+    WeatherState, ZoneId, ZoneState,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
@@ -494,7 +494,11 @@ impl EnvironmentManager {
     /// [`feed_zones`] call or the previous [`update`] call). All heap-allocated
     /// fields inside `state` are cleared and refilled, reusing existing
     /// capacity and eliminating per-step allocations on the hot path.
-    pub fn update_in_place(&mut self, state: &mut EnvironmentState, clock: &SimClock) {
+    pub fn update_in_place(
+        &mut self,
+        state: &mut EnvironmentState,
+        clock: &SimClock,
+    ) -> Result<(), HaresError> {
         let step = usize::try_from(clock.current_step())
             .expect("step counter exceeds usize on this target");
         let weather_len = self.weather.len();
@@ -534,7 +538,7 @@ impl EnvironmentManager {
             self.mains_dt_annual_range_c,
             u16::try_from(day_of_year).unwrap_or(366),
             self.mains_hemisphere,
-        );
+        )?;
         let ground_albedo = self.weather.get(WeatherField::SurfaceAlbedo, weather_idx);
 
         self.solar_irradiance_buf.clear();
@@ -680,11 +684,15 @@ impl EnvironmentManager {
         state.time_res = clock.time_res;
         state.price_signal = Default::default();
         state.electrical = Default::default();
+        Ok(())
     }
 
     /// Update environment state for the current clock step.
-    #[must_use]
-    pub fn update(&mut self, clock: &SimClock, zone_states: &[ZoneState]) -> EnvironmentState {
+    pub fn update(
+        &mut self,
+        clock: &SimClock,
+        zone_states: &[ZoneState],
+    ) -> Result<EnvironmentState, HaresError> {
         self.feed_zones(zone_states);
         let mut state = EnvironmentState {
             zones: Vec::new(),
@@ -701,8 +709,8 @@ impl EnvironmentManager {
             price_signal: Default::default(),
             electrical: Default::default(),
         };
-        self.update_in_place(&mut state, clock);
-        state
+        self.update_in_place(&mut state, clock)?;
+        Ok(state)
     }
 }
 
@@ -1376,7 +1384,7 @@ mod tests {
         )
         .expect("manager");
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
-        let env = manager.update(&sim_clock, &[]);
+        let env = manager.update(&sim_clock, &[]).unwrap();
         assert!((env.weather.outdoor_temp_c - 10.0).abs() < 1.0e-6);
     }
 
@@ -1435,7 +1443,7 @@ mod tests {
         )
         .expect("manager");
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(1));
-        let env = manager.update(&sim_clock, &[]);
+        let env = manager.update(&sim_clock, &[]).unwrap();
 
         assert_eq!(env.zones.len(), 3);
         assert!(
@@ -1466,7 +1474,7 @@ mod tests {
         for _ in 0..59 {
             let _ = sim_clock.next();
         }
-        let env = manager.update(&sim_clock, &[]);
+        let env = manager.update(&sim_clock, &[]).unwrap();
         // PCHIP linearly interpolates between 10.0 and 20.0 for 2-element input.
         let expected = 10.0 + (59.0 / 60.0) * 10.0;
         assert!(
@@ -1489,7 +1497,7 @@ mod tests {
         )
         .expect("manager");
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
-        let env = manager.update(&sim_clock, &[]);
+        let env = manager.update(&sim_clock, &[]).unwrap();
         assert!((env.weather.wind_dir_deg - 185.0).abs() < 1.0e-6);
     }
 
@@ -1504,7 +1512,7 @@ mod tests {
             None,
         )
         .expect("manager");
-        let env = manager.update(&clock(), &[]);
+        let env = manager.update(&clock(), &[]).unwrap();
         let payload = env.custom_domains[0]
             .custom_payload
             .clone()
@@ -1530,7 +1538,7 @@ mod tests {
         for _ in 0..120 {
             let _ = clock.next();
         }
-        let env = manager.update(&clock, &[]);
+        let env = manager.update(&clock, &[]).unwrap();
         let payload = env.custom_domains[0]
             .custom_payload
             .clone()
@@ -1549,7 +1557,7 @@ mod tests {
             None,
         )
         .expect("manager");
-        let env = manager.update(&clock(), &[]);
+        let env = manager.update(&clock(), &[]).unwrap();
         assert!(
             env.weather.solar_irradiance[0].direct_w_m2
                 > env.weather.solar_irradiance[1].direct_w_m2
@@ -1575,7 +1583,7 @@ mod tests {
             wet_bulb_c: 22.0,
             volume_m3: 200.0,
         }];
-        let env = manager.update(&clock(), &feedback);
+        let env = manager.update(&clock(), &feedback).unwrap();
         assert_eq!(env.zones[0].temperature_c, 22.0);
     }
 
@@ -1591,7 +1599,7 @@ mod tests {
         )
         .expect("manager");
 
-        let env_default = manager.update(&clock(), &[]);
+        let env_default = manager.update(&clock(), &[]).unwrap();
         assert_eq!(env_default.grid.voltage_pu, 1.0);
         assert_eq!(env_default.grid.frequency_hz, 60.0);
 
@@ -1599,12 +1607,12 @@ mod tests {
             voltage_pu: 0.95,
             frequency_hz: 59.8,
         });
-        let env_override = manager.update(&clock(), &[]);
+        let env_override = manager.update(&clock(), &[]).unwrap();
         assert_eq!(env_override.grid.voltage_pu, 0.95);
         assert_eq!(env_override.grid.frequency_hz, 59.8);
 
         manager.clear_grid_override();
-        let env_cleared = manager.update(&clock(), &[]);
+        let env_cleared = manager.update(&clock(), &[]).unwrap();
         assert_eq!(env_cleared.grid.voltage_pu, 1.0);
     }
 
@@ -1619,7 +1627,7 @@ mod tests {
             None,
         )
         .expect("manager");
-        let env = manager.update(&clock(), &[]);
+        let env = manager.update(&clock(), &[]).unwrap();
         // Free-float zone (no HVAC setpoints) starts at outdoor temperature,
         // not 21 °C. weather_series() has dry_bulb_c[0] = 10.0.
         assert!((env.zones[0].temperature_c - 10.0).abs() < 1e-6);
@@ -1653,7 +1661,7 @@ mod tests {
 
         // Solar noon on June 21 UTC at longitude 0°, lat 40°N.
         // The test clock starts 2024-06-21T12:00:00Z -- solar altitude > 60°.
-        let env = manager.update(&clock(), &[]);
+        let env = manager.update(&clock(), &[]).unwrap();
 
         // The building fixture has a south-facing vertical wall (azimuth 180°, tilt 90°).
         // Perez circumsolar term must produce diffuse_w_m2 > 0.
@@ -1676,7 +1684,7 @@ mod tests {
             None,
         )
         .expect("manager");
-        let env = manager.update(&clock(), &[]);
+        let env = manager.update(&clock(), &[]).unwrap();
 
         // Wet-bulb must be <= dry-bulb and finite.
         let wb = env.weather.outdoor_wet_bulb_c;
@@ -1730,7 +1738,7 @@ mod tests {
         .expect("manager");
 
         let clock = SimClock::new(start, Duration::hours(1), Duration::hours(2));
-        let env = manager.update(&clock, &[]);
+        let env = manager.update(&clock, &[]).unwrap();
         assert!(
             (env.weather.outdoor_temp_c - 20.0).abs() < 1e-6,
             "step 0 with offset 2 should read row 2 (20°C), got {}",
@@ -1965,7 +1973,7 @@ mod tests {
         // Feb 29 00:00 (step 24): doy0=59, not >59, no adjustment → 59*24+0 = 1416
         // Mar  1 00:00 (step 48): doy0=60, adjusted -1 → 59*24+0 = 1416
         for step in 0..72u64 {
-            let env = mgr.update(&clock, &[]);
+            let env = mgr.update(&clock, &[]).unwrap();
             let got = env
                 .custom_domains
                 .iter()
@@ -2047,7 +2055,7 @@ mod tests {
         )
         .expect("jan");
         let clock_jan = SimClock::new(jan_start, Duration::hours(1), Duration::hours(1));
-        let env_jan = mgr.update(&clock_jan, &[]);
+        let env_jan = mgr.update(&clock_jan, &[]).unwrap();
         assert!(
             env_jan.weather.outdoor_temp_c < -15.0,
             "January start should be cold, got {}",
@@ -2079,7 +2087,7 @@ mod tests {
         )
         .expect("jul");
         let clock_jul = SimClock::new(jul_start, Duration::hours(1), Duration::hours(1));
-        let env_jul = mgr.update(&clock_jul, &[]);
+        let env_jul = mgr.update(&clock_jul, &[]).unwrap();
         assert!(
             env_jul.weather.outdoor_temp_c > 0.0,
             "July start should be warm, got {}",
@@ -2144,7 +2152,7 @@ mod tests {
         .expect("manager");
 
         let clock = SimClock::new(start, Duration::hours(1), Duration::hours(1));
-        let env = mgr.update(&clock, &[]);
+        let env = mgr.update(&clock, &[]).unwrap();
 
         // The field must be finite and populated.
         assert!(
@@ -2201,7 +2209,7 @@ mod tests {
         )
         .expect("winter manager");
         let clock_winter = SimClock::new(winter_start, Duration::hours(1), Duration::hours(1));
-        let env_winter = mgr_winter.update(&clock_winter, &[]);
+        let env_winter = mgr_winter.update(&clock_winter, &[]).unwrap();
         let mains_winter = env_winter.weather.mains_temp_c;
 
         // Day 180 of year (~late June, summer).
@@ -2216,7 +2224,7 @@ mod tests {
         )
         .expect("summer manager");
         let clock_summer = SimClock::new(summer_start, Duration::hours(1), Duration::hours(1));
-        let env_summer = mgr_summer.update(&clock_summer, &[]);
+        let env_summer = mgr_summer.update(&clock_summer, &[]).unwrap();
         let mains_summer = env_summer.weather.mains_temp_c;
 
         assert!(
@@ -2279,13 +2287,13 @@ mod tests {
         );
 
         // Get baseline irradiance on first surface.
-        let baseline = env.update(&clock, &[]);
+        let baseline = env.update(&clock, &[]).unwrap();
         let surface_0_id = baseline.weather.solar_irradiance[0].surface_id;
         let baseline_direct = baseline.weather.solar_irradiance[0].direct_w_m2;
 
         // Set 50% coverage on that surface.
         env.set_pv_roof_coverage(surface_0_id, 0.5);
-        let shaded = env.update(&clock, &[]);
+        let shaded = env.update(&clock, &[]).unwrap();
         let shaded_direct = shaded.weather.solar_irradiance[0].direct_w_m2;
 
         // Irradiance should be halved.
@@ -2603,7 +2611,7 @@ mod tests {
             )
             .expect("no-dst manager");
             let clock = SimClock::new(start, Duration::hours(1), Duration::hours(4));
-            let env = mgr_no_dst.update(&clock, &[]);
+            let env = mgr_no_dst.update(&clock, &[]).unwrap();
             // March 12, 2023 (non-leap): ordinal0 = 70.  Hour 6: row = 70*24 + 6 = 1686.
             let val = schedule_val(&env);
             assert!(
@@ -2636,7 +2644,7 @@ mod tests {
 
             // Step 0 → civil 1:00 AM EST, Step 1 → civil 3:00 AM EDT (skips 2 AM).
             let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(4));
-            let env0 = mgr.update(&clock, &[]);
+            let env0 = mgr.update(&clock, &[]).unwrap();
             let val0 = schedule_val(&env0);
             // March 12 (non-leap): ordinal0 = 70.  Hour 1: row = 70*24 + 1 = 1681.
             assert!(
@@ -2645,7 +2653,7 @@ mod tests {
             );
 
             let _ = clock.next(); // advance to step 1
-            let env1 = mgr.update(&clock, &[]);
+            let env1 = mgr.update(&clock, &[]).unwrap();
             let val1 = schedule_val(&env1);
             // Civil time is now 3:00 AM EDT (skipped 2 AM). Row = 70*24 + 3 = 1683.
             assert!(
@@ -2679,7 +2687,7 @@ mod tests {
             // Step 1 → civil 1:00 AM EDT (first occurrence).
             let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(6));
             let _ = clock.next(); // step 1
-            let env1 = mgr.update(&clock, &[]);
+            let env1 = mgr.update(&clock, &[]).unwrap();
             let val1 = schedule_val(&env1);
             // Nov 5, 2023 = day 308 (ordinal0). Hour 1: row = 308*24 + 1 = 7393.
             assert!(
@@ -2688,7 +2696,7 @@ mod tests {
             );
 
             let _ = clock.next(); // step 2 → civil 2:00 AM EDT → falls back to 1:00 AM EST
-            let env2 = mgr.update(&clock, &[]);
+            let env2 = mgr.update(&clock, &[]).unwrap();
             let val2 = schedule_val(&env2);
             // Civil time is 1:00 AM EST (second occurrence). Same row 7393.
             assert!(
@@ -2726,8 +2734,8 @@ mod tests {
             .expect("dst");
 
             let clock = SimClock::new(start, Duration::hours(1), Duration::hours(4));
-            let env_no = mgr_no_dst.update(&clock, &[]);
-            let env_yes = mgr_dst.update(&clock, &[]);
+            let env_no = mgr_no_dst.update(&clock, &[]).unwrap();
+            let env_yes = mgr_dst.update(&clock, &[]).unwrap();
 
             assert_eq!(
                 env_no.weather.outdoor_temp_c, env_yes.weather.outdoor_temp_c,
@@ -2768,7 +2776,7 @@ mod tests {
                 let sim_time = clock.current_time();
                 let civil = sim_time.with_timezone(&tz);
                 let expected_row = civil.ordinal0() as u64 * 24 + civil.hour() as u64;
-                let env = mgr.update(&clock, &[]);
+                let env = mgr.update(&clock, &[]).unwrap();
                 let got = schedule_val(&env);
                 let expected = (expected_row as usize % 8760) as f64;
                 assert!(
@@ -3031,7 +3039,7 @@ mod tests {
         .expect("manager");
 
         // Solar noon on June 21 at 40°N — south surface 0, north surface 1, omni surface 2.
-        let env = manager.update(&clock(), &[]);
+        let env = manager.update(&clock(), &[]).unwrap();
         let south = &env.weather.solar_irradiance[0];
         let north = &env.weather.solar_irradiance[1];
         let omni = &env.weather.solar_irradiance[2];

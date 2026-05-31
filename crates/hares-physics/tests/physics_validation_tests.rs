@@ -555,7 +555,7 @@ fn water_mains_temp_seasonal_variation() {
     let hemisphere = Hemisphere::Northern;
 
     let temps: Vec<f64> = (1u16..=365)
-        .map(|d| water_mains_temperature_c(t_avg_c, dt_annual_range_c, d, hemisphere))
+        .map(|d| water_mains_temperature_c(t_avg_c, dt_annual_range_c, d, hemisphere).unwrap())
         .collect();
 
     // --- All values must be finite and physically plausible ---

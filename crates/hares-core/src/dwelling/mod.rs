@@ -1186,7 +1186,7 @@ impl Dwelling {
         attach_pv_to_roofs(&mut equipment_specs, &building);
         register_pv_roof_shading(&equipment_specs, &building, &mut environment);
 
-        let initial_env = environment.update(&clock, &[]);
+        let initial_env = environment.update(&clock, &[])?;
 
         let solvers = build_default_solvers(
             &initial_env,
@@ -2722,7 +2722,7 @@ impl Dwelling {
         let schedule_started = Instant::now();
         self.environment.feed_zones(&self.latest_env.zones);
         self.environment
-            .update_in_place(&mut self.latest_env, &self.clock);
+            .update_in_place(&mut self.latest_env, &self.clock)?;
 
         // Populate price signal from tariff evaluator (deterministic function of clock).
         if let Some(ref evaluator) = self.tariff_evaluator {
@@ -7315,6 +7315,91 @@ occupancy = 1.0
         );
     }
 
+    /// Verify that constructing a dwelling with a window U-factor >= ~10
+    /// (which produces negative r_glass in `window_u_factor_decomposition`)
+    /// returns `HaresError::Physics` rather than silently producing garbage
+    /// or panicking.
+    ///
+    /// Integration test: T-0145 — regression protection for physics error
+    /// propagation from solar model through dwelling construction.
+    #[test]
+    fn dwelling_construction_with_corrupted_window_u_returns_physics_error() {
+        let toml_path = {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-corrupt-window-{nanos}.toml"));
+            path
+        };
+
+        fs::write(
+            &toml_path,
+            r#"building_id = 999
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 60
+duration_s = 120
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[[windows]]
+id = "Win1"
+area_m2 = 4.0
+azimuth_deg = 180
+u_factor_w_m2_k = 10.0
+shgc = 0.6
+
+[weather]
+outdoor_temp_c = -10.0
+dew_point_c = -5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#,
+        )
+        .expect("write synthetic TOML");
+
+        let result = Dwelling::from_toml_config(&toml_path);
+        let _ = fs::remove_file(&toml_path);
+
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("dwelling with U=10 window must return error"),
+        };
+        assert!(
+            matches!(err, HaresError::Physics(_)),
+            "error must be HaresError::Physics, got {:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("r_glass"),
+            "error message must mention r_glass, got: {msg}"
+        );
+    }
+
     /// Verify that calling `run_timestep` after the simulation has exhausted
     /// all steps returns `HaresError::Dwelling`, not a spurious physics error.
     /// Regression: T-0144 reclassified the step-overflow guard from
@@ -7376,9 +7461,7 @@ master_seed = 0
 
         let total = dwelling.clock.total_steps();
         for _ in 0..total {
-            dwelling
-                .run_timestep(false)
-                .expect("step within bounds");
+            dwelling.run_timestep(false).expect("step within bounds");
         }
 
         let err = dwelling

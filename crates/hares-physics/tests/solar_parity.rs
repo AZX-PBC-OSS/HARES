@@ -393,7 +393,7 @@ use hares_physics::solar::window_u_factor_decomposition;
 /// Rl,w = 1/U − Ri,w − Ro,w; full assembly = Rl,w + Ri,w + Ro,w = 1/U.
 #[test]
 fn window_decomposition_low_e_double_pane() {
-    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(2.1);
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(2.1).unwrap();
     let r_total = r_glass + r_int + r_ext;
     assert!(
         (r_total - 1.0 / 2.1).abs() < 1e-10,
@@ -419,7 +419,7 @@ fn window_decomposition_low_e_double_pane() {
 /// Single-pane window: U=5.5 W/m²K (< 5.85 threshold, logarithmic fit).
 #[test]
 fn window_decomposition_single_pane() {
-    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(5.5);
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(5.5).unwrap();
     let r_total = r_glass + r_int + r_ext;
     assert!(
         (r_total - 1.0 / 5.5).abs() < 1e-10,
@@ -435,7 +435,7 @@ fn window_decomposition_single_pane() {
 /// High-U single-pane: U=6.5 W/m²K (≥ 5.85 threshold, linear fit).
 #[test]
 fn window_decomposition_high_u_linear_fit() {
-    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(6.5);
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(6.5).unwrap();
     let r_total = r_glass + r_int + r_ext;
     assert!(
         (r_total - 1.0 / 6.5).abs() < 1e-10,
@@ -450,7 +450,7 @@ fn window_decomposition_high_u_linear_fit() {
 /// Triple-pane: U=1.0 W/m²K.
 #[test]
 fn window_decomposition_triple_pane() {
-    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(1.0);
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(1.0).unwrap();
     assert!(
         r_glass > 0.5,
         "triple-pane glass R should be substantial: {r_glass}"
@@ -462,25 +462,58 @@ fn window_decomposition_triple_pane() {
     );
 }
 
-/// U=0 and negative U must not panic or produce NaN/infinity.
+/// U ≤ 0 and non-finite U must return Err(HaresError::Physics(...)).
 #[test]
 fn window_decomposition_zero_and_negative_u() {
-    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(0.0);
-    assert!(r_glass.is_finite(), "r_glass must be finite for U=0");
-    assert!(r_int.is_finite(), "r_int must be finite for U=0");
-    assert!(r_ext.is_finite(), "r_ext must be finite for U=0");
+    for u in [
+        0.0_f64,
+        -0.5,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        let result = window_u_factor_decomposition(u);
+        assert!(
+            result.is_err(),
+            "U={u} should return Err(HaresError::Physics), got {result:?}"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("U-factor"),
+            "U={u}: error should mention U-factor, got: {err_msg}"
+        );
+    }
+}
 
-    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(-1.0);
-    assert!(r_glass.is_finite(), "r_glass must be finite for U<0");
-    assert!(r_int.is_finite(), "r_int must be finite for U<0");
-    assert!(r_ext.is_finite(), "r_ext must be finite for U<0");
+/// U-factors ≥ ~10 produce negative r_glass because the EnergyPlus
+/// film-resistance correlations yield r_int + r_ext > 1/U at those values.
+/// The function must return Err, not silently clamp to zero.
+#[test]
+fn window_decomposition_high_u_returns_physics_error() {
+    for u in [10.0_f64, 12.0, 15.0, 20.0, 50.0, 100.0] {
+        let result = window_u_factor_decomposition(u);
+        assert!(
+            result.is_err(),
+            "U={u} should return Err(HaresError::Physics), got {result:?}"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("r_glass"),
+            "U={u}: error should mention r_glass, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("EnergyPlus"),
+            "U={u}: error should mention EnergyPlus correlation range, got: {err_msg}"
+        );
+    }
 }
 
 /// Log/linear fit should be approximately continuous at U=5.85 threshold.
 #[test]
 fn window_decomposition_continuity_at_threshold() {
-    let (_, r_int_below, _) = window_u_factor_decomposition(5.8499);
-    let (_, r_int_above, _) = window_u_factor_decomposition(5.85);
+    let (_, r_int_below, _) = window_u_factor_decomposition(5.8499).unwrap();
+    let (_, r_int_above, _) = window_u_factor_decomposition(5.85).unwrap();
     assert!(
         (r_int_below - r_int_above).abs() < 0.005,
         "film R should be continuous at threshold: below={r_int_below:.4} above={r_int_above:.4}"
@@ -504,7 +537,7 @@ fn window_decomposition_continuity_at_threshold() {
 #[test]
 fn window_u_factor_round_trip() {
     for &u in &[0.2_f64, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 5.85, 6.0] {
-        let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u);
+        let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u).unwrap();
         let assembled = r_glass + r_int + r_ext;
         assert!(
             (assembled - 1.0 / u).abs() < 1e-10,
@@ -527,7 +560,7 @@ fn exterior_film_matches_energyplus_ro_w() {
     let ep_ro_w = |u: f64| 1.0 / (0.025342 * u + 29.163853);
 
     for &u in &[0.5_f64, 1.0, 2.0, 3.0, 5.0, 5.85, 6.5] {
-        let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u);
+        let (r_glass, r_int, r_ext) = window_u_factor_decomposition(u).unwrap();
         let ro_w = ep_ro_w(u);
 
         assert!(
@@ -536,7 +569,7 @@ fn exterior_film_matches_energyplus_ro_w() {
         );
 
         // r_glass must be the true glass-only resistance: 1/U − Ri,w − Ro,w.
-        let r_glass_expected = (1.0 / u - r_int - r_ext).max(0.0);
+        let r_glass_expected = 1.0 / u - r_int - r_ext;
         assert!(
             (r_glass - r_glass_expected).abs() < 1e-10,
             "U={u}: r_glass={r_glass:.8} must equal 1/U − Ri,w − Ro,w = {r_glass_expected:.8}"
@@ -554,7 +587,7 @@ fn exterior_film_matches_energyplus_ro_w() {
 /// Definition-of-done round-trip test: U=2.0 → R_total = 0.500 m²·K/W.
 #[test]
 fn window_u_2_round_trip_to_0_5() {
-    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(2.0);
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(2.0).unwrap();
     let r_total = r_glass + r_int + r_ext;
     assert!(
         (r_total - 0.5).abs() < 1e-10,
@@ -565,7 +598,7 @@ fn window_u_2_round_trip_to_0_5() {
 /// Definition-of-done round-trip test: U=0.5 → R_total = 2.000 m²·K/W.
 #[test]
 fn window_u_0_5_round_trip_to_2_0() {
-    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(0.5);
+    let (r_glass, r_int, r_ext) = window_u_factor_decomposition(0.5).unwrap();
     let r_total = r_glass + r_int + r_ext;
     assert!(
         (r_total - 2.0).abs() < 1e-10,

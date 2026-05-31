@@ -1,7 +1,7 @@
 //! Solar position, irradiance decomposition, and surface tilting.
 
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
-use hares_types::SurfaceIrradiance;
+use hares_types::{HaresError, SurfaceIrradiance};
 
 const MINUTES_PER_DAY: f64 = 1440.0;
 const SOLAR_NOON_MINUTES: f64 = 720.0;
@@ -684,11 +684,11 @@ pub fn window_iam(theta_rad: f64, curve: GlazingCurve) -> f64 {
 ///   https://bigladdersoftware.com/epx/docs/9-5/engineering-reference/window-calculation-module.html
 /// - OCHRE `ochre/utils/envelope.py:294–304` sets res_ext_w = 0, absorbing Ro,w
 ///   into r_window. HARES diverges from OCHRE here for correctness.
-#[must_use]
-pub fn window_u_factor_decomposition(u_factor_w_m2_k: f64) -> (f64, f64, f64) {
+pub fn window_u_factor_decomposition(u_factor_w_m2_k: f64) -> Result<(f64, f64, f64), HaresError> {
     if !u_factor_w_m2_k.is_finite() || u_factor_w_m2_k <= 0.0 {
-        // Safe defaults: no glass R, standard interior film, typical exterior film.
-        return (0.0, 0.12, 0.034);
+        return Err(HaresError::Physics(format!(
+            "window U-factor must be finite and positive, got {u_factor_w_m2_k:.6e}"
+        )));
     }
     let r_int = if u_factor_w_m2_k < 5.85 {
         1.0 / (0.359073 * u_factor_w_m2_k.ln() + 6.949915)
@@ -698,11 +698,24 @@ pub fn window_u_factor_decomposition(u_factor_w_m2_k: f64) -> (f64, f64, f64) {
     // Exterior film per EnergyPlus Ro,w correlation (standard winter conditions).
     // Ro,w ≈ 0.034 m²·K/W across the full U-factor range.
     let r_ext = 1.0 / (0.025342 * u_factor_w_m2_k + 29.163853);
-    let r_glass = (1.0 / u_factor_w_m2_k - r_int - r_ext).max(0.0);
-    debug_assert!(r_glass >= 0.0, "r_glass must be non-negative");
-    debug_assert!(r_int > 0.0, "r_film_int must be positive");
-    debug_assert!(r_ext > 0.0, "r_film_ext must be positive");
-    (r_glass, r_int, r_ext)
+    let r_glass = 1.0 / u_factor_w_m2_k - r_int - r_ext;
+    if r_glass < 0.0 {
+        return Err(HaresError::Physics(format!(
+            "r_glass is negative ({r_glass:.6e}): film resistances exceed 1/U; \
+             U-factor {u_factor_w_m2_k:.4} W/m²·K is outside the EnergyPlus correlation range"
+        )));
+    }
+    if r_int <= 0.0 {
+        return Err(HaresError::Physics(format!(
+            "r_film_int must be positive, got {r_int:.6e}"
+        )));
+    }
+    if r_ext <= 0.0 {
+        return Err(HaresError::Physics(format!(
+            "r_film_ext must be positive, got {r_ext:.6e}"
+        )));
+    }
+    Ok((r_glass, r_int, r_ext))
 }
 
 /// Pre-computed window optical parameters from EnergyPlus Simple Window Model.
@@ -792,6 +805,18 @@ pub fn calculate_window_parameters(
     } else {
         0.5
     };
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        debug_assert!(
+            (0.0..=1.0).contains(&transmittance),
+            "solar transmittance τ = {transmittance:.6e} outside [0, 1]"
+        );
+        debug_assert!(
+            (0.0..=1.0).contains(&radiation_frac),
+            "inward-flowing fraction N_i = {radiation_frac:.6e} outside [0, 1]"
+        );
+    }
 
     (transmittance, radiation_frac)
 }

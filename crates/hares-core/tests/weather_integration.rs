@@ -293,7 +293,7 @@ fn full_pipeline_synthetic_weather() {
     let mut air_max = f64::NEG_INFINITY;
 
     for _ in 0..total_steps {
-        let env = mgr.update(&clock, &[]);
+        let env = mgr.update(&clock, &[]).unwrap();
         let w = &env.weather;
         let step = clock.current_step();
 
@@ -487,7 +487,7 @@ fn solar_irradiance_physical_bounds() {
     let mut clock = SimClock::new(start, Duration::seconds(300), Duration::hours(24));
 
     for _ in 0..total_steps {
-        let env = mgr.update(&clock, &[]);
+        let env = mgr.update(&clock, &[]).unwrap();
         let w = &env.weather;
         let step = clock.current_step();
 
@@ -552,7 +552,7 @@ fn solar_irradiance_physical_bounds() {
 #[test]
 fn leap_year_dec31_reads_correct_weather_row() {
     let n = 8784usize;
-    let seq: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let seq: Vec<f64> = (0..n).map(|i| i as f64 * 0.005).collect();
 
     let weather = WeatherTimeSeries {
         meta: WeatherMeta {
@@ -704,12 +704,13 @@ fn leap_year_dec31_reads_correct_weather_row() {
     .expect("EnvironmentManager::new failed");
 
     let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(1));
-    let env = mgr.update(&clock, &[]);
+    let env = mgr.update(&clock, &[]).unwrap();
     let observed = env.weather.outdoor_temp_c;
 
+    let expected = 8760.0 * 0.005;
     assert_eq!(
-        observed, 8760.0,
-        "leap-year Dec 31 should read row 8760 (dry_bulb=8760.0) \
+        observed, expected,
+        "leap-year Dec 31 should read row 8760 (dry_bulb={expected}) \
          but got {observed}; the 365-day modulus bug causes row 0 (dry_bulb=0.0)"
     );
 
@@ -761,7 +762,7 @@ fn resampled_weather_produces_smooth_environment() {
     let mut prev_temp: Option<f64> = None;
 
     for _ in 0..total_steps {
-        let env = mgr.update(&clock, &[]);
+        let env = mgr.update(&clock, &[]).unwrap();
         let w = &env.weather;
         let step = clock.current_step();
 

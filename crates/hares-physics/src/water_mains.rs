@@ -39,6 +39,8 @@ const LAG_SLOPE: f64 = 1.0;
 /// Degrees-to-radians conversion.
 const DEG_TO_RAD: f64 = PI / 180.0;
 
+use hares_types::HaresError;
+
 use crate::units::{temperature_c_to_f, temperature_delta_c_to_f, temperature_f_to_c};
 
 // ---------------------------------------------------------------------------
@@ -84,11 +86,12 @@ pub fn water_mains_temperature_c(
     dt_annual_range_c: f64,
     day_of_year: u16,
     hemisphere: Hemisphere,
-) -> f64 {
-    debug_assert!(
-        (1..=366).contains(&day_of_year),
-        "day_of_year must be in 1..=366, got {day_of_year}"
-    );
+) -> Result<f64, HaresError> {
+    if !(1..=366).contains(&day_of_year) {
+        return Err(HaresError::Physics(format!(
+            "day_of_year must be in 1..=366, got {day_of_year}"
+        )));
+    }
 
     let t_avg_f = temperature_c_to_f(t_annual_avg_c);
     let dt_annual_range_f = temperature_delta_c_to_f(dt_annual_range_c);
@@ -109,8 +112,25 @@ pub fn water_mains_temperature_c(
     let amplitude = ratio * (dt_annual_range_f / 2.0);
 
     let t_mains_f = t_avg_f + OFFSET_F + amplitude * (angle_deg * DEG_TO_RAD).sin();
+    let result = temperature_f_to_c(t_mains_f);
 
-    temperature_f_to_c(t_mains_f)
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        debug_assert!(
+            result.is_finite(),
+            "water mains temperature is non-finite: {result:.6e}"
+        );
+        // Mains water above 100 °C is steam at atmospheric pressure; municipal
+        // water supply cannot deliver steam. The Burch-Christensen model
+        // produces well-defined output for any input, so extreme input values
+        // are the only path to this violation.
+        debug_assert!(
+            (-50.0..=100.0).contains(&result),
+            "water mains temperature {result:.2} °C outside liquid water range [-50, 100]"
+        );
+    }
+
+    Ok(result)
 }
 
 /// Hemisphere selector for [`water_mains_temperature_c`].
@@ -137,7 +157,10 @@ mod tests {
     /// Compute mains temperature for all 365 days and return (min, max, mean).
     fn annual_stats(t_avg_c: f64, dt_annual_range_c: f64) -> (f64, f64, f64) {
         let temps: Vec<f64> = (1u16..=365)
-            .map(|d| water_mains_temperature_c(t_avg_c, dt_annual_range_c, d, Hemisphere::Northern))
+            .map(|d| {
+                water_mains_temperature_c(t_avg_c, dt_annual_range_c, d, Hemisphere::Northern)
+                    .unwrap()
+            })
             .collect();
         let min = temps.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = temps.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -148,7 +171,10 @@ mod tests {
     /// Day of the annual min/max.
     fn peak_day(t_avg_c: f64, dt_annual_range_c: f64) -> (u16, u16) {
         let temps: Vec<f64> = (1u16..=365)
-            .map(|d| water_mains_temperature_c(t_avg_c, dt_annual_range_c, d, Hemisphere::Northern))
+            .map(|d| {
+                water_mains_temperature_c(t_avg_c, dt_annual_range_c, d, Hemisphere::Northern)
+                    .unwrap()
+            })
             .collect();
         let max_day = temps
             .iter()
@@ -172,9 +198,9 @@ mod tests {
     fn day_of_year_boundary_values_are_accepted() {
         // day 1 (1 Jan) and day 366 (31 Dec in a leap year) must both succeed
         // without triggering the debug_assert.
-        let t = water_mains_temperature_c(12.0, 25.0, 1, Hemisphere::Northern);
+        let t = water_mains_temperature_c(12.0, 25.0, 1, Hemisphere::Northern).unwrap();
         assert!(t.is_finite(), "day 1 should produce a finite result");
-        let t = water_mains_temperature_c(12.0, 25.0, 366, Hemisphere::Northern);
+        let t = water_mains_temperature_c(12.0, 25.0, 366, Hemisphere::Northern).unwrap();
         assert!(t.is_finite(), "day 366 should produce a finite result");
     }
 
@@ -182,7 +208,7 @@ mod tests {
 
     #[test]
     fn leap_year_day_366_produces_finite_reasonable_value() {
-        let t = water_mains_temperature_c(12.0, 25.0, 366, Hemisphere::Northern);
+        let t = water_mains_temperature_c(12.0, 25.0, 366, Hemisphere::Northern).unwrap();
         assert!(t.is_finite(), "day 366 should return a finite value");
         // Day 366 is late December; mains should be below annual mean for NH.
         // Annual mean ≈ 12 + 3.33 ≈ 15.3 °C; late Dec should be well below.
@@ -204,7 +230,7 @@ mod tests {
         let t_avg_c = -40.0_f64;
         let expected_mean_c = temperature_f_to_c(temperature_c_to_f(t_avg_c) + OFFSET_F);
         for d in [1u16, 91, 182, 274, 365] {
-            let t = water_mains_temperature_c(t_avg_c, 30.0, d, Hemisphere::Northern);
+            let t = water_mains_temperature_c(t_avg_c, 30.0, d, Hemisphere::Northern).unwrap();
             assert!(t.is_finite(), "arctic day {d} should be finite");
             // With ratio=0 all days return the same flat value.
             approx_eq(t, expected_mean_c, 0.001);
@@ -218,8 +244,8 @@ mod tests {
         // Mid-summer (day 210) vs mid-winter (day 20) for moderate US climate.
         let t_avg = 12.0; // ~54 °F -- typical US mid-latitude
         let dt = 25.0;
-        let summer = water_mains_temperature_c(t_avg, dt, 210, Hemisphere::Northern);
-        let winter = water_mains_temperature_c(t_avg, dt, 20, Hemisphere::Northern);
+        let summer = water_mains_temperature_c(t_avg, dt, 210, Hemisphere::Northern).unwrap();
+        let winter = water_mains_temperature_c(t_avg, dt, 20, Hemisphere::Northern).unwrap();
         assert!(
             summer > winter,
             "summer mains ({summer:.2}) should exceed winter mains ({winter:.2})"
@@ -328,7 +354,7 @@ mod tests {
                     * ((DEG_TO_RAD * (DEG_PER_DAY * (f64::from(day) - 15.0 - lag) - 90.0)).sin());
             let ochre_c = temperature_f_to_c(ochre_f);
 
-            let ours = water_mains_temperature_c(t_avg_c, dt_c, day, Hemisphere::Northern);
+            let ours = water_mains_temperature_c(t_avg_c, dt_c, day, Hemisphere::Northern).unwrap();
             approx_eq(ours, ochre_c, 0.001);
         }
     }
@@ -338,7 +364,7 @@ mod tests {
     #[test]
     fn very_hot_climate_35c_produces_finite_result() {
         for d in [1u16, 100, 200, 300, 365] {
-            let t = water_mains_temperature_c(35.0, 10.0, d, Hemisphere::Northern);
+            let t = water_mains_temperature_c(35.0, 10.0, d, Hemisphere::Northern).unwrap();
             assert!(
                 t.is_finite(),
                 "expected finite result for hot climate day {d}"
@@ -353,7 +379,7 @@ mod tests {
     #[test]
     fn very_cold_climate_neg5c_produces_finite_result() {
         for d in [1u16, 100, 200, 300, 365] {
-            let t = water_mains_temperature_c(-5.0, 30.0, d, Hemisphere::Northern);
+            let t = water_mains_temperature_c(-5.0, 30.0, d, Hemisphere::Northern).unwrap();
             assert!(
                 t.is_finite(),
                 "expected finite result for cold climate day {d}"
@@ -366,7 +392,7 @@ mod tests {
         // In Southern Hemisphere summer = Northern winter, so mains peak should
         // be in the first quarter of the year (days ~20–100) when sign = +1.
         let temps: Vec<f64> = (1u16..=365)
-            .map(|d| water_mains_temperature_c(15.0, 20.0, d, Hemisphere::Southern))
+            .map(|d| water_mains_temperature_c(15.0, 20.0, d, Hemisphere::Southern).unwrap())
             .collect();
         let max_day = temps
             .iter()
@@ -387,6 +413,44 @@ mod tests {
         for t in [-20.0_f64, 0.0, 15.0, 35.0, 50.0] {
             let round = temperature_f_to_c(temperature_c_to_f(t));
             approx_eq(round, t, 1e-10);
+        }
+    }
+
+    #[test]
+    fn day_of_year_out_of_range_returns_physics_error() {
+        // day_of_year = 0 is out of range
+        let result = water_mains_temperature_c(12.0, 25.0, 0, Hemisphere::Northern);
+        assert!(result.is_err(), "day 0 should return Err");
+        match result.unwrap_err() {
+            HaresError::Physics(ref msg) => {
+                assert!(
+                    msg.contains("day_of_year"),
+                    "error message should contain 'day_of_year': {msg}"
+                );
+            }
+            other => panic!("expected HaresError::Physics, got {other:?}"),
+        }
+
+        // day_of_year = 367 is out of range
+        let result = water_mains_temperature_c(12.0, 25.0, 367, Hemisphere::Northern);
+        assert!(result.is_err(), "day 367 should return Err");
+        match result.unwrap_err() {
+            HaresError::Physics(ref msg) => {
+                assert!(
+                    msg.contains("day_of_year"),
+                    "error message should contain 'day_of_year': {msg}"
+                );
+            }
+            other => panic!("expected HaresError::Physics, got {other:?}"),
+        }
+
+        // Normal values 1..=366 should succeed
+        for day in 1u16..=366 {
+            let result = water_mains_temperature_c(12.0, 25.0, day, Hemisphere::Northern);
+            assert!(
+                result.is_ok(),
+                "day {day} should succeed but got: {result:?}"
+            );
         }
     }
 }

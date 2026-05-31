@@ -169,7 +169,7 @@ fn fixed_offset_schedule_does_not_apply_dst_without_civil_timezone() {
         .single()
         .expect("valid spring-forward start");
     let mut manager = EnvironmentManager::new(
-        sequential_weather(100.0, 24, -5.0),
+        sequential_weather(20.0, 24, -5.0),
         hourly_schedule(start),
         &minimal_building(),
         StdDuration::from_secs(3600),
@@ -182,7 +182,7 @@ fn fixed_offset_schedule_does_not_apply_dst_without_civil_timezone() {
     let mut observed_schedule = Vec::new();
     let mut observed_weather = Vec::new();
     for _ in 0..4 {
-        let env = manager.update(&clock, &[]);
+        let env = manager.update(&clock, &[]).unwrap();
         observed_schedule.push(schedule_value(&env));
         observed_weather.push(env.weather.outdoor_temp_c);
         let _ = clock.next();
@@ -195,7 +195,7 @@ fn fixed_offset_schedule_does_not_apply_dst_without_civil_timezone() {
     );
     assert_eq!(
         observed_weather,
-        vec![100.0, 101.0, 102.0, 103.0],
+        vec![20.0, 21.0, 22.0, 23.0],
         "weather indexing must advance sequentially by timestep"
     );
 }
@@ -234,7 +234,7 @@ fn spring_forward_civil_timezone_skips_schedule_hour_but_not_weather_hour() {
         .single()
         .expect("valid spring-forward start");
     let mut manager = EnvironmentManager::new(
-        sequential_weather(200.0, 24, -5.0),
+        sequential_weather(30.0, 24, -5.0),
         hourly_schedule(start),
         &minimal_building(),
         StdDuration::from_secs(3600),
@@ -247,7 +247,7 @@ fn spring_forward_civil_timezone_skips_schedule_hour_but_not_weather_hour() {
     let mut observed_schedule = Vec::new();
     let mut observed_weather = Vec::new();
     for _ in 0..5 {
-        let env = manager.update(&clock, &[]);
+        let env = manager.update(&clock, &[]).unwrap();
         observed_schedule.push(schedule_value(&env));
         observed_weather.push(env.weather.outdoor_temp_c);
         let _ = clock.next();
@@ -260,7 +260,7 @@ fn spring_forward_civil_timezone_skips_schedule_hour_but_not_weather_hour() {
     );
     assert_eq!(
         observed_weather,
-        vec![200.0, 201.0, 202.0, 203.0, 204.0],
+        vec![30.0, 31.0, 32.0, 33.0, 34.0],
         "weather indexing must remain sequential and physical across spring DST transition"
     );
 }
@@ -273,7 +273,7 @@ fn fall_back_civil_timezone_repeats_schedule_hour_but_not_weather_hour() {
         .single()
         .expect("valid fall-back start");
     let mut manager = EnvironmentManager::new(
-        sequential_weather(300.0, 24, -4.0),
+        sequential_weather(40.0, 24, -4.0),
         hourly_schedule(start),
         &minimal_building(),
         StdDuration::from_secs(3600),
@@ -286,7 +286,7 @@ fn fall_back_civil_timezone_repeats_schedule_hour_but_not_weather_hour() {
     let mut observed_schedule = Vec::new();
     let mut observed_weather = Vec::new();
     for _ in 0..5 {
-        let env = manager.update(&clock, &[]);
+        let env = manager.update(&clock, &[]).unwrap();
         observed_schedule.push(schedule_value(&env));
         observed_weather.push(env.weather.outdoor_temp_c);
         let _ = clock.next();
@@ -299,7 +299,7 @@ fn fall_back_civil_timezone_repeats_schedule_hour_but_not_weather_hour() {
     );
     assert_eq!(
         observed_weather,
-        vec![300.0, 301.0, 302.0, 303.0, 304.0],
+        vec![40.0, 41.0, 42.0, 43.0, 44.0],
         "weather indexing must remain sequential and physical across fall DST transition"
     );
 }
