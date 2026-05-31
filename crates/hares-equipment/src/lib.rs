@@ -280,16 +280,14 @@ mod tests {
     use hares_types::{
         ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
         CorePerformance, CoreState, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
-        EquipmentId, EvConnectionState, ExecutionStage, FuelType, GridState,
-        IdealCapacityMode, InverterPriority, OperatingMode, PortDeclaration, PortSlots,
-        ProtocolId, SurfaceIrradiance, Telemetry, TelemetryField, WeatherState, ZoneId, ZoneState,
+        EquipmentId, EvConnectionState, ExecutionStage, FuelType, GridState, IdealCapacityMode,
+        InverterPriority, OperatingMode, PortDeclaration, PortSlots, ProtocolId, SurfaceIrradiance,
+        Telemetry, TelemetryField, WeatherState, ZoneId, ZoneState,
     };
     use serde::{Deserialize, Serialize};
 
     use crate::config::ConfigPayload;
-    use crate::{
-        Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned,
-    };
+    use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
     #[derive(Clone)]
     struct MockEquipment {

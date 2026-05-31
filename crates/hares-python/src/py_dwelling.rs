@@ -1973,6 +1973,9 @@ fn to_py_err(err: HaresError) -> PyErr {
             HaresConfigError::new_err(msg)
         }
         HaresError::Equipment(_) => HaresEquipmentError::new_err(msg),
+        // Physics variant is DEPRECATED: zero production constructors remain in
+        // the codebase (T-0144). Kept for serialization compatibility and future
+        // hares-physics crate retrofitting (T-0145).
         HaresError::Physics(_)
         | HaresError::Control(_)
         | HaresError::Tariff(_)

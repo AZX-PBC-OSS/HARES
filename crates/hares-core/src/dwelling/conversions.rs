@@ -459,12 +459,12 @@ pub(crate) fn default_output_path(config: &DwellingConfig) -> PathBuf {
 pub(crate) fn chrono_to_std_duration(duration: Duration) -> Result<StdDuration> {
     let millis = duration.num_milliseconds();
     if millis <= 0 {
-        return Err(HaresError::Physics(format!(
+        return Err(HaresError::Io(format!(
             "time resolution must be positive, got {millis} ms"
         )));
     }
     let ms_u64 = u64::try_from(millis)
-        .map_err(|_| HaresError::Physics("failed converting duration to u64 ms".to_string()))?;
+        .map_err(|_| HaresError::Io("failed converting duration to u64 ms".to_string()))?;
     Ok(StdDuration::from_millis(ms_u64))
 }
 
@@ -621,12 +621,12 @@ pub(crate) fn boundary_zone_index(
 pub(crate) fn duration_to_u32_secs(duration: Duration) -> Result<u32> {
     let secs = duration.num_seconds();
     if secs <= 0 {
-        return Err(HaresError::Physics(format!(
+        return Err(HaresError::Io(format!(
             "duration must be positive seconds, got {secs}"
         )));
     }
     u32::try_from(secs)
-        .map_err(|_| HaresError::Physics(format!("duration seconds exceed u32 range: {secs}")))
+        .map_err(|_| HaresError::Io(format!("duration seconds exceed u32 range: {secs}")))
 }
 
 pub(crate) fn required_path(kwargs: &HashMap<String, Value>, key: &str) -> Result<PathBuf> {
@@ -771,9 +771,10 @@ mod tests {
     use hares_types::FuelType;
 
     use super::{
-        building_to_zone_inputs, find_zone_idx, mass_multiplier_for_zone, merged_equipment_config,
-        zone_has_furniture_boundaries,
+        building_to_zone_inputs, chrono_to_std_duration, duration_to_u32_secs, find_zone_idx,
+        mass_multiplier_for_zone, merged_equipment_config, zone_has_furniture_boundaries,
     };
+    use hares_types::HaresError;
 
     // ── mass_multiplier_for_zone tests ─────────────────────────────────
 
@@ -1761,5 +1762,79 @@ mod tests {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
         hares_io::DefaultsStore::load(&defaults_path)
             .expect("DefaultsStore must be loadable from project defaults/ directory")
+    }
+
+    // ── chrono_to_std_duration tests ──────────────────────────────────
+
+    #[test]
+    fn chrono_to_std_duration_positive_round_trips() {
+        let d = chrono::Duration::seconds(60);
+        let result = chrono_to_std_duration(d).expect("positive duration should convert");
+        assert_eq!(result, std::time::Duration::from_millis(60_000));
+    }
+
+    #[test]
+    fn chrono_to_std_duration_zero_returns_io_error() {
+        let d = chrono::Duration::zero();
+        let err = chrono_to_std_duration(d).expect_err("zero duration must error");
+        assert!(
+            matches!(err, HaresError::Io(_)),
+            "error must be HaresError::Io, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn chrono_to_std_duration_negative_returns_io_error() {
+        let d = chrono::Duration::seconds(-1);
+        let err = chrono_to_std_duration(d).expect_err("negative duration must error");
+        assert!(
+            matches!(err, HaresError::Io(_)),
+            "error must be HaresError::Io, got {:?}",
+            err
+        );
+    }
+
+    // ── duration_to_u32_secs tests ────────────────────────────────────
+
+    #[test]
+    fn duration_to_u32_secs_positive_round_trips() {
+        let d = chrono::Duration::seconds(3600);
+        let result = duration_to_u32_secs(d).expect("positive duration should convert");
+        assert_eq!(result, 3600);
+    }
+
+    #[test]
+    fn duration_to_u32_secs_zero_returns_io_error() {
+        let d = chrono::Duration::zero();
+        let err = duration_to_u32_secs(d).expect_err("zero duration must error");
+        assert!(
+            matches!(err, HaresError::Io(_)),
+            "error must be HaresError::Io, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn duration_to_u32_secs_negative_returns_io_error() {
+        let d = chrono::Duration::seconds(-1);
+        let err = duration_to_u32_secs(d).expect_err("negative duration must error");
+        assert!(
+            matches!(err, HaresError::Io(_)),
+            "error must be HaresError::Io, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn duration_to_u32_secs_exceeds_u32_range_returns_io_error() {
+        let d = chrono::Duration::seconds(u32::MAX as i64 + 1);
+        let err =
+            duration_to_u32_secs(d).expect_err("duration exceeding u32 range must error");
+        assert!(
+            matches!(err, HaresError::Io(_)),
+            "error must be HaresError::Io, got {:?}",
+            err
+        );
     }
 }

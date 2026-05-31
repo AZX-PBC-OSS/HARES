@@ -2628,7 +2628,7 @@ impl Dwelling {
     /// heavyweight (concrete slab, masonry).
     pub fn run_warmup_converged(&mut self, threshold_c: f64, max_iter: u32) -> Result<u32> {
         let time_res_s = u64::try_from(self.clock.time_res.num_seconds())
-            .map_err(|_| HaresError::Physics("invalid time resolution".to_string()))?;
+            .map_err(|_| HaresError::Io("invalid time resolution".to_string()))?;
         let steps_per_day = (24u64 * 3600).checked_div(time_res_s).unwrap_or(0);
 
         if steps_per_day == 0 {
@@ -2694,7 +2694,7 @@ impl Dwelling {
 
     fn run_timestep(&mut self, record_output: bool) -> Result<()> {
         if self.clock.current_step() >= self.clock.total_steps() {
-            return Err(HaresError::Physics(
+            return Err(HaresError::Dwelling(
                 "simulation already reached configured end".to_string(),
             ));
         }
@@ -7312,6 +7312,82 @@ occupancy = 1.0
             eq.descriptor().zone,
             Some(ZoneId(2)),
             "Garage Lighting should auto-route via ZoneMap to garage zone (ZoneId(2))"
+        );
+    }
+
+    /// Verify that calling `run_timestep` after the simulation has exhausted
+    /// all steps returns `HaresError::Dwelling`, not a spurious physics error.
+    /// Regression: T-0144 reclassified the step-overflow guard from
+    /// `HaresError::Physics` to `HaresError::Dwelling`.
+    #[test]
+    fn run_timestep_past_end_returns_dwelling_error() {
+        let toml_path = {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-step-overflow-{nanos}.toml"));
+            path
+        };
+
+        fs::write(
+            &toml_path,
+            r#"building_id = 999
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 60
+duration_s = 120
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[weather]
+outdoor_temp_c = -10.0
+dew_point_c = -5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#,
+        )
+        .expect("write synthetic TOML");
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let _ = fs::remove_file(&toml_path);
+
+        let total = dwelling.clock.total_steps();
+        for _ in 0..total {
+            dwelling
+                .run_timestep(false)
+                .expect("step within bounds");
+        }
+
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("step past end must error");
+        assert!(
+            matches!(err, HaresError::Dwelling(_)),
+            "step-past-end error must be HaresError::Dwelling, got {:?}",
+            err
         );
     }
 }

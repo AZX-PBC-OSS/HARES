@@ -6,6 +6,9 @@ use thiserror::Error;
 /// Top-level error grouping by subsystem domain.
 #[derive(Debug, Error, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HaresError {
+    // DEPRECATED: No genuine physics errors exist in the codebase.
+    // Use only after hares-physics crate is retrofitted to return Physics errors
+    // for physically impossible input conditions.
     #[error("physics error: {0}")]
     Physics(String),
     #[error("envelope error: {0}")]
@@ -59,6 +62,7 @@ mod tests {
             HaresError::Equipment("unknown id".to_string()),
             HaresError::Io("file not found".to_string()),
             HaresError::Control("unsupported signal".to_string()),
+            HaresError::Dwelling("missing window U-factor".to_string()),
             HaresError::Tariff("invalid rate".to_string()),
             HaresError::InvariantViolation {
                 check_name: "thermal_balance".to_string(),
@@ -71,6 +75,20 @@ mod tests {
             let decoded: HaresError = serde_json::from_str(&json).expect("deserialize error");
             assert_eq!(decoded, err);
         }
+    }
+
+    /// Verify the deprecated Physics variant still serializes and deserializes
+    /// correctly. The variant must remain in the enum for compatibility with
+    /// existing serialized data and for future hares-physics crate retrofitting
+    /// (see T-0145).
+    #[test]
+    fn deprecated_physics_variant_round_trips_through_json() {
+        let err = HaresError::Physics("physically impossible temperature".to_string());
+        let json = serde_json::to_string(&err).expect("serialize deprecated physics");
+        let decoded: HaresError =
+            serde_json::from_str(&json).expect("deserialize deprecated physics");
+        assert_eq!(decoded, err);
+        assert!(json.contains("physically impossible temperature"));
     }
 
     #[test]
