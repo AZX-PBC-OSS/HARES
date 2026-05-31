@@ -1254,4 +1254,49 @@ mod tests {
         assert!(!fleet.telemetry(0).unwrap().dwelling_failed);
         assert!(!fleet.telemetry(2).unwrap().dwelling_failed);
     }
+
+    #[test]
+    fn assert_panic_from_dwelling_step_includes_file_and_line() {
+        // Verifies the end-to-end chain when equipment/dwelling code panics
+        // via assert! (as opposed to panic!()). The hook must capture
+        // PanicHookInfo::location() from the assert's expansion site
+        // (the dwelling source file), not from the catch_unwind call site
+        // in fleet code.
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+        assert_eq!(fleet.len(), 3);
+
+        fleet.dwellings[1].set_test_assert_panic();
+
+        let results = fleet.step();
+        assert_eq!(results.len(), 3);
+
+        match &results[1] {
+            Err(SimError::Panic { bldg_id, message }) => {
+                assert_eq!(*bldg_id, 2);
+                assert!(
+                    message.contains("test-induced assert failure"),
+                    "expected assert failure text in message: {message}"
+                );
+                assert!(
+                    message.contains(" — "),
+                    "expected location separator in message: {message}"
+                );
+                // The location should point to the dwelling source file,
+                // not fleet.rs (the catch_unwind site).
+                assert!(
+                    message.contains("mod.rs") || message.contains("dwelling"),
+                    "expected dwelling source file in message: {message}"
+                );
+            }
+            other => panic!(
+                "expected Panic error for assert-panicking dwelling, got {:?}",
+                other
+            ),
+        }
+
+        assert!(results[0].is_ok());
+        assert!(results[2].is_ok());
+    }
 }

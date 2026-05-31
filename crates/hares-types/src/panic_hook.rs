@@ -271,7 +271,11 @@ mod tests {
         let _guard = PanicHookGuard::new();
 
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            assert!(false, "assertion that must fail");
+            // Use a runtime bool condition to avoid clippy::assertions_on_constants
+            // while still exercising the full assert! macro path (including
+            // location metadata capture via PanicHookInfo).
+            let condition = true;
+            assert!(!condition, "assertion that must fail");
         }));
 
         assert!(result.is_err());
@@ -303,7 +307,7 @@ mod tests {
     #[test]
     fn guard_constructs_cleanly_in_child_thread() {
         // Run in a child thread to isolate from other test hooks.
-        let outcome = std::thread::spawn(|| PanicHookGuard::new()).join();
+        let outcome = std::thread::spawn(PanicHookGuard::new).join();
         assert!(
             outcome.is_ok(),
             "guard should construct cleanly in child thread"
@@ -395,5 +399,67 @@ mod tests {
 
         assert!(m1.contains("t1 panic"));
         assert!(m2.contains("t2 panic"));
+    }
+
+    #[test]
+    fn hook_captures_file_and_line_for_unwrap_on_none() {
+        let _guard = PanicHookGuard::new();
+
+        let result = panic::catch_unwind(AssertUnwindSafe(
+            #[allow(clippy::unnecessary_literal_unwrap)]
+            // Why: clippy sees `None` → `unwrap()` in the same scope; the test
+            // intentionally triggers `unwrap()` panic on `None` to verify the hook
+            // captures PanicHookInfo::location() from the actual unwrap site.
+            || {
+                let x: Option<i32> = None;
+                x.unwrap();
+            },
+        ));
+
+        assert!(result.is_err());
+        let msg = panic_payload_to_string(result.unwrap_err());
+        assert!(
+            msg.contains("panic_hook.rs"),
+            "expected file path in: {msg}"
+        );
+        assert!(
+            msg.contains("unwrap"),
+            "expected unwrap reference in: {msg}"
+        );
+        assert!(
+            msg.contains(" — "),
+            "expected location separator in: {msg}"
+        );
+    }
+
+    #[test]
+    fn hook_captures_file_and_line_for_expect_on_err() {
+        let _guard = PanicHookGuard::new();
+
+        let result = panic::catch_unwind(AssertUnwindSafe(
+            #[allow(clippy::unnecessary_literal_unwrap)]
+            // Why: clippy sees `Err` → `expect()` in the same scope; the test
+            // intentionally triggers `expect()` panic on `Err` to verify the hook
+            // captures PanicHookInfo::location() from the actual expect site.
+            || {
+                let r: Result<i32, &str> = Err("expect test error");
+                r.expect("custom expect message");
+            },
+        ));
+
+        assert!(result.is_err());
+        let msg = panic_payload_to_string(result.unwrap_err());
+        assert!(
+            msg.contains("panic_hook.rs"),
+            "expected file path in: {msg}"
+        );
+        assert!(
+            msg.contains("custom expect message"),
+            "expected custom expect text in: {msg}"
+        );
+        assert!(
+            msg.contains(" — "),
+            "expected location separator in: {msg}"
+        );
     }
 }

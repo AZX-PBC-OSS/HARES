@@ -820,6 +820,8 @@ pub struct Dwelling {
     stage_snapshot: Option<StageSnapshot>,
     #[cfg(debug_assertions)]
     test_panic_on_step: bool,
+    #[cfg(debug_assertions)]
+    test_assert_panic_on_step: bool,
     output_column_index: HashMap<String, usize>,
     /// Pre-resolved output column indices for each equipment piece, avoiding
     /// per-timestep name allocation in `record_step`.
@@ -1497,6 +1499,8 @@ impl Dwelling {
             failed: false,
             #[cfg(debug_assertions)]
             test_panic_on_step: false,
+            #[cfg(debug_assertions)]
+            test_assert_panic_on_step: false,
             equipment,
             equipment_id_by_name,
             thermal_solver: solvers.thermal,
@@ -1702,12 +1706,24 @@ impl Dwelling {
         self.test_panic_on_step = true;
     }
 
+    /// Test-only hook: causes the next [`step()`](Self::step) call to panic
+    /// via `assert!` failure for integration testing of assert-based panics.
+    #[cfg(debug_assertions)]
+    pub fn set_test_assert_panic(&mut self) {
+        self.test_assert_panic_on_step = true;
+    }
+
     /// Executes exactly one simulation timestep.
     pub fn step(&mut self) -> Result<StepResult> {
         #[cfg(debug_assertions)]
         if self.test_panic_on_step {
             panic!("test-induced panic in Dwelling::step()");
         }
+        #[cfg(debug_assertions)]
+        assert!(
+            !self.test_assert_panic_on_step,
+            "test-induced assert failure in Dwelling::step()"
+        );
         self.run_timestep(self.write_output)?;
         Ok(self.simulation_results.steps.last().unwrap().clone())
     }
