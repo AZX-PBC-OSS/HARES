@@ -10,7 +10,10 @@ pub mod writer;
 
 use std::path::PathBuf;
 
-pub use columns::{build_schema, expected_columns_at_verbosity, mode_to_ordinal};
+pub use columns::{
+    build_schema, display_name_to_end_use_key, end_use_display_name, equipment_name_to_end_use,
+    expected_columns_at_verbosity, mode_to_ordinal,
+};
 pub use metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
     SimulationMetrics,

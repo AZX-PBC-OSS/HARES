@@ -42,8 +42,9 @@ pub use hpxml::{
 };
 pub use output::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
-    OutputSummary, SimulationMetrics, StreamingRecorder, build_schema,
-    expected_columns_at_verbosity, mode_to_ordinal,
+    OutputSummary, SimulationMetrics, StreamingRecorder, build_schema, display_name_to_end_use_key,
+    end_use_display_name, equipment_name_to_end_use, expected_columns_at_verbosity,
+    mode_to_ordinal,
 };
 pub use psm3::parse_psm3;
 pub use resstock::{

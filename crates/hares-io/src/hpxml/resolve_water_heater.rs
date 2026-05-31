@@ -1361,7 +1361,10 @@ mod tests {
             "\"none\" is not a valid HPXML fuel type and must be rejected"
         );
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("unsupported water-heater FuelType"), "got: {err}");
+        assert!(
+            err.contains("unsupported water-heater FuelType"),
+            "got: {err}"
+        );
     }
 
     #[test]

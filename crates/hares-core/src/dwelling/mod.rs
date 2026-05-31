@@ -31,8 +31,8 @@ use hares_equipment::{
 };
 use hares_io::{
     Building, DefaultsStore, PvPanelDefaults, ScheduleTimeSeries, SimulationConfig,
-    StreamingRecorder, WeatherTimeSeries, build_schema, parse_hpxml, parse_schedule_csv,
-    parse_weather, resolve_equipment,
+    StreamingRecorder, WeatherTimeSeries, build_schema, end_use_display_name,
+    equipment_name_to_end_use, parse_hpxml, parse_schedule_csv, parse_weather, resolve_equipment,
 };
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
@@ -818,6 +818,10 @@ pub struct Dwelling {
     /// Pre-resolved output column indices for each equipment piece, avoiding
     /// per-timestep name allocation in `record_step`.
     equipment_column_map: Vec<EquipmentColumns>,
+    /// Pre-resolved aggregate end-use column index for each equipment's
+    /// electric power contribution, or `None` if no aggregate column exists
+    /// for that equipment's EndUse category.
+    end_use_aggregate_indices: Vec<Option<usize>>,
     /// Pre-resolved actor telemetry column indices per actor, avoiding
     /// per-timestep `format!()` allocation in `record_step`.
     /// Each inner vec maps telemetry key → column index.
@@ -1453,6 +1457,15 @@ impl Dwelling {
         let facility_type = building.residential_facility_type.clone();
 
         let equipment_column_map = build_equipment_column_map(&equipment, &output_column_index);
+        let end_use_aggregate_indices: Vec<Option<usize>> = equipment_specs
+            .iter()
+            .map(|spec| {
+                let end_use = equipment_name_to_end_use(&spec.name);
+                let display = end_use_display_name(&end_use);
+                let col_name = format!("{display} Electric Power (kW)");
+                output_column_index.get(&col_name).copied()
+            })
+            .collect();
         let zone_types = environment.zone_types().to_vec();
         let zone_caches = build_zone_column_caches(
             &initial_env.zones,
@@ -1509,6 +1522,7 @@ impl Dwelling {
             #[cfg(debug_assertions)]
             stage_snapshot: None,
             equipment_column_map,
+            end_use_aggregate_indices,
             output_column_index,
             output_value_count,
             record_scratch,
@@ -2142,6 +2156,36 @@ impl Dwelling {
             self.output_column_index = build_output_column_index(&schema);
             self.equipment_column_map =
                 build_equipment_column_map(&self.equipment, &self.output_column_index);
+            self.end_use_aggregate_indices = {
+                // Rebuild using the specs derived from current equipment descriptors.
+                let specs: Vec<hares_io::EquipmentSpec> = self
+                    .equipment
+                    .iter()
+                    .map(|eq| {
+                        let d = eq.descriptor();
+                        hares_io::EquipmentSpec {
+                            instance_name: None,
+                            name: d.name.clone(),
+                            fuel_type: d.fuel,
+                            parameters: Map::new(),
+                            zip_params: None,
+                            typed_config: None,
+                            system_id: None,
+                            related_hvac_idref: None,
+                            primary_role: None,
+                        }
+                    })
+                    .collect();
+                specs
+                    .iter()
+                    .map(|spec| {
+                        let end_use = equipment_name_to_end_use(&spec.name);
+                        let display = end_use_display_name(&end_use);
+                        let col_name = format!("{display} Electric Power (kW)");
+                        self.output_column_index.get(&col_name).copied()
+                    })
+                    .collect()
+            };
 
             // Pre-resolve actor telemetry column indices; avoids format!() per step.
             self.actor_column_map.clear();
@@ -3534,6 +3578,17 @@ impl Dwelling {
                 // Only the first equipment's index is used; all HVAC contributions
                 // are accumulated into the same row slot.
                 row[idx] += eq.telemetry().get(tk::DUCT_LOSS_W).unwrap_or(0.0); // allowed: duct loss remains telemetry-only until CoreOutput gains a duct loss field.
+            }
+        }
+
+        // Per-EndUse aggregate electric power columns.
+        // Each equipment's electric power is accumulated into the aggregate column
+        // for its EndUse category (e.g. all HVAC_HEATING equipment contribute to
+        // "HVAC Heating Electric Power (kW)").
+        for (eq, &agg_idx_opt) in self.equipment.iter().zip(&self.end_use_aggregate_indices) {
+            if let Some(idx) = agg_idx_opt {
+                let co = eq.core_output();
+                row[idx] += co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
             }
         }
 

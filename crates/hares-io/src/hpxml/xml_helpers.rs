@@ -536,7 +536,10 @@ mod tests {
     #[test]
     fn parse_fuel_none_is_not_electric() {
         let result = parse_fuel(Some("none"));
-        assert!(result.is_err(), "\"none\" is not a valid HPXML fuel type and must be rejected");
+        assert!(
+            result.is_err(),
+            "\"none\" is not a valid HPXML fuel type and must be rejected"
+        );
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("unsupported FuelType"), "got: {err}");
     }

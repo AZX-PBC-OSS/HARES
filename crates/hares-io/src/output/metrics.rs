@@ -332,6 +332,9 @@ pub struct MetricsCalculator {
     hvac_cooling_electric_wh: f64,
     battery_energy_in_kwh: f64,
     battery_energy_out_kwh: f64,
+
+    #[cfg(feature = "observe")]
+    end_use_equipment_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug)]
@@ -401,6 +404,33 @@ impl MetricsCalculator {
             optional_float64_column(schema, &["HVAC Cooling Electric Power (kW)"])?;
         let battery_kw_idx = optional_float64_column(schema, &["Battery Electric Power (kW)"])?;
 
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // Only warn about missing HVAC aggregate columns when the schema
+            // contains per-equipment columns for that EndUse category.
+            // Without this gate, the check fires at every verbosity-0 run
+            // regardless of whether HVAC equipment is present.
+            let has_hvac_heating_equipment =
+                schema_has_equipment_for(schema, &hares_types::EndUse::HVAC_HEATING);
+            let has_hvac_cooling_equipment =
+                schema_has_equipment_for(schema, &hares_types::EndUse::HVAC_COOLING);
+
+            if hvac_heating_kw_idx.is_none() && has_hvac_heating_equipment {
+                tracing::warn!(
+                    "HVAC Heating aggregate column ('{}') not found in schema — \
+                     hvac_heating_electric_wh will be zero",
+                    "HVAC Heating Electric Power (kW)"
+                );
+            }
+            if hvac_cooling_kw_idx.is_none() && has_hvac_cooling_equipment {
+                tracing::warn!(
+                    "HVAC Cooling aggregate column ('{}') not found in schema — \
+                     hvac_cooling_electric_wh will be zero",
+                    "HVAC Cooling Electric Power (kW)"
+                );
+            }
+        }
+
         let timestep_h = f64::from(time_res_secs) / 3600.0;
         let energy_by_end_use = end_use_columns
             .iter()
@@ -468,7 +498,15 @@ impl MetricsCalculator {
             hvac_cooling_electric_wh: 0.0,
             battery_energy_in_kwh: 0.0,
             battery_energy_out_kwh: 0.0,
+            #[cfg(feature = "observe")]
+            end_use_equipment_counts: compute_equipment_counts_from_schema(schema),
         })
+    }
+
+    /// Set end-use equipment counts for observer diagnostics.
+    #[cfg(feature = "observe")]
+    pub fn set_end_use_equipment_counts(&mut self, counts: BTreeMap<String, usize>) {
+        self.end_use_equipment_counts = counts;
     }
 
     /// Update metrics from a single flushed batch.
@@ -680,6 +718,29 @@ impl MetricsCalculator {
                     }
                 }
             }
+
+            #[cfg(feature = "observe")]
+            if row == batch.num_rows() - 1 {
+                let mut parts: Vec<String> = Vec::new();
+                for (key, val) in &self.energy_by_end_use {
+                    parts.push(format!("{key}={val:.3}kWh"));
+                }
+                for (key, count) in &self.end_use_equipment_counts {
+                    parts.push(format!("n_{key}={count}"));
+                }
+                parts.push(format!(
+                    "hvac_heating_wh={:.1}",
+                    self.hvac_heating_electric_wh
+                ));
+                parts.push(format!(
+                    "hvac_cooling_wh={:.1}",
+                    self.hvac_cooling_electric_wh
+                ));
+                tracing::info!(
+                    end_use_diagnostics = %parts.join(", "),
+                    "end-use metrics at batch boundary"
+                );
+            }
         }
     }
 
@@ -785,18 +846,85 @@ fn discover_end_use_columns(
             continue;
         }
         let name = field.name().as_str();
-        // OCHRE-style: "{End Use} Electric Power (kW)"
+        // Match OCHRE-style per-end-use aggregate columns:
+        // "{EndUse Display Name} Electric Power (kW)"
         if name.ends_with(ELECTRIC_POWER_SUFFIX) {
-            ensure_float64(schema, idx)?;
-            let end_use = name
+            let prefix = name
                 .strip_suffix(ELECTRIC_POWER_SUFFIX)
                 .unwrap_or(name)
-                .trim()
-                .to_owned();
-            columns.push((end_use, idx));
+                .trim();
+            // Only include columns whose prefix matches a known EndUse display
+            // name — this filters out per-equipment columns (e.g. "ASHP Heater
+            // Electric Power (kW)") and keeps only aggregate columns
+            // (e.g. "HVAC Heating Electric Power (kW)").
+            if let Some(end_use_key) = crate::output::columns::display_name_to_end_use_key(prefix) {
+                ensure_float64(schema, idx)?;
+                columns.push((end_use_key, idx));
+            }
         }
     }
     Ok(columns)
+}
+
+/// Returns true if the schema contains at least one per-equipment electric
+/// power column that maps to the given `EndUse` category.
+///
+/// Used by invariant checks to gate warnings about missing aggregate columns
+/// on the actual presence of equipment for that end-use category.
+fn schema_has_equipment_for(schema: &Schema, target: &hares_types::EndUse) -> bool {
+    for field in schema.fields() {
+        let name = field.name().as_str();
+        if name.ends_with(ELECTRIC_POWER_SUFFIX) {
+            let prefix = name
+                .strip_suffix(ELECTRIC_POWER_SUFFIX)
+                .unwrap_or(name)
+                .trim();
+            // Strip instance qualifier suffix (" #N") for multi-instance
+            // equipment columns (e.g. "ASHP Heater #1" -> "ASHP Heater").
+            let base = match prefix.rfind(" #") {
+                Some(pos) => &prefix[..pos],
+                None => prefix,
+            };
+            if crate::output::columns::equipment_name_to_end_use(base) == *target {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Derives per-end-use equipment counts from the output schema.
+///
+/// Counts each per-equipment electric power column whose name maps to a
+/// recognised EndUse category, skipping aggregate columns (whose prefix is
+/// an EndUse display name rather than an equipment instance name).
+#[cfg(feature = "observe")]
+fn compute_equipment_counts_from_schema(schema: &Schema) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for field in schema.fields() {
+        let name = field.name().as_str();
+        if name.ends_with(ELECTRIC_POWER_SUFFIX) {
+            let prefix = name
+                .strip_suffix(ELECTRIC_POWER_SUFFIX)
+                .unwrap_or(name)
+                .trim();
+            let base = match prefix.rfind(" #") {
+                Some(pos) => &prefix[..pos],
+                None => prefix,
+            };
+            let end_use = crate::output::columns::equipment_name_to_end_use(base);
+            // Only count columns that represent real equipment instances:
+            // aggregate columns (e.g. "HVAC Heating") do not match
+            // equipment_name_to_end_use and return EndUse::OTHER.
+            if end_use != hares_types::EndUse::OTHER {
+                let display = crate::output::columns::end_use_display_name(&end_use);
+                if let Some(key) = crate::output::columns::display_name_to_end_use_key(display) {
+                    *counts.entry(key).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    counts
 }
 
 fn discover_setpoint_inputs(
@@ -1031,7 +1159,7 @@ mod tests {
         calc.accumulate(&b2);
         let metrics = calc.finish();
 
-        assert_eq!(metrics.peak_power_kw.per_end_use["EV"], 6.2);
+        assert_eq!(metrics.peak_power_kw.per_end_use["ev"], 6.2);
     }
 
     #[test]
@@ -1444,5 +1572,219 @@ mod tests {
         calc.accumulate(&build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0])]));
         let metrics = calc.finish();
         assert!(metrics.metrics.envelope_loads_kwh.is_none());
+    }
+
+    // ── End‑use aggregate column tests ─────────────────────────────────
+
+    /// Aggregate columns are discovered with EndUse keys, per-equipment
+    /// columns are skipped. Verifies that `discover_end_use_columns` correctly
+    /// maps aggregate column display names back to EndUse category strings.
+    #[test]
+    fn discover_end_use_columns_maps_aggregate_not_per_equipment() {
+        // Schema with both per-equipment and aggregate columns.
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "ASHP Heater Electric Power (kW)",
+            "Gas Furnace Electric Power (kW)",
+            "HVAC Heating Electric Power (kW)",
+            "Battery Electric Power (kW)",
+        ]);
+        let calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let metrics = calc.finish();
+
+        // energy_by_end_use should have "hvac_heating" and "battery" keys
+        // (from aggregate columns), NOT "ASHP Heater" or "Gas Furnace"
+        // (from per-equipment columns).
+        assert!(
+            metrics
+                .annual_energy_kwh
+                .per_end_use
+                .contains_key("hvac_heating"),
+            "per_end_use must contain key 'hvac_heating' from aggregate column"
+        );
+        assert!(
+            metrics
+                .annual_energy_kwh
+                .per_end_use
+                .contains_key("battery"),
+            "per_end_use must contain key 'battery' from aggregate column"
+        );
+        assert!(
+            !metrics
+                .annual_energy_kwh
+                .per_end_use
+                .contains_key("ASHP Heater"),
+            "per_end_use must NOT contain per-equipment key 'ASHP Heater'"
+        );
+        assert!(
+            !metrics
+                .annual_energy_kwh
+                .per_end_use
+                .contains_key("Gas Furnace"),
+            "per_end_use must NOT contain per-equipment key 'Gas Furnace'"
+        );
+    }
+
+    /// Multiple HVAC_HEATING equipment power contributions are accumulated
+    /// under the same `"hvac_heating"` end-use key.
+    #[test]
+    fn energy_by_end_use_aggregates_multiple_hvac_heating_equipment() {
+        let schema =
+            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "HVAC Heating Electric Power (kW)"]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        // Simulate two hours at constant 3 kW
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 3.0]),
+            ("HVAC Heating Electric Power (kW)", vec![3.0, 3.0]),
+        ]));
+        let metrics = calc.finish();
+        assert!(
+            metrics.annual_energy_kwh.per_end_use["hvac_heating"] > 0.0,
+            "hvac_heating energy must be non-zero"
+        );
+        assert!(
+            (metrics.annual_energy_kwh.per_end_use["hvac_heating"] - 6.0).abs() < 1e-9,
+            "hvac_heating energy must equal 3 kW × 2 h = 6 kWh"
+        );
+    }
+
+    /// HVAC heating electric energy is populated when the aggregate column
+    /// has positive values. Regression test for the hvac_heating_kw_idx
+    /// resolution and hvac_heating_electric_wh accumulation.
+    #[test]
+    fn hvac_heating_electric_wh_populated_from_aggregate_column() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating Electric Power (kW)",
+            "HVAC Heating Delivered (W)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 3.0]),
+            ("HVAC Heating Electric Power (kW)", vec![2.0, 2.5]),
+            ("HVAC Heating Delivered (W)", vec![6000.0, 7000.0]),
+        ]));
+        let metrics = calc.finish();
+        // hvac_heating_cop requires hvac_heating_electric_wh > 0
+        assert!(
+            metrics.efficiency.hvac_heating_cop.is_some(),
+            "hvac_heating_cop must be Some when HVAC Heating electric power > 0; \
+             hvac_heating_kw_idx resolution failed"
+        );
+        assert!(
+            metrics.efficiency.hvac_heating_cop.unwrap() > 0.0,
+            "hvac_heating_cop must be > 0"
+        );
+    }
+
+    // ── Equipment-count derivation from schema ─────────────────────────
+
+    /// `schema_has_equipment_for` detects HVAC equipment columns in the
+    /// schema and correctly returns false when none are present.
+    #[test]
+    fn schema_has_equipment_for_detects_hvac_columns() {
+        let hvac_schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "ASHP Heater Electric Power (kW)",
+            "HVAC Heating Electric Power (kW)",
+        ]);
+        assert!(
+            schema_has_equipment_for(&hvac_schema, &hares_types::EndUse::HVAC_HEATING),
+            "must detect ASHP Heater as HVAC_HEATING equipment"
+        );
+
+        // Battery is not HVAC.
+        let battery_schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Battery Electric Power (kW)",
+        ]);
+        assert!(
+            !schema_has_equipment_for(&battery_schema, &hares_types::EndUse::HVAC_HEATING),
+            "must NOT detect Battery as HVAC_HEATING equipment"
+        );
+        assert!(
+            !schema_has_equipment_for(
+                &battery_schema,
+                &hares_types::EndUse::HVAC_COOLING
+            ),
+            "must NOT detect Battery as HVAC_COOLING equipment"
+        );
+
+        // Empty schema has no equipment.
+        let empty = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        assert!(
+            !schema_has_equipment_for(&empty, &hares_types::EndUse::HVAC_HEATING),
+            "empty schema must not report HVAC equipment"
+        );
+    }
+
+    /// `schema_has_equipment_for` strips instance qualifiers (" #N") from
+    /// multi-instance equipment column names.
+    #[test]
+    fn schema_has_equipment_for_strips_instance_qualifiers() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "ASHP Heater #1 Electric Power (kW)",
+            "ASHP Heater #2 Electric Power (kW)",
+            "HVAC Heating Electric Power (kW)",
+        ]);
+        assert!(
+            schema_has_equipment_for(&schema, &hares_types::EndUse::HVAC_HEATING),
+            "must detect instance-qualified ASHP Heater columns as HVAC_HEATING"
+        );
+    }
+
+    /// `compute_equipment_counts_from_schema` counts per-equipment columns
+    /// grouped by EndUse category, skipping aggregate columns.
+    #[test]
+    #[cfg(feature = "observe")]
+    fn compute_equipment_counts_counts_equipment_excluding_aggregates() {
+        // Schema with 2 HVAC_HEATING equipment, 1 BATTERY, and aggregate columns.
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "ASHP Heater Electric Power (kW)",
+            "Gas Furnace Electric Power (kW)",
+            "HVAC Heating Electric Power (kW)",
+            "Battery Electric Power (kW)",
+        ]);
+        let counts = compute_equipment_counts_from_schema(&schema);
+        assert_eq!(
+            counts.get("hvac_heating"),
+            Some(&2),
+            "must count ASHP Heater + Gas Furnace = 2 HVAC_HEATING equipment"
+        );
+        assert_eq!(
+            counts.get("battery"),
+            Some(&1),
+            "must count 1 Battery equipment"
+        );
+        // Aggregate columns (e.g. "HVAC Heating") must not be counted.
+        assert!(
+            !counts.contains_key("other"),
+            "aggregate columns must not be counted as OTHER: got keys {:?}",
+            counts.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// `MetricsCalculator::new` populates `end_use_equipment_counts` from
+    /// the schema so observer diagnostics report non-zero equipment counts.
+    #[test]
+    #[cfg(feature = "observe")]
+    fn metrics_calculator_new_populates_equipment_counts() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "ASHP Heater Electric Power (kW)",
+            "HVAC Heating Electric Power (kW)",
+        ]);
+        let calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        assert!(
+            !calc.end_use_equipment_counts.is_empty(),
+            "end_use_equipment_counts must be populated from schema"
+        );
+        assert_eq!(
+            calc.end_use_equipment_counts.get("hvac_heating"),
+            Some(&1),
+            "must count 1 HVAC_HEATING equipment"
+        );
     }
 }

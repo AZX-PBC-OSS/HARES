@@ -681,4 +681,48 @@ mod tests {
              expected={expected_per_cycle:.9} kWh"
         );
     }
+
+    /// Integration test: BEopt fixture has ASHP Heater (heat pump) →
+    /// HVAC_HEATING equipment. After end-use aggregate column changes
+    /// (T‑0139), `energy_by_end_use["hvac_heating"]` must be populated
+    /// and non-zero because all HVAC_HEATING equipment electric power
+    /// is summed into the `"HVAC Heating Electric Power (kW)"` aggregate
+    /// column, which `discover_end_use_columns` maps to key `"hvac_heating"`.
+    #[test]
+    fn beopt_smoke_end_use_aggregates_by_category() {
+        let output_path = std::env::temp_dir().join(unique_temp_name("hares_beopt_enduse", "csv"));
+        let _guard = TempFile(output_path.clone());
+
+        let engine = SimulationEngine::new();
+        let result = engine
+            .run(beopt_config(1, output_path.clone()))
+            .expect("engine.run should succeed");
+
+        assert!(
+            !matches!(result.status, SimStatus::Failed(_)),
+            "BEopt simulation failed: {:?}",
+            result.status
+        );
+
+        // The BEopt fixture has an air-to-air heat pump → HVAC_HEATING equipment.
+        let per_end_use = &result.metrics.annual_energy_kwh.per_end_use;
+
+        assert!(
+            per_end_use.contains_key("hvac_heating"),
+            "per_end_use must contain 'hvac_heating' key from aggregate column; \
+             got keys: {:?}",
+            per_end_use.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !per_end_use.contains_key("ASHP Heater"),
+            "per_end_use must NOT contain per-equipment key 'ASHP Heater'"
+        );
+
+        let hvac_heating_kwh = per_end_use["hvac_heating"];
+        assert!(
+            hvac_heating_kwh > 0.0,
+            "hvac_heating end-use energy must be non-zero for a heating simulation; \
+             got {hvac_heating_kwh:.6} kWh"
+        );
+    }
 }
