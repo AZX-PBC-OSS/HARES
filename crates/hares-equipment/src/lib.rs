@@ -554,9 +554,12 @@ mod tests {
     #[test]
     fn default_set_charging_curve_lut_returns_err() {
         let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
-        let lut =
-            crate::ndinterp::RegularGridInterpolator::new(vec![vec![0.0, 1.0]], vec![1.0, 0.0])
-                .unwrap();
+        let lut = crate::ndinterp::RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0]],
+            vec![1.0, 0.0],
+            crate::ndinterp::ExtrapolationStrategy::Clamp,
+        )
+        .unwrap();
         let result = eq.set_charging_curve_lut(Some(lut));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not support"));

@@ -10,6 +10,7 @@ use hares_equipment::battery::catalog::BatteryProductId as RustBatteryProductId;
 use hares_equipment::ev::catalog::{
     EvArchetypeId as RustEvArchetypeId, VehicleId as RustVehicleId,
 };
+use hares_equipment::ndinterp::ExtrapolationStrategy as RustExtrapolationStrategy;
 use hares_fleet::fleet::SimStatus as FleetSimStatus;
 use hares_io::ResStockVersion as IoResStockVersion;
 use hares_types::{
@@ -111,10 +112,6 @@ impl PyEndUse {
         Self {
             inner: RustEndUse::custom(name.to_string()),
         }
-    }
-
-    fn as_str(&self) -> &str {
-        self.inner.as_str()
     }
 
     fn is_standard(&self) -> bool {
@@ -2744,6 +2741,42 @@ impl PyBmsMode {
             }
             RustBmsMode::Manual => "BmsMode.manual()".to_string(),
         }
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+// ── ExtrapolationStrategy ────────────────────────────────────────────
+
+#[pyclass(name = "ExtrapolationStrategy", skip_from_py_object)]
+#[derive(Clone, Copy)]
+pub struct PyExtrapolationStrategy {
+    inner: RustExtrapolationStrategy,
+}
+
+#[pymethods]
+impl PyExtrapolationStrategy {
+    #[classattr]
+    const CLAMP: Self = Self {
+        inner: RustExtrapolationStrategy::Clamp,
+    };
+    #[classattr]
+    const NAN: Self = Self {
+        inner: RustExtrapolationStrategy::NaN,
+    };
+    #[classattr]
+    const LINEAR: Self = Self {
+        inner: RustExtrapolationStrategy::Linear,
+    };
+    #[classattr]
+    const NEAREST_NEIGHBOR: Self = Self {
+        inner: RustExtrapolationStrategy::NearestNeighbor,
+    };
+
+    fn __repr__(&self) -> String {
+        format!("ExtrapolationStrategy.{:?}", self.inner)
     }
 
     fn __eq__(&self, other: &Self) -> bool {

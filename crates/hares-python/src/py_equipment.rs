@@ -2,6 +2,7 @@
 
 use hares_equipment::battery::catalog::{BatteryProductId, BatterySpec};
 use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId, VehicleSpec};
+use hares_equipment::ndinterp::ExtrapolationStrategy;
 use hares_equipment::ndinterp::RegularGridInterpolator;
 use hares_equipment::{OcvTable, UNegTable};
 use hares_types::{
@@ -23,6 +24,8 @@ use crate::py_enums::{
 /// - `dict`: with the same keys as numpy arrays
 ///
 /// The `lut` values are flattened to row-major f32.  Axis arrays are float64, 1-D, strictly ascending.
+/// The interpolator is constructed with `ExtrapolationStrategy::Clamp` for safe runtime behaviour.
+/// Use `ExtrapolationStrategy::NaN` during offline LUT validation to detect coverage gaps.
 pub fn extract_charging_lut(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
@@ -45,8 +48,12 @@ pub fn extract_charging_lut(
         .ok_or_else(|| PyValueError::new_err("charging_curve_lut dict missing 'lut' key"))?;
     let values = extract_flat_f32(py, &lut_arr)?;
 
-    RegularGridInterpolator::new(vec![soc, temp, crate_ax, soh], values)
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    RegularGridInterpolator::new(
+        vec![soc, temp, crate_ax, soh],
+        values,
+        ExtrapolationStrategy::Clamp,
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 fn extract_f64_axis(_py: Python<'_>, dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<f64>> {
@@ -89,8 +96,12 @@ fn load_npz_lut(py: Python<'_>, path: &str) -> PyResult<RegularGridInterpolator>
         .extract()?;
     let values = extract_flat_f32(py, &data.get_item("lut")?)?;
 
-    RegularGridInterpolator::new(vec![soc, temp, crate_ax, soh], values)
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    RegularGridInterpolator::new(
+        vec![soc, temp, crate_ax, soh],
+        values,
+        ExtrapolationStrategy::Clamp,
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 #[pyclass(name = "Battery")]

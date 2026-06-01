@@ -26,9 +26,9 @@ use py_enums::{
     PyAggregationResolution, PyBatteryChemistry, PyBatteryProductId, PyBmsAction, PyBmsMode,
     PyBmsScheduleWindow, PyChargingLevel, PyChargingStrategy, PyControlCapabilities,
     PyDepartureConstraint, PyDutyCycleComponent, PyEndUse, PyEvArchetypeId, PyEvConnectionState,
-    PyExecutionStage, PyFluidType, PyFuelType, PyGridExportRule, PyIdealCapacityMode,
-    PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion, PySimStatus,
-    PyStormWatchTrigger, PyVehicleId, PyVehicleType,
+    PyExecutionStage, PyExtrapolationStrategy, PyFluidType, PyFuelType, PyGridExportRule,
+    PyIdealCapacityMode, PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion,
+    PySimStatus, PyStormWatchTrigger, PyVehicleId, PyVehicleType,
 };
 use py_equipment::{
     PyBattery, PyCoreOutput, PyEquipment, PyEquipmentDescriptor, PyEv, PyProtocolBridge, PyPv,
@@ -97,6 +97,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGridExportRule>()?;
     m.add_class::<PyStormWatchTrigger>()?;
     m.add_class::<PyDepartureConstraint>()?;
+    m.add_class::<PyExtrapolationStrategy>()?;
     m.add_class::<PySimulationMetrics>()?;
     m.add_class::<PyAnnualEnergyKwh>()?;
     m.add_class::<PyPeakPowerKw>()?;

@@ -4049,6 +4049,7 @@ mod tests {
         crate::ndinterp::RegularGridInterpolator::new(
             vec![soc_grid, vec![25.0], vec![1.0], vec![1.0]],
             values,
+            crate::ndinterp::ExtrapolationStrategy::Clamp,
         )
         .unwrap()
     }
@@ -4207,7 +4208,12 @@ mod tests {
         ];
         // Row-major: [soc=0,t=-10], [soc=0,t=25], [soc=1,t=-10], [soc=1,t=25]
         let values = vec![0.5f32, 1.0, 0.5, 1.0];
-        let lut = crate::ndinterp::RegularGridInterpolator::new(axes, values).unwrap();
+        let lut = crate::ndinterp::RegularGridInterpolator::new(
+            axes,
+            values,
+            crate::ndinterp::ExtrapolationStrategy::Clamp,
+        )
+        .unwrap();
 
         let config = battery_config(&[]);
         let mut bat = Battery::new(config);

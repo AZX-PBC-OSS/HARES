@@ -873,6 +873,7 @@ fn make_4d_lut(soc_pf: &[(f64, f32)]) -> crate::ndinterp::RegularGridInterpolato
     crate::ndinterp::RegularGridInterpolator::new(
         vec![soc_grid, vec![25.0], vec![1.0], vec![1.0]],
         values,
+        crate::ndinterp::ExtrapolationStrategy::Clamp,
     )
     .unwrap()
 }
@@ -887,6 +888,7 @@ fn charging_curve_lut_limits_power() {
     let lut = crate::ndinterp::RegularGridInterpolator::new(
         vec![soc_grid, temp_grid, crate_grid, soh_grid],
         values,
+        crate::ndinterp::ExtrapolationStrategy::Clamp,
     )
     .unwrap();
 
@@ -1002,7 +1004,12 @@ fn no_lut_charges_at_full_rated_power() {
 fn lut_with_soh_adjusted_c_rate() {
     let axes = vec![vec![0.0, 1.0], vec![25.0], vec![0.05, 0.30], vec![0.5, 1.0]];
     let values = vec![1.0f32, 1.0, 0.1, 0.1, 1.0, 1.0, 0.1, 0.1];
-    let lut = crate::ndinterp::RegularGridInterpolator::new(axes, values).unwrap();
+    let lut = crate::ndinterp::RegularGridInterpolator::new(
+        axes,
+        values,
+        crate::ndinterp::ExtrapolationStrategy::Clamp,
+    )
+    .unwrap();
 
     let config = ev_config(base_raw());
     let mut ev = Ev::new(config);
