@@ -215,6 +215,8 @@ fn battery_core_output_matches_dwelling_aggregation() {
             ControlSignal::PowerSetpoint {
                 active_power_kw: 3.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
         )
         .expect("battery power setpoint must validate");

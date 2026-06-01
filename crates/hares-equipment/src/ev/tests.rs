@@ -257,6 +257,8 @@ fn negative_power_setpoint_rejected_without_v2l_or_v2g() {
         .apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -1.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap_err();
 
@@ -657,6 +659,8 @@ fn v2l_allows_negative_power_when_enabled_and_soc_above_reserve() {
     ev.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -2.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -686,6 +690,8 @@ fn v2l_respects_soc_reserve_floor() {
     ev.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -3.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -711,6 +717,8 @@ fn v2l_respects_max_discharge_limit() {
     ev.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -10.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -736,6 +744,8 @@ fn v2l_rejected_when_disabled() {
         .apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -1.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap_err();
     assert!(
@@ -759,6 +769,8 @@ fn v2l_does_not_export_to_grid() {
     ev.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -2.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -798,6 +810,8 @@ fn v2g_allows_negative_power_when_enabled() {
     ev.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -3.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("V2G negative setpoint should be accepted");
 }
@@ -817,6 +831,8 @@ fn v2g_discharge_produces_negative_power() {
     ev.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -3.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("setpoint");
 
@@ -845,6 +861,8 @@ fn v2g_respects_soc_reserve() {
     ev.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -5.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("setpoint");
 
@@ -863,6 +881,123 @@ fn v2g_disabled_by_default() {
     let config = ev_config(base_raw());
     let ev = Ev::new(config);
     assert!(!ev.v2g_enabled, "V2G should be disabled by default");
+}
+
+#[test]
+fn v2g_respects_power_setpoint_min_soc_above_reserve() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.30.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).expect("init");
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -5.0,
+        reactive_power_kvar: None,
+        min_soc: Some(0.35),
+        max_soc: None,
+    })
+    .expect("setpoint");
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports)
+        .expect("step");
+    let power = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
+    assert!(
+        power.abs() < 0.01,
+        "V2G must not discharge when SOC=0.30 below power_setpoint_min_soc=0.35 (effective_floor=max(0.2, 0.35)=0.35), got {power}"
+    );
+}
+
+#[test]
+fn v2g_discharges_when_soc_above_power_setpoint_min_soc() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.50.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).expect("init");
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -5.0,
+        reactive_power_kvar: None,
+        min_soc: Some(0.35),
+        max_soc: None,
+    })
+    .expect("setpoint");
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports)
+        .expect("step");
+    let power = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
+    assert!(
+        power < -0.1,
+        "V2G should discharge when SOC=0.50 above power_setpoint_min_soc=0.35, got {power}"
+    );
+}
+
+#[test]
+fn v2l_respects_power_setpoint_min_soc_above_reserve() {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.25.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).expect("init");
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: -3.0,
+        reactive_power_kvar: None,
+        min_soc: Some(0.30),
+        max_soc: None,
+    })
+    .expect("setpoint");
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports)
+        .expect("step");
+    let power = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
+    assert!(
+        power.abs() < 0.01,
+        "V2L must not discharge when SOC=0.25 below power_setpoint_min_soc=0.30, got {power}"
+    );
+}
+
+#[test]
+fn power_setpoint_max_soc_caps_charging() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.85.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).expect("init");
+
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_kw: 7.2,
+        reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: Some(0.90),
+    })
+    .expect("setpoint");
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports)
+        .expect("step");
+    let p_full = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        p_full < 7.2,
+        "charging should be capped near power_setpoint_max_soc=0.90, got {p_full}"
+    );
 }
 
 // ── 4D LUT and degradation tests ─────────────────────────────────
@@ -1365,6 +1500,8 @@ fn power_setpoint_zero_suppresses_charging() {
     ev.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: 0.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 

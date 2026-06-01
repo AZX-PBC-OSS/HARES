@@ -116,6 +116,14 @@ pub struct Ev {
 
     power_limit_kw: Option<f64>,
     power_setpoint_kw: Option<f64>,
+    /// min_soc carried by the last PowerSetpoint signal. Used to enforce
+    /// a SOC floor during discharge (OCHRE EV.py:298).
+    power_setpoint_min_soc: Option<f64>,
+    /// max_soc carried by the last PowerSetpoint signal. Used as a charge
+    /// ceiling — when charging, the EV will not exceed this SOC even if
+    /// the power setpoint would otherwise allow it. Symmetric with
+    /// power_setpoint_min_soc which acts as a discharge floor.
+    power_setpoint_max_soc: Option<f64>,
     soc_target: Option<f64>,
     soc_target_min: Option<f64>,
     soc_target_max: Option<f64>,
@@ -242,6 +250,8 @@ impl Ev {
                 .unwrap_or(PlugInPolicy::Always),
             power_limit_kw: config.get_f64(KEY_POWER_LIMIT_KW),
             power_setpoint_kw: None,
+            power_setpoint_min_soc: None,
+            power_setpoint_max_soc: None,
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
@@ -371,6 +381,8 @@ impl Ev {
         self.v2l_active = false;
         self.v2l_power_kw = 0.0;
         self.power_setpoint_kw = None;
+        self.power_setpoint_min_soc = None;
+        self.power_setpoint_max_soc = None;
         self.soc_target = None;
         self.soc_target_min = None;
         self.soc_target_max = None;
@@ -387,6 +399,9 @@ impl Ev {
             limit = limit.max(min);
         }
         if let Some(max) = self.soc_target_max {
+            limit = limit.min(max);
+        }
+        if let Some(max) = self.power_setpoint_max_soc {
             limit = limit.min(max);
         }
         limit.clamp(0.0, self.soc_max)
@@ -425,6 +440,9 @@ impl Ev {
                 limit = limit.max(min);
             }
             if let Some(max) = self.soc_target_max {
+                limit = limit.min(max);
+            }
+            if let Some(max) = self.power_setpoint_max_soc {
                 limit = limit.min(max);
             }
             limit.clamp(0.0, self.soc_max)
@@ -518,25 +536,31 @@ impl Ev {
     }
 
     fn compute_v2l_discharge(&self, dt: Duration) -> f64 {
-        if self.soc <= self.v2l_soc_reserve {
+        let effective_floor = self
+            .power_setpoint_min_soc
+            .map_or(self.v2l_soc_reserve, |ms| self.v2l_soc_reserve.max(ms));
+        if self.soc <= effective_floor {
             return 0.0;
         }
         let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
         let capped = setpoint_magnitude.min(self.v2l_max_discharge_kw);
         let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
-        let available_kwh = (self.soc - self.v2l_soc_reserve) * self.battery_capacity_kwh;
+        let available_kwh = (self.soc - effective_floor) * self.battery_capacity_kwh;
         let max_discharge_kw = available_kwh / dt_hours;
         -(capped.min(max_discharge_kw).max(0.0))
     }
 
     fn compute_v2g_discharge(&self, dt: Duration) -> f64 {
-        if self.soc <= self.v2g_soc_reserve {
+        let effective_floor = self
+            .power_setpoint_min_soc
+            .map_or(self.v2g_soc_reserve, |ms| self.v2g_soc_reserve.max(ms));
+        if self.soc <= effective_floor {
             return 0.0;
         }
         let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
         let capped = setpoint_magnitude.min(self.v2g_max_discharge_kw);
         let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
-        let available_kwh = (self.soc - self.v2g_soc_reserve) * self.battery_capacity_kwh;
+        let available_kwh = (self.soc - effective_floor) * self.battery_capacity_kwh;
         let max_discharge_kw = available_kwh / dt_hours;
         -(capped.min(max_discharge_kw).max(0.0))
     }
@@ -831,6 +855,8 @@ impl Equipment for Ev {
                 active_power_kw: self.active_power_kw,
                 power_limit_kw: self.power_limit_kw,
                 power_setpoint_kw: self.power_setpoint_kw,
+                power_setpoint_min_soc: self.power_setpoint_min_soc,
+                power_setpoint_max_soc: self.power_setpoint_max_soc,
                 soc_target: self.soc_target,
                 soc_target_min: self.soc_target_min,
                 soc_target_max: self.soc_target_max,
@@ -867,6 +893,8 @@ impl Equipment for Ev {
         self.active_power_kw = cp.active_power_kw;
         self.power_limit_kw = cp.power_limit_kw;
         self.power_setpoint_kw = cp.power_setpoint_kw;
+        self.power_setpoint_min_soc = cp.power_setpoint_min_soc;
+        self.power_setpoint_max_soc = cp.power_setpoint_max_soc;
         self.soc_target = cp.soc_target;
         self.soc_target_min = cp.soc_target_min;
         self.soc_target_max = cp.soc_target_max;
@@ -919,7 +947,10 @@ impl Equipment for Ev {
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::PowerSetpoint {
-                active_power_kw, ..
+                active_power_kw,
+                min_soc,
+                max_soc,
+                ..
             } => {
                 if *active_power_kw < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
                     return Err(HaresError::Control(
@@ -932,6 +963,8 @@ impl Equipment for Ev {
                     ));
                 }
                 self.power_setpoint_kw = Some(*active_power_kw);
+                self.power_setpoint_min_soc = *min_soc;
+                self.power_setpoint_max_soc = *max_soc;
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
                 if !max_power_kw.is_finite() {

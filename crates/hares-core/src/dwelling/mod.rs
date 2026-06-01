@@ -5354,6 +5354,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5362,6 +5364,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Grid,
         });
@@ -5385,6 +5389,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5393,6 +5399,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 2.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::UserOverride,
         });
@@ -5401,6 +5409,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 3.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Grid,
         });
@@ -5409,6 +5419,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 0.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Safety,
         });
@@ -5431,6 +5443,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5454,6 +5468,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5477,6 +5493,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5501,6 +5519,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 2.5,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5526,6 +5546,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5551,6 +5573,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5893,6 +5917,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5901,6 +5927,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 2.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5909,6 +5937,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 3.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Grid,
         });
@@ -5945,6 +5975,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5953,6 +5985,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 9.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5979,6 +6013,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 9.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -5987,6 +6023,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -6011,6 +6049,8 @@ occupancy = 1.0
                 signal: ControlSignal::PowerSetpoint {
                     active_power_kw: kw,
                     reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
                 },
                 priority: PriorityTier::Schedule,
             });
@@ -6036,6 +6076,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -6044,6 +6086,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -6077,6 +6121,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -6085,6 +6131,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 2.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -6115,6 +6163,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -6288,6 +6338,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -6319,6 +6371,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });
@@ -6462,6 +6516,8 @@ occupancy = 1.0
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: 7.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::Schedule,
         });

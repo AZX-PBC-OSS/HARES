@@ -49,6 +49,13 @@ pub enum ControlSignal {
     PowerSetpoint {
         active_power_kw: f64,
         reactive_power_kvar: Option<f64>,
+        /// Minimum SOC floor constraint (e.g. from V2G/V2H discharge strategies).
+        /// When set, equipment BMS should clamp discharge to respect this floor.
+        #[serde(default)]
+        min_soc: Option<f64>,
+        /// Maximum SOC ceiling constraint.
+        #[serde(default)]
+        max_soc: Option<f64>,
     },
     PowerLimit {
         max_power_kw: f64,
@@ -273,6 +280,8 @@ mod tests {
             ControlSignal::PowerSetpoint {
                 active_power_kw: 4.2,
                 reactive_power_kvar: Some(0.5),
+                min_soc: None,
+                max_soc: None,
             },
             ControlSignal::PowerLimit {
                 max_power_kw: 5.0,

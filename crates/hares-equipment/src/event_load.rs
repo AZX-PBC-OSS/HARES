@@ -2558,6 +2558,8 @@ mod tests {
         eq.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 0.5,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -3264,6 +3266,8 @@ mod tests {
         eq.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -3314,6 +3318,8 @@ mod tests {
         eq.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 0.75,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 

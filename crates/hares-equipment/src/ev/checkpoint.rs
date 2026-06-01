@@ -9,6 +9,8 @@ pub(super) struct EvCheckpoint {
     pub(super) active_power_kw: f64,
     pub(super) power_limit_kw: Option<f64>,
     pub(super) power_setpoint_kw: Option<f64>,
+    pub(super) power_setpoint_min_soc: Option<f64>,
+    pub(super) power_setpoint_max_soc: Option<f64>,
     pub(super) soc_target: Option<f64>,
     pub(super) soc_target_min: Option<f64>,
     pub(super) soc_target_max: Option<f64>,

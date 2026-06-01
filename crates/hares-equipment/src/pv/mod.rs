@@ -1190,6 +1190,7 @@ impl Equipment for PV {
             ControlSignal::PowerSetpoint {
                 active_power_kw,
                 reactive_power_kvar,
+                ..
             } => {
                 if !active_power_kw.is_finite() {
                     return Err(HaresError::Control(
@@ -2697,6 +2698,8 @@ mod tests {
         pv.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 2.0,
             reactive_power_kvar: Some(0.75),
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         approx_eq(pv.q_setpoint_kvar, 0.75);
@@ -2807,6 +2810,8 @@ mod tests {
         pv.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 2.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 

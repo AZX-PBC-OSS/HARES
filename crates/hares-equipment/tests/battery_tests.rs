@@ -140,6 +140,8 @@ fn charge_increases_soc() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: 3.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("apply charge setpoint");
 
@@ -170,6 +172,8 @@ fn discharge_decreases_soc() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -3.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("apply discharge setpoint");
 
@@ -211,6 +215,8 @@ fn soc_clamped_at_min_max() {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .expect("apply discharge setpoint");
 
@@ -242,6 +248,8 @@ fn soc_clamped_at_min_max() {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .expect("apply charge setpoint");
 
@@ -273,6 +281,8 @@ fn round_trip_efficiency_below_unity() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: charge_kw,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("charge setpoint");
 
@@ -290,6 +300,8 @@ fn round_trip_efficiency_below_unity() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -charge_kw,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("discharge setpoint");
 
@@ -411,6 +423,8 @@ fn inverter_efficiency_applied() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: charge_kw,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("charge setpoint");
 
@@ -457,6 +471,8 @@ fn power_limits_respected() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: 100.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("apply oversized setpoint");
 
@@ -520,6 +536,8 @@ fn checkpoint_preserves_soc_and_mode() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: 4.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .expect("charge setpoint");
 

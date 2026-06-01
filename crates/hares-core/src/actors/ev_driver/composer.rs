@@ -198,11 +198,45 @@ impl ChargingComposer {
                 // Zero power = idle, no dispatch needed
                 return;
             }
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                // Invariant: when a strategy sets min_soc or max_soc on a discharge
+                // vote, the emitted PowerSetpoint must carry that constraint. Strategies
+                // that discharge without a SOC floor (e.g. pure price-based TOU) are valid.
+                // This check confirms the forwarding code below is not dropping the field.
+                if power < 0.0 {
+                    if let Some(ms) = vote.min_soc {
+                        debug_assert!(
+                            (0.0..=1.0).contains(&ms),
+                            "min_soc must be in [0, 1], got {ms}"
+                        );
+                    }
+                    if let Some(ms) = vote.max_soc {
+                        debug_assert!(
+                            (0.0..=1.0).contains(&ms),
+                            "max_soc must be in [0, 1], got {ms}"
+                        );
+                    }
+                }
+            }
+            #[cfg(feature = "observe")]
+            {
+                if vote.min_soc.is_some() || vote.max_soc.is_some() {
+                    tracing::info!(
+                        power_kw = power,
+                        min_soc = vote.min_soc,
+                        max_soc = vote.max_soc,
+                        "PowerSetpoint carries SOC constraint",
+                    );
+                }
+            }
             out.push(DispatchRequest {
                 target: self.dispatch_target.clone(),
                 signal: ControlSignal::PowerSetpoint {
                     active_power_kw: power,
                     reactive_power_kvar: None,
+                    min_soc: vote.min_soc,
+                    max_soc: vote.max_soc,
                 },
                 priority: PriorityTier::Schedule,
             });
@@ -417,5 +451,82 @@ mod tests {
 
         assert!(out.is_empty());
         assert_eq!(composer.last_action(), "idle:no_preferences");
+    }
+
+    #[test]
+    fn power_setpoint_carries_soc_constraints_from_v2g_v2h() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        let discharge_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: Some(-5.0),
+            departure_hour: None,
+            min_soc: Some(0.2),
+            max_soc: None,
+            score: 2.0,
+            label: "v2h:discharging",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(ScoredPref {
+            vote: discharge_vote,
+        })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw,
+                min_soc,
+                max_soc,
+                ..
+            } => {
+                assert!((active_power_kw - (-5.0)).abs() < 1e-9);
+                assert_eq!(*min_soc, Some(0.2));
+                assert_eq!(*max_soc, None);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn power_setpoint_without_soc_constraints_passes_none() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        // Simulate a strategy like SolarTracking that produces positive power
+        // (charge) without any SOC constraints.
+        let charge_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: Some(3.5),
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 1.0,
+            label: "solar:charging",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> =
+            vec![Box::new(ScoredPref { vote: charge_vote })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw,
+                min_soc,
+                max_soc,
+                ..
+            } => {
+                assert!((active_power_kw - 3.5).abs() < 1e-9);
+                assert_eq!(*min_soc, None);
+                assert_eq!(*max_soc, None);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
     }
 }

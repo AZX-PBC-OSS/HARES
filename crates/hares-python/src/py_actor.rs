@@ -220,6 +220,8 @@ pub enum PySignal {
     PowerSetpoint {
         active_power_kw: f64,
         reactive_power_kvar: Option<f64>,
+        min_soc: Option<f64>,
+        max_soc: Option<f64>,
     },
     SOCTarget {
         target_soc: f64,
@@ -368,9 +370,13 @@ impl PySignal {
             PySignal::PowerSetpoint {
                 active_power_kw,
                 reactive_power_kvar,
+                min_soc,
+                max_soc,
             } => ControlSignal::PowerSetpoint {
                 active_power_kw,
                 reactive_power_kvar,
+                min_soc,
+                max_soc,
             },
             PySignal::SOCTarget {
                 target_soc,
@@ -625,11 +631,13 @@ impl PyDispatchRequest {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, active_power_kw, reactive_power_kvar=None, priority=None))]
+    #[pyo3(signature = (target, active_power_kw, reactive_power_kvar=None, min_soc=None, max_soc=None, priority=None))]
     fn power_setpoint(
         target: String,
         active_power_kw: f64,
         reactive_power_kvar: Option<f64>,
+        min_soc: Option<f64>,
+        max_soc: Option<f64>,
         priority: Option<PyPriority>,
     ) -> PyResult<Self> {
         Ok(Self {
@@ -637,6 +645,8 @@ impl PyDispatchRequest {
             signal: PySignal::PowerSetpoint {
                 active_power_kw,
                 reactive_power_kvar,
+                min_soc,
+                max_soc,
             },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
@@ -980,11 +990,18 @@ impl PySignal {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (active_power_kw, reactive_power_kvar=None))]
-    fn power_setpoint(active_power_kw: f64, reactive_power_kvar: Option<f64>) -> Self {
+    #[pyo3(signature = (active_power_kw, reactive_power_kvar=None, min_soc=None, max_soc=None))]
+    fn power_setpoint(
+        active_power_kw: f64,
+        reactive_power_kvar: Option<f64>,
+        min_soc: Option<f64>,
+        max_soc: Option<f64>,
+    ) -> Self {
         PySignal::PowerSetpoint {
             active_power_kw,
             reactive_power_kvar,
+            min_soc,
+            max_soc,
         }
     }
 

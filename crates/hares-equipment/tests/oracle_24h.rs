@@ -640,6 +640,8 @@ fn oracle_generator_24h_constant_load() {
         .apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: setpoint_kw,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 

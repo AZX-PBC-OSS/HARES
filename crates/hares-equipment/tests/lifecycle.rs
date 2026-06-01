@@ -374,6 +374,8 @@ fn lifecycle_battery() {
     let valid = ControlSignal::PowerSetpoint {
         active_power_kw: 2.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     };
     let invalid = ControlSignal::ThermalSetpoint {
         heating_setpoint_c: Some(21.0),
@@ -426,6 +428,8 @@ fn lifecycle_gas_furnace() {
     let invalid = ControlSignal::PowerSetpoint {
         active_power_kw: 5.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     };
 
     assert_equipment_lifecycle(eq.as_mut(), &env, valid, invalid);
@@ -1285,6 +1289,8 @@ fn lifecycle_resistance_water_heater() {
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         },
     );
 }
@@ -1309,6 +1315,8 @@ fn lifecycle_gas_water_heater() {
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         },
     );
 }
@@ -1333,6 +1341,8 @@ fn lifecycle_heat_pump_water_heater() {
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         },
     );
 }
@@ -1357,6 +1367,8 @@ fn lifecycle_tankless_water_heater() {
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         },
     );
 }
@@ -1381,6 +1393,8 @@ fn lifecycle_gas_tankless_water_heater() {
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         },
     );
 }
@@ -1405,6 +1419,8 @@ fn lifecycle_indirect_tank() {
         ControlSignal::PowerSetpoint {
             active_power_kw: 1.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         },
     );
 }

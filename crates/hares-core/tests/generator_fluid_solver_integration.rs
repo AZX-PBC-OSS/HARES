@@ -118,6 +118,8 @@ fn generator_fluid_solver_invariant_passes() {
         .apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 8.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 

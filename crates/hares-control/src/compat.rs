@@ -127,7 +127,8 @@ mod tests {
             x,
             ControlSignal::PowerSetpoint {
                 active_power_kw: 3.5,
-                reactive_power_kvar: None
+                reactive_power_kvar: None,
+                ..
             }
         )));
         assert!(out.iter().any(|x| matches!(

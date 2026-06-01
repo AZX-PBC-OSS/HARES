@@ -155,6 +155,8 @@ fn battery_charge_cycle_soc_accounting() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: 3.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -204,6 +206,8 @@ fn battery_discharge_cycle_soc_accounting() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -2.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -253,6 +257,8 @@ fn battery_soc_limits_enforced() {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -276,6 +282,8 @@ fn battery_soc_limits_enforced() {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -316,6 +324,8 @@ fn battery_degradation_model_documented() {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: power_kw,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut ports = PortSlots::default();
@@ -594,6 +604,8 @@ fn generator_fuel_efficiency_at_half_load() {
     eq.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: 5.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -691,6 +703,8 @@ fn generator_ramp_rate_is_kw_per_second() {
     eq.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: 10.0,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -772,6 +786,8 @@ fn generator_capacity_min_enforced() {
     eq.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: 1.0, // positive = generation in HARES convention
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -824,6 +840,8 @@ fn battery_control_signal_not_a_stub() {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 3.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut ports = PortSlots::default();
@@ -839,6 +857,8 @@ fn battery_control_signal_not_a_stub() {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -3.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut ports = PortSlots::default();
@@ -894,6 +914,8 @@ fn battery_round_trip_efficiency_below_unity() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: charge_kw,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 
@@ -911,6 +933,8 @@ fn battery_round_trip_efficiency_below_unity() {
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: -charge_kw,
         reactive_power_kvar: None,
+        min_soc: None,
+        max_soc: None,
     })
     .unwrap();
 

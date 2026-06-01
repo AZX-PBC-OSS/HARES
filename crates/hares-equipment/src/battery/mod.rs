@@ -1510,8 +1510,16 @@ impl Equipment for Battery {
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::PowerSetpoint {
-                active_power_kw, ..
+                active_power_kw,
+                min_soc,
+                max_soc,
+                ..
             } => {
+                if min_soc.is_some() || max_soc.is_some() {
+                    return Err(HaresError::Control(
+                        "Battery PowerSetpoint must not carry min_soc/max_soc; SOC window constraints arrive via SOCTarget".to_string(),
+                    ));
+                }
                 self.power_setpoint_kw = Some(*active_power_kw);
                 self.soc_target = None;
                 self.self_consumption_enabled = false;
@@ -1991,6 +1999,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 100.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -2021,6 +2031,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -100.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -2051,6 +2063,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: charge_power,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -2067,6 +2081,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -charge_power,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -2199,12 +2215,16 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 3.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         bat_b
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 3.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2236,6 +2256,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 2.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut ports = default_ports();
@@ -2370,6 +2392,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -2479,6 +2503,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -2540,6 +2566,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut ports_warm = default_ports();
@@ -2553,6 +2581,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut ports_cold = default_ports();
@@ -2581,6 +2611,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -2611,6 +2643,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -2762,6 +2796,8 @@ mod tests {
             bat.apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: charge_power_kw,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
             for _ in 0..charge_steps {
@@ -2773,6 +2809,8 @@ mod tests {
             bat.apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: -charge_power_kw,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
             for _ in 0..charge_steps {
@@ -2854,6 +2892,8 @@ mod tests {
             bat.apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: power_kw,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2881,6 +2921,8 @@ mod tests {
             bat.apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: -power_kw,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2909,6 +2951,8 @@ mod tests {
             bat.apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: power_kw,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2949,6 +2993,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: high_power_kw,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -3139,6 +3185,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -(p_max_w * 10.0 / 1000.0),
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -3219,6 +3267,8 @@ mod tests {
         bat1.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 2.5,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -3578,6 +3628,8 @@ mod tests {
         bat1.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 3.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         for _ in 0..10 {
@@ -3625,6 +3677,8 @@ mod tests {
                 bat1.apply_control_unchecked(&ControlSignal::PowerSetpoint {
                     active_power_kw: power,
                     reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
                 })
                 .unwrap();
                 let mut ports = default_ports();
@@ -3795,6 +3849,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -3831,6 +3887,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -3869,6 +3927,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -3928,6 +3988,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .expect("setpoint");
 
@@ -3957,6 +4019,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .expect("setpoint");
 
@@ -3987,6 +4051,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .expect("setpoint");
 
@@ -4027,6 +4093,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .expect("setpoint");
 
@@ -4380,12 +4448,16 @@ mod tests {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
                         active_power_kw: 5.0,
                         reactive_power_kvar: None,
+                        min_soc: None,
+                        max_soc: None,
                     })
                     .unwrap();
                 } else {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
                         active_power_kw: -5.0,
                         reactive_power_kvar: None,
+                        min_soc: None,
+                        max_soc: None,
                     })
                     .unwrap();
                 }
@@ -4685,6 +4757,8 @@ mod tests {
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
 
@@ -4746,12 +4820,16 @@ mod tests {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
                         active_power_kw: 5.0,
                         reactive_power_kvar: None,
+                        min_soc: None,
+                        max_soc: None,
                     })
                     .unwrap();
                 } else {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
                         active_power_kw: -5.0,
                         reactive_power_kvar: None,
+                        min_soc: None,
+                        max_soc: None,
                     })
                     .unwrap();
                 }
@@ -4790,6 +4868,8 @@ mod tests {
             bat.apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: power_kw,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 

@@ -23,12 +23,19 @@ pub struct PyControlSignal {
 #[pymethods]
 impl PyControlSignal {
     #[staticmethod]
-    #[pyo3(signature = (kw, reactive_kvar=None))]
-    pub fn power_setpoint(kw: f64, reactive_kvar: Option<f64>) -> Self {
+    #[pyo3(signature = (kw, reactive_kvar=None, min_soc=None, max_soc=None))]
+    pub fn power_setpoint(
+        kw: f64,
+        reactive_kvar: Option<f64>,
+        min_soc: Option<f64>,
+        max_soc: Option<f64>,
+    ) -> Self {
         Self {
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: kw,
                 reactive_power_kvar: reactive_kvar,
+                min_soc,
+                max_soc,
             },
         }
     }
@@ -305,6 +312,8 @@ impl PyControlSignal {
             "PowerSetpoint" => ControlSignal::PowerSetpoint {
                 active_power_kw: dict_required(d, "active_power_kw")?,
                 reactive_power_kvar: dict_optional(d, "reactive_power_kvar")?,
+                min_soc: dict_optional(d, "min_soc")?,
+                max_soc: dict_optional(d, "max_soc")?,
             },
             "HumiditySetpoint" => ControlSignal::HumiditySetpoint {
                 target_rh: dict_required(d, "target_rh")?,
@@ -415,11 +424,19 @@ impl PyControlSignal {
             ControlSignal::PowerSetpoint {
                 active_power_kw,
                 reactive_power_kvar,
+                min_soc,
+                max_soc,
             } => {
                 dict.set_item("type", "PowerSetpoint")?;
                 dict.set_item("active_power_kw", active_power_kw)?;
                 if let Some(kvar) = reactive_power_kvar {
                     dict.set_item("reactive_power_kvar", kvar)?;
+                }
+                if let Some(v) = min_soc {
+                    dict.set_item("min_soc", v)?;
+                }
+                if let Some(v) = max_soc {
+                    dict.set_item("max_soc", v)?;
                 }
             }
             ControlSignal::ThermalSetpoint {

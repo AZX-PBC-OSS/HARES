@@ -307,13 +307,14 @@ impl EvDriverActor {
             "EV driver daily-miles distribution"
         );
 
-        let mut telemetry = Telemetry::with_capacity(6);
+        let mut telemetry = Telemetry::with_capacity(7);
         telemetry.insert("soc", 1.0);
         telemetry.insert("phase", 0.0);
         telemetry.insert("charge_kw", 0.0);
         telemetry.insert("plugged_in", 1.0);
         telemetry.insert("soc_gate_charging_allowed", 1.0);
         telemetry.insert("needed_charge_hours", 0.0);
+        telemetry.insert("discharge_min_soc", f64::NAN);
 
         Self {
             name: Arc::from(name),
@@ -379,17 +380,24 @@ impl EvDriverActor {
 
         // Scan newly-emitted dispatch requests for charge/discharge power.
         let mut charge_kw = 0.0;
+        let mut discharge_min_soc = f64::NAN;
         for req in &out[before_out..] {
             match &req.signal {
                 ControlSignal::PowerSetpoint {
-                    active_power_kw, ..
-                } => charge_kw = *active_power_kw,
+                    active_power_kw,
+                    min_soc,
+                    ..
+                } => {
+                    charge_kw = *active_power_kw;
+                    discharge_min_soc = min_soc.unwrap_or(f64::NAN);
+                }
                 ControlSignal::EvAwayCharge { power_kw } => charge_kw = *power_kw,
                 ControlSignal::EvDrive { .. } => {} // driving, not charging
                 _ => {}
             }
         }
         self.telemetry.set("charge_kw", charge_kw);
+        self.telemetry.set("discharge_min_soc", discharge_min_soc);
         self.telemetry.set(
             "soc_gate_charging_allowed",
             if self.composer.soc_gate_charging_allowed() {
@@ -1740,6 +1748,50 @@ mod tests {
         assert!(
             (power + 3.0).abs() < 0.1,
             "V2H deficit = 4.0-1.0 = 3.0 kW, expected power ~ -3.0, got {power}"
+        );
+    }
+
+    #[test]
+    fn ev_v2h_power_setpoint_carries_min_soc_during_discharge() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.5,
+                min_soc: 0.2,
+            },
+            0.7, // SOC above threshold (0.5), well above min_soc (0.2) — should discharge
+        );
+        let mut env = env_at_minute(19 * 60);
+        env.electrical = ElectricalSummary {
+            pv_generation_kw: 1.0,
+            base_load_kw: 4.0,
+            ..Default::default()
+        };
+        let out = plugged_in_step_with_env(&mut actor, &env);
+
+        let min_soc_from_signal = out.iter().find_map(|r| {
+            if let ControlSignal::PowerSetpoint {
+                active_power_kw,
+                min_soc,
+                ..
+            } = &r.signal
+            {
+                if *active_power_kw < 0.0 {
+                    Some(*min_soc)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+        assert!(
+            min_soc_from_signal.is_some(),
+            "V2H should emit PowerSetpoint with min_soc during discharge, got: {out:?}"
+        );
+        assert_eq!(
+            min_soc_from_signal.unwrap(),
+            Some(0.2),
+            "PowerSetpoint should carry min_soc=0.2 from V2H strategy"
         );
     }
 

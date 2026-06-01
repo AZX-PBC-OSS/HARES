@@ -470,6 +470,8 @@ mod tests {
         let signal = ControlSignal::PowerSetpoint {
             active_power_kw: 3.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         };
         let err = eq.apply_control(&signal).unwrap_err();
         assert!(err.to_string().contains("unsupported control signal"));
@@ -719,6 +721,8 @@ mod tests {
                 ControlSignal::PowerSetpoint {
                     active_power_kw: 1.0,
                     reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
                 },
                 ControlCapabilities::POWER_SETPOINT,
             ),

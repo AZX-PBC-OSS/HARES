@@ -232,6 +232,8 @@ impl BatteryManagementActor {
                                 ControlSignal::PowerSetpoint {
                                     active_power_kw: -clamped,
                                     reactive_power_kvar: None,
+                                    min_soc: None,
+                                    max_soc: None,
                                 },
                                 out,
                             );
@@ -274,6 +276,8 @@ impl BatteryManagementActor {
                         ControlSignal::PowerSetpoint {
                             active_power_kw: self.max_charge_kw,
                             reactive_power_kvar: None,
+                            min_soc: None,
+                            max_soc: None,
                         },
                         out,
                     );
@@ -284,6 +288,8 @@ impl BatteryManagementActor {
                         ControlSignal::PowerSetpoint {
                             active_power_kw: -clamped,
                             reactive_power_kvar: None,
+                            min_soc: None,
+                            max_soc: None,
                         },
                         out,
                     );
@@ -351,6 +357,8 @@ impl BatteryManagementActor {
                             ControlSignal::PowerSetpoint {
                                 active_power_kw: -clamped,
                                 reactive_power_kvar: None,
+                                min_soc: None,
+                                max_soc: None,
                             },
                             out,
                         );
@@ -375,6 +383,8 @@ impl BatteryManagementActor {
                                 ControlSignal::PowerSetpoint {
                                     active_power_kw: rate_fraction * self.max_charge_kw,
                                     reactive_power_kvar: None,
+                                    min_soc: None,
+                                    max_soc: None,
                                 },
                                 out,
                             );
@@ -387,6 +397,8 @@ impl BatteryManagementActor {
                                 ControlSignal::PowerSetpoint {
                                     active_power_kw: -clamped,
                                     reactive_power_kvar: None,
+                                    min_soc: None,
+                                    max_soc: None,
                                 },
                                 out,
                             );

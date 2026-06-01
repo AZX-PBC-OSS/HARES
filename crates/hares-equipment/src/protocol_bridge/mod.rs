@@ -521,6 +521,8 @@ mod tests {
             ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             }
         );
     }
@@ -600,6 +602,8 @@ mod tests {
         let signal = ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         };
         let result = bridge.apply_control(&signal);
         assert!(result.is_err());

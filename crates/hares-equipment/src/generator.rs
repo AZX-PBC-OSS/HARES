@@ -2033,6 +2033,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: setpoint_kw,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(generator);
@@ -2232,6 +2234,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 10.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -2249,6 +2253,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 2.5,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         slots.zero();
@@ -2284,6 +2290,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 10.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -2300,6 +2308,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         slots.zero();
@@ -2325,6 +2335,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -2353,6 +2365,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 10.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2396,6 +2410,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 0.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -2519,6 +2535,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 1.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -2536,6 +2554,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         slots.zero();
@@ -2569,6 +2589,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 0.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -2601,6 +2623,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 6.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2638,6 +2662,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2675,6 +2701,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 6.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2712,6 +2740,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 8.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2766,6 +2796,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 6.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2840,6 +2872,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 6.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -2891,6 +2925,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -2921,6 +2957,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 10.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         slots.zero();
@@ -2974,6 +3012,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 6.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -3033,6 +3073,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 7.5,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -3095,6 +3137,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 6.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -3143,6 +3187,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -3254,6 +3300,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -3446,6 +3494,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -3475,6 +3525,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         assert!(generator.power_setpoint_kw.is_some());
@@ -3715,6 +3767,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -3768,6 +3822,8 @@ mod tests {
         fc.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 2.5,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut slots = ports_for(&fc);
@@ -4017,6 +4073,8 @@ mod tests {
         fc.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut slots = ports_for(&fc);
@@ -4066,6 +4124,8 @@ mod tests {
         fc.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut slots = ports_for(&fc);
@@ -4102,6 +4162,8 @@ mod tests {
         fc.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut slots = ports_for(&fc);
@@ -4140,6 +4202,8 @@ mod tests {
         fc.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         let mut slots = ports_for(&fc);
@@ -4203,6 +4267,8 @@ mod tests {
         gg.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         gg.step(&base_env(), Duration::from_secs(1), &mut ports_for(&gg))
@@ -4212,6 +4278,8 @@ mod tests {
         fc.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
             reactive_power_kvar: None,
+            min_soc: None,
+            max_soc: None,
         })
         .unwrap();
         fc.step(&base_env(), Duration::from_secs(1), &mut ports_for(&fc))
@@ -4248,6 +4316,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);
@@ -4327,6 +4397,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 10.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -4397,6 +4469,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 10.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -4438,6 +4512,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 10.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -4468,6 +4544,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 6.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -4549,6 +4627,8 @@ mod tests {
                 .apply_control(&ControlSignal::PowerSetpoint {
                     active_power_kw: 10.0,
                     reactive_power_kvar: None,
+                    min_soc: None,
+                    max_soc: None,
                 })
                 .unwrap();
             let mut slots = ports_for(&generator);
@@ -4597,6 +4677,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 10.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -4656,6 +4738,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 8.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -4709,6 +4793,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 6.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -4739,6 +4825,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 5.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
 
@@ -4789,6 +4877,8 @@ mod tests {
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 6.0,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(&generator);

@@ -359,6 +359,8 @@ fn push_power_setpoint_if(
             signal: ControlSignal::PowerSetpoint {
                 active_power_kw: power_kw,
                 reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
             },
             priority: PriorityTier::UserOverride,
         });

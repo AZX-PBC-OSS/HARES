@@ -76,6 +76,8 @@ impl ControlSignalConstructors for ControlSignal {
         ControlSignal::PowerSetpoint {
             active_power_kw,
             reactive_power_kvar,
+            min_soc: None,
+            max_soc: None,
         }
     }
 
@@ -225,6 +227,8 @@ mod tests {
             ControlSignal::PowerSetpoint {
                 active_power_kw: 4.5,
                 reactive_power_kvar: Some(0.3),
+                min_soc: None,
+                max_soc: None,
             }
         );
 
