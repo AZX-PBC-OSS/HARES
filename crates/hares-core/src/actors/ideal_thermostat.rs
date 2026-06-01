@@ -20,6 +20,7 @@
 //! 4. Override signals use `PriorityTier::UserOverride` (higher than Schedule)
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
+use hares_equipment::hvac::ThermalSetpoints;
 use hares_types::{ControlSignal, EnvironmentState, Telemetry};
 
 use crate::Actor;
@@ -68,11 +69,11 @@ impl OverrideState {
 
     /// Creates a dual heating/cooling override.
     ///
-    /// # Panics (debug only)
+    /// # Panics
     ///
-    /// Panics if `heating_c >= cooling_c` -- physically impossible setpoint inversion.
+    /// Panics if `heating_c >= cooling_c` — physically impossible setpoint inversion.
     pub fn dual(heating_c: f64, cooling_c: f64) -> Self {
-        debug_assert!(
+        assert!(
             heating_c < cooling_c,
             "heating setpoint ({heating_c}°C) must be below cooling setpoint ({cooling_c}°C)"
         );
@@ -127,6 +128,10 @@ pub struct IdealThermostat {
     dispatch_target: DispatchTarget,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
+    /// Equipment hysteresis/deadband half-width (°C), used by `decide()` to
+    /// validate setpoint ordering via `ThermalSetpoints::validate_for_deadband`.
+    /// Defaults to 1.0 °C (matches `ThermostatConfig::default()`).
+    hysteresis_c: f64,
     /// Count of setpoint overrides rejected because heating >= cooling.
     /// Gated on `observe` feature for diagnostic CSV output.
     #[cfg(feature = "observe")]
@@ -146,11 +151,13 @@ impl IdealThermostat {
             dispatch_target: DispatchTarget::ByName(target_name.into()),
             override_state: OverrideState::default(),
             telemetry,
+            hysteresis_c: 1.0,
             #[cfg(feature = "observe")]
             setpoint_inversion_rejected_count: 0,
         }
     }
 
+    /// Overrides the actor display name (used in log output and telemetry).
     pub fn with_name(mut self, name: &str) -> Self {
         self.name = name.to_string();
         self
@@ -176,11 +183,11 @@ impl IdealThermostat {
 
     /// Sets dual heating and cooling overrides (convenience method).
     ///
-    /// # Panics (debug only)
+    /// # Panics
     ///
-    /// Panics if `heating_c >= cooling_c` -- physically impossible setpoint inversion.
+    /// Panics if `heating_c >= cooling_c` — physically impossible setpoint inversion.
     pub fn with_setpoints(mut self, heating_c: f64, cooling_c: f64) -> Self {
-        debug_assert!(
+        assert!(
             heating_c < cooling_c,
             "heating setpoint ({heating_c}°C) must be below cooling setpoint ({cooling_c}°C)"
         );
@@ -195,13 +202,57 @@ impl IdealThermostat {
         self
     }
 
+    /// Sets the equipment hysteresis/deadband half-width (°C) used for
+    /// setpoint deadband validation during `decide()`.
+    ///
+    /// Defaults to 1.0 °C (matching `ThermostatConfig::default`).
+    pub fn with_hysteresis(mut self, hysteresis_c: f64) -> Self {
+        self.hysteresis_c = hysteresis_c;
+        self
+    }
+
     /// Returns the current override state.
     pub fn override_state(&self) -> &OverrideState {
         &self.override_state
     }
 
-    /// Updates the override state.
+    /// Updates the override state, rejecting inverted setpoints.
+    ///
+    /// When both `heating_setpoint_c` and `cooling_setpoint_c` are set and
+    /// `heating >= cooling`, the override is rejected:
+    /// - In debug/check_invariants builds: panics with a diagnostic message.
+    /// - In release builds: no-ops, logs a warning, and increments the
+    ///   observable rejection counter.
     pub fn set_override(&mut self, state: OverrideState) {
+        if let (Some(heating_c), Some(cooling_c)) =
+            (state.heating_setpoint_c, state.cooling_setpoint_c)
+        {
+            if heating_c >= cooling_c {
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    panic!(
+                        "setpoint inversion in set_override() for IdealThermostat '{}': \
+                         heating={heating_c}°C >= cooling={cooling_c}°C",
+                        self.name,
+                    );
+                }
+                #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+                {
+                    #[cfg(feature = "observe")]
+                    {
+                        self.setpoint_inversion_rejected_count =
+                            self.setpoint_inversion_rejected_count.saturating_add(1);
+                    }
+                    tracing::warn!(
+                        actor = %self.name,
+                        heating_c = heating_c,
+                        cooling_c = cooling_c,
+                        "set_override: rejected inverted setpoints (heating >= cooling)",
+                    );
+                    return;
+                }
+            }
+        }
         self.override_state = state;
     }
 
@@ -256,13 +307,18 @@ impl Actor for IdealThermostat {
         }
 
         // Validate setpoint ordering when both heating and cooling are set.
-        // This catches the case where a script or user pushes an invert
-        // override (heating_c >= cooling_c) that is physically impossible.
+        // Uses the deadband-aware invariant: cooling_c - heating_c >= 2 * hysteresis_c.
+        // This catches setpoint inversion (heating >= cooling) as well as setpoints
+        // that are too close together to maintain a meaningful deadband.
         if let (Some(heat), Some(cool)) = (
             self.override_state.heating_setpoint_c,
             self.override_state.cooling_setpoint_c,
         ) {
-            if heat >= cool {
+            let setpoints = ThermalSetpoints {
+                heating_c: heat,
+                cooling_c: cool,
+            };
+            if setpoints.validate_for_deadband(self.hysteresis_c).is_err() {
                 // In debug/check_invariants builds, panic with unambiguous
                 // diagnostic. In release builds, reject the emission with a
                 // warning and an observable counter/telemetry flag so the error
@@ -270,9 +326,11 @@ impl Actor for IdealThermostat {
                 #[cfg(any(debug_assertions, feature = "check_invariants"))]
                 {
                     panic!(
-                        "setpoint inversion detected in IdealThermostat '{}': \
-                         heating={heat}°C >= cooling={cool}°C",
-                        self.name
+                        "setpoint deadband violation in IdealThermostat '{}': \
+                         heating={heat}°C, cooling={cool}°C, gap={gap:.2}°C < required {required:.2}°C",
+                        self.name,
+                        gap = cool - heat,
+                        required = 2.0 * self.hysteresis_c,
                     );
                 }
                 #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
@@ -288,7 +346,10 @@ impl Actor for IdealThermostat {
                         target = self.target_name(),
                         heating_c = heat,
                         cooling_c = cool,
-                        "rejected thermal setpoint override: heating setpoint >= cooling setpoint",
+                        hysteresis_c = self.hysteresis_c,
+                        gap_c = cool - heat,
+                        required_gap_c = 2.0 * self.hysteresis_c,
+                        "rejected thermal setpoint override: violates deadband invariant",
                     );
                     return;
                 }
@@ -560,29 +621,119 @@ mod tests {
     #[test]
     fn ideal_thermostat_inverted_setpoints_block_emission() {
         let mut thermostat = IdealThermostat::new("HVAC");
-        // Bypass dual()'s debug_assert by constructing the state directly.
-        thermostat.set_override(OverrideState {
-            heating_setpoint_c: Some(30.0),
-            cooling_setpoint_c: Some(25.0),
-            deadband_c: None,
-        });
-        let env = test_env().build();
-        let mut requests = Vec::new();
-
-        // In debug/check_invariants builds, decide() panics. In release
-        // builds it rejects gracefully with a telemetry flag. Either path
-        // must prevent the signal from being emitted.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            thermostat.decide(&env, &mut requests);
+        // In debug/check_invariants builds, set_override() panics on
+        // inverted setpoints. In release builds it no-ops with a warning.
+        // Either path must prevent the invalid state from being stored
+        // and subsequently emitted.
+        let set_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            thermostat.set_override(OverrideState {
+                heating_setpoint_c: Some(30.0),
+                cooling_setpoint_c: Some(25.0),
+                deadband_c: None,
+            });
         }));
 
-        // No emission in either path — requests is empty.
+        // The override must not persist — state is either never set
+        // (release no-op) or set_override panicked before assignment
+        // (debug/check_invariants).
+        assert!(!thermostat.has_override());
+
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        thermostat.decide(&env, &mut requests);
         assert!(requests.is_empty());
 
-        if result.is_ok() {
-            // Release path: verify telemetry surfaces the rejection.
+        if set_result.is_ok() {
+            // Release: set_override no-opped. decide() returned early (no active override),
+            // so the inversion counter was reset to 0.0 and never incremented.
             let telemetry = thermostat.telemetry().unwrap();
-            assert_eq!(telemetry.get("setpoint_inversion_rejected"), Some(1.0));
+            assert_eq!(telemetry.get("setpoint_inversion_rejected"), Some(0.0));
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "heating setpoint (30°C) must be below cooling setpoint (25°C)")]
+    fn dual_inverted_setpoints_panics() {
+        let _ = OverrideState::dual(30.0, 25.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "heating setpoint (30°C) must be below cooling setpoint (25°C)")]
+    fn with_setpoints_inverted_panics() {
+        let _ = IdealThermostat::new("HVAC").with_setpoints(30.0, 25.0);
+    }
+
+    #[test]
+    fn set_override_rejects_inverted_state_and_retains_prior() {
+        let mut thermostat = IdealThermostat::new("HVAC");
+
+        // Set a valid override first.
+        thermostat.set_override(OverrideState::dual(20.0, 26.0));
+        assert!(thermostat.has_override());
+        assert_eq!(thermostat.override_state().heating_setpoint_c, Some(20.0));
+        assert_eq!(thermostat.override_state().cooling_setpoint_c, Some(26.0));
+
+        // Try to set an inverted override. In debug/check_invariants builds
+        // this panics in set_override(). In release builds it no-ops.
+        let _set_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            thermostat.set_override(OverrideState {
+                heating_setpoint_c: Some(30.0),
+                cooling_setpoint_c: Some(25.0),
+                deadband_c: None,
+            });
+        }));
+
+        // The prior valid state must be retained.
+        assert!(thermostat.has_override());
+        assert_eq!(thermostat.override_state().heating_setpoint_c, Some(20.0));
+        assert_eq!(thermostat.override_state().cooling_setpoint_c, Some(26.0));
+    }
+
+    #[test]
+    fn decide_rejects_deadband_violation_not_just_inversion() {
+        let mut thermostat = IdealThermostat::new("HVAC");
+        // Default hysteresis_c=1.0 requires a gap >= 2.0°C.
+        // These setpoints (20.0, 21.0) are not inverted but violate the
+        // deadband constraint. set_override() accepts them (heating < cooling
+        // passes the basic check), but decide() must reject emission.
+        let set_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            thermostat.set_override(OverrideState {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(21.0),
+                deadband_c: None,
+            });
+        }));
+
+        if set_result.is_ok() {
+            // Release path: state was stored but decide() rejects emission.
+            assert!(thermostat.has_override());
+            let env = test_env().build();
+            let mut requests = Vec::new();
+            // In debug/check_invariants builds decide() panics; in release
+            // it rejects the emission gracefully. Either path must block
+            // signal emission.
+            let decide_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                thermostat.decide(&env, &mut requests);
+            }));
+            assert!(requests.is_empty());
+            if decide_result.is_ok() {
+                let telemetry = thermostat.telemetry().unwrap();
+                assert_eq!(telemetry.get("setpoint_inversion_rejected"), Some(1.0));
+            }
+        }
+    }
+
+    #[test]
+    fn custom_hysteresis_relaxes_deadband_check() {
+        let mut thermostat = IdealThermostat::new("HVAC").with_hysteresis(0.5);
+        // With hysteresis_c=0.5, required gap is 1.0°C.
+        // 20.0 and 21.0: gap=1.0 >= 2*0.5=1.0 — should pass.
+        thermostat.set_override(OverrideState::dual(20.0, 21.0));
+        assert!(thermostat.has_override());
+
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        thermostat.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1);
     }
 }
