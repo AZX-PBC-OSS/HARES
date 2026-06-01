@@ -63,4 +63,10 @@ pub trait ChargingPreference: Send + Sync {
 
     /// Human-readable name for telemetry.
     fn name(&self) -> &'static str;
+
+    /// Whether this preference currently allows charging. Returns `None`
+    /// for preferences that don't manage charge/no-charge gating.
+    fn charging_allowed(&self) -> Option<bool> {
+        None
+    }
 }

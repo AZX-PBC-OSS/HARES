@@ -69,6 +69,15 @@ enum DriverPhase {
     Away,
 }
 
+/// Hysteresis band (SOC fraction) for SocGate lower_threshold.
+///
+/// 0.05 (5 percentage points) is sufficient to suppress rapid charge/no-charge
+/// cycling from typical BMS estimation noise, self-discharge rates, and
+/// auxiliary-load fluctuations in residential EV use. The band is applied
+/// symmetrically below the upper threshold for both LowSoc and QuickThenWait
+/// strategies.
+const SOC_GATE_DEFAULT_HYSTERESIS_BAND: f64 = 0.05;
+
 /// Build the preference stack for a given charging strategy.
 fn build_preferences(
     strategy: &ChargingStrategy,
@@ -103,14 +112,18 @@ fn build_preferences(
             target_soc,
         } => {
             vec![Box::new(SocGate {
-                threshold: *threshold,
+                upper_threshold: *threshold,
+                lower_threshold: *threshold - SOC_GATE_DEFAULT_HYSTERESIS_BAND,
                 target_soc: *target_soc,
+                charging_allowed: true,
             })]
         }
         ChargingStrategy::QuickThenWait { partial_soc } => {
             vec![Box::new(SocGate {
-                threshold: *partial_soc,
+                upper_threshold: *partial_soc,
+                lower_threshold: *partial_soc - SOC_GATE_DEFAULT_HYSTERESIS_BAND,
                 target_soc: *partial_soc,
+                charging_allowed: true,
             })]
         }
         ChargingStrategy::PreDeparture {
@@ -294,11 +307,12 @@ impl EvDriverActor {
             "EV driver daily-miles distribution"
         );
 
-        let mut telemetry = Telemetry::with_capacity(4);
+        let mut telemetry = Telemetry::with_capacity(5);
         telemetry.insert("soc", 1.0);
         telemetry.insert("phase", 0.0);
         telemetry.insert("charge_kw", 0.0);
         telemetry.insert("plugged_in", 1.0);
+        telemetry.insert("soc_gate_charging_allowed", 1.0);
 
         Self {
             name: Arc::from(name),
@@ -375,6 +389,14 @@ impl EvDriverActor {
             }
         }
         self.telemetry.set("charge_kw", charge_kw);
+        self.telemetry.set(
+            "soc_gate_charging_allowed",
+            if self.composer.soc_gate_charging_allowed() {
+                1.0
+            } else {
+                0.0
+            },
+        );
     }
 
     /// Returns the target equipment name.

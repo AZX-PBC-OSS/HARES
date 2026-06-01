@@ -30,6 +30,16 @@ impl ChargingComposer {
         &self.last_action
     }
 
+    /// Whether the SocGate preference (if present) currently allows charging.
+    /// Returns `true` if no SocGate is in the preference stack.
+    pub fn soc_gate_charging_allowed(&self) -> bool {
+        self.preferences
+            .iter()
+            .filter_map(|p| p.charging_allowed())
+            .next()
+            .unwrap_or(true)
+    }
+
     /// Evaluate all preferences and emit a resolved DispatchRequest.
     ///
     /// 1. Check constraints -- first Override wins.
