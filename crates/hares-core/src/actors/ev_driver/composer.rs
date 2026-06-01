@@ -72,7 +72,7 @@ impl ChargingComposer {
                 self.last_action.push_str(pref.name());
                 self.last_action.push(':');
                 self.last_action.push_str(vote.label);
-                self.emit_vote(&vote, out);
+                self.emit_vote(ctx, &vote, out);
                 return;
             }
         }
@@ -100,7 +100,7 @@ impl ChargingComposer {
         self.last_action.clear();
         self.last_action.push_str("resolved:");
         self.last_action.push_str(resolved.label);
-        self.emit_vote(&resolved, out);
+        self.emit_vote(ctx, &resolved, out);
     }
 
     /// Resolve multiple votes into a single action.
@@ -178,7 +178,12 @@ impl ChargingComposer {
     /// All signals use `Schedule` tier — matches the central mapping for
     /// `EvSetReadyBy`, `PowerSetpoint`, and `SOCTarget`. The charging
     /// composer operates within the EV driver's schedule-level framework.
-    fn emit_vote(&self, vote: &PreferenceVote, out: &mut Vec<DispatchRequest>) {
+    fn emit_vote(
+        &self,
+        ctx: &DecisionContext,
+        vote: &PreferenceVote,
+        out: &mut Vec<DispatchRequest>,
+    ) {
         // If there's a departure_hour + target_soc, use EvSetReadyBy
         if let (Some(departure), Some(target)) = (vote.departure_hour, vote.target_soc) {
             out.push(DispatchRequest {
@@ -193,11 +198,44 @@ impl ChargingComposer {
         }
 
         // If there's a power_kw, use PowerSetpoint
-        if let Some(power) = vote.power_kw {
-            if power.abs() < 1e-9 {
+        if let Some(unclamped) = vote.power_kw {
+            if unclamped.abs() < 1e-9 {
                 // Zero power = idle, no dispatch needed
                 return;
             }
+
+            // Defense-in-depth: clamp power against equipment context limits.
+            // Individual strategies self-clamp, but this output-boundary clamp
+            // catches unclamped custom preferences and strategy bugs.
+            // OCHRE reference: EV.py:296-300 centralizes power clamping at the
+            // equipment level.
+            let power = if unclamped > 0.0 {
+                unclamped.min(ctx.max_charge_kw)
+            } else {
+                unclamped.max(-ctx.max_discharge_kw)
+            };
+
+            if (power - unclamped).abs() > 1e-9 {
+                tracing::warn!(
+                    original_kw = unclamped,
+                    clamped_kw = power,
+                    preference = vote.label,
+                    max_charge_kw = ctx.max_charge_kw,
+                    max_discharge_kw = ctx.max_discharge_kw,
+                    "PowerSetpoint clamped to context limit",
+                );
+            }
+
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    power_before_clamp = unclamped,
+                    power_after_clamp = power,
+                    preference = vote.label,
+                    "PowerSetpoint clamp applied",
+                );
+            }
+
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             {
                 // Invariant: when a strategy sets min_soc or max_soc on a discharge
@@ -222,7 +260,7 @@ impl ChargingComposer {
             #[cfg(feature = "observe")]
             {
                 if vote.min_soc.is_some() || vote.max_soc.is_some() {
-                    tracing::info!(
+                    tracing::debug!(
                         power_kw = power,
                         min_soc = vote.min_soc,
                         max_soc = vote.max_soc,
@@ -525,6 +563,142 @@ mod tests {
                 assert!((active_power_kw - 3.5).abs() < 1e-9);
                 assert_eq!(*min_soc, None);
                 assert_eq!(*max_soc, None);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn charge_power_clamped_to_max_charge_kw() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        // Unclamped preference: emits 999 kW charge power, well above the
+        // 7.2 kW equipment limit.
+        let unclamped_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: Some(999.0),
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 1.0,
+            label: "unclamped:charge",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> =
+            vec![Box::new(ScoredPref { vote: unclamped_vote })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(
+                    (active_power_kw - ctx.max_charge_kw).abs() < 1e-9,
+                    "expected clamped power {expected}, got {active_power_kw}",
+                    expected = ctx.max_charge_kw,
+                );
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn discharge_power_clamped_to_max_discharge_kw() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        // Unclamped preference: emits -999 kW discharge power, well below the
+        // -5.0 kW equipment limit.
+        let unclamped_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: Some(-999.0),
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 1.0,
+            label: "unclamped:discharge",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> =
+            vec![Box::new(ScoredPref { vote: unclamped_vote })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(
+                    (active_power_kw - (-ctx.max_discharge_kw)).abs() < 1e-9,
+                    "expected clamped power {expected}, got {active_power_kw}",
+                    expected = -ctx.max_discharge_kw,
+                );
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn power_within_limits_passes_through_unchanged() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env);
+
+        // Charge power within equipment limit (3.0 kW < 7.2 kW max_charge).
+        let charge_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: Some(3.0),
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 1.0,
+            label: "within_limit:charge",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> =
+            vec![Box::new(ScoredPref { vote: charge_vote })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!((active_power_kw - 3.0).abs() < 1e-9);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+
+        // Discharge power within equipment limit (-3.0 kW, magnitude < 5.0 kW max_discharge).
+        let discharge_vote = PreferenceVote {
+            target_soc: None,
+            power_kw: Some(-3.0),
+            departure_hour: None,
+            min_soc: None,
+            max_soc: None,
+            score: 1.0,
+            label: "within_limit:discharge",
+        };
+
+        let prefs: Vec<Box<dyn ChargingPreference>> =
+            vec![Box::new(ScoredPref { vote: discharge_vote })];
+        let mut composer = ChargingComposer::new(prefs, "ev1");
+        let mut out = Vec::new();
+        composer.evaluate(&ctx, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!((active_power_kw - (-3.0)).abs() < 1e-9);
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
