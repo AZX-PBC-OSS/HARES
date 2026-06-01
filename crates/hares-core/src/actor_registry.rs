@@ -680,7 +680,10 @@ mod tests {
         let env = crate::actor::testing::test_env().build();
         let mut requests = Vec::new();
         actor.decide(&env, &mut requests);
-        assert!(requests.is_empty(), "no signals expected at Normal DR level");
+        assert!(
+            requests.is_empty(),
+            "no signals expected at Normal DR level"
+        );
 
         let telemetry = actor
             .telemetry()

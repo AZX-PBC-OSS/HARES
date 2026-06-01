@@ -49,6 +49,31 @@ use crate::Actor;
 
 use super::constants::DEFAULT_FREEZE_THRESHOLD_C;
 
+/// Per-severity-step multiplier for DR compliance probability scaling.
+///
+/// HARES engineering choice: no prescriptive standard (ASHRAE, IEEE, or otherwise)
+/// governs occupant DR compliance elasticity. The value 0.1 (10% relative increase
+/// per DR severity level) is a conservative, tunable default calibrated so that a
+/// GridEmergency event at a 50% base rate yields ~70% compliance — consistent with
+/// utility-reported participation rates for critical peak pricing and emergency DR
+/// events (FERC 2023 Assessment of Demand Response and Advanced Metering, Staff
+/// Report, §3.1 Table 3-2: residential critical peak pricing participation rates
+/// routinely exceed 60%). OCHRE does not model occupant compliance decisions at all,
+/// so no reference value is available from that codebase.
+///
+/// Adjust via HARES configuration or replace the `Probabilistic` model with a
+/// calibrated behavioral model for fleet studies.
+const SEVERITY_MULTIPLIER: f64 = 0.1;
+
+/// Applies DR severity scaling to the base compliance rate.
+///
+/// Returns `base_rate * (1.0 + dr_level_as_int * SEVERITY_MULTIPLIER)`, clamped to `[0.0, 1.0]`.
+/// DRLevel::Normal (level 0) receives no scaling; GridEmergency (level 4) receives +40%.
+fn severity_adjusted_rate(base_rate: f64, dr_level: DRLevel) -> f64 {
+    let factor = 1.0 + (dr_level as u8 as f64) * SEVERITY_MULTIPLIER;
+    (base_rate * factor).clamp(0.0, 1.0)
+}
+
 /// Trait for DR compliance decision models.
 ///
 /// Implementations decide whether an occupant complies with a DR event.
@@ -62,6 +87,14 @@ pub trait ComplianceModel: Send + Sync {
     /// * `dr_level` - Severity of the DR event (Normal, Moderate, High, Critical, GridEmergency)
     /// * `env` - Current environment state (weather, zone temps, time, etc.)
     fn should_comply(&self, dr_level: DRLevel, env: &EnvironmentState) -> bool;
+
+    /// Returns the severity-adjusted effective compliance rate for the given DR level.
+    ///
+    /// Returns `None` for models that do not use a configurable compliance rate
+    /// (e.g., AlwaysComply, NeverComply).
+    fn effective_compliance_rate(&self, _dr_level: DRLevel) -> Option<f64> {
+        None
+    }
 }
 
 /// Compliance model that always participates in DR events.
@@ -127,9 +160,14 @@ impl Default for Probabilistic {
 
 impl ComplianceModel for Probabilistic {
     fn should_comply(&self, dr_level: DRLevel, env: &EnvironmentState) -> bool {
+        let effective = severity_adjusted_rate(self.compliance_rate, dr_level);
         let hash = self.hash_inputs(dr_level, env);
         let normalized = (hash % 10_000) as f64 / 10_000.0;
-        normalized < self.compliance_rate
+        normalized < effective
+    }
+
+    fn effective_compliance_rate(&self, dr_level: DRLevel) -> Option<f64> {
+        Some(severity_adjusted_rate(self.compliance_rate, dr_level))
     }
 }
 
@@ -258,7 +296,7 @@ pub struct DrCompliance {
 impl DrCompliance {
     /// Creates a new DR compliance actor with the default compliance model.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(7);
+        let mut telemetry = Telemetry::with_capacity(8);
         telemetry.insert("dr_level", 0.0);
         telemetry.insert("dr_active", 0.0);
         telemetry.insert("dr_complied", 0.0);
@@ -266,6 +304,7 @@ impl DrCompliance {
         telemetry.insert("dr_freeze_guard", 0.0);
         telemetry.insert("clear_signals_dispatched_count", 0.0);
         telemetry.insert("targets_configured", 0.0);
+        telemetry.insert("effective_compliance_rate", 0.0);
         Self {
             name: Arc::from(name),
             model: Box::new(AlwaysComply),
@@ -290,10 +329,8 @@ impl DrCompliance {
     /// Sets the HVAC equipment target.
     pub fn with_hvac_target(mut self, target: DispatchTarget) -> Self {
         self.hvac_target = Some(target);
-        self.telemetry.set(
-            "targets_configured",
-            self.load_targets.len() as f64 + 1.0,
-        );
+        self.telemetry
+            .set("targets_configured", self.load_targets.len() as f64 + 1.0);
         self
     }
 
@@ -503,6 +540,16 @@ impl Actor for DrCompliance {
         self.telemetry
             .set("dr_complied", if should_comply { 1.0 } else { 0.0 });
 
+        #[cfg(feature = "observe")]
+        {
+            self.telemetry.set(
+                "effective_compliance_rate",
+                self.model
+                    .effective_compliance_rate(self.current_dr_level)
+                    .unwrap_or(f64::NAN),
+            );
+        }
+
         tracing::debug!(
             actor = %self.name,
             dr_level = ?self.current_dr_level,
@@ -693,7 +740,7 @@ mod tests {
         // With enough distinct seeds at 50% rate, we must see both true and false
         for seed in 0..50 {
             let model = Probabilistic::new(0.5).with_seed(seed);
-            outcomes.insert(model.should_comply(DRLevel::High, &env));
+            outcomes.insert(model.should_comply(DRLevel::Normal, &env));
         }
 
         assert_eq!(
@@ -927,7 +974,7 @@ mod tests {
 
         for i in 0..trials {
             let model = Probabilistic::new(0.5).with_seed(i as u64);
-            if model.should_comply(DRLevel::Moderate, &env) {
+            if model.should_comply(DRLevel::Normal, &env) {
                 comply_count += 1;
             }
         }
@@ -935,7 +982,55 @@ mod tests {
         let rate = comply_count as f64 / trials as f64;
         assert!(
             rate > 0.3 && rate < 0.7,
-            "compliance rate {rate} should be near 0.5 for 50% configured rate"
+            "compliance rate {rate} should be near 0.5 for 50% configured rate with Normal severity (no scaling)"
+        );
+    }
+
+    #[test]
+    fn probabilistic_grid_emergency_higher_compliance_than_moderate() {
+        let env = test_env().build();
+        let trials = 1000;
+        let mut moderate_complies = 0usize;
+        let mut emergency_complies = 0usize;
+
+        for i in 0..trials {
+            let m = Probabilistic::new(0.5).with_seed(i * 2);
+            if m.should_comply(DRLevel::Moderate, &env) {
+                moderate_complies += 1;
+            }
+            let e = Probabilistic::new(0.5).with_seed(i * 2 + 1);
+            if e.should_comply(DRLevel::GridEmergency, &env) {
+                emergency_complies += 1;
+            }
+        }
+
+        let moderate_rate = moderate_complies as f64 / trials as f64;
+        let emergency_rate = emergency_complies as f64 / trials as f64;
+        assert!(
+            emergency_rate > moderate_rate,
+            "GridEmergency compliance ({emergency_rate}) must exceed Moderate compliance ({moderate_rate}) over {trials} trials"
+        );
+    }
+
+    #[test]
+    fn probabilistic_normal_with_rate_one_always_complies() {
+        let env = test_env().build();
+        let model = Probabilistic::new(1.0);
+        assert!(
+            model.should_comply(DRLevel::Normal, &env),
+            "rate=1.0 with Normal must always comply"
+        );
+    }
+
+    #[test]
+    fn probabilistic_severity_scaling_preserves_deterministic_reproducibility() {
+        let env = test_env().build();
+        let model = Probabilistic::new(0.5).with_seed(42);
+        let result1 = model.should_comply(DRLevel::GridEmergency, &env);
+        let result2 = model.should_comply(DRLevel::GridEmergency, &env);
+        assert_eq!(
+            result1, result2,
+            "same seed + same severity must produce same result after severity scaling"
         );
     }
 
