@@ -127,20 +127,27 @@ pub struct IdealThermostat {
     dispatch_target: DispatchTarget,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
+    /// Count of setpoint overrides rejected because heating >= cooling.
+    /// Gated on `observe` feature for diagnostic CSV output.
+    #[cfg(feature = "observe")]
+    setpoint_inversion_rejected_count: u64,
 }
 
 impl IdealThermostat {
     /// Creates a new IdealThermostat actor targeting the named equipment.
     pub fn new(target_name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(3);
+        let mut telemetry = Telemetry::with_capacity(4);
         telemetry.insert("heating_setpoint_c", 0.0);
         telemetry.insert("cooling_setpoint_c", 0.0);
         telemetry.insert("deadband_c", 0.0);
+        telemetry.insert("setpoint_inversion_rejected", 0.0);
         Self {
             name: format!("IdealThermostat({})", target_name),
             dispatch_target: DispatchTarget::ByName(target_name.into()),
             override_state: OverrideState::default(),
             telemetry,
+            #[cfg(feature = "observe")]
+            setpoint_inversion_rejected_count: 0,
         }
     }
 
@@ -241,9 +248,51 @@ impl Actor for IdealThermostat {
             "deadband_c",
             self.override_state.deadband_c.unwrap_or(f64::NAN),
         );
+        // Reset inversion flag each step; set to 1.0 only when rejected below.
+        self.telemetry.set("setpoint_inversion_rejected", 0.0);
 
         if !self.override_state.is_active() {
             return;
+        }
+
+        // Validate setpoint ordering when both heating and cooling are set.
+        // This catches the case where a script or user pushes an invert
+        // override (heating_c >= cooling_c) that is physically impossible.
+        if let (Some(heat), Some(cool)) = (
+            self.override_state.heating_setpoint_c,
+            self.override_state.cooling_setpoint_c,
+        ) {
+            if heat >= cool {
+                // In debug/check_invariants builds, panic with unambiguous
+                // diagnostic. In release builds, reject the emission with a
+                // warning and an observable counter/telemetry flag so the error
+                // is auditable without crashing the fleet simulation.
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    panic!(
+                        "setpoint inversion detected in IdealThermostat '{}': \
+                         heating={heat}°C >= cooling={cool}°C",
+                        self.name
+                    );
+                }
+                #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+                {
+                    #[cfg(feature = "observe")]
+                    {
+                        self.setpoint_inversion_rejected_count =
+                            self.setpoint_inversion_rejected_count.saturating_add(1);
+                    }
+                    self.telemetry.set("setpoint_inversion_rejected", 1.0);
+                    tracing::warn!(
+                        actor = %self.name,
+                        target = self.target_name(),
+                        heating_c = heat,
+                        cooling_c = cool,
+                        "rejected thermal setpoint override: heating setpoint >= cooling setpoint",
+                    );
+                    return;
+                }
+            }
         }
 
         tracing::debug!(
@@ -505,6 +554,35 @@ mod tests {
                 assert_eq!(*deadband_c, Some(2.0));
             }
             _ => panic!("expected ThermalSetpoint signal"),
+        }
+    }
+
+    #[test]
+    fn ideal_thermostat_inverted_setpoints_block_emission() {
+        let mut thermostat = IdealThermostat::new("HVAC");
+        // Bypass dual()'s debug_assert by constructing the state directly.
+        thermostat.set_override(OverrideState {
+            heating_setpoint_c: Some(30.0),
+            cooling_setpoint_c: Some(25.0),
+            deadband_c: None,
+        });
+        let env = test_env().build();
+        let mut requests = Vec::new();
+
+        // In debug/check_invariants builds, decide() panics. In release
+        // builds it rejects gracefully with a telemetry flag. Either path
+        // must prevent the signal from being emitted.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            thermostat.decide(&env, &mut requests);
+        }));
+
+        // No emission in either path — requests is empty.
+        assert!(requests.is_empty());
+
+        if result.is_ok() {
+            // Release path: verify telemetry surfaces the rejection.
+            let telemetry = thermostat.telemetry().unwrap();
+            assert_eq!(telemetry.get("setpoint_inversion_rejected"), Some(1.0));
         }
     }
 }

@@ -721,9 +721,10 @@ fn setpoint_override_shifts_thermostat() {
 
     // Raise the heating setpoint to 25°C via control signal.
     // Now 22°C < 25°C - deadband so the thermostat should demand heating.
+    // Also raise cooling to 27°C to maintain the required deadband gap.
     eq.apply_control(&ControlSignal::ThermalSetpoint {
         heating_setpoint_c: Some(25.0),
-        cooling_setpoint_c: None,
+        cooling_setpoint_c: Some(27.0),
         deadband_c: None,
     })
     .unwrap();
@@ -3884,7 +3885,7 @@ fn runtime_setpoint_key_resets_to_zero_after_clearing_override() {
     // Apply override then immediately clear it by applying a no-op override with None fields,
     // then step. After step, key must be at default (0.0 = no override).
     eq.apply_control(&ControlSignal::ThermalSetpoint {
-        heating_setpoint_c: Some(25.0),
+        heating_setpoint_c: Some(22.0),
         cooling_setpoint_c: None,
         deadband_c: None,
     })
@@ -3914,7 +3915,7 @@ fn runtime_setpoint_key_resets_to_zero_after_clearing_override() {
 
     // Now apply a fresh override and re-step; key must equal the override value.
     eq.apply_control(&ControlSignal::ThermalSetpoint {
-        heating_setpoint_c: Some(25.0),
+        heating_setpoint_c: Some(22.0),
         cooling_setpoint_c: None,
         deadband_c: None,
     })
@@ -3928,8 +3929,8 @@ fn runtime_setpoint_key_resets_to_zero_after_clearing_override() {
         .get("runtime_heating_setpoint_c")
         .expect("runtime_heating_setpoint_c must be present when override is active");
     assert!(
-        (rt - 25.0).abs() < 1e-9,
-        "runtime_heating_setpoint_c must be 25.0, got {rt:.4}"
+        (rt - 22.0).abs() < 1e-9,
+        "runtime_heating_setpoint_c must be 22.0, got {rt:.4}"
     );
 }
 
@@ -3945,9 +3946,9 @@ fn runtime_setpoint_key_reflects_active_override_value() {
     let env = env_with_zone_temp(22.0);
     eq.init(&cfg, &env).unwrap();
 
-    // Apply a heating setpoint override to 25°C.
+    // Apply a heating setpoint override to 22°C.
     eq.apply_control(&ControlSignal::ThermalSetpoint {
-        heating_setpoint_c: Some(25.0),
+        heating_setpoint_c: Some(22.0),
         cooling_setpoint_c: None,
         deadband_c: None,
     })
@@ -3964,8 +3965,8 @@ fn runtime_setpoint_key_reflects_active_override_value() {
         .get("runtime_heating_setpoint_c")
         .expect("runtime_heating_setpoint_c must be present when override is active");
     assert!(
-        (rt_heat - 25.0).abs() < 1e-9,
-        "runtime_heating_setpoint_c must be 25.0 (override), got {rt_heat:.4}"
+        (rt_heat - 22.0).abs() < 1e-9,
+        "runtime_heating_setpoint_c must be 22.0 (override), got {rt_heat:.4}"
     );
 
     // effective setpoint (HEATING_SETPOINT_C) must equal the override value.
@@ -3973,8 +3974,8 @@ fn runtime_setpoint_key_reflects_active_override_value() {
         .get(tk::HEATING_SETPOINT_C)
         .expect("HEATING_SETPOINT_C must always be present");
     assert!(
-        (eff - 25.0).abs() < 1e-9,
-        "HEATING_SETPOINT_C must equal override 25.0, got {eff:.4}"
+        (eff - 22.0).abs() < 1e-9,
+        "HEATING_SETPOINT_C must equal override 22.0, got {eff:.4}"
     );
 
     // schedule-stage must NOT equal the override; it must reflect static (default ~20°C).

@@ -228,7 +228,7 @@ pub fn apply_heating_control_unchecked(
     signal: &ControlSignal,
     equipment_name: &str,
 ) -> crate::Result<()> {
-    hvac.apply_control_signal(signal);
+    hvac.apply_control_signal(signal)?;
     if let ControlSignal::ThermalSetpoint {
         deadband_c: Some(deadband_c),
         ..

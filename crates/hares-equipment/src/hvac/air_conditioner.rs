@@ -1570,7 +1570,7 @@ impl CoolingCore {
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::ThermalSetpoint { deadband_c, .. } => {
-                self.hvac.apply_control_signal(signal);
+                self.hvac.apply_control_signal(signal)?;
                 if let Some(db) = deadband_c {
                     if !db.is_finite() || *db < 0.0 {
                         return Err(HaresError::Control(format!(
@@ -1641,7 +1641,7 @@ impl CoolingCore {
                     equipment = %self.descriptor.equipment_type,
                     "control signal routed through hvac catch-all path",
                 );
-                self.hvac.apply_control_signal(signal);
+                self.hvac.apply_control_signal(signal)?;
             }
         }
         Ok(())

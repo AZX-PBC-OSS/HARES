@@ -3702,7 +3702,8 @@ mod tests {
                 heating_setpoint_c: Some(raised_setpoint),
                 cooling_setpoint_c: Some(26.0),
                 deadband_c: None,
-            });
+            })
+            .ok();
 
         for step in 0..10 {
             let t = make_env(16.0, 0.0, step * 60);
@@ -3749,7 +3750,8 @@ mod tests {
                 heating_setpoint_c: Some(21.0),
                 cooling_setpoint_c: Some(26.0),
                 deadband_c: None,
-            });
+            })
+            .ok();
 
         // Step within hard lockout period.
         eq.update_control(&make_env(16.0, 0.0, 0));
@@ -4984,7 +4986,8 @@ mod tests {
                 heating_setpoint_c: Some(21.0),
                 cooling_setpoint_c: Some(26.0),
                 deadband_c: None,
-            });
+            })
+            .ok();
 
         // Steps: keep zone rising each step so soft lockout would normally hold.
         // At t = lockout_s * 2 + some steps, the timeout must release it.
@@ -5210,7 +5213,8 @@ mod tests {
                 heating_setpoint_c: Some(21.0),
                 cooling_setpoint_c: Some(26.0),
                 deadband_c: None,
-            });
+            })
+            .ok();
 
         // Advance past hard lockout + twice the hard lockout to guarantee timeout fires.
         // Keep zone rising so soft lockout would re-arm if the bug were present.

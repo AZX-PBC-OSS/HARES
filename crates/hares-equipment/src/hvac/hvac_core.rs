@@ -739,13 +739,14 @@ impl HvacEquipment {
     ///
     /// OCHRE HVAC.py lines 853–857: `disable_speeds` is updated from the external
     /// control signal. The highest non-disabled speed is cached as `max_enabled_speed`.
-    pub fn apply_control_signal(&mut self, signal: &ControlSignal) {
-        if self.thermostat_fsm.apply_thermal_setpoint_signal(signal) {
-            return;
+    pub fn apply_control_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        if self.thermostat_fsm.apply_thermal_setpoint_signal(signal)? {
+            return Ok(());
         }
         if let ControlSignal::MaxCapacityFraction { fraction } = signal {
             self.control.max_capacity_fraction = fraction.clamp(0.0, 1.0);
         }
+        Ok(())
     }
 
     pub fn set_schedule_setpoints(&mut self, schedule: ScheduleSetpoints) {
@@ -1080,7 +1081,8 @@ mod tests {
             heating_setpoint_c: Some(18.0),
             cooling_setpoint_c: Some(26.0),
             deadband_c: None,
-        });
+        })
+        .unwrap();
 
         let setpoints = hvac.effective_setpoints();
         assert_eq!(setpoints.heating_c, 18.0);
