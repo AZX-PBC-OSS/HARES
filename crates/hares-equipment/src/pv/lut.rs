@@ -46,6 +46,8 @@
 //!   **Resolvable when:** `EnvironmentState` gains `site_latitude_deg` and
 //!   `site_longitude_deg` fields (tracked in a follow-up ticket).
 
+#[cfg(feature = "observe")]
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -104,6 +106,8 @@ pub(crate) struct PvLut {
     sam_losses: f64,
     sam_array_type: Option<u8>,
     nn_warned: AtomicBool,
+    #[cfg(feature = "observe")]
+    lut_lookup_count: Cell<u64>,
 }
 
 impl Clone for PvLut {
@@ -124,6 +128,8 @@ impl Clone for PvLut {
             sam_losses: self.sam_losses,
             sam_array_type: self.sam_array_type,
             nn_warned: AtomicBool::new(false),
+            #[cfg(feature = "observe")]
+            lut_lookup_count: Cell::new(0),
         }
     }
 }
@@ -424,6 +430,8 @@ impl PvLut {
             sam_losses,
             sam_array_type,
             nn_warned: AtomicBool::new(false),
+            #[cfg(feature = "observe")]
+            lut_lookup_count: Cell::new(0),
         })
     }
 
@@ -531,6 +539,13 @@ impl PvLut {
         let dni_br = axis_bracket(&self.dni_values, dni);
         let dhi_br = axis_bracket(&self.dhi_values, dhi);
         let temp_br = axis_bracket(&self.temp_values, temp_c);
+
+        #[cfg(feature = "observe")]
+        {
+            let n = self.lut_lookup_count.get();
+            self.lut_lookup_count.set(n + 1);
+            tracing::debug!(lut_lookup_count = n + 1, "PV LUT interpolate call",);
+        }
 
         let mut weighted_sum = 0.0;
         let mut total_weight = 0.0;
@@ -675,6 +690,8 @@ impl PvLut {
             sam_losses: 0.0,
             sam_array_type: None,
             nn_warned: AtomicBool::new(false),
+            #[cfg(feature = "observe")]
+            lut_lookup_count: Cell::new(0),
         }
     }
 }
@@ -738,20 +755,22 @@ pub(super) fn axis_bracket(axis: &[f64], value: f64) -> (usize, usize, f64) {
         return (last, last, 0.0);
     }
 
-    for idx in 0..last {
-        let lo = axis[idx];
-        let hi = axis[idx + 1];
-        if value >= lo && value <= hi {
-            let span = hi - lo;
-            if span.abs() < f64::EPSILON {
-                return (idx, idx, 0.0);
-            }
-            let t = (value - lo) / span;
-            return (idx, idx + 1, t.clamp(0.0, 1.0));
-        }
+    // Binary search for the containing interval.
+    // partition_point returns the first index where axis[i] > value.
+    // Since value > axis[0] and value < axis[last], pos ∈ [1, n-1].
+    // Why: no separate O(log N) algorithmic-complexity test — the property
+    // is guaranteed by std::slice::partition_point, which the stdlib doc
+    // specifies as O(log n) (per partition_point docs: "This method is well
+    // suited for binary search on a slice").
+    let pos = axis.partition_point(|&v| v <= value);
+    let lo = pos - 1;
+    let hi = pos;
+    let span = axis[hi] - axis[lo];
+    if span.abs() < f64::EPSILON {
+        return (lo, lo, 0.0);
     }
-
-    (last, last, 0.0)
+    let t = (value - axis[lo]) / span;
+    (lo, hi, t.clamp(0.0, 1.0))
 }
 
 pub(super) fn bracket_corners(bracket: (usize, usize, f64)) -> [(usize, f64); 2] {
@@ -760,5 +779,265 @@ pub(super) fn bracket_corners(bracket: (usize, usize, f64)) -> [(usize, f64); 2]
         [(lo, 1.0), (hi, 0.0)]
     } else {
         [(lo, 1.0 - t), (hi, t)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify `axis_bracket` returns correct index and fraction for a value
+    /// exactly on the third axis point.
+    #[test]
+    fn axis_bracket_exact_on_point() {
+        let axis = vec![0.0, 1.0, 3.0, 6.0, 10.0];
+        let (lo, hi, t) = axis_bracket(&axis, 3.0);
+        assert_eq!(lo, 2);
+        assert_eq!(hi, 3);
+        assert_eq!(t, 0.0);
+    }
+
+    /// Verify interpolation between two interior points.
+    #[test]
+    fn axis_bracket_between_points() {
+        let axis = vec![0.0, 2.0, 10.0];
+        let (lo, hi, t) = axis_bracket(&axis, 6.0);
+        assert_eq!(lo, 1);
+        assert_eq!(hi, 2);
+        assert!((t - 0.5).abs() < 1e-12);
+    }
+
+    /// Verify clamping below the axis minimum.
+    #[test]
+    fn axis_bracket_below_min_clamps() {
+        let axis = vec![0.0, 1.0, 2.0];
+        let (lo, hi, t) = axis_bracket(&axis, -5.0);
+        assert_eq!(lo, 0);
+        assert_eq!(hi, 0);
+        assert_eq!(t, 0.0);
+    }
+
+    /// Verify clamping above the axis maximum.
+    #[test]
+    fn axis_bracket_above_max_clamps() {
+        let axis = vec![0.0, 1.0, 2.0];
+        let (lo, hi, t) = axis_bracket(&axis, 42.0);
+        assert_eq!(lo, 2);
+        assert_eq!(hi, 2);
+        assert_eq!(t, 0.0);
+    }
+
+    /// Exact match at axis[0] clamps to the first point.
+    #[test]
+    fn axis_bracket_value_equals_first_point() {
+        let axis = vec![0.0, 1.0, 2.0];
+        let (lo, hi, t) = axis_bracket(&axis, 0.0);
+        assert_eq!(lo, 0);
+        assert_eq!(hi, 0);
+        assert_eq!(t, 0.0);
+    }
+
+    /// Exact match at axis[last] clamps to the last point.
+    #[test]
+    fn axis_bracket_value_equals_last_point() {
+        let axis = vec![0.0, 1.0, 2.0];
+        let (lo, hi, t) = axis_bracket(&axis, 2.0);
+        assert_eq!(lo, 2);
+        assert_eq!(hi, 2);
+        assert_eq!(t, 0.0);
+    }
+
+    /// Single-element axis always returns the single point.
+    #[test]
+    fn axis_bracket_single_element_axis() {
+        let axis = vec![5.0];
+        let (lo, hi, t) = axis_bracket(&axis, 5.0);
+        assert_eq!(lo, 0);
+        assert_eq!(hi, 0);
+        assert_eq!(t, 0.0);
+    }
+
+    /// Single-element axis with out-of-bounds value — method returns
+    /// the single point (callers pre-clamp before reaching axis_bracket).
+    #[test]
+    fn axis_bracket_single_element_oob() {
+        let axis = vec![5.0];
+        let (lo, hi, t) = axis_bracket(&axis, -99.0);
+        assert_eq!(lo, 0);
+        assert_eq!(hi, 0);
+        assert_eq!(t, 0.0);
+    }
+
+    /// Zero-width span behaviour — the binary search and old linear scan
+    /// may split an exact-axis-point match into different adjacent
+    /// intervals (e.g. (0,1,1.0) vs (1,2,0.0)), but the weighted
+    /// interpolation result is identical.
+    #[test]
+    fn axis_bracket_zero_width_span() {
+        let axis = vec![0.0, 1.0, 1.0, 2.0];
+        let (lo, hi, t) = axis_bracket(&axis, 0.5);
+        assert_eq!(lo, 0);
+        assert_eq!(hi, 1);
+        assert!((t - 0.5).abs() < 1e-12);
+        // Query at the zero-width span itself: partition_point finds that
+        // axis[1] <= 1.0 is true, axis[2] <= 1.0 is true, pos=3, lo=1 (axis[1]=1.0).
+        // These two points differ, so span > 0 and we interpolate normally
+        // (t = 0.0 means 100% weight on the common value 1.0).
+        let (lo, hi, t) = axis_bracket(&axis, 1.0);
+        // value == axis[last] = 2.0? No, value is 1.0, axis[last] = 2.0.
+        // value > axis[0] = 0.0, value < 2.0.
+        // partition_point: pos for v <= 1.0: axis[0]=0.0<=1, axis[1]=1.0<=1, axis[2]=1.0<=1, axis[3]=2.0>1 → pos=3.
+        // lo=2, hi=3, span=2.0-1.0=1.0, t=0.0.
+        // bracket_corners: (2, 3, 0.0) → [(2, 1.0), (3, 0.0)] — 100% on index 2 (=1.0).
+        // The old linear scan would have matched idx=1: lo=1.0, hi=1.0, span=0 → (1, 1, 0.0).
+        // bracket_corners: (1, 1, 0.0) → [(1, 1.0), (1, 0.0)] — 100% on index 1 (=1.0).
+        // Same end result: 100% weight on 1.0.
+        assert_eq!(lo, 2);
+        assert_eq!(hi, 3);
+        assert_eq!(t, 0.0);
+    }
+
+    /// Generate the old linear-scan version for comparison.
+    fn old_axis_bracket(axis: &[f64], value: f64) -> (usize, usize, f64) {
+        if axis.len() == 1 {
+            return (0, 0, 0.0);
+        }
+        if value <= axis[0] {
+            return (0, 0, 0.0);
+        }
+        let last = axis.len() - 1;
+        if value >= axis[last] {
+            return (last, last, 0.0);
+        }
+
+        for idx in 0..last {
+            let lo = axis[idx];
+            let hi = axis[idx + 1];
+            if value >= lo && value <= hi {
+                let span = hi - lo;
+                if span.abs() < f64::EPSILON {
+                    return (idx, idx, 0.0);
+                }
+                let t = (value - lo) / span;
+                return (idx, idx + 1, t.clamp(0.0, 1.0));
+            }
+        }
+
+        (last, last, 0.0)
+    }
+
+    /// Verify the binary-search implementation produces the same bracket results
+    /// as the old linear scan for a wide range of inputs.  The two implementations
+    /// may split an exact-axis-point match into different adjacent intervals
+    /// (e.g. (0, 1, 1.0) vs (1, 2, 0.0)), but the weighted-interpolation result
+    /// is identical because the 100%-weight lands on the same axis index.
+    #[test]
+    fn axis_bracket_parity_with_old_linear_scan() {
+        let axes: [Vec<f64>; 6] = [
+            vec![0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0],
+            vec![0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 360.0],
+            vec![0.0, 200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0],
+            vec![0.0, 200.0, 400.0, 600.0, 800.0, 1000.0],
+            vec![0.0, 100.0, 200.0, 300.0, 400.0, 500.0],
+            vec![-20.0, -10.0, 0.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+        ];
+
+        // Probe each axis with values spanning and exceeding the axis range.
+        for axis in &axes {
+            let min = axis.first().unwrap();
+            let max = axis.last().unwrap();
+            let test_values = vec![
+                min - 100.0,
+                min - 1.0,
+                *min,
+                *min + 1e-9,
+                (min + axis[1]) / 2.0,
+                axis[1],
+                axis[axis.len() / 2],
+                axis[axis.len() / 2] + 1e-9,
+                axis[axis.len() - 2],
+                (axis[axis.len() - 2] + max) / 2.0,
+                *max - 1e-9,
+                *max,
+                max + 1.0,
+                max + 100.0,
+            ];
+            // Build a synthetic values array: values[i] = axis[i] * 2.0.
+            let values: Vec<f64> = axis.iter().map(|&x| x * 2.0).collect();
+            for &v in &test_values {
+                // 1D interpolation result from old linear scan.
+                let old_br = old_axis_bracket(axis, v);
+                let old_corners = bracket_corners(old_br);
+                let mut old_result = 0.0;
+                for (idx, w) in old_corners {
+                    old_result += w * values[idx];
+                }
+                // 1D interpolation result from new binary search.
+                let new_br = axis_bracket(axis, v);
+                let new_corners = bracket_corners(new_br);
+                let mut new_result = 0.0;
+                for (idx, w) in new_corners {
+                    new_result += w * values[idx];
+                }
+                assert!(
+                    (new_result - old_result).abs() < 1e-12,
+                    "axis={axis:?} value={v}: old_result={old_result} new_result={new_result} \
+                     old_bracket={old_br:?} new_bracket={new_br:?}",
+                );
+            }
+        }
+    }
+
+    /// Regression test: PV power for a known LUT configuration must be
+    /// unchanged after the axis_bracket refactor.
+    #[test]
+    fn pv_lut_power_unchanged_after_bracket_refactor() {
+        // Build a minimal 6-D LUT grid.
+        let zenith = vec![0.0, 30.0, 60.0, 90.0];
+        let azimuth = vec![0.0, 90.0, 180.0, 270.0, 360.0];
+        let ghi_vals = vec![0.0, 500.0, 1000.0];
+        let dni_vals = vec![0.0, 500.0, 1000.0];
+        let dhi_vals = vec![0.0, 300.0, 600.0];
+        let temp_vals = vec![-10.0, 0.0, 10.0, 25.0, 40.0];
+
+        // Fill the LUT with deterministic AC power values.
+        let mut entries = Vec::new();
+        for (zi, &_z) in zenith.iter().enumerate() {
+            for (ai, &_a) in azimuth.iter().enumerate() {
+                for (gi, &g) in ghi_vals.iter().enumerate() {
+                    for (di, &d) in dni_vals.iter().enumerate() {
+                        for (dhi, &dh) in dhi_vals.iter().enumerate() {
+                            for (ti, &t) in temp_vals.iter().enumerate() {
+                                let ac: f64 = g * 0.5 + d * 0.3 + dh * 0.2
+                                    - (t - 25.0_f64).max(0.0) * 0.005 * g;
+                                entries.push(([zi, ai, gi, di, dhi, ti], ac.max(0.0)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let lut = PvLut::from_raw(
+            zenith.clone(),
+            azimuth.clone(),
+            ghi_vals.clone(),
+            dni_vals.clone(),
+            dhi_vals.clone(),
+            temp_vals.clone(),
+            entries,
+        );
+
+        // Query at a representative operating point.
+        let (power_kw, method) = lut.interpolate(45.0, 135.0, 750.0, 600.0, 250.0, 15.0);
+        assert_eq!(method, InterpolationMethod::Multilinear);
+        assert!(
+            power_kw > 0.0,
+            "PV power should be positive at this irradiance"
+        );
+        assert!(
+            (power_kw - 605.0).abs() < 0.01,
+            "PV power changed after bracket refactor: got {power_kw}",
+        );
     }
 }
