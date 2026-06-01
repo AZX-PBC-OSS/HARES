@@ -210,6 +210,14 @@ pub enum DrAction {
     TurnOff,
     /// Limit power draw to a maximum.
     PowerLimit { max_kw: f64 },
+    /// Dispatch a demand-response signal with built-in auto-reversion.
+    /// Equipment applies DR setpoint/curtailment behaviour for `duration_s`
+    /// seconds, then automatically reverts to `DRLevel::Normal`.
+    /// `None` duration means indefinite — no auto-revert.
+    DemandResponse {
+        level: DRLevel,
+        duration_s: Option<f64>,
+    },
     /// No action (used for testing).
     None,
 }
@@ -250,6 +258,23 @@ impl DrAction {
     /// Creates a turn-off action.
     pub fn off() -> Self {
         Self::TurnOff
+    }
+
+    /// Creates a demand-response action with duration-based auto-reversion.
+    ///
+    /// Equipment applies DR behaviour for the given duration, then
+    /// automatically reverts to `DRLevel::Normal` when the duration expires.
+    /// `None` duration means indefinite — no auto-revert.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics if `duration_s` is `Some(0.0)` or `Some(negative)`.
+    pub fn demand_response(level: DRLevel, duration_s: Option<f64>) -> Self {
+        debug_assert!(
+            duration_s.is_none_or(|d| d > 0.0),
+            "DR duration must be positive or None, got {duration_s:?}"
+        );
+        Self::DemandResponse { level, duration_s }
     }
 
     /// Creates a power limit action.
@@ -309,7 +334,7 @@ pub struct DrCompliance {
 impl DrCompliance {
     /// Creates a new DR compliance actor with the default compliance model.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(9);
+        let mut telemetry = Telemetry::with_capacity(11);
         telemetry.insert("dr_level", 0.0);
         telemetry.insert("dr_active", 0.0);
         telemetry.insert("dr_complied", 0.0);
@@ -319,6 +344,8 @@ impl DrCompliance {
         telemetry.insert("clear_signals_dispatched_count", 0.0);
         telemetry.insert("targets_configured", 0.0);
         telemetry.insert("effective_compliance_rate", 0.0);
+        telemetry.insert("demand_response_level", 0.0);
+        telemetry.insert("demand_response_duration_s", f64::NAN);
         Self {
             name: Arc::from(name),
             model: Box::new(AlwaysComply),
@@ -470,6 +497,19 @@ impl DrCompliance {
                 max_power_kw: *max_kw,
                 ramp_rate_kw_per_s: None,
             },
+            DrAction::DemandResponse { level, duration_s } => {
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    debug_assert!(
+                        duration_s.is_none_or(|d| d > 0.0),
+                        "DemandResponse duration_s must be positive or None, got {duration_s:?}"
+                    );
+                }
+                ControlSignal::DemandResponse {
+                    level: *level,
+                    duration_s: *duration_s,
+                }
+            }
             DrAction::None => return,
         };
 
@@ -516,6 +556,7 @@ impl DrCompliance {
                 DrAction::LoadCurtailment { .. }
                 | DrAction::SetpointAdjust { .. }
                 | DrAction::AbsoluteSetpoint { .. }
+                | DrAction::DemandResponse { .. }
                 | DrAction::None => {
                     // Non-sticky actions are filtered by track_dispatched;
                     // reaching here indicates a bug in track_dispatched.
@@ -663,6 +704,15 @@ impl Actor for DrCompliance {
                 );
             } else {
                 Self::dispatch_for_action(target, &self.hvac_action, out);
+                #[cfg(feature = "observe")]
+                {
+                    if let DrAction::DemandResponse { level, duration_s } = &self.hvac_action {
+                        self.telemetry
+                            .set("demand_response_level", dr_level_as_f64(*level));
+                        self.telemetry
+                            .set("demand_response_duration_s", duration_s.unwrap_or(f64::NAN));
+                    }
+                }
                 let t = target.clone();
                 let a = self.hvac_action.clone();
                 self.track_dispatched(&t, &a);
@@ -707,6 +757,15 @@ impl Actor for DrCompliance {
                 );
             } else {
                 Self::dispatch_for_action(target, action, out);
+                #[cfg(feature = "observe")]
+                {
+                    if let DrAction::DemandResponse { level, duration_s } = action {
+                        self.telemetry
+                            .set("demand_response_level", dr_level_as_f64(*level));
+                        self.telemetry
+                            .set("demand_response_duration_s", duration_s.unwrap_or(f64::NAN));
+                    }
+                }
                 self.track_dispatched(target, action);
             }
         }
@@ -2142,6 +2201,209 @@ mod tests {
                 .iter()
                 .all(|r| !matches!(&r.target, DispatchTarget::ByName(n) if &**n == "HPWH")),
             "rejected HPWH signal must not appear in dispatch output"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // DemandResponse dispatch (T-0167)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dr_action_demand_response_constructor() {
+        let action = DrAction::demand_response(DRLevel::High, Some(3600.0));
+        assert_eq!(
+            action,
+            DrAction::DemandResponse {
+                level: DRLevel::High,
+                duration_s: Some(3600.0)
+            }
+        );
+    }
+
+    #[test]
+    fn dr_action_demand_response_indefinite_duration() {
+        let action = DrAction::demand_response(DRLevel::Critical, None);
+        assert_eq!(
+            action,
+            DrAction::DemandResponse {
+                level: DRLevel::Critical,
+                duration_s: None
+            }
+        );
+    }
+
+    #[test]
+    fn dispatch_demand_response_emits_control_signal() {
+        let target = DispatchTarget::ByName("HVAC".into());
+        let action = DrAction::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(3600.0),
+        };
+        let mut out = Vec::new();
+        DrCompliance::dispatch_for_action(&target, &action, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].target, target);
+        assert_eq!(out[0].priority, PriorityTier::Grid);
+        match &out[0].signal {
+            ControlSignal::DemandResponse { level, duration_s } => {
+                assert_eq!(*level, DRLevel::High);
+                assert_eq!(*duration_s, Some(3600.0));
+            }
+            other => panic!("expected DemandResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demand_response_via_actor_emits_correct_signal() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::demand_response(DRLevel::Critical, Some(7200.0)));
+
+        actor.set_dr_level(DRLevel::Critical);
+
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].priority, PriorityTier::Grid);
+        match &requests[0].signal {
+            ControlSignal::DemandResponse { level, duration_s } => {
+                assert_eq!(*level, DRLevel::Critical);
+                assert_eq!(*duration_s, Some(7200.0));
+            }
+            other => panic!("expected DemandResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demand_response_not_cleared_on_normal_transition() {
+        // DemandResponse auto-reverts via equipment-side duration expiry;
+        // no actor-side clear signal is needed or emitted.
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::demand_response(DRLevel::High, Some(3600.0)));
+
+        // Step 1: dispatch DemandResponse during DR
+        actor.set_dr_level(DRLevel::High);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1);
+
+        // Step 2: Normal — no clear signal (DemandResponse is not sticky)
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests2 = Vec::new();
+        actor.decide(&env, &mut requests2);
+        assert!(
+            requests2.is_empty(),
+            "DemandResponse auto-reverts on equipment; no actor-side clear needed"
+        );
+    }
+
+    #[test]
+    fn demand_response_as_load_target_dispatches() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
+                DrAction::demand_response(DRLevel::High, Some(1800.0)),
+            );
+
+        actor.set_dr_level(DRLevel::High);
+
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].target,
+            DispatchTarget::ByEndUse(EndUse::HVAC_HEATING)
+        );
+        match &requests[0].signal {
+            ControlSignal::DemandResponse { level, duration_s } => {
+                assert_eq!(*level, DRLevel::High);
+                assert_eq!(*duration_s, Some(1800.0));
+            }
+            other => panic!("expected DemandResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demand_response_not_blocked_by_freeze_guard() {
+        // DemandResponse is not TurnOff — freeze guard does not apply.
+        // Equipment applies its own DR-level behaviour, which may
+        // reduce but not shut off heating.
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::demand_response(DRLevel::High, Some(3600.0)));
+
+        actor.set_dr_level(DRLevel::Critical);
+
+        // Cold zone — freeze guard should NOT fire on DemandResponse
+        let env = test_env().zone_temp(2.0).build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 1);
+        assert!(
+            matches!(&requests[0].signal, ControlSignal::DemandResponse { .. }),
+            "DemandResponse must not be blocked or downgraded by freeze guard"
+        );
+        assert_eq!(actor.telemetry.get("dr_freeze_guard"), Some(0.0));
+    }
+
+    #[test]
+    fn demand_response_bypasses_protected_state_check() {
+        // DemandResponse is not PowerLimit or TurnOff — it bypasses
+        // the should_reject_dispatch check for defrost/WH freeze.
+        let mut telem = Telemetry::with_capacity(2);
+        telem.insert(tk::DEFROST_ACTIVE, 1.0);
+
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByName("HVAC".into()),
+                DrAction::demand_response(DRLevel::Moderate, None),
+            );
+
+        actor.set_dr_level(DRLevel::High);
+
+        let env = test_env().with_equipment_telemetry("HVAC", telem).build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(
+            requests.len(),
+            1,
+            "DemandResponse must not be rejected when equipment in defrost"
+        );
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::DemandResponse { .. }
+        ));
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(0.0));
+    }
+
+    #[test]
+    fn demand_response_telemetry_keys_pre_registered() {
+        let actor = DrCompliance::new("Test");
+        assert_eq!(
+            actor.telemetry.get("demand_response_level"),
+            Some(0.0),
+            "demand_response_level must be pre-registered at init"
+        );
+        assert!(
+            actor
+                .telemetry
+                .get("demand_response_duration_s")
+                .map_or(false, |v| v.is_nan()),
+            "demand_response_duration_s must be pre-registered at init (NaN = unset)"
         );
     }
 }

@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use hares_control::DispatchTarget;
 use hares_equipment::config::ConfigValue;
-use hares_types::{EndUse, HaresError};
+use hares_types::{DRLevel, EndUse, HaresError};
 
 use hares_equipment::ev::catalog::archetype_by_id;
 use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource};
@@ -109,6 +109,35 @@ fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
     match raw {
         "TurnOff" => Ok(DrAction::TurnOff),
         "None" => Ok(DrAction::None),
+        s if s.starts_with("DemandResponse:") => {
+            let rest = s.strip_prefix("DemandResponse:").unwrap();
+            let colon = rest.find(':');
+            let (level_str, dur_str) = match colon {
+                Some(i) => (&rest[..i], Some(&rest[i + 1..])),
+                None => (rest, None),
+            };
+            let level = match level_str {
+                "Normal" => DRLevel::Normal,
+                "Moderate" => DRLevel::Moderate,
+                "High" => DRLevel::High,
+                "Critical" => DRLevel::Critical,
+                "GridEmergency" => DRLevel::GridEmergency,
+                unknown => {
+                    return Err(HaresError::Control(format!(
+                        "unknown DR level '{unknown}' in DemandResponse for '{raw}': \
+                         valid levels are Normal, Moderate, High, Critical, GridEmergency"
+                    )));
+                }
+            };
+            let duration_s = match dur_str {
+                Some("inf") | Some("Inf") | Some("none") | Some("None") => None,
+                Some(s) => Some(s.parse::<f64>().map_err(|_| {
+                    HaresError::Control(format!("invalid duration_s for DemandResponse in '{raw}'"))
+                })?),
+                None => None,
+            };
+            Ok(DrAction::demand_response(level, duration_s))
+        }
         s if s.starts_with("SetpointAdjust:") => {
             let val: f64 = s
                 .strip_prefix("SetpointAdjust:")
@@ -158,7 +187,8 @@ fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
         _ => Err(HaresError::Control(format!(
             "unknown DrAction '{raw}': valid actions are TurnOff, SetpointAdjust:<delta_c>, \
              LoadCurtailment:<fraction>, PowerLimit:<max_kw>, \
-             AbsoluteSetpoint:<heating_c>:<cooling_c>, None"
+             AbsoluteSetpoint:<heating_c>:<cooling_c>, \
+             DemandResponse:<level>[:<duration_s>], None"
         ))),
     }
 }

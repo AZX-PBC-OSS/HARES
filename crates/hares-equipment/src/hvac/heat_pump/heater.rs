@@ -4074,6 +4074,71 @@ mod tests {
         assert_eq!(kw, 0.0, "GridEmergency must force zero output; got {kw}");
     }
 
+    // DR with duration_s: auto-reverts to Normal after the duration elapses.
+    // update_control decrements dr_duration_remaining_s by time_res (1 min = 60 s)
+    // each call. DR persists while remaining > 0 and auto-reverts when it reaches <= 0.
+    #[test]
+    fn dr_duration_auto_reverts() {
+        let cfg = heater_config();
+        let e = env(18.0, 5.0, 0.005);
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        // High DR for 120 s (two 60-s steps); time_res = 1 min = 60 s.
+        // First update_control decrements by 60 s → remaining = 60 s > 0 → still active.
+        // Second update_control decrements by 60 s → remaining = 0 s → reverts to Normal.
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(120.0),
+        })
+        .unwrap();
+
+        // Step 1: DR active → load_fraction=0.8, setpoint offset=-2°C → reduced output.
+        eq.update_control(&e);
+        let mut ports1 = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&e, Duration::from_secs(60), &mut ports1).unwrap();
+        let kw_dr = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+
+        // After one step, dr_duration_remaining_s must have decremented to 60 s.
+        assert_eq!(
+            eq.core.dr_duration_remaining_s,
+            Some(60.0),
+            "dr_duration_remaining_s must be 60 s after one step; got {:?}",
+            eq.core.dr_duration_remaining_s,
+        );
+
+        // Step 2: remaining decrements from 60 → 0 s → auto-revert to Normal → full output.
+        eq.update_control(&e);
+        let mut ports2 = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&e, Duration::from_secs(60), &mut ports2).unwrap();
+        let kw_after = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+
+        // Auto-revert must clear the duration and restore Normal.
+        assert!(
+            eq.core.dr_duration_remaining_s.is_none(),
+            "dr_duration_remaining_s must be None after auto-revert; got {:?}",
+            eq.core.dr_duration_remaining_s,
+        );
+        assert_eq!(
+            eq.core.dr_level,
+            DRLevel::Normal,
+            "dr_level must revert to Normal after duration expires; got {:?}",
+            eq.core.dr_level,
+        );
+        assert!(
+            kw_after > kw_dr,
+            "Output must recover after DR duration expires; \
+             dr={kw_dr:.4}, after={kw_after:.4}",
+        );
+    }
+
     // LoadFraction is transient: update_control resets ctrl_load_fraction=1.0 at its start.
     // Signals must be applied AFTER update_control but BEFORE step to take effect that step.
     // The next update_control call restores the default -- no re-apply needed.
