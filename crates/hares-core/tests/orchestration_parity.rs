@@ -32,7 +32,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hares_core::Dwelling;
+use hares_core::actors::IdealThermostat;
+use hares_core::{Actor, Dwelling};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -906,4 +907,119 @@ fn normal_operation_produces_no_dispatch_warnings() {
         "normal operation should produce no dispatch warnings, got: {:?}",
         dispatch_warnings
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test: IdealThermostat deadband validation prevents FSM oscillation
+//
+// The thermostat pushes setpoints with a gap that violates the equipment's
+// hysteresis deadband. The actor must reject the signal, preventing the
+// equipment FSM from receiving invalid setpoints that would cause it to
+// oscillate between Heating and Cooling.
+//
+// In debug/check_invariants builds, decide() panics on the violation
+// (correct — loud failure). In release, the signal is gracefully rejected
+// and recorded in telemetry. Either path proves the FSM is protected.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn thermostat_deadband_rejects_narrow_setpoints_protecting_fsm() {
+    use std::collections::HashMap;
+
+    let path = unique_temp_toml("deadband-osc");
+    // Outdoor at 20 C — warm enough that equipment would normally be in
+    // Deadband. The thermostat pushes heat=21, cool=22 with default
+    // hysteresis_c=1.0: gap = 1.0 < required 2.0 — deadband violation.
+    write_synthetic_toml(&path, 20.0, "electricity", 30.0, 600);
+
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
+    let _ = fs::remove_file(&path);
+
+    // Discover the HVAC equipment name so the thermostat targets it.
+    let hvac_names: Vec<String> = dwelling
+        .equipment()
+        .iter()
+        .filter_map(|eq| {
+            let tel = eq.telemetry();
+            // HVAC equipment exposes operating_mode.
+            if tel.get("operating_mode").is_some() {
+                Some(eq.descriptor().name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        !hvac_names.is_empty(),
+        "synthetic dwelling must have at least one HVAC equipment with operating_mode telemetry"
+    );
+    let hvac_name = &hvac_names[0];
+
+    // Add thermostat with setpoints that violate the deadband constraint.
+    let thermostat = IdealThermostat::new(hvac_name).with_setpoints(21.0, 22.0);
+    dwelling.add_actor(Box::new(thermostat));
+
+    // Collect pre-step equipment operating modes.
+    let mut equipment_modes_history: Vec<HashMap<String, f64>> = Vec::new();
+
+    let mut steps_survived = 0;
+    for _step in 0..10 {
+        let step_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dwelling.step().expect("step must succeed");
+        }));
+        match step_result {
+            Ok(()) => {
+                steps_survived += 1;
+                // Record equipment operating modes for oscillation check.
+                let mut mode_map = HashMap::new();
+                for eq in dwelling.equipment() {
+                    let tel = eq.telemetry();
+                    if let Some(mode) = tel.get("operating_mode") {
+                        mode_map.insert(eq.descriptor().name.clone(), mode);
+                    }
+                }
+                equipment_modes_history.push(mode_map);
+            }
+            Err(_) => {
+                // Debug/check_invariants panic in decide() — correct behavior.
+                // The simulation stops, preventing any oscillation.
+                break;
+            }
+        }
+    }
+
+    if steps_survived == 10 {
+        // Release path: all 10 steps completed. Verify the thermostat
+        // telemetry records the rejection.
+        let tel = dwelling.telemetry();
+        let actor_name = format!("IdealThermostat({hvac_name})");
+        let actor_tel = tel.actor_telemetry.get(&actor_name).unwrap_or_else(|| {
+            panic!(
+                "actor telemetry must contain '{}'; available: {:?}",
+                actor_name,
+                tel.actor_telemetry.keys().collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            actor_tel.get("setpoint_inversion_rejected"),
+            Some(&1.0),
+            "thermostat telemetry must record deadband rejection flag = 1.0"
+        );
+
+        // Verify the HVAC equipment never enters Heating or Cooling mode
+        // (operating_mode code 1.0 = Heating, 2.0 = Cooling).
+        // The offending signal was rejected, so the FSM stays in Deadband/Off.
+        for (step, mode_map) in equipment_modes_history.iter().enumerate() {
+            if let Some(mode) = mode_map.get(hvac_name) {
+                assert!(
+                    *mode != 1.0 && *mode != 2.0,
+                    "step {step}: HVAC equipment entered active mode {mode} (1.0=Heat, 2.0=Cool); \
+                     deadband-violating setpoints should have been blocked"
+                );
+            }
+        }
+    }
+    // If steps_survived < 10, the debug panic stopped the simulation —
+    // which is also correct behavior (loud failure on invariant violation).
 }

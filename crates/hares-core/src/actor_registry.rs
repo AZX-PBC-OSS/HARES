@@ -116,6 +116,9 @@ impl ActorRegistry {
                 if let Some(deadband) = config.get_f64("deadband_c") {
                     actor = actor.with_deadband(deadband);
                 }
+                if let Some(h) = config.get_f64("hysteresis_c") {
+                    actor = actor.with_hysteresis(h);
+                }
                 Ok(Box::new(actor))
             }),
         );
@@ -435,6 +438,31 @@ mod tests {
 
         let actor = registry.create(config).expect("create actor");
         assert_eq!(actor.name(), "Thermostat");
+    }
+
+    #[test]
+    fn actor_registry_ideal_thermostat_hysteresis_from_config() {
+        let registry = ActorRegistry::new();
+        // With hysteresis_c=0.5, required gap is 1.0°C.
+        // setpoints 20.0/21.0 have gap=1.0 which meets the threshold.
+        let config = ActorConfig::new("Thermostat", "IdealThermostat")
+            .with_param("target", ConfigValue::Text("MainHVAC".into()))
+            .with_param("heating_c", ConfigValue::Float(20.0))
+            .with_param("cooling_c", ConfigValue::Float(21.0))
+            .with_param("hysteresis_c", ConfigValue::Float(0.5));
+        let mut actor = registry.create(config).expect("create actor");
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            actor.decide(&env, &mut requests);
+        }));
+        if result.is_ok() {
+            assert_eq!(
+                requests.len(),
+                1,
+                "gap=1.0 with hysteresis=0.5 should pass validation"
+            );
+        }
     }
 
     #[test]

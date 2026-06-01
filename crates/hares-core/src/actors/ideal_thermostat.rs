@@ -216,13 +216,18 @@ impl IdealThermostat {
         &self.override_state
     }
 
-    /// Updates the override state, rejecting inverted setpoints.
+    /// Updates the override state, rejecting strictly inverted setpoints.
     ///
     /// When both `heating_setpoint_c` and `cooling_setpoint_c` are set and
     /// `heating >= cooling`, the override is rejected:
     /// - In debug/check_invariants builds: panics with a diagnostic message.
     /// - In release builds: no-ops, logs a warning, and increments the
     ///   observable rejection counter.
+    ///
+    /// NOTE: This method only catches strict inversion (heating >= cooling).
+    /// Deadband violations (cooling - heating < 2 * hysteresis_c) are not
+    /// checked here — they are caught later in `decide()` which is the
+    /// authoritative gate.
     pub fn set_override(&mut self, state: OverrideState) {
         if let (Some(heating_c), Some(cooling_c)) =
             (state.heating_setpoint_c, state.cooling_setpoint_c)
