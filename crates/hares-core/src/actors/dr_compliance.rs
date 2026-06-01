@@ -258,13 +258,14 @@ pub struct DrCompliance {
 impl DrCompliance {
     /// Creates a new DR compliance actor with the default compliance model.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(6);
+        let mut telemetry = Telemetry::with_capacity(7);
         telemetry.insert("dr_level", 0.0);
         telemetry.insert("dr_active", 0.0);
         telemetry.insert("dr_complied", 0.0);
         telemetry.insert("signals_count", 0.0);
         telemetry.insert("dr_freeze_guard", 0.0);
         telemetry.insert("clear_signals_dispatched_count", 0.0);
+        telemetry.insert("targets_configured", 0.0);
         Self {
             name: Arc::from(name),
             model: Box::new(AlwaysComply),
@@ -289,6 +290,10 @@ impl DrCompliance {
     /// Sets the HVAC equipment target.
     pub fn with_hvac_target(mut self, target: DispatchTarget) -> Self {
         self.hvac_target = Some(target);
+        self.telemetry.set(
+            "targets_configured",
+            self.load_targets.len() as f64 + 1.0,
+        );
         self
     }
 
@@ -301,6 +306,10 @@ impl DrCompliance {
     /// Adds a load curtailment target with a specific action.
     pub fn with_load_target(mut self, target: DispatchTarget, action: DrAction) -> Self {
         self.load_targets.push((target, action));
+        self.telemetry.set(
+            "targets_configured",
+            self.hvac_target.is_some() as u8 as f64 + self.load_targets.len() as f64,
+        );
         self
     }
 

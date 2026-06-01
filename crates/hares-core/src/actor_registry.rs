@@ -26,6 +26,7 @@
 //! | `FloatArray` | `Vec<f64>` | `list[float]` | `[20.0, 22.0]` |
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use hares_control::DispatchTarget;
 use hares_equipment::config::ConfigValue;
@@ -36,7 +37,7 @@ use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, Sched
 
 use crate::Actor;
 use crate::actors::{
-    AlwaysComply, BatteryManagementActor, DrCompliance, EquipmentBehavior, EvDriverActor,
+    AlwaysComply, BatteryManagementActor, DrAction, DrCompliance, EquipmentBehavior, EvDriverActor,
     IdealThermostat, Occupant, Presence, Probabilistic, SafetyMonitor,
 };
 
@@ -80,6 +81,136 @@ impl ActorConfig {
     pub fn get_f64_array(&self, key: &str) -> Option<&[f64]> {
         self.parameters.get(key).and_then(ConfigValue::as_f64_array)
     }
+}
+
+fn parse_dispatch_target(raw: &str) -> Result<DispatchTarget, HaresError> {
+    if let Some(rest) = raw.strip_prefix("name:") {
+        if rest.is_empty() {
+            return Err(HaresError::Control(
+                "dispatch target 'name:' requires a non-empty equipment name".into(),
+            ));
+        }
+        Ok(DispatchTarget::ByName(Arc::from(rest)))
+    } else if let Some(rest) = raw.strip_prefix("end_use:") {
+        if rest.is_empty() {
+            return Err(HaresError::Control(
+                "dispatch target 'end_use:' requires a non-empty end-use string".into(),
+            ));
+        }
+        Ok(DispatchTarget::ByEndUse(EndUse::custom(rest.to_string())))
+    } else {
+        Err(HaresError::Control(format!(
+            "invalid dispatch target '{raw}': must start with 'name:' or 'end_use:'"
+        )))
+    }
+}
+
+fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
+    match raw {
+        "TurnOff" => Ok(DrAction::TurnOff),
+        "None" => Ok(DrAction::None),
+        s if s.starts_with("SetpointAdjust:") => {
+            let val: f64 = s
+                .strip_prefix("SetpointAdjust:")
+                .unwrap()
+                .parse()
+                .map_err(|_| {
+                    HaresError::Control(format!("invalid delta_c for SetpointAdjust in '{raw}'"))
+                })?;
+            Ok(DrAction::setpoint_delta(val))
+        }
+        s if s.starts_with("LoadCurtailment:") => {
+            let val: f64 = s
+                .strip_prefix("LoadCurtailment:")
+                .unwrap()
+                .parse()
+                .map_err(|_| {
+                    HaresError::Control(format!("invalid fraction for LoadCurtailment in '{raw}'"))
+                })?;
+            Ok(DrAction::curtail(val))
+        }
+        s if s.starts_with("PowerLimit:") => {
+            let val: f64 = s
+                .strip_prefix("PowerLimit:")
+                .unwrap()
+                .parse()
+                .map_err(|_| {
+                    HaresError::Control(format!("invalid max_kw for PowerLimit in '{raw}'"))
+                })?;
+            Ok(DrAction::limit_power(val))
+        }
+        s if s.starts_with("AbsoluteSetpoint:") => {
+            let rest = s.strip_prefix("AbsoluteSetpoint:").unwrap();
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            if parts.len() != 2 {
+                return Err(HaresError::Control(format!(
+                    "AbsoluteSetpoint requires heating_c:cooling_c, got '{rest}'"
+                )));
+            }
+            let heat: f64 = parts[0].parse().map_err(|_| {
+                HaresError::Control(format!("invalid heating_c for AbsoluteSetpoint in '{raw}'"))
+            })?;
+            let cool: f64 = parts[1].parse().map_err(|_| {
+                HaresError::Control(format!("invalid cooling_c for AbsoluteSetpoint in '{raw}'"))
+            })?;
+            Ok(DrAction::absolute_setpoint(heat, cool))
+        }
+        _ => Err(HaresError::Control(format!(
+            "unknown DrAction '{raw}': valid actions are TurnOff, SetpointAdjust:<delta_c>, \
+             LoadCurtailment:<fraction>, PowerLimit:<max_kw>, \
+             AbsoluteSetpoint:<heating_c>:<cooling_c>, None"
+        ))),
+    }
+}
+
+fn parse_load_target(raw: &str) -> Result<(DispatchTarget, DrAction), HaresError> {
+    let (prefix, rest) = raw.split_once(':').ok_or_else(|| {
+        HaresError::Control(format!(
+            "invalid load target '{raw}': missing target prefix (name: or end_use:)"
+        ))
+    })?;
+    match prefix {
+        "name" => {
+            let (equip_name, action_str) = rest.split_once(':').ok_or_else(|| {
+                HaresError::Control(format!(
+                    "load target '{raw}' missing action after equipment name"
+                ))
+            })?;
+            if equip_name.is_empty() {
+                return Err(HaresError::Control(format!(
+                    "load target '{raw}' has empty equipment name"
+                )));
+            }
+            let target = DispatchTarget::ByName(Arc::from(equip_name));
+            let action = parse_dr_action(action_str)?;
+            Ok((target, action))
+        }
+        "end_use" => {
+            let (end_use_str, action_str) = rest.split_once(':').ok_or_else(|| {
+                HaresError::Control(format!("load target '{raw}' missing action after end_use"))
+            })?;
+            if end_use_str.is_empty() {
+                return Err(HaresError::Control(format!(
+                    "load target '{raw}' has empty end_use"
+                )));
+            }
+            let target = DispatchTarget::ByEndUse(EndUse::custom(end_use_str.to_string()));
+            let action = parse_dr_action(action_str)?;
+            Ok((target, action))
+        }
+        other => Err(HaresError::Control(format!(
+            "load target prefix must be 'name' or 'end_use', got '{other}' in '{raw}'"
+        ))),
+    }
+}
+
+fn parse_load_targets(raw: &str) -> Result<Vec<(DispatchTarget, DrAction)>, HaresError> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    raw.split(';')
+        .map(|s| parse_load_target(s.trim()))
+        .collect()
 }
 
 /// Registry mapping actor type strings to actor constructors.
@@ -232,6 +363,39 @@ impl ActorRegistry {
                     });
                 } else if config.get_bool("always_comply").unwrap_or(false) {
                     actor = actor.with_compliance_model(AlwaysComply);
+                }
+                if let Some(target_str) = config.get_str("hvac_target") {
+                    let target = parse_dispatch_target(target_str)?;
+                    actor = actor.with_hvac_target(target);
+                }
+                if let Some(action_str) = config.get_str("hvac_action") {
+                    let action = parse_dr_action(action_str)?;
+                    actor = actor.with_hvac_action(action);
+                }
+                if let Some(load_str) = config.get_str("load_targets") {
+                    let targets = parse_load_targets(load_str)?;
+                    for (target, action) in targets {
+                        actor = actor.with_load_target(target, action);
+                    }
+                }
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    let has_hvac_target = config.get_str("hvac_target").is_some();
+                    let has_hvac_action = config.get_str("hvac_action").is_some();
+                    if has_hvac_target && !has_hvac_action {
+                        tracing::debug!(
+                            name = %config.name,
+                            "DrCompliance actor has hvac_target but no hvac_action; \
+                             dispatch will use DrAction::None (no signal emitted)"
+                        );
+                    }
+                    if has_hvac_action && !has_hvac_target {
+                        tracing::debug!(
+                            name = %config.name,
+                            "DrCompliance actor has hvac_action but no hvac_target; \
+                             hvac_action will not dispatch"
+                        );
+                    }
                 }
                 Ok(Box::new(actor))
             }),
@@ -482,6 +646,233 @@ mod tests {
 
         let actor = registry.create(config).expect("create actor");
         assert_eq!(actor.name(), "DR1");
+    }
+
+    #[test]
+    fn actor_registry_create_dr_compliance_with_targets_and_actions() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("DR2", "DrCompliance")
+            .with_param("always_comply", ConfigValue::Bool(true))
+            .with_param("hvac_target", ConfigValue::Text("name:MainHVAC".into()))
+            .with_param(
+                "hvac_action",
+                ConfigValue::Text("SetpointAdjust:2.0".into()),
+            )
+            .with_param(
+                "load_targets",
+                ConfigValue::Text(
+                    "end_use:plug_loads:LoadCurtailment:0.5;name:EV:PowerLimit:5.0".into(),
+                ),
+            );
+
+        let mut actor = registry
+            .create(config)
+            .expect("create dr compliance with targets");
+        assert_eq!(actor.name(), "DR2");
+
+        // Verify registry-constructed actor exposes telemetry and produces correct
+        // initial state through the Actor trait interface. Full dispatch-path
+        // verification requires set_dr_level() which is on DrCompliance, not Actor;
+        // the direct-construction test below (dispatch_with_targets_and_dr_level)
+        // covers the dispatch logic. See Known Limitations: T-1937 (ActorFactory
+        // context) would enable dwelling-level validation of registry-constructed
+        // actors end-to-end.
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert!(requests.is_empty(), "no signals expected at Normal DR level");
+
+        let telemetry = actor
+            .telemetry()
+            .expect("DrCompliance must expose telemetry");
+        assert_eq!(
+            telemetry.get("signals_count"),
+            Some(0.0),
+            "signals_count must be 0 after Normal DR decide with no prior dispatch state"
+        );
+        assert_eq!(
+            telemetry.get("dr_level"),
+            Some(0.0),
+            "dr_level must be Normal (0.0) after construction"
+        );
+        assert_eq!(
+            telemetry.get("dr_active"),
+            Some(0.0),
+            "dr_active must be 0 after construction"
+        );
+        assert_eq!(
+            telemetry.get("targets_configured"),
+            Some(3.0),
+            "targets_configured must be 3 (1 HVAC + 2 load targets); \
+             verifies that config parsing wired targets into the actor"
+        );
+    }
+
+    #[test]
+    fn actor_registry_create_dr_compliance_invalid_hvac_target_format() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("DR3", "DrCompliance")
+            .with_param("always_comply", ConfigValue::Bool(true))
+            .with_param("hvac_target", ConfigValue::Text("bad_format".into()));
+
+        let result = registry.create(config);
+        assert!(
+            result.is_err(),
+            "registry creation should fail for invalid hvac_target format"
+        );
+        match &result {
+            Err(HaresError::Control(msg)) => {
+                assert!(
+                    msg.contains("invalid dispatch target") || msg.contains("must start with"),
+                    "error should describe format requirements, got: {msg}"
+                );
+            }
+            _ => panic!("expected Control error"),
+        }
+    }
+
+    #[test]
+    fn actor_registry_create_dr_compliance_invalid_hvac_action_format() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("DR4", "DrCompliance")
+            .with_param("always_comply", ConfigValue::Bool(true))
+            .with_param("hvac_target", ConfigValue::Text("name:HVAC".into()))
+            .with_param("hvac_action", ConfigValue::Text("UnknownAction".into()));
+
+        let result = registry.create(config);
+        assert!(
+            result.is_err(),
+            "registry creation should fail for invalid hvac_action"
+        );
+        match &result {
+            Err(HaresError::Control(msg)) => {
+                assert!(
+                    msg.contains("unknown DrAction") || msg.contains("valid actions"),
+                    "error should list valid actions, got: {msg}"
+                );
+            }
+            _ => panic!("expected Control error"),
+        }
+    }
+
+    #[test]
+    fn actor_registry_create_dr_compliance_invalid_load_target_format() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("DR5", "DrCompliance")
+            .with_param("always_comply", ConfigValue::Bool(true))
+            .with_param(
+                "load_targets",
+                ConfigValue::Text("invalid:missing:parts".into()),
+            );
+
+        let result = registry.create(config);
+        assert!(
+            result.is_err(),
+            "registry creation should fail for invalid load_targets prefix"
+        );
+        match &result {
+            Err(HaresError::Control(msg)) => {
+                assert!(
+                    msg.contains("load target prefix must be 'name' or 'end_use'"),
+                    "error should identify bad prefix, got: {msg}"
+                );
+            }
+            _ => panic!("expected Control error"),
+        }
+    }
+
+    #[test]
+    fn actor_registry_create_dr_compliance_empty_hvac_target_name() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("DR6", "DrCompliance")
+            .with_param("always_comply", ConfigValue::Bool(true))
+            .with_param("hvac_target", ConfigValue::Text("name:".into()));
+
+        let result = registry.create(config);
+        assert!(
+            result.is_err(),
+            "registry creation should fail for empty equipment name in hvac_target"
+        );
+        match &result {
+            Err(HaresError::Control(msg)) => {
+                assert!(
+                    msg.contains("non-empty equipment name"),
+                    "error should mention non-empty requirement, got: {msg}"
+                );
+            }
+            _ => panic!("expected Control error"),
+        }
+    }
+
+    #[test]
+    fn actor_registry_create_dr_compliance_empty_hvac_target_end_use() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("DR7", "DrCompliance")
+            .with_param("always_comply", ConfigValue::Bool(true))
+            .with_param("hvac_target", ConfigValue::Text("end_use:".into()));
+
+        let result = registry.create(config);
+        assert!(
+            result.is_err(),
+            "registry creation should fail for empty end_use in hvac_target"
+        );
+        match &result {
+            Err(HaresError::Control(msg)) => {
+                assert!(
+                    msg.contains("non-empty end-use string"),
+                    "error should mention non-empty requirement, got: {msg}"
+                );
+            }
+            _ => panic!("expected Control error"),
+        }
+    }
+
+    #[test]
+    fn actor_registry_create_dr_compliance_dispatch_with_targets_and_dr_level() {
+        use crate::actors::DrCompliance;
+        use hares_types::DRLevel;
+
+        let mut actor = DrCompliance::new("DR8")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName(Arc::from("HVAC")))
+            .with_hvac_action(DrAction::off())
+            .with_load_target(
+                DispatchTarget::ByEndUse(EndUse::PLUG_LOADS),
+                DrAction::curtail(0.5),
+            );
+
+        actor.set_dr_level(DRLevel::Critical);
+
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(
+            requests.len(),
+            2,
+            "should dispatch 2 signals: 1 HVAC TurnOff + 1 plug load curtailment"
+        );
+
+        let has_hvac = requests.iter().any(|r| {
+            matches!(&r.target, DispatchTarget::ByName(n) if &**n == "HVAC")
+                && matches!(
+                    &r.signal,
+                    hares_types::ControlSignal::ModeOverride {
+                        mode: hares_types::OperatingMode::Off
+                    }
+                )
+        });
+        assert!(has_hvac, "HVAC TurnOff not dispatched");
+
+        let has_plug = requests.iter().any(|r| {
+            matches!(&r.target, DispatchTarget::ByEndUse(eu) if *eu == EndUse::PLUG_LOADS)
+                && matches!(
+                    &r.signal,
+                    hares_types::ControlSignal::LoadFraction { fraction: f }
+                    if (f - 0.5).abs() < 0.01
+                )
+        });
+        assert!(has_plug, "plug loads curtailment not dispatched");
     }
 
     #[test]
