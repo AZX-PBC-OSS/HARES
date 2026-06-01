@@ -152,6 +152,26 @@ pub fn wet_bulb_from_humidity_ratio_typed(t_db: Temperature, w: f64, p: Pressure
     ))
 }
 
+/// Zone relative humidity (0–1) derived from the zone's stored `temperature_c`
+/// and `humidity_ratio` plus the current atmospheric pressure.
+///
+/// This is the canonical accessor — callers must use this instead of inspecting
+/// `ZoneState` fields that no longer exist, guaranteeing that relative humidity
+/// is always consistent with the current thermodynamic state.
+pub fn zone_relative_humidity(zone: &hares_types::ZoneState, pressure_pa: f64) -> f64 {
+    relative_humidity(zone.temperature_c, zone.humidity_ratio, pressure_pa)
+}
+
+/// Zone wet-bulb temperature [°C] derived from the zone's stored `temperature_c`
+/// and `humidity_ratio` plus the current atmospheric pressure.
+///
+/// This is the canonical accessor — callers must use this instead of inspecting
+/// `ZoneState` fields that no longer exist, guaranteeing that wet-bulb is
+/// always consistent with the current thermodynamic state.
+pub fn zone_wet_bulb_c(zone: &hares_types::ZoneState, pressure_pa: f64) -> f64 {
+    wet_bulb_from_humidity_ratio(zone.temperature_c, zone.humidity_ratio, pressure_pa)
+}
+
 /// Dew-point [°C] from humidity ratio and pressure [Pa].
 pub fn dew_point(w: f64, p_pa: f64) -> f64 {
     let w_eff = w.max(MIN_HUMIDITY_RATIO);
@@ -658,6 +678,106 @@ mod tests {
         assert!(
             rel_err < 0.02,
             "sub-freezing round-trip error {rel_err:.4} too large"
+        );
+    }
+
+    /// Unit test: after updating `temperature_c` on a ZoneState, the computed
+    /// accessors `zone_relative_humidity` and `zone_wet_bulb_c` return values
+    /// consistent with the psychrometric library, reflecting the current
+    /// temperature, not a stale stored value (T-0170).
+    #[test]
+    fn zone_state_accessors_reflect_temperature_change() {
+        let p = 101_325.0; // standard sea-level pressure [Pa]
+        let w = 0.009; // humidity ratio [kg/kg]
+
+        let mut zone = hares_types::ZoneState::new(hares_types::ZoneId(1), 20.0, w, 200.0);
+        let rh_20 = zone_relative_humidity(&zone, p);
+        let wb_20 = zone_wet_bulb_c(&zone, p);
+        assert!(rh_20 > 0.0 && rh_20 <= 1.0, "RH at 20°C should be valid");
+        assert!(wb_20 > 0.0 && wb_20 < 30.0, "WB at 20°C should be valid");
+
+        // Change temperature — RH and WB must follow immediately.
+        zone.temperature_c = 30.0;
+        let rh_30 = zone_relative_humidity(&zone, p);
+        let wb_30 = zone_wet_bulb_c(&zone, p);
+
+        // At higher temperature with same absolute humidity, RH decreases.
+        assert!(
+            rh_30 < rh_20,
+            "RH must drop when temperature rises: {rh_20:.4} → {rh_30:.4}"
+        );
+        // Wet-bulb rises when dry-bulb rises at constant humidity ratio.
+        assert!(
+            wb_30 > wb_20,
+            "WB must rise when temperature rises: {wb_20:.4} → {wb_30:.4}"
+        );
+
+        // Verify values match direct psychrometric computation.
+        let expected_rh_30 = relative_humidity(30.0, w, p);
+        let expected_wb_30 = wet_bulb_from_humidity_ratio(30.0, w, p);
+        assert!(
+            (rh_30 - expected_rh_30).abs() < 1e-12,
+            "zone_relative_humidity must match direct psychrometric call"
+        );
+        assert!(
+            (wb_30 - expected_wb_30).abs() < 1e-12,
+            "zone_wet_bulb_c must match direct psychrometric call"
+        );
+    }
+
+    /// Regression test: simulate a multi-pass equipment iteration within a
+    /// timestep where temperature is adjusted between humidity updates.
+    /// RH and wet-bulb must reflect the current temperature, never stale
+    /// values from the last humidity solver pass (T-0170).
+    ///
+    /// Scenario: humidity solver updates humidity_ratio at 23°C; equipment
+    /// step moves temperature to 27°C. The computed accessors must return
+    /// values for the 27°C state, not the old 23°C state.
+    #[test]
+    fn multi_pass_temperature_change_not_stale() {
+        let p = 101_325.0;
+        let w = 0.010;
+
+        let mut zone = hares_types::ZoneState::new(hares_types::ZoneId(1), 23.0, w, 200.0);
+
+        // Pass 1: humidity solver ran, set humidity_ratio. Record RH/WB at 23°C.
+        let rh_pass1 = zone_relative_humidity(&zone, p);
+        let wb_pass1 = zone_wet_bulb_c(&zone, p);
+
+        // Pass 2: equipment adjusts temperature to 27°C.
+        zone.temperature_c = 27.0;
+        let rh_pass2 = zone_relative_humidity(&zone, p);
+        let wb_pass2 = zone_wet_bulb_c(&zone, p);
+
+        // RH must NOT be the stale value from pass 1.
+        assert!(
+            rh_pass2 != rh_pass1,
+            "RH must change when temperature changes between passes"
+        );
+        assert!(
+            wb_pass2 != wb_pass1,
+            "WB must change when temperature changes between passes"
+        );
+
+        // The warm pass has lower RH (same absolute moisture, higher temp).
+        assert!(rh_pass2 < rh_pass1,
+            "RH at 27°C ({rh_pass2:.4}) must be lower than RH at 23°C ({rh_pass1:.4})");
+        // The warm pass has higher WB.
+        assert!(wb_pass2 > wb_pass1,
+            "WB at 27°C ({wb_pass2:.4}) must be higher than WB at 23°C ({wb_pass1:.4})");
+
+        // Both passes match direct psychrometric results.
+        assert!(
+            (rh_pass1 - relative_humidity(23.0, w, p)).abs() < 1e-12
+        );
+        assert!(
+            (rh_pass2 - relative_humidity(27.0, w, p)).abs() < 1e-12
+        );
+        assert!(
+            (wb_pass1 - wet_bulb_from_humidity_ratio(23.0, w, p)).abs() < 0.02
+        );
+        assert!(
+            (wb_pass2 - wet_bulb_from_humidity_ratio(27.0, w, p)).abs() < 0.02
         );
     }
 }

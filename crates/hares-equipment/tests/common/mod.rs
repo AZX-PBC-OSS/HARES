@@ -56,9 +56,6 @@ impl EnvBuilder {
                 id: ZoneId(1),
                 temperature_c: self.zone_temp_c,
                 humidity_ratio: self.humidity_ratio,
-                relative_humidity: 0.45,
-                // Approximate wet-bulb: always ≤ dry-bulb to stay physically valid.
-                wet_bulb_c: (self.zone_temp_c - 3.0).min(self.zone_temp_c),
                 volume_m3: self.zone_volume_m3,
             }],
             weather: WeatherState {

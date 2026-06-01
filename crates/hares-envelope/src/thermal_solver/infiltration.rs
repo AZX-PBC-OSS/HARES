@@ -298,8 +298,6 @@ mod tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.007,
-                relative_humidity: 0.45,
-                wet_bulb_c: zone_temp_c - 3.0,
                 volume_m3,
             }],
             weather: WeatherState {
@@ -363,8 +361,6 @@ mod tests {
             id: ZoneId(2),
             temperature_c: other_temp_c,
             humidity_ratio: 0.007,
-            relative_humidity: 0.45,
-            wet_bulb_c: other_temp_c - 3.0,
             volume_m3: other_volume_m3,
         });
         env

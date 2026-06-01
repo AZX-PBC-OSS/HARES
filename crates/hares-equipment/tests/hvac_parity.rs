@@ -30,8 +30,6 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, zone_wb_c: f64) -> Environmen
             id: ZoneId(1),
             temperature_c: zone_temp_c,
             humidity_ratio: 0.010,
-            relative_humidity: 0.50,
-            wet_bulb_c: zone_wb_c,
             volume_m3: 200.0,
         }],
         weather: WeatherState {
@@ -99,8 +97,6 @@ fn make_env_two_zones(
         id: ZoneId(2),
         temperature_c: zone2_temp_c,
         humidity_ratio: 0.010,
-        relative_humidity: 0.50,
-        wet_bulb_c: zone2_wb_c,
         volume_m3: 200.0,
     });
     env

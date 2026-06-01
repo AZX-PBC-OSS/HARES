@@ -309,10 +309,9 @@ impl HeatPumpWH {
         self.descriptor
             .zone
             .and_then(|zone| {
-                env.zones
-                    .iter()
-                    .find(|z| z.id == zone)
-                    .map(|z| z.wet_bulb_c)
+                env.zones.iter().find(|z| z.id == zone).map(|z| {
+                    hares_physics::psychrometrics::zone_wet_bulb_c(z, env.weather.pressure_pa())
+                })
             })
             .unwrap_or_else(|| self.zone_temp_c(env))
     }
@@ -1262,8 +1261,6 @@ mod tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -1578,13 +1575,19 @@ mod tests {
     }
 
     fn env_with_wet_bulb(zone_temp_c: f64, wet_bulb_c: f64) -> EnvironmentState {
+        // Compute the humidity_ratio needed so that zone_wet_bulb_c() returns
+        // the target wet_bulb_c at this temperature and pressure.
+        let pressure_pa = 101_325.0;
+        let humidity_ratio = hares_physics::psychrometrics::humidity_ratio_from_twb(
+            zone_temp_c,
+            wet_bulb_c,
+            pressure_pa,
+        );
         EnvironmentState {
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
-                humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c,
+                humidity_ratio,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -2383,8 +2386,6 @@ mod mutual_exclusion_tests {
                 id: ZoneId(1),
                 temperature_c: 24.0,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -2669,8 +2670,6 @@ mod dr_tests {
                 id: ZoneId(1),
                 temperature_c: 24.0,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -2984,8 +2983,6 @@ mod new_feature_tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: zone_temp_c - 5.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {

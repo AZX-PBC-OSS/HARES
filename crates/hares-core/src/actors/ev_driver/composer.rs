@@ -585,8 +585,9 @@ mod tests {
             label: "unclamped:charge",
         };
 
-        let prefs: Vec<Box<dyn ChargingPreference>> =
-            vec![Box::new(ScoredPref { vote: unclamped_vote })];
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(ScoredPref {
+            vote: unclamped_vote,
+        })];
         let mut composer = ChargingComposer::new(prefs, "ev1");
         let mut out = Vec::new();
         composer.evaluate(&ctx, &mut out);
@@ -623,8 +624,9 @@ mod tests {
             label: "unclamped:discharge",
         };
 
-        let prefs: Vec<Box<dyn ChargingPreference>> =
-            vec![Box::new(ScoredPref { vote: unclamped_vote })];
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(ScoredPref {
+            vote: unclamped_vote,
+        })];
         let mut composer = ChargingComposer::new(prefs, "ev1");
         let mut out = Vec::new();
         composer.evaluate(&ctx, &mut out);
@@ -687,8 +689,9 @@ mod tests {
             label: "within_limit:discharge",
         };
 
-        let prefs: Vec<Box<dyn ChargingPreference>> =
-            vec![Box::new(ScoredPref { vote: discharge_vote })];
+        let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(ScoredPref {
+            vote: discharge_vote,
+        })];
         let mut composer = ChargingComposer::new(prefs, "ev1");
         let mut out = Vec::new();
         composer.evaluate(&ctx, &mut out);

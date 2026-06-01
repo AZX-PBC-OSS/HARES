@@ -1166,7 +1166,7 @@ impl HeatPumpHeaterCore {
                     env.weather.outdoor_temp_c,
                     env.weather.outdoor_humidity_ratio,
                     pressure_pa,
-                    zone.wet_bulb_c,
+                    hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa),
                     max_capacity_w,
                     current_cap,
                     rtf,
@@ -1637,7 +1637,9 @@ impl HeatPumpHeaterCore {
                     defrost_q_w = 0.0;
                     let defrost_eir = match self.defrost_config.defrost_eir_coeffs {
                         Some(c) => {
-                            let wb = zone.wet_bulb_c.max(DEFROST_EIR_CURVE_TEMP_MIN_C);
+                            let wb =
+                                hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa)
+                                    .max(DEFROST_EIR_CURVE_TEMP_MIN_C);
                             let db = env.weather.outdoor_temp_c.max(DEFROST_EIR_CURVE_TEMP_MIN_C);
                             c[0] + c[1] * wb
                                 + c[2] * wb * wb
@@ -1689,7 +1691,7 @@ impl HeatPumpHeaterCore {
                 env.weather.outdoor_temp_c,
                 env.weather.outdoor_humidity_ratio,
                 pressure_pa,
-                zone.wet_bulb_c,
+                hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa),
                 max_capacity_w,
                 hp_capacity_w,
                 plr,
@@ -2468,8 +2470,6 @@ mod tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -3640,8 +3640,6 @@ mod tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -6522,8 +6520,6 @@ mod ideal_capacity_tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {

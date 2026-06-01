@@ -39,8 +39,6 @@ fn env_with_zone(zone_temp_c: f64, outdoor_temp_c: f64, humidity_ratio: f64) -> 
             id: ZoneId(1),
             temperature_c: zone_temp_c,
             humidity_ratio,
-            relative_humidity: 0.45,
-            wet_bulb_c: zone_temp_c - 5.0,
             volume_m3: 200.0,
         }],
         weather: WeatherState {

@@ -151,7 +151,13 @@ fn environment_to_py_dict<'py>(py: Python<'py>, env: &EnvironmentState) -> Bound
             let _ = z.set_item("id", zone.id.0);
             let _ = z.set_item("temperature_c", zone.temperature_c);
             let _ = z.set_item("humidity_ratio", zone.humidity_ratio);
-            let _ = z.set_item("relative_humidity", zone.relative_humidity);
+            let _ = z.set_item(
+                "relative_humidity",
+                hares_physics::psychrometrics::zone_relative_humidity(
+                    zone,
+                    env.weather.pressure_pa(),
+                ),
+            );
             let _ = z.set_item("volume_m3", zone.volume_m3);
             z
         })

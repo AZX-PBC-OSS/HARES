@@ -483,13 +483,11 @@ impl Equipment for Dehumidifier {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        let pressure_pa = env.weather.pressure_pa();
         let zone = env.zones.iter().find(|z| z.id == self.zone_id);
         if let Some(zone_state) = zone {
-            self.update_is_on(
-                zone_state
-                    .relative_humidity
-                    .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION),
-            );
+            let rh = hares_physics::psychrometrics::zone_relative_humidity(zone_state, pressure_pa);
+            self.update_is_on(rh.clamp(RH_MIN_FRACTION, RH_MAX_FRACTION));
         } else {
             self.is_on = false;
             self.operating_mode = OperatingMode::Off;
@@ -509,10 +507,11 @@ impl Equipment for Dehumidifier {
             .find(|z| z.id == self.zone_id)
             .ok_or_else(|| HaresError::Equipment(format!("zone {} not found", self.zone_id.0)))?;
 
+        let pressure_pa = env.weather.pressure_pa();
+        let rh = hares_physics::psychrometrics::zone_relative_humidity(zone, pressure_pa);
         let snapshot = self.performance_snapshot(
             zone.temperature_c,
-            zone.relative_humidity
-                .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION),
+            rh.clamp(RH_MIN_FRACTION, RH_MAX_FRACTION),
         );
         self.check_invariants(snapshot.plf, snapshot.rtf)?;
         if snapshot.electric_power_w > 0.0 {
@@ -835,13 +834,21 @@ mod tests {
     }
 
     fn env_with_temp(temperature_c: f64, relative_humidity: f64) -> EnvironmentState {
+        // Compute humidity_ratio from desired RH so the computed accessor
+        // zone_relative_humidity() returns the intended value.
+        let pressure_pa = 101_325.0;
+        let p_sat = hares_physics::psychrometrics::saturation_pressure_pa(temperature_c);
+        let p_v = (relative_humidity * p_sat).clamp(0.0, p_sat * 0.9999);
+        let humidity_ratio = if p_v > 0.0 {
+            hares_physics::psychrometrics::EPSILON * p_v / (pressure_pa - p_v)
+        } else {
+            0.0
+        };
         EnvironmentState {
             zones: vec![ZoneState {
                 id: ZoneId(1),
                 temperature_c,
-                humidity_ratio: 0.010,
-                relative_humidity,
-                wet_bulb_c: 20.0,
+                humidity_ratio,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {

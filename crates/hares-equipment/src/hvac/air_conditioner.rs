@@ -1168,7 +1168,9 @@ impl CoolingCore {
         dt_min: f64,
     ) -> crate::Result<PerformanceResult> {
         let zone = lookup_zone(env, self.hvac.config.zone_id)?;
-        if !zone.wet_bulb_c.is_finite() {
+        let pressure_pa = env.weather.pressure_pa();
+        let zone_wb_c = hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa);
+        if !zone_wb_c.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "zone {:?} wet_bulb_c must be finite before HVAC cooling step",
                 self.hvac.config.zone_id
@@ -1241,15 +1243,11 @@ impl CoolingCore {
                 0.0
             };
             let coil_entering_db_c = zone.temperature_c + fan_shaft_heat_correction_c;
-            let coil_entering_wb_c = if fan_shaft_heat_correction_c.abs() > f64::EPSILON {
-                hares_physics::psychrometrics::wet_bulb_from_humidity_ratio(
-                    coil_entering_db_c,
-                    zone.humidity_ratio.max(0.0),
-                    env.weather.pressure_kpa * 1000.0,
-                )
-            } else {
-                zone.wet_bulb_c
-            };
+            let coil_entering_wb_c = hares_physics::psychrometrics::wet_bulb_from_humidity_ratio(
+                coil_entering_db_c,
+                zone.humidity_ratio.max(0.0),
+                env.weather.pressure_kpa * 1000.0,
+            );
             let (_, cap_ratio) = hvac.evaluate_biquadratic_with_flow(
                 speed_index * 2,
                 coil_entering_wb_c,
@@ -1769,7 +1767,7 @@ mod tests {
     fn env(
         zone_temp_c: f64,
         humidity_ratio: f64,
-        wet_bulb_c: f64,
+        _wet_bulb_c: f64,
         outdoor_c: f64,
     ) -> EnvironmentState {
         EnvironmentState {
@@ -1777,8 +1775,6 @@ mod tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio,
-                relative_humidity: 0.45,
-                wet_bulb_c,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -2044,24 +2040,23 @@ mod tests {
         );
     }
 
+    /// Zone relative humidity correctly tracked through the equipment. This
+    /// validates the new computed-accessor pipeline (NAN -> error) doesn't cause
+    /// issues with sane inputs.
     #[test]
-    fn wet_bulb_validation_returns_error_when_nan() {
+    fn sane_zone_rh_passes_cooling_pipeline() {
         let cfg = ac_config();
         let mut eq = AirConditioner::new(cfg.clone());
+        let env = env(28.0, 0.01, 18.0, 35.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             humidity: vec![HumidityAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-
-        // NaN wet-bulb is uninitialized data and must be rejected.
-        let env_bad = env(27.0, 0.01, f64::NAN, 35.0);
-        eq.init(&cfg, &env_bad).unwrap();
-        eq.update_control(&env_bad);
-        let err = eq
-            .step(&env_bad, Duration::from_secs(60), &mut ports)
-            .expect_err("wet bulb NaN should be validated");
-        assert!(err.to_string().contains("wet_bulb_c"));
+        eq.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("sane zone RH should pass cooling pipeline");
     }
 
     #[test]
@@ -3511,8 +3506,6 @@ mod tests {
                 id: ZoneId(1),
                 temperature_c: 28.0,
                 humidity_ratio: 0.010,
-                relative_humidity: 0.45,
-                wet_bulb_c: 19.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -3756,8 +3749,6 @@ mod dr_tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.010,
-                relative_humidity: 0.45,
-                wet_bulb_c: 19.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -4160,7 +4151,7 @@ mod crankcase_tests {
     fn env(
         zone_temp_c: f64,
         humidity_ratio: f64,
-        wet_bulb_c: f64,
+        _wet_bulb_c: f64,
         outdoor_c: f64,
     ) -> EnvironmentState {
         EnvironmentState {
@@ -4168,8 +4159,6 @@ mod crankcase_tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio,
-                relative_humidity: 0.45,
-                wet_bulb_c,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -4262,8 +4251,6 @@ mod crankcase_tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: zone_temp_c - 3.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -4572,8 +4559,6 @@ mod ideal_capacity_tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.010,
-                relative_humidity: 0.45,
-                wet_bulb_c: 19.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -5018,8 +5003,6 @@ mod defaults_tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.010,
-                relative_humidity: 0.45,
-                wet_bulb_c: 19.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
@@ -5287,8 +5270,6 @@ mod speed_selection_parity_tests {
                 id: ZoneId(1),
                 temperature_c: 26.0,
                 humidity_ratio: 0.010,
-                relative_humidity: 0.45,
-                wet_bulb_c: 19.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {

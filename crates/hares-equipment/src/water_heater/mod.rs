@@ -670,8 +670,6 @@ mod dhw_integration_tests {
                 id: ZoneId(1),
                 temperature_c: 21.0,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {

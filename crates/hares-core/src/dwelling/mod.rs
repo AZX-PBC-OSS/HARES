@@ -7217,16 +7217,12 @@ occupancy = 1.0
                 id: ZoneId(10),
                 temperature_c: 21.0,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             },
             ZoneState {
                 id: ZoneId(3),
                 temperature_c: 16.0,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 120.0,
             },
         ];
@@ -7262,8 +7258,6 @@ occupancy = 1.0
             id: ZoneId(1),
             temperature_c: 21.0,
             humidity_ratio: 0.008,
-            relative_humidity: 0.45,
-            wet_bulb_c: 14.0,
             volume_m3: 200.0,
         }];
         let zone_types = vec![ZoneType::Conditioned];
@@ -7553,8 +7547,6 @@ occupancy = 1.0
                 id: ZoneId(1),
                 temperature_c: 21.0,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             }],
             weather: hares_types::WeatherState::default(),
@@ -7763,8 +7755,6 @@ master_seed = 0
                     id: zone_id,
                     temperature_c,
                     humidity_ratio: 0.008,
-                    relative_humidity: 0.45,
-                    wet_bulb_c: 14.0,
                     volume_m3: 120.0,
                 }],
                 weather: WeatherState::default(),

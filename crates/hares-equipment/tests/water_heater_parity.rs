@@ -30,8 +30,6 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
             id: ZoneId(1),
             temperature_c: zone_temp_c,
             humidity_ratio: 0.008,
-            relative_humidity: 0.45,
-            wet_bulb_c: zone_temp_c - 3.0,
             volume_m3: 200.0,
         }],
         weather: WeatherState {

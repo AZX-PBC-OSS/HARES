@@ -389,16 +389,12 @@ mod tests {
                 id: hares_types::ZoneId(1),
                 temperature_c: 3.0,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             },
             hares_types::ZoneState {
                 id: hares_types::ZoneId(2),
                 temperature_c: 55.0,
                 humidity_ratio: 0.010,
-                relative_humidity: 0.15,
-                wet_bulb_c: 25.0,
                 volume_m3: 200.0,
             },
         ];
@@ -446,16 +442,12 @@ mod tests {
                 id: hares_types::ZoneId(1),
                 temperature_c: 3.0,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             },
             hares_types::ZoneState {
                 id: hares_types::ZoneId(2),
                 temperature_c: 3.5,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 150.0,
             },
         ];

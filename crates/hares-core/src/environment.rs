@@ -948,8 +948,6 @@ fn initial_zones(
             id: ZoneId(1),
             temperature_c: default_temp,
             humidity_ratio: 0.008,
-            relative_humidity: 0.45,
-            wet_bulb_c: default_temp,
             volume_m3: DEFAULT_ZONE_VOLUME_M3,
         }]);
     }
@@ -995,8 +993,6 @@ fn initial_zones(
                     id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
                     temperature_c: temp,
                     humidity_ratio: 0.008,
-                    relative_humidity: 0.45,
-                    wet_bulb_c: temp,
                     volume_m3,
                 })
             },
@@ -1579,8 +1575,6 @@ mod tests {
             id: ZoneId(1),
             temperature_c: 22.0,
             humidity_ratio: 0.008,
-            relative_humidity: 0.45,
-            wet_bulb_c: 22.0,
             volume_m3: 200.0,
         }];
         let env = manager.update(&clock(), &feedback).unwrap();

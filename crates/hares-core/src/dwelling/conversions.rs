@@ -496,8 +496,9 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
     for chunk in payload.chunks_exact(5) {
         let zone_raw = chunk[0];
         let humidity_ratio = chunk[1];
-        let relative_humidity = chunk[2];
-        let wet_bulb_c = chunk[3];
+        // chunk[2] and chunk[3] are relative_humidity and wet_bulb_c — no longer
+        // stored in ZoneState; they are derived from humidity_ratio + temperature_c
+        // on every read via zone_relative_humidity / zone_wet_bulb_c.
         let alpha = chunk[4];
 
         if !zone_raw.is_finite() || zone_raw < 0.0 || zone_raw > f64::from(u16::MAX) {
@@ -506,8 +507,6 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
         let zone_id = ZoneId(zone_raw as u16);
         if let Some(zone) = env.zones.iter_mut().find(|z| z.id == zone_id) {
             zone.humidity_ratio = humidity_ratio;
-            zone.relative_humidity = relative_humidity;
-            zone.wet_bulb_c = wet_bulb_c;
         }
         let alpha_key = format!(
             "{}_zone_{}",
@@ -1195,8 +1194,6 @@ mod tests {
                 id: hares_types::ZoneId(zone_id),
                 temperature_c: 22.0,
                 humidity_ratio,
-                relative_humidity: 0.45,
-                wet_bulb_c: 19.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {

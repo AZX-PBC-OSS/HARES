@@ -114,14 +114,41 @@ impl From<ZoneId> for u16 {
 }
 
 /// Zone-level state used by equipment and envelope models each timestep.
+///
+/// `relative_humidity` and `wet_bulb_c` are derived from `humidity_ratio` and
+/// `temperature_c` via psychrometric functions at each access point (see
+/// `hares_physics::psychrometrics::zone_relative_humidity` and
+/// `zone_wet_bulb_c`). They are not stored as independent fields — this
+/// guarantees consistency with the current thermodynamic state and matches the
+/// OCHRE approach of computing on every access.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ZoneState {
     pub id: ZoneId,
     pub temperature_c: f64,
     pub humidity_ratio: f64,
-    pub relative_humidity: f64,
-    pub wet_bulb_c: f64,
     pub volume_m3: f64,
+}
+
+impl Default for ZoneState {
+    fn default() -> Self {
+        Self {
+            id: ZoneId(0),
+            temperature_c: 20.0,
+            humidity_ratio: 0.008,
+            volume_m3: 200.0,
+        }
+    }
+}
+
+impl ZoneState {
+    pub fn new(id: ZoneId, temperature_c: f64, humidity_ratio: f64, volume_m3: f64) -> Self {
+        Self {
+            id,
+            temperature_c,
+            humidity_ratio,
+            volume_m3,
+        }
+    }
 }
 
 /// Solar irradiance components mapped to an envelope surface.
@@ -455,8 +482,6 @@ mod tests {
                 id: ZoneId(1),
                 temperature_c: 21.5,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.2,
                 volume_m3: 240.0,
             }],
             weather: WeatherState {
@@ -523,8 +548,6 @@ mod tests {
                 id: ZoneId(1),
                 temperature_c: 21.0,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState::default(),

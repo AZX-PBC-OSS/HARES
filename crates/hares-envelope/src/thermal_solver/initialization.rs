@@ -300,8 +300,6 @@ mod tests {
                 id: ZoneId(1),
                 temperature_c: zone_temp_c,
                 humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: zone_temp_c - 5.0,
                 volume_m3: 200.0,
             }],
             weather: WeatherState {
