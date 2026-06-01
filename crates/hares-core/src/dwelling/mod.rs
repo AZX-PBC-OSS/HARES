@@ -17,7 +17,7 @@ use std::time::Duration as StdDuration;
 #[cfg(any(feature = "profiling", feature = "actor_profiling"))]
 use std::time::Instant;
 
-use chrono::{DateTime, Duration, FixedOffset};
+use chrono::{DateTime, Duration, FixedOffset, Timelike};
 use chrono_tz::Tz;
 use hares_control::{
     DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal, PriorityTier,
@@ -43,9 +43,10 @@ use hares_physics::units::power_w_to_kw;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 use hares_types::{
     BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver, ElectricalSummary,
-    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, PortDeclaration,
-    PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId, ZoneMap, ZoneRole,
-    telemetry_keys as tk, validate_core_contract, validate_fluid_type_consistency,
+    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
+    PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId,
+    ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
+    validate_fluid_type_consistency,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -59,7 +60,7 @@ use crate::environment::EnvironmentInitOptions;
 use crate::invariants::InvariantChecker;
 use crate::scheduler::{ActorSlot, ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
-use crate::{Actor, EnvironmentManager, SimClock, derive_dwelling_rng};
+use crate::{Actor, ActorInterest, EnvironmentManager, SimClock, derive_dwelling_rng};
 
 #[cfg(feature = "observe")]
 use crate::observer::{
@@ -888,6 +889,19 @@ pub struct Dwelling {
     /// Solver feedback actor: bridges thermal solver to IdealHvac equipment.
     /// Stored separately (not in actors Vec) so dwelling can call collect_and_solve().
     solver_feedback_actor: SolverFeedbackActor,
+    /// Previous-step zone temperatures for ActorInterest::ZoneTemperatureDelta.
+    /// Empty on the very first step (all interests trigger).
+    prev_zone_temps: HashMap<ZoneId, f64>,
+    /// Zone temperatures from the step before the previous step (step N-2).
+    /// Used by interest_triggered as a one-step-lagged comparison target so the
+    /// delta reflects an actual per-step change rather than comparing
+    /// latest_env (not yet updated by the Step 4 envelope solve when
+    /// ActorDecide runs at Step 1e-1f) against prev_zone_temps (same source).
+    prior_zone_temps: HashMap<ZoneId, f64>,
+    /// Previous-step price signal for ActorInterest::PriceSignalChange.
+    prev_price_signal: PriceSignal,
+    /// Previous-step equipment operating modes for ActorInterest::EquipmentModeChange.
+    prev_equipment_modes: HashMap<EquipmentId, Option<OperatingMode>>,
     /// Pre-computed equipment execution order (sorted by stage rank).
     /// Computed once at init time, reused each timestep.
     equipment_execution_order: Vec<usize>,
@@ -935,6 +949,22 @@ pub struct Dwelling {
     observer_buf: Option<ObserverBuffer>,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     envelope_diagnostics: EnvelopeDiagnostics,
+}
+
+/// Borrowed view of per-step actor-interest filter state passed to
+/// `Dwelling::interest_triggered`. Groups the shift-register zone-temp maps,
+/// the previous price signal, equipment mode snapshot, and the equipment
+/// metadata needed to resolve `DispatchTarget` references into a single
+/// argument so the hot-loop call site stays readable.
+struct InterestFilterState<'a> {
+    /// Step N-1 zone temperatures (used as first-step sentinel for PriceSignalChange).
+    prev_zone_temps: &'a HashMap<ZoneId, f64>,
+    /// Step N-2 zone temperatures (used for the actual ZoneTemperatureDelta comparison).
+    prior_zone_temps: &'a HashMap<ZoneId, f64>,
+    prev_price_signal: &'a PriceSignal,
+    prev_equipment_modes: &'a HashMap<EquipmentId, Option<OperatingMode>>,
+    equipment_id_by_name: &'a HashMap<String, EquipmentId>,
+    equipment: &'a [Box<dyn Equipment>],
 }
 
 impl Dwelling {
@@ -1563,6 +1593,10 @@ impl Dwelling {
             auto_registered_actor_names: HashSet::new(),
             actor_dispatch_buf: Vec::with_capacity(16),
             solver_feedback_actor,
+            prev_zone_temps: HashMap::new(),
+            prior_zone_temps: HashMap::new(),
+            prev_price_signal: PriceSignal::default(),
+            prev_equipment_modes: HashMap::new(),
             equipment_execution_order,
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             invariant_checker: InvariantChecker::new(),
@@ -2729,6 +2763,92 @@ impl Dwelling {
         Ok(max_iter)
     }
 
+    /// Returns true if an actor interest was triggered by state changes
+    /// between the previous step and the current step.
+    fn interest_triggered(
+        interest: &ActorInterest,
+        env: &EnvironmentState,
+        filter: &InterestFilterState<'_>,
+    ) -> bool {
+        let InterestFilterState {
+            prev_zone_temps,
+            prior_zone_temps,
+            prev_price_signal,
+            prev_equipment_modes,
+            equipment_id_by_name,
+            equipment,
+        } = filter;
+        match interest {
+            ActorInterest::EveryStep => true,
+            ActorInterest::ZoneTemperatureDelta { zone, threshold_c } => {
+                let current = env
+                    .zones
+                    .iter()
+                    .find(|z| z.id == *zone)
+                    .map(|z| z.temperature_c);
+                match (current, prior_zone_temps.get(zone)) {
+                    (Some(current), Some(prev)) => (current - prev).abs() >= *threshold_c,
+                    (Some(_), None) => true,
+                    _ => false,
+                }
+            }
+            ActorInterest::TimeOfDay { hour } => env.current_time.hour() as u8 == *hour,
+            ActorInterest::EquipmentModeChange { target } => Self::equipment_mode_changed(
+                target,
+                env,
+                prev_equipment_modes,
+                equipment_id_by_name,
+                equipment,
+            ),
+            ActorInterest::PriceSignalChange => {
+                prev_zone_temps.is_empty() || env.price_signal != **prev_price_signal
+            }
+        }
+    }
+
+    /// Checks whether the operating mode of the equipment identified by `target`
+    /// has changed since the previous step.
+    fn equipment_mode_changed(
+        target: &DispatchTarget,
+        env: &EnvironmentState,
+        prev_equipment_modes: &HashMap<EquipmentId, Option<OperatingMode>>,
+        equipment_id_by_name: &HashMap<String, EquipmentId>,
+        equipment: &[Box<dyn Equipment>],
+    ) -> bool {
+        match target {
+            DispatchTarget::ByName(name) => {
+                let Some(&id) = equipment_id_by_name.get(name.as_ref()) else {
+                    return false;
+                };
+                let current = env
+                    .equipment_core
+                    .get(&id)
+                    .and_then(|co| co.state.operating_mode);
+                let prev = prev_equipment_modes.get(&id).copied().flatten();
+                current != prev
+            }
+            DispatchTarget::ByEndUse(end_use) => {
+                for eq in equipment {
+                    if eq.descriptor().end_use == *end_use {
+                        let desc = eq.descriptor();
+                        let Some(&id) = equipment_id_by_name.get(&desc.name) else {
+                            continue;
+                        };
+                        let current = env
+                            .equipment_core
+                            .get(&id)
+                            .and_then(|co| co.state.operating_mode);
+                        let prev = prev_equipment_modes.get(&id).copied().flatten();
+                        if current != prev {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+        }
+    }
+
     fn run_timestep(&mut self, record_output: bool) -> Result<()> {
         if self.failed {
             return Err(HaresError::Dwelling(
@@ -2875,6 +2995,10 @@ impl Dwelling {
 
         #[cfg(feature = "observe")]
         let mut scheduled_phases: Vec<String> = Vec::new();
+        #[cfg(feature = "observe")]
+        let mut actor_skips: usize = 0;
+        #[cfg(feature = "observe")]
+        let mut actor_calls: usize = 0;
         #[cfg(debug_assertions)]
         let mut executed_actors: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
@@ -2907,20 +3031,43 @@ impl Dwelling {
                         .expect("ActorDecide plan entries must carry a slot")
                         .0;
 
+                    let interests = self.actors[idx].interests();
+                    let filter = InterestFilterState {
+                        prev_zone_temps: &self.prev_zone_temps,
+                        prior_zone_temps: &self.prior_zone_temps,
+                        prev_price_signal: &self.prev_price_signal,
+                        prev_equipment_modes: &self.prev_equipment_modes,
+                        equipment_id_by_name: &self.equipment_id_by_name,
+                        equipment: &self.equipment,
+                    };
+                    let should_call = interests.is_empty()
+                        || interests.iter().any(|interest| {
+                            Self::interest_triggered(interest, &self.latest_env, &filter)
+                        });
+
                     #[cfg(feature = "observe")]
-                    scheduled_phases.push(format!("ActorDecide({})", entry.name));
-                    #[cfg(debug_assertions)]
-                    {
-                        executed_actors.insert(idx);
+                    if should_call {
+                        actor_calls += 1;
+                    } else {
+                        actor_skips += 1;
                     }
 
-                    #[cfg(feature = "actor_profiling")]
-                    let start = Instant::now();
+                    if should_call {
+                        #[cfg(feature = "observe")]
+                        scheduled_phases.push(format!("ActorDecide({})", entry.name));
+                        #[cfg(debug_assertions)]
+                        {
+                            executed_actors.insert(idx);
+                        }
 
-                    self.actors[idx].decide(&self.latest_env, &mut self.actor_dispatch_buf);
+                        #[cfg(feature = "actor_profiling")]
+                        let start = Instant::now();
 
-                    #[cfg(feature = "actor_profiling")]
-                    self.per_actor_timing.push((idx, start.elapsed()));
+                        self.actors[idx].decide(&self.latest_env, &mut self.actor_dispatch_buf);
+
+                        #[cfg(feature = "actor_profiling")]
+                        self.per_actor_timing.push((idx, start.elapsed()));
+                    }
                 }
             }
         }
@@ -2931,19 +3078,23 @@ impl Dwelling {
 
         #[cfg(debug_assertions)]
         {
-            // Invariant: every actor in the vector that registered for a phase
-            // must have executed during the plan iteration.
             for (i, actor) in self.actors.iter().enumerate() {
+                let interests = actor.interests();
+                let is_every_step = interests.is_empty()
+                    || interests
+                        .iter()
+                        .any(|i| matches!(i, ActorInterest::EveryStep));
                 let registered = self
                     .scheduler
                     .plan()
                     .iter()
                     .any(|e| e.slot == Some(ActorSlot(i)));
-                if registered && !executed_actors.contains(&i) {
-                    tracing::warn!(
-                        actor_name = actor.name(),
-                        actor_index = i,
-                        "actor registered for execution but did not execute in this timestep"
+                if registered && is_every_step {
+                    debug_assert!(
+                        executed_actors.contains(&i),
+                        "EveryStep actor '{}' (index {}) was not called during ActorDecide phase",
+                        actor.name(),
+                        i,
                     );
                 }
             }
@@ -3326,6 +3477,8 @@ impl Dwelling {
                 step_index: self.clock.current_step(),
                 timestamp: self.latest_env.current_time,
                 phases: obs_phases,
+                actor_skips,
+                actor_calls,
             });
         }
 
@@ -3498,6 +3651,23 @@ impl Dwelling {
             battery_power_kw: battery_kw,
             ev_power_kw: ev_kw,
         };
+
+        // Update previous-step state for interest filtering on the next step.
+        // Shift-register: prior ← prev (swap, zero alloc), then prev ← current
+        // step's zones (clear + re-insert, zero alloc — reuses existing capacity).
+        std::mem::swap(&mut self.prior_zone_temps, &mut self.prev_zone_temps);
+        self.prev_zone_temps.clear();
+        for zone in &self.latest_env.zones {
+            self.prev_zone_temps.insert(zone.id, zone.temperature_c);
+        }
+        self.prev_price_signal = self.latest_env.price_signal.clone();
+        self.prev_equipment_modes.clear();
+        self.prev_equipment_modes.extend(
+            self.latest_env
+                .equipment_core
+                .iter()
+                .map(|(&id, co)| (id, co.state.operating_mode)),
+        );
 
         // ORDERING: ports.zero() must come AFTER check_invariants() (called above)
         // because the electrical balance check reads self.ports.electrical.load_power_w
@@ -7514,5 +7684,193 @@ master_seed = 0
             "step-past-end error must be HaresError::Dwelling, got {:?}",
             err
         );
+    }
+
+    #[test]
+    fn zone_temperature_delta_above_threshold_triggers_interest() {
+        use chrono::{Duration, FixedOffset, TimeZone};
+        use hares_types::{ElectricalSummary, GridState, WeatherState};
+        use std::collections::HashMap;
+
+        let zone = ZoneId(1);
+        let threshold_c = 2.0;
+        let interest = ActorInterest::ZoneTemperatureDelta { zone, threshold_c };
+        let prev_price = PriceSignal::default();
+        let prev_modes: HashMap<EquipmentId, Option<OperatingMode>> = HashMap::new();
+        let id_by_name: HashMap<String, EquipmentId> = HashMap::new();
+        let equipment: Vec<Box<dyn Equipment>> = vec![];
+
+        fn env_with_zone(zone_id: ZoneId, temperature_c: f64) -> EnvironmentState {
+            EnvironmentState {
+                zones: vec![ZoneState {
+                    id: zone_id,
+                    temperature_c,
+                    humidity_ratio: 0.008,
+                    relative_humidity: 0.45,
+                    wet_bulb_c: 14.0,
+                    volume_m3: 120.0,
+                }],
+                weather: WeatherState::default(),
+                grid: GridState {
+                    voltage_pu: 1.0,
+                    frequency_hz: 60.0,
+                },
+                custom_domains: vec![],
+                equipment_telemetry: Default::default(),
+                equipment_core: Default::default(),
+                current_time: FixedOffset::east_opt(0)
+                    .expect("UTC")
+                    .with_ymd_and_hms(2024, 6, 15, 12, 0, 0)
+                    .single()
+                    .expect("valid timestamp"),
+                time_res: Duration::minutes(1),
+                price_signal: PriceSignal::default(),
+                electrical: ElectricalSummary::default(),
+            }
+        }
+
+        // Case 1: prior_zone_temps empty → first comparison, always triggers.
+        {
+            let env = env_with_zone(zone, 21.0);
+            let prior_empty: HashMap<ZoneId, f64> = HashMap::new();
+            let prev_empty: HashMap<ZoneId, f64> = HashMap::new();
+            assert!(
+                Dwelling::interest_triggered(
+                    &interest,
+                    &env,
+                    &InterestFilterState {
+                        prev_zone_temps: &prev_empty,
+                        prior_zone_temps: &prior_empty,
+                        prev_price_signal: &prev_price,
+                        prev_equipment_modes: &prev_modes,
+                        equipment_id_by_name: &id_by_name,
+                        equipment: &equipment,
+                    },
+                ),
+                "first step with empty prior_zone_temps must trigger"
+            );
+        }
+
+        // Case 2: delta below threshold → should NOT trigger.
+        {
+            let env = env_with_zone(zone, 20.5);
+            let mut prior = HashMap::new();
+            prior.insert(zone, 20.0);
+            let prev_dummy: HashMap<ZoneId, f64> = HashMap::new();
+            assert!(
+                !Dwelling::interest_triggered(
+                    &interest,
+                    &env,
+                    &InterestFilterState {
+                        prev_zone_temps: &prev_dummy,
+                        prior_zone_temps: &prior,
+                        prev_price_signal: &prev_price,
+                        prev_equipment_modes: &prev_modes,
+                        equipment_id_by_name: &id_by_name,
+                        equipment: &equipment,
+                    },
+                ),
+                "0.5°C delta below 2.0°C threshold must not trigger"
+            );
+        }
+
+        // Case 3: delta above threshold (heating) → SHOULD trigger.
+        {
+            let env = env_with_zone(zone, 23.0);
+            let mut prior = HashMap::new();
+            prior.insert(zone, 20.0);
+            let prev_dummy: HashMap<ZoneId, f64> = HashMap::new();
+            assert!(
+                Dwelling::interest_triggered(
+                    &interest,
+                    &env,
+                    &InterestFilterState {
+                        prev_zone_temps: &prev_dummy,
+                        prior_zone_temps: &prior,
+                        prev_price_signal: &prev_price,
+                        prev_equipment_modes: &prev_modes,
+                        equipment_id_by_name: &id_by_name,
+                        equipment: &equipment,
+                    },
+                ),
+                "3.0°C heating delta must trigger when >= 2.0°C threshold"
+            );
+        }
+
+        // Case 4: negative delta above threshold (cooling) → SHOULD trigger via abs().
+        {
+            let env = env_with_zone(zone, 17.0);
+            let mut prior = HashMap::new();
+            prior.insert(zone, 20.0);
+            let prev_dummy: HashMap<ZoneId, f64> = HashMap::new();
+            assert!(
+                Dwelling::interest_triggered(
+                    &interest,
+                    &env,
+                    &InterestFilterState {
+                        prev_zone_temps: &prev_dummy,
+                        prior_zone_temps: &prior,
+                        prev_price_signal: &prev_price,
+                        prev_equipment_modes: &prev_modes,
+                        equipment_id_by_name: &id_by_name,
+                        equipment: &equipment,
+                    },
+                ),
+                "3.0°C cooling delta must trigger (abs) when >= 2.0°C threshold"
+            );
+        }
+
+        // Case 5: zone present in env but absent from prior → triggers (first comparison).
+        {
+            let env = env_with_zone(ZoneId(2), 30.0);
+            let mut prior = HashMap::new();
+            prior.insert(ZoneId(1), 20.0);
+            let prev_dummy: HashMap<ZoneId, f64> = HashMap::new();
+            let interest_z2 = ActorInterest::ZoneTemperatureDelta {
+                zone: ZoneId(2),
+                threshold_c: 2.0,
+            };
+            assert!(
+                Dwelling::interest_triggered(
+                    &interest_z2,
+                    &env,
+                    &InterestFilterState {
+                        prev_zone_temps: &prev_dummy,
+                        prior_zone_temps: &prior,
+                        prev_price_signal: &prev_price,
+                        prev_equipment_modes: &prev_modes,
+                        equipment_id_by_name: &id_by_name,
+                        equipment: &equipment,
+                    },
+                ),
+                "zone in env but not in prior_zone_temps must trigger"
+            );
+        }
+
+        // Case 6: zone absent from env → never triggers.
+        {
+            let env = env_with_zone(ZoneId(1), 20.0);
+            let prior: HashMap<ZoneId, f64> = HashMap::new();
+            let prev_dummy: HashMap<ZoneId, f64> = HashMap::new();
+            let interest_z99 = ActorInterest::ZoneTemperatureDelta {
+                zone: ZoneId(99),
+                threshold_c: 2.0,
+            };
+            assert!(
+                !Dwelling::interest_triggered(
+                    &interest_z99,
+                    &env,
+                    &InterestFilterState {
+                        prev_zone_temps: &prev_dummy,
+                        prior_zone_temps: &prior,
+                        prev_price_signal: &prev_price,
+                        prev_equipment_modes: &prev_modes,
+                        equipment_id_by_name: &id_by_name,
+                        equipment: &equipment,
+                    },
+                ),
+                "zone not present in env must never trigger"
+            );
+        }
     }
 }

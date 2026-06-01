@@ -21,6 +21,10 @@ pub struct StepSnapshot {
     pub step_index: u64,
     pub timestamp: DateTime<FixedOffset>,
     pub phases: PhaseSnapshots,
+    /// Number of actors skipped this step due to interest filtering.
+    pub actor_skips: usize,
+    /// Number of actors whose `decide()` was called this step.
+    pub actor_calls: usize,
 }
 
 /// Incrementally populated captures for each phase of `run_timestep`.
