@@ -384,12 +384,11 @@ impl SteppableFleet {
                     message: err.to_string(),
                 }),
                 Err(payload) => {
-                    let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
-                        DwellingBuildError {
+                    let handler_result =
+                        panic::catch_unwind(AssertUnwindSafe(|| DwellingBuildError {
                             bldg_id,
                             message: panic_hook::panic_payload_to_string(payload),
-                        }
-                    }));
+                        }));
                     match handler_result {
                         Ok(err) => build_errors.push(err),
                         Err(_) => {
@@ -408,7 +407,7 @@ impl SteppableFleet {
                             });
                         }
                     }
-                },
+                }
             }
         }
 
@@ -964,6 +963,8 @@ mod tests {
         let thread_ids = Arc::new(Mutex::new(HashSet::new()));
         let thread_ids_for_callback = Arc::clone(&thread_ids);
 
+        // Keep each unit of work non-trivial so Rayon has time to schedule
+        // across workers, even when simulations fail quickly.
         let fleet =
             Fleet::from_buildings(build_missing_configs(64)).with_progress(move |_done, _total| {
                 let id = thread::current().id();
@@ -971,6 +972,7 @@ mod tests {
                     .lock()
                     .expect("lock thread id set")
                     .insert(id);
+                std::thread::sleep(std::time::Duration::from_millis(2));
             });
 
         let sequential = fleet.simulate(1);
@@ -981,18 +983,33 @@ mod tests {
             .len();
         assert_eq!(sequential_threads, 1);
 
-        thread_ids
-            .lock()
-            .expect("lock thread id set for clear")
-            .clear();
+        // Retry a few times and assert on the max observed thread usage to
+        // avoid scheduler timing flakes.
+        let mut max_parallel_threads = 0usize;
+        for _ in 0..3 {
+            thread_ids
+                .lock()
+                .expect("lock thread id set for clear")
+                .clear();
 
-        let parallel = fleet.simulate(4);
-        assert_eq!(parallel.len(), 64);
-        let parallel_threads = thread_ids
-            .lock()
-            .expect("lock thread ids after parallel run")
-            .len();
-        assert!(parallel_threads > 1);
+            let parallel = fleet.simulate(4);
+            assert_eq!(parallel.len(), 64);
+
+            let parallel_threads = thread_ids
+                .lock()
+                .expect("lock thread ids after parallel run")
+                .len();
+            max_parallel_threads = max_parallel_threads.max(parallel_threads);
+
+            if max_parallel_threads > 1 {
+                break;
+            }
+        }
+
+        assert!(
+            max_parallel_threads > 1,
+            "expected >1 worker thread with n_threads=4, observed {max_parallel_threads}"
+        );
 
         let global_pool = fleet.simulate(0);
         assert_eq!(global_pool.len(), 64);

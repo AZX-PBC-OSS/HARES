@@ -129,6 +129,10 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "HaresSimulationError",
         m.py().get_type::<py_dwelling::HaresSimulationError>(),
     )?;
+    m.add(
+        "FatalDwellingError",
+        m.py().get_type::<py_dwelling::FatalDwellingError>(),
+    )?;
 
     m.add("OperatingMode", m.getattr("Mode")?)?;
     m.add("Mode", m.getattr("Mode")?)?;

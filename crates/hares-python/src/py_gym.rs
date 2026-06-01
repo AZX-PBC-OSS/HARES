@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 
-use crate::py_dwelling::{PyDwelling, lock_dwelling_string};
+use crate::py_dwelling::{FATAL_DWELLING_PREFIX, PyDwelling};
 
 /// One batched RL step result.
 #[derive(Debug, Clone)]
@@ -23,8 +23,8 @@ struct StepResult {
 
 fn observation_for_fields(dwelling: &PyDwelling, fields: &[String]) -> Result<Vec<f64>, String> {
     let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-    let dwelling = lock_dwelling_string(&dwelling.dwelling)?;
-    dwelling
+    let guard = dwelling.acquire_string()?;
+    guard
         .telemetry()
         .to_observation_vec(&refs)
         .map_err(|err| err.to_string())
@@ -109,10 +109,15 @@ pub fn batch_step_py(
                 }));
                 let step_result = match step_result {
                     Ok(inner) => inner,
-                    Err(payload) => Err(format!(
-                        "HARES internal panic: {}",
-                        panic_hook::panic_payload_to_string(payload)
-                    )),
+                    Err(payload) => {
+                        if dwelling.dwelling.is_poisoned() {
+                            dwelling.mark_poisoned();
+                        }
+                        Err(format!(
+                            "HARES internal panic: {}",
+                            panic_hook::panic_payload_to_string(payload)
+                        ))
+                    }
                 };
                 match step_result {
                     Ok(step) => {
@@ -139,7 +144,11 @@ pub fn batch_step_py(
                         }
                     }
                     Err(e) => {
+                        let is_fatal = e.starts_with(FATAL_DWELLING_PREFIX);
                         info.insert("error".to_string(), 1.0);
+                        if is_fatal {
+                            info.insert("dwelling_fatal".to_string(), 1.0);
+                        }
                         StepResult {
                             obs: Vec::new(),
                             reward: 0.0,

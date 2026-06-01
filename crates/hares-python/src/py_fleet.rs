@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hares_fleet::aggregation::{AggregationResolution, aggregate};
 use hares_fleet::{DwellingBuildError, Fleet, FleetResults, SimError, SteppableFleet};
@@ -341,19 +342,30 @@ fn to_py_err<E: std::fmt::Display>(err: E) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
-fn lock_steppable_fleet(fleet: &Mutex<SteppableFleet>) -> PyResult<MutexGuard<'_, SteppableFleet>> {
-    fleet.lock().map_err(|e| {
-        PyRuntimeError::new_err(format!(
-            "steppable fleet state is corrupted (internal panic: {}); create a new SteppableFleet instance",
-            e
-        ))
-    })
-}
-
 #[pyclass(name = "SteppableFleet")]
 pub struct PySteppableFleet {
     fleet: Mutex<SteppableFleet>,
+    poisoned: AtomicBool,
     build_errors: Vec<DwellingBuildError>,
+}
+
+impl PySteppableFleet {
+    fn acquire(&self) -> PyResult<std::sync::MutexGuard<'_, SteppableFleet>> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(PyRuntimeError::new_err(
+                "steppable fleet is in a fatal error state (internal state corruption); \
+                 create a new SteppableFleet instance",
+            ));
+        }
+        self.fleet.lock().map_err(|e| {
+            self.poisoned.store(true, Ordering::SeqCst);
+            PyRuntimeError::new_err(format!(
+                "steppable fleet state is corrupted (internal panic: {}); \
+                 create a new SteppableFleet instance",
+                e
+            ))
+        })
+    }
 }
 
 #[pymethods]
@@ -388,11 +400,18 @@ impl PySteppableFleet {
         }
         Ok(Self {
             fleet: Mutex::new(fleet),
+            poisoned: AtomicBool::new(false),
             build_errors,
         })
     }
 
     pub fn step(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(PyRuntimeError::new_err(
+                "steppable fleet is in a fatal error state (internal state corruption); \
+                 create a new SteppableFleet instance",
+            ));
+        }
         let (step_results, bldg_ids, reactive_power_kvar) = py
             .detach(|| {
                 let mut fleet = self.fleet.lock().map_err(|e| {
@@ -410,7 +429,12 @@ impl PySteppableFleet {
                     .collect::<Vec<_>>();
                 Ok::<_, String>((step_results, bldg_ids, reactive_power_kvar))
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|e| {
+                // If the closure returned an error string because the fleet mutex is
+                // poisoned, mark the fleet as dead so subsequent calls fail fast.
+                self.poisoned.store(true, Ordering::SeqCst);
+                PyRuntimeError::new_err(e)
+            })?;
 
         let out = PyList::empty(py);
         for (idx, entry) in step_results.into_iter().enumerate() {
@@ -469,7 +493,7 @@ impl PySteppableFleet {
     }
 
     pub fn set_grid_voltage(&self, dwelling_index: usize, voltage_pu: f64) -> PyResult<()> {
-        let mut fleet = lock_steppable_fleet(&self.fleet)?;
+        let mut fleet = self.acquire()?;
         if dwelling_index >= fleet.len() {
             return Err(PyIndexError::new_err(format!(
                 "dwelling_index {dwelling_index} out of range (len={})",
@@ -481,7 +505,7 @@ impl PySteppableFleet {
     }
 
     pub fn set_grid_voltage_all(&self, voltage_pu: f64) -> PyResult<()> {
-        let mut fleet = lock_steppable_fleet(&self.fleet)?;
+        let mut fleet = self.acquire()?;
         fleet.set_grid_voltage_all(voltage_pu);
         Ok(())
     }
@@ -492,7 +516,7 @@ impl PySteppableFleet {
         name: String,
         signal: &PyControlSignal,
     ) -> PyResult<()> {
-        let mut fleet = lock_steppable_fleet(&self.fleet)?;
+        let mut fleet = self.acquire()?;
         if dwelling_index >= fleet.len() {
             return Err(PyIndexError::new_err(format!(
                 "dwelling_index {dwelling_index} out of range (len={})",
@@ -504,7 +528,7 @@ impl PySteppableFleet {
     }
 
     pub fn telemetry(&self, dwelling_index: usize) -> PyResult<PyTelemetry> {
-        let fleet = lock_steppable_fleet(&self.fleet)?;
+        let fleet = self.acquire()?;
         fleet
             .telemetry(dwelling_index)
             .map(PyTelemetry::new)
@@ -517,32 +541,32 @@ impl PySteppableFleet {
     }
 
     pub fn is_finished(&self) -> PyResult<bool> {
-        let fleet = lock_steppable_fleet(&self.fleet)?;
+        let fleet = self.acquire()?;
         Ok(fleet.is_finished())
     }
 
     pub fn time_res_s(&self) -> PyResult<f64> {
-        let fleet = lock_steppable_fleet(&self.fleet)?;
+        let fleet = self.acquire()?;
         Ok(fleet.time_res_s())
     }
 
     pub fn total_steps(&self) -> PyResult<u64> {
-        let fleet = lock_steppable_fleet(&self.fleet)?;
+        let fleet = self.acquire()?;
         Ok(fleet.total_steps())
     }
 
     pub fn current_step(&self) -> PyResult<u64> {
-        let fleet = lock_steppable_fleet(&self.fleet)?;
+        let fleet = self.acquire()?;
         Ok(fleet.current_step())
     }
 
     fn __len__(&self) -> PyResult<usize> {
-        let fleet = lock_steppable_fleet(&self.fleet)?;
+        let fleet = self.acquire()?;
         Ok(fleet.len())
     }
 
     fn __repr__(&self) -> PyResult<String> {
-        let fleet = lock_steppable_fleet(&self.fleet)?;
+        let fleet = self.acquire()?;
         Ok(format!(
             "SteppableFleet(n_dwellings={}, current_step={}, total_steps={}, build_errors={})",
             fleet.len(),

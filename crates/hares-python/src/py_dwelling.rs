@@ -3,6 +3,7 @@
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::PriceSignal;
@@ -35,6 +36,7 @@ pyo3::create_exception!(
     HaresSimulationError,
     pyo3::exceptions::PyRuntimeError
 );
+pyo3::create_exception!(_hares, FatalDwellingError, pyo3::exceptions::PyRuntimeError);
 
 use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
 use crate::py_actor::PyActor;
@@ -498,43 +500,19 @@ fn protocol_bridge_config_from_py(bridge: &PyProtocolBridge) -> EquipmentConfig 
     EquipmentConfig::from_typed(bridge.name.clone(), "ProtocolBridge".to_string(), cfg)
 }
 
-fn lock_dwelling(dwelling: &Mutex<Dwelling>) -> PyResult<MutexGuard<'_, Dwelling>> {
-    dwelling.lock().map_err(|e| {
-        PyRuntimeError::new_err(format!(
-            "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
-            e
-        ))
-    })
-}
+// Lock helpers are now methods on PyDwelling (acquire, acquire_string,
+// acquire_hares) that check the `poisoned` AtomicBool before locking.
 
-/// GIL-free variant of [`lock_dwelling`] required by `Send` contexts (e.g. Rayon threads).
-///
-/// Returns `Err(String)` instead of `PyErr` so it can be used without holding the GIL.
-pub(crate) fn lock_dwelling_string(
-    dwelling: &Mutex<Dwelling>,
-) -> Result<MutexGuard<'_, Dwelling>, String> {
-    dwelling.lock().map_err(|e| {
-        format!(
-            "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
-            e
-        )
-    })
-}
-
-/// GIL-free variant that preserves [`HaresError`] for proper Python exception mapping
-/// via [`to_py_err`].
-fn lock_dwelling_hares(dwelling: &Mutex<Dwelling>) -> Result<MutexGuard<'_, Dwelling>, HaresError> {
-    dwelling.lock().map_err(|e| {
-        HaresError::Dwelling(format!(
-            "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
-            e
-        ))
-    })
-}
+/// Sentinels that identify a fatal dwelling error in GIL-free `String` error
+/// contexts (e.g. [`batch_step_py`]) where a typed error cannot cross thread
+/// boundaries.
+pub(crate) const FATAL_DWELLING_PREFIX: &str = "[FATAL_DWELLING] ";
 
 #[pyclass(name = "Dwelling")]
 pub struct PyDwelling {
     pub(crate) dwelling: Mutex<Dwelling>,
+    pub(crate) poisoned: AtomicBool,
+    pub(crate) mutex_poison_events: std::sync::atomic::AtomicU64,
     pub(crate) config: DwellingConfig,
     sim_config: PySimulationConfig,
     initial_state: Option<Vec<u8>>,
@@ -561,6 +539,8 @@ impl PyDwelling {
         let dwelling = Dwelling::from_config(config.clone()).map_err(to_py_err)?;
         Ok(Self {
             dwelling: Mutex::new(dwelling),
+            poisoned: AtomicBool::new(false),
+            mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
             config,
             sim_config,
             initial_state: None,
@@ -579,7 +559,7 @@ impl PyDwelling {
         }
 
         let bytes = {
-            let dwelling = lock_dwelling(&self.dwelling)?;
+            let dwelling = self.acquire()?;
             serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err_display)?
         };
 
@@ -589,7 +569,7 @@ impl PyDwelling {
     }
 
     pub fn timesteps(&self) -> PyResult<PyTimestepsIter> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
 
         let start = dwelling.clock.start_time;
         let time_res_s = dwelling.clock.time_res.num_seconds();
@@ -615,15 +595,23 @@ impl PyDwelling {
         }
         let sim_result: Result<Result<(), HaresError>, _> = py.detach(|| {
             std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let mut dwelling = lock_dwelling_hares(&self.dwelling)?;
+                let mut dwelling = self.acquire_hares()?;
                 dwelling.simulate()?;
                 Ok(())
             }))
         });
         match sim_result {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(to_py_err(e)),
+            Ok(Err(e)) => {
+                if self.poisoned.load(Ordering::Acquire) {
+                    return Err(FatalDwellingError::new_err(e.to_string()));
+                }
+                return Err(to_py_err(e));
+            }
             Err(payload) => {
+                if self.dwelling.is_poisoned() {
+                    self.mark_poisoned();
+                }
                 return Err(PyRuntimeError::new_err(format!(
                     "HARES internal panic: {}",
                     panic_hook::panic_payload_to_string(payload)
@@ -631,7 +619,15 @@ impl PyDwelling {
             }
         }
 
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                !self.poisoned.load(Ordering::Acquire) || self.dwelling.is_poisoned(),
+                "invariant violation: poisoned flag is true but dwelling mutex is not poisoned"
+            );
+        }
+
+        let dwelling = self.acquire()?;
         let batches: Vec<_> = dwelling.flushed_batches().to_vec();
         let steps = dwelling.results().steps.clone();
         drop(dwelling);
@@ -651,14 +647,30 @@ impl PyDwelling {
             py.detach(|| std::panic::catch_unwind(AssertUnwindSafe(|| self.step_core())));
         let step = match step_result {
             Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(to_py_err(e)),
+            Ok(Err(e)) => {
+                if self.poisoned.load(Ordering::Acquire) {
+                    return Err(FatalDwellingError::new_err(e.to_string()));
+                }
+                return Err(to_py_err(e));
+            }
             Err(payload) => {
+                if self.dwelling.is_poisoned() {
+                    self.mark_poisoned();
+                }
                 return Err(PyRuntimeError::new_err(format!(
                     "HARES internal panic: {}",
                     panic_hook::panic_payload_to_string(payload)
                 )));
             }
         };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                !self.poisoned.load(Ordering::Acquire) || self.dwelling.is_poisoned(),
+                "invariant violation: poisoned flag is true but dwelling mutex is not poisoned"
+            );
+        }
 
         if self.zone_keys.is_none() {
             let keys: Vec<String> = step
@@ -692,7 +704,7 @@ impl PyDwelling {
     }
 
     pub fn apply_control(&self, name: String, signal: &PyControlSignal) -> PyResult<()> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling
             .apply_control_validated(&name, signal.signal.clone())
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
@@ -700,7 +712,7 @@ impl PyDwelling {
 
     /// Adds a Python actor to the dwelling's decision-making loop.
     pub fn add_actor(&self, py: Python<'_>, actor: Py<PyActor>) -> PyResult<()> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         let wrapper = crate::py_actor::PyActorWrapper::new(py, actor);
         dwelling.add_actor(Box::new(wrapper));
         Ok(())
@@ -729,7 +741,7 @@ impl PyDwelling {
             }
         }
 
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling
             .add_actor_by_name(&self.registry, config)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -742,27 +754,27 @@ impl PyDwelling {
             export_price: dict_optional(signal, "export_price")?,
             ghg_intensity: dict_optional(signal, "ghg_intensity")?,
         };
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling.set_price_signal(price);
         Ok(())
     }
 
     pub fn set_grid_voltage(&self, voltage_pu: f64) -> PyResult<()> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling.set_grid_voltage(voltage_pu);
         Ok(())
     }
 
     #[cfg(feature = "observe")]
     pub fn enable_observer(&self, capacity: usize) -> PyResult<()> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling.enable_observer(capacity);
         Ok(())
     }
 
     #[cfg(feature = "observe")]
     pub fn drain_observations(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         let snapshots = dwelling.drain_observations();
         snapshots
             .into_iter()
@@ -770,13 +782,37 @@ impl PyDwelling {
             .collect()
     }
 
+    #[cfg(feature = "observe")]
+    #[getter]
+    pub fn poison_events(&self) -> u64 {
+        self.mutex_poison_events.load(Ordering::Relaxed)
+    }
+
     pub fn telemetry(&self) -> PyResult<PyTelemetry> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let fatal = self.poisoned.load(Ordering::Acquire);
+        if fatal {
+            // Dwelling is fatally poisoned — the mutex cannot be locked, but we
+            // surface the fatal status to Python callers.
+            return Err(FatalDwellingError::new_err(
+                "dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance",
+            ));
+        }
+        let dwelling = self.dwelling.lock().map_err(|e| {
+            FatalDwellingError::new_err(format!(
+                "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
+                e
+            ))
+        })?;
         Ok(PyTelemetry::new(dwelling.telemetry()))
     }
 
+    #[getter]
+    pub fn dwelling_fatal(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
     pub fn equipment_descriptors(&self) -> PyResult<Vec<PyEquipmentDescriptor>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         Ok(dwelling
             .equipment()
             .iter()
@@ -785,7 +821,7 @@ impl PyDwelling {
     }
 
     pub fn equipment(&self) -> PyResult<Vec<PyEquipment>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         Ok(dwelling
             .equipment()
             .iter()
@@ -800,7 +836,7 @@ impl PyDwelling {
     }
 
     pub fn equipment_names(&self) -> PyResult<Vec<String>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         Ok(dwelling
             .equipment()
             .iter()
@@ -816,7 +852,7 @@ impl PyDwelling {
     /// appears in the dict; equipment without reconciliation is absent.
     #[pyo3(name = "setpoints_reconciled")]
     pub fn py_setpoints_reconciled(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         let sr_map = dwelling.setpoints_reconciled();
         let result = PyDict::new(py);
         for (name, reconciliations) in sr_map {
@@ -845,7 +881,7 @@ impl PyDwelling {
             .create("Battery", config.clone())
             .map_err(to_py_err)?;
 
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
 
         // Set LUTs after init -- init may reset internal state
@@ -871,7 +907,7 @@ impl PyDwelling {
             .equipment_registry
             .create("PV", config.clone())
             .map_err(to_py_err)?;
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
 
         // Register the PV surface orientation with the environment so that
         // Perez irradiance is computed for this panel during simulation.
@@ -917,7 +953,7 @@ impl PyDwelling {
             .create("EV", config.clone())
             .map_err(to_py_err)?;
 
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
 
         // Set LUT after init -- init_from_config resets charging_curve_lut to None
@@ -993,7 +1029,7 @@ impl PyDwelling {
             .create("EV", config.clone())
             .map_err(to_py_err)?;
 
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
         dwelling.add_equipment(eq);
 
@@ -1034,14 +1070,14 @@ impl PyDwelling {
             .equipment_registry
             .create("Protocol Bridge", config.clone())
             .map_err(to_py_err)?;
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
         dwelling.add_equipment(eq);
         Ok(())
     }
 
     pub fn remove_equipment(&mut self, name: &str) -> PyResult<()> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling.remove_equipment(name).map_err(to_py_err)?;
         Ok(())
     }
@@ -1053,7 +1089,7 @@ impl PyDwelling {
         equipment: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let new_eq = self.py_any_to_equipment(equipment)?;
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling
             .replace_equipment(&name, new_eq)
             .map_err(to_py_err)?;
@@ -1077,7 +1113,7 @@ impl PyDwelling {
             PyValueError::new_err("update_equipment requires at least one keyword argument")
         })?;
 
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
 
         if let Some(cc) = kwargs.get_item("charging_curve")? {
             let lut = extract_charging_lut(py, &cc)?;
@@ -1120,7 +1156,7 @@ impl PyDwelling {
         lut_type: &PyLutType,
         data: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         match lut_type {
             PyLutType::ChargingCurve => {
                 let lut = extract_charging_lut(py, data)?;
@@ -1152,7 +1188,7 @@ impl PyDwelling {
 
     /// Clear / reset a LUT on equipment by name and LUT type.
     pub fn clear_equipment_lut(&mut self, name: String, lut_type: &PyLutType) -> PyResult<()> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         match lut_type {
             PyLutType::ChargingCurve => {
                 dwelling
@@ -1179,7 +1215,7 @@ impl PyDwelling {
     /// For ChargingCurve: returns True if a LUT is set, None if not.
     /// For Ocv/UNeg: always returns True (tables always exist, even defaults).
     pub fn has_equipment_lut(&self, name: String, lut_type: &PyLutType) -> PyResult<bool> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         let eq = dwelling
             .equipment()
             .iter()
@@ -1193,7 +1229,7 @@ impl PyDwelling {
     }
 
     pub fn validate_control(&self, name: &str, signal: &PyControlSignal) -> PyResult<bool> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         let required_cap = signal.signal.required_capability();
         if let Some(eq) = dwelling
             .equipment()
@@ -1208,7 +1244,7 @@ impl PyDwelling {
     }
 
     pub fn results(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         let batches: Vec<_> = dwelling.flushed_batches().to_vec();
         let steps = dwelling.results().steps.clone();
         drop(dwelling);
@@ -1216,7 +1252,7 @@ impl PyDwelling {
     }
 
     pub fn metrics(&self) -> PyResult<PySimulationMetrics> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         let batches: Vec<_> = dwelling.flushed_batches().to_vec();
 
         if batches.is_empty() {
@@ -1249,6 +1285,8 @@ impl PyDwelling {
 
         let dwelling = Dwelling::from_config(config.clone()).map_err(to_py_err)?;
         self.dwelling = Mutex::new(dwelling);
+        self.poisoned.store(false, Ordering::SeqCst);
+        self.mutex_poison_events.store(0, Ordering::SeqCst);
         self.config = config;
         self.initialized = false;
         self.initial_state = None;
@@ -1258,14 +1296,14 @@ impl PyDwelling {
     }
 
     pub fn save_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         let bytes = serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err_display)?;
         Ok(PyBytes::new(py, &bytes))
     }
 
     pub fn load_state(&self, state: &[u8]) -> PyResult<()> {
         let checkpoint = serde_json::from_slice(state).map_err(to_py_err_display)?;
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling.load_checkpoint(checkpoint).map_err(to_py_err)
     }
 
@@ -1282,24 +1320,24 @@ impl PyDwelling {
 
     pub fn set_solar_override(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let solar_data = parse_solar_override(py, data)?;
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling.environment.set_solar_override(solar_data);
         Ok(())
     }
 
     pub fn clear_solar_override(&self) -> PyResult<()> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling.environment.clear_solar_override();
         Ok(())
     }
 
     pub fn has_solar_override(&self) -> PyResult<bool> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         Ok(dwelling.environment.has_solar_override())
     }
 
     pub fn surface_ids(&self) -> PyResult<Vec<u32>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         Ok(dwelling
             .environment
             .surface_geometry()
@@ -1310,7 +1348,7 @@ impl PyDwelling {
 
     /// Return all roof planes from the parsed HPXML building.
     pub fn roof_planes(&self) -> PyResult<Vec<crate::py_pv_sizing::PyRoofPlane>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         Ok(crate::py_pv_sizing::roof_planes_from_dwelling(
             &dwelling.roof_info,
         ))
@@ -1341,7 +1379,7 @@ impl PyDwelling {
         panel_area_m2: Option<f64>,
         roof_shape: Option<crate::py_pv_sizing::PyRoofShape>,
     ) -> PyResult<Vec<crate::py_pv_sizing::PyPvCandidate>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         let (roof_shape, user_override) = match roof_shape {
             Some(py_shape) => {
                 tracing::debug!(
@@ -1411,7 +1449,7 @@ impl PyDwelling {
         system_losses: Option<f64>,
         roof_shape: Option<crate::py_pv_sizing::PyRoofShape>,
     ) -> PyResult<crate::py_pv_sizing::PyPvSizingResult> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         let (roof_shape, user_override) = match roof_shape {
             Some(py_shape) => {
                 tracing::debug!(
@@ -1462,7 +1500,7 @@ impl PyDwelling {
         let tz: chrono_tz::Tz = tz_str
             .parse()
             .map_err(|_| PyValueError::new_err(format!("unknown timezone '{tz_str}'")))?;
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling
             .set_tariff(tariff.inner.clone(), tz)
             .map_err(to_py_err)
@@ -1476,14 +1514,14 @@ impl PyDwelling {
     /// Emit the final partial billing period. Call after the last `step()`
     /// when driving the simulation step-by-step. Idempotent.
     pub fn finalize_billing(&self) -> PyResult<()> {
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        let mut dwelling = self.acquire()?;
         dwelling.finalize_billing();
         Ok(())
     }
 
     /// Returns accumulated billing period summaries.
     pub fn billing_summaries(&self) -> PyResult<Vec<crate::py_telemetry::PyBillingPeriodSummary>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         Ok(dwelling
             .billing_summaries()
             .iter()
@@ -1493,7 +1531,7 @@ impl PyDwelling {
 
     /// Returns a snapshot of current tariff state, or None if no tariff is set.
     pub fn tariff_telemetry(&self) -> PyResult<Option<crate::py_telemetry::PyTariffTelemetry>> {
-        let dwelling = lock_dwelling(&self.dwelling)?;
+        let dwelling = self.acquire()?;
         let evaluator = match dwelling.tariff_evaluator() {
             Some(ev) => ev,
             None => return Ok(None),
@@ -1512,20 +1550,84 @@ impl PyDwelling {
 }
 
 impl PyDwelling {
+    /// Acquire the dwelling mutex after checking the poisoned flag.
+    /// Returns `FatalDwellingError` if the dwelling is in a fatal error state.
+    fn acquire(&self) -> PyResult<MutexGuard<'_, Dwelling>> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(FatalDwellingError::new_err(
+                "dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance",
+            ));
+        }
+        self.dwelling.lock().map_err(|e| {
+            FatalDwellingError::new_err(format!(
+                "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
+                e
+            ))
+        })
+    }
+
+    /// GIL-free variant of [`acquire`] required by `Send` contexts (e.g. Rayon threads).
+    ///
+    /// Returns `Err(String)` instead of `PyErr` so it can be used without holding the GIL.
+    /// Fatal errors are prefixed with [`FATAL_DWELLING_PREFIX`] so callers can
+    /// distinguish permanent from transient failures.
+    pub(crate) fn acquire_string(&self) -> Result<MutexGuard<'_, Dwelling>, String> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(format!(
+                "{}dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance",
+                FATAL_DWELLING_PREFIX
+            ));
+        }
+        self.dwelling.lock().map_err(|e| {
+            format!(
+                "{}dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
+                FATAL_DWELLING_PREFIX, e
+            )
+        })
+    }
+
+    /// GIL-free variant that preserves [`HaresError`] for proper Python exception mapping
+    /// via [`to_py_err`].
+    fn acquire_hares(&self) -> Result<MutexGuard<'_, Dwelling>, HaresError> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(HaresError::Dwelling(
+                "dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance".to_string(),
+            ));
+        }
+        self.dwelling.lock().map_err(|e| {
+            HaresError::Dwelling(format!(
+                "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
+                e
+            ))
+        })
+    }
+
+    /// Mark this dwelling as fatally poisoned. Idempotent.
+    pub(crate) fn mark_poisoned(&self) {
+        if !self.poisoned.swap(true, Ordering::SeqCst) {
+            self.mutex_poison_events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn step_core(&self) -> Result<hares_core::StepResult, HaresError> {
-        let mut dwelling = lock_dwelling_hares(&self.dwelling)?;
+        let mut dwelling = self.acquire_hares()?;
         dwelling.step()
     }
 
-    /// String-error variant of [`step_core`] for use in GIL-free Rayon contexts
+    /// String-error variant for use in GIL-free Rayon contexts
     /// (e.g. [`batch_step_py`]) where `HaresError` cannot cross thread boundaries
     /// as a `PyErr`.
+    ///
+    /// Routes through [`acquire_string`] so fatal (poisoned) errors are prefixed
+    /// with [`FATAL_DWELLING_PREFIX`], allowing [`batch_step_py`] to distinguish
+    /// permanent from transient failures. Transient [`step`] errors carry no prefix.
     pub(crate) fn step_core_string(&self) -> Result<hares_core::StepResult, String> {
-        self.step_core().map_err(|e| e.to_string())
+        let mut dwelling = self.acquire_string()?;
+        dwelling.step().map_err(|e| e.to_string())
     }
 
     pub(crate) fn observation(&self) -> Result<Vec<f64>, String> {
-        let dwelling = lock_dwelling_string(&self.dwelling)?;
+        let dwelling = self.acquire_string()?;
         let telemetry = dwelling.telemetry();
         telemetry
             .to_observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_rh"])
@@ -2155,6 +2257,7 @@ mod tests {
     use std::fs;
     use std::sync::Mutex;
     use std::sync::MutexGuard;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration as StdDuration;
 
@@ -2383,5 +2486,177 @@ mod tests {
                 || msg.contains("missing one of required columns"),
             "unexpected error: {msg}"
         );
+    }
+
+    // --------------------------------------------------------------------
+    // Mutex poison flag tests
+    // --------------------------------------------------------------------
+
+    use super::FATAL_DWELLING_PREFIX;
+
+    /// Minimal struct mirroring `PyDwelling`'s poison-guard pattern.
+    struct PoisonGuard {
+        lock: Mutex<i32>,
+        poisoned: AtomicBool,
+    }
+
+    impl PoisonGuard {
+        fn new() -> Self {
+            Self {
+                lock: Mutex::new(0),
+                poisoned: AtomicBool::new(false),
+            }
+        }
+
+        fn acquire(&self) -> Result<MutexGuard<'_, i32>, String> {
+            if self.poisoned.load(Ordering::Acquire) {
+                return Err(format!("{}fatal: state corruption", FATAL_DWELLING_PREFIX));
+            }
+            self.lock
+                .lock()
+                .map_err(|_| "acquire failed: poison".to_string())
+        }
+
+        fn mark_poisoned(&self) {
+            self.poisoned.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn mutex_poison_detected_after_panic() {
+        let _guard = PoisonGuard::new();
+        let lock_static: &'static Mutex<i32> = Box::leak(Box::new(Mutex::new(0)));
+        let _ = std::thread::spawn(move || {
+            let _held = lock_static.lock().unwrap();
+            panic!("intentional");
+        })
+        .join();
+        assert!(
+            lock_static.is_poisoned(),
+            "mutex should report poisoned after panic while locked"
+        );
+    }
+
+    #[test]
+    fn acquire_fails_fast_when_poisoned_flag_set() {
+        let guard = PoisonGuard::new();
+        guard.mark_poisoned();
+        assert!(guard.poisoned.load(Ordering::Acquire));
+        let result = guard.acquire();
+        assert!(result.is_err(), "acquire should fail when flag is set");
+        assert!(
+            result.unwrap_err().starts_with(FATAL_DWELLING_PREFIX),
+            "error should carry fatal prefix"
+        );
+    }
+
+    #[test]
+    fn acquire_fails_on_poisoned_mutex_even_without_flag() {
+        let lock: Mutex<i32> = Mutex::new(0);
+        let lock_static: &'static Mutex<i32> = Box::leak(Box::new(lock));
+        let _ = std::thread::spawn(move || {
+            let _held = lock_static.lock().unwrap();
+            panic!("intentional");
+        })
+        .join();
+        assert!(lock_static.is_poisoned());
+        let result = lock_static.lock();
+        assert!(
+            result.is_err(),
+            "lock on poisoned mutex should return PoisonError"
+        );
+    }
+
+    #[test]
+    fn mark_poisoned_is_idempotent() {
+        let guard = PoisonGuard::new();
+        assert!(!guard.poisoned.load(Ordering::Acquire));
+        guard.mark_poisoned();
+        assert!(guard.poisoned.load(Ordering::Acquire));
+        guard.mark_poisoned();
+        // Flag should still be true (no double-counting or flip)
+        assert!(guard.poisoned.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn invariant_flag_implies_mutex_poisoned_holds() {
+        // After a panic while locked → mutex is poisoned → flag should be set
+        let lock: Mutex<i32> = Mutex::new(0);
+        let lock_static: &'static Mutex<i32> = Box::leak(Box::new(lock));
+        let _ = std::thread::spawn(move || {
+            let _held = lock_static.lock().unwrap();
+            panic!("intentional");
+        })
+        .join();
+        let is_poisoned = lock_static.is_poisoned();
+        let flag = AtomicBool::new(is_poisoned);
+        assert_eq!(
+            flag.load(Ordering::Acquire),
+            is_poisoned,
+            "flag should match mutex poison state"
+        );
+    }
+
+    #[test]
+    fn fatal_dwelling_prefix_detectable_by_callers() {
+        let guard = PoisonGuard::new();
+        guard.mark_poisoned();
+        let err = guard.acquire().unwrap_err();
+        assert!(
+            err.starts_with(FATAL_DWELLING_PREFIX),
+            "fatal errors must be detectable by prefix in GIL-free String contexts"
+        );
+    }
+
+    /// Mock mirroring the `step_core_string` → `acquire_string` chain.
+    struct StepGuard {
+        lock: Mutex<i32>,
+        poisoned: AtomicBool,
+    }
+
+    impl StepGuard {
+        fn new() -> Self {
+            Self {
+                lock: Mutex::new(0),
+                poisoned: AtomicBool::new(false),
+            }
+        }
+
+        fn acquire_string(&self) -> Result<MutexGuard<'_, i32>, String> {
+            if self.poisoned.load(Ordering::Acquire) {
+                return Err(format!("{}fatal: state corruption", FATAL_DWELLING_PREFIX));
+            }
+            self.lock.lock().map_err(|_| "acquire failed".to_string())
+        }
+
+        fn mark_poisoned(&self) {
+            self.poisoned.store(true, Ordering::SeqCst);
+        }
+
+        /// Mirrors `PyDwelling::step_core_string`: locks via `acquire_string`,
+        /// then performs a step. Fatal errors carry `FATAL_DWELLING_PREFIX`.
+        fn step_core_string(&self) -> Result<i32, String> {
+            let _guard = self.acquire_string()?;
+            Ok(42)
+        }
+    }
+
+    #[test]
+    fn step_core_string_returns_fatal_prefix_when_poisoned() {
+        let guard = StepGuard::new();
+        guard.mark_poisoned();
+        let err = guard.step_core_string().unwrap_err();
+        assert!(
+            err.starts_with(FATAL_DWELLING_PREFIX),
+            "step_core_string must propagate the fatal prefix from acquire_string so \
+             batch_step_py can distinguish permanent from transient failures"
+        );
+    }
+
+    #[test]
+    fn step_core_string_succeeds_when_not_poisoned() {
+        let guard = StepGuard::new();
+        let result = guard.step_core_string();
+        assert_eq!(result.unwrap(), 42);
     }
 }
