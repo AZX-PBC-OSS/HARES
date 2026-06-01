@@ -37,7 +37,7 @@ use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, Sched
 use crate::Actor;
 use crate::actors::{
     AlwaysComply, BatteryManagementActor, DrCompliance, EquipmentBehavior, EvDriverActor,
-    IdealThermostat, Occupant, Probabilistic, SafetyMonitor,
+    IdealThermostat, Occupant, Presence, Probabilistic, SafetyMonitor,
 };
 
 pub type ActorFactory =
@@ -75,6 +75,10 @@ impl ActorConfig {
 
     pub fn get_bool(&self, key: &str) -> Option<bool> {
         self.parameters.get(key).and_then(ConfigValue::as_bool)
+    }
+
+    pub fn get_f64_array(&self, key: &str) -> Option<&[f64]> {
+        self.parameters.get(key).and_then(ConfigValue::as_f64_array)
     }
 }
 
@@ -123,6 +127,19 @@ impl ActorRegistry {
                 if let Some(target) = config.get_str("lighting_target") {
                     occupant = occupant
                         .with_lighting(target, EquipmentBehavior::default().off_when_away());
+                }
+                if let Some(occupancy_column) = config.get_f64_array("occupancy_column") {
+                    let presence_schedule: Vec<Presence> = occupancy_column
+                        .iter()
+                        .map(|&v| {
+                            if v > 0.0 {
+                                Presence::Home
+                            } else {
+                                Presence::Away
+                            }
+                        })
+                        .collect();
+                    occupant = occupant.with_presence_schedule(presence_schedule);
                 }
                 Ok(Box::new(occupant))
             }),
@@ -453,11 +470,147 @@ mod tests {
             _ => panic!("expected Control error"),
         }
     }
-
     #[test]
     fn actor_registry_get_returns_factory() {
         let registry = ActorRegistry::new();
         assert!(registry.get("IdealThermostat").is_some());
         assert!(registry.get("UnknownType").is_none());
+    }
+
+    #[test]
+    fn actor_registry_create_occupant_with_occupancy_column() {
+        let registry = ActorRegistry::new();
+        let occupancy_column = vec![0.0, 1.0, 0.0];
+        let config = ActorConfig::new("Resident1", "Occupant")
+            .with_param(
+                "occupancy_column",
+                ConfigValue::FloatArray(occupancy_column),
+            )
+            .with_param("lighting_target", ConfigValue::Text("Indoor Lights".into()));
+        let mut actor = registry.create(config).expect("create occupant");
+        assert_eq!(actor.name(), "Resident1");
+
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+
+        // Step 0: presence_schedule[0] = Away (threshold 0.0 → Away)
+        // + lighting target with off_when_away → ModeOverride(Off) dispatched
+        actor.decide(&env, &mut requests);
+        assert!(!requests.is_empty(), "step 0 (Away) should emit signals");
+        let has_off = requests.iter().any(|r| {
+            matches!(
+                r.signal,
+                hares_types::ControlSignal::ModeOverride {
+                    mode: hares_types::OperatingMode::Off
+                }
+            )
+        });
+        assert!(has_off, "step 0 (Away) must emit ModeOverride Off");
+
+        // Step 1: presence_schedule[1] = Home (transition Away→Home)
+        // Factory configures off_when_away only, not on_when_home, so no signal expected
+        requests.clear();
+        actor.decide(&env, &mut requests);
+        assert!(
+            requests.is_empty(),
+            "step 1 (Home transition, on_when_home not configured) should emit no signals"
+        );
+
+        // Step 2: presence_schedule[2] = Away (transition Home→Away)
+        // off_when_away triggers again
+        requests.clear();
+        actor.decide(&env, &mut requests);
+        assert!(
+            !requests.is_empty(),
+            "step 2 (Away transition) should emit signals"
+        );
+        let has_off_again = requests.iter().any(|r| {
+            matches!(
+                r.signal,
+                hares_types::ControlSignal::ModeOverride {
+                    mode: hares_types::OperatingMode::Off
+                }
+            )
+        });
+        assert!(
+            has_off_again,
+            "step 2 (Away transition) must emit ModeOverride Off"
+        );
+
+        // Telemetry: presence_changes should be 3 (Home→Away, Away→Home, Home→Away)
+        let telemetry = actor.telemetry().expect("actor must have telemetry");
+        let changes = telemetry.get("presence_changes").unwrap_or(0.0);
+        assert!(
+            (changes - 3.0).abs() < 1e-9,
+            "presence_changes must be 3.0 (three transitions); got {changes}"
+        );
+    }
+
+    #[test]
+    fn actor_registry_create_occupant_without_occupancy_column_falls_back_to_default() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("Resident2", "Occupant");
+        let actor = registry.create(config).expect("create occupant");
+        assert_eq!(actor.name(), "Resident2");
+    }
+
+    #[test]
+    fn actor_registry_occupant_empty_occupancy_column_all_away() {
+        let registry = ActorRegistry::new();
+        let occupancy_column = vec![0.0, 0.0, 0.0];
+        let config = ActorConfig::new("Resident3", "Occupant")
+            .with_param(
+                "occupancy_column",
+                ConfigValue::FloatArray(occupancy_column),
+            )
+            .with_param("lighting_target", ConfigValue::Text("Lights".into()));
+        let mut actor = registry.create(config).expect("create occupant");
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+
+        // All away — each step should emit ModeOverride Off
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1, "step 0 Away must emit 1 signal");
+
+        requests.clear();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1, "step 1 Away must emit 1 signal");
+
+        requests.clear();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1, "step 2 Away must emit 1 signal");
+
+        let telemetry = actor.telemetry().expect("actor must have telemetry");
+        let changes = telemetry.get("presence_changes").unwrap_or(0.0);
+        assert!(
+            (changes - 1.0).abs() < 1e-9,
+            "presence_changes must be 1.0 (only default Home→Away transition); got {changes}"
+        );
+    }
+
+    #[test]
+    fn actor_registry_occupant_all_home_no_transitions() {
+        let registry = ActorRegistry::new();
+        let occupancy_column = vec![1.0, 1.0, 1.0];
+        let config = ActorConfig::new("Resident4", "Occupant").with_param(
+            "occupancy_column",
+            ConfigValue::FloatArray(occupancy_column),
+        );
+        let mut actor = registry.create(config).expect("create occupant");
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+
+        actor.decide(&env, &mut requests);
+        assert!(
+            requests.is_empty(),
+            "no signals expected when always home with no targets"
+        );
+
+        let telemetry = actor.telemetry().expect("actor must have telemetry");
+        let changes = telemetry.get("presence_changes").unwrap_or(0.0);
+        assert!(
+            (changes - 0.0).abs() < 1e-9,
+            "presence_changes must be 0.0 (no transitions); got {changes}"
+        );
     }
 }

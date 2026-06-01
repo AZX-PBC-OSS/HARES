@@ -7287,7 +7287,7 @@ occupancy = 1.0
         let extended_fields = extended.fields().len();
 
         // Schema must gain columns (one per actor telemetry key).
-        let n_actor_keys = 3; // away, transition, signals_count
+        let n_actor_keys = 4; // away, transition, signals_count, presence_changes
         assert_eq!(
             extended_fields,
             base_fields + n_actor_keys,
@@ -7300,7 +7300,7 @@ occupancy = 1.0
             .map(|f| f.name().as_str())
             .collect();
 
-        for key in &["away", "transition", "signals_count"] {
+        for key in &["away", "transition", "signals_count", "presence_changes"] {
             let col = format!("actor:Occupant:{key}");
             assert!(
                 field_names.contains(&col.as_str()),
@@ -7324,7 +7324,7 @@ occupancy = 1.0
         }
 
         // Verify values populated in scratch at correct indices.
-        for key in &["away", "transition", "signals_count"] {
+        for key in &["away", "transition", "signals_count", "presence_changes"] {
             let col = format!("actor:Occupant:{key}");
             let idx = column_index[&col];
             assert!(scratch[idx] >= 0.0,);

@@ -138,6 +138,11 @@ pub struct Occupant {
     ev: Option<(DispatchTarget, EquipmentBehavior)>,
     /// Pre-cached dispatch target + behavior for plug loads.
     plug_loads: Option<(DispatchTarget, EquipmentBehavior)>,
+    /// Whether `with_presence_schedule()` was explicitly called.
+    /// `false` + configured equipment targets = unwired schedule (dead code).
+    schedule_configured: bool,
+    /// Cumulative count of presence transitions observed over the simulation.
+    presence_change_count: f64,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
 }
@@ -145,10 +150,11 @@ pub struct Occupant {
 impl Occupant {
     /// Creates a new Occupant actor with the given name.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(3);
+        let mut telemetry = Telemetry::with_capacity(4);
         telemetry.insert("away", 0.0);
         telemetry.insert("transition", 0.0);
         telemetry.insert("signals_count", 0.0);
+        telemetry.insert("presence_changes", 0.0);
         Self {
             name: Arc::from(name),
             presence_schedule: vec![Presence::Home],
@@ -158,6 +164,8 @@ impl Occupant {
             appliance: None,
             ev: None,
             plug_loads: None,
+            schedule_configured: false,
+            presence_change_count: 0.0,
             telemetry,
         }
     }
@@ -167,6 +175,7 @@ impl Occupant {
     /// The schedule is a pre-computed array of presence states, one per timestep.
     /// This avoids per-step computation and enables deterministic behavior.
     pub fn with_presence_schedule(mut self, schedule: Vec<Presence>) -> Self {
+        self.schedule_configured = true;
         self.presence_schedule = schedule;
         self
     }
@@ -225,6 +234,19 @@ impl Occupant {
     fn advance_step(&mut self) {
         self.previous_presence = self.current_presence();
         self.current_step = self.current_step.saturating_add(1);
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let has_targets = self.lighting.is_some()
+                || self.appliance.is_some()
+                || self.ev.is_some()
+                || self.plug_loads.is_some();
+            debug_assert!(
+                !has_targets || self.schedule_configured,
+                "occupant '{}' has equipment targets configured but with_presence_schedule() was never called; \
+                 behavioral control logic is dead code",
+                self.name,
+            );
+        }
     }
 
     /// Generates control signals for equipment based on behavior and presence.
@@ -409,6 +431,11 @@ impl Actor for Occupant {
         self.telemetry
             .set("transition", if is_transition { 1.0 } else { 0.0 });
         self.telemetry.set("signals_count", dispatched as f64);
+        if is_transition {
+            self.presence_change_count += 1.0;
+        }
+        self.telemetry
+            .set("presence_changes", self.presence_change_count);
 
         if dispatched > 0 || is_transition {
             tracing::debug!(

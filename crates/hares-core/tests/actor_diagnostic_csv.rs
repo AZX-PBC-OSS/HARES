@@ -129,6 +129,10 @@ fn actor_telemetry_columns_in_csv_output_after_multi_step_simulation() {
         header.contains("actor:Occupant:signals_count"),
         "CSV header must contain 'actor:Occupant:signals_count'; header was: {header}"
     );
+    assert!(
+        header.contains("actor:Occupant:presence_changes"),
+        "CSV header must contain 'actor:Occupant:presence_changes'; header was: {header}"
+    );
 
     // Verify that at least one data row has non-default values.
     let data_rows: Vec<&str> = csv_content.lines().skip(1).collect();
@@ -151,6 +155,10 @@ fn actor_telemetry_columns_in_csv_output_after_multi_step_simulation() {
         .iter()
         .position(|h| *h == "actor:Occupant:signals_count")
         .expect("signals_count column must exist");
+    let presence_changes_idx = headers
+        .iter()
+        .position(|h| *h == "actor:Occupant:presence_changes")
+        .expect("presence_changes column must exist");
 
     // Step 2 (third data row, 0-indexed row 2) transitions Home→Away:
     //   away = 1.0 (occupied), transition = 1.0 (change occurred).
@@ -181,6 +189,13 @@ fn actor_telemetry_columns_in_csv_output_after_multi_step_simulation() {
         signals_val.is_finite(),
         "step 2 signals_count must be finite; got {signals_val}"
     );
+    let presence_changes_val: f64 = row3[presence_changes_idx]
+        .parse()
+        .expect("presence_changes column must be numeric");
+    assert!(
+        (presence_changes_val - 1.0).abs() < 1e-9,
+        "step 2 must report presence_changes=1.0 (first transition); got {presence_changes_val}"
+    );
 
     // Step 3 (row 4) stays away, so no transition.
     let row4: Vec<&str> = data_rows[3].split(',').collect();
@@ -195,5 +210,22 @@ fn actor_telemetry_columns_in_csv_output_after_multi_step_simulation() {
     assert!(
         (transition_step3 - 0.0).abs() < 1e-9,
         "step 3 must report transition=0.0 (no change); got {transition_step3}"
+    );
+    let presence_changes_step3: f64 = row4[presence_changes_idx]
+        .parse()
+        .expect("presence_changes column must be numeric");
+    assert!(
+        (presence_changes_step3 - 1.0).abs() < 1e-9,
+        "step 3 must report presence_changes=1.0 (still one transition); got {presence_changes_step3}"
+    );
+
+    // Step 5 (row 6, data index 5) transitions Away→Home: second transition.
+    let row6: Vec<&str> = data_rows[5].split(',').collect();
+    let presence_changes_step5: f64 = row6[presence_changes_idx]
+        .parse()
+        .expect("presence_changes column must be numeric");
+    assert!(
+        (presence_changes_step5 - 2.0).abs() < 1e-9,
+        "step 5 must report presence_changes=2.0 (two transitions total); got {presence_changes_step5}"
     );
 }
