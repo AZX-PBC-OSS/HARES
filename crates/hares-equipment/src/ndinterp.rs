@@ -8,9 +8,11 @@
 
 #[cfg(feature = "observe")]
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
+use tracing;
 
 /// Strategy for out-of-bounds coordinates during interpolation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +23,13 @@ pub enum ExtrapolationStrategy {
     NaN,
     /// Extrapolate linearly using the edge-segment slope.
     /// Fractional positions outside [0,1] are allowed, producing weights <0 or >1.
+    ///
+    /// # Warning
+    /// Linear extrapolation can produce physically nonsensical values (negative
+    /// or unrealistically large results) for efficiency curves such as COP or
+    /// capacity maps. Use only when the extrapolated function is approximately
+    /// linear near the boundary (e.g., OCV tables near 0% or 100% SOC) or for
+    /// controlled experiments and verification.
     Linear,
     /// Snap each OOB coordinate to the nearest axis endpoint (equivalent to Clamp).
     NearestNeighbor,
@@ -33,7 +42,7 @@ pub enum ExtrapolationStrategy {
 ///
 /// At query time, the `strategy` determines how out-of-bounds coordinates
 /// are handled.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RegularGridInterpolator {
     /// One axis per dimension, each strictly ascending.
     axes: Vec<Vec<f64>>,
@@ -43,10 +52,44 @@ pub struct RegularGridInterpolator {
     strides: Vec<usize>,
     /// Extrapolation strategy for out-of-bounds coordinates.
     strategy: ExtrapolationStrategy,
+    /// Throttle linear-extrapolation warnings to once per interpolator lifetime.
+    #[serde(skip)]
+    linear_extrap_warned: AtomicBool,
     /// Count of out-of-bounds coordinate occurrences (only when feature "observe" is active).
     #[cfg(feature = "observe")]
     #[serde(skip)]
     pub oob_count: Cell<u64>,
+    /// Per-dimension count of linear-extrapolation events (only when feature "observe" is active).
+    #[cfg(feature = "observe")]
+    #[serde(skip)]
+    pub linear_extrap_count: [Cell<u64>; 8],
+}
+
+impl Clone for RegularGridInterpolator {
+    fn clone(&self) -> Self {
+        Self {
+            axes: self.axes.clone(),
+            values: self.values.clone(),
+            strides: self.strides.clone(),
+            strategy: self.strategy,
+            linear_extrap_warned: AtomicBool::new(
+                self.linear_extrap_warned.load(Ordering::Relaxed),
+            ),
+            #[cfg(feature = "observe")]
+            oob_count: Cell::new(self.oob_count.get()),
+            #[cfg(feature = "observe")]
+            linear_extrap_count: [
+                Cell::new(self.linear_extrap_count[0].get()),
+                Cell::new(self.linear_extrap_count[1].get()),
+                Cell::new(self.linear_extrap_count[2].get()),
+                Cell::new(self.linear_extrap_count[3].get()),
+                Cell::new(self.linear_extrap_count[4].get()),
+                Cell::new(self.linear_extrap_count[5].get()),
+                Cell::new(self.linear_extrap_count[6].get()),
+                Cell::new(self.linear_extrap_count[7].get()),
+            ],
+        }
+    }
 }
 
 impl RegularGridInterpolator {
@@ -132,8 +175,20 @@ impl RegularGridInterpolator {
             values,
             strides,
             strategy,
+            linear_extrap_warned: AtomicBool::new(false),
             #[cfg(feature = "observe")]
             oob_count: Cell::new(0),
+            #[cfg(feature = "observe")]
+            linear_extrap_count: [
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+            ],
         })
     }
 
@@ -213,6 +268,21 @@ impl RegularGridInterpolator {
             #[cfg(feature = "observe")]
             if !needs_clamp && (x < axis[0] || x > axis[axis.len() - 1]) {
                 self.oob_count.set(self.oob_count.get() + 1);
+                self.linear_extrap_count[dim].set(self.linear_extrap_count[dim].get() + 1);
+            }
+
+            if !needs_clamp
+                && !self.linear_extrap_warned.load(Ordering::Relaxed)
+                && (x < axis[0] || x > axis[axis.len() - 1])
+            {
+                self.linear_extrap_warned.store(true, Ordering::Relaxed);
+                tracing::warn!(
+                    dim = dim,
+                    query_value = x,
+                    axis_min = axis[0],
+                    axis_max = axis[axis.len() - 1],
+                    "Linear extrapolation active: coordinate out of grid bounds"
+                );
             }
         }
 
@@ -563,16 +633,6 @@ mod tests {
 
     // ── ExtrapolationStrategy tests ──────────────────────────────────────
 
-    /// f(x,y) = x*10 + y on [0,1]×[0,1]
-    fn make_2d_grid() -> RegularGridInterpolator {
-        RegularGridInterpolator::new(
-            vec![vec![0.0, 1.0], vec![0.0, 1.0]],
-            vec![0.0, 1.0, 10.0, 11.0],
-            ExtrapolationStrategy::Clamp,
-        )
-        .unwrap()
-    }
-
     fn make_2d_grid_with_strategy(s: ExtrapolationStrategy) -> RegularGridInterpolator {
         RegularGridInterpolator::new(
             vec![vec![0.0, 1.0], vec![0.0, 1.0]],
@@ -700,5 +760,105 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn strategy_linear_1d_extrapolation_above() {
+        let interp = RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0, 2.0]],
+            vec![0.0, 1.0, 2.0],
+            ExtrapolationStrategy::Linear,
+        )
+        .unwrap();
+        let result = interp.interpolate(&[3.0]);
+        assert!((result - 3.0).abs() < 1e-5, "expected 3.0, got {result}");
+    }
+
+    #[test]
+    fn strategy_linear_1d_extrapolation_below() {
+        let interp = RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0, 2.0]],
+            vec![0.0, 1.0, 2.0],
+            ExtrapolationStrategy::Linear,
+        )
+        .unwrap();
+        let result = interp.interpolate(&[-1.0]);
+        assert!(
+            (result - (-1.0)).abs() < 1e-5,
+            "expected -1.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn strategy_linear_inbounds_matches_clamp() {
+        let grids: Vec<RegularGridInterpolator> = vec![
+            // 1D non-uniform
+            RegularGridInterpolator::new(
+                vec![vec![0.0, 0.25, 7.0]],
+                vec![10.0, 11.0, 13.0],
+                ExtrapolationStrategy::Linear,
+            )
+            .unwrap(),
+            // 2D
+            make_2d_grid_with_strategy(ExtrapolationStrategy::Linear),
+            // 4D constant
+            RegularGridInterpolator::new(
+                vec![
+                    vec![0.0, 0.5, 1.0],
+                    vec![-10.0, 25.0, 45.0],
+                    vec![0.1, 1.0, 2.0],
+                    vec![0.7, 1.0],
+                ],
+                vec![0.5f32; 54],
+                ExtrapolationStrategy::Linear,
+            )
+            .unwrap(),
+        ];
+        for interp in grids {
+            // Query at various in-bounds points; should match Clamp.
+            let clamp = RegularGridInterpolator::new(
+                interp.axes.clone(),
+                interp.values.clone(),
+                ExtrapolationStrategy::Clamp,
+            )
+            .unwrap();
+            let ndim = interp.ndim();
+            let test_points: Vec<Vec<f64>> = if ndim == 1 {
+                vec![vec![0.0], vec![3.0], vec![6.99]]
+            } else if ndim == 2 {
+                vec![
+                    vec![0.0, 0.0],
+                    vec![0.5, 0.5],
+                    vec![1.0, 1.0],
+                    vec![0.25, 0.75],
+                ]
+            } else {
+                vec![vec![0.3, 15.0, 0.5, 0.85]]
+            };
+            for pt in &test_points {
+                let v_linear = interp.interpolate(pt);
+                let v_clamp = clamp.interpolate(pt);
+                assert!(
+                    (v_linear - v_clamp).abs() < 1e-5,
+                    "Linear vs Clamp mismatch at {:?}: linear={v_linear}, clamp={v_clamp}",
+                    pt
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strategy_linear_single_element_axis_does_not_panic() {
+        let interp = RegularGridInterpolator::new(
+            vec![vec![0.5]],
+            vec![3.125],
+            ExtrapolationStrategy::Linear,
+        )
+        .unwrap();
+        // Single-element axis: bracket returns (0, 0.0), result is the lone value.
+        let result = interp.interpolate(&[0.0]);
+        assert!((result - 3.125).abs() < 1e-5);
+        let result = interp.interpolate(&[1.0]);
+        assert!((result - 3.125).abs() < 1e-5);
     }
 }
