@@ -294,6 +294,7 @@ impl Equipment for ProtocolBridge {
                 }
 
                 if !self.is_registered(protocol.0) {
+                    self.pending_commands.clear();
                     self.dispatch_count = self.dispatch_count.wrapping_add(1);
                     self.last_dispatch_command_count = 0;
                     self.telemetry.set(tk::PROTOCOL_ID, protocol.0 as f64);
@@ -744,5 +745,50 @@ mod tests {
         // Dispatch NOT counted — the entire apply_control returned Err.
         // parse_error_count reflects the failed parse attempt.
         assert_eq!(bridge.parse_error_count, 1);
+    }
+
+    #[test]
+    fn unregistered_protocol_clears_pending_commands_from_prior_registered_dispatch() {
+        let config = EquipmentConfig::from_typed(
+            "restricted-bridge".to_string(),
+            "ProtocolBridge".to_string(),
+            ProtocolBridgeConfig {
+                equipment_id: None,
+                registered_protocols: vec![17],
+                handlers: vec![config::HandlerConfig::Json { protocol_id: 17 }],
+            },
+        );
+        let mut bridge = ProtocolBridge::new(config.clone());
+        let env = empty_env();
+        bridge.init(&config, &env).unwrap();
+
+        let payload = br#"[{"target": "X", "signal": {"ModeOverride": {"mode": "Off"}}}]"#.to_vec();
+
+        bridge
+            .apply_control(&ControlSignal::ProtocolNative {
+                protocol: ProtocolId(17),
+                payload: payload.clone(),
+            })
+            .unwrap();
+        assert_eq!(bridge.drain_pending_commands().len(), 1);
+
+        bridge
+            .apply_control(&ControlSignal::ProtocolNative {
+                protocol: ProtocolId(17),
+                payload: payload.clone(),
+            })
+            .unwrap();
+
+        bridge
+            .apply_control(&ControlSignal::ProtocolNative {
+                protocol: ProtocolId(99),
+                payload,
+            })
+            .unwrap();
+
+        assert!(
+            bridge.drain_pending_commands().is_empty(),
+            "unregistered protocol dispatch must clear pending_commands"
+        );
     }
 }

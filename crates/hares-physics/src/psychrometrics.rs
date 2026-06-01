@@ -760,24 +760,20 @@ mod tests {
         );
 
         // The warm pass has lower RH (same absolute moisture, higher temp).
-        assert!(rh_pass2 < rh_pass1,
-            "RH at 27°C ({rh_pass2:.4}) must be lower than RH at 23°C ({rh_pass1:.4})");
+        assert!(
+            rh_pass2 < rh_pass1,
+            "RH at 27°C ({rh_pass2:.4}) must be lower than RH at 23°C ({rh_pass1:.4})"
+        );
         // The warm pass has higher WB.
-        assert!(wb_pass2 > wb_pass1,
-            "WB at 27°C ({wb_pass2:.4}) must be higher than WB at 23°C ({wb_pass1:.4})");
+        assert!(
+            wb_pass2 > wb_pass1,
+            "WB at 27°C ({wb_pass2:.4}) must be higher than WB at 23°C ({wb_pass1:.4})"
+        );
 
         // Both passes match direct psychrometric results.
-        assert!(
-            (rh_pass1 - relative_humidity(23.0, w, p)).abs() < 1e-12
-        );
-        assert!(
-            (rh_pass2 - relative_humidity(27.0, w, p)).abs() < 1e-12
-        );
-        assert!(
-            (wb_pass1 - wet_bulb_from_humidity_ratio(23.0, w, p)).abs() < 0.02
-        );
-        assert!(
-            (wb_pass2 - wet_bulb_from_humidity_ratio(27.0, w, p)).abs() < 0.02
-        );
+        assert!((rh_pass1 - relative_humidity(23.0, w, p)).abs() < 1e-12);
+        assert!((rh_pass2 - relative_humidity(27.0, w, p)).abs() < 1e-12);
+        assert!((wb_pass1 - wet_bulb_from_humidity_ratio(23.0, w, p)).abs() < 0.02);
+        assert!((wb_pass2 - wet_bulb_from_humidity_ratio(27.0, w, p)).abs() < 0.02);
     }
 }
