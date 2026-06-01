@@ -154,8 +154,8 @@ impl BatteryManagementActor {
             GridExportRule::SolarOnly => {
                 // Battery may discharge up to load + PV, so net grid export
                 // (discharge - load) is at most PV generation.
-                let max_allowed =
-                    env.electrical.base_load_kw.max(0.0) + env.electrical.actual_pv_kw_or_fallback();
+                let max_allowed = env.electrical.base_load_kw.max(0.0)
+                    + env.electrical.actual_pv_kw_or_fallback();
                 discharge_kw.min(max_allowed)
             }
         }
@@ -524,7 +524,8 @@ impl Actor for BatteryManagementActor {
             .set("bms_action", bms_action_code(&self.last_action));
         self.telemetry
             .set("soc", self.read_soc(env).unwrap_or(f64::NAN));
-        self.telemetry.set("pv_kw", env.electrical.actual_pv_kw_or_fallback());
+        self.telemetry
+            .set("pv_kw", env.electrical.actual_pv_kw_or_fallback());
         self.telemetry.set("load_kw", env.electrical.base_load_kw);
     }
 }

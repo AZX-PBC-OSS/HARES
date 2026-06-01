@@ -69,4 +69,12 @@ pub trait ChargingPreference: Send + Sync {
     fn charging_allowed(&self) -> Option<bool> {
         None
     }
+
+    /// Estimated hours needed to reach target SOC from current state.
+    /// Returns `f64::INFINITY` for preferences that don't produce a
+    /// time-to-charge estimate. The composer aggregates by taking the
+    /// minimum across all preferences.
+    fn needed_charge_hours(&self, _ctx: &DecisionContext) -> f64 {
+        f64::INFINITY
+    }
 }

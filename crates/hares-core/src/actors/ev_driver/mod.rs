@@ -307,12 +307,13 @@ impl EvDriverActor {
             "EV driver daily-miles distribution"
         );
 
-        let mut telemetry = Telemetry::with_capacity(5);
+        let mut telemetry = Telemetry::with_capacity(6);
         telemetry.insert("soc", 1.0);
         telemetry.insert("phase", 0.0);
         telemetry.insert("charge_kw", 0.0);
         telemetry.insert("plugged_in", 1.0);
         telemetry.insert("soc_gate_charging_allowed", 1.0);
+        telemetry.insert("needed_charge_hours", 0.0);
 
         Self {
             name: Arc::from(name),
@@ -396,6 +397,10 @@ impl EvDriverActor {
             } else {
                 0.0
             },
+        );
+        self.telemetry.set(
+            "needed_charge_hours",
+            self.composer.last_needed_charge_hours(),
         );
     }
 
@@ -2008,8 +2013,8 @@ mod tests {
         actor.estimated_soc = 0.3;
         actor.phase = DriverPhase::HomePluggedIn;
 
-        // At 06:00, only 1 hour until departure. Need 0.6 * 60kWh / (7.2 * 0.9) = 5.6h.
-        // 1h << 5.6h * 1.2 = urgent override fires.
+        // At 06:00, only 1 hour until departure. Default env temp=10°C → effective_eff=0.811
+        // Need 0.6*60/(7.2*0.811) ≈ 6.19h. 1h << 6.19h * 1.2 = urgent override fires.
         let mut env = env_at_minute(6 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.40), // expensive
@@ -2050,7 +2055,8 @@ mod tests {
         );
 
         // Step 1: no PV surplus, 8 hours until departure (23:00 -> 07:00 = 8h).
-        // SOC 0.3, need 0.7 * 60 / (7.2 * 0.9) = 6.48h, 8h > 6.48 * 1.2 = not urgent.
+        // Default env temp=10°C → effective_eff=0.811
+        // SOC 0.3, need 0.7*60/(7.2*0.811) ≈ 7.19h, 8h > 7.19 * 1.2 = not urgent.
         // Solar has nothing -> should idle.
         let mut env1 = env_at_minute(23 * 60);
         env1.electrical = ElectricalSummary {
@@ -2074,7 +2080,7 @@ mod tests {
         );
 
         // Step 2: same conditions but only 30 min until departure (06:30).
-        // Need 6.48h but only 0.5h -> departure override fires.
+        // Need ≈7.19h but only 0.5h -> departure override fires.
         let env2 = env_at_minute(6 * 60 + 30);
         let out2 = plugged_in_step_with_env(&mut actor, &env2);
         let has_charging2 = out2.iter().any(|r| {

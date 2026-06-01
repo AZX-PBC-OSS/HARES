@@ -26,19 +26,44 @@ impl DepartureDeadline {
 
     /// Hours needed to charge from current SOC to target at max rate.
     /// Rounds up to the nearest timestep to avoid underestimating charge time.
+    ///
+    /// Applies `temp_efficiency_multiplier` to the base charging efficiency to
+    /// account for temperature-dependent degradation of charging acceptance
+    /// (cold weather reduces BMS acceptance rate, thermal conditioning draws
+    /// power, and internal resistance increases). The multiplier is the same
+    /// piecewise-linear fleet-average curve from `efficiency.rs`, originally
+    /// calibrated for driving energy consumption (AAA 2019, Geotab 2020,
+    /// DOE/Argonne 2024, Recurrent Auto) but applicable to charging because
+    /// the same physical mechanisms (electrochemical kinetics, resistive
+    /// heating, thermal management) degrade both driving and charging efficiency
+    /// at low temperatures.
     fn needed_charge_hours(&self, ctx: &DecisionContext) -> f64 {
         let soc_gap = (self.target_soc - ctx.current_soc).max(0.0);
         let energy_kwh = soc_gap * ctx.capacity_kwh;
         if ctx.max_charge_kw <= 0.0 || self.efficiency <= 0.0 {
             return f64::INFINITY;
         }
-        let raw_hours = energy_kwh / (ctx.max_charge_kw * self.efficiency);
-        let step_hours = ctx.time_res_minutes / 60.0;
-        if step_hours > 0.0 {
+        let temp_mult =
+            super::efficiency::temp_efficiency_multiplier(ctx.env.weather.outdoor_temp_c);
+        let effective_efficiency = self.efficiency / temp_mult;
+        let raw_hours = energy_kwh / (ctx.max_charge_kw * effective_efficiency);
+        let hours = if ctx.time_res_minutes > 0.0 {
+            let step_hours = ctx.time_res_minutes / 60.0;
             (raw_hours / step_hours).ceil() * step_hours
         } else {
             raw_hours
+        };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                hours.is_finite() && hours >= 0.0,
+                "needed_charge_hours: result is not a finite non-negative number; got hours={hours}, soc_gap={soc_gap}, energy_kwh={energy_kwh}, max_charge_kw={}, effective_efficiency={effective_efficiency}",
+                ctx.max_charge_kw,
+            );
         }
+
+        hours
     }
 
     /// Minutes remaining until departure.
@@ -134,6 +159,10 @@ impl ChargingPreference for DepartureDeadline {
         }
     }
 
+    fn needed_charge_hours(&self, ctx: &DecisionContext) -> f64 {
+        DepartureDeadline::needed_charge_hours(self, ctx)
+    }
+
     fn name(&self) -> &'static str {
         "DepartureDeadline"
     }
@@ -177,8 +206,9 @@ mod tests {
         let mut pref = make_departure_pref();
 
         // At 06:00 (360 min), departure at 07:00 (420 min) = 60 min left
-        // Need to charge from 0.2 to 0.9 = 0.7 * 60 / (7.2 * 0.9) = 6.48 hours
-        // 60 min < 6.48 * 1.2 * 60 = 467 min => urgent
+        // Default env temp is 10°C → temp_mult=1.11, effective_eff=0.9/1.11=0.811
+        // Need to charge from 0.2 to 0.9: 0.7*60/(7.2*0.811) ≈ 7.19h
+        // 60 min << 7.19 * 1.2 * 60 = 518 min => urgent
         let ctx = make_ctx(&env, 0.2, 360);
         match pref.constraint(&ctx) {
             Constraint::Override(vote) => {
@@ -195,8 +225,9 @@ mod tests {
         let mut pref = make_departure_pref();
 
         // At 20:00 (1200 min), departure at 07:00 (420 min) next day = 660 min left
-        // Need to charge from 0.8 to 0.9 = 0.1 * 60 / (7.2 * 0.9) = 0.926 hours
-        // 660 min >> 0.926 * 1.2 * 60 = 66.7 min => not urgent
+        // Default env temp is 10°C → temp_mult=1.11, effective_eff=0.9/1.11=0.811
+        // Need to charge from 0.8 to 0.9: 0.1*60/(7.2*0.811) ≈ 1.03h
+        // 660 min >> 1.03 * 1.2 * 60 = 74 min => not urgent
         let ctx = make_ctx(&env, 0.8, 1200);
         assert!(matches!(pref.constraint(&ctx), Constraint::Inactive));
     }
@@ -278,8 +309,9 @@ mod tests {
         // needed = 0.4 * 60 / (7.2 * 0.9) ≈ 3.7h, 3h available.
         // buffer=0: only urgency check: 3h < 3.7 * 1.2 = 4.44h → Override(urgent)
         // But let's pick a scenario where urgency does NOT fire but buffer does:
-        // SOC 0.8, target 0.9, needed = 0.1 * 60 / (7.2*0.9) ≈ 0.93h
-        // 3h > 0.93 * 1.2 = 1.11h → urgency Inactive.
+        // SOC 0.8, target 0.9. Default env (04:00) temp=10°C → effective_eff=0.811
+        // needed = 0.1 * 60 / (7.2*0.811) ≈ 1.03h
+        // 3h > 1.03 * 1.2 = 1.24h → urgency Inactive.
         // buffer=0: Inactive. buffer=4: 3h <= 4h AND 0.8 < 0.9 → Override(buffer).
 
         let mut no_buffer = DepartureDeadline {
@@ -327,10 +359,11 @@ mod tests {
         let env = TestEnvBuilder::new().hour(5).build();
 
         // SOC gap 0.5, max_charge_kw=7.2, time_to_departure=2h (120 min)
-        // Small battery (10 kWh): needed = 0.5 * 10 / (7.2 * 0.9) ≈ 0.77h
-        //   2h > 0.77 * 1.2 = 0.93h → Inactive
-        // Large battery (100 kWh): needed = 0.5 * 100 / (7.2 * 0.9) ≈ 7.72h
-        //   2h < 7.72 * 1.2 = 9.26h → Override
+        // Default env temp is 10°C → temp_mult=1.11, effective_eff=0.9/1.11=0.811
+        // Small battery (10 kWh): needed = 0.5*10/(7.2*0.811) ≈ 0.86h
+        //   2h > 0.86 * 1.2 = 1.03h → Inactive
+        // Large battery (100 kWh): needed = 0.5*100/(7.2*0.811) ≈ 8.59h
+        //   2h < 8.59 * 1.2 = 10.3h → Override
 
         let mut pref = DepartureDeadline {
             schedule: vec![DepartureConstraint {
@@ -396,7 +429,8 @@ mod tests {
         };
 
         // Context B: next_departure_minute=None, falls back to schedule 480 (08:00)
-        // 180 min to departure (3h), needed = 0.1*60/(7.2*0.9)=0.93h, 3h>1.11h → Inactive
+        // 180 min to departure (3h). temp at 10°C → effective_eff=0.811
+        // needed = 0.1*60/(7.2*0.811)≈1.03h, 3h > 1.03*1.2=1.24h → Inactive
         let ctx_b = DecisionContext {
             current_soc: 0.8,
             capacity_kwh: 60.0,
@@ -408,8 +442,9 @@ mod tests {
             time_res_minutes: 1.0,
         };
 
-        // Context A with same SOC=0.8: next_departure=360, 60 min left, needed=0.93h
-        // 1h < 0.93 * 1.2 = 1.11h → Override
+        // Context A with same SOC=0.8: next_departure=360, 60 min left
+        // temp at 10°C → effective_eff=0.811, needed=0.1*60/(7.2*0.811)≈1.03h
+        // 1h < 1.03 * 1.2 = 1.24h → Override
         let ctx_a_high_soc = DecisionContext {
             current_soc: 0.8,
             capacity_kwh: 60.0,
@@ -431,6 +466,57 @@ mod tests {
         assert!(
             matches!(result_b, Constraint::Inactive),
             "fallback to schedule minute=480 (3h away) should be Inactive"
+        );
+    }
+
+    /// Verify that `needed_charge_hours` accounts for cold-weather charging
+    /// degradation: at -10°C the estimate should be at least 30% higher than
+    /// at the EPA baseline 22°C for the same SOC gap.
+    #[test]
+    fn needed_charge_hours_increases_in_cold() {
+        use crate::actor::testing::TestEnvBuilder;
+
+        let pref = make_departure_pref();
+
+        // Build environments at 22°C (EPA baseline) and -10°C (cold).
+        let env_warm = TestEnvBuilder::new().hour(5).outdoor_temp(22.0).build();
+        let env_cold = TestEnvBuilder::new().hour(5).outdoor_temp(-10.0).build();
+
+        // Same SOC gap (0.5), capacity, and max charge rate.
+        let ctx_warm = make_ctx(&env_warm, 0.4, 300);
+        let ctx_cold = make_ctx(&env_cold, 0.4, 300);
+
+        let hours_warm = pref.needed_charge_hours(&ctx_warm);
+        let hours_cold = pref.needed_charge_hours(&ctx_cold);
+
+        assert!(
+            hours_cold > hours_warm * 1.30,
+            "cold (-10°C) hours ({hours_cold:.3}) must be at least 30% greater than warm (22°C) hours ({hours_warm:.3})"
+        );
+    }
+
+    /// At 22°C (EPA baseline), temp_efficiency_multiplier ≈ 1.0, so
+    /// needed_charge_hours should match the constant-efficiency calculation.
+    #[test]
+    fn needed_charge_hours_unchanged_at_epa_baseline() {
+        use crate::actor::testing::TestEnvBuilder;
+
+        let pref = make_departure_pref();
+        let env = TestEnvBuilder::new().hour(5).outdoor_temp(22.0).build();
+        let ctx = make_ctx(&env, 0.4, 300);
+
+        let hours = pref.needed_charge_hours(&ctx);
+
+        // At 22°C: temp_mult = 1.0, effective_efficiency = 0.9.
+        // soc_gap = 0.5, energy_kwh = 0.5 * 60 = 30 kWh.
+        // raw_hours = 30 / (7.2 * 0.9) = 4.6296...
+        // step_hours = 1/60 ≈ 0.01667, ceil(4.6296 / 0.01667) = 278, 278 * 0.01667 = 4.6333
+        let expected_raw: f64 = 30.0 / (7.2 * 0.9);
+        let step_hours: f64 = 1.0 / 60.0;
+        let expected = (expected_raw / step_hours).ceil() * step_hours;
+        assert!(
+            (hours - expected).abs() < 1e-9,
+            "at 22°C, needed_charge_hours ({hours}) should equal constant-efficiency expected ({expected})"
         );
     }
 }

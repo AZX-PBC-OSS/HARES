@@ -14,6 +14,7 @@ pub struct ChargingComposer {
     scratch: Vec<PreferenceVote>,
     dispatch_target: DispatchTarget,
     last_action: String,
+    last_needed_charge_hours: f64,
 }
 
 impl ChargingComposer {
@@ -23,6 +24,7 @@ impl ChargingComposer {
             scratch: Vec::with_capacity(8),
             dispatch_target: DispatchTarget::ByName(Arc::from(target_name)),
             last_action: String::new(),
+            last_needed_charge_hours: f64::INFINITY,
         }
     }
 
@@ -40,6 +42,13 @@ impl ChargingComposer {
             .unwrap_or(true)
     }
 
+    /// The most recent needed-charge-hours estimate from preferences
+    /// (minimum across all preferences). Returns `f64::INFINITY` if no
+    /// preference provides an estimate.
+    pub fn last_needed_charge_hours(&self) -> f64 {
+        self.last_needed_charge_hours
+    }
+
     /// Evaluate all preferences and emit a resolved DispatchRequest.
     ///
     /// 1. Check constraints -- first Override wins.
@@ -48,6 +57,13 @@ impl ChargingComposer {
     ///    max min_soc, earliest departure.
     /// 4. Translate to ControlSignal.
     pub fn evaluate(&mut self, ctx: &DecisionContext, out: &mut Vec<DispatchRequest>) {
+        // Capture needed charge hours for telemetry (minimum across all preferences)
+        self.last_needed_charge_hours = self
+            .preferences
+            .iter()
+            .map(|p| p.needed_charge_hours(ctx))
+            .fold(f64::INFINITY, f64::min);
+
         // Check constraints first
         for pref in &mut self.preferences {
             if let Constraint::Override(vote) = pref.constraint(ctx) {
