@@ -43,11 +43,20 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
+use hares_types::telemetry_keys as tk;
 use hares_types::{ControlSignal, DRLevel, EnvironmentState, OperatingMode, Telemetry};
 
 use crate::Actor;
 
 use super::constants::DEFAULT_FREEZE_THRESHOLD_C;
+
+/// Default water heater freeze-protection threshold in °C.
+///
+/// Tank water temperature below this value triggers DR TurnOff rejection to
+/// prevent pipe/tank freezing. ASHRAE Guideline 36-2021 §5.16: freeze-stat
+/// setpoint not to exceed 4.4°C (40°F). 5°C provides a conservative safety
+/// margin for residential WH freeze protection.
+const WH_FREEZE_THRESHOLD_C: f64 = DEFAULT_FREEZE_THRESHOLD_C;
 
 /// Per-severity-step multiplier for DR compliance probability scaling.
 ///
@@ -291,16 +300,21 @@ pub struct DrCompliance {
     /// Count of clear signals dispatched this timestep (observability gate).
     #[cfg(feature = "observe")]
     clear_signals_dispatched_count: u64,
+    /// Count of signals rejected this timestep due to protected state
+    /// (defrost active, WH tank below freeze threshold) (observability gate).
+    #[cfg(feature = "observe")]
+    signals_rejected_count: u64,
 }
 
 impl DrCompliance {
     /// Creates a new DR compliance actor with the default compliance model.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(8);
+        let mut telemetry = Telemetry::with_capacity(9);
         telemetry.insert("dr_level", 0.0);
         telemetry.insert("dr_active", 0.0);
         telemetry.insert("dr_complied", 0.0);
         telemetry.insert("signals_count", 0.0);
+        telemetry.insert("signals_rejected", 0.0);
         telemetry.insert("dr_freeze_guard", 0.0);
         telemetry.insert("clear_signals_dispatched_count", 0.0);
         telemetry.insert("targets_configured", 0.0);
@@ -317,6 +331,8 @@ impl DrCompliance {
             last_dispatched: Vec::new(),
             #[cfg(feature = "observe")]
             clear_signals_dispatched_count: 0,
+            #[cfg(feature = "observe")]
+            signals_rejected_count: 0,
         }
     }
 
@@ -380,6 +396,42 @@ impl DrCompliance {
         env.zones
             .iter()
             .any(|z| z.temperature_c.is_finite() && z.temperature_c < self.freeze_risk_threshold_c)
+    }
+
+    /// Returns true if the target/signal pair should be rejected because the
+    /// equipment is in a protected state that blocks control dispatch.
+    ///
+    /// Checks `env.equipment_telemetry` for ByName targets:
+    /// - Defrost: when equipment is actively defrosting, reject PowerLimit and
+    ///   ModeOverride (TurnOff) — these would interrupt or conflict with the
+    ///   defrost cycle.
+    /// - Water heater freeze protection: when tank average temperature is below
+    ///   [`WH_FREEZE_THRESHOLD_C`], reject TurnOff to prevent pipe/tank freezing.
+    fn should_reject_dispatch(
+        &self,
+        target: &DispatchTarget,
+        action: &DrAction,
+        env: &EnvironmentState,
+    ) -> bool {
+        let DispatchTarget::ByName(name) = target else {
+            return false;
+        };
+        let Some(telem) = env.equipment_telemetry.get(name.as_ref()) else {
+            return false;
+        };
+        if telem.get(tk::DEFROST_ACTIVE) == Some(1.0)
+            && matches!(action, DrAction::PowerLimit { .. } | DrAction::TurnOff)
+        {
+            return true;
+        }
+        if matches!(action, DrAction::TurnOff) {
+            if let Some(tank_temp) = telem.get(tk::TANK_AVG_TEMP_C) {
+                if tank_temp.is_finite() && tank_temp < WH_FREEZE_THRESHOLD_C {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Generates dispatch signals for the given action.
@@ -525,6 +577,7 @@ impl Actor for DrCompliance {
             };
             self.telemetry.set("dr_complied", 0.0);
             self.telemetry.set("signals_count", clear_count as f64);
+            self.telemetry.set("signals_rejected", 0.0);
             self.telemetry.set("dr_freeze_guard", 0.0);
             #[cfg(feature = "observe")]
             {
@@ -559,6 +612,7 @@ impl Actor for DrCompliance {
 
         if !should_comply {
             self.telemetry.set("signals_count", 0.0);
+            self.telemetry.set("signals_rejected", 0.0);
             self.telemetry.set("dr_freeze_guard", 0.0);
             return;
         }
@@ -572,16 +626,24 @@ impl Actor for DrCompliance {
         self.telemetry.set("dr_freeze_guard", 0.0);
 
         let before = out.len();
+        let mut rejected: u64 = 0;
 
         if let Some(target) = &self.hvac_target {
-            // Freeze-protection guard: when DR TurnOff targets HVAC and any
-            // zone is below the freeze-risk threshold, downgrade to a
-            // minimum-heating ThermalSetpoint instead of ModeOverride::Off.
-            // This prevents equipment/building damage from freezing during
-            // DR events. Long-term: the Safety actor (T-0052) will provide
-            // an independent freeze-protection layer at Safety tier, at
-            // which point this guard can be relaxed.
-            if matches!(&self.hvac_action, DrAction::TurnOff) && self.any_zone_below_freeze(env) {
+            // Protected-state check: equipment in defrost or WH freeze protection
+            // blocks DR control signals. This runs before the freeze-protection guard
+            // so telemetry correctly records the rejection rather than a downgrade.
+            if self.should_reject_dispatch(target, &self.hvac_action, env) {
+                rejected = rejected.saturating_add(1);
+            } else if matches!(&self.hvac_action, DrAction::TurnOff)
+                && self.any_zone_below_freeze(env)
+            {
+                // Freeze-protection guard: when DR TurnOff targets HVAC and any
+                // zone is below the freeze-risk threshold, downgrade to a
+                // minimum-heating ThermalSetpoint instead of ModeOverride::Off.
+                // This prevents equipment/building damage from freezing during
+                // DR events. Long-term: the Safety actor (T-0052) will provide
+                // an independent freeze-protection layer at Safety tier, at
+                // which point this guard can be relaxed.
                 out.push(DispatchRequest {
                     target: target.clone(),
                     signal: ControlSignal::ThermalSetpoint {
@@ -616,6 +678,14 @@ impl Actor for DrCompliance {
             .collect();
 
         for (target, action) in &load_pairs {
+            // Protected-state check: skip dispatch for equipment in defrost
+            // or WH freeze protection. Recording rejection rather than
+            // dispatching prevents fire-and-forget signals that equipment
+            // would silently ignore.
+            if self.should_reject_dispatch(target, action, env) {
+                rejected = rejected.saturating_add(1);
+                continue;
+            }
             let is_turn_off = matches!(action, DrAction::TurnOff);
             let is_hvac_by_end_use = matches!(target, DispatchTarget::ByEndUse(eu) if eu.is_hvac());
             if is_turn_off && is_hvac_by_end_use && self.any_zone_below_freeze(env) {
@@ -643,6 +713,11 @@ impl Actor for DrCompliance {
 
         self.telemetry
             .set("signals_count", (out.len() - before) as f64);
+        self.telemetry.set("signals_rejected", rejected as f64);
+        #[cfg(feature = "observe")]
+        {
+            self.signals_rejected_count = rejected;
+        }
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
@@ -672,6 +747,18 @@ impl Actor for DrCompliance {
                     );
                 }
             }
+
+            // Invariant: rejected signals must be excluded from the dispatch
+            // output. Every rejection counted in `signals_rejected` must
+            // correspond to a signal that was NOT pushed to `out`.
+            let dispatched_and_rejected = rejected + (out.len() - before) as u64;
+            let expected_accepted =
+                (self.hvac_target.is_some() as u64).saturating_add(self.load_targets.len() as u64);
+            debug_assert!(
+                dispatched_and_rejected <= expected_accepted,
+                "DR actor '{}' dispatched+rejected ({dispatched_and_rejected}) exceeds configured targets ({expected_accepted})",
+                self.name,
+            );
         }
     }
 }
@@ -1187,7 +1274,8 @@ mod tests {
 
         actor.set_dr_level(DRLevel::Critical);
 
-        // Cold zone — guard does NOT apply to load targets
+        // Cold zone — HVAC zone freeze guard and should_reject_dispatch only apply to
+        // ByName targets or ByEndUse HVAC end-uses; ByEndUse WATER_HEATING bypasses both.
         let env = test_env().zone_temp(-10.0).build();
         let mut requests = Vec::new();
 
@@ -1784,6 +1872,276 @@ mod tests {
                 ControlSignal::PowerLimit { max_power_kw, .. } if max_power_kw.is_infinite() && *max_power_kw > 0.0
             ),
             "must dispatch PowerLimit INFINITY clear, not original DR signal"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pre-dispatch protected-state validation (T-0166)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn power_limit_rejected_when_equipment_in_defrost() {
+        let mut telem = Telemetry::with_capacity(2);
+        telem.insert(tk::DEFROST_ACTIVE, 1.0);
+
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByName("HPWH".into()),
+                DrAction::limit_power(3.0),
+            );
+
+        actor.set_dr_level(DRLevel::High);
+
+        let env = test_env().with_equipment_telemetry("HPWH", telem).build();
+        let mut requests = Vec::new();
+
+        actor.decide(&env, &mut requests);
+
+        assert!(
+            requests.is_empty(),
+            "PowerLimit must be rejected when equipment in defrost"
+        );
+        assert_eq!(actor.telemetry.get("signals_count"), Some(0.0));
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(1.0));
+    }
+
+    #[test]
+    fn mode_override_off_rejected_when_equipment_in_defrost() {
+        let mut telem = Telemetry::with_capacity(2);
+        telem.insert(tk::DEFROST_ACTIVE, 1.0);
+
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::off());
+
+        actor.set_dr_level(DRLevel::Critical);
+
+        let env = test_env().with_equipment_telemetry("HVAC", telem).build();
+        let mut requests = Vec::new();
+
+        actor.decide(&env, &mut requests);
+
+        assert!(
+            requests.is_empty(),
+            "ModeOverride(Off) must be rejected when equipment in defrost"
+        );
+        assert_eq!(actor.telemetry.get("signals_count"), Some(0.0));
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(1.0));
+    }
+
+    #[test]
+    fn power_limit_dispatched_when_equipment_not_in_defrost() {
+        let mut telem = Telemetry::with_capacity(2);
+        telem.insert(tk::DEFROST_ACTIVE, 0.0);
+        telem.insert(tk::ELECTRIC_KW, 1.5);
+
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByName("HPWH".into()),
+                DrAction::limit_power(3.0),
+            );
+
+        actor.set_dr_level(DRLevel::High);
+
+        let env = test_env().with_equipment_telemetry("HPWH", telem).build();
+        let mut requests = Vec::new();
+
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(
+            requests.len(),
+            1,
+            "PowerLimit must be dispatched when equipment is not in defrost"
+        );
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::PowerLimit { max_power_kw, .. } if (*max_power_kw - 3.0).abs() < 0.01
+        ));
+        assert_eq!(actor.telemetry.get("signals_count"), Some(1.0));
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(0.0));
+    }
+
+    #[test]
+    fn turn_off_rejected_when_wh_tank_below_freeze_threshold() {
+        // WH_FREEZE_THRESHOLD_C = 5.0°C. Tank at 3.0°C means freeze
+        // protection must block TurnOff.
+        let mut telem = Telemetry::with_capacity(2);
+        telem.insert(tk::TANK_AVG_TEMP_C, 3.0);
+
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(DispatchTarget::ByName("HPWH".into()), DrAction::off());
+
+        actor.set_dr_level(DRLevel::Critical);
+
+        let env = test_env().with_equipment_telemetry("HPWH", telem).build();
+        let mut requests = Vec::new();
+
+        actor.decide(&env, &mut requests);
+
+        assert!(
+            requests.is_empty(),
+            "TurnOff must be rejected when WH tank temp is below freeze threshold"
+        );
+        assert_eq!(actor.telemetry.get("signals_count"), Some(0.0));
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(1.0));
+    }
+
+    #[test]
+    fn turn_off_proceeds_when_wh_tank_above_freeze_threshold() {
+        let mut telem = Telemetry::with_capacity(2);
+        telem.insert(tk::TANK_AVG_TEMP_C, 45.0);
+
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(DispatchTarget::ByName("HPWH".into()), DrAction::off());
+
+        actor.set_dr_level(DRLevel::Critical);
+
+        let env = test_env().with_equipment_telemetry("HPWH", telem).build();
+        let mut requests = Vec::new();
+
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(
+            requests.len(),
+            1,
+            "TurnOff must be dispatched when WH tank temp is above freeze threshold"
+        );
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::ModeOverride {
+                mode: OperatingMode::Off
+            }
+        ));
+        assert_eq!(actor.telemetry.get("signals_count"), Some(1.0));
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(0.0));
+    }
+
+    #[test]
+    fn rejection_does_not_apply_to_by_end_use_targets() {
+        let mut telem = Telemetry::with_capacity(2);
+        telem.insert(tk::DEFROST_ACTIVE, 1.0);
+
+        // ByEndUse targets are resolved at dispatch time; the actor cannot
+        // look up individual equipment state. Protected-state checks skip
+        // ByEndUse targets — validation happens downstream in the dwelling
+        // dispatch loop.
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByEndUse(EndUse::WATER_HEATING),
+                DrAction::limit_power(2.0),
+            );
+
+        actor.set_dr_level(DRLevel::High);
+
+        let env = test_env().with_equipment_telemetry("HPWH", telem).build();
+        let mut requests = Vec::new();
+
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(
+            requests.len(),
+            1,
+            "ByEndUse targets bypass actor-side protected-state check"
+        );
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(0.0));
+    }
+
+    #[test]
+    fn signals_rejected_pre_registered_at_init() {
+        let actor = DrCompliance::new("Test");
+        assert_eq!(
+            actor.telemetry.get("signals_rejected"),
+            Some(0.0),
+            "signals_rejected must be pre-registered at init"
+        );
+    }
+
+    #[test]
+    fn signals_rejected_resets_each_step() {
+        // First step: equipment in defrost → PowerLimit rejected
+        let mut telem_defrost = Telemetry::with_capacity(2);
+        telem_defrost.insert(tk::DEFROST_ACTIVE, 1.0);
+
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByName("HVAC".into()),
+                DrAction::limit_power(3.0),
+            );
+
+        actor.set_dr_level(DRLevel::High);
+        let env_defrost = test_env()
+            .with_equipment_telemetry("HVAC", telem_defrost)
+            .build();
+        let mut requests = Vec::new();
+        actor.decide(&env_defrost, &mut requests);
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(1.0));
+
+        // Second step: equipment not in defrost → signal dispatched, rejected resets
+        let mut telem_normal = Telemetry::with_capacity(2);
+        telem_normal.insert(tk::DEFROST_ACTIVE, 0.0);
+
+        let env_normal = test_env()
+            .with_equipment_telemetry("HVAC", telem_normal)
+            .build();
+        let mut requests2 = Vec::new();
+        actor.decide(&env_normal, &mut requests2);
+
+        assert_eq!(requests2.len(), 1);
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(0.0));
+        assert_eq!(actor.telemetry.get("signals_count"), Some(1.0));
+    }
+
+    #[test]
+    fn mixed_rejected_and_dispatched_signals_tracked_separately() {
+        // HPWH in defrost → PowerLimit rejected
+        // EV normal → PowerLimit dispatched
+        let mut telem_hpwh = Telemetry::with_capacity(2);
+        telem_hpwh.insert(tk::DEFROST_ACTIVE, 1.0);
+        let mut telem_ev = Telemetry::with_capacity(2);
+        telem_ev.insert(tk::DEFROST_ACTIVE, 0.0);
+        telem_ev.insert(tk::ELECTRIC_KW, 2.0);
+
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByName("HPWH".into()),
+                DrAction::limit_power(3.0),
+            )
+            .with_load_target(
+                DispatchTarget::ByName("EV".into()),
+                DrAction::limit_power(5.0),
+            );
+
+        actor.set_dr_level(DRLevel::High);
+
+        let env = test_env()
+            .with_equipment_telemetry("HPWH", telem_hpwh)
+            .with_equipment_telemetry("EV", telem_ev)
+            .build();
+        let mut requests = Vec::new();
+
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 1, "one signal dispatched, one rejected");
+        assert_eq!(requests[0].target, DispatchTarget::ByName("EV".into()));
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::PowerLimit { max_power_kw, .. } if (*max_power_kw - 5.0).abs() < 0.01
+        ));
+        assert_eq!(actor.telemetry.get("signals_count"), Some(1.0));
+        assert_eq!(actor.telemetry.get("signals_rejected"), Some(1.0));
+        assert!(
+            requests
+                .iter()
+                .all(|r| !matches!(&r.target, DispatchTarget::ByName(n) if &**n == "HPWH")),
+            "rejected HPWH signal must not appear in dispatch output"
         );
     }
 }

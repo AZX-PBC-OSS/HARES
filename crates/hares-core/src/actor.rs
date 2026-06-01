@@ -97,6 +97,7 @@ pub mod testing {
         weather: Option<hares_types::WeatherState>,
         price_signal: hares_types::PriceSignal,
         electrical: hares_types::ElectricalSummary,
+        equipment_telemetry: std::collections::HashMap<String, Telemetry>,
     }
 
     impl TestEnvBuilder {
@@ -110,6 +111,7 @@ pub mod testing {
                 weather: None,
                 price_signal: Default::default(),
                 electrical: Default::default(),
+                equipment_telemetry: std::collections::HashMap::new(),
             }
         }
 
@@ -140,6 +142,16 @@ pub mod testing {
         /// Sets the electrical summary.
         pub fn with_electrical(mut self, es: hares_types::ElectricalSummary) -> Self {
             self.electrical = es;
+            self
+        }
+
+        /// Inserts equipment telemetry for testing actor equipment-state awareness.
+        pub fn with_equipment_telemetry(
+            mut self,
+            name: impl Into<String>,
+            telem: Telemetry,
+        ) -> Self {
+            self.equipment_telemetry.insert(name.into(), telem);
             self
         }
 
@@ -205,7 +217,7 @@ pub mod testing {
                     .with_ymd_and_hms(year, month, day, self.hour as u32, 0, 0)
                     .single()
                     .expect("valid timestamp"),
-                equipment_telemetry: std::collections::HashMap::new(),
+                equipment_telemetry: self.equipment_telemetry,
                 equipment_core: std::collections::HashMap::new(),
                 time_res: Duration::minutes(1),
                 price_signal: self.price_signal,
