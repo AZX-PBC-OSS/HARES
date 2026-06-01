@@ -240,6 +240,10 @@ pub struct ThermostatFsm {
     /// Gated on `observe` feature for diagnostic CSV output.
     #[cfg(feature = "observe")]
     pub setpoint_inversion_rejected_count: u64,
+    /// Count of deadband collisions where `heat_turn_on >= cool_turn_on`
+    /// in `update_mode()`. Gated on `observe` for diagnostic CSV output.
+    #[cfg(feature = "observe")]
+    pub deadband_collision_count: u64,
 }
 
 impl ThermostatFsm {
@@ -258,6 +262,8 @@ impl ThermostatFsm {
             min_off_time_s: 0.0,
             #[cfg(feature = "observe")]
             setpoint_inversion_rejected_count: 0,
+            #[cfg(feature = "observe")]
+            deadband_collision_count: 0,
         }
     }
 
@@ -382,6 +388,8 @@ impl ThermostatFsm {
         let hysteresis = self.thermostat.hysteresis_c;
         let offset = self.thermostat.deadband_offset.clamp(0.0, 1.0);
         let cutout = self.thermostat.cutout_ratio;
+        let heat_turn_on = setpoints.heating_c - hysteresis * (1.0 - offset);
+        let cool_turn_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
         let next_mode = if offset > 0.0 {
             match self.mode {
                 ThermostatMode::Heating => {
@@ -401,14 +409,35 @@ impl ThermostatFsm {
                     }
                 }
                 ThermostatMode::Deadband => {
-                    let heat_turn_on = setpoints.heating_c - hysteresis * (1.0 - offset);
-                    let cool_turn_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
-                    if zone_temp < heat_turn_on {
-                        ThermostatMode::Heating
-                    } else if zone_temp > cool_turn_on {
-                        ThermostatMode::Cooling
-                    } else {
+                    if heat_turn_on >= cool_turn_on {
+                        #[cfg(feature = "observe")]
+                        {
+                            self.deadband_collision_count =
+                                self.deadband_collision_count.saturating_add(1);
+                        }
+                        tracing::warn!(
+                            heat_turn_on,
+                            cool_turn_on,
+                            zone_temp,
+                            "deadband collision: heat_turn_on >= cool_turn_on; returning Deadband as safe default"
+                        );
                         ThermostatMode::Deadband
+                    } else {
+                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                        debug_assert!(
+                            heat_turn_on < cool_turn_on,
+                            "deadband collision: heat_turn_on={} >= cool_turn_on={}",
+                            heat_turn_on,
+                            cool_turn_on,
+                        );
+
+                        if zone_temp < heat_turn_on {
+                            ThermostatMode::Heating
+                        } else if zone_temp > cool_turn_on {
+                            ThermostatMode::Cooling
+                        } else {
+                            ThermostatMode::Deadband
+                        }
                     }
                 }
             }
@@ -429,12 +458,35 @@ impl ThermostatFsm {
                     }
                 }
                 ThermostatMode::Deadband => {
-                    if zone_temp < setpoints.heating_c - hysteresis {
-                        ThermostatMode::Heating
-                    } else if zone_temp > setpoints.cooling_c + hysteresis {
-                        ThermostatMode::Cooling
-                    } else {
+                    if heat_turn_on >= cool_turn_on {
+                        #[cfg(feature = "observe")]
+                        {
+                            self.deadband_collision_count =
+                                self.deadband_collision_count.saturating_add(1);
+                        }
+                        tracing::warn!(
+                            heat_turn_on,
+                            cool_turn_on,
+                            zone_temp,
+                            "deadband collision: heat_turn_on >= cool_turn_on; returning Deadband as safe default"
+                        );
                         ThermostatMode::Deadband
+                    } else {
+                        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                        debug_assert!(
+                            heat_turn_on < cool_turn_on,
+                            "deadband collision: heat_turn_on={} >= cool_turn_on={}",
+                            heat_turn_on,
+                            cool_turn_on,
+                        );
+
+                        if zone_temp < heat_turn_on {
+                            ThermostatMode::Heating
+                        } else if zone_temp > cool_turn_on {
+                            ThermostatMode::Cooling
+                        } else {
+                            ThermostatMode::Deadband
+                        }
                     }
                 }
             }
@@ -546,9 +598,10 @@ impl ThermostatFsm {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{FixedOffset, TimeZone};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 
     use super::*;
+    use hares_types::{GridState, WeatherState, ZoneState};
 
     fn thermostat_with_cycle_time(min_cycle_time_s: f64) -> ThermostatConfig {
         ThermostatConfig {
@@ -725,5 +778,104 @@ mod tests {
         });
         assert!(result.is_ok());
         assert!(!result.unwrap()); // signal was NOT handled
+    }
+
+    fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: temp_c,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: Default::default(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
+                .unwrap(),
+            time_res: ChronoDuration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    #[test]
+    fn update_mode_returns_deadband_on_collapsed_deadband() {
+        let mut fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 21.0,
+        });
+        fsm.thermostat = ThermostatConfig::default();
+
+        // offset=0.2 (default): heat_turn_on = 25.0 - 1.0*(1.0-0.2) = 24.2
+        // cool_turn_on = 21.0 + 1.0*(1.0-0.2) = 21.8
+        // heat_turn_on(24.2) >= cool_turn_on(21.8) → collision → Deadband
+        let env = env_with_zone_temp(23.0);
+        let mode = fsm.update_mode(&env, ZoneId(1)).unwrap();
+        assert_eq!(mode, ThermostatMode::Deadband);
+    }
+
+    #[test]
+    fn update_mode_returns_heating_with_valid_deadband() {
+        let mut fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 21.0,
+            cooling_c: 23.0,
+        });
+        fsm.thermostat = ThermostatConfig::default();
+
+        // offset=0.2 (default): heat_turn_on = 21.0 - 1.0*(1.0-0.2) = 20.2
+        // cool_turn_on = 23.0 + 1.0*(1.0-0.2) = 23.8
+        // heat_turn_on(20.2) < cool_turn_on(23.8), zone_temp=19.0 < 20.2 → Heating
+        let env = env_with_zone_temp(19.0);
+        let mode = fsm.update_mode(&env, ZoneId(1)).unwrap();
+        assert_eq!(mode, ThermostatMode::Heating);
+    }
+
+    #[test]
+    fn update_mode_returns_deadband_on_runtime_inverted_setpoints() {
+        let mut fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        });
+        fsm.thermostat = ThermostatConfig::default();
+        // Simulate inverted setpoints that bypassed deadband validation
+        // (e.g. through a bug in the dispatch chain as described in T-0156/T-0157).
+        fsm.runtime_setpoints = Some(RuntimeSetpointOverride {
+            heating_c: Some(25.0),
+            cooling_c: Some(21.0),
+        });
+        // offset=0.2 (default): heat_turn_on = 25.0 - 1.0*(1.0-0.2) = 24.2
+        // cool_turn_on = 21.0 + 1.0*(1.0-0.2) = 21.8
+        // heat_turn_on(24.2) >= cool_turn_on(21.8) → collision → Deadband
+        let env = env_with_zone_temp(23.0);
+        let mode = fsm.update_mode(&env, ZoneId(1)).unwrap();
+        assert_eq!(mode, ThermostatMode::Deadband);
+    }
+
+    #[test]
+    fn update_mode_collapsed_deadband_with_offset_does_not_mask_as_heating() {
+        let mut fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 21.0,
+        });
+        let mut config = ThermostatConfig::default();
+        config.deadband_offset = 0.2;
+        fsm.thermostat = config;
+
+        // heat_turn_on = 25.0 - 1.0*(1.0-0.2) = 25.0 - 0.8 = 24.2
+        // cool_turn_on = 21.0 + 1.0*(1.0-0.2) = 21.0 + 0.8 = 21.8
+        // heat_turn_on >= cool_turn_on → collision → Deadband
+        let env = env_with_zone_temp(23.0);
+        let mode = fsm.update_mode(&env, ZoneId(1)).unwrap();
+        assert_eq!(mode, ThermostatMode::Deadband);
     }
 }
