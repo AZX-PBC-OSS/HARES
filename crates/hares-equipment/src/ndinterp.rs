@@ -7,7 +7,7 @@
 //! (SOC × temperature × C-rate × SOH → power fraction).
 
 #[cfg(feature = "observe")]
-use std::cell::Cell;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use hares_types::HaresError;
@@ -58,11 +58,11 @@ pub struct RegularGridInterpolator {
     /// Count of out-of-bounds coordinate occurrences (only when feature "observe" is active).
     #[cfg(feature = "observe")]
     #[serde(skip)]
-    pub oob_count: Cell<u64>,
+    pub oob_count: AtomicU64,
     /// Per-dimension count of linear-extrapolation events (only when feature "observe" is active).
     #[cfg(feature = "observe")]
     #[serde(skip)]
-    pub linear_extrap_count: [Cell<u64>; 8],
+    pub linear_extrap_count: [AtomicU64; 8],
 }
 
 impl Clone for RegularGridInterpolator {
@@ -76,17 +76,17 @@ impl Clone for RegularGridInterpolator {
                 self.linear_extrap_warned.load(Ordering::Relaxed),
             ),
             #[cfg(feature = "observe")]
-            oob_count: Cell::new(self.oob_count.get()),
+            oob_count: AtomicU64::new(self.oob_count.load(Ordering::Relaxed)),
             #[cfg(feature = "observe")]
             linear_extrap_count: [
-                Cell::new(self.linear_extrap_count[0].get()),
-                Cell::new(self.linear_extrap_count[1].get()),
-                Cell::new(self.linear_extrap_count[2].get()),
-                Cell::new(self.linear_extrap_count[3].get()),
-                Cell::new(self.linear_extrap_count[4].get()),
-                Cell::new(self.linear_extrap_count[5].get()),
-                Cell::new(self.linear_extrap_count[6].get()),
-                Cell::new(self.linear_extrap_count[7].get()),
+                AtomicU64::new(self.linear_extrap_count[0].load(Ordering::Relaxed)),
+                AtomicU64::new(self.linear_extrap_count[1].load(Ordering::Relaxed)),
+                AtomicU64::new(self.linear_extrap_count[2].load(Ordering::Relaxed)),
+                AtomicU64::new(self.linear_extrap_count[3].load(Ordering::Relaxed)),
+                AtomicU64::new(self.linear_extrap_count[4].load(Ordering::Relaxed)),
+                AtomicU64::new(self.linear_extrap_count[5].load(Ordering::Relaxed)),
+                AtomicU64::new(self.linear_extrap_count[6].load(Ordering::Relaxed)),
+                AtomicU64::new(self.linear_extrap_count[7].load(Ordering::Relaxed)),
             ],
         }
     }
@@ -177,17 +177,17 @@ impl RegularGridInterpolator {
             strategy,
             linear_extrap_warned: AtomicBool::new(false),
             #[cfg(feature = "observe")]
-            oob_count: Cell::new(0),
+            oob_count: AtomicU64::new(0),
             #[cfg(feature = "observe")]
             linear_extrap_count: [
-                Cell::new(0),
-                Cell::new(0),
-                Cell::new(0),
-                Cell::new(0),
-                Cell::new(0),
-                Cell::new(0),
-                Cell::new(0),
-                Cell::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
             ],
         })
     }
@@ -230,7 +230,7 @@ impl RegularGridInterpolator {
                 if x < axis[0] || x > axis[axis.len() - 1] {
                     #[cfg(feature = "observe")]
                     {
-                        self.oob_count.set(self.oob_count.get() + 1);
+                        self.oob_count.fetch_add(1, Ordering::Relaxed);
                     }
                     #[cfg(any(debug_assertions, feature = "check_invariants"))]
                     {
@@ -267,8 +267,8 @@ impl RegularGridInterpolator {
 
             #[cfg(feature = "observe")]
             if !needs_clamp && (x < axis[0] || x > axis[axis.len() - 1]) {
-                self.oob_count.set(self.oob_count.get() + 1);
-                self.linear_extrap_count[dim].set(self.linear_extrap_count[dim].get() + 1);
+                self.oob_count.fetch_add(1, Ordering::Relaxed);
+                self.linear_extrap_count[dim].fetch_add(1, Ordering::Relaxed);
             }
 
             if !needs_clamp

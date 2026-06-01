@@ -212,7 +212,10 @@ pub(super) struct CoilResult {
     /// `true` when ADP exceeded entering dry-bulb and was clamped — distinct
     /// from natural dry-coil operation (T_ADP ≤ DBT with SHR = 1.0).
     /// Only compiled when the `observe` feature is active.
+    // Why: field is consumed via serde/telemetry serialization, not direct Rust access;
+    // compiler dead_code analysis cannot see the serde path.
     #[cfg(feature = "observe")]
+    #[allow(dead_code)]
     pub adp_exceeds_dbt: bool,
 }
 

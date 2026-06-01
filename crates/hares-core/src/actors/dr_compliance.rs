@@ -246,17 +246,25 @@ pub struct DrCompliance {
     freeze_risk_threshold_c: f64,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
+    /// Track of last-dispatched sticky actions (PowerLimit, TurnOff) per target.
+    /// Used to dispatch clear/reset signals when the DR event ends
+    /// (current_dr_level transitions to Normal).
+    last_dispatched: Vec<(DispatchTarget, DrAction)>,
+    /// Count of clear signals dispatched this timestep (observability gate).
+    #[cfg(feature = "observe")]
+    clear_signals_dispatched_count: u64,
 }
 
 impl DrCompliance {
     /// Creates a new DR compliance actor with the default compliance model.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(5);
+        let mut telemetry = Telemetry::with_capacity(6);
         telemetry.insert("dr_level", 0.0);
         telemetry.insert("dr_active", 0.0);
         telemetry.insert("dr_complied", 0.0);
         telemetry.insert("signals_count", 0.0);
         telemetry.insert("dr_freeze_guard", 0.0);
+        telemetry.insert("clear_signals_dispatched_count", 0.0);
         Self {
             name: Arc::from(name),
             model: Box::new(AlwaysComply),
@@ -266,6 +274,9 @@ impl DrCompliance {
             current_dr_level: DRLevel::Normal,
             freeze_risk_threshold_c: DEFAULT_FREEZE_THRESHOLD_C,
             telemetry,
+            last_dispatched: Vec::new(),
+            #[cfg(feature = "observe")]
+            clear_signals_dispatched_count: 0,
         }
     }
 
@@ -370,6 +381,65 @@ impl DrCompliance {
             priority: PriorityTier::Grid,
         });
     }
+
+    /// Dispatches clear/reset signals for all previously-dispatched targets
+    /// and clears the tracking vector. Returns the number of clear signals
+    /// dispatched.
+    fn dispatch_clear_signals(&mut self, out: &mut Vec<DispatchRequest>) -> usize {
+        let before = out.len();
+        for (target, action) in &self.last_dispatched {
+            match action {
+                DrAction::PowerLimit { .. } => {
+                    Self::dispatch_for_action(
+                        target,
+                        &DrAction::PowerLimit {
+                            max_kw: f64::INFINITY,
+                        },
+                        out,
+                    );
+                }
+                DrAction::TurnOff => {
+                    // ModeOverride clearing via ControlSignal is not currently
+                    // achievable: the equipment stores ctrl_mode_override as
+                    // Option<OperatingMode> where None means "autonomous", but
+                    // ControlSignal::ModeOverride always sets Some(mode).
+                    // OperatingMode::Auto does not exist in the enum.
+                    // Full clearing requires equipment-side changes to
+                    // apply_dr_level(DRLevel::Normal).
+                    // See Implementation Notes / Known Limitations.
+                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                    {
+                        tracing::debug!(
+                            target = ?target,
+                            "TurnOff ModeOverride cannot be cleared via actor-side signal; equipment ctrl_mode_override remains sticky"
+                        );
+                    }
+                }
+                DrAction::LoadCurtailment { .. }
+                | DrAction::SetpointAdjust { .. }
+                | DrAction::AbsoluteSetpoint { .. }
+                | DrAction::None => {
+                    // Non-sticky actions are filtered by track_dispatched;
+                    // reaching here indicates a bug in track_dispatched.
+                    debug_assert!(false, "non-sticky action in last_dispatched: {action:?}");
+                }
+            }
+        }
+        self.last_dispatched.clear();
+        out.len().saturating_sub(before)
+    }
+
+    /// Records a dispatched action for later clearing if it creates sticky state.
+    fn track_dispatched(&mut self, target: &DispatchTarget, action: &DrAction) {
+        let is_sticky = matches!(action, DrAction::PowerLimit { .. } | DrAction::TurnOff);
+        if !is_sticky {
+            return;
+        }
+        // Use conflicts_with for dedup: same-target new entry replaces old.
+        self.last_dispatched
+            .retain(|(t, _)| !t.conflicts_with(target));
+        self.last_dispatched.push((target.clone(), action.clone()));
+    }
 }
 
 impl Actor for DrCompliance {
@@ -389,9 +459,33 @@ impl Actor for DrCompliance {
             .set("dr_active", if self.is_dr_active() { 1.0 } else { 0.0 });
 
         if self.current_dr_level == DRLevel::Normal {
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                // All tracked entries must be sticky actions (PowerLimit or
+                // TurnOff). Non-sticky actions create no clearing obligation
+                // and indicate a track_dispatched filtering bug.
+                debug_assert!(
+                    self.last_dispatched
+                        .iter()
+                        .all(|(_, a)| matches!(a, DrAction::PowerLimit { .. } | DrAction::TurnOff)),
+                    "DR actor '{}' last_dispatched contains non-sticky entries",
+                    self.name,
+                );
+            }
+            let clear_count = if !self.last_dispatched.is_empty() {
+                self.dispatch_clear_signals(out)
+            } else {
+                0
+            };
             self.telemetry.set("dr_complied", 0.0);
-            self.telemetry.set("signals_count", 0.0);
+            self.telemetry.set("signals_count", clear_count as f64);
             self.telemetry.set("dr_freeze_guard", 0.0);
+            #[cfg(feature = "observe")]
+            {
+                self.clear_signals_dispatched_count = clear_count as u64;
+                self.telemetry
+                    .set("clear_signals_dispatched_count", clear_count as f64);
+            }
             return;
         }
 
@@ -412,6 +506,9 @@ impl Actor for DrCompliance {
             self.telemetry.set("dr_freeze_guard", 0.0);
             return;
         }
+
+        // Clear previous tracking before recording this step's dispatches.
+        self.last_dispatched.clear();
 
         // Reset freeze-guard telemetry at the top of the complied path so the
         // field reflects the current step's guard status regardless of
@@ -448,10 +545,21 @@ impl Actor for DrCompliance {
                 );
             } else {
                 Self::dispatch_for_action(target, &self.hvac_action, out);
+                let t = target.clone();
+                let a = self.hvac_action.clone();
+                self.track_dispatched(&t, &a);
             }
         }
 
-        for (target, action) in &self.load_targets {
+        // Collect target-action pairs to avoid borrowing self.load_targets
+        // during mutable self.track_dispatched calls.
+        let load_pairs: Vec<(DispatchTarget, DrAction)> = self
+            .load_targets
+            .iter()
+            .map(|(t, a)| (t.clone(), a.clone()))
+            .collect();
+
+        for (target, action) in &load_pairs {
             let is_turn_off = matches!(action, DrAction::TurnOff);
             let is_hvac_by_end_use = matches!(target, DispatchTarget::ByEndUse(eu) if eu.is_hvac());
             if is_turn_off && is_hvac_by_end_use && self.any_zone_below_freeze(env) {
@@ -473,6 +581,7 @@ impl Actor for DrCompliance {
                 );
             } else {
                 Self::dispatch_for_action(target, action, out);
+                self.track_dispatched(target, action);
             }
         }
 
@@ -1249,6 +1358,328 @@ mod tests {
             actor.telemetry.get("dr_freeze_guard"),
             Some(0.0),
             "dr_freeze_guard must reset to 0.0 in warm step; before the fix it would retain 1.0 from step 1"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // DR clear-signal tests (T-0163: sticky DR control signals)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn power_limit_cleared_on_normal_transition() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByName("HPWH".into()),
+                DrAction::limit_power(3.0),
+            );
+
+        // Step 1: DR High — dispatch power limit
+        actor.set_dr_level(DRLevel::High);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::PowerLimit { max_power_kw, .. } if (*max_power_kw - 3.0).abs() < 0.01
+        ));
+
+        // Step 2: DR Normal — clear signal dispatched
+        actor.set_dr_level(DRLevel::Normal);
+        let env2 = test_env().build();
+        let mut requests2 = Vec::new();
+        actor.decide(&env2, &mut requests2);
+        assert_eq!(
+            requests2.len(),
+            1,
+            "must dispatch one clear signal for PowerLimit"
+        );
+        assert_eq!(requests2[0].priority, PriorityTier::Grid);
+        assert_eq!(requests2[0].target, DispatchTarget::ByName("HPWH".into()));
+        match &requests2[0].signal {
+            ControlSignal::PowerLimit {
+                max_power_kw,
+                ramp_rate_kw_per_s,
+            } => {
+                assert!(
+                    max_power_kw.is_infinite() && *max_power_kw > 0.0,
+                    "clear signal must use INFINITY power limit, got {max_power_kw}"
+                );
+                assert_eq!(*ramp_rate_kw_per_s, None);
+            }
+            other => panic!("expected PowerLimit clear signal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiple_power_limit_targets_all_cleared() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByName("HPWH".into()),
+                DrAction::limit_power(3.0),
+            )
+            .with_load_target(
+                DispatchTarget::ByName("EV".into()),
+                DrAction::limit_power(5.0),
+            );
+
+        // Dispatch both power limits during DR High
+        actor.set_dr_level(DRLevel::High);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 2);
+
+        // Transition to Normal — both should be cleared
+        actor.set_dr_level(DRLevel::Normal);
+        let env2 = test_env().build();
+        let mut requests2 = Vec::new();
+        actor.decide(&env2, &mut requests2);
+        assert_eq!(
+            requests2.len(),
+            2,
+            "both PowerLimit targets must be cleared"
+        );
+
+        let targets: Vec<&DispatchTarget> = requests2.iter().map(|r| &r.target).collect();
+        assert!(targets.contains(&&DispatchTarget::ByName("HPWH".into())));
+        assert!(targets.contains(&&DispatchTarget::ByName("EV".into())));
+        for req in &requests2 {
+            assert!(matches!(
+                &req.signal,
+                ControlSignal::PowerLimit { max_power_kw, .. } if max_power_kw.is_infinite() && *max_power_kw > 0.0
+            ));
+        }
+    }
+
+    #[test]
+    fn no_clear_signals_when_no_prior_sticky_dispatch() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByEndUse(EndUse::PLUG_LOADS),
+                DrAction::curtail(0.5),
+            );
+
+        // Dispatch LoadCurtailment — not sticky (LoadFraction auto-resets)
+        actor.set_dr_level(DRLevel::High);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::LoadFraction { .. }
+        ));
+
+        // Transition to Normal — no clear signals needed
+        actor.set_dr_level(DRLevel::Normal);
+        let env2 = test_env().build();
+        let mut requests2 = Vec::new();
+        actor.decide(&env2, &mut requests2);
+        assert!(
+            requests2.is_empty(),
+            "non-sticky signals (LoadFraction) must not trigger clears"
+        );
+    }
+
+    #[test]
+    fn turnoff_modeoverride_dispatched_but_not_cleared_on_normal() {
+        // ModeOverride::Off (from TurnOff) is sticky on equipment but cannot
+        // be cleared via the current ControlSignal::ModeOverride API:
+        // OperatingMode::Auto does not exist, and setting any Other mode
+        // still sets Some(mode) rather than clearing to None.
+        // This test verifies the actor tracks TurnOff but does not emit a
+        // false-positive clearing signal (no OperatingMode::Auto exists).
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::off());
+
+        // Step 1: DR Critical — dispatch TurnOff
+        actor.set_dr_level(DRLevel::Critical);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].signal,
+            ControlSignal::ModeOverride {
+                mode: OperatingMode::Off
+            }
+        ));
+
+        // Step 2: DR Normal — no clearing signal for ModeOverride
+        // (PowerLimit { INFINITY } would be dispatched if PowerLimit was tracked,
+        // but TurnOff tracking only logs, does not dispatch)
+        actor.set_dr_level(DRLevel::Normal);
+        let env2 = test_env().build();
+        let mut requests2 = Vec::new();
+        actor.decide(&env2, &mut requests2);
+        assert!(
+            requests2.is_empty(),
+            "TurnOff ModeOverride must not emit a false clearing signal"
+        );
+    }
+
+    #[test]
+    fn no_clear_signals_on_consecutive_normal_calls() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByName("EV".into()),
+                DrAction::limit_power(4.0),
+            );
+
+        // Dispatch during DR High
+        actor.set_dr_level(DRLevel::High);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        // First Normal call — clears dispatched
+        actor.set_dr_level(DRLevel::Normal);
+        let env2 = test_env().build();
+        let mut requests2 = Vec::new();
+        actor.decide(&env2, &mut requests2);
+        assert_eq!(requests2.len(), 1, "first Normal call must dispatch clear");
+
+        // Second Normal call — no more clear signals
+        let env3 = test_env().build();
+        let mut requests3 = Vec::new();
+        actor.decide(&env3, &mut requests3);
+        assert!(
+            requests3.is_empty(),
+            "consecutive Normal calls without intervening DR must not re-dispatch clears"
+        );
+    }
+
+    #[test]
+    fn telemetry_signals_count_reflects_clear_signals_on_normal() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_load_target(
+                DispatchTarget::ByName("HPWH".into()),
+                DrAction::limit_power(3.0),
+            );
+
+        // Active DR — signals count reflects dispatched signals
+        actor.set_dr_level(DRLevel::Critical);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(actor.telemetry.get("signals_count"), Some(1.0));
+
+        // Normal — signals count reflects clear signals (not 0)
+        actor.set_dr_level(DRLevel::Normal);
+        let env2 = test_env().build();
+        let mut requests2 = Vec::new();
+        actor.decide(&env2, &mut requests2);
+        assert_eq!(
+            actor.telemetry.get("signals_count"),
+            Some(1.0),
+            "signals_count on Normal must reflect clear signal count"
+        );
+    }
+
+    #[test]
+    fn telemetry_signals_count_zero_on_normal_with_no_prior_dispatch() {
+        let mut actor = DrCompliance::new("Test").with_compliance_model(AlwaysComply);
+
+        // No prior dispatch — signals_count must be 0 on Normal
+        actor.set_dr_level(DRLevel::Normal);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(actor.telemetry.get("signals_count"), Some(0.0));
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn telemetry_clear_signals_dispatched_count_key_pre_registered() {
+        // Regression: Telemetry::set() panics for unknown keys. Verify
+        // clear_signals_dispatched_count is pre-registered at construction
+        // so that decide() under #[cfg(feature = "observe")] does not panic.
+        let actor = DrCompliance::new("Test");
+        assert_eq!(
+            actor.telemetry.get("clear_signals_dispatched_count"),
+            Some(0.0),
+            "clear_signals_dispatched_count must be pre-registered at init"
+        );
+    }
+
+    #[test]
+    fn power_limit_target_dedup_emits_single_clear_signal() {
+        // When the same target receives PowerLimit via both hvac and
+        // load target paths, dedup ensures only one clear signal is dispatched.
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HPWH".into()))
+            .with_hvac_action(DrAction::limit_power(2.0))
+            .with_load_target(
+                DispatchTarget::ByName("HPWH".into()),
+                DrAction::limit_power(3.0),
+            );
+
+        // Step 1: DR High — dispatches two PowerLimit signals (hvac + load)
+        actor.set_dr_level(DRLevel::High);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 2);
+
+        // Step 2: DR Normal — only one clear signal (dedup works)
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests2 = Vec::new();
+        actor.decide(&env, &mut requests2);
+        assert_eq!(
+            requests2.len(),
+            1,
+            "dedup should emit exactly one clear signal for the same target"
+        );
+        assert!(
+            matches!(
+                &requests2[0].signal,
+                ControlSignal::PowerLimit { max_power_kw, .. }
+                if max_power_kw.is_infinite() && *max_power_kw > 0.0
+            ),
+            "clear signal must be PowerLimit with INFINITY"
+        );
+    }
+
+    #[test]
+    fn dr_level_normal_after_active_dr_emits_clears_not_original_signals() {
+        // Regression: after DR ends, only clear signals should be dispatched,
+        // not the original DR actions re-dispatched.
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::off())
+            .with_load_target(
+                DispatchTarget::ByName("HPWH".into()),
+                DrAction::limit_power(3.0),
+            );
+
+        // Active DR
+        actor.set_dr_level(DRLevel::Critical);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 2);
+
+        // Normal — only PowerLimit clear (TurnOff can't be cleared)
+        actor.set_dr_level(DRLevel::Normal);
+        let mut requests2 = Vec::new();
+        actor.decide(&env, &mut requests2);
+        assert_eq!(requests2.len(), 1, "only PowerLimit clear dispatched");
+        assert!(
+            matches!(
+                &requests2[0].signal,
+                ControlSignal::PowerLimit { max_power_kw, .. } if max_power_kw.is_infinite() && *max_power_kw > 0.0
+            ),
+            "must dispatch PowerLimit INFINITY clear, not original DR signal"
         );
     }
 }

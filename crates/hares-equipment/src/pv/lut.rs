@@ -46,10 +46,10 @@
 //!   **Resolvable when:** `EnvironmentState` gains `site_latitude_deg` and
 //!   `site_longitude_deg` fields (tracked in a follow-up ticket).
 
-#[cfg(feature = "observe")]
-use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+#[cfg(feature = "observe")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arrow::array::Array;
@@ -107,7 +107,7 @@ pub(crate) struct PvLut {
     sam_array_type: Option<u8>,
     nn_warned: AtomicBool,
     #[cfg(feature = "observe")]
-    lut_lookup_count: Cell<u64>,
+    lut_lookup_count: AtomicU64,
 }
 
 impl Clone for PvLut {
@@ -129,7 +129,7 @@ impl Clone for PvLut {
             sam_array_type: self.sam_array_type,
             nn_warned: AtomicBool::new(false),
             #[cfg(feature = "observe")]
-            lut_lookup_count: Cell::new(0),
+            lut_lookup_count: AtomicU64::new(0),
         }
     }
 }
@@ -431,7 +431,7 @@ impl PvLut {
             sam_array_type,
             nn_warned: AtomicBool::new(false),
             #[cfg(feature = "observe")]
-            lut_lookup_count: Cell::new(0),
+            lut_lookup_count: AtomicU64::new(0),
         })
     }
 
@@ -542,9 +542,8 @@ impl PvLut {
 
         #[cfg(feature = "observe")]
         {
-            let n = self.lut_lookup_count.get();
-            self.lut_lookup_count.set(n + 1);
-            tracing::debug!(lut_lookup_count = n + 1, "PV LUT interpolate call",);
+            let new_n = self.lut_lookup_count.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::debug!(lut_lookup_count = new_n, "PV LUT interpolate call",);
         }
 
         let mut weighted_sum = 0.0;
@@ -691,7 +690,7 @@ impl PvLut {
             sam_array_type: None,
             nn_warned: AtomicBool::new(false),
             #[cfg(feature = "observe")]
-            lut_lookup_count: Cell::new(0),
+            lut_lookup_count: AtomicU64::new(0),
         }
     }
 }

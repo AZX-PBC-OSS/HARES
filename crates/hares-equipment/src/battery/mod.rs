@@ -940,7 +940,7 @@ impl Battery {
                 ah_cell = c.ah_cell,
                 v_cell = c.v_cell,
                 declared_capacity_kwh = self.capacity_kwh,
-                implied_capacity_kwh,
+                implied_capacity_kwh = implied_kwh,
                 "Battery topology initialized",
             );
         }
