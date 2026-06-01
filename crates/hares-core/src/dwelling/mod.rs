@@ -3644,6 +3644,7 @@ impl Dwelling {
         let net_grid = self.electrical_solver.net_active_kw();
         self.prior_electrical_summary = ElectricalSummary {
             pv_generation_kw: -pv_kw,
+            actual_pv_kw: -pv_kw,
             base_load_kw: power_w_to_kw(self.ports.electrical.load_power_w)
                 - battery_kw.max(0.0)
                 - ev_kw,

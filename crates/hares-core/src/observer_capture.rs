@@ -32,6 +32,8 @@ pub(crate) fn capture_environment(
         zone_humidity_ratios: env.zones.iter().map(|z| (z.id, z.humidity_ratio)).collect(),
         solar_irradiance: env.weather.solar_irradiance.clone(),
         wf_allows_leap_years,
+        pv_generation_kw: env.electrical.pv_generation_kw,
+        pv_actual_kw: env.electrical.actual_pv_kw,
     }
 }
 

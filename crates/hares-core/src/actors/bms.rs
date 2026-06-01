@@ -155,7 +155,7 @@ impl BatteryManagementActor {
                 // Battery may discharge up to load + PV, so net grid export
                 // (discharge - load) is at most PV generation.
                 let max_allowed =
-                    env.electrical.base_load_kw.max(0.0) + env.electrical.pv_generation_kw.max(0.0);
+                    env.electrical.base_load_kw.max(0.0) + env.electrical.actual_pv_kw_or_fallback();
                 discharge_kw.min(max_allowed)
             }
         }
@@ -181,11 +181,15 @@ impl BatteryManagementActor {
                     self.last_action = "idle:no_soc".into();
                     return;
                 };
-                let pv = env.electrical.pv_generation_kw;
+                let pv = env.electrical.actual_pv_kw_or_fallback();
                 let load = env.electrical.base_load_kw;
                 let surplus = pv - load;
 
-                if *solar_only_charging && pv <= 0.0 {
+                // `actual_pv_kw` directly for the binary "is PV present?" guard:
+                // the sentinel value is 0.0 (no actual equipment output).
+                // If actual PV output is zero, grid-disconnect regardless of
+                // the forecast pv_generation_kw value.
+                if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
                     self.emit(ControlSignal::GridConnect { connected: false }, out);
                     self.last_action = "grid_disconnect:solar_only".into();
                     return;
@@ -261,7 +265,7 @@ impl BatteryManagementActor {
                 let price = env.price_signal.electricity_price.unwrap_or(0.0);
 
                 if price <= self.charge_price_threshold && soc < (1.0 - reserve_soc) {
-                    if *solar_only_charging && env.electrical.pv_generation_kw <= 0.0 {
+                    if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:tou_solar_only".into();
                         return;
@@ -299,7 +303,7 @@ impl BatteryManagementActor {
                     return;
                 };
                 if soc < *target_soc {
-                    if !charge_from_grid && env.electrical.pv_generation_kw <= 0.0 {
+                    if !charge_from_grid && env.electrical.actual_pv_kw <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:backup_no_pv".into();
                         return;
@@ -520,7 +524,7 @@ impl Actor for BatteryManagementActor {
             .set("bms_action", bms_action_code(&self.last_action));
         self.telemetry
             .set("soc", self.read_soc(env).unwrap_or(f64::NAN));
-        self.telemetry.set("pv_kw", env.electrical.pv_generation_kw);
+        self.telemetry.set("pv_kw", env.electrical.actual_pv_kw_or_fallback());
         self.telemetry.set("load_kw", env.electrical.base_load_kw);
     }
 }
@@ -2024,5 +2028,135 @@ mod tests {
             Some(EquipmentId(42)),
             "equipment_id must match the registry entry"
         );
+    }
+
+    // ── actual-vs-forecast PV regression tests ──
+
+    #[test]
+    fn bms_self_consumption_uses_actual_pv_not_forecast() {
+        // pv_generation_kw=10.0 (forecast), actual_pv_kw=3.0 (observed).
+        // Load=5.0 → deficit = 5.0 - 3.0 = 2.0 → should discharge.
+        // With forecast alone (10.0) there'd be surplus=5.0 → would charge.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 10.0,
+                actual_pv_kw: 3.0,
+                base_load_kw: 5.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.7);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::SelfConsumption {
+                enabled,
+                solar_only_charging,
+            } => {
+                assert!(*enabled);
+                assert!(!solar_only_charging);
+            }
+            other => panic!("expected SelfConsumption, got {other:?}"),
+        }
+        assert_eq!(actor.last_action(), "self_consumption:discharge");
+    }
+
+    #[test]
+    fn bms_self_consumption_solar_only_disconnects_when_actual_pv_is_zero() {
+        // pv_generation_kw=5.0 (forecast), actual_pv_kw=0.0 (actual).
+        // solar_only_charging=true → should grid-disconnect because actual PV is zero.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: true,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 5.0,
+                actual_pv_kw: 0.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::GridConnect { connected: false }
+        ));
+        assert_eq!(actor.last_action(), "grid_disconnect:solar_only");
+    }
+
+    #[test]
+    fn bms_solar_only_export_uses_actual_pv() {
+        // pv_generation_kw=10.0 (forecast), actual_pv_kw=2.0 (observed).
+        // Load=4.0 → deficit = 4.0 - 2.0 = 2.0 → raw discharge = 2.0.
+        // SolarOnly clamp: max = load + actual_pv = 4.0 + 2.0 = 6.0.
+        // 2.0 < 6.0 → discharge passes clamp. With forecast PV alone
+        // (10.0), there'd be surplus = 6.0 → would charge instead.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::SolarOnly,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 10.0,
+                actual_pv_kw: 2.0,
+                base_load_kw: 4.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.7);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                // deficit=2.0 → raw discharge = 2.0, SolarOnly clamp load+actual=4+2=6.0 → 2.0
+                assert!((*active_power_kw + 2.0).abs() < 1e-9);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
     }
 }

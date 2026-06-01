@@ -18,7 +18,14 @@ impl ChargingPreference for V2HDischarge {
     }
 
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
-        let pv = ctx.env.electrical.pv_generation_kw;
+        let pv = ctx.env.electrical.actual_pv_kw_or_fallback();
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            pv.is_finite() && pv >= 0.0,
+            "pv must be non-negative and finite"
+        );
+
         let load = ctx.env.electrical.base_load_kw;
         let deficit = load - pv;
 
@@ -185,5 +192,54 @@ mod tests {
 
         assert_eq!(vote.label, "v2h:discharging");
         assert!((vote.power_kw.unwrap() - (-5.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn v2h_uses_actual_not_forecast() {
+        // pv_generation_kw=8.0 (forecast), actual_pv_kw=2.0 (observed).
+        // Load=4.0, deficit = 4.0 - 2.0 = 2.0 (not 4.0 - 8.0 = -4.0 which would idle).
+        let env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 8.0,
+                actual_pv_kw: 2.0,
+                base_load_kw: 4.0,
+                ..Default::default()
+            })
+            .build();
+        let mut pref = V2HDischarge {
+            threshold_soc: 0.5,
+            min_soc: 0.2,
+            max_discharge_kw: 5.0,
+        };
+        let ctx = make_ctx(&env, 0.7);
+        let vote = pref.score(&ctx);
+
+        assert_eq!(vote.label, "v2h:discharging");
+        // deficit = 4.0 - 2.0 = 2.0, clamped to max_discharge_kw=5.0 → 2.0
+        assert!((vote.power_kw.unwrap() - (-2.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn v2h_falls_back_when_no_actual() {
+        // actual_pv_kw=0.0, fall back to pv_generation_kw=1.0.
+        // Load=4.0, deficit = 4.0 - 1.0 = 3.0.
+        let env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 1.0,
+                actual_pv_kw: 0.0,
+                base_load_kw: 4.0,
+                ..Default::default()
+            })
+            .build();
+        let mut pref = V2HDischarge {
+            threshold_soc: 0.5,
+            min_soc: 0.2,
+            max_discharge_kw: 5.0,
+        };
+        let ctx = make_ctx(&env, 0.7);
+        let vote = pref.score(&ctx);
+
+        assert_eq!(vote.label, "v2h:discharging");
+        assert!((vote.power_kw.unwrap() - (-3.0)).abs() < 1e-9);
     }
 }

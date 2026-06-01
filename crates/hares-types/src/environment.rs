@@ -36,9 +36,18 @@ pub struct PriceSignal {
 /// Provides read-only observation of the building's electrical state
 /// so actors can make informed decisions (e.g., BMS self-consumption
 /// needs to know PV generation vs home load).
+///
+/// `pv_generation_kw` may carry forecast values in forecast-driven
+/// simulation modes (e.g., model-predictive-control). `actual_pv_kw`
+/// always holds the observed PV output from the prior timestep's
+/// equipment step. Real-time dispatch strategies (solar surplus
+/// tracking, V2H) should read `actual_pv_kw` and fall back to
+/// `pv_generation_kw` when `actual_pv_kw` is zero.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ElectricalSummary {
     /// Total PV generation [kW], positive = producing.
+    /// In forecast-driven modes this may carry forecast values;
+    /// in normal simulation it holds the prior-step actual output.
     pub pv_generation_kw: f64,
     /// Total non-dispatchable load [kW], positive = consuming.
     /// Excludes battery and EV (those are dispatchable).
@@ -49,6 +58,35 @@ pub struct ElectricalSummary {
     pub battery_power_kw: f64,
     /// Total EV power [kW], positive = charging.
     pub ev_power_kw: f64,
+    /// Actual (observed) PV generation from equipment step [kW], positive = producing.
+    ///
+    /// Always reflects real equipment output; never carries forecast values.
+    /// Set to 0.0 when no PV equipment is present or when actual data is
+    /// unavailable. Real-time dispatch strategies that must not over-commit
+    /// on forecast values should use this field with a fallback to
+    /// `pv_generation_kw` when this value is zero.
+    #[serde(default)]
+    pub actual_pv_kw: f64,
+}
+
+impl ElectricalSummary {
+    /// Best-available PV generation for real-time dispatch decisions.
+    ///
+    /// Returns `actual_pv_kw` when it is non-zero (real observed output from
+    /// equipment step). Falls back to `pv_generation_kw` when `actual_pv_kw`
+    /// is zero — because zero actual PV at night is indistinguishable from
+    /// "no measurement available" in the current infrastructure. The `> 0.0`
+    /// sentinel treats zero as absent, not as true zero-PV-now.
+    ///
+    /// Callers that must not over-commit on forecast values should use this
+    /// method instead of reading `pv_generation_kw` directly.
+    pub fn actual_pv_kw_or_fallback(&self) -> f64 {
+        if self.actual_pv_kw > 0.0 {
+            self.actual_pv_kw
+        } else {
+            self.pv_generation_kw
+        }
+    }
 }
 
 /// Stable zone identifier.
@@ -510,6 +548,7 @@ mod tests {
             },
             electrical: ElectricalSummary {
                 pv_generation_kw: 3.5,
+                actual_pv_kw: 3.5,
                 base_load_kw: 1.2,
                 net_grid_kw: -2.3,
                 battery_power_kw: 0.0,
@@ -532,6 +571,7 @@ mod tests {
         assert_eq!(summary.net_grid_kw, 0.0);
         assert_eq!(summary.battery_power_kw, 0.0);
         assert_eq!(summary.ev_power_kw, 0.0);
+        assert_eq!(summary.actual_pv_kw, 0.0);
     }
 
     #[test]

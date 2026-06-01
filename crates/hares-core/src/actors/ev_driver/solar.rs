@@ -8,7 +8,14 @@ pub struct SolarTracking {
 
 impl ChargingPreference for SolarTracking {
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
-        let pv = ctx.env.electrical.pv_generation_kw;
+        let pv = ctx.env.electrical.actual_pv_kw_or_fallback();
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            pv.is_finite() && pv >= 0.0,
+            "pv must be non-negative and finite"
+        );
+
         let load = ctx.env.electrical.base_load_kw;
         let surplus = (pv - load).max(0.0);
 
@@ -126,5 +133,49 @@ mod tests {
 
         assert_eq!(vote.label, "solar:insufficient");
         assert!(vote.power_kw.is_none());
+    }
+
+    #[test]
+    fn solar_uses_actual_not_forecast() {
+        // pv_generation_kw=10.0 (forecast), actual_pv_kw=4.0 (observed).
+        // Surplus should use actual: 4.0 - 2.0 = 2.0 kW, not 10.0 - 2.0 = 8.0 kW.
+        let env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 10.0,
+                actual_pv_kw: 4.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        let mut pref = SolarTracking {
+            min_charge_rate_kw: 1.0,
+        };
+        let ctx = make_ctx(&env);
+        let vote = pref.score(&ctx);
+
+        assert_eq!(vote.label, "solar:surplus");
+        assert!((vote.power_kw.unwrap() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn solar_falls_back_when_no_actual() {
+        // actual_pv_kw=0.0, so fall back to pv_generation_kw=5.0.
+        // Surplus: 5.0 - 1.5 = 3.5 kW.
+        let env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 5.0,
+                actual_pv_kw: 0.0,
+                base_load_kw: 1.5,
+                ..Default::default()
+            })
+            .build();
+        let mut pref = SolarTracking {
+            min_charge_rate_kw: 1.0,
+        };
+        let ctx = make_ctx(&env);
+        let vote = pref.score(&ctx);
+
+        assert_eq!(vote.label, "solar:surplus");
+        assert!((vote.power_kw.unwrap() - 3.5).abs() < 1e-9);
     }
 }

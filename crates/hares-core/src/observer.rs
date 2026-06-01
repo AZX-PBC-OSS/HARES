@@ -58,6 +58,11 @@ pub struct EnvironmentCapture {
     /// observation. Downstream tooling can use this to flag mismatches between
     /// file content and explicit header declarations.
     pub wf_allows_leap_years: bool,
+    /// PV generation from `ElectricalSummary.pv_generation_kw` (may carry forecast
+    /// values in forecast-driven modes).
+    pub pv_generation_kw: f64,
+    /// Actual PV generation from `ElectricalSummary.actual_pv_kw` (observed).
+    pub pv_actual_kw: f64,
 }
 
 /// Equipment telemetry + accumulated port state after an equipment phase.
