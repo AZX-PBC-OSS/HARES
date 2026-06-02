@@ -4334,7 +4334,7 @@ mod tests {
     use hares_equipment::{Equipment, EquipmentConfig};
     use hares_types::ports::{PortContribution, PortSlots};
     use hares_types::{
-        ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse,
+        ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, DRLevel, EndUse,
         EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, OperatingMode, PortDeclaration,
         Telemetry, TelemetryField, ZoneId, ZoneState,
     };
@@ -4756,6 +4756,7 @@ mod tests {
         telemetry: Telemetry,
         last_power_kw: f64,
         last_soc_target: f64,
+        last_dr_level: Option<DRLevel>,
         core_output: CoreOutput,
     }
 
@@ -4783,12 +4784,18 @@ mod tests {
                             unit: "fraction".to_string(),
                             description: "last applied SOC target".to_string(),
                         },
+                        TelemetryField {
+                            name: "last_dr_level".to_string(),
+                            unit: "enum".to_string(),
+                            description: "last applied DR level".to_string(),
+                        },
                     ],
                     zone_type: None,
                 },
-                telemetry: Telemetry::with_capacity(2),
+                telemetry: Telemetry::with_capacity(3),
                 last_power_kw: 0.0,
                 last_soc_target: 0.0,
+                last_dr_level: None,
                 core_output: CoreOutput::default(),
             }
         }
@@ -4861,6 +4868,11 @@ mod tests {
                     self.last_soc_target = *target_soc;
                     self.telemetry
                         .insert(tk::LAST_SOC_TARGET, self.last_soc_target);
+                }
+                ControlSignal::DemandResponse { level, .. } => {
+                    self.last_dr_level = Some(*level);
+                    self.telemetry
+                        .insert("last_dr_level", *level as u8 as f64);
                 }
                 _ => {}
             }
@@ -6355,6 +6367,44 @@ occupancy = 1.0
         assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
         // Battery should NOT receive it
         assert_eq!(equipment[2].telemetry().get(tk::LAST_POWER_KW), None);
+    }
+
+    #[test]
+    fn dispatch_demand_response_by_end_use_ev_routes_to_ev_equipment() {
+        let mut ev = TestEquipment::new(
+            "Home EV",
+            ControlCapabilities::POWER_SETPOINT | ControlCapabilities::DEMAND_RESPONSE,
+        );
+        ev.descriptor.end_use = EndUse::EV;
+        let mut battery = TestEquipment::new(
+            "Home Battery",
+            ControlCapabilities::POWER_SETPOINT | ControlCapabilities::DEMAND_RESPONSE,
+        );
+        battery.descriptor.end_use = EndUse::BATTERY;
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::EV),
+            signal: ControlSignal::DemandResponse {
+                level: DRLevel::Critical,
+                duration_s: Some(3600.0),
+            },
+            priority: PriorityTier::Grid,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> =
+            vec![Box::new(ev), Box::new(battery)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        // EV should have received the DR signal (Critical = 3)
+        assert_eq!(
+            equipment[0].telemetry().get("last_dr_level"),
+            Some(DRLevel::Critical as u8 as f64)
+        );
+        // Battery should NOT have received it
+        assert_eq!(equipment[1].telemetry().get("last_dr_level"), None);
     }
 
     // -----------------------------------------------------------------------

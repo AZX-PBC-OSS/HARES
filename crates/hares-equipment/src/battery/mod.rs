@@ -1369,6 +1369,18 @@ impl Equipment for Battery {
         self.telemetry.set(tk::TERMINAL_VOLTAGE_V, terminal_v);
         self.telemetry.set(tk::CURRENT_A, current_a);
         self.telemetry.set(tk::OPERATING_MODE, self.mode.as_code());
+        self.telemetry
+            .set(tk::DR_POWER_FRACTION, self.dr_power_fraction());
+        self.telemetry.set(
+            tk::DR_LEVEL,
+            match self.dr_level {
+                DRLevel::Normal => 0.0,
+                DRLevel::Moderate => 1.0,
+                DRLevel::High => 2.0,
+                DRLevel::Critical => 3.0,
+                DRLevel::GridEmergency => 4.0,
+            },
+        );
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Bidirectional(port_power_kw)),
@@ -1619,7 +1631,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry() -> Telemetry {
-    let mut t = Telemetry::with_capacity(18);
+    let mut t = Telemetry::with_capacity(20);
     t.insert(tk::SOC, 0.0);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
     t.insert(tk::OHMIC_LOSS_W, 0.0);
@@ -1640,6 +1652,8 @@ fn default_telemetry() -> Telemetry {
     t.insert(tk::DERIVATION_SOURCE, 0.0);
     t.insert(tk::IMPLIED_CAPACITY_KWH, f64::NAN);
     t.insert(tk::DECLARED_CAPACITY_KWH, f64::NAN);
+    t.insert(tk::DR_POWER_FRACTION, 1.0);
+    t.insert(tk::DR_LEVEL, 0.0);
     t
 }
 
@@ -1751,6 +1765,17 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::DECLARED_CAPACITY_KWH.to_string(),
             unit: "kWh".to_string(),
             description: "Declared pack capacity from config".to_string(),
+        },
+        TelemetryField {
+            name: tk::DR_POWER_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Demand response power scaling factor [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::DR_LEVEL.to_string(),
+            unit: "code".to_string(),
+            description: "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)"
+                .to_string(),
         },
     ]
 }

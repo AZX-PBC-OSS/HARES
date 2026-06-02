@@ -129,6 +129,8 @@ pub const CYCLE_COUNT: &str = "cycle_count";
 pub const CAPACITY_FADE_PCT: &str = "capacity_fade_pct";
 pub const TERMINAL_VOLTAGE_V: &str = "terminal_voltage_v";
 pub const CURRENT_A: &str = "current_a";
+pub const DR_POWER_FRACTION: &str = "dr_power_fraction";
+pub const DR_LEVEL: &str = "dr_level";
 /// Pack series cell count.
 pub const N_SERIES: &str = "n_series";
 /// Pack parallel cell count.

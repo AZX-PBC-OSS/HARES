@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_types::{
-    ControlSignal, EnvironmentState, EvConnectionState, GridState, PortSlots, SurfaceIrradiance,
-    WeatherState, ZoneState,
+    ControlSignal, DRLevel, EnvironmentState, EvConnectionState, GridState, PortSlots,
+    SurfaceIrradiance, WeatherState, ZoneState,
 };
 
 use super::*;
@@ -1889,6 +1889,7 @@ fn ev_control_capabilities_include_new_signals() {
     assert!(caps.contains(ControlCapabilities::EV_DRIVE));
     assert!(caps.contains(ControlCapabilities::EV_AWAY_CHARGE));
     assert!(caps.contains(ControlCapabilities::EV_SET_READY_BY));
+    assert!(caps.contains(ControlCapabilities::DEMAND_RESPONSE));
 }
 
 #[test]
@@ -3061,3 +3062,95 @@ fn raw_and_typed_explicit_battery_temp_c_is_honoured() {
         "raw and typed paths must produce the same battery_temp_c when an explicit value is present"
     );
 }
+
+// ── DemandResponse tests ──────────────────────────────────────────
+
+#[test]
+fn ev_dr_grid_emergency_sheds_charging() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::DemandResponse {
+        level: DRLevel::GridEmergency,
+        duration_s: None,
+    })
+    .expect("DemandResponse signal should be accepted by EV");
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    assert_eq!(ev.telemetry().get("active_power_kw"), Some(0.0));
+    assert_eq!(ev.telemetry().get("dr_level"), Some(4.0));
+}
+
+#[test]
+fn ev_dr_critical_reduces_charging_power() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let max_allowed = ev.rated_power_kw * 0.25;
+
+    ev.apply_control(&ControlSignal::DemandResponse {
+        level: DRLevel::Critical,
+        duration_s: Some(3600.0),
+    })
+    .expect("DemandResponse signal should be accepted by EV");
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let power = ev
+        .telemetry()
+        .get("active_power_kw")
+        .expect("active_power_kw missing from telemetry");
+    assert!(
+        power <= max_allowed,
+        "Critical DR power {:.3} kW exceeds 25% of rated {:.3} kW",
+        power,
+        max_allowed
+    );
+    assert!(
+        power > 0.0,
+        "Critical DR should still allow some charging"
+    );
+    assert_eq!(ev.telemetry().get("dr_level"), Some(3.0));
+}
+
+#[test]
+fn ev_dr_timer_reverts_to_normal_after_duration() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::DemandResponse {
+        level: DRLevel::High,
+        duration_s: Some(120.0),
+    })
+    .expect("DemandResponse signal should be accepted");
+
+    // advance 60s at a time; timer should hit zero during the second call
+    ev.update_control(&env);
+    ev.update_control(&env);
+
+    // After timer expiry, DR reverts to Normal and charging returns to full power
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+
+    let power = ev
+        .telemetry()
+        .get("active_power_kw")
+        .expect("active_power_kw missing from telemetry");
+    assert_eq!(ev.telemetry().get("dr_power_fraction"), Some(1.0));
+    assert_eq!(ev.telemetry().get("dr_level"), Some(0.0));
+    assert!(
+        power >= ev.rated_power_kw * 0.5,
+        "post-timer power should be near full rated (was {:.3} kW)",
+        power
+    );
+}
+

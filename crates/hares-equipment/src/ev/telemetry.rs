@@ -5,7 +5,7 @@ use super::config::{DEFAULT_CAPACITY_KWH, DEFAULT_FUEL_ECONOMY_KWH_PER_MI, DEFAU
 use super::telemetry_code;
 
 pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
-    let mut t = Telemetry::with_capacity(14);
+    let mut t = Telemetry::with_capacity(16);
     t.insert(tk::SOC, DEFAULT_SOC);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
     t.insert(tk::CONNECTION_STATE, 0.0);
@@ -19,6 +19,8 @@ pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     t.insert(tk::AWAY_CHARGE_POWER_KW, 0.0);
     t.insert(tk::CAPACITY_KWH, DEFAULT_CAPACITY_KWH);
     t.insert(tk::FUEL_ECONOMY_KWH_PER_MI, DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
+    t.insert(tk::DR_POWER_FRACTION, 1.0);
+    t.insert(tk::DR_LEVEL, 0.0);
     t
 }
 
@@ -90,6 +92,17 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::FUEL_ECONOMY_KWH_PER_MI.to_string(),
             unit: "kWh/mi".to_string(),
             description: "EV fuel economy for actor trip planning".to_string(),
+        },
+        TelemetryField {
+            name: tk::DR_POWER_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "Demand response power scaling factor [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::DR_LEVEL.to_string(),
+            unit: "code".to_string(),
+            description: "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)"
+                .to_string(),
         },
     ]
 }

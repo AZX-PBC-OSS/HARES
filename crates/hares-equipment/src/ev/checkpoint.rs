@@ -1,4 +1,4 @@
-use hares_types::EvConnectionState;
+use hares_types::{DRLevel, EvConnectionState};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -11,6 +11,8 @@ pub(super) struct EvCheckpoint {
     pub(super) power_setpoint_kw: Option<f64>,
     pub(super) power_setpoint_min_soc: Option<f64>,
     pub(super) power_setpoint_max_soc: Option<f64>,
+    pub(super) dr_level: DRLevel,
+    pub(super) dr_duration_remaining_s: Option<f64>,
     pub(super) soc_target: Option<f64>,
     pub(super) soc_target_min: Option<f64>,
     pub(super) soc_target_max: Option<f64>,

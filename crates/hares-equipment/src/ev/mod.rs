@@ -8,8 +8,8 @@ use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal,
-    CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, ElectricPower, EndUse,
-    EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage,
+    CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower,
+    EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage,
     FuelType, HaresError, OperatingMode, PlugInPolicy, PortContribution, PortDeclaration,
     PortSlots, Soc, Telemetry,
 };
@@ -49,6 +49,16 @@ fn telemetry_code(level: ChargingLevel) -> f64 {
     match level {
         ChargingLevel::L1 => 1.0,
         ChargingLevel::L2 => 2.0,
+    }
+}
+
+fn dr_level_code(level: DRLevel) -> f64 {
+    match level {
+        DRLevel::Normal => 0.0,
+        DRLevel::Moderate => 1.0,
+        DRLevel::High => 2.0,
+        DRLevel::Critical => 3.0,
+        DRLevel::GridEmergency => 4.0,
     }
 }
 
@@ -124,6 +134,9 @@ pub struct Ev {
     /// the power setpoint would otherwise allow it. Symmetric with
     /// power_setpoint_min_soc which acts as a discharge floor.
     power_setpoint_max_soc: Option<f64>,
+    /// Demand response severity level (e.g. shed load, curtailment).
+    dr_level: DRLevel,
+    dr_duration_remaining_s: Option<f64>,
     soc_target: Option<f64>,
     soc_target_min: Option<f64>,
     soc_target_max: Option<f64>,
@@ -146,7 +159,8 @@ impl Ev {
                 | ControlCapabilities::EV_PLUG_IN
                 | ControlCapabilities::EV_DRIVE
                 | ControlCapabilities::EV_AWAY_CHARGE
-                | ControlCapabilities::EV_SET_READY_BY,
+                | ControlCapabilities::EV_SET_READY_BY
+                | ControlCapabilities::DEMAND_RESPONSE,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::HAS_SOC
                 | CoreCapabilities::HAS_MODE,
@@ -252,6 +266,8 @@ impl Ev {
             power_setpoint_kw: None,
             power_setpoint_min_soc: None,
             power_setpoint_max_soc: None,
+            dr_level: DRLevel::Normal,
+            dr_duration_remaining_s: None,
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
@@ -424,9 +440,9 @@ impl Ev {
             && setpoint < 0.0
         {
             if self.v2g_enabled {
-                return self.compute_v2g_discharge(dt);
+                return self.compute_v2g_discharge(dt) * self.dr_power_fraction();
             } else if self.v2l_enabled {
-                return self.compute_v2l_discharge(dt);
+                return self.compute_v2l_discharge(dt) * self.dr_power_fraction();
             }
         }
 
@@ -491,7 +507,7 @@ impl Ev {
         {
             power = power.min(limit.max(0.0));
         }
-        power
+        power * self.dr_power_fraction()
     }
 
     fn bms_ready_by_power(
@@ -573,6 +589,16 @@ impl Ev {
         )
     }
 
+    fn dr_power_fraction(&self) -> f64 {
+        match self.dr_level {
+            DRLevel::Normal => 1.0,
+            DRLevel::Moderate => 0.8,
+            DRLevel::High => 0.5,
+            DRLevel::Critical => 0.25,
+            DRLevel::GridEmergency => 0.0,
+        }
+    }
+
     fn l1_power_kw(&self) -> f64 {
         match self.l1_current_a {
             Some(current_a) => power_w_to_kw(current_a * self.l1_voltage_v).max(0.0),
@@ -618,6 +644,12 @@ impl Ev {
             .set(tk::CAPACITY_KWH, self.battery_capacity_kwh);
         self.telemetry
             .set(tk::FUEL_ECONOMY_KWH_PER_MI, self.fuel_economy_kwh_per_mi);
+        self.telemetry
+            .set(tk::DR_POWER_FRACTION, self.dr_power_fraction());
+        self.telemetry.set(
+            tk::DR_LEVEL,
+            dr_level_code(self.dr_level),
+        );
 
         #[cfg(feature = "observe")]
         tracing::debug!(
@@ -721,7 +753,14 @@ impl Equipment for Ev {
         self.init_typed(config)
     }
 
-    fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
+    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= env.time_res.num_seconds() as f64;
+            if *remaining <= 0.0 {
+                self.dr_level = DRLevel::Normal;
+                self.dr_duration_remaining_s = None;
+            }
+        }
         match self.connection_state {
             EvConnectionState::HomePluggedIn if self.active_power_kw > 0.0 => {
                 OperatingMode::Charging
@@ -857,6 +896,8 @@ impl Equipment for Ev {
                 power_setpoint_kw: self.power_setpoint_kw,
                 power_setpoint_min_soc: self.power_setpoint_min_soc,
                 power_setpoint_max_soc: self.power_setpoint_max_soc,
+                dr_level: self.dr_level,
+                dr_duration_remaining_s: self.dr_duration_remaining_s,
                 soc_target: self.soc_target,
                 soc_target_min: self.soc_target_min,
                 soc_target_max: self.soc_target_max,
@@ -895,6 +936,8 @@ impl Equipment for Ev {
         self.power_setpoint_kw = cp.power_setpoint_kw;
         self.power_setpoint_min_soc = cp.power_setpoint_min_soc;
         self.power_setpoint_max_soc = cp.power_setpoint_max_soc;
+        self.dr_level = cp.dr_level;
+        self.dr_duration_remaining_s = cp.dr_duration_remaining_s;
         self.soc_target = cp.soc_target;
         self.soc_target_min = cp.soc_target_min;
         self.soc_target_max = cp.soc_target_max;
@@ -1069,6 +1112,10 @@ impl Equipment for Ev {
                 }
                 self.ready_by_hour = Some(*departure_hour);
                 self.ready_by_soc = Some(*target_soc);
+            }
+            ControlSignal::DemandResponse { level, duration_s } => {
+                self.dr_level = *level;
+                self.dr_duration_remaining_s = *duration_s;
             }
             _ => {
                 return Err(HaresError::Control(format!(
