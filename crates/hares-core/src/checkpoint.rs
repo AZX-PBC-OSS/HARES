@@ -28,6 +28,9 @@ pub struct DwellingCheckpoint {
     pub thermal_last_u: Vec<f64>,
     /// Per-exterior-surface converged LWR surface temperatures [°C].
     pub lwr_t_prev_c: Vec<f64>,
+    /// Actor decision-state blobs, one per registered actor (name, blob).
+    /// Actors with no mutable state contribute an empty blob.
+    pub actor_states: Vec<(String, Vec<u8>)>,
 }
 
 impl DwellingCheckpoint {
@@ -137,6 +140,7 @@ mod tests {
             rng_word_pos: 8,
             thermal_last_u: vec![0.1],
             lwr_t_prev_c: vec![15.0, 18.0],
+            actor_states: vec![("test_actor".into(), vec![1, 2, 3])],
         };
 
         let path =
@@ -162,6 +166,7 @@ mod tests {
             rng_word_pos: 0,
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
+            actor_states: vec![],
         };
 
         let path =
@@ -190,6 +195,7 @@ mod tests {
             rng_word_pos: 0,
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
+            actor_states: vec![],
         };
 
         let path =
@@ -219,6 +225,7 @@ mod tests {
             rng_word_pos: 0,
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
+            actor_states: vec![],
         };
 
         let path = std::env::temp_dir().join(unique_temp_name(

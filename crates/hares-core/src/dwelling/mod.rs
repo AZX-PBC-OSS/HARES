@@ -2774,8 +2774,7 @@ impl Dwelling {
     }
 
     /// Snapshot current simulation state to an in-memory checkpoint struct.
-    #[must_use]
-    pub fn save_checkpoint(&self) -> DwellingCheckpoint {
+    pub fn save_checkpoint(&self) -> Result<DwellingCheckpoint> {
         let (envelope_state, thermal_last_u, lwr_t_prev_c) = self.thermal_solver.snapshot_state();
         let humidity_states: Vec<(ZoneId, f64)> = self
             .humidity_solver
@@ -2785,7 +2784,7 @@ impl Dwelling {
             .collect();
         let fluid_states = self.fluid_solver.snapshot_payload();
 
-        DwellingCheckpoint {
+        Ok(DwellingCheckpoint {
             format_version: CHECKPOINT_VERSION,
             bldg_id: self.bldg_id,
             timestep_index: self.clock.current_step(),
@@ -2798,7 +2797,12 @@ impl Dwelling {
             rng_word_pos: self.rng.get_word_pos(),
             thermal_last_u,
             lwr_t_prev_c,
-        }
+            actor_states: self
+                .actors
+                .iter()
+                .map(|a| a.save_state().map(|blob| (a.name().to_string(), blob)))
+                .collect::<std::result::Result<Vec<_>, HaresError>>()?,
+        })
     }
 
     /// Restore simulation state from a checkpoint.
@@ -2847,6 +2851,34 @@ impl Dwelling {
         self.fluid_solver
             .restore_from_payload(&cp.fluid_states)
             .map_err(|err| HaresError::Envelope(format!("restore fluid state failed: {err}")))?;
+
+        // Restore actor decision-state.
+        let mut restored_count = 0usize;
+        let cp_actor_map: std::collections::HashMap<&str, &[u8]> = cp
+            .actor_states
+            .iter()
+            .map(|(name, blob)| (name.as_str(), blob.as_slice()))
+            .collect();
+        for actor in self.actors.iter_mut() {
+            if let Some(blob) = cp_actor_map.get(actor.name()) {
+                actor.load_state(blob)?;
+                restored_count += 1;
+            }
+        }
+
+        if restored_count != self.actors.len() {
+            return Err(HaresError::Io(format!(
+                "checkpoint actor count mismatch: checkpoint has {} actor states, dwelling has {} actors",
+                restored_count,
+                self.actors.len()
+            )));
+        }
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            for actor in self.actors.iter() {
+                tracing::debug!(actor = actor.name(), "post-restore actor state",);
+            }
+        }
 
         Ok(())
     }
@@ -8277,7 +8309,7 @@ occupancy = 1.0
         let extended_fields = extended.fields().len();
 
         // Schema must gain columns (one per actor telemetry key).
-        let n_actor_keys = 4; // away, transition, signals_count, presence_changes
+        let n_actor_keys = 5; // away, transition, signals_count, presence_changes, current_step
         assert_eq!(
             extended_fields,
             base_fields + n_actor_keys,
@@ -8290,7 +8322,13 @@ occupancy = 1.0
             .map(|f| f.name().as_str())
             .collect();
 
-        for key in &["away", "transition", "signals_count", "presence_changes"] {
+        for key in &[
+            "away",
+            "transition",
+            "signals_count",
+            "presence_changes",
+            "current_step",
+        ] {
             let col = format!("actor:Occupant:{key}");
             assert!(
                 field_names.contains(&col.as_str()),

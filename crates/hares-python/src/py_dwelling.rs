@@ -560,7 +560,8 @@ impl PyDwelling {
 
         let bytes = {
             let dwelling = self.acquire()?;
-            serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err_display)?
+            serde_json::to_vec(&dwelling.save_checkpoint().map_err(to_py_err)?)
+                .map_err(to_py_err_display)?
         };
 
         self.initial_state = Some(bytes);
@@ -1297,7 +1298,8 @@ impl PyDwelling {
 
     pub fn save_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let dwelling = self.acquire()?;
-        let bytes = serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err_display)?;
+        let bytes = serde_json::to_vec(&dwelling.save_checkpoint().map_err(to_py_err_display)?)
+            .map_err(to_py_err_display)?;
         Ok(PyBytes::new(py, &bytes))
     }
 

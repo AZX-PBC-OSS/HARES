@@ -5,11 +5,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     BmsAction, BmsMode, BmsScheduleWindow, ControlSignal, EnvironmentState, EquipmentId,
-    GridExportRule, StormWatchTrigger, Telemetry,
+    GridExportRule, HaresError, StormWatchTrigger, Telemetry,
 };
 
 use crate::Actor;
@@ -769,6 +771,16 @@ impl BatteryManagementActor {
     }
 }
 
+/// Serializable snapshot of BatteryManagementActor mutable runtime state for checkpointing.
+#[derive(Serialize, Deserialize)]
+struct BmsSnapshot {
+    current_day_ordinal0: u32,
+    daily_avg_price: f64,
+    charge_price_threshold: f64,
+    discharge_price_threshold: f64,
+    last_action: String,
+}
+
 impl Actor for BatteryManagementActor {
     fn name(&self) -> &str {
         &self.name
@@ -807,6 +819,32 @@ impl Actor for BatteryManagementActor {
         let mode = std::mem::take(&mut self.bms_mode);
         self.adjust_for_pv_in_mode(pv_kw, env, &mode, out);
         self.bms_mode = mode;
+    }
+
+    fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+        let snap = BmsSnapshot {
+            current_day_ordinal0: self.current_day_ordinal0,
+            daily_avg_price: self.daily_avg_price,
+            charge_price_threshold: self.charge_price_threshold,
+            discharge_price_threshold: self.discharge_price_threshold,
+            last_action: self.last_action.clone(),
+        };
+        postcard::to_allocvec(&snap)
+            .map_err(|e| HaresError::Io(format!("BatteryManagementActor save_state: {e}")))
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<(), HaresError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let snap: BmsSnapshot = postcard::from_bytes(data)
+            .map_err(|e| HaresError::Io(format!("BatteryManagementActor load_state: {e}")))?;
+        self.current_day_ordinal0 = snap.current_day_ordinal0;
+        self.daily_avg_price = snap.daily_avg_price;
+        self.charge_price_threshold = snap.charge_price_threshold;
+        self.discharge_price_threshold = snap.discharge_price_threshold;
+        self.last_action = snap.last_action;
+        Ok(())
     }
 }
 
@@ -3033,5 +3071,60 @@ mod tests {
         // Code -1: unknown
         assert_eq!(bms_action_code("dr:soc_too_low"), -1.0);
         assert_eq!(bms_action_code("scheduled:hold"), -1.0);
+    }
+
+    #[test]
+    fn save_state_load_state_round_trip_preserves_to_thresholds() {
+        let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.2,
+                charge_threshold_percentile: 0.25,
+                discharge_threshold_percentile: 0.75,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices.into()),
+            24,
+        );
+        // Force state to a known non-default value
+        actor.daily_avg_price = 0.15;
+        actor.charge_price_threshold = 0.05;
+        actor.discharge_price_threshold = 0.25;
+        actor.current_day_ordinal0 = 42;
+        actor.last_action = "idle:no_soc".to_string();
+
+        let blob = actor.save_state().expect("save_state should succeed");
+        assert!(
+            !blob.is_empty(),
+            "stateful actor must produce non-empty blob"
+        );
+
+        let mut restored = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.2,
+                charge_threshold_percentile: 0.25,
+                discharge_threshold_percentile: 0.75,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+
+        assert_eq!(restored.current_day_ordinal0, 42);
+        assert!((restored.daily_avg_price - 0.15).abs() < 1e-12);
+        assert!((restored.charge_price_threshold - 0.05).abs() < 1e-12);
+        assert!((restored.discharge_price_threshold - 0.25).abs() < 1e-12);
+        assert_eq!(restored.last_action, "idle:no_soc");
     }
 }

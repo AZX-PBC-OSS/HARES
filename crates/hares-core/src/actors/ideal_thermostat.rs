@@ -21,12 +21,13 @@
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_equipment::hvac::ThermalSetpoints;
-use hares_types::{ControlSignal, EnvironmentState, Telemetry};
+use hares_types::{ControlSignal, EnvironmentState, HaresError, Telemetry};
+use serde::{Deserialize, Serialize};
 
 use crate::Actor;
 
 /// Thermostat override state.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OverrideState {
     /// Override heating setpoint (°C). `None` means no heating override.
     pub heating_setpoint_c: Option<f64>,
@@ -385,6 +386,20 @@ impl Actor for IdealThermostat {
             priority: PriorityTier::UserOverride,
         });
     }
+
+    fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+        postcard::to_allocvec(&self.override_state)
+            .map_err(|e| HaresError::Io(format!("IdealThermostat save_state: {e}")))
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<(), HaresError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.override_state = postcard::from_bytes(data)
+            .map_err(|e| HaresError::Io(format!("IdealThermostat load_state: {e}")))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -740,5 +755,34 @@ mod tests {
         let mut requests = Vec::new();
         thermostat.decide(&env, &mut requests);
         assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
+    fn save_state_load_state_round_trip_override_preserved() {
+        let mut thermostat = IdealThermostat::new("HVAC");
+        thermostat.set_override(OverrideState::heating(20.0));
+
+        let blob = thermostat.save_state().expect("save_state should succeed");
+        assert!(
+            !blob.is_empty(),
+            "stateful actor must produce non-empty blob"
+        );
+
+        let mut restored = IdealThermostat::new("HVAC");
+        assert!(
+            !restored.has_override(),
+            "default thermostat should not have override"
+        );
+
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+        assert!(
+            restored.has_override(),
+            "override must be preserved after load_state"
+        );
+
+        let state = restored.override_state();
+        assert_eq!(state.heating_setpoint_c, Some(20.0));
     }
 }

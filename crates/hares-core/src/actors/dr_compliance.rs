@@ -42,9 +42,11 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::telemetry_keys as tk;
-use hares_types::{ControlSignal, DRLevel, EnvironmentState, OperatingMode, Telemetry};
+use hares_types::{ControlSignal, DRLevel, EnvironmentState, HaresError, OperatingMode, Telemetry};
 
 use crate::Actor;
 
@@ -194,7 +196,7 @@ impl Probabilistic {
 }
 
 /// Action to take when complying with a DR event.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DrAction {
     /// Reduce load by a fraction (0.0 = full curtailment, 1.0 = no change).
     LoadCurtailment { fraction: f64 },
@@ -819,6 +821,24 @@ impl Actor for DrCompliance {
                 self.name,
             );
         }
+    }
+
+    fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+        let data = (&self.current_dr_level, &self.last_dispatched);
+        postcard::to_allocvec(&data)
+            .map_err(|e| HaresError::Io(format!("DrCompliance save_state: {e}")))
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<(), HaresError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (level, dispatched): (DRLevel, Vec<(DispatchTarget, DrAction)>) =
+            postcard::from_bytes(data)
+                .map_err(|e| HaresError::Io(format!("DrCompliance load_state: {e}")))?;
+        self.current_dr_level = level;
+        self.last_dispatched = dispatched;
+        Ok(())
     }
 }
 
@@ -2404,6 +2424,37 @@ mod tests {
                 .get("demand_response_duration_s")
                 .map_or(false, |v| v.is_nan()),
             "demand_response_duration_s must be pre-registered at init (NaN = unset)"
+        );
+    }
+
+    #[test]
+    fn save_state_load_state_round_trip_dr_level_preserved() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(AlwaysComply)
+            .with_hvac_target(DispatchTarget::ByName("HVAC".into()))
+            .with_hvac_action(DrAction::SetpointAdjust { delta_c: 2.0 });
+        actor.set_dr_level(DRLevel::High);
+        actor.last_dispatched.push((
+            DispatchTarget::ByName("HVAC".into()),
+            DrAction::PowerLimit { max_kw: 3.0 },
+        ));
+
+        let blob = actor.save_state().expect("save_state should succeed");
+        assert!(
+            !blob.is_empty(),
+            "stateful actor must produce non-empty blob"
+        );
+
+        let mut restored = DrCompliance::new("Test");
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+
+        assert_eq!(restored.current_dr_level, DRLevel::High);
+        assert_eq!(restored.last_dispatched.len(), 1);
+        assert_eq!(
+            restored.last_dispatched[0].1,
+            DrAction::PowerLimit { max_kw: 3.0 }
         );
     }
 }

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget};
-use hares_types::{EnvironmentState, Telemetry, ZoneId};
+use hares_types::{EnvironmentState, HaresError, Telemetry, ZoneId};
 
 /// What state changes an actor subscribes to. Empty = polled every step.
 ///
@@ -94,6 +94,18 @@ pub trait Actor: Send + Sync + 'static {
     /// override this to return `Some(&self.telemetry)`.
     fn telemetry(&self) -> Option<&Telemetry> {
         None
+    }
+
+    /// Serializes the actor's mutable decision-state into an opaque blob for
+    /// checkpointing. Actors with no mutable state return an empty `Vec`.
+    fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+        Ok(Vec::new())
+    }
+
+    /// Restores the actor's mutable decision-state from a previously saved
+    /// opaque blob. Actors with no mutable state perform a no-op.
+    fn load_state(&mut self, _data: &[u8]) -> Result<(), HaresError> {
+        Ok(())
     }
 }
 

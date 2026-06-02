@@ -20,13 +20,15 @@ mod time_window;
 mod v2g;
 mod v2h;
 
+use serde::{Deserialize, Serialize};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
-    ChargingStrategy, ControlSignal, EnvironmentState, EquipmentId, EvConnectionState,
+    ChargingStrategy, ControlSignal, EnvironmentState, EquipmentId, EvConnectionState, HaresError,
     PlugInPolicy, ScheduleSource, Telemetry,
 };
 use rand::RngExt;
@@ -47,7 +49,7 @@ use self::v2g::V2GExport;
 use self::v2h::V2HDischarge;
 
 /// A rolled daily driving event.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct DayEvent {
     departure_minute: u16,
     arrival_minute: u16,
@@ -55,7 +57,7 @@ struct DayEvent {
 }
 
 /// State machine phase for the driver's day.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 enum DriverPhase {
     /// At home, plugged in (or waiting to plug in).
     HomePluggedIn,
@@ -628,6 +630,19 @@ impl EvDriverActor {
     }
 }
 
+/// Serializable snapshot of EvDriverActor mutable runtime state for checkpointing.
+#[derive(Serialize, Deserialize)]
+struct EvDriverSnapshot {
+    estimated_soc: f64,
+    current_day_ordinal: i32,
+    todays_event: Option<DayEvent>,
+    phase: DriverPhase,
+    rng_seed: [u8; 32],
+    rng_stream: u64,
+    rng_word_pos: u128,
+    needs_away_charge: bool,
+}
+
 impl Actor for EvDriverActor {
     fn name(&self) -> &str {
         &self.name
@@ -803,6 +818,39 @@ impl Actor for EvDriverActor {
         }
 
         self.populate_telemetry(before_out, out);
+    }
+
+    fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+        let snap = EvDriverSnapshot {
+            estimated_soc: self.estimated_soc,
+            current_day_ordinal: self.current_day_ordinal,
+            todays_event: self.todays_event,
+            phase: self.phase,
+            rng_seed: self.rng.get_seed(),
+            rng_stream: self.rng.get_stream(),
+            rng_word_pos: self.rng.get_word_pos(),
+            needs_away_charge: self.needs_away_charge,
+        };
+        postcard::to_allocvec(&snap)
+            .map_err(|e| HaresError::Io(format!("EvDriverActor save_state: {e}")))
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<(), HaresError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let snap: EvDriverSnapshot = postcard::from_bytes(data)
+            .map_err(|e| HaresError::Io(format!("EvDriverActor load_state: {e}")))?;
+        self.estimated_soc = snap.estimated_soc;
+        self.current_day_ordinal = snap.current_day_ordinal;
+        self.todays_event = snap.todays_event;
+        self.phase = snap.phase;
+        let mut rng = ChaCha8Rng::from_seed(snap.rng_seed);
+        rng.set_stream(snap.rng_stream);
+        rng.set_word_pos(snap.rng_word_pos);
+        self.rng = rng;
+        self.needs_away_charge = snap.needs_away_charge;
+        Ok(())
     }
 }
 
@@ -3268,5 +3316,82 @@ mod tests {
             direct_1700,
             "direct actor should arrive at 17:00, got: {out:?}"
         );
+    }
+
+    #[test]
+    fn save_state_load_state_round_trip_estimated_soc_preserved() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.estimated_soc = 0.73;
+        actor.current_day_ordinal = 12345;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let blob = actor.save_state().expect("save_state should succeed");
+        assert!(
+            !blob.is_empty(),
+            "stateful actor must produce non-empty blob"
+        );
+
+        let mut restored = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+
+        assert!((restored.estimated_soc - 0.73).abs() < 1e-12);
+        assert_eq!(restored.current_day_ordinal, 12345);
+        assert_eq!(restored.phase, DriverPhase::HomePluggedIn);
+    }
+
+    #[test]
+    fn post_restore_estimated_soc_not_reset_to_default() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.estimated_soc = 0.45;
+
+        let blob = actor.save_state().expect("save_state should succeed");
+
+        let mut restored = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+
+        assert!(
+            (restored.estimated_soc - 0.45).abs() < 1e-12,
+            "estimated_soc should be 0.45 after restore, not the default 1.0"
+        );
+    }
+
+    #[test]
+    fn actor_with_no_state_returns_empty_blob() {
+        struct NoStateActor;
+        impl Actor for NoStateActor {
+            fn name(&self) -> &str {
+                "none"
+            }
+            fn decide(&mut self, _: &EnvironmentState, _: &mut Vec<DispatchRequest>) {}
+        }
+        let actor = NoStateActor;
+        let blob = actor
+            .save_state()
+            .expect("save_state default should succeed");
+        assert!(blob.is_empty());
+        let mut actor = NoStateActor;
+        actor
+            .load_state(&[])
+            .expect("load_state default should succeed");
     }
 }

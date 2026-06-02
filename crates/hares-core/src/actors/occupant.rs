@@ -28,15 +28,18 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
-    ControlSignal, EndUse, EnvironmentState, EvConnectionState, OperatingMode, Telemetry,
+    ControlSignal, EndUse, EnvironmentState, EvConnectionState, HaresError, OperatingMode,
+    Telemetry,
 };
 
 use crate::Actor;
 
 /// Occupant presence state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Presence {
     /// Occupant is home and active.
     #[default]
@@ -150,11 +153,12 @@ pub struct Occupant {
 impl Occupant {
     /// Creates a new Occupant actor with the given name.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(4);
+        let mut telemetry = Telemetry::with_capacity(5);
         telemetry.insert("away", 0.0);
         telemetry.insert("transition", 0.0);
         telemetry.insert("signals_count", 0.0);
         telemetry.insert("presence_changes", 0.0);
+        telemetry.insert("current_step", 0.0);
         Self {
             name: Arc::from(name),
             presence_schedule: vec![Presence::Home],
@@ -394,6 +398,14 @@ fn presence_as_f64(p: Presence) -> f64 {
     }
 }
 
+/// Serializable snapshot of Occupant mutable runtime state for checkpointing.
+#[derive(Serialize, Deserialize)]
+struct OccupantSnapshot {
+    current_step: usize,
+    previous_presence: Presence,
+    presence_change_count: f64,
+}
+
 impl Actor for Occupant {
     fn name(&self) -> &str {
         &self.name
@@ -433,6 +445,7 @@ impl Actor for Occupant {
         self.telemetry
             .set("transition", if is_transition { 1.0 } else { 0.0 });
         self.telemetry.set("signals_count", dispatched as f64);
+        self.telemetry.set("current_step", self.current_step as f64);
         if is_transition {
             self.presence_change_count += 1.0;
         }
@@ -450,6 +463,28 @@ impl Actor for Occupant {
         }
 
         self.advance_step();
+    }
+
+    fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+        let snap = OccupantSnapshot {
+            current_step: self.current_step,
+            previous_presence: self.previous_presence,
+            presence_change_count: self.presence_change_count,
+        };
+        postcard::to_allocvec(&snap)
+            .map_err(|e| HaresError::Io(format!("Occupant save_state: {e}")))
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<(), HaresError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let snap: OccupantSnapshot = postcard::from_bytes(data)
+            .map_err(|e| HaresError::Io(format!("Occupant load_state: {e}")))?;
+        self.current_step = snap.current_step;
+        self.previous_presence = snap.previous_presence;
+        self.presence_change_count = snap.presence_change_count;
+        Ok(())
     }
 }
 
@@ -904,5 +939,63 @@ mod tests {
         requests.clear();
         occupant.decide(&env, &mut requests);
         assert_eq!(requests.len(), 1, "power setpoint re-sent on second step");
+    }
+
+    #[test]
+    fn save_state_load_state_round_trip_preserves_current_step() {
+        let schedule = vec![Presence::Home, Presence::Away, Presence::Home];
+        let mut actor = Occupant::new("Test").with_presence_schedule(schedule);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+
+        // Step through to build state
+        actor.decide(&env, &mut requests);
+        requests.clear();
+        actor.decide(&env, &mut requests);
+        requests.clear();
+
+        // current_step should be 2, previous_presence should be Away
+        let blob = actor.save_state().expect("save_state should succeed");
+        assert!(
+            !blob.is_empty(),
+            "stateful actor must produce non-empty blob"
+        );
+
+        let mut restored = Occupant::new("Test").with_presence_schedule(vec![
+            Presence::Home,
+            Presence::Away,
+            Presence::Home,
+        ]);
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+
+        assert_eq!(restored.current_step, 2, "current_step must be preserved");
+        assert_eq!(restored.previous_presence, Presence::Away);
+    }
+
+    #[test]
+    fn post_restore_current_step_not_reset_to_zero() {
+        let schedule = vec![Presence::Home, Presence::Home, Presence::Away];
+        let mut actor = Occupant::new("Test").with_presence_schedule(schedule.clone());
+        let env = test_env().build();
+        let mut requests = Vec::new();
+
+        // Step twice through
+        actor.decide(&env, &mut requests);
+        requests.clear();
+        actor.decide(&env, &mut requests);
+
+        let blob = actor.save_state().expect("save_state should succeed");
+
+        let mut restored = Occupant::new("Test").with_presence_schedule(schedule);
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+
+        assert_ne!(
+            restored.current_step, 0,
+            "current_step must not be the default 0 after restore"
+        );
     }
 }

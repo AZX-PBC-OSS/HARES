@@ -102,6 +102,16 @@ fn regression_full_suite() {
         }
     }
 
+    // --- Actor state checkpoint round-trip ---
+    if let Err(errs) = checkpoint_restart::run_actor_state_checkpoint_roundtrip() {
+        for detail in errs {
+            failures.push(RegressionFailure {
+                suite: "actor_state_checkpoint",
+                detail,
+            });
+        }
+    }
+
     // --- Multi-instance independence ---
     if let Err(errs) = multi_instance::run_multi_instance_check() {
         for detail in errs {
