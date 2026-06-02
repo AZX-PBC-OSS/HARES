@@ -8,6 +8,7 @@
 //! In production release builds without the feature flag all public functions
 //! compile to nothing -- the compiler eliminates the bodies entirely.
 
+use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_types::{ControlCapabilities, HaresError};
 
 /// Entrypoint for per-timestep numerical invariant validation.
@@ -34,7 +35,7 @@ impl InvariantChecker {
     /// Verifies energy conservation across the thermal domain for one zone.
     ///
     /// The check asserts:
-    /// `|Σ(Q_gain) − ΔE_storage − Q_loss_envelope| < max(1.0, 1e-6 · |Σ Q_gain|)`
+    /// `|Σ(Q_gain) − ΔE_storage − Q_loss_envelope| < max(1.0, 1e-6 · Σ|Q_gain_i|)`
     ///
     /// All values in watts [W].
     pub fn check_thermal(
@@ -63,7 +64,7 @@ impl InvariantChecker {
     /// Verifies electrical power balance across the bus.
     ///
     /// The check asserts:
-    /// `|P_grid + Σ P_equipment_ports| < 0.001` [kW]
+    /// `|P_grid + Σ P_equipment_ports| < max(0.001, 1e-6 · Σ|P_i|)` [kW]
     pub fn check_electrical(
         &self,
         p_grid: f64,
@@ -71,12 +72,17 @@ impl InvariantChecker {
     ) -> Result<(), HaresError> {
         let p_sum: f64 = p_equipment_ports.iter().sum();
         let residual = (p_grid + p_sum).abs();
-        const TOLERANCE: f64 = 0.001;
-        if residual >= TOLERANCE {
+        // Use gross flux (sum of absolute values of all terms on the bus)
+        // for relative tolerance — a balanced system with large opposed fluxes
+        // still has floating-point accumulation error proportional to gross
+        // magnitude. Floor of 0.001 kW (1 W) for near-zero systems.
+        let gross_flux: f64 = p_grid.abs() + p_equipment_ports.iter().map(|p| p.abs()).sum::<f64>();
+        let tolerance = f64::max(0.001, 1e-6 * gross_flux);
+        if residual >= tolerance {
             return Err(HaresError::InvariantViolation {
                 check_name: "electrical_balance".to_string(),
                 value: residual,
-                tolerance: TOLERANCE,
+                tolerance,
             });
         }
         Ok(())
@@ -85,27 +91,31 @@ impl InvariantChecker {
     /// Verifies moisture mass conservation.
     ///
     /// Each term is `(Q_latent_i [W], dt_s [s])`.
-    /// `h_fg = 2_501_000 J/kg` (latent heat of vaporisation at 0°C).
+    /// `h_fg` is `hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG`
+    /// (latent heat of vaporisation at 0°C, ASHRAE HoF 2017 Ch.1 Table 2).
     ///
     /// The check asserts:
-    /// `|Δm_water − Σ(Q_latent_i · dt / h_fg)| < 1e-6` [kg]
+    /// `|Δm_water − Σ(Q_latent_i · dt / h_fg)| < max(1e-6, 1e-6 · Σ|term_i|)` [kg]
     pub fn check_moisture(
         &self,
         delta_m_water: f64,
         q_latent_terms: &[(f64, f64)],
     ) -> Result<(), HaresError> {
-        const H_FG_J_KG: f64 = 2_501_000.0;
-        const TOLERANCE: f64 = 1e-6;
-        let m_from_latent: f64 = q_latent_terms
+        let (m_from_latent, gross_flux) = q_latent_terms
             .iter()
-            .map(|&(q_w, dt_s)| q_w * dt_s / H_FG_J_KG)
-            .sum();
+            .map(|&(q_w, dt_s)| q_w * dt_s / LATENT_HEAT_VAPORISATION_0C_J_KG)
+            .fold((0.0_f64, delta_m_water.abs()), |(sum, abs_sum), term| {
+                (sum + term, abs_sum + term.abs())
+            });
         let residual = (delta_m_water - m_from_latent).abs();
-        if residual >= TOLERANCE {
+        // Use gross moisture flux (|Δm_water| + Σ|term_i|) for relative tolerance.
+        // Floor of 1e-6 kg for near-zero systems.
+        let tolerance = f64::max(1e-6, 1e-6 * gross_flux);
+        if residual >= tolerance {
             return Err(HaresError::InvariantViolation {
                 check_name: "moisture_balance".to_string(),
                 value: residual,
-                tolerance: TOLERANCE,
+                tolerance,
             });
         }
         Ok(())
@@ -362,6 +372,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn electrical_balance_tolerance_scales_with_system_size() {
+        // 10,000 kW system: gross_flux ≈ 20,000 kW → tolerance ≈ max(0.001, 1e-6*20000) = 0.02 kW.
+        // A 0.010 kW residual is under tolerance and should pass.
+        let p_grid = 10000.0;
+        let p_equipment = -9999.99; // residual = |10000 - 9999.99| = 0.01
+        let result = checker().check_electrical(p_grid, &[p_equipment]);
+        assert!(
+            result.is_ok(),
+            "0.01 kW residual should pass for 10,000 kW system (tolerance ≈ 0.02 kW)"
+        );
+    }
+
+    #[test]
+    fn electrical_balance_fails_when_residual_exceeds_scaled_tolerance() {
+        // Same 10,000 kW system: tolerance ≈ 0.02 kW. 0.03 kW residual exceeds it.
+        let p_grid = 10000.0;
+        let p_equipment = -9999.97; // residual = |10000 - 9999.97| = 0.03
+        let result = checker().check_electrical(p_grid, &[p_equipment]);
+        assert!(
+            result.is_err(),
+            "0.03 kW residual should fail for 10,000 kW system (tolerance ≈ 0.02 kW)"
+        );
+    }
+
+    #[test]
+    fn electrical_balance_catches_small_residual_on_tiny_system() {
+        // 0.05 kW system: gross_flux ≈ 0.1 kW → tolerance = floor = 0.001 kW.
+        // 0.002 kW residual > 0.001 kW floor → must fail.
+        let p_grid = 0.052;
+        let p_equipment = -0.05; // residual = |0.052 - 0.05| = 0.002
+        let result = checker().check_electrical(p_grid, &[p_equipment]);
+        assert!(
+            result.is_err(),
+            "0.002 kW residual should fail for 0.05 kW system (tolerance floor = 0.001 kW)"
+        );
+    }
+
+    #[test]
+    fn electrical_balance_floor_tolerance_works_near_zero() {
+        // Near-zero system: gross_flux small → tolerance = floor = 0.001 kW.
+        // Residual of 0.0005 kW is under floor and should pass.
+        let result = checker().check_electrical(0.0, &[0.0005]);
+        assert!(result.is_ok());
+    }
+
     // ── moisture_balance ──────────────────────────────────────────────────────
 
     #[test]
@@ -369,7 +425,7 @@ mod tests {
         // 100 W latent for 600 s → 100 * 600 / 2_501_000 ≈ 2.399e-5 kg
         let dt_s = 600.0_f64;
         let q_latent_w = 100.0_f64;
-        let delta_m = q_latent_w * dt_s / 2_501_000.0;
+        let delta_m = q_latent_w * dt_s / LATENT_HEAT_VAPORISATION_0C_J_KG;
         let result = checker().check_moisture(delta_m, &[(q_latent_w, dt_s)]);
         assert!(result.is_ok());
     }
