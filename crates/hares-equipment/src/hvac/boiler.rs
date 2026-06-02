@@ -970,10 +970,9 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, DRLevel, DomainUpdate, EnvironmentState,
-        ExecutionStage, FLUID, FluidDomainPayload, FluidLoopState, FluidType, GridState, LoopId,
-        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
-        telemetry_keys as tk,
+        ControlSignal, DRLevel, DomainUpdate, EnvironmentState, ExecutionStage, FLUID,
+        FluidDomainPayload, FluidLoopState, FluidType, GridState, LoopId, OperatingMode, PortSlots,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{

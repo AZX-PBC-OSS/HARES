@@ -304,8 +304,8 @@ pub fn apply_simple_mode_override_and_dr(
         }
         ControlSignal::DemandResponse {
             level,
-            duration_s: _,   // Discarded: simple heating equipment does not maintain a
-                             // step clock; callers must send an explicit Normal to cancel.
+            duration_s: _, // Discarded: simple heating equipment does not maintain a
+                           // step clock; callers must send an explicit Normal to cancel.
         } => {
             *dr_level = *level;
             tracing::debug!(

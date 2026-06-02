@@ -343,8 +343,8 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, DRLevel, EnvironmentState, ExecutionStage, GridState,
-        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        ControlSignal, DRLevel, EnvironmentState, ExecutionStage, GridState, OperatingMode,
+        PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
     use super::ElectricBaseboard;

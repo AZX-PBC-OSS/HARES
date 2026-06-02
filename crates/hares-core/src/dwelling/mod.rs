@@ -765,6 +765,26 @@ fn register_pv_roof_shading(
     }
 }
 
+/// Verify that every zone referenced by a port declaration exists in the
+/// environment model. Equipment targeting a nonexistent zone would silently
+/// orphan its contributions — reject it at construction time instead.
+fn validate_equipment_zones(
+    decls: &[PortDeclaration],
+    env_zone_ids: &HashSet<ZoneId>,
+) -> Result<()> {
+    for decl in decls {
+        if let Some(zone) = decl.zone {
+            if !env_zone_ids.contains(&zone) {
+                return Err(HaresError::Dwelling(format!(
+                    "equipment declares port for zone {zone:?} \
+                     which does not exist in the environment model"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Top-level single-dwelling simulation orchestrator.
 pub struct Dwelling {
     pub bldg_id: i64,
@@ -1429,16 +1449,32 @@ impl Dwelling {
         for eq in &equipment {
             declarations.extend_from_slice(eq.ports());
         }
-        for zone in &initial_env.zones {
-            declarations.push(PortDeclaration {
-                port_type: hares_types::PortType::Thermal,
-                zone: Some(zone.id),
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            });
-        }
+
+        let env_zone_ids: HashSet<ZoneId> = initial_env.zones.iter().map(|z| z.id).collect();
+        validate_equipment_zones(&declarations, &env_zone_ids)?;
+
         let ports = PortSlots::from_declarations(&declarations);
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // Invariant: every thermal accumulator must have at least one
+            // equipment declarant matching its zone. A thermal accumulator
+            // with no equipment declarant indicates the env-zone safety-net
+            // loop was reintroduced, weakening wire-to-slot safety.
+            let declared_thermal_zones: HashSet<ZoneId> = declarations
+                .iter()
+                .filter(|d| d.port_type == hares_types::PortType::Thermal)
+                .filter_map(|d| d.zone)
+                .collect();
+            for acc in &ports.thermal {
+                if !declared_thermal_zones.contains(&acc.zone) {
+                    tracing::warn!(
+                        zone = ?acc.zone,
+                        "thermal accumulator created for zone with no equipment declarant"
+                    );
+                }
+            }
+        }
 
         // Reject equipment configurations where two pieces of equipment wired
         // to the same fluid loop_id declare different fluid types. This is a
@@ -4745,9 +4781,6 @@ mod tests {
         for eq in &dwelling.equipment {
             declarations.extend_from_slice(eq.ports());
         }
-        for zone in &dwelling.latest_env.zones {
-            declarations.push(PortDeclaration::thermal(zone.id));
-        }
         dwelling.ports = PortSlots::from_declarations(&declarations);
     }
 
@@ -7967,5 +8000,48 @@ master_seed = 0
                 "zone not present in env must never trigger"
             );
         }
+    }
+
+    /// Verify that `validate_equipment_zones` rejects a declaration targeting a zone
+    /// absent from the environment model.  Deleting the validation block from
+    /// `from_preparsed` would silently remove this protection; this test would fail.
+    #[test]
+    fn equipment_declaring_nonexistent_zone_is_rejected_at_construction() {
+        let env_zones: HashSet<ZoneId> = [ZoneId(1), ZoneId(2)].into_iter().collect();
+
+        // ZoneId(1) is valid.
+        let valid = vec![PortDeclaration::thermal(ZoneId(1))];
+        assert!(
+            validate_equipment_zones(&valid, &env_zones).is_ok(),
+            "declaration for an env zone must succeed"
+        );
+
+        // ZoneId(999) does not exist in the env.
+        let bad = vec![
+            PortDeclaration::thermal(ZoneId(1)),
+            PortDeclaration::thermal(ZoneId(999)),
+        ];
+        let err = validate_equipment_zones(&bad, &env_zones)
+            .expect_err("declaration for a nonexistent zone must return Err");
+        match err {
+            HaresError::Dwelling(msg) => {
+                assert!(
+                    msg.contains("ZoneId(999)"),
+                    "error must name the offending zone; got: {msg}"
+                );
+                assert!(
+                    msg.contains("does not exist in the environment model"),
+                    "error must explain why; got: {msg}"
+                );
+            }
+            other => panic!("expected HaresError::Dwelling, got {other:?}"),
+        }
+
+        // Declarations without a zone (Electrical, Fuel) are not zone-checked.
+        let no_zone = vec![PortDeclaration::electrical(), PortDeclaration::fuel()];
+        assert!(
+            validate_equipment_zones(&no_zone, &env_zones).is_ok(),
+            "non-zoned declarations must always pass zone validation"
+        );
     }
 }

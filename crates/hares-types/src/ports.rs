@@ -1674,4 +1674,30 @@ mod tests {
             _ => unreachable!(),
         }
     }
+
+    #[test]
+    fn from_declarations_only_creates_accumulators_for_declared_zones() {
+        // Only ZoneId(1) is declared. No accumulator should exist for ZoneId(2).
+        let decls = &[PortDeclaration::thermal(ZoneId(1))];
+        let slots = PortSlots::from_declarations(decls);
+        assert_eq!(slots.thermal.len(), 1);
+        assert_eq!(slots.thermal[0].zone, ZoneId(1));
+        assert!(!slots.thermal.iter().any(|t| t.zone == ZoneId(2)));
+    }
+
+    #[test]
+    fn accumulate_to_zone_without_equipment_declarant_returns_error() {
+        // Wire-to-slot safety: only declared zones get accumulators.
+        // Accumulating to an undeclared zone must fail.
+        let decls = &[PortDeclaration::thermal(ZoneId(1))];
+        let mut slots = PortSlots::from_declarations(decls);
+        let result = slots.accumulate(&PortContribution::Thermal {
+            zone: ZoneId(999),
+            sensible_gain_w: 500.0,
+            radiant_gain_w: 0.0,
+            latent_gain_w: 0.0,
+            category: ThermalCategory::HvacHeating,
+        });
+        assert!(result.is_err());
+    }
 }

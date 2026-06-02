@@ -1074,9 +1074,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_physics::constants::W_PER_TON;
     use hares_types::{
-        ControlSignal, DRLevel, EnvironmentState, ExecutionStage, GridState,
-        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
-        telemetry_keys as tk,
+        ControlSignal, DRLevel, EnvironmentState, ExecutionStage, GridState, OperatingMode,
+        PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{ElectricFurnace, GasFurnace};
