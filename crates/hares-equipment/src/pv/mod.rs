@@ -26,7 +26,7 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use crate::config::KEY_EQUIPMENT_ID;
 
@@ -1131,8 +1131,8 @@ impl Equipment for PV {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &PvCheckpoint {
                 power_limit_kw: self.power_limit_kw,
                 curtailment_fraction: self.curtailment_fraction,
@@ -1778,10 +1778,10 @@ mod tests {
         })
         .unwrap();
 
-        let state = pv.save_state();
+        let state = pv.save_state().unwrap();
         let mut restored = PV::new(config_single());
         restored.load_state(&state).unwrap();
-        let state2 = restored.save_state();
+        let state2 = restored.save_state().unwrap();
         assert_eq!(state, state2);
     }
 
@@ -2681,7 +2681,7 @@ mod tests {
         pv.inverter_priority = InverterPriority::Cpf;
         pv.power_factor = 0.85;
 
-        let state = pv.save_state();
+        let state = pv.save_state().unwrap();
         let mut restored = PV::new(config_single());
         restored.load_state(&state).unwrap();
 
@@ -2692,7 +2692,7 @@ mod tests {
         approx_eq(restored.power_factor, 0.85);
 
         // Double round-trip: serialized bytes must be identical.
-        assert_eq!(state, restored.save_state());
+        assert_eq!(state, restored.save_state().unwrap());
     }
 
     #[test]
@@ -2844,7 +2844,7 @@ mod tests {
             annual_fraction: 0.15,
         };
 
-        let state = pv.save_state();
+        let state = pv.save_state().unwrap();
         let mut restored = PV::new(config_single());
         restored.load_state(&state).unwrap();
 
@@ -2859,7 +2859,7 @@ mod tests {
         }
 
         // Verify state bytes are identical after round-trip
-        assert_eq!(state, restored.save_state());
+        assert_eq!(state, restored.save_state().unwrap());
     }
 
     /// Verify that shading_factor telemetry is present and reflects the model.

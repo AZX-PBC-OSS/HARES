@@ -40,23 +40,35 @@ pub struct DwellingCheckpoint {
 impl DwellingCheckpoint {
     /// Persist checkpoint atomically with SHA-256 integrity checksum.
     pub fn save(&self, path: &Path) -> Result<(), HaresError> {
-        let json_bytes = serde_json::to_vec(self)
-            .map_err(|err| HaresError::Io(format!("checkpoint serialize failed: {err}")))?;
+        let result = (|| -> Result<(), HaresError> {
+            let json_bytes = serde_json::to_vec(self)
+                .map_err(|err| HaresError::Io(format!("checkpoint serialize failed: {err}")))?;
+
+            let tmp_bytes = checksum::write_with_sha256(&json_bytes);
+            let tmp_path = temp_checkpoint_path(path);
+            fs::write(&tmp_path, &tmp_bytes)
+                .map_err(|err| HaresError::Io(format!("checkpoint temp write failed: {err}")))?;
+            fs::rename(&tmp_path, path)
+                .map_err(|err| HaresError::Io(format!("checkpoint atomic rename failed: {err}")))?;
+            Ok(())
+        })();
 
         #[cfg(feature = "observe")]
-        tracing::debug!(
-            checkpoint_path = %path.display(),
-            sha256 = %checksum::compute_sha256_hex(&json_bytes),
-            "checkpoint saved with integrity checksum",
-        );
+        {
+            match &result {
+                Ok(()) => tracing::info!(
+                    checkpoint_path = %path.display(),
+                    "checkpoint saved successfully",
+                ),
+                Err(e) => tracing::warn!(
+                    checkpoint_path = %path.display(),
+                    error = %e,
+                    "checkpoint save failed",
+                ),
+            }
+        }
 
-        let file_bytes = checksum::write_with_sha256(&json_bytes);
-        let tmp_path = temp_checkpoint_path(path);
-        fs::write(&tmp_path, &file_bytes)
-            .map_err(|err| HaresError::Io(format!("checkpoint temp write failed: {err}")))?;
-        fs::rename(&tmp_path, path)
-            .map_err(|err| HaresError::Io(format!("checkpoint atomic rename failed: {err}")))?;
-        Ok(())
+        result
     }
 
     /// Load checkpoint from disk, verifying SHA-256 integrity before

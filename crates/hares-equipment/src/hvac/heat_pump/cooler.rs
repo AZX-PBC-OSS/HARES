@@ -272,7 +272,7 @@ impl Equipment for HpCooler {
         self.inner.core_output()
     }
 
-    fn save_state(&self) -> Vec<u8> {
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.inner.save_state()
     }
 
@@ -618,7 +618,7 @@ impl Equipment for GshpCooler {
         self.inner.core_output()
     }
 
-    fn save_state(&self) -> Vec<u8> {
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.inner.save_state()
     }
 
@@ -887,7 +887,7 @@ impl Equipment for WshpCooler {
         self.inner.core_output()
     }
 
-    fn save_state(&self) -> Vec<u8> {
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.inner.save_state()
     }
 

@@ -50,7 +50,7 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 
 use crate::protocol_bridge::handler::{EquipmentCommand, ProtocolHandler};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 pub use config::ProtocolBridgeConfig;
 pub use handler::JsonHandler;
@@ -248,8 +248,8 @@ impl Equipment for ProtocolBridge {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &ProtocolBridgeCheckpoint {
                 dispatch_count: self.dispatch_count,
                 total_commands_parsed: self.total_commands_parsed,
@@ -639,7 +639,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        let saved = bridge.save_state();
+        let saved = bridge.save_state().unwrap();
 
         let mut restored = ProtocolBridge::new(minimal_config());
         restored.init(&minimal_config(), &env).unwrap();

@@ -20,7 +20,7 @@ use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
     parse_usize, parse_zone_id, restore_schedule_source_state,
 };
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use crate::config::KEY_EQUIPMENT_ID;
 const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
@@ -943,8 +943,8 @@ impl Equipment for ScheduledLoad {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &ScheduledLoadState {
                 last_non_zero_power_kw: self.last_non_zero_power_kw,
                 last_non_zero_gas_w: self.last_non_zero_gas_w,
@@ -1925,7 +1925,7 @@ mod tests {
         eq.init(&config, &env).unwrap();
         eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.7 })
             .unwrap();
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored =
             ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -2043,7 +2043,7 @@ mod tests {
         env.current_time += ChronoDuration::minutes(15);
         ports.zero();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored =
             ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -2119,7 +2119,7 @@ mod tests {
         env.current_time += ChronoDuration::minutes(15);
         ports.zero();
         a.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        let checkpoint = a.save_state();
+        let checkpoint = a.save_state().unwrap();
 
         let mut b = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         b.init(&config, &env).unwrap();

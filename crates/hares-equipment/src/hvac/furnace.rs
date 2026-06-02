@@ -17,7 +17,7 @@ use hares_types::telemetry_keys as tk;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::hvac::heating_config::{ElectricFurnaceConfig, GasFurnaceConfig};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
@@ -339,8 +339,8 @@ impl Equipment for ElectricFurnace {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &FurnaceState {
                 mode: self.hvac.thermostat_fsm.mode,
                 duty_cycle: self.hvac.runtime.duty_cycle,
@@ -696,8 +696,8 @@ impl Equipment for GasFurnace {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &FurnaceState {
                 mode: self.hvac.thermostat_fsm.mode,
                 duty_cycle: self.hvac.runtime.duty_cycle,
@@ -1322,7 +1322,7 @@ mod tests {
         };
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = ElectricFurnace::new(cfg.clone());
         restored.init(&cfg, &env).unwrap();
@@ -1356,7 +1356,7 @@ mod tests {
         };
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = GasFurnace::new(cfg.clone());
         restored.init(&cfg, &env).unwrap();

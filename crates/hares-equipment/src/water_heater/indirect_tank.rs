@@ -23,7 +23,7 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
@@ -556,8 +556,8 @@ impl Equipment for IndirectTank {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &IndirectTankState {
                 setpoint_c: self.setpoint_c,
                 target_setpoint_c: self.target_setpoint_c,
@@ -568,7 +568,7 @@ impl Equipment for IndirectTank {
                 heating_on: self.heating_on,
                 duty_cycle: self.duty_cycle,
                 mode_override: self.mode_override,
-                tank_state: self.tank.save_state(),
+                tank_state: self.tank.save_state()?,
                 tank_avg_temp_c: self
                     .telemetry
                     .get(tk::TANK_AVG_TEMP_C)

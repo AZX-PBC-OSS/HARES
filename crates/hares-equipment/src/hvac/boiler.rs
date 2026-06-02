@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use hares_types::telemetry_keys as tk;
 
 use crate::hvac::heating_config::{ElectricBoilerConfig, GasBoilerConfig};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
@@ -351,8 +351,8 @@ impl Equipment for ElectricBoiler {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &BoilerState {
                 mode: self.hvac.thermostat_fsm.mode,
                 duty_cycle: self.hvac.runtime.duty_cycle,
@@ -724,8 +724,8 @@ impl Equipment for GasBoiler {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &BoilerState {
                 mode: self.hvac.thermostat_fsm.mode,
                 duty_cycle: self.hvac.runtime.duty_cycle,
@@ -1226,7 +1226,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = GasBoiler::new(cfg.clone());
         restored.init(&cfg, &env).unwrap();

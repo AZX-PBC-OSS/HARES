@@ -129,7 +129,7 @@ fn assert_equipment_lifecycle(
     );
 
     // 6. save_state must produce non-empty bytes.
-    let saved = equipment.save_state();
+    let saved = equipment.save_state().unwrap();
     assert!(
         !saved.is_empty(),
         "save_state must return non-empty bytes for '{}'",

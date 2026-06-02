@@ -4,7 +4,7 @@ use std::{f64::consts::PI, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Result, load_versioned, save_versioned};
+use crate::{Result, load_versioned, try_save_versioned};
 use hares_types::{EquipmentId, HaresError, telemetry_keys as tk};
 
 use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
@@ -528,8 +528,8 @@ impl StratifiedTank {
         total_merges
     }
 
-    pub fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    pub fn save_state(&self) -> Result<Vec<u8>> {
+        try_save_versioned(
             &StratifiedTankState {
                 node_temps_c: self.node_temps_c.clone(),
             },
@@ -988,7 +988,7 @@ mod tests {
             let temps = &mut tank.node_temps_c;
             temps.copy_from_slice(&[58.0, 54.0, 50.0, 46.0]);
         }
-        let state = tank.save_state();
+        let state = tank.save_state().unwrap();
 
         tank.heat_node(0, 2_000.0, Duration::from_secs(60))
             .expect("mutate");

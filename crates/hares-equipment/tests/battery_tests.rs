@@ -544,7 +544,7 @@ fn checkpoint_preserves_soc_and_mode() {
     let soc_before_save = bat.telemetry().get("soc").expect("soc");
 
     // Save state.
-    let checkpoint = bat.save_state();
+    let checkpoint = bat.save_state().unwrap();
 
     // Continue stepping to mutate state further.
     step_n(&mut bat, 30, &env);

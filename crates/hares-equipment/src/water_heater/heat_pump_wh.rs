@@ -16,7 +16,7 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 pub use super::hpwh_compressor::ElementHpControlMode;
 use super::hpwh_compressor::{
@@ -911,8 +911,8 @@ impl Equipment for HeatPumpWH {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &HpwhState {
                 setpoint_c: self.setpoint_c,
                 target_setpoint_c: self.target_setpoint_c,
@@ -924,7 +924,7 @@ impl Equipment for HeatPumpWH {
                 er_duty_cycle: self.er_duty_cycle,
                 mode_override: self.mode_override,
                 element_hp_control: self.element_hp_control,
-                tank_state: self.tank.save_state(),
+                tank_state: self.tank.save_state()?,
                 tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
                 cop: self.telemetry.get(tk::COP).unwrap_or(0.0),
                 cap_mult: self.telemetry.get(tk::CAP_MULT).unwrap_or(1.0),
@@ -2594,7 +2594,7 @@ mod mutual_exclusion_tests {
             let mut p = ports();
             wh.step(&env_state(), Duration::from_secs(60), &mut p)
                 .unwrap();
-            let saved = wh.save_state();
+            let saved = wh.save_state().unwrap();
 
             let mut restored = HeatPumpWH::new(cfg.clone());
             restored.init(&cfg, &env_state()).unwrap();
@@ -2621,7 +2621,7 @@ mod mutual_exclusion_tests {
         })
         .unwrap();
 
-        let saved = wh.save_state();
+        let saved = wh.save_state().unwrap();
 
         let mut restored = HeatPumpWH::new(cfg.clone());
         restored.init(&cfg, &env_state()).unwrap();

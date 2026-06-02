@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::ac_config::DehumidifierConfig;
 use super::dehumidifier_defaults::{
@@ -571,8 +571,8 @@ impl Equipment for Dehumidifier {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &DehumidifierState {
                 is_on: self.is_on,
                 accumulated_water_removal_l: self.accumulated_water_removal_l,
@@ -997,7 +997,7 @@ mod tests {
         let mut slots_a = ports();
         eq.step(&env(0.62), Duration::from_secs(60), &mut slots_a)
             .unwrap();
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = Dehumidifier::new(cfg.clone());
         restored.init(&cfg, &env(0.62)).unwrap();

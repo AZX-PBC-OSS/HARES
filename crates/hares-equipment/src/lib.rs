@@ -115,7 +115,7 @@ pub trait Equipment: Send + Sync {
     fn telemetry(&self) -> &Telemetry;
     fn core_output(&self) -> &CoreOutput;
 
-    fn save_state(&self) -> Vec<u8>;
+    fn save_state(&self) -> crate::Result<Vec<u8>>;
     fn load_state(&mut self, state: &[u8]) -> Result<()>;
 
     /// Version of this equipment's postcard checkpoint format.
@@ -268,7 +268,9 @@ pub trait Equipment: Send + Sync {
 }
 
 /// Re-export postcard CRC32 serialisation helpers from the serial module.
-pub use serial::{load_postcard, load_versioned, save_postcard, save_versioned, try_save_postcard};
+pub use serial::{
+    load_postcard, load_versioned, save_versioned, try_save_postcard, try_save_versioned,
+};
 
 #[cfg(test)]
 mod tests {
@@ -276,6 +278,11 @@ mod tests {
     use std::borrow::Cow;
     use std::time::Duration;
 
+    use crate::config::ConfigPayload;
+    use crate::{
+        Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_postcard,
+        try_save_versioned,
+    };
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
         ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
@@ -284,10 +291,8 @@ mod tests {
         InverterPriority, OperatingMode, PortDeclaration, PortSlots, ProtocolId, SurfaceIrradiance,
         Telemetry, TelemetryField, WeatherState, ZoneId, ZoneState,
     };
+    use serde::ser::Error as _;
     use serde::{Deserialize, Serialize};
-
-    use crate::config::ConfigPayload;
-    use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
 
     #[derive(Clone)]
     struct MockEquipment {
@@ -367,12 +372,12 @@ mod tests {
             &self.core_output
         }
 
-        fn save_state(&self) -> Vec<u8> {
+        fn save_state(&self) -> crate::Result<Vec<u8>> {
             #[derive(Serialize)]
             struct State {
                 state_value: f64,
             }
-            save_versioned(
+            try_save_versioned(
                 &State {
                     state_value: self.state_value,
                 },
@@ -856,5 +861,107 @@ mod tests {
                  or remove the variant if it is no longer planned"
             );
         }
+    }
+
+    #[test]
+    fn save_state_propagates_serialization_error_not_panic() {
+        use std::borrow::Cow;
+        use std::time::Duration;
+
+        use hares_types::{
+            ControlCapabilities, CoreCapabilities, CoreOutput, EndUse, EquipmentDescriptor,
+            EquipmentId, ExecutionStage, FuelType, OperatingMode, PortDeclaration, Telemetry,
+            ZoneId,
+        };
+        use serde::Serialize;
+
+        #[derive(Clone)]
+        struct BadSerializingEquipment {
+            descriptor: EquipmentDescriptor,
+            ports: Vec<PortDeclaration>,
+            telemetry: Telemetry,
+            core_output: CoreOutput,
+        }
+
+        impl BadSerializingEquipment {
+            fn new() -> Self {
+                Self {
+                    descriptor: EquipmentDescriptor {
+                        id: EquipmentId(999),
+                        name: "BadSer".to_string(),
+                        end_use: EndUse::OTHER,
+                        equipment_type: Cow::Borrowed("BadSer"),
+                        zone: Some(ZoneId(1)),
+                        fuel: FuelType::Electric,
+                        stage: ExecutionStage::Independent,
+                        control_capabilities: ControlCapabilities::empty(),
+                        core_capabilities: CoreCapabilities::empty(),
+                        telemetry_fields: vec![],
+                        zone_type: None,
+                    },
+                    ports: vec![],
+                    telemetry: Telemetry::with_capacity(0),
+                    core_output: CoreOutput::default(),
+                }
+            }
+        }
+
+        impl Equipment for BadSerializingEquipment {
+            fn descriptor(&self) -> &EquipmentDescriptor {
+                &self.descriptor
+            }
+            fn ports(&self) -> &[PortDeclaration] {
+                &self.ports
+            }
+            fn init(&mut self, _: &EquipmentConfig, _: &EnvironmentState) -> crate::Result<()> {
+                Ok(())
+            }
+            fn update_control(&mut self, _: &EnvironmentState) -> OperatingMode {
+                OperatingMode::Off
+            }
+            fn step(
+                &mut self,
+                _: &EnvironmentState,
+                _: Duration,
+                _: &mut PortSlots,
+            ) -> std::result::Result<(), hares_types::HaresError> {
+                Ok(())
+            }
+            fn telemetry(&self) -> &Telemetry {
+                &self.telemetry
+            }
+            fn core_output(&self) -> &CoreOutput {
+                &self.core_output
+            }
+            fn apply_control_unchecked(&mut self, _: &ControlSignal) -> crate::Result<()> {
+                Ok(())
+            }
+
+            fn save_state(&self) -> crate::Result<Vec<u8>> {
+                struct AlwaysFails;
+                impl Serialize for AlwaysFails {
+                    fn serialize<S: serde::Serializer>(
+                        &self,
+                        _: S,
+                    ) -> std::result::Result<S::Ok, S::Error> {
+                        Err(<S as serde::Serializer>::Error::custom(
+                            "deliberate failure",
+                        ))
+                    }
+                }
+                try_save_postcard(&AlwaysFails)
+            }
+
+            fn load_state(&mut self, _: &[u8]) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let eq = BadSerializingEquipment::new();
+        let result = eq.save_state();
+        assert!(
+            result.is_err(),
+            "save_state on equipment with a failing Serialize impl should return Err, not panic"
+        );
     }
 }

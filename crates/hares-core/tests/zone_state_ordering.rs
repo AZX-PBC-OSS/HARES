@@ -174,8 +174,8 @@ impl Equipment for ZoneTemperatureSniffer {
     fn core_output(&self) -> &CoreOutput {
         &self.core_output
     }
-    fn save_state(&self) -> Vec<u8> {
-        vec![]
+    fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+        Ok(vec![])
     }
     fn load_state(&mut self, _state: &[u8]) -> Result<(), HaresError> {
         Ok(())

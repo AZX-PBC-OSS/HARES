@@ -1076,7 +1076,7 @@ fn ramp_rate_checkpoint_round_trip() {
     wh.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     // Save state and restore into a fresh instance
-    let state = wh.save_state();
+    let state = wh.save_state().unwrap();
     let mut wh2 = ResistanceWH::new(cfg.clone());
     wh2.init(&cfg, &env).unwrap();
     wh2.load_state(&state).unwrap();

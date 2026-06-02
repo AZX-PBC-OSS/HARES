@@ -26,7 +26,7 @@ use crate::schedule_helpers::{
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use crate::scheduled_load::{ZIP_SUM_TARGET, ZIP_SUM_TOLERANCE};
 use crate::scheduled_load::{ZipCoefficients, parse_zip_coefficients, zip_coefficients_from_class};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use crate::config::KEY_EQUIPMENT_ID;
 const KEY_BUILDING_ID: &str = "building_id";
@@ -771,8 +771,8 @@ impl Equipment for EventBasedLoad {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &EventBasedLoadState {
                 phase: self.phase,
                 remaining_phase_s: self.remaining_phase_s,
@@ -1438,8 +1438,8 @@ impl Equipment for WetAppliance {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &WetApplianceState {
                 active: self.active,
                 phase_index: self.phase_index,
@@ -2152,7 +2152,7 @@ mod tests {
         eq_a.step(&env_a, Duration::from_secs(60), &mut ports_a)
             .unwrap();
 
-        let checkpoint = eq_a.save_state();
+        let checkpoint = eq_a.save_state().unwrap();
 
         let mut env_b = env_a.clone();
         let mut eq_b = WetAppliance::new(config.clone(), "Clothes Dryer");
@@ -2412,7 +2412,7 @@ mod tests {
             env_step.current_time += ChronoDuration::minutes(1);
         }
 
-        let checkpoint = eq_a.save_state();
+        let checkpoint = eq_a.save_state().unwrap();
 
         // Create new instance and load state
         let mut eq_b = EventBasedLoad::new(config.clone());
@@ -3229,7 +3229,7 @@ mod tests {
         // After step 1 the delay is 60 s; event has not started.
         assert_eq!(slots_a.electrical.load_power_w, 0.0);
 
-        let checkpoint = eq_a.save_state();
+        let checkpoint = eq_a.save_state().unwrap();
 
         // Instance B: fresh init, load the checkpoint.
         let mut eq_b = EventBasedLoad::new(config.clone());

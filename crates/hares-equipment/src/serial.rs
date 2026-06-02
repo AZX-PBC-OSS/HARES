@@ -13,31 +13,6 @@
 use hares_types::{EquipmentId, HaresError};
 use serde::{Serialize, de::DeserializeOwned};
 
-/// Serialize checkpoint state via postcard with CRC32 integrity suffix.
-///
-/// The 4-byte CRC32 is appended automatically by `postcard::to_allocvec_crc32`.
-/// The CRC algorithm used is CRC-32/ISCSI (CRC-32 Castagnoli polynomial),
-/// the default for postcard's CRC support.
-/// On load, `from_bytes_crc32` validates the suffix and returns
-/// `Err(PostcardError::CrcMismatch)` on mismatch.
-///
-/// # Safety (panic-freedom)
-///
-/// `postcard::to_allocvec_crc32` only fails for types that use unsupported
-/// serde features (e.g. `i128`, nested enums with data in certain
-/// configurations). All HARES state types derive `Serialize` with
-/// postcard-compatible field types (primitives, `Vec`, `Option`, flat enums),
-/// so this path is infallible in practice.  The `#[cold]` hint marks the panic
-/// branch as unlikely so the compiler can optimise for the success path.
-#[must_use]
-pub fn save_postcard<T: Serialize>(state: &T) -> Vec<u8> {
-    let crc = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
-    match postcard::to_allocvec_crc32(state, crc.digest()) {
-        Ok(bytes) => bytes,
-        Err(e) => panic_serialize(e),
-    }
-}
-
 /// Non-panicking variant for callers that need graceful error handling
 /// (e.g., checkpoint paths where a serialization failure should not
 /// terminate a long-running simulation).
@@ -46,12 +21,6 @@ pub fn try_save_postcard<T: Serialize>(state: &T) -> crate::Result<Vec<u8>> {
     let crc = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
     postcard::to_allocvec_crc32(state, crc.digest())
         .map_err(|e| HaresError::Equipment(format!("state serialization failed: {e}")))
-}
-
-#[cold]
-#[inline(never)]
-fn panic_serialize(e: postcard::Error) -> ! {
-    panic!("equipment state serialization failed: {e}")
 }
 
 /// Deserialize checkpoint state via postcard with CRC32 integrity verification.
@@ -80,7 +49,27 @@ const VERSION_PREAMBLE_LEN: usize = std::mem::size_of::<u32>();
 /// deserialization so that a field-type or enum-variant change in the
 /// checkpoint struct is caught with a descriptive error rather than silent
 /// corruption or a generic postcard failure.
+///
+/// # Panics
+///
+/// Panics on postcard serialization failure. Prefer `try_save_versioned` in
+/// production code where panicking would crash a long-running simulation.
 pub fn save_versioned<T: Serialize>(state: &T, version: u32, equipment_type: &str) -> Vec<u8> {
+    try_save_versioned(state, version, equipment_type)
+        .expect("postcard serialization failed in save_versioned — use try_save_versioned for production paths")
+}
+
+/// Non-panicking variant of `save_versioned` for production checkpoint paths
+/// where a serialization failure must be propagated rather than terminating
+/// the process.
+///
+/// Format: `[version: u32 LE][postcard payload with CRC32 suffix]`
+#[must_use = "serialization errors should be handled, not silently discarded"]
+pub fn try_save_versioned<T: Serialize>(
+    state: &T,
+    version: u32,
+    equipment_type: &str,
+) -> crate::Result<Vec<u8>> {
     #[cfg(feature = "observe")]
     tracing::debug!(
         equipment_type = %equipment_type,
@@ -90,8 +79,8 @@ pub fn save_versioned<T: Serialize>(state: &T, version: u32, equipment_type: &st
     #[cfg(not(feature = "observe"))]
     let _ = equipment_type;
     let mut blob = version.to_le_bytes().to_vec();
-    blob.extend_from_slice(&save_postcard(state));
-    blob
+    blob.extend_from_slice(&try_save_postcard(state)?);
+    Ok(blob)
 }
 
 /// Load versioned state, validating the version token before deserialization
@@ -122,6 +111,7 @@ pub fn load_versioned<T: DeserializeOwned>(
             bytes.len()
         )));
     }
+    // Safety: length checked above — bytes[..4] is guaranteed to have exactly 4 bytes.
     let blob_version = u32::from_le_bytes(bytes[..VERSION_PREAMBLE_LEN].try_into().unwrap());
     if blob_version != expected_version {
         #[cfg(feature = "observe")]
@@ -180,7 +170,7 @@ mod tests {
             d: LoopId(9),
             e: FluidType::Water,
         };
-        let bytes = save_postcard(&s);
+        let bytes = try_save_postcard(&s).unwrap();
         let decoded: S = load_postcard(&bytes).unwrap();
         assert_eq!(decoded, s);
     }
@@ -193,7 +183,7 @@ mod tests {
             y: f64,
         }
         let s = S { x: 42, y: 3.14 };
-        let mut blob = save_postcard(&s);
+        let mut blob = try_save_postcard(&s).unwrap();
         // Corrupt one byte of the postcard blob (skip CRC suffix by
         // corrupting a middle byte — the CRC32 check will catch it)
         blob[10] ^= 0x01;
@@ -258,7 +248,7 @@ mod tests {
         let p = P { x: 0xDEADBEEF };
         let version: u32 = 1;
 
-        let raw_postcard = save_postcard(&p);
+        let raw_postcard = try_save_postcard(&p).unwrap();
         let versioned = save_versioned(&p, version, "P");
 
         assert_eq!(&versioned[..4], &version.to_le_bytes());
@@ -290,5 +280,58 @@ mod tests {
             err_msg.contains("P") && err_msg.contains("EquipmentId(99)"),
             "error should name equipment type P and id 99; got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn try_save_postcard_propagates_error_on_custom_serialize_failure() {
+        use serde::ser::{self, SerializeStruct};
+
+        struct AlwaysFails;
+
+        impl Serialize for AlwaysFails {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut s = serializer.serialize_struct("AlwaysFails", 1)?;
+                s.serialize_field("bad", &FailingField)?;
+                s.end()
+            }
+        }
+
+        struct FailingField;
+        impl Serialize for FailingField {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(ser::Error::custom(
+                    "deliberate serialization failure for testing",
+                ))
+            }
+        }
+
+        let bad = AlwaysFails;
+        let result = try_save_postcard(&bad);
+        assert!(
+            result.is_err(),
+            "try_save_postcard should return Err for types whose Serialize impl fails"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("state serialization failed"),
+            "error should mention serialization failure; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn try_save_postcard_error_does_not_panic() {
+        use serde::ser::Error;
+
+        struct AlwaysFails;
+        impl Serialize for AlwaysFails {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(<S as serde::Serializer>::Error::custom("fail"))
+            }
+        }
+
+        let bad = AlwaysFails;
+        // This must not panic — the whole point of try_save_postcard
+        let result = try_save_postcard(&bad);
+        assert!(result.is_err());
     }
 }

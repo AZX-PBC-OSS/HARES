@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
-use crate::{Equipment, EquipmentConfig, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, load_versioned, try_save_versioned};
 
 use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
@@ -409,7 +409,7 @@ impl Equipment for HeatPumpHeaterCore {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.save_state()
     }
 
@@ -2242,8 +2242,8 @@ impl HeatPumpHeaterCore {
         }
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &HeaterState {
                 mode: self.hvac.thermostat_fsm.mode,
                 duty_cycle: self.hvac.runtime.duty_cycle,
@@ -3068,7 +3068,7 @@ mod tests {
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = ASHPHeater::new(cfg.clone());
         restored.init(&cfg, &env).unwrap();
@@ -4197,7 +4197,7 @@ mod tests {
         eq.init(&cfg, &environment).unwrap();
         eq.update_control(&environment);
 
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
         let mut restored = ASHPHeater::new(cfg.clone());
         restored.init(&cfg, &environment).unwrap();
         restored.load_state(&state).unwrap();
@@ -4228,7 +4228,7 @@ mod tests {
         })
         .unwrap();
 
-        let saved = eq.save_state();
+        let saved = eq.save_state().unwrap();
 
         let mut restored = ASHPHeater::new(cfg.clone());
         restored.init(&cfg, &environment).unwrap();
@@ -4417,7 +4417,7 @@ mod tests {
         );
 
         // Save and restore state.
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
         let mut restored = ASHPHeater::new(cfg.clone());
         restored.init(&cfg, &make_env(18.0, 0.0, 0)).unwrap();
         restored.load_state(&state).unwrap();
@@ -6017,7 +6017,7 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = ASHPHeater::new(cfg.clone());
         restored.init(&cfg, &environment).unwrap();
@@ -6060,7 +6060,7 @@ mod tests {
             "time_at_current_speed_s must be positive after stepping"
         );
 
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = ASHPHeater::new(cfg.clone());
         restored.init(&cfg, &environment).unwrap();

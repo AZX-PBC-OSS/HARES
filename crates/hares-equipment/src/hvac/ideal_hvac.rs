@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use hares_types::telemetry_keys as tk;
 
 use crate::hvac::heating_config::{IdealCapacityModeConfig, IdealHvacConfig};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::hvac_core::{DEFAULT_BIQUADRATIC_COEFFS, IDEAL_CAPACITY_TIME_RES_THRESHOLD_S};
 use super::thermostat::{ThermostatFsm, ThermostatMode, lookup_zone_temp};
@@ -816,8 +816,8 @@ impl Equipment for IdealHvac {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &IdealHvacState {
                 runtime_setpoints: self.thermostat_fsm.runtime_setpoints,
                 ideal_capacity_w: self.ideal_capacity_w,
@@ -1344,7 +1344,7 @@ mod tests {
         eq.update_control(&env);
         eq.ideal_capacity_w = 4200.0;
 
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
         let mut restored = IdealHvac::new(cfg.clone());
         restored.init(&cfg, &env).unwrap();
         restored.load_state(&state).unwrap();
@@ -2667,7 +2667,7 @@ mod tests {
         };
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = IdealHvac::new(cfg.clone());
         restored.init(&cfg, &e).unwrap();

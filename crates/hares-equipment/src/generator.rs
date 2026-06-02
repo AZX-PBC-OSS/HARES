@@ -36,7 +36,7 @@ use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::config::EquipmentTypedConfig;
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 // ---------------------------------------------------------------------------
 // Typed config
@@ -1507,8 +1507,8 @@ impl Equipment for Generator {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &GeneratorCheckpoint {
                 current_power_kw: self.current_power_kw,
                 mode: self.mode,
@@ -3273,7 +3273,7 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let bytes = generator.save_state();
+        let bytes = generator.save_state().unwrap();
         let mut generator2 = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator2.init(&config, &base_env()).unwrap();
         generator2.load_state(&bytes).unwrap();
@@ -3356,7 +3356,7 @@ mod tests {
         ramp_to_steady_state(&mut generator, 10.0, &base_env());
 
         let saved = generator.current_power_kw;
-        let bytes = generator.save_state();
+        let bytes = generator.save_state().unwrap();
 
         let mut generator2 = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator2.init(&config, &base_env()).unwrap();
@@ -3699,7 +3699,7 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let bytes = generator.save_state();
+        let bytes = generator.save_state().unwrap();
 
         let mut generator2 = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator2.init(&config, &base_env()).unwrap();
@@ -4383,7 +4383,7 @@ mod tests {
         let mut slots = ports_for(&fc);
         fc.step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
-        let bytes = fc.save_state();
+        let bytes = fc.save_state().unwrap();
 
         let mut fc2 = Generator::new(config.clone(), GeneratorKind::FuelCell);
         fc2.init(&config, &base_env()).unwrap();
@@ -4944,7 +4944,7 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let bytes = generator.save_state();
+        let bytes = generator.save_state().unwrap();
         let mut restored = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         restored.init(&config, &base_env()).unwrap();
         restored.load_state(&bytes).unwrap();

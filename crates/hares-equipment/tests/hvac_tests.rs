@@ -764,7 +764,7 @@ fn checkpoint_round_trip_preserves_mode() {
     let mode_before = eq.telemetry().get("operating_mode");
     let thermal_before = eq.telemetry().get("thermal_output_w");
 
-    let snapshot = eq.save_state();
+    let snapshot = eq.save_state().unwrap();
 
     // Restore into a fresh instance.
     let mut restored = registry.create("Gas Furnace", cfg.clone()).unwrap();

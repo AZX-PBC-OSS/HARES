@@ -2793,7 +2793,11 @@ impl Dwelling {
             format_version: CHECKPOINT_VERSION,
             bldg_id: self.bldg_id,
             timestep_index: self.clock.current_step(),
-            equipment_states: self.equipment.iter().map(|eq| eq.save_state()).collect(),
+            equipment_states: self
+                .equipment
+                .iter()
+                .map(|eq| eq.save_state())
+                .collect::<std::result::Result<Vec<_>, _>>()?,
             rng_state: self.rng.get_seed(),
             envelope_state,
             humidity_states,
@@ -5489,8 +5493,8 @@ mod tests {
             &self.core_output
         }
 
-        fn save_state(&self) -> Vec<u8> {
-            vec![]
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
         }
 
         fn load_state(
@@ -5617,8 +5621,8 @@ mod tests {
             &self.core_output
         }
 
-        fn save_state(&self) -> Vec<u8> {
-            vec![]
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
         }
 
         fn load_state(
@@ -5712,8 +5716,8 @@ mod tests {
             &self.core_output
         }
 
-        fn save_state(&self) -> Vec<u8> {
-            Vec::new()
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(Vec::new())
         }
 
         fn load_state(
@@ -6361,8 +6365,8 @@ occupancy = 1.0
             &self.core_output
         }
 
-        fn save_state(&self) -> Vec<u8> {
-            vec![]
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
         }
 
         fn load_state(
@@ -7577,8 +7581,10 @@ occupancy = 1.0
         fn core_output(&self) -> &CoreOutput {
             self.inner.core_output()
         }
-        fn save_state(&self) -> Vec<u8> {
-            self.inner.save_state()
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            self.inner.save_state().map_err(|e| {
+                hares_types::HaresError::Equipment(format!("delegate save_state: {e}"))
+            })
         }
         fn load_state(&mut self, state: &[u8]) -> std::result::Result<(), hares_types::HaresError> {
             self.inner.load_state(state)
@@ -9078,5 +9084,177 @@ master_seed = 0
             validate_equipment_loops(&no_loop, &allocated).is_ok(),
             "non-fluid declarations must always pass loop validation"
         );
+    }
+
+    #[test]
+    fn save_checkpoint_does_not_panic_on_minimal_dwelling() {
+        // Build a minimal dwelling via TOML, step once, and verify
+        // save_checkpoint() returns a Result (not a panic).
+        let toml_path = unique_temp_toml("save_checkpoint_no_panic");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        dwelling.step().expect("step succeeds");
+        let result = dwelling.save_checkpoint();
+        assert!(
+            result.is_ok(),
+            "save_checkpoint should succeed on minimal dwelling"
+        );
+    }
+
+    #[test]
+    fn save_checkpoint_propagates_equipment_error() {
+        // Build a minimal dwelling, inject equipment whose save_state() always
+        // fails, and verify save_checkpoint() returns Err rather than panicking.
+        let toml_path = unique_temp_toml("save_checkpoint_failure");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        dwelling.step().expect("step succeeds");
+
+        #[derive(Clone)]
+        struct BadSer {
+            descriptor: EquipmentDescriptor,
+            ports: Vec<PortDeclaration>,
+            telemetry: Telemetry,
+            core_output: CoreOutput,
+        }
+
+        impl Equipment for BadSer {
+            fn descriptor(&self) -> &EquipmentDescriptor {
+                &self.descriptor
+            }
+            fn ports(&self) -> &[PortDeclaration] {
+                &self.ports
+            }
+            fn init(
+                &mut self,
+                _: &EquipmentConfig,
+                _: &EnvironmentState,
+            ) -> std::result::Result<(), HaresError> {
+                Ok(())
+            }
+            fn update_control(&mut self, _: &EnvironmentState) -> OperatingMode {
+                OperatingMode::Off
+            }
+            fn step(
+                &mut self,
+                _: &EnvironmentState,
+                _: Duration,
+                _: &mut PortSlots,
+            ) -> std::result::Result<(), HaresError> {
+                Ok(())
+            }
+            fn telemetry(&self) -> &Telemetry {
+                &self.telemetry
+            }
+            fn core_output(&self) -> &CoreOutput {
+                &self.core_output
+            }
+            fn apply_control_unchecked(
+                &mut self,
+                _: &ControlSignal,
+            ) -> std::result::Result<(), HaresError> {
+                Ok(())
+            }
+            fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
+                Err(HaresError::Equipment(
+                    "serialization failed".to_string(),
+                ))
+            }
+            fn load_state(
+                &mut self,
+                _: &[u8],
+            ) -> std::result::Result<(), HaresError> {
+                Ok(())
+            }
+        }
+
+        let bad = BadSer {
+            descriptor: EquipmentDescriptor {
+                id: EquipmentId(9999),
+                name: "BadSer".to_string(),
+                end_use: EndUse::OTHER,
+                equipment_type: Cow::Borrowed("BadSer"),
+                zone: Some(ZoneId(1)),
+                fuel: FuelType::Electric,
+                stage: ExecutionStage::Independent,
+                control_capabilities: ControlCapabilities::empty(),
+                core_capabilities: CoreCapabilities::empty(),
+                telemetry_fields: vec![],
+                zone_type: None,
+            },
+            ports: vec![],
+            telemetry: Telemetry::with_capacity(0),
+            core_output: CoreOutput::default(),
+        };
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(bad)]);
+        let result = dwelling.save_checkpoint();
+        assert!(
+            result.is_err(),
+            "save_checkpoint should return Err when equipment save_state fails"
+        );
+    }
+
+    // Helpers for save_checkpoint tests
+    fn nanos_suffix() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_nanos()
+    }
+
+    fn unique_temp_toml(tag: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("hares-checkpoint-{tag}-{}.toml", nanos_suffix()));
+        path
+    }
+
+    fn write_minimal_toml(path: &PathBuf) {
+        let content = r#"building_id = 9001
+
+[simulation]
+start_time = "2024-06-15T12:00:00Z"
+time_res_s = 60
+duration_s = 600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "none"
+
+[weather]
+outdoor_temp_c = 20.0
+dew_point_c = 10.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 0.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = 0
+"#;
+        fs::write(path, content).expect("failed to write synthetic TOML");
+    }
+
+    struct TempFile(PathBuf);
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
     }
 }

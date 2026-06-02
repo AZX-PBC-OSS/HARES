@@ -278,7 +278,7 @@ fn save_load_preserves_trajectory() {
         a.step(&env, Duration::minutes(5), &mut ports).unwrap();
     }
 
-    let checkpoint = a.save_state();
+    let checkpoint = a.save_state().unwrap();
     let mut b = Ev::new(config.clone());
     b.init(&config, &env).unwrap();
     b.load_state(&checkpoint).unwrap();
@@ -1104,7 +1104,7 @@ fn degradation_state_survives_checkpoint() {
     let env = sample_env();
     ev1.init(&config, &env).unwrap();
 
-    let saved = ev1.save_state();
+    let saved = ev1.save_state().unwrap();
     let mut ev2 = Ev::new(config.clone());
     ev2.init(&config, &env).unwrap();
     ev2.load_state(&saved).unwrap();

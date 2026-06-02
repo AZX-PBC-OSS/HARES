@@ -32,7 +32,7 @@ use crate::config::EquipmentTypedConfig;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, restore_schedule_source_state,
 };
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 // ---------------------------------------------------------------------------
 // Typed config
@@ -727,8 +727,8 @@ impl Equipment for Ventilation {
         ))
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &VentilationCheckpoint {
                 mode: self.mode,
                 dr_level: self.dr_level,

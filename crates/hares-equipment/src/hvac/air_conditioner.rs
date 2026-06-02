@@ -19,7 +19,7 @@ use hares_types::telemetry_keys as tk;
 
 #[cfg(test)]
 use crate::HvacSetpointConfig;
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::ac_config::{
     CentralAirConditionerConfig, RoomAcConfig, default_telemetry, load_curve_pair, telemetry_fields,
@@ -296,7 +296,7 @@ impl Equipment for AirConditioner {
         &self.core.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.core.save_state()
     }
 
@@ -355,7 +355,7 @@ impl Equipment for RoomAC {
         &self.core.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.core.save_state()
     }
 
@@ -1469,8 +1469,8 @@ impl CoolingCore {
         self.coil_ao_by_stage[speed_index.min(self.coil_ao_by_stage.len() - 1)]
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &AirConditionerState {
                 mode: self.hvac.thermostat_fsm.mode,
                 duty_cycle: self.hvac.runtime.duty_cycle,
@@ -2181,7 +2181,7 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = AirConditioner::new(cfg.clone());
         restored.init(&cfg, &env).unwrap();
@@ -3021,7 +3021,7 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         // Create a fresh instance and restore.
         let mut restored = AirConditioner::new(cfg.clone());
@@ -3065,7 +3065,7 @@ mod tests {
             "time_at_current_speed_s must be positive after stepping"
         );
 
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = AirConditioner::new(cfg.clone());
         restored.init(&cfg, &environment).unwrap();
@@ -4510,7 +4510,7 @@ mod crankcase_tests {
         })
         .unwrap();
 
-        let saved = eq.save_state();
+        let saved = eq.save_state().unwrap();
 
         let mut restored = AirConditioner::new(cfg.clone());
         restored.init(&cfg, &e).unwrap();

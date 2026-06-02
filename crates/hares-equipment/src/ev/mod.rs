@@ -15,7 +15,7 @@ use hares_types::{
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 pub mod catalog;
 mod charging_curve;
@@ -883,8 +883,8 @@ impl Equipment for Ev {
         })
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &EvCheckpoint {
                 soc: self.soc,
                 connection_state: self.connection_state,

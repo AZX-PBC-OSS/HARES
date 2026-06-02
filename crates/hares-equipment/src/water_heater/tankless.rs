@@ -18,7 +18,7 @@ use hares_physics::constants::{
 };
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::WaterHeaterZip;
 use super::wh_config::TanklessWaterHeaterConfig;
@@ -444,8 +444,8 @@ impl Equipment for TanklessWH {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &TanklessState {
                 setpoint_c: self.setpoint_c,
                 duty_cycle: self.duty_cycle,
@@ -838,7 +838,7 @@ mod tests {
         })
         .unwrap();
 
-        let saved = eq.save_state();
+        let saved = eq.save_state().unwrap();
 
         let mut restored = TanklessWH::new(config());
         restored.init(&config(), &env()).unwrap();
@@ -1436,7 +1436,7 @@ mod tests {
         })
         .unwrap();
 
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
         let mut restored = TanklessWH::new(cfg.clone());
         restored.init(&cfg, &env()).unwrap();
         restored.load_state(&state).unwrap();

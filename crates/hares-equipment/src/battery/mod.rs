@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use hares_physics::constants::SECONDS_PER_HOUR;
 use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 pub use config::BatteryConfig;
 pub use ocv::{OcvTable, UNegTable};
@@ -1422,8 +1422,8 @@ impl Equipment for Battery {
         })
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &BatteryCheckpoint {
                 soc: self.soc,
                 cell_temp_c: self.cell_temp_c,
@@ -2303,7 +2303,7 @@ mod tests {
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
 
-        let saved = bat.save_state();
+        let saved = bat.save_state().unwrap();
         let soc_saved = bat.soc;
         let cycles_saved = bat.rainflow.total_cycles();
 
@@ -3322,7 +3322,7 @@ mod tests {
         let saved_cycles = bat1.rainflow.total_cycles();
         let saved_derate = bat1.discharge_derate_factor();
         let saved_standby = bat1.standby_power_w;
-        let state = bat1.save_state();
+        let state = bat1.save_state().unwrap();
 
         // Restore into a fresh battery.
         let mut bat2 = Battery::new(config.clone());
@@ -3677,7 +3677,7 @@ mod tests {
                 .unwrap();
         }
 
-        let saved = bat1.save_state();
+        let saved = bat1.save_state().unwrap();
         let fade_before = bat1.degradation.capacity_fade_fraction();
         let b1_accum_before = bat1.degradation.b1_accum;
 
@@ -3736,7 +3736,7 @@ mod tests {
         );
 
         // Save and restore into a fresh battery.
-        let saved = bat1.save_state();
+        let saved = bat1.save_state().unwrap();
         let mut bat2 = Battery::new(config.clone());
         bat2.init(&config, &env).unwrap();
         bat2.load_state(&saved).unwrap();

@@ -16,7 +16,7 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, save_versioned};
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
@@ -696,15 +696,15 @@ impl Equipment for GasWH {
         &self.core_output
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        save_versioned(
+    fn save_state(&self) -> crate::Result<Vec<u8>> {
+        try_save_versioned(
             &GasWhState {
                 setpoint_c: self.setpoint_c,
                 deadband_c: self.deadband_c,
                 burner_on: self.burner_on,
                 duty_cycle: self.duty_cycle,
                 mode_override: self.mode_override,
-                tank_state: self.tank.save_state(),
+                tank_state: self.tank.save_state()?,
                 tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
                 burner_power_w: self.telemetry.get(tk::BURNER_POWER_W).unwrap_or(0.0),
                 pilot_power_w: self.telemetry.get(tk::PILOT_POWER_W).unwrap_or(0.0),
@@ -1293,7 +1293,7 @@ mod tests {
         let mut p = ports();
         eq.step(&env(21.0), Duration::from_secs(60), &mut p)
             .unwrap();
-        let state = eq.save_state();
+        let state = eq.save_state().unwrap();
 
         let mut restored = GasWH::new(config());
         restored.init(&config(), &env(21.0)).unwrap();
@@ -1316,7 +1316,7 @@ mod tests {
         })
         .unwrap();
 
-        let saved = eq.save_state();
+        let saved = eq.save_state().unwrap();
 
         let mut restored = GasWH::new(config());
         restored.init(&config(), &env(21.0)).unwrap();

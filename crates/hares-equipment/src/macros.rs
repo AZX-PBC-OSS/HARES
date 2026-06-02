@@ -58,7 +58,7 @@ macro_rules! delegate_equipment {
                 self.$inner.core_output()
             }
 
-            fn save_state(&self) -> Vec<u8> {
+            fn save_state(&self) -> $crate::Result<Vec<u8>> {
                 self.$inner.save_state()
             }
 
