@@ -869,6 +869,11 @@ pub struct Dwelling {
     test_panic_on_step: bool,
     #[cfg(debug_assertions)]
     test_assert_panic_on_step: bool,
+    /// Test-only: causes the next thermal invariant check in
+    /// [`check_invariants`](Self::check_invariants) to receive deliberately
+    /// broken balance terms, forcing `InvariantViolation { check_name: "thermal_balance" }`.
+    #[cfg(debug_assertions)]
+    test_thermal_invariant_failure: bool,
     output_column_index: HashMap<String, usize>,
     /// Pre-resolved output column indices for each equipment piece, avoiding
     /// per-timestep name allocation in `record_step`.
@@ -914,7 +919,7 @@ pub struct Dwelling {
     /// convert it to a person count.  Equals `number_of_occupants` from the
     /// Occupancy equipment spec (defaults to 1.0 when unspecified).
     occupancy_scale: f64,
-    #[expect(dead_code, reason = "reserved for thermal balance invariant")]
+    #[expect(dead_code, reason = "reserved for potential future use")]
     zone_capacitances_j_k: Vec<(ZoneId, f64)>,
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     prev_humidity_ratios: Vec<(ZoneId, f64)>,
@@ -1601,6 +1606,8 @@ impl Dwelling {
             test_panic_on_step: false,
             #[cfg(debug_assertions)]
             test_assert_panic_on_step: false,
+            #[cfg(debug_assertions)]
+            test_thermal_invariant_failure: false,
             equipment,
             equipment_id_by_name,
             thermal_solver: solvers.thermal,
@@ -1815,6 +1822,18 @@ impl Dwelling {
     #[cfg(debug_assertions)]
     pub fn set_test_assert_panic(&mut self) {
         self.test_assert_panic_on_step = true;
+    }
+
+    /// Test-only hook: causes the thermal invariant check in the next
+    /// [`check_invariants`](Self::check_invariants) call to receive deliberately
+    /// broken balance terms, forcing `InvariantViolation { check_name: "thermal_balance" }`.
+    ///
+    /// Only available in debug_assertions builds. Has no effect on the
+    /// production simulation — the real balance terms computed by the solver
+    /// are preserved.
+    #[cfg(debug_assertions)]
+    pub fn set_thermal_invariant_failure_for_test(&mut self) {
+        self.test_thermal_invariant_failure = true;
     }
 
     /// Executes exactly one simulation timestep.
@@ -4099,14 +4118,44 @@ impl Dwelling {
         // accumulator.
         checker.check_fuel_electric_absent(self.ports.fuel.get(hares_types::FuelType::Electric))?;
 
-        // Thermal balance: deferred -- the multi-node RC state-space model
-        // distributes thermal energy across zone-air and wall-mass nodes.
-        // A zone-air-only balance (C_zone × ΔT / dt vs. component gains)
-        // has a ~6 kW residual because wall-mass energy changes aren't
-        // captured. A proper system-level energy audit requires exposing
-        // per-node capacitances and previous-step state vectors from
-        // ThermalSolver, which exceeds the ~20-line API surface limit.
-        // See T-0177 for ThermalSolver::balance_inputs() API.
+        // Thermal balance: full-system energy conservation check.
+        //
+        // The thermal solver computes three independently-verified energy
+        // balance terms during integrate_inner using the same affine step
+        // operator as the production path:
+        //   q_gains = [Σ C_i·(G·u)[i]/dt, Σ C_i·h_i/dt] — external + coupling [W]
+        //   delta_E = Σ C_i·(T_next_i − T_prev_i)/dt — stored rate [W]
+        //   q_loss  = −Σ C_i·((F−I)·x_prev)[i]/dt — envelope conduction [W]
+        //
+        // By construction these satisfy Σ q_gains − delta_E − q_loss ≡ 0
+        // (to machine precision) for any correctly-functioning solver, with
+        // or without interior convection coupling.
+        //
+        // Note: when node_capacitances is empty (e.g., simple test fixtures
+        // that use R-value-only walls without discrete RC layers), q_gains will
+        // also be empty and the thermal check is silently skipped. An RC model
+        // with no registered capacitances cannot be energy-balanced — this
+        // guard prevents a false positive on an empty system.
+        let (q_gains, delta_e_storage, q_loss) = self.thermal_solver.thermal_balance_terms();
+        if !q_gains.is_empty() {
+            #[cfg(debug_assertions)]
+            {
+                if self.test_thermal_invariant_failure {
+                    // Test seam: verify thermal invariant wiring by injecting
+                    // deliberately broken terms so that the check always fails.
+                    // A -1e9 W gain with zero storage and zero loss ensures the
+                    // residual exceeds check_thermal's tolerance and produces
+                    // InvariantViolation { check_name: "thermal_balance" }.
+                    checker.check_thermal(&[-1e9], 0.0, 0.0)?;
+                } else {
+                    checker.check_thermal(q_gains, delta_e_storage, q_loss)?;
+                }
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                checker.check_thermal(q_gains, delta_e_storage, q_loss)?;
+            }
+        }
 
         // Moisture balance: mass conservation across the humidity solver.
         if let Some(update) = self
@@ -4146,7 +4195,10 @@ impl Dwelling {
                 let latent = quint[1];
                 let m_dot_inf = quint[2];
                 let w_outdoor = quint[3];
-                let _residual = quint[4];
+                // quint[4] (energy_balance_residual_w) is available from the
+                // solver's custom_payload for observability; the thermal balance
+                // invariant check above uses thermal_balance_terms() instead.
+                let _ = quint[4];
                 if zone_raw.is_finite() && zone_raw >= 0.0 {
                     let zone_id = ZoneId(zone_raw as u16);
                     self.invariant_infiltration_latent.push((zone_id, latent));

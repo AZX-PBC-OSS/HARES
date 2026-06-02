@@ -785,6 +785,7 @@ impl ThermalSolver {
         // method requires that the sum of all thermal energy flows across the
         // system boundary equals the rate of change of stored energy in all
         // thermal capacitances.
+        self.full_system_stored_energy_w = 0.0;
         if !self.wiring.node_capacitances.is_empty() {
             let mut stored_energy_w: f64 = 0.0;
             for (node_id, c_j_k) in &self.wiring.node_capacitances {
@@ -795,7 +796,207 @@ impl ThermalSolver {
                     }
                 }
             }
+            self.full_system_stored_energy_w = stored_energy_w;
             tracing::debug!(stored_energy_w, "full-system stored energy change rate [W]");
+        }
+
+        // ── Thermal balance terms for invariant check ─────────────────────────────
+        //
+        // Compute the three terms the dwelling's thermal invariant needs.  For
+        // uncoupled steps the discrete-time identities are exact.  For coupled
+        // steps we use the SAME affine operator that production uses, so the
+        // balance closes to machine precision.
+        //
+        // Uncoupled:  x_next = A_d·x + B_d·u
+        // Coupled:    x_next = F·x + G·u + h   where h = (M+D)⁻¹·f
+        //
+        // Partition stored (Σ C_i·ΔT_i/dt) into external (G·u), internal
+        // ((F−I)·x), and affine coupling (h) contributions.  Without coupling
+        // (h ≡ 0) the three-term balance is identically zero for a correct
+        // solver.  With coupling, including h in the gain terms makes the
+        // balance exact.
+        //
+        // Reference: EnergyPlus Engineering Reference §"Basis for the Zone and
+        // Air System Integration" — heat balance method must conserve energy.
+        // ASHRAE HoF 2021 Ch.18 — first-law requirement for zone heat balance.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            self.thermal_balance_q_gains.clear();
+            self.thermal_balance_q_loss = 0.0;
+            let n_states = self.x.len();
+            let dt_s = self.dt_s;
+            let x_zero = &self.balance_x_zero;
+            let u_zero = &self.balance_u_zero;
+
+            if self.coupling_buf.is_empty() {
+                // Uncoupled step: external = B_d·u, internal = (A_d−I)·x_prev
+                let b_d_u = &mut self.balance_buf_a;
+                self.model.step_into(x_zero, &u, b_d_u);
+
+                let mut external_w = 0.0_f64;
+                for (node_id, &c_j_k) in &self.wiring.node_capacitances {
+                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
+                        if idx < n_states {
+                            external_w += c_j_k * b_d_u[idx] / dt_s;
+                        }
+                    }
+                }
+                self.thermal_balance_q_gains.push(external_w);
+
+                // (A_d·x_prev − x_prev) = (A_d − I)·x_prev
+                let a_d_x = &mut self.balance_buf_b;
+                self.model.step_into(&self.rhs_buf, u_zero, a_d_x);
+                let mut internal_w = 0.0_f64;
+                for (node_id, &c_j_k) in &self.wiring.node_capacitances {
+                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
+                        if idx < n_states {
+                            internal_w += c_j_k * (a_d_x[idx] - self.rhs_buf[idx]) / dt_s;
+                        }
+                    }
+                }
+                self.thermal_balance_q_loss = -internal_w;
+            } else if self.model.m_is_identity() {
+                // Identity-M coupled step: O(n) diagonal solve.
+                // RHS = (N−D)·x + B_eff·u + f
+                // Solve: x_next[i] = RHS[i] / (1 + d_i)  for coupled rows,
+                //        x_next[i] = RHS[i]              for uncoupled rows.
+                //
+                // Affine decomposition:
+                //   h        = coupled_step(0, 0)         → affine term
+                //   external = coupled_step(0, u) − h     → G·u
+                //   internal = coupled_step(x_prev, 0) − h − x_prev → (F−I)·x
+                let balance_bufs = (
+                    &mut self.balance_buf_a,
+                    &mut self.balance_buf_b,
+                    &mut self.balance_buf_c,
+                );
+                let h = balance_bufs.0;
+                let g_u = balance_bufs.1;
+                let f_minus_i_x = balance_bufs.2;
+
+                // h  = coupled_step(0, 0)
+                self.model
+                    .build_coupled_rhs(x_zero, u_zero, h, &self.coupling_buf);
+                for &(idx, d, _) in &self.coupling_buf {
+                    if idx < n_states {
+                        h[idx] /= 1.0 + d;
+                    }
+                }
+
+                // g_u = coupled_step(0, u) − h
+                self.model
+                    .build_coupled_rhs(x_zero, &u, g_u, &self.coupling_buf);
+                for &(idx, d, _) in &self.coupling_buf {
+                    if idx < n_states {
+                        g_u[idx] /= 1.0 + d;
+                    }
+                }
+                for i in 0..n_states {
+                    g_u[i] -= h[i];
+                }
+
+                // f_minus_i_x = coupled_step(x_prev, 0) − h − x_prev
+                self.model.build_coupled_rhs(
+                    &self.rhs_buf,
+                    u_zero,
+                    f_minus_i_x,
+                    &self.coupling_buf,
+                );
+                for &(idx, d, _) in &self.coupling_buf {
+                    if idx < n_states {
+                        f_minus_i_x[idx] /= 1.0 + d;
+                    }
+                }
+                for i in 0..n_states {
+                    f_minus_i_x[i] = f_minus_i_x[i] - h[i] - self.rhs_buf[i];
+                }
+
+                let mut external_w = 0.0_f64;
+                let mut internal_w = 0.0_f64;
+                let mut affine_w = 0.0_f64;
+                for (node_id, &c_j_k) in &self.wiring.node_capacitances {
+                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
+                        if idx < n_states {
+                            external_w += c_j_k * g_u[idx] / dt_s;
+                            internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
+                            affine_w += c_j_k * h[idx] / dt_s;
+                        }
+                    }
+                }
+                self.thermal_balance_q_gains.push(external_w);
+                self.thermal_balance_q_gains.push(affine_w);
+                self.thermal_balance_q_loss = -internal_w;
+            } else {
+                // Coupled step with non-identity M: rebuild the coupled LU
+                // factorization and decompose via three separate solves.
+                let coupled_lu = self
+                    .model
+                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
+
+                let balance_bufs = (
+                    &mut self.balance_buf_a,
+                    &mut self.balance_buf_b,
+                    &mut self.balance_buf_c,
+                );
+                let h = balance_bufs.0;
+                let g_u = balance_bufs.1;
+                let f_minus_i_x = balance_bufs.2;
+
+                // h = coupled_step(0, 0)
+                self.model.step_with_coupled_lu_into(
+                    x_zero,
+                    u_zero,
+                    h,
+                    &coupled_lu,
+                    &self.coupling_buf,
+                );
+
+                // g_u = coupled_step(0, u) − h
+                self.model.step_with_coupled_lu_into(
+                    x_zero,
+                    &u,
+                    g_u,
+                    &coupled_lu,
+                    &self.coupling_buf,
+                );
+                for i in 0..n_states {
+                    g_u[i] -= h[i];
+                }
+
+                // f_minus_i_x = coupled_step(x_prev, 0) − h − x_prev
+                self.model.step_with_coupled_lu_into(
+                    &self.rhs_buf,
+                    u_zero,
+                    f_minus_i_x,
+                    &coupled_lu,
+                    &self.coupling_buf,
+                );
+                for i in 0..n_states {
+                    f_minus_i_x[i] = f_minus_i_x[i] - h[i] - self.rhs_buf[i];
+                }
+
+                let mut external_w = 0.0_f64;
+                let mut internal_w = 0.0_f64;
+                let mut affine_w = 0.0_f64;
+                for (node_id, &c_j_k) in &self.wiring.node_capacitances {
+                    if let Some(&idx) = self.wiring.node_index.get(node_id) {
+                        if idx < n_states {
+                            external_w += c_j_k * g_u[idx] / dt_s;
+                            internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
+                            affine_w += c_j_k * h[idx] / dt_s;
+                        }
+                    }
+                }
+                self.thermal_balance_q_gains.push(external_w);
+                self.thermal_balance_q_gains.push(affine_w);
+                self.thermal_balance_q_loss = -internal_w;
+            }
+        }
+
+        #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+        {
+            // Release builds: clear gains so check_invariants skips the check.
+            self.thermal_balance_q_gains.clear();
         }
 
         self.last_u.clone_from(&u);

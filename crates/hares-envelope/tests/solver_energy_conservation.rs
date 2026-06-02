@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{
-    OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
+    NodeId, OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
 };
 use hares_types::{
     DomainSolver, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
@@ -295,5 +295,106 @@ fn test_energy_conservation_1r1c_no_hvac() {
     assert!(
         t_zone > t_outdoor,
         "zone must remain above outdoor: final={t_zone}, outdoor={t_outdoor}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Thermal balance invariant terms
+// ---------------------------------------------------------------------------
+
+/// Build a 1R1C thermal solver with per-node capacitance and index maps
+/// populated so that `thermal_balance_terms()` computes non-empty gain,
+/// storage, and loss terms for the full-system invariant check.
+fn build_1r1c_solver_with_balance_terms(
+    env: &EnvironmentState,
+    indoor_temp_c: f64,
+    config: ThermalSolverConfig,
+) -> ThermalSolver {
+    let a_c = DMatrix::from_row_slice(1, 1, &[-UA / C]);
+    let b_c = DMatrix::from_row_slice(1, 2, &[UA / C, 1.0 / C]);
+
+    let mapping = OutputMapping {
+        output_count: 1,
+        node_to_output: vec![(0, 0, 1.0)],
+        input_to_output: vec![],
+    };
+
+    let model = StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping)
+        .expect("1R1C state-space model must be stable");
+
+    // Populate node_capacitances and node_index with the single zone-air node
+    // so that integrate_inner computes the full-system stored energy rate and
+    // the three-term affine balance decomposition.
+    let wiring = StateSpaceWiring {
+        zone_state_indices: HashMap::from([(ZONE, 0)]),
+        zone_output_indices: HashMap::from([(ZONE, 0)]),
+        zone_sensible_input_indices: HashMap::from([(ZONE, 1)]),
+        outdoor_temp_input_indices: vec![0],
+        ground_temp_input_indices: vec![],
+        ground_temp_input_depths_m: vec![],
+        indoor_temp_input_indices: vec![],
+        solar_input_indices: HashMap::new(),
+        c_zone_j_k: HashMap::from([(ZONE, C)]),
+        node_capacitances: HashMap::from([(NodeId(0), C)]),
+        node_index: HashMap::from([(NodeId(0), 0)]),
+    };
+
+    ThermalSolver::new(model, wiring, config, DT_S, env, indoor_temp_c)
+        .expect("ThermalSolver construction must succeed")
+}
+
+/// Verify that `thermal_balance_terms()` returns non-empty gains and closes to
+/// machine precision when `node_capacitances` is populated.
+///
+/// Injects known sensible gains, runs the solver, then reads the three-term
+/// affine balance decomposition and checks `Σ q_gains − ΔE_storage − q_loss ≈ 0`.
+/// This test ensures the invariant-visible balance terms are computed correctly
+/// and the guard in `Dwelling::check_invariants` (which skips the thermal
+/// check when `q_gains` is empty) will not silently suppress the check in
+/// real dwellings with RC envelope models.
+#[test]
+fn thermal_balance_terms_close_with_populated_node_capacitances() {
+    const Q_GAIN_W: f64 = 1700.0;
+
+    let t_zone = 20.0_f64;
+    let t_outdoor = 5.0_f64;
+    let env = one_zone_env(t_zone, t_outdoor);
+    let config = ThermalSolverConfig {
+        indoor_zone_id: ZONE,
+        ..ThermalSolverConfig::default()
+    };
+
+    let mut solver = build_1r1c_solver_with_balance_terms(&env, t_zone, config);
+
+    let mut ports = one_zone_ports();
+    ports.thermal[0].sensible_gain_w = Q_GAIN_W;
+
+    let _update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
+
+    let (q_gains, delta_e, q_loss) = solver.thermal_balance_terms();
+
+    assert!(
+        !q_gains.is_empty(),
+        "thermal_balance_terms must return non-empty q_gains when node_capacitances is populated"
+    );
+
+    let q_sum: f64 = q_gains.iter().sum();
+    let residual = (q_sum - delta_e - q_loss).abs();
+
+    // Use the same tolerance as InvariantChecker::check_thermal:
+    // residual < max(1.0, 1e-6 × gross_flux). For an uncoupled 1R1C step the
+    // balance is exact to machine precision, so the residual should be far
+    // below this generous bound.
+    let gross_flux: f64 = q_gains.iter().map(|q| q.abs()).sum();
+    let tolerance = f64::max(1.0, 1e-6 * gross_flux);
+
+    assert!(
+        residual < tolerance,
+        "thermal balance residual {} exceeds tolerance {} (q_gains={:?}, delta_e={}, q_loss={})",
+        residual,
+        tolerance,
+        q_gains,
+        delta_e,
+        q_loss,
     );
 }

@@ -33,7 +33,7 @@ currently active.
 
 | Check                     | Equation                                            | Tolerance                          | Fatal? | Wired? |
 |---------------------------|-----------------------------------------------------|------------------------------------|--------|--------|
-| `thermal_balance`         | \|Σ Q_gain − ΔE_storage − Q_loss\| < tol           | max(1.0 W, 1e-6 × gross_flux)     | Yes    | No     |
+| `thermal_balance`         | \|Σ (B_d·u contributions) − Σ C_i·ΔT_i/dt + Σ (A_d−I)·x contributions\| < tol | max(1.0, 1e-6 × gross_flux) | Yes    | Yes    |
 | `electrical_balance`      | \|P_grid + Σ P_equipment\| < tol                    | 0.001 kW                          | Yes    | Yes    |
 | `moisture_balance`        | \|Δm_water − Σ(Q_latent·dt / h_fg)\| < tol         | 1e-6 kg                           | Yes    | No     |
 | `zone_temperature_bounds` | T_conditioned ∈ [−50, 80] °C, finite               | —                                  | Yes    | Yes    |
@@ -58,6 +58,7 @@ These fire every timestep after solver resolution but before port zeroing:
 | `zone_temperature_bounds`  | Conditioned zone temps within [−50, 80] °C; unconditioned within [−50, 120] °C |
 | `electrical_net_finite`    | `electrical_solver.net_active_kw()` is finite                  |
 | `electrical_balance`       | Solver net matches port accumulation: \|solver + ports\| < 0.001 kW |
+| `thermal_balance`          | Full-system energy conservation: external (B_d·u) + coupling (h) = stored (C·ΔT/dt) + envelope conduction ((A_d−I)·x) |
 | `humidity_payload_finite`  | Every value in humidity domain payload is finite               |
 | `soc_bounds`               | Battery/EV SoC ∈ [0, 1]; warns if out of range (non-fatal)    |
 

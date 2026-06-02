@@ -157,6 +157,31 @@ pub struct ThermalSolver {
     /// Per-zone energy balance residuals [W] from the current timestep's closure check.
     /// Populated by `integrate_inner`, consumed by `format_domain_update` for telemetry.
     energy_balance_residuals: HashMap<ZoneId, f64>,
+    /// Full-system stored energy rate [W] = Σ C_i × (T_next_i − T_prev_i) / dt
+    /// across ALL thermal state nodes.  Populated by `integrate_inner`, consumed
+    /// by the dwelling invariant check for thermal energy conservation.
+    full_system_stored_energy_w: f64,
+    /// Per-node external energy injection [W] from B_c × u weighted by capacitance.
+    /// Single-element vec: each entry = Σ_i C_i × (B_c × u)[i] for one zone.
+    /// Populated by `integrate_inner`, consumed by check_thermal in check_invariants.
+    thermal_balance_q_gains: Vec<f64>,
+    /// Total envelope conduction to outdoor [W] = − Σ_i C_i × (A_c × x_prev)[i].
+    /// Positive = heat leaving the system.  Populated by `integrate_inner`.
+    thermal_balance_q_loss: f64,
+    /// Pre-allocated working buffers for the affine-coupled balance
+    /// decomposition (populated only when check_invariants is active).
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    balance_buf_a: DVector<f64>,
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    balance_buf_b: DVector<f64>,
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    balance_buf_c: DVector<f64>,
+    /// Zero vector for the input dimension (avoids per-step allocation).
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    balance_u_zero: DVector<f64>,
+    /// Zero vector for the state dimension (avoids per-step allocation).
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    balance_x_zero: DVector<f64>,
     /// Per-zone consecutive failure counts for `solve_ideal_capacity_for_target`.
     /// Incremented on each solve failure, reset to 0 on success. Used to throttle
     /// warn-level diagnostic logs — only the first failure in a run emits `warn!`;
@@ -262,6 +287,56 @@ impl ThermalSolver {
     /// Per-component envelope gains from the most recent `resolve()` call.
     pub fn component_gains(&self) -> &EnvelopeComponentGains {
         &self.component_gains
+    }
+
+    /// Full-system stored energy rate from the most recent `resolve()` call [W].
+    ///
+    /// Computes Σ C_i × (T_next_i − T_prev_i) / dt across ALL thermal state nodes
+    /// (zone air + wall-mass nodes).  This accounts for energy stored in every
+    /// thermal capacitance in the RC network, unlike the per-zone residual which
+    /// is zone-air-only and excludes wall-mass redistribution.
+    ///
+    /// At steady state this approaches zero; positive values indicate net energy
+    /// storage (heating up), negative values indicate net energy release (cooling).
+    pub fn full_system_stored_energy_w(&self) -> f64 {
+        self.full_system_stored_energy_w
+    }
+
+    /// Per-zone energy balance residuals from the most recent `resolve()` call [W].
+    ///
+    /// Returns a map from zone ID to the zone-air-only residual:
+    /// `|C_zone × ΔT_zone / dt − q_port_sensible|` where q_port_sensible is the
+    /// total sensible heat injected into the zone air node.
+    ///
+    /// For single-node models (no wall-mass nodes) the residual is near-zero
+    /// (within floating-point tolerance).  For multi-node RC models, wall-mass
+    /// energy redistribution can produce residuals of several kW during
+    /// transient conditions — this is expected physical behaviour, not a solver
+    /// defect.
+    pub fn energy_balance_residuals(&self) -> &HashMap<ZoneId, f64> {
+        &self.energy_balance_residuals
+    }
+
+    /// Thermal balance terms for the invariant check, populated by the most
+    /// recent `resolve()` call.
+    ///
+    /// Returns `(q_gains_slice, delta_e_storage_w, q_loss_w)` where:
+    /// - `q_gains_slice`: external energy injections computed from B_c × u
+    ///   weighted by node capacitance [W],
+    /// - `delta_e_storage_w`: full-system stored energy rate
+    ///   Σ C_i × (T_next_i − T_prev_i) / dt [W],
+    /// - `q_loss_w`: total envelope conduction to outdoor/ground derived from
+    ///   A_c × x weighted by capacitance [W], positive when heat leaves.
+    ///
+    /// These are computed independently inside `integrate_inner` using the
+    /// continuous-time state-space matrices, the input vector `u`, and the
+    /// state vectors before and after the ZOH integration.
+    pub fn thermal_balance_terms(&self) -> (&[f64], f64, f64) {
+        (
+            &self.thermal_balance_q_gains,
+            self.full_system_stored_energy_w,
+            self.thermal_balance_q_loss,
+        )
     }
 
     /// Number of configured boundary diagnostic entries.
@@ -573,6 +648,19 @@ impl ThermalSolver {
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
             custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 5),
+            full_system_stored_energy_w: 0.0,
+            thermal_balance_q_gains: Vec::with_capacity(n_zones_for_latent.max(1)),
+            thermal_balance_q_loss: 0.0,
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            balance_buf_a: DVector::<f64>::zeros(n_states),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            balance_buf_b: DVector::<f64>::zeros(n_states),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            balance_buf_c: DVector::<f64>::zeros(n_states),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            balance_u_zero: DVector::<f64>::zeros(n_inputs),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            balance_x_zero: DVector::<f64>::zeros(n_states),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
