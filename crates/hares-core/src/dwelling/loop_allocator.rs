@@ -16,53 +16,42 @@ use hares_equipment::{
 };
 use hares_io::EquipmentSpec;
 
+/// Iterate over all allocated loop IDs across equipment typed configs.
+///
+/// Yields the `loop_id` (or `boiler_loop_id` for indirect tanks) from every
+/// equipment spec whose typed config carries a `Some` value.  This is the
+/// single source of truth for which equipment types carry loop IDs — both
+/// `max_wired_loop_id` and `collect_allocated_loop_ids` derive from it,
+/// guaranteeing that adding a new equipment type to this match arm
+/// automatically covers allocation, validation, and max-finding.
+fn iter_allocated_loop_ids(specs: &[EquipmentSpec]) -> impl Iterator<Item = u16> + '_ {
+    specs.iter().filter_map(|spec| {
+        let cfg = spec.typed_config.as_ref()?;
+        match spec.name.as_str() {
+            "Gas Boiler" => cfg.typed::<GasBoilerConfig>().ok()?.loop_id,
+            "Electric Boiler" => cfg.typed::<ElectricBoilerConfig>().ok()?.loop_id,
+            "Gas Water Heater" => cfg.typed::<GasWaterHeaterConfig>().ok()?.loop_id,
+            "Electric Resistance Water Heater" => {
+                cfg.typed::<ElectricResistanceWaterHeaterConfig>()
+                    .ok()?
+                    .loop_id
+            }
+            "Tankless Water Heater" => cfg.typed::<TanklessWaterHeaterConfig>().ok()?.loop_id,
+            "Heat Pump Water Heater" => cfg.typed::<HeatPumpWaterHeaterConfig>().ok()?.loop_id,
+            "Indirect Tank" => cfg.typed::<IndirectTankConfig>().ok()?.boiler_loop_id,
+            "Gas Generator" | "Gas Fuel Cell" => cfg.typed::<GeneratorConfig>().ok()?.loop_id,
+            _ => None,
+        }
+    })
+}
+
 /// Scan all equipment typed configs and find the maximum assigned loop ID.
 ///
 /// Loop ID 0 (the `Default` for `LoopId`) is never explicitly assigned by
 /// `resolve_loop_wiring` (which starts from 1).  Returning 0 when no IDs are
 /// wired produces the correct `max_wired + 1 = 1` start for the allocator.
 fn max_wired_loop_id(specs: &[EquipmentSpec]) -> u16 {
-    let mut max_id: u16 = 0;
-    for spec in specs {
-        let Some(ref cfg) = spec.typed_config else {
-            continue;
-        };
-        let lid: Option<u16> = match spec.name.as_str() {
-            "Gas Boiler" => cfg.typed::<GasBoilerConfig>().ok().and_then(|c| c.loop_id),
-            "Electric Boiler" => cfg
-                .typed::<ElectricBoilerConfig>()
-                .ok()
-                .and_then(|c| c.loop_id),
-            "Gas Water Heater" => cfg
-                .typed::<GasWaterHeaterConfig>()
-                .ok()
-                .and_then(|c| c.loop_id),
-            "Electric Resistance Water Heater" => cfg
-                .typed::<ElectricResistanceWaterHeaterConfig>()
-                .ok()
-                .and_then(|c| c.loop_id),
-            "Tankless Water Heater" => cfg
-                .typed::<TanklessWaterHeaterConfig>()
-                .ok()
-                .and_then(|c| c.loop_id),
-            "Heat Pump Water Heater" => cfg
-                .typed::<HeatPumpWaterHeaterConfig>()
-                .ok()
-                .and_then(|c| c.loop_id),
-            "Indirect Tank" => cfg
-                .typed::<IndirectTankConfig>()
-                .ok()
-                .and_then(|c| c.boiler_loop_id),
-            "Gas Generator" | "Gas Fuel Cell" => {
-                cfg.typed::<GeneratorConfig>().ok().and_then(|c| c.loop_id)
-            }
-            _ => None,
-        };
-        if let Some(id) = lid {
-            max_id = max_id.max(id);
-        }
-    }
-    max_id
+    iter_allocated_loop_ids(specs).max().unwrap_or(0)
 }
 
 /// Patch a typed config in-place when `loop_id` field is `None`.
@@ -84,6 +73,17 @@ fn replace_typed<T: EquipmentTypedConfig>(
     setter(&mut typed, *next_id);
     *next_id = next_id.saturating_add(1);
     *eq_cfg = EquipmentConfig::from_typed(eq_cfg.name.clone(), eq_cfg.ochre_class.clone(), typed);
+}
+
+/// Collect every loop ID currently assigned across all equipment typed configs.
+///
+/// Used by the dwelling constructor to validate that fluid port declarations
+/// reference loop IDs that were actually allocated — catching equipment
+/// constructors that hardcode a loop ID instead of using their typed config.
+pub(crate) fn collect_allocated_loop_ids(
+    specs: &[EquipmentSpec],
+) -> std::collections::HashSet<u16> {
+    iter_allocated_loop_ids(specs).collect()
 }
 
 /// Centralized loop ID allocator.

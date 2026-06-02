@@ -41,6 +41,8 @@ use hares_physics::constants::{
 use hares_physics::pv_sizing::RoofInfo;
 use hares_physics::units::power_w_to_kw;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
+#[cfg(test)]
+use hares_types::LoopId;
 use hares_types::{
     BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver, ElectricalSummary,
     EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
@@ -785,6 +787,30 @@ fn validate_equipment_zones(
     Ok(())
 }
 
+/// Verify that every fluid-loop port declaration references a loop ID that was
+/// allocated to equipment via [`loop_allocator::allocate_loop_ids`].
+///
+/// A fluid port with an unallocated loop ID indicates an equipment constructor
+/// that hardcoded a loop ID instead of using its typed config — the
+/// contribution would be orphaned with no corresponding accumulator in the
+/// fluid solver.
+fn validate_equipment_loops(
+    decls: &[PortDeclaration],
+    allocated_loop_ids: &HashSet<u16>,
+) -> Result<()> {
+    for decl in decls {
+        if let Some(loop_id) = decl.loop_id {
+            if !allocated_loop_ids.contains(&loop_id.0) {
+                return Err(HaresError::Dwelling(format!(
+                    "equipment declares fluid port for loop {loop_id:?} \
+                     which has not been allocated to any equipment spec"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Top-level single-dwelling simulation orchestrator.
 pub struct Dwelling {
     pub bldg_id: i64,
@@ -1452,6 +1478,14 @@ impl Dwelling {
 
         let env_zone_ids: HashSet<ZoneId> = initial_env.zones.iter().map(|z| z.id).collect();
         validate_equipment_zones(&declarations, &env_zone_ids)?;
+
+        let mut allocated_loop_ids = loop_allocator::collect_allocated_loop_ids(&equipment_specs);
+        // Sentinel loop IDs always valid — well-known addresses used by
+        // equipment as sentinels when no typed config is available (0) or
+        // for the shared DHW demand loop (u16::MAX - 1).
+        allocated_loop_ids.insert(0); // LoopId::default() — fallback for raw-config equipment
+        allocated_loop_ids.insert(hares_equipment::DHW_DEMAND_LOOP.0);
+        validate_equipment_loops(&declarations, &allocated_loop_ids)?;
 
         let ports = PortSlots::from_declarations(&declarations);
 
@@ -8105,6 +8139,57 @@ master_seed = 0
         assert!(
             validate_equipment_zones(&no_zone, &env_zones).is_ok(),
             "non-zoned declarations must always pass zone validation"
+        );
+    }
+
+    /// Verify that `validate_equipment_loops` rejects a fluid port declaration
+    /// referencing a loop ID that was never allocated to any equipment spec.
+    /// A fluid port with an unallocated loop ID indicates an equipment
+    /// constructor that hardcoded a loop ID instead of using its typed config.
+    #[test]
+    fn equipment_declaring_unallocated_loop_is_rejected_at_construction() {
+        use hares_types::FluidType;
+
+        // LoopId(1) and LoopId(2) were allocated.
+        let allocated: HashSet<u16> = [1, 2].into_iter().collect();
+
+        // LoopId(1) is valid.
+        let valid = vec![PortDeclaration::fluid(LoopId(1), FluidType::Water)];
+        assert!(
+            validate_equipment_loops(&valid, &allocated).is_ok(),
+            "declaration for an allocated loop must succeed"
+        );
+
+        // LoopId(999) was never allocated.
+        let bad = vec![
+            PortDeclaration::fluid(LoopId(1), FluidType::Water),
+            PortDeclaration::fluid(LoopId(999), FluidType::Water),
+        ];
+        let err = validate_equipment_loops(&bad, &allocated)
+            .expect_err("declaration for an unallocated loop must return Err");
+        match err {
+            HaresError::Dwelling(msg) => {
+                assert!(
+                    msg.contains("LoopId(999)"),
+                    "error must name the offending loop; got: {msg}"
+                );
+                assert!(
+                    msg.contains("has not been allocated"),
+                    "error must explain why; got: {msg}"
+                );
+            }
+            other => panic!("expected HaresError::Dwelling, got {other:?}"),
+        }
+
+        // Declarations without a loop_id (Electrical, Fuel, Thermal) are not loop-checked.
+        let no_loop = vec![
+            PortDeclaration::electrical(),
+            PortDeclaration::fuel(),
+            PortDeclaration::thermal(ZoneId(1)),
+        ];
+        assert!(
+            validate_equipment_loops(&no_loop, &allocated).is_ok(),
+            "non-fluid declarations must always pass loop validation"
         );
     }
 }
