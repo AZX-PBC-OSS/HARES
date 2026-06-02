@@ -263,6 +263,26 @@ impl InvariantChecker {
         }
         Ok(())
     }
+
+    /// Verifies that equipment step execution order respects `stage_rank` ordering.
+    ///
+    /// The `stage_ranks` slice contains the `stage_rank()` values for each
+    /// equipment in the order they were stepped — collected at runtime from the
+    /// actual step loops. These must be non-decreasing (Independent < Electrical
+    /// < Thermal). A violation indicates equipment was stepped out of the
+    /// documented stage order by the dwelling's step loop.
+    pub fn check_equipment_step_order(&self, stage_ranks: &[u8]) -> Result<(), HaresError> {
+        for window in stage_ranks.windows(2) {
+            if window[0] > window[1] {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "equipment_step_order".to_string(),
+                    value: window[0] as f64,
+                    tolerance: window[1] as f64,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
@@ -295,6 +315,10 @@ impl InvariantChecker {
     }
 
     pub fn check_fuel_electric_absent(&self, _: f64) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_equipment_step_order(&self, _: &[u8]) -> Result<(), HaresError> {
         Ok(())
     }
 }

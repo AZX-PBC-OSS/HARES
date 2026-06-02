@@ -54,7 +54,7 @@ impl BatteryManagementActor {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // Why: all fields are distinct BMS configuration parameters; introducing a builder adds complexity for no structural benefit
     pub fn with_name(
         name: &str,
         battery_name: &str,
@@ -148,7 +148,12 @@ impl BatteryManagementActor {
     /// - `Unrestricted`: no clamping.
     /// - `Disabled`: clamp discharge so net export is zero (battery only offsets home load).
     /// - `SolarOnly`: clamp discharge so net export does not exceed PV generation.
-    fn clamp_discharge_for_export(&self, discharge_kw: f64, pv_kw: f64, env: &EnvironmentState) -> f64 {
+    fn clamp_discharge_for_export(
+        &self,
+        discharge_kw: f64,
+        pv_kw: f64,
+        env: &EnvironmentState,
+    ) -> f64 {
         // discharge_kw is the raw magnitude (positive value) of desired discharge.
         match self.grid_export_rule {
             GridExportRule::Unrestricted => discharge_kw,
@@ -231,7 +236,11 @@ impl BatteryManagementActor {
                         }
                         GridExportRule::Disabled | GridExportRule::SolarOnly => {
                             let raw_discharge = (-surplus).min(self.max_discharge_kw);
-                            let clamped = self.clamp_discharge_for_export(raw_discharge, env.electrical.actual_pv_kw_or_fallback(), env);
+                            let clamped = self.clamp_discharge_for_export(
+                                raw_discharge,
+                                env.electrical.actual_pv_kw_or_fallback(),
+                                env,
+                            );
                             self.emit(
                                 ControlSignal::PowerSetpoint {
                                     active_power_kw: -clamped,
@@ -287,7 +296,11 @@ impl BatteryManagementActor {
                     );
                     self.last_action = "tou:charge".into();
                 } else if price >= self.discharge_price_threshold && soc > *reserve_soc {
-                    let clamped = self.clamp_discharge_for_export(self.max_discharge_kw, env.electrical.actual_pv_kw_or_fallback(), env);
+                    let clamped = self.clamp_discharge_for_export(
+                        self.max_discharge_kw,
+                        env.electrical.actual_pv_kw_or_fallback(),
+                        env,
+                    );
                     self.emit(
                         ControlSignal::PowerSetpoint {
                             active_power_kw: -clamped,
@@ -356,7 +369,11 @@ impl BatteryManagementActor {
                     };
                     if soc > *min_soc_during_dr {
                         let raw = dr_discharge_rate * self.max_discharge_kw;
-                        let clamped = self.clamp_discharge_for_export(raw, env.electrical.actual_pv_kw_or_fallback(), env);
+                        let clamped = self.clamp_discharge_for_export(
+                            raw,
+                            env.electrical.actual_pv_kw_or_fallback(),
+                            env,
+                        );
                         self.emit(
                             ControlSignal::PowerSetpoint {
                                 active_power_kw: -clamped,
@@ -396,7 +413,11 @@ impl BatteryManagementActor {
                         }
                         BmsAction::Discharge { rate_fraction } => {
                             let raw = rate_fraction * self.max_discharge_kw;
-                            let clamped = self.clamp_discharge_for_export(raw, env.electrical.actual_pv_kw_or_fallback(), env);
+                            let clamped = self.clamp_discharge_for_export(
+                                raw,
+                                env.electrical.actual_pv_kw_or_fallback(),
+                                env,
+                            );
                             self.emit(
                                 ControlSignal::PowerSetpoint {
                                     active_power_kw: -clamped,

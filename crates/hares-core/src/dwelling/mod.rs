@@ -87,6 +87,11 @@ use synthetic::{current_process_hwm_kb, hot_path_alloc_counter};
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 
+/// Minimum timestep resolution at which PV re-evaluation and BMS staleness
+/// diagnostics have meaningful impact.  5 min matches the EnergyPlus minimum
+/// `TimeStep` for sub-hourly simulation.
+const PV_RE_EVAL_MIN_STEP_SECS: f64 = 300.0;
+
 fn create_equipment_from_spec(
     registry: &EquipmentRegistry,
     spec: &hares_io::EquipmentSpec,
@@ -3451,9 +3456,27 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         let hvac_started = Instant::now();
 
-        // Step 3a: thermal stage equipment step.
+        // Step 3: unified equipment step in stage_rank order
+        // (Independent → Electrical → Thermal).
+        //
+        // Independent equipment (PV, generators) steps first, depositing
+        // generation data to ports. BMS actors re-evaluate based on actual
+        // PV generation. Electrical equipment (battery, EV) steps next
+        // with the revised signals. Thermal equipment (HVAC, water heaters,
+        // ventilation) steps last, committing heating/cooling power with
+        // full visibility of same-step PV generation and storage dispatch.
+        //
+        // This replaces the prior two-pass structure (Step 3a thermal-first,
+        // Step 3b non-thermal-second) that reversed the stage_rank dependency
+        // chain and caused a one-step lag for PV-informed HVAC dispatch.
+        //
+        // The PV-BMS re-evaluation pass is gated behind a timestep threshold
+        // (default: ≥ 5 minutes) because 1-minute timesteps have <1%/s PV
+        // ramp rates where the one-step PV lag has negligible impact.
         #[cfg(feature = "observe")]
         let mut thermal_obs: Vec<EquipmentObservation> = Vec::new();
+        #[cfg(feature = "observe")]
+        let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
         #[cfg(feature = "observe")]
         let mut pre_snapshot = if observing {
             Some(self.ports.clone())
@@ -3461,60 +3484,12 @@ impl Dwelling {
             None
         };
 
-        for &idx in &self.equipment_execution_order {
-            if self.equipment[idx].descriptor().stage != ExecutionStage::Thermal {
-                continue;
-            }
-            #[cfg(feature = "observe")]
-            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
-
-            // update_control() already ran in Step 2a after control dispatch.
-            if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.warnings.push(format!(
-                    "equipment step failed for '{}' : {err}",
-                    self.equipment[idx].descriptor().name
-                ));
-            } else {
-                // Fail fast on core contract violations: continuing the step with
-                // partially invalid equipment state can poison downstream actors/ports.
-                validate_core_contract(
-                    self.equipment[idx].descriptor(),
-                    self.equipment[idx].core_output(),
-                )?;
-                step_succeeded[idx] = true;
-            }
-
-            #[cfg(feature = "observe")]
-            if let Some(ref mut snapshot) = pre_snapshot {
-                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
-                thermal_obs.push(observer_capture::capture_single_equipment(
-                    self.equipment[idx].as_ref(),
-                    contribution,
-                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
-                ));
-                *snapshot = self.ports.clone();
-            }
-        }
-
-        #[cfg(feature = "observe")]
-        if observing {
-            obs_phases.post_thermal_equipment = Some(observer_capture::capture_equipment_phase(
-                thermal_obs,
-                &self.ports,
-            ));
-        }
-
-        // Step 3b: non-thermal stage equipment (Independent, Electrical).
-        // Two-phase flow: Independent equipment (including PV) steps first,
-        // depositing generation data to ports. Then BMS actors re-evaluate
-        // based on actual PV generation from ports. Then Electrical equipment
-        // (including battery) steps with the revised signals.
-        //
-        // The re-evaluation pass is gated behind a timestep threshold (default:
-        // ≥ 5 minutes) because 1-minute timesteps have <1%/s PV ramp rates
-        // where the one-step PV lag has negligible impact.
-        #[cfg(feature = "observe")]
-        let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
+        // Runtime stage-rank tracking: records the actual step execution
+        // sequence so the invariant checker validates real loop ordering,
+        // not just the static sort of equipment_execution_order.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        let mut stepped_stage_ranks: Vec<u8> =
+            Vec::with_capacity(self.equipment_execution_order.len());
 
         // Phase 1: Independent-stage equipment (PV, generators).
         for &idx in &self.equipment_execution_order {
@@ -3537,17 +3512,26 @@ impl Dwelling {
                     self.equipment[idx].core_output(),
                 )?;
                 step_succeeded[idx] = true;
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                stepped_stage_ranks.push(stage_rank(stage));
             }
 
             #[cfg(feature = "observe")]
-            if let Some(ref mut snapshot) = pre_snapshot {
-                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
-                nonthermal_obs.push(observer_capture::capture_single_equipment(
-                    self.equipment[idx].as_ref(),
-                    contribution,
-                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
-                ));
-                *snapshot = self.ports.clone();
+            {
+                tracing::debug!(
+                    stage = ?stage,
+                    equipment = %self.equipment[idx].descriptor().name,
+                    "equipment step executed"
+                );
+                if let Some(ref mut snapshot) = pre_snapshot {
+                    let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                    nonthermal_obs.push(observer_capture::capture_single_equipment(
+                        self.equipment[idx].as_ref(),
+                        contribution,
+                        pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+                    ));
+                    *snapshot = self.ports.clone();
+                }
             }
         }
 
@@ -3556,9 +3540,8 @@ impl Dwelling {
         // with actual (not prior-step) PV generation so that battery
         // charge power setpoints reflect same-step PV availability.
         {
-            const RE_EVAL_MIN_STEP_SECS: f64 = 300.0; // 5 minutes
             let time_step_secs = self.latest_env.time_step_secs();
-            if time_step_secs >= RE_EVAL_MIN_STEP_SECS {
+            if time_step_secs >= PV_RE_EVAL_MIN_STEP_SECS {
                 let pv_kw = -power_w_to_kw(self.ports.electrical.generation_power_w);
                 self.actor_dispatch_buf.clear();
                 for actor in &mut self.actors {
@@ -3595,27 +3578,98 @@ impl Dwelling {
                     self.equipment[idx].core_output(),
                 )?;
                 step_succeeded[idx] = true;
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                stepped_stage_ranks.push(stage_rank(stage));
             }
 
             #[cfg(feature = "observe")]
-            if let Some(ref mut snapshot) = pre_snapshot {
-                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
-                nonthermal_obs.push(observer_capture::capture_single_equipment(
-                    self.equipment[idx].as_ref(),
-                    contribution,
-                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
-                ));
-                *snapshot = self.ports.clone();
+            {
+                tracing::debug!(
+                    stage = ?stage,
+                    equipment = %self.equipment[idx].descriptor().name,
+                    "equipment step executed"
+                );
+                if let Some(ref mut snapshot) = pre_snapshot {
+                    let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                    nonthermal_obs.push(observer_capture::capture_single_equipment(
+                        self.equipment[idx].as_ref(),
+                        contribution,
+                        pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+                    ));
+                    *snapshot = self.ports.clone();
+                }
             }
         }
 
+        // Phase 3: Thermal-stage equipment (HVAC, water heaters, ventilation).
+        // update_control() already ran in Step 2a after control dispatch, so
+        // only .step() is called here. Thermal equipment commits heating/cooling
+        // power to ports with full visibility of same-step PV generation and
+        // storage dispatch from Phases 1–2.
+        for &idx in &self.equipment_execution_order {
+            if self.equipment[idx].descriptor().stage != ExecutionStage::Thermal {
+                continue;
+            }
+            #[cfg(feature = "observe")]
+            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
+
+            if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
+                self.warnings.push(format!(
+                    "equipment step failed for '{}' : {err}",
+                    self.equipment[idx].descriptor().name
+                ));
+            } else {
+                validate_core_contract(
+                    self.equipment[idx].descriptor(),
+                    self.equipment[idx].core_output(),
+                )?;
+                step_succeeded[idx] = true;
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                stepped_stage_ranks.push(stage_rank(ExecutionStage::Thermal));
+            }
+
+            #[cfg(feature = "observe")]
+            {
+                tracing::debug!(
+                    stage = ?ExecutionStage::Thermal,
+                    equipment = %self.equipment[idx].descriptor().name,
+                    "equipment step executed"
+                );
+                if let Some(ref mut snapshot) = pre_snapshot {
+                    let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                    thermal_obs.push(observer_capture::capture_single_equipment(
+                        self.equipment[idx].as_ref(),
+                        contribution,
+                        pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+                    ));
+                    *snapshot = self.ports.clone();
+                }
+            }
+        }
+
+        // Observer captures: nonthermal first (Independent + Electrical ran
+        // first), then thermal (Thermal ran last). This reverses the prior
+        // capture order to match the new execution order.
         #[cfg(feature = "observe")]
         if observing {
             obs_phases.post_nonthermal_equipment = Some(observer_capture::capture_equipment_phase(
                 nonthermal_obs,
                 &self.ports,
             ));
+            obs_phases.post_thermal_equipment = Some(observer_capture::capture_equipment_phase(
+                thermal_obs,
+                &self.ports,
+            ));
         }
+
+        // Stage-ordering invariant: verify that equipment step execution order
+        // respects stage_rank ordering (non-decreasing ranks).
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            self.invariant_checker
+                .check_equipment_step_order(&stepped_stage_ranks)?;
+        }
+
         #[cfg(debug_assertions)]
         {
             self.stage_snapshot = Some(StageSnapshot {
@@ -3709,8 +3763,7 @@ impl Dwelling {
         // re-evaluation pass ran, both telemetry fields are populated and
         // the difference is the stale-data error from the one-step ordering.
         {
-            const BMS_PV_STALE_MIN_STEP_S: f64 = 300.0;
-            if self.latest_env.time_step_secs() >= BMS_PV_STALE_MIN_STEP_S {
+            if self.latest_env.time_step_secs() >= PV_RE_EVAL_MIN_STEP_SECS {
                 for actor in &self.actors {
                     let Some(tel) = actor.telemetry() else {
                         continue;
@@ -3847,8 +3900,8 @@ impl Dwelling {
 
         // Snapshot end-of-timestep equipment state into latest_env so that the
         // NEXT step's actors see the freshest committed state for every
-        // equipment that stepped this timestep. Snapshot runs AFTER both
-        // thermal and non-thermal equipment have stepped (Step 3a + 3b) so
+        // equipment that stepped this timestep. Snapshot runs AFTER all
+        // equipment phases (Independent + Electrical + Thermal in Step 3) so
         // nothing is one step stale.
         let active_equipment_ids: HashSet<EquipmentId> = self
             .equipment
