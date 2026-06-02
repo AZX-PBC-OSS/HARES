@@ -297,6 +297,13 @@ impl PyControlSignal {
         }
     }
 
+    #[staticmethod]
+    pub fn event_delay(delay_s: f64) -> Self {
+        Self {
+            signal: ControlSignal::EventDelay { delay_s },
+        }
+    }
+
     #[classmethod]
     pub fn from_dict(_cls: &Bound<'_, PyType>, d: &Bound<'_, PyDict>) -> PyResult<Self> {
         let kind: String = dict_required(d, "type")?;
@@ -764,11 +771,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn max_capacity_fraction_constructs_correct_signal() {
-        let sig = PyControlSignal::max_capacity_fraction(0.5);
+    fn event_delay_constructs_correct_signal() {
+        let sig = PyControlSignal::event_delay(30.0);
         assert!(matches!(
             sig.signal,
-            ControlSignal::MaxCapacityFraction { fraction: 0.5 }
+            ControlSignal::EventDelay { delay_s: 30.0 }
         ));
     }
 }

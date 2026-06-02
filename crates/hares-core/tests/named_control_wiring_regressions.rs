@@ -150,8 +150,10 @@ fn named_thermal_setpoint_reaches_hvac_on_same_step() {
         fixture,
         target_step,
         &equipment_name,
+        // Set heating to a value well below any achievable indoor temperature
+        // to guarantee suppression regardless of cold-start conditions.
         ControlSignal::ThermalSetpoint {
-            heating_setpoint_c: Some(5.0),
+            heating_setpoint_c: Some(-50.0),
             cooling_setpoint_c: None,
             deadband_c: None,
         },

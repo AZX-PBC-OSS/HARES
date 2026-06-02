@@ -203,7 +203,24 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
         }
     }
 
-    match hvac.update_mode(env) {
+    // Apply DR setpoint offset (set by apply_simple_mode_override_in_control)
+    // as a temporary override so the thermostat FSM sees the lowered setpoint.
+    // runtime_setpoints is saved and restored because it is also used by
+    // ThermalSetpoint/ThermalSetpointDelta signals; this avoids cross-talk
+    // where a DR Normal would otherwise clear an active ThermalSetpoint.
+    let saved_runtime_setpoints = hvac.thermostat_fsm.runtime_setpoints;
+    if hvac.runtime.dr_setpoint_offset_c != 0.0 {
+        let base = hvac
+            .thermostat_fsm
+            .static_setpoints
+            .with_schedule_override(hvac.thermostat_fsm.schedule_setpoints);
+        hvac.thermostat_fsm.runtime_setpoints = Some(super::RuntimeSetpointOverride {
+            heating_c: Some(base.heating_c + hvac.runtime.dr_setpoint_offset_c),
+            cooling_c: None,
+        });
+    }
+
+    let result = match hvac.update_mode(env) {
         Ok(super::thermostat::ThermostatMode::Heating) => {
             if !hvac.use_ideal_capacity(env) {
                 hvac.runtime.duty_cycle = 1.0;
@@ -218,11 +235,13 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
             }
             OperatingMode::Off
         }
-    }
+    };
+
+    hvac.thermostat_fsm.runtime_setpoints = saved_runtime_setpoints;
+    result
 }
 
 /// Shared `apply_control_unchecked` logic for heating equipment that uses
-/// `ThermalSetpoint` signals and delegates into `HvacEquipment`.
 pub fn apply_heating_control_unchecked(
     hvac: &mut HvacEquipment,
     signal: &ControlSignal,
@@ -262,6 +281,104 @@ pub fn apply_simple_heating_ideal_capacity_control(
         hvac.thermostat_fsm.thermostat.use_ideal_capacity = true;
         hvac.runtime.duty_cycle = duty.clamp(0.0, 1.0);
     }
+}
+
+/// Apply `ModeOverride` and `DemandResponse` signals for simple heating-only
+/// equipment. Returns `true` when the signal was consumed; the caller should
+/// not forward it to `apply_heating_control_unchecked`.
+pub fn apply_simple_mode_override_and_dr(
+    mode_override: &mut Option<OperatingMode>,
+    dr_level: &mut hares_types::DRLevel,
+    signal: &ControlSignal,
+    equipment_name: &str,
+) -> crate::Result<bool> {
+    match signal {
+        ControlSignal::ModeOverride { mode } => {
+            *mode_override = Some(*mode);
+            tracing::debug!(
+                equipment = equipment_name,
+                mode = ?mode,
+                "ModeOverride applied"
+            );
+            Ok(true)
+        }
+        ControlSignal::DemandResponse {
+            level,
+            duration_s: _,   // Discarded: simple heating equipment does not maintain a
+                             // step clock; callers must send an explicit Normal to cancel.
+        } => {
+            *dr_level = *level;
+            tracing::debug!(
+                equipment = equipment_name,
+                level = ?level,
+                "DemandResponse applied"
+            );
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Apply ModeOverride and DemandResponse effects in `update_control` for simple
+/// heating-only equipment.
+///
+/// Returns `Some(mode)` when a control override took effect (the caller should
+/// return that mode immediately). Returns `None` if normal thermostat control
+/// should proceed. When `Some(Off)` is returned, the caller should also zero
+/// the duty cycle.
+pub fn apply_simple_mode_override_in_control(
+    hvac: &mut HvacEquipment,
+    mode_override: &mut Option<OperatingMode>,
+    dr_level: hares_types::DRLevel,
+    equipment_name: &str,
+) -> Option<OperatingMode> {
+    // ModeOverride takes priority over all thermostat and DR control.
+    if let Some(mode) = *mode_override {
+        match mode {
+            OperatingMode::Off => {
+                hvac.runtime.duty_cycle = 0.0;
+                tracing::debug!(
+                    equipment = equipment_name,
+                    "ModeOverride Off: forcing equipment off"
+                );
+                return Some(OperatingMode::Off);
+            }
+            OperatingMode::Heating | OperatingMode::On => {
+                hvac.runtime.duty_cycle = 1.0;
+                hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+                tracing::debug!(
+                    equipment = equipment_name,
+                    mode = ?mode,
+                    "ModeOverride: forcing equipment to Heating at full duty"
+                );
+                return Some(OperatingMode::Heating);
+            }
+            _ => { /* unrecognised modes fall through to normal control */ }
+        }
+    }
+
+    // DemandResponse curtailing: GridEmergency forces equipment off.
+    if dr_level == hares_types::DRLevel::GridEmergency {
+        hvac.runtime.duty_cycle = 0.0;
+        tracing::debug!(
+            equipment = equipment_name,
+            "DemandResponse GridEmergency: forcing equipment off"
+        );
+        return Some(OperatingMode::Off);
+    }
+
+    // DR setpoint offset: lower the effective heating setpoint to curtail.
+    let dr_offset_c = match dr_level {
+        hares_types::DRLevel::Normal => 0.0,
+        hares_types::DRLevel::Moderate => -1.0,
+        hares_types::DRLevel::High => -2.0,
+        hares_types::DRLevel::Critical => -3.0,
+        hares_types::DRLevel::GridEmergency => 0.0, // handled above
+    };
+
+    hvac.runtime.dr_setpoint_offset_c = dr_offset_c;
+
+    None
 }
 
 /// Resolve duct DSE from equipment config.
@@ -445,6 +562,7 @@ mod tests {
             (OperatingMode::Standby, 9.0),
             (OperatingMode::Charging, 10.0),
             (OperatingMode::Discharging, 11.0),
+            (OperatingMode::On, 12.0),
         ];
 
         for &(mode, expected) in cases {

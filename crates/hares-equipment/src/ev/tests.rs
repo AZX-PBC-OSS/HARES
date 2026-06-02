@@ -3113,10 +3113,7 @@ fn ev_dr_critical_reduces_charging_power() {
         power,
         max_allowed
     );
-    assert!(
-        power > 0.0,
-        "Critical DR should still allow some charging"
-    );
+    assert!(power > 0.0, "Critical DR should still allow some charging");
     assert_eq!(ev.telemetry().get("dr_level"), Some(3.0));
 }
 
@@ -3153,4 +3150,3 @@ fn ev_dr_timer_reverts_to_normal_after_duration() {
         power
     );
 }
-

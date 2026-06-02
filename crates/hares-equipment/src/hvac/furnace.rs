@@ -6,7 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
@@ -23,6 +23,7 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
+        apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
         equipment_id_from_config, operating_mode_code, update_heating_control,
         zone_id_from_config_or_default,
     },
@@ -47,6 +48,10 @@ pub struct ElectricFurnace {
     use_ideal: bool,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// External ModeOverride control (sticky).
+    mode_override: Option<OperatingMode>,
+    /// External DemandResponse level (sticky).
+    dr_level: DRLevel,
 }
 
 pub struct GasFurnace {
@@ -66,6 +71,10 @@ pub struct GasFurnace {
     use_ideal: bool,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// External ModeOverride control (sticky).
+    mode_override: Option<OperatingMode>,
+    /// External DemandResponse level (sticky).
+    dr_level: DRLevel,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,6 +92,8 @@ struct FurnaceState {
     runtime_fraction: f64,
     main_power_kw: f64,
     duct_loss_w: f64,
+    mode_override: Option<OperatingMode>,
+    dr_level: DRLevel,
 }
 
 impl ElectricFurnace {
@@ -99,7 +110,9 @@ impl ElectricFurnace {
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
-                | ControlCapabilities::IDEAL_CAPACITY,
+                | ControlCapabilities::IDEAL_CAPACITY
+                | ControlCapabilities::MODE_OVERRIDE
+                | ControlCapabilities::DEMAND_RESPONSE,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::HAS_MODE
                 | CoreCapabilities::THERMAL
@@ -124,6 +137,8 @@ impl ElectricFurnace {
             run_time_s: 0.0,
             use_ideal: false,
             zone_id_explicit,
+            mode_override: None,
+            dr_level: DRLevel::Normal,
         }
     }
 }
@@ -172,6 +187,15 @@ impl Equipment for ElectricFurnace {
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         self.use_ideal = self.hvac.use_ideal_capacity(env);
+        if let Some(mode) = apply_simple_mode_override_in_control(
+            &mut self.hvac,
+            &mut self.mode_override,
+            self.dr_level,
+            "Electric Furnace",
+        ) {
+            self.operating_mode = mode;
+            return mode;
+        }
         self.operating_mode = update_heating_control(&mut self.hvac, env);
         self.operating_mode
     }
@@ -331,6 +355,8 @@ impl Equipment for ElectricFurnace {
                 runtime_fraction: self.telemetry.get(tk::RUNTIME_FRACTION).unwrap_or(0.0),
                 main_power_kw: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
                 duct_loss_w: self.telemetry.get(tk::DUCT_LOSS_W).unwrap_or(0.0),
+                mode_override: self.mode_override,
+                dr_level: self.dr_level,
             },
             Self::checkpoint_version(),
             "ElectricFurnace",
@@ -350,6 +376,8 @@ impl Equipment for ElectricFurnace {
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
+        self.mode_override = decoded.mode_override;
+        self.dr_level = decoded.dr_level;
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
@@ -370,6 +398,14 @@ impl Equipment for ElectricFurnace {
     }
 
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        if apply_simple_mode_override_and_dr(
+            &mut self.mode_override,
+            &mut self.dr_level,
+            signal,
+            "Electric Furnace",
+        )? {
+            return Ok(());
+        }
         apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Furnace")?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
@@ -398,7 +434,9 @@ impl GasFurnace {
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
-                | ControlCapabilities::IDEAL_CAPACITY,
+                | ControlCapabilities::IDEAL_CAPACITY
+                | ControlCapabilities::MODE_OVERRIDE
+                | ControlCapabilities::DEMAND_RESPONSE,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::FUEL
                 | CoreCapabilities::HAS_MODE
@@ -427,6 +465,8 @@ impl GasFurnace {
             run_time_s: 0.0,
             use_ideal: false,
             zone_id_explicit,
+            mode_override: None,
+            dr_level: DRLevel::Normal,
         }
     }
 }
@@ -486,6 +526,15 @@ impl Equipment for GasFurnace {
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         self.use_ideal = self.hvac.use_ideal_capacity(env);
+        if let Some(mode) = apply_simple_mode_override_in_control(
+            &mut self.hvac,
+            &mut self.mode_override,
+            self.dr_level,
+            "Gas Furnace",
+        ) {
+            self.operating_mode = mode;
+            return mode;
+        }
         self.operating_mode = update_heating_control(&mut self.hvac, env);
         self.operating_mode
     }
@@ -663,6 +712,8 @@ impl Equipment for GasFurnace {
                 runtime_fraction: self.telemetry.get(tk::RUNTIME_FRACTION).unwrap_or(0.0),
                 main_power_kw: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
                 duct_loss_w: self.telemetry.get(tk::DUCT_LOSS_W).unwrap_or(0.0),
+                mode_override: self.mode_override,
+                dr_level: self.dr_level,
             },
             Self::checkpoint_version(),
             "GasFurnace",
@@ -682,6 +733,8 @@ impl Equipment for GasFurnace {
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
+        self.mode_override = decoded.mode_override;
+        self.dr_level = decoded.dr_level;
         self.hvac.runtime.last_speed_index = decoded.speed_index as usize;
 
         self.telemetry.insert(tk::FAN_KW, decoded.electric_kw);
@@ -707,6 +760,14 @@ impl Equipment for GasFurnace {
     }
 
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        if apply_simple_mode_override_and_dr(
+            &mut self.mode_override,
+            &mut self.dr_level,
+            signal,
+            "Gas Furnace",
+        )? {
+            return Ok(());
+        }
         apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Furnace")?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
@@ -1013,8 +1074,9 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_physics::constants::W_PER_TON;
     use hares_types::{
-        ControlSignal, EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator,
-        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, DRLevel, EnvironmentState, ExecutionStage, GridState,
+        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        telemetry_keys as tk,
     };
 
     use super::{ElectricFurnace, GasFurnace};
@@ -1783,5 +1845,123 @@ mod tests {
             "electric furnace main_power must equal electric_kw - fan_kw ({expected}), got {main_kw}"
         );
         assert!(main_kw > 0.0, "main_power must be positive during heating");
+    }
+
+    #[test]
+    fn electric_furnace_can_accept_mode_override_and_demand_response() {
+        let cfg = ef_config(8_000.0, 1.05);
+        let eq = ElectricFurnace::new(cfg);
+        use hares_control::capabilities::can_accept;
+        assert!(can_accept(
+            eq.descriptor().control_capabilities,
+            &ControlSignal::ModeOverride {
+                mode: OperatingMode::Off,
+            }
+        ));
+        assert!(can_accept(
+            eq.descriptor().control_capabilities,
+            &ControlSignal::DemandResponse {
+                level: DRLevel::High,
+                duration_s: Some(3600.0),
+            }
+        ));
+    }
+
+    #[test]
+    fn gas_furnace_can_accept_mode_override_and_demand_response() {
+        let cfg = gf_config(10_000.0, 0.80);
+        let eq = GasFurnace::new(cfg);
+        use hares_control::capabilities::can_accept;
+        assert!(can_accept(
+            eq.descriptor().control_capabilities,
+            &ControlSignal::ModeOverride {
+                mode: OperatingMode::Off,
+            }
+        ));
+        assert!(can_accept(
+            eq.descriptor().control_capabilities,
+            &ControlSignal::DemandResponse {
+                level: DRLevel::Critical,
+                duration_s: Some(1800.0),
+            }
+        ));
+    }
+
+    #[test]
+    fn electric_furnace_mode_override_off_forces_off() {
+        let cfg = ef_config(8_000.0, 1.05);
+        let mut eq = ElectricFurnace::new(cfg.clone());
+        let state = env(18.0);
+        eq.init(&cfg, &state).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        let mode = eq.update_control(&state);
+        assert_eq!(mode, OperatingMode::Off);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&state, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            ports.thermal[0].sensible_gain_w < 1e-9,
+            "ModeOverride Off must prevent furnace heating"
+        );
+    }
+
+    #[test]
+    fn gas_furnace_mode_override_off_forces_off() {
+        let cfg = gf_config(10_000.0, 0.80);
+        let mut eq = GasFurnace::new(cfg.clone());
+        let state = env(18.0);
+        eq.init(&cfg, &state).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        let mode = eq.update_control(&state);
+        assert_eq!(mode, OperatingMode::Off);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&state, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            ports.thermal[0].sensible_gain_w < 1e-9,
+            "ModeOverride Off must prevent gas furnace heating"
+        );
+    }
+
+    #[test]
+    fn electric_furnace_demand_response_grid_emergency_forces_off() {
+        let cfg = ef_config(8_000.0, 1.05);
+        let mut eq = ElectricFurnace::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        let mode = eq.update_control(&env);
+        assert_eq!(mode, OperatingMode::Off);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            ports.thermal[0].sensible_gain_w < 1e-9,
+            "GridEmergency must prevent furnace heating"
+        );
     }
 }

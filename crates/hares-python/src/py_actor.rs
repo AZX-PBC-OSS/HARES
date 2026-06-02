@@ -324,6 +324,7 @@ pub enum PyMode {
     HeatingHPAndER,
     HeatPumpWH,
     BackupElement,
+    On,
 }
 
 /// Strongly typed priority tiers.
@@ -547,6 +548,7 @@ impl PyMode {
             PyMode::HeatingHPAndER => OperatingMode::HeatingHPAndER,
             PyMode::HeatPumpWH => OperatingMode::HeatPumpWH,
             PyMode::BackupElement => OperatingMode::BackupElement,
+            PyMode::On => OperatingMode::On,
         }
     }
 }
@@ -1198,6 +1200,11 @@ impl PyMode {
     }
 
     #[staticmethod]
+    fn on() -> Self {
+        PyMode::On
+    }
+
+    #[staticmethod]
     fn from_str(name: &str) -> PyResult<Self> {
         match name.to_lowercase().as_str() {
             "off" => Ok(PyMode::Off),
@@ -1212,6 +1219,7 @@ impl PyMode {
             "heating_hp_and_er" => Ok(PyMode::HeatingHPAndER),
             "heat_pump_wh" => Ok(PyMode::HeatPumpWH),
             "backup_element" => Ok(PyMode::BackupElement),
+            "on" => Ok(PyMode::On),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "invalid OperatingMode variant: {}",
                 name
@@ -1237,6 +1245,7 @@ impl PyMode {
             PyMode::HeatingHPAndER => "heating_hp_and_er".to_string(),
             PyMode::HeatPumpWH => "heat_pump_wh".to_string(),
             PyMode::BackupElement => "backup_element".to_string(),
+            PyMode::On => "on".to_string(),
         }
     }
 
@@ -1262,6 +1271,7 @@ impl PyMode {
             PyMode::HeatingHPAndER => 9,
             PyMode::HeatPumpWH => 10,
             PyMode::BackupElement => 11,
+            PyMode::On => 12,
         }
     }
 }

@@ -59,6 +59,8 @@ from ._hares import (
     GridExportRule,
     StormWatchTrigger,
     DepartureConstraint,
+    ExtrapolationStrategy,
+    RoofShape,
 )
 
 # Metrics types
@@ -155,6 +157,8 @@ __all__ = [
     "GridExportRule",
     "StormWatchTrigger",
     "DepartureConstraint",
+    "ExtrapolationStrategy",
+    "RoofShape",
     # Metrics
     "SimulationMetrics",
     "AnnualEnergyKwh",

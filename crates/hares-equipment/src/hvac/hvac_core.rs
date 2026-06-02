@@ -371,6 +371,13 @@ pub struct HvacRuntimeState {
     /// whether the temperature is still moving away from setpoint.
     /// Updated each timestep by `update_prev_zone_temp`.
     pub prev_zone_temp_c: Option<f64>,
+    /// DemandResponse heating setpoint offset [°C]. Set by
+    /// `apply_simple_mode_override_in_control` each timestep; cleared
+    /// when DR reverts to Normal. Applied by `update_heating_control`
+    /// as a temporary override on top of the thermostat's effective
+    /// setpoints without mutating `runtime_setpoints` (which is reserved
+    /// for `ThermalSetpoint`/`ThermalSetpointDelta` signals).
+    pub dr_setpoint_offset_c: f64,
 }
 
 /// Control-signal state modified by external control signals.
@@ -466,6 +473,7 @@ impl HvacEquipment {
                 last_speed_frac: 0.0,
                 time_at_current_speed_s: 0.0,
                 prev_zone_temp_c: None,
+                dr_setpoint_offset_c: 0.0,
             },
             control: HvacControlState {
                 max_capacity_fraction: 1.0,

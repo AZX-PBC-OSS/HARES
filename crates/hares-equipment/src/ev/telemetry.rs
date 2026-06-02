@@ -101,8 +101,9 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::DR_LEVEL.to_string(),
             unit: "code".to_string(),
-            description: "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)"
-                .to_string(),
+            description:
+                "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)"
+                    .to_string(),
         },
     ]
 }

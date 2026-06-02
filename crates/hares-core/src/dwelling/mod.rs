@@ -4871,8 +4871,7 @@ mod tests {
                 }
                 ControlSignal::DemandResponse { level, .. } => {
                     self.last_dr_level = Some(*level);
-                    self.telemetry
-                        .insert("last_dr_level", *level as u8 as f64);
+                    self.telemetry.insert("last_dr_level", *level as u8 as f64);
                 }
                 _ => {}
             }
@@ -6393,8 +6392,7 @@ occupancy = 1.0
         });
 
         let mut warnings = Vec::new();
-        let mut equipment: Vec<Box<dyn Equipment>> =
-            vec![Box::new(ev), Box::new(battery)];
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(ev), Box::new(battery)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
         assert!(warnings.is_empty());

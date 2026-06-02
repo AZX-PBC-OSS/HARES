@@ -6,7 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
     PortSlots, Telemetry, TelemetryField, ThermalCategory,
 };
@@ -23,6 +23,7 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
         apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
+        apply_simple_mode_override_and_dr, apply_simple_mode_override_in_control,
         equipment_id_from_config, operating_mode_code, update_heating_control,
         zone_id_from_config_or_default,
     },
@@ -43,6 +44,10 @@ pub struct ElectricBaseboard {
     use_ideal: bool,
     /// Whether zone_id was explicitly set in config or fell back to ZoneId(1).
     zone_id_explicit: bool,
+    /// External ModeOverride control (sticky).
+    mode_override: Option<OperatingMode>,
+    /// External DemandResponse level (sticky).
+    dr_level: DRLevel,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,6 +60,8 @@ struct BaseboardState {
     run_time_s: f64,
     electric_kw: f64,
     thermal_output_w: f64,
+    mode_override: Option<OperatingMode>,
+    dr_level: DRLevel,
 }
 
 impl ElectricBaseboard {
@@ -71,7 +78,9 @@ impl ElectricBaseboard {
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
-                | ControlCapabilities::IDEAL_CAPACITY,
+                | ControlCapabilities::IDEAL_CAPACITY
+                | ControlCapabilities::MODE_OVERRIDE
+                | ControlCapabilities::DEMAND_RESPONSE,
             core_capabilities: CoreCapabilities::ELECTRIC
                 | CoreCapabilities::HAS_MODE
                 | CoreCapabilities::THERMAL
@@ -95,6 +104,8 @@ impl ElectricBaseboard {
             run_time_s: 0.0,
             use_ideal: false,
             zone_id_explicit,
+            mode_override: None,
+            dr_level: DRLevel::Normal,
         }
     }
 }
@@ -138,6 +149,15 @@ impl Equipment for ElectricBaseboard {
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         self.use_ideal = self.hvac.use_ideal_capacity(env);
+        if let Some(mode) = apply_simple_mode_override_in_control(
+            &mut self.hvac,
+            &mut self.mode_override,
+            self.dr_level,
+            "Electric Baseboard",
+        ) {
+            self.operating_mode = mode;
+            return mode;
+        }
         self.operating_mode = update_heating_control(&mut self.hvac, env);
         self.operating_mode
     }
@@ -213,6 +233,8 @@ impl Equipment for ElectricBaseboard {
                 run_time_s: self.run_time_s,
                 electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+                mode_override: self.mode_override,
+                dr_level: self.dr_level,
             },
             Self::checkpoint_version(),
             "Baseboard",
@@ -232,6 +254,8 @@ impl Equipment for ElectricBaseboard {
         self.hvac.thermostat_fsm.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
+        self.mode_override = decoded.mode_override;
+        self.dr_level = decoded.dr_level;
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
@@ -244,6 +268,14 @@ impl Equipment for ElectricBaseboard {
     }
 
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        if apply_simple_mode_override_and_dr(
+            &mut self.mode_override,
+            &mut self.dr_level,
+            signal,
+            "Electric Baseboard",
+        )? {
+            return Ok(());
+        }
         apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Baseboard")?;
         apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
         Ok(())
@@ -311,8 +343,8 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator,
-        WeatherState, ZoneId, ZoneState,
+        ControlSignal, DRLevel, EnvironmentState, ExecutionStage, GridState,
+        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
     use super::ElectricBaseboard;
@@ -470,6 +502,150 @@ mod tests {
         assert!(
             (ports.thermal[0].sensible_gain_w - 1_500.0).abs() < 1e-6,
             "IdealCapacity must scale delivered heat to 50% of rated output"
+        );
+    }
+
+    #[test]
+    fn dr_normal_clears_setpoint_curtailment() {
+        let cfg = config(3_000.0);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+
+        // Set a heating setpoint so the base is known.
+        eq.apply_control_unchecked(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+
+        // Apply DR High: -2°C setpoint offset.
+        eq.apply_control_unchecked(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+
+        // DR offset must be applied in runtime state.
+        eq.update_control(&env);
+        assert!(
+            (eq.hvac.runtime.dr_setpoint_offset_c + 2.0).abs() < 1e-9,
+            "DR High must set dr_setpoint_offset_c to -2.0, got {}",
+            eq.hvac.runtime.dr_setpoint_offset_c
+        );
+
+        // Revert to DR Normal: offset must be cleared.
+        eq.apply_control_unchecked(&ControlSignal::DemandResponse {
+            level: DRLevel::Normal,
+            duration_s: None,
+        })
+        .unwrap();
+        eq.update_control(&env);
+        assert!(
+            eq.hvac.runtime.dr_setpoint_offset_c.abs() < 1e-9,
+            "DR Normal must clear dr_setpoint_offset_c, got {}",
+            eq.hvac.runtime.dr_setpoint_offset_c
+        );
+
+        // Verify the effective setpoint is unaffected (no runtime_setpoints pollution).
+        let sp = eq.hvac.effective_setpoints();
+        assert!(
+            (sp.heating_c - 21.0).abs() < 1e-9,
+            "heating setpoint must be 21.0 after DR Normal, got {:.3}",
+            sp.heating_c
+        );
+    }
+
+    #[test]
+    fn can_accept_mode_override_and_demand_response() {
+        let cfg = config(3_000.0);
+        let eq = ElectricBaseboard::new(cfg);
+        use hares_control::capabilities::can_accept;
+        assert!(can_accept(
+            eq.descriptor().control_capabilities,
+            &ControlSignal::ModeOverride {
+                mode: OperatingMode::Off,
+            }
+        ));
+        assert!(can_accept(
+            eq.descriptor().control_capabilities,
+            &ControlSignal::DemandResponse {
+                level: DRLevel::High,
+                duration_s: Some(3600.0),
+            }
+        ));
+    }
+
+    #[test]
+    fn mode_override_off_forces_equipment_off() {
+        let cfg = config(3_000.0);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0); // below setpoint → thermostat would heat
+        eq.init(&cfg, &env).unwrap();
+
+        // Force off via ModeOverride
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+
+        let mode = eq.update_control(&env);
+        assert_eq!(mode, OperatingMode::Off);
+
+        // Verify no heating output
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            ports.thermal[0].sensible_gain_w < 1e-9,
+            "ModeOverride Off must prevent heating"
+        );
+    }
+
+    #[test]
+    fn demand_response_curtails_heating() {
+        let cfg = config(3_000.0);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0); // below setpoint → thermostat would normally heat
+        eq.init(&cfg, &env).unwrap();
+
+        // Apply DemandResponse High: -2°C setpoint offset
+        eq.apply_control_unchecked(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+
+        // GridEmergency fully prevents heating
+        let mut eq_emerg = ElectricBaseboard::new(cfg.clone());
+        eq_emerg.init(&cfg, &env).unwrap();
+        eq_emerg
+            .apply_control_unchecked(&ControlSignal::DemandResponse {
+                level: DRLevel::GridEmergency,
+                duration_s: Some(3600.0),
+            })
+            .unwrap();
+
+        let mode_emerg = eq_emerg.update_control(&env);
+        assert_eq!(
+            mode_emerg,
+            OperatingMode::Off,
+            "GridEmergency must force equipment off"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq_emerg
+            .step(&env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            ports.thermal[0].sensible_gain_w < 1e-9,
+            "GridEmergency must prevent heating"
         );
     }
 }

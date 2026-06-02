@@ -646,10 +646,8 @@ impl Ev {
             .set(tk::FUEL_ECONOMY_KWH_PER_MI, self.fuel_economy_kwh_per_mi);
         self.telemetry
             .set(tk::DR_POWER_FRACTION, self.dr_power_fraction());
-        self.telemetry.set(
-            tk::DR_LEVEL,
-            dr_level_code(self.dr_level),
-        );
+        self.telemetry
+            .set(tk::DR_LEVEL, dr_level_code(self.dr_level));
 
         #[cfg(feature = "observe")]
         tracing::debug!(
