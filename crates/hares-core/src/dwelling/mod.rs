@@ -44,8 +44,8 @@ use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 use hares_types::{
     BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver, ElectricalSummary,
     EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
-    PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId,
-    ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
+    PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
+    ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
     validate_fluid_type_consistency,
 };
 use rand::SeedableRng;
@@ -2675,9 +2675,9 @@ impl Dwelling {
     /// when an Occupancy spec exists the schedule always includes an occupancy column,
     /// so a `None` column index here indicates an intentionally unoccupied dwelling
     /// (e.g. BESTEST base cases with `occupants_present: false`).
-    fn apply_occupancy_gains(&mut self) {
+    fn apply_occupancy_gains(&mut self) -> Result<()> {
         let Some(col_idx) = self.occupancy_column_idx else {
-            return;
+            return Ok(());
         };
 
         // Construction-time validation guarantees the schedule domain exists
@@ -2699,7 +2699,7 @@ impl Dwelling {
             * self.occupancy_scale;
 
         if n_occupants <= 0.0 {
-            return;
+            return Ok(());
         }
 
         let sensible_w = n_occupants * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_CONVECTIVE_FRACTION;
@@ -2707,19 +2707,15 @@ impl Dwelling {
         let latent_w = n_occupants * OCCUPANT_LATENT_GAIN_W;
 
         let indoor_zone = self.thermal_solver.config().indoor_zone_id;
-        if let Some(thermal) = self
-            .ports
-            .thermal
-            .iter_mut()
-            .find(|t| t.zone == indoor_zone)
-        {
-            thermal.add(
-                sensible_w,
-                radiant_w,
-                latent_w,
-                ThermalCategory::InternalGain,
-            );
-        }
+        self.ports.accumulate(&PortContribution::Thermal {
+            zone: indoor_zone,
+            sensible_gain_w: sensible_w,
+            radiant_gain_w: radiant_w,
+            latent_gain_w: latent_w,
+            category: ThermalCategory::InternalGain,
+        })?;
+
+        Ok(())
     }
 
     /// Iterative warm-up convergence per EnergyPlus Engineering Reference §"Warmup Convergence".
@@ -3003,7 +2999,7 @@ impl Dwelling {
         // Step 1b: deposit deterministic internal gains (occupancy, plug loads)
         // BEFORE prepare_inputs so the ideal solver sees them when computing
         // required HVAC capacity.
-        self.apply_occupancy_gains();
+        self.apply_occupancy_gains()?;
 
         let mut step_succeeded = vec![false; self.equipment.len()];
 
@@ -7064,7 +7060,9 @@ occupancy = 1.0
             thermal.zero();
         }
 
-        dwelling.apply_occupancy_gains();
+        dwelling
+            .apply_occupancy_gains()
+            .expect("apply_occupancy_gains");
 
         // Expected n_occupants = 0.5 * 4.0 = 2.0
         // Convective sensible = 2.0 × 66.0 × 0.70 = 92.4 W
@@ -7099,6 +7097,29 @@ occupancy = 1.0
             (indoor_port.latent_gain_w - expected_latent).abs() < 1e-9,
             "indoor zone latent gain: expected {expected_latent}, got {}",
             indoor_port.latent_gain_w
+        );
+
+        // Occupancy gains are bucketed under InternalGain category.
+        // If the category were changed (e.g. to HvacHeating), the
+        // aggregate totals would be correct but the per-category
+        // breakdown in the thermal output CSV would be silently wrong.
+        assert!(
+            (indoor_port.sensible_for_category(ThermalCategory::InternalGain) - expected_sensible)
+                .abs()
+                < 1e-9,
+            "occupancy gain must be categorized as InternalGain convective sensible"
+        );
+        assert!(
+            (indoor_port.radiant_for_category(ThermalCategory::InternalGain) - expected_radiant)
+                .abs()
+                < 1e-9,
+            "occupancy gain must be categorized as InternalGain radiant sensible"
+        );
+        assert!(
+            (indoor_port.latent_for_category(ThermalCategory::InternalGain) - expected_latent)
+                .abs()
+                < 1e-9,
+            "occupancy gain must be categorized as InternalGain latent"
         );
 
         // Non-indoor zones must receive ZERO occupancy gains.
@@ -7156,7 +7177,49 @@ occupancy = 1.0
 
         // This must panic — the schedule domain payload is absent and the
         // `.expect()` replaces the old silent `.unwrap_or(0.0)`.
-        dwelling.apply_occupancy_gains();
+        let _ = dwelling.apply_occupancy_gains();
+    }
+
+    /// Verify that `apply_occupancy_gains` returns `Err` when the indoor
+    /// zone accumulator is missing from `ports.thermal` — exercising the
+    /// error path through `PortSlots::accumulate()`.
+    #[test]
+    fn occupancy_gains_errors_on_missing_accumulator() {
+        use hares_types::DomainUpdate;
+
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        dwelling.occupancy_column_idx = Some(0);
+        dwelling.occupancy_scale = 2.0;
+
+        dwelling.latest_env.upsert_domain(DomainUpdate {
+            domain_id: SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: vec![],
+            custom_payload: Some(vec![0.5]),
+        });
+
+        let indoor_zone = dwelling.thermal_solver.config().indoor_zone_id;
+
+        // Remove the indoor zone accumulator from ports to force the error path.
+        dwelling.ports.thermal.retain(|t| t.zone != indoor_zone);
+        assert!(
+            !dwelling.ports.thermal.iter().any(|t| t.zone == indoor_zone),
+            "indoor zone accumulator must be removed to trigger the error"
+        );
+
+        let result = dwelling.apply_occupancy_gains();
+        assert!(
+            result.is_err(),
+            "apply_occupancy_gains must return Err when indoor zone accumulator is missing"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, HaresError::Equipment(_)),
+            "error must be HaresError::Equipment, got: {err}"
+        );
     }
 
     /// Verify that construction-time validation rejects a dwelling with an
