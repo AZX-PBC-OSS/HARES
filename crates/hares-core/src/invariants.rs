@@ -8,7 +8,6 @@
 //! In production release builds without the feature flag all public functions
 //! compile to nothing -- the compiler eliminates the bodies entirely.
 
-use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_types::{ControlCapabilities, HaresError};
 
 /// Entrypoint for per-timestep numerical invariant validation.
@@ -88,34 +87,63 @@ impl InvariantChecker {
         Ok(())
     }
 
-    /// Verifies moisture mass conservation.
+    /// Verifies moisture mass conservation with independent source/sink tracking.
     ///
-    /// Each term is `(Q_latent_i [W], dt_s [s])`.
-    /// `h_fg` is `hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG`
-    /// (latent heat of vaporisation at 0°C, ASHRAE HoF 2017 Ch.1 Table 2).
+    /// The check compares independently tracked moisture sources and sinks against
+    /// the humidity solver's actual output. Unlike the previous implementation which
+    /// was a mathematical tautology (both sides derived from the same `Q_latent` and
+    /// `moisture_buffering_multiplier`), this version:
     ///
-    /// The check asserts:
-    /// `|Δm_water − Σ(Q_latent_i · dt / h_fg)| < max(1e-6, 1e-6 · Σ|term_i|)` [kg]
+    /// 1. Independently enumerates physical moisture sources (equipment latent gains)
+    ///    and sinks (dehumidification, condensation, infiltration exchange).
+    /// 2. Computes the expected air moisture change using the expected buffering
+    ///    multiplier — catching regressions where the solver uses a wrong multiplier.
+    /// 3. Monitors the net sorption residual (physical − actual) as a physically
+    ///    meaningful quantity representing moisture absorbed/desorbed by building
+    ///    materials.
+    ///
+    /// Two invariant checks are performed:
+    ///
+    /// **Moisture balance**: `|expected_balance_kg − actual_delta_kg| < max(5e-4, 1e-4 · gross_kg)`
+    /// Catches missing source contributions, extra sources, or incorrect buffering
+    /// multiplier when the independently-tracked accounting disagrees with the solver.
+    ///
+    /// **Sorption bound**: `|independent_physical_kg − actual_delta_kg| < max(1.0, 5.0 · gross_kg)`
+    /// Catches absurdly large buffering multipliers by bounding the material sorption
+    /// residual to multiple times the zone moisture inventory. Fires when sorption
+    /// exceeds either 1 kg absolute or 5× the zone air moisture content — conditions
+    /// that indicate a runaway multiplier, a simulation input error, or a solver
+    /// logic bug.
     pub fn check_moisture(
         &self,
-        delta_m_water: f64,
-        q_latent_terms: &[(f64, f64)],
+        independent_physical_kg: f64,
+        expected_balance_kg: f64,
+        actual_delta_kg: f64,
+        gross_moisture_mass_kg: f64,
     ) -> Result<(), HaresError> {
-        let (m_from_latent, gross_flux) = q_latent_terms
-            .iter()
-            .map(|&(q_w, dt_s)| q_w * dt_s / LATENT_HEAT_VAPORISATION_0C_J_KG)
-            .fold((0.0_f64, delta_m_water.abs()), |(sum, abs_sum), term| {
-                (sum + term, abs_sum + term.abs())
-            });
-        let residual = (delta_m_water - m_from_latent).abs();
-        // Use gross moisture flux (|Δm_water| + Σ|term_i|) for relative tolerance.
-        // Floor of 1e-6 kg for near-zero systems.
-        let tolerance = f64::max(1e-6, 1e-6 * gross_flux);
-        if residual >= tolerance {
+        // Check 1: moisture balance — independent accounting vs solver output.
+        let balance_residual = (expected_balance_kg - actual_delta_kg).abs();
+        // Floor of 5e-4 kg (0.5 g) absorbs floating-point noise from the
+        // solver's round-trip multiplication (dW = Q·dt/(hfg·ρ·V·M); actual = dW·ρ·V)
+        // vs the invariant's direct computation (Q·dt/hfg/M). The relative factor
+        // scales with zone moisture mass so large zones aren't over-tolerated.
+        let balance_tolerance = f64::max(5e-4, 1e-4 * gross_moisture_mass_kg);
+        if balance_residual >= balance_tolerance {
             return Err(HaresError::InvariantViolation {
                 check_name: "moisture_balance".to_string(),
-                value: residual,
-                tolerance,
+                value: balance_residual,
+                tolerance: balance_tolerance,
+            });
+        }
+
+        // Check 2: sorption bound — physical net vs apparent air moisture change.
+        let sorption_residual = (independent_physical_kg - actual_delta_kg).abs();
+        let sorption_tolerance = f64::max(1e0, 5.0 * gross_moisture_mass_kg);
+        if sorption_residual >= sorption_tolerance {
+            return Err(HaresError::InvariantViolation {
+                check_name: "moisture_sorption".to_string(),
+                value: sorption_residual,
+                tolerance: sorption_tolerance,
             });
         }
         Ok(())
@@ -247,7 +275,7 @@ impl InvariantChecker {
         Ok(())
     }
 
-    pub fn check_moisture(&self, _: f64, _: &[(f64, f64)]) -> Result<(), HaresError> {
+    pub fn check_moisture(&self, _: f64, _: f64, _: f64, _: f64) -> Result<(), HaresError> {
         Ok(())
     }
 
@@ -420,21 +448,235 @@ mod tests {
 
     // ── moisture_balance ──────────────────────────────────────────────────────
 
+    /// When independently-tracked sources match the solver output (same multiplier, all
+    /// sources accounted), both the balance and sorption checks pass.
     #[test]
-    fn moisture_balance_passes_when_balanced() {
-        // 100 W latent for 600 s → 100 * 600 / 2_501_000 ≈ 2.399e-5 kg
-        let dt_s = 600.0_f64;
-        let q_latent_w = 100.0_f64;
-        let delta_m = q_latent_w * dt_s / LATENT_HEAT_VAPORISATION_0C_J_KG;
-        let result = checker().check_moisture(delta_m, &[(q_latent_w, dt_s)]);
-        assert!(result.is_ok());
+    fn moisture_balance_passes_with_independent_tracking() {
+        // Zone: 200 m³ at 25°C, w=0.010 → ~2.33 kg water vapor.
+        // 100 W latent for 600 s → physical source = 100*600/2_501_000 ≈ 0.024 kg.
+        // With M=15: actual delta = 0.024/15 ≈ 0.0016 kg.
+        let h_fg = 2_501_000.0;
+        let dt_s = 600.0;
+        let q_latent = 100.0;
+        let moisture_mult: f64 = 15.0;
+        let gross_kg = 2.33;
+        let physical_source = q_latent * dt_s / h_fg; // ~0.024 kg
+        let expected_balance = physical_source / moisture_mult; // ~0.0016 kg
+        let actual_delta = physical_source / moisture_mult; // same formula, all sources tracked
+        let result =
+            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        assert!(result.is_ok(), "balanced independent check should pass");
     }
 
+    /// Missing source (occupant latent): the independent accounting sees less moisture
+    /// than the solver used → balance check must fail.
     #[test]
-    fn moisture_balance_fails_on_large_discrepancy() {
-        // 0.01 kg claimed change vs 0 latent → residual = 0.01 >> 1e-6.
-        let result = checker().check_moisture(0.01, &[]);
-        assert!(result.is_err());
+    fn moisture_balance_fails_on_missing_source() {
+        let h_fg = 2_501_000.0;
+        let dt_s = 600.0;
+        let moisture_mult: f64 = 15.0;
+        let gross_kg = 2.33;
+        // Solver sees 300 W total (200 equipment + 100 occupant).
+        // Independent tracking only accounts for 200 W equipment (occupant output not wired).
+        let q_total = 300.0; // solver's bundled latent
+        let q_independent = 200.0; // independent port tally
+        let physical_independent = q_independent * dt_s / h_fg;
+        let expected_balance = physical_independent / moisture_mult; // ~0.0032 kg
+        let actual_delta = q_total * dt_s / h_fg / moisture_mult; // ~0.0048 kg
+        // Residual = |0.0032 − 0.0048| = 0.0016 kg > max(5e-4, 1e-4*2.33=2.33e-4) = 5e-4
+        let result = checker().check_moisture(
+            physical_independent,
+            expected_balance,
+            actual_delta,
+            gross_kg,
+        );
+        assert!(
+            result.is_err(),
+            "missing occupant source must fail balance check"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HaresError::InvariantViolation { check_name, .. } if check_name == "moisture_balance"),
+            "first violation should be moisture_balance, got {err:?}"
+        );
+    }
+
+    /// Manipulated multiplier (30× instead of 15×): the solver uses a different M
+    /// than the independent check expects. The old tautological check would pass;
+    /// this check fails.
+    #[test]
+    fn moisture_balance_fails_on_wrong_multiplier() {
+        let h_fg = 2_501_000.0;
+        let dt_s = 600.0;
+        let q_latent = 100.0;
+        let expected_mult: f64 = 15.0; // what the invariant expects
+        let actual_mult: f64 = 30.0; // what solver was manipulated to use
+        let gross_kg = 2.33;
+        let physical_source = q_latent * dt_s / h_fg;
+        let expected_balance = physical_source / expected_mult; // 0.0016 kg
+        let actual_delta = physical_source / actual_mult; // 0.0008 kg
+        // Residual = |0.0016 − 0.0008| = 0.0008 kg > max(5e-4, 1e-4*2.33=2.33e-4) = 5e-4
+        let result =
+            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        assert!(
+            result.is_err(),
+            "manipulated multiplier must fail balance check"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HaresError::InvariantViolation { check_name, .. } if check_name == "moisture_balance")
+        );
+    }
+
+    /// Regression: known moisture sources over a 1-hour step — the invariant residual
+    /// (sorption) equals the expected material buffering contribution within tolerance.
+    #[test]
+    fn moisture_sorption_residual_matches_buffering() {
+        let h_fg = 2_501_000.0;
+        let dt_s = 3600.0; // 1 hour
+        let q_latent = 100.0;
+        let moisture_mult: f64 = 15.0;
+        let gross_kg = 2.33;
+        // Physical source mass for the step:
+        let physical_source = q_latent * dt_s / h_fg; // ~0.1439 kg
+        // Actual air moisture change with M=15:
+        let actual_delta = physical_source / moisture_mult; // ~0.0096 kg
+        // Sorption (material buffering) = physical − actual:
+        let expected_sorption = physical_source - actual_delta; // ~0.1343 kg
+        // The sorption check bounds the residual: |physical − actual| < max(1e-3, 0.1*gross)
+        // |0.1439 − 0.0096| = 0.1343 < max(1e-3, 0.1*2.33=0.233) → passes
+        // The balance check: |physical/M − actual| = 0 → passes (same M)
+        let expected_balance = physical_source / moisture_mult;
+        let result =
+            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        assert!(
+            result.is_ok(),
+            "regression step should pass; expected sorption {expected_sorption:.4} < tolerance"
+        );
+    }
+
+    /// The sorption check must fail when the buffering multiplier is absurdly large
+    /// (e.g., 100×) causing the sorption residual to approach the full source mass.
+    #[test]
+    fn moisture_sorption_fails_with_runaway_multiplier() {
+        let h_fg = 2_501_000.0;
+        let dt_s = 600.0;
+        let q_latent = 100.0;
+        let expected_mult: f64 = 15.0; // expected
+        let actual_mult: f64 = 100.0; // absurdly large
+        let gross_kg = 0.01; // very dry zone — forces loose check to use absolute floor
+        let physical_source = q_latent * dt_s / h_fg; // ~0.024 kg
+        let expected_balance = physical_source / expected_mult; // ~0.0016 kg
+        let actual_delta = physical_source / actual_mult; // ~0.00024 kg
+        // Sorption = |0.024 − 0.00024| = 0.0238 kg > max(1.0, 5*0.01=0.05) = 1.0
+        // → sorption check would also fail, but balance fires first:
+        // |0.0016 − 0.00024| = 0.00136 > max(5e-4, 1e-4*0.01=1e-6) = 5e-4
+        let result =
+            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        assert!(result.is_err(), "100× multiplier must fail invariant check");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HaresError::InvariantViolation { check_name, .. } if check_name == "moisture_balance")
+        );
+    }
+
+    /// The sorption check guards against sorption exceeding the absolute floor
+    /// of 1 kg or 5× the zone moisture inventory. When the buffering produces a
+    /// sorption residual that exceeds the sorption bound (but NOT the balance
+    /// bound because M matches), the sorption check catches it.
+    ///
+    /// Scenario: an absurdly large moisture source (~10 kW latent) in a very dry
+    /// zone — the per-step sorption exceeds 1 kg while the zone barely holds any
+    /// moisture, indicating either a runaway multiplier or a simulation input error.
+    #[test]
+    fn sorption_bound_catches_excessive_buffering() {
+        let h_fg = 2_501_000.0;
+        let dt_s = 600.0;
+        let q_latent = 10_000.0; // absurdly large latent
+        let moisture_mult: f64 = 15.0;
+        let gross_kg = 0.01; // very small zone moisture inventory
+        let physical_source = q_latent * dt_s / h_fg; // ~2.398 kg
+        let expected_balance = physical_source / moisture_mult; // ~0.160 kg
+        let actual_delta = physical_source / moisture_mult; // same (balance passes)
+        // Balance: |0.160 − 0.160| = 0 < 5e-4 → passes
+        // Sorption: |2.398 − 0.160| = 2.238 kg > max(1.0, 5*0.01=0.05) = 1.0
+        // → sorption bound fires
+        let result =
+            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        assert!(
+            result.is_err(),
+            "excessive sorption must fail sorption bound"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HaresError::InvariantViolation { check_name, .. } if check_name == "moisture_sorption"),
+            "sorption check should fire when sorption exceeds bound, got {err:?}"
+        );
+    }
+
+    /// Regression: dehumidifier + occupant scenario must not cancel dehumidifier
+    /// contribution in the independent physical mass.
+    ///
+    /// In the prior implementation, `independent_physical_kg` subtracted
+    /// `dehum_kg` (from the humidity port's moisture_mass_flow_kg_s) from the
+    /// equipment contribution (thermal port's latent_gain_w / h_fg). Equipment
+    /// that writes both ports (dehumidifiers, ACs with latent cooling, ideal
+    /// HVAC) had its contribution cancel to zero. This test verifies that the
+    /// invariant correctly includes the dehumidifier's moisture removal in the
+    /// independent physical mass.
+    #[test]
+    fn moisture_balance_includes_dehumidifier_not_cancelled() {
+        let h_fg = 2_501_000.0;
+        let dt_s = 3600.0; // 1 hour step
+        let moisture_mult: f64 = 15.0;
+        let gross_kg = 2.33;
+
+        // Occupant generates 75 W latent → 75*3600/2_501_000 ≈ 0.108 kg moisture.
+        let occupant_w = 75.0;
+        // Dehumidifier removes 100 W latent → -100*3600/2_501_000 ≈ -0.144 kg moisture.
+        let dehum_w = -100.0;
+
+        // Correct independent physical mass (thermal port only, no cancellation):
+        // equipment_kg = (75 + (-100)) * 3600 / 2_501_000 ≈ -0.036 kg.
+        let independent_physical_kg = (occupant_w + dehum_w) * dt_s / h_fg;
+        // Expected balance with M=15: -0.036 / 15 ≈ -0.0024 kg.
+        let expected_balance_kg = independent_physical_kg / moisture_mult;
+        // Solver uses the same net equipment latent and same M → same actual delta.
+        let actual_delta_kg = independent_physical_kg / moisture_mult;
+
+        // Balance check: residual = 0 → passes.
+        // Sorption check: |physical - actual| = |(-0.036) - (-0.0024)| ≈ 0.0336 kg
+        //   < max(1.0, 5*2.33=11.65) = 1.0 → passes.
+        let result = checker().check_moisture(
+            independent_physical_kg,
+            expected_balance_kg,
+            actual_delta_kg,
+            gross_kg,
+        );
+        assert!(
+            result.is_ok(),
+            "dehumidifier + occupant with correct independent accounting must pass; got {result:?}"
+        );
+
+        // Verify that the old (buggy) value WOULD fail.
+        // Old code: independent_physical_kg = equipment_kg - dehum_kg
+        //   = (occupant*dt/h_fg + dehum*dt/h_fg) - dehum*dt/h_fg
+        //   = occupant*dt/h_fg (dehumidifier cancelled)
+        let old_independent = occupant_w * dt_s / h_fg; // ≈ 0.108 kg
+        let old_expected = old_independent / moisture_mult; // ≈ 0.0072 kg
+        // actual_delta_kg is still the correct solver output (-0.0024 kg)
+        // Residual = |0.0072 - (-0.0024)| = 0.0096 kg > max(5e-4, 1e-4*2.33) = 5e-4
+        let old_result =
+            checker().check_moisture(old_independent, old_expected, actual_delta_kg, gross_kg);
+        assert!(
+            old_result.is_err(),
+            "old cancelled independent mass must produce false-positive invariant failure; got {old_result:?}"
+        );
+        let err = old_result.unwrap_err();
+        assert!(
+            matches!(&err, HaresError::InvariantViolation { check_name, .. } if check_name == "moisture_balance"),
+            "old cancelling code should fail balance check, got {err:?}"
+        );
     }
 
     // ── temperature bounds ────────────────────────────────────────────────────

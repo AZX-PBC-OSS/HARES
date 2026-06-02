@@ -249,19 +249,43 @@ impl DomainSolver for HumiditySolver {
 
                 (numerator / denominator, alpha)
             } else if moisture_mass_flow_kg_s.abs() > 0.0 {
+                // The humidity port's moisture_mass_flow_kg_s provides a direct
+                // mass-transfer signal (e.g., dehumidifier condensation rate).
+                // The thermal port's latent_gain_w independently carries moisture
+                // contributions from sources that only write the thermal port
+                // (occupants, process gains). Convert the humidity port's mass
+                // flow to an equivalent latent power, subtract it from the total
+                // latent_gain_w to avoid double-counting equipment that writes
+                // both ports, and handle the remainder through the latent-gain
+                // path. This ensures all moisture sources and sinks — not just
+                // the humidity-port contributor — are accounted for.
+                let mass_flow_latent_equiv_w = moisture_mass_flow_kg_s * self.config.h_fg_j_kg;
+                let remaining_latent_gain_w = latent_gain_w - mass_flow_latent_equiv_w;
+
                 tracing::debug!(
                     zone = zone_id.0,
                     moisture_mass_flow_kg_s,
-                    "humidity solver using explicit moisture_mass_flow_kg_s"
+                    mass_flow_latent_equiv_w,
+                    remaining_latent_gain_w,
+                    "humidity solver using explicit moisture_mass_flow_kg_s + remaining latent"
                 );
-                let d_w = humidity_ratio_increment_from_mass_flow(
+
+                let d_w_mass = humidity_ratio_increment_from_mass_flow(
                     moisture_mass_flow_kg_s,
                     dt_s,
                     rho_air,
                     volume_m3,
                     self.config.moisture_buffering_multiplier,
                 );
-                (w_old + d_w, 0.0)
+                let d_w_latent = humidity_ratio_increment(
+                    remaining_latent_gain_w,
+                    dt_s,
+                    self.config.h_fg_j_kg,
+                    rho_air,
+                    volume_m3,
+                    self.config.moisture_buffering_multiplier,
+                );
+                (w_old + d_w_mass + d_w_latent, 0.0)
             } else {
                 tracing::debug!(
                     zone = zone_id.0,
@@ -1402,62 +1426,68 @@ mod tests {
         );
     }
 
-    /// Ticket 001: humidity solver prefers `moisture_mass_flow_kg_s` over
-    /// `latent_gain_w / h_fg` conversion.
+    /// When a dehumidifier writes both the thermal port (`latent_gain_w`) and the
+    /// humidity port (`moisture_mass_flow_kg_s`), and an occupant simultaneously
+    /// writes only the thermal port (`latent_gain_w`), the solver must include
+    /// BOTH contributions — not drop the occupant's latent gain when the
+    /// mass-flow branch is taken.
     ///
-    /// When both a `Humidity` contribution and a `Thermal { latent_gain_w }`
-    /// are present for the same zone, the solver must use the direct
-    /// `moisture_mass_flow_kg_s` path, not the `latent_gain_w / h_fg` fallback.
-    /// We verify this by providing a deliberately wrong `latent_gain_w` (computed
-    /// with a different h_fg) and asserting that the solver's result matches the
-    /// mass-flow path, not the latent-energy path.
+    /// Prior behaviour: the explicit mass-flow path computed dW from
+    /// `moisture_mass_flow_kg_s` alone and ignored `latent_gain_w` entirely,
+    /// silently dropping occupant moisture contributions.
     #[test]
-    fn humidity_solver_prefers_moisture_mass_flow_over_latent_gain_w() {
+    fn occupant_latent_included_when_mass_flow_branch_active() {
         let zone_id = ZoneId(1);
         let t_c = 22.0;
         let w_init = 0.008;
         let volume_m3 = 200.0;
         let dt_s = 60.0;
+        let h_fg = 2_501_000.0_f64;
 
         let env = env_with_zone(t_c, w_init);
+
+        // Dehumidifier: removes 100 W latent, writes both thermal and humidity ports.
+        let dehum_latent_w = -100.0;
+        let dehum_mass_flow_kg_s = dehum_latent_w / h_fg;
+
+        // Occupant: adds 75 W latent, writes only the thermal port.
+        let occupant_latent_w = 75.0;
+
+        // Total latent gain from the thermal port (both contributors summed).
+        let total_latent_gain_w = dehum_latent_w + occupant_latent_w;
 
         let config = HumiditySolverConfig {
             moisture_buffering_multiplier: 1.0,
             ..HumiditySolverConfig::default()
         };
-        let mut solver_mass_flow = HumiditySolver::new(config.clone(), &env);
-        let mut solver_latent_only = HumiditySolver::new(config, &env);
+        let mut solver_combined = HumiditySolver::new(config.clone(), &env);
+        let mut solver_latent_ref = HumiditySolver::new(config, &env);
 
-        let moisture_mass_flow_kg_s = -0.000_1;
-
-        let correct_h_fg = 2_501_000.0_f64;
-        let wrong_h_fg = 2_454_000.0_f64;
-
-        let latent_gain_w_wrong = moisture_mass_flow_kg_s * wrong_h_fg;
-
-        let ports_mass_flow = PortSlots {
+        // Combined ports: dehumidifier writes both ports, occupant writes thermal only.
+        let ports_combined = PortSlots {
             thermal: vec![ThermalAccumulator {
                 zone: zone_id,
                 sensible_gain_w: 0.0,
                 radiant_gain_w: 0.0,
-                latent_gain_w: latent_gain_w_wrong,
+                latent_gain_w: total_latent_gain_w,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             }],
             humidity: vec![HumidityAccumulator {
                 zone: zone_id,
-                moisture_mass_flow_kg_s,
+                moisture_mass_flow_kg_s: dehum_mass_flow_kg_s,
             }],
             ..PortSlots::default()
         };
 
-        let ports_latent_only = PortSlots {
+        // Reference: same total latent through the thermal port (no humidity port).
+        let ports_latent_ref = PortSlots {
             thermal: vec![ThermalAccumulator {
                 zone: zone_id,
                 sensible_gain_w: 0.0,
                 radiant_gain_w: 0.0,
-                latent_gain_w: moisture_mass_flow_kg_s * correct_h_fg,
+                latent_gain_w: total_latent_gain_w,
                 sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 radiant_by_category: [0.0; THERMAL_CATEGORY_COUNT],
                 latent_by_category: [0.0; THERMAL_CATEGORY_COUNT],
@@ -1466,33 +1496,20 @@ mod tests {
         };
 
         let _ =
-            solver_mass_flow.resolve_new(&ports_mass_flow, &env, Duration::from_secs(dt_s as u64));
-        let _ = solver_latent_only.resolve_new(
-            &ports_latent_only,
+            solver_combined.resolve_new(&ports_combined, &env, Duration::from_secs(dt_s as u64));
+        let _ = solver_latent_ref.resolve_new(
+            &ports_latent_ref,
             &env,
             Duration::from_secs(dt_s as u64),
         );
 
-        let w_mass_flow = solver_mass_flow.humidity_ratio(zone_id);
-        let w_latent_only = solver_latent_only.humidity_ratio(zone_id);
+        let w_combined = solver_combined.humidity_ratio(zone_id);
+        let w_latent_ref = solver_latent_ref.humidity_ratio(zone_id);
 
         assert!(
-            (w_mass_flow - w_latent_only).abs() < 1e-12,
-            "mass-flow path result ({w_mass_flow:.12e}) must match \
-             latent-only path with correct h_fg ({w_latent_only:.12e})"
-        );
-
-        let rho = hares_physics::air_properties::moist_air_density_kg_m3(
-            env.weather.pressure_pa(),
-            t_c,
-            w_init,
-        );
-        let dw_wrong = (latent_gain_w_wrong * dt_s) / (correct_h_fg * rho * volume_m3);
-        let w_wrong = w_init + dw_wrong;
-        assert!(
-            (w_mass_flow - w_wrong).abs() > 1e-8,
-            "solver must NOT use the wrong-h_fg latent path: \
-             mass_flow_result={w_mass_flow:.12e}, wrong_latent_result={w_wrong:.12e}"
+            (w_combined - w_latent_ref).abs() < 1e-12,
+            "combined mass-flow+latent result ({w_combined:.12e}) must match \
+             all-latent reference ({w_latent_ref:.12e}): occupant latent not dropped"
         );
     }
 

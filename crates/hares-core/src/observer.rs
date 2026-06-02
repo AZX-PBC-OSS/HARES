@@ -25,6 +25,11 @@ pub struct StepSnapshot {
     pub actor_skips: usize,
     /// Number of actors whose `decide()` was called this step.
     pub actor_calls: usize,
+    /// Per-step moisture invariant capture from `check_moisture`.
+    /// Populated when `check_invariants` is active; `None` when only
+    /// the `observe` feature is enabled without invariant checks.
+    #[cfg(feature = "observe")]
+    pub moisture_invariant: Option<MoistureInvariantCapture>,
 }
 
 /// Incrementally populated captures for each phase of `run_timestep`.
@@ -252,4 +257,29 @@ impl ObserverBuffer {
     pub fn is_empty(&self) -> bool {
         self.snapshots.is_empty()
     }
+}
+
+/// Per-zone moisture invariant capture from `check_moisture`.
+///
+/// Captured behind `#[cfg(feature = "observe")]` alongside the existing solver
+/// and equipment phase captures. These values are the independent moisture
+/// source/sink tallies used by the invariant checker at each step.
+#[derive(Debug, Clone)]
+pub struct MoistureInvariantCapture {
+    /// Per-zone moisture invariant data.
+    pub zones: Vec<MoistureZoneInvariant>,
+}
+
+/// Per-zone breakdown of the moisture invariant check inputs.
+#[derive(Debug, Clone)]
+pub struct MoistureZoneInvariant {
+    pub zone_id: ZoneId,
+    /// Sum of independently tracked moisture sources [kg].
+    pub expected_sources_kg: f64,
+    /// Sum of independently tracked moisture sinks [kg].
+    pub expected_sinks_kg: f64,
+    /// Solver's actual moisture mass change in the zone air (dW · ρ · V) [kg].
+    pub solver_delta_kg: f64,
+    /// Net material sorption/desorption: expected_sources_kg − expected_sinks_kg − solver_delta_kg [kg].
+    pub sorption_residual_kg: f64,
 }
