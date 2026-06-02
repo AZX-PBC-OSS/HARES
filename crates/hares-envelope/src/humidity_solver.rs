@@ -48,6 +48,11 @@ pub struct HumiditySolver {
     m_dot_inf_buf: HashMap<ZoneId, f64>,
     /// Per-zone outdoor humidity ratio [kg/kg] from thermal domain payload.
     w_outdoor_buf: HashMap<ZoneId, f64>,
+    /// Per-zone condensation/sublimation mass accumulated during clamping [kg].
+    /// Positive = condensation to surfaces (moisture removed from air).
+    /// Negative = frost/sublimation (moisture added to air by clamping at zero).
+    /// Reset each timestep at the start of `resolve`.
+    condensation_kg: HashMap<ZoneId, f64>,
 }
 
 impl HumiditySolver {
@@ -66,6 +71,7 @@ impl HumiditySolver {
             latent_buf: HashMap::with_capacity(n_zones),
             m_dot_inf_buf: HashMap::with_capacity(n_zones),
             w_outdoor_buf: HashMap::with_capacity(n_zones),
+            condensation_kg: HashMap::with_capacity(n_zones),
         }
     }
 
@@ -94,6 +100,28 @@ impl HumiditySolver {
         );
         self.humidity_ratios.get(&zone_id).copied().unwrap_or(0.0)
     }
+
+    /// Return the per-step condensation mass [kg] for `zone_id`.
+    ///
+    /// Positive = condensation to surfaces (moisture removed from air).
+    /// Negative = frost deposition/sublimation (moisture added to air when
+    /// `w_raw` was below zero and clamped up).
+    #[must_use]
+    pub fn condensation_mass_kg(&self, zone_id: ZoneId) -> f64 {
+        debug_assert!(
+            self.condensation_kg.contains_key(&zone_id),
+            "condensation_mass_kg: ZoneId {} not found — \
+             ensure the solver is re-initialized after zone list changes",
+            zone_id.0,
+        );
+        self.condensation_kg.get(&zone_id).copied().unwrap_or(0.0)
+    }
+
+    /// Return whether condensation occurred for `zone_id` this step.
+    #[must_use]
+    pub fn condensation_occurred(&self, zone_id: ZoneId) -> bool {
+        self.condensation_mass_kg(zone_id).abs() > f64::EPSILON
+    }
 }
 
 impl DomainSolver for HumiditySolver {
@@ -119,6 +147,7 @@ impl DomainSolver for HumiditySolver {
         self.latent_buf.clear();
         self.m_dot_inf_buf.clear();
         self.w_outdoor_buf.clear();
+        self.condensation_kg.clear();
         if let Some(thermal_update) = env.custom_domains.iter().find(|u| u.domain_id == THERMAL) {
             for &(zone_id, t_c) in &thermal_update.zone_temperatures_c {
                 self.zone_temp_buf.insert(zone_id, t_c);
@@ -304,16 +333,39 @@ impl DomainSolver for HumiditySolver {
             };
 
             let w_sat = humidity_ratio_from_tdp(t_zone_c, p_pa);
+            let w_raw = w_new;
             let w_new = w_new.clamp(0.0, w_sat);
             self.humidity_ratios.insert(zone_id, w_new);
+
+            // Condensation / frost deposition mass: moisture removed from (or
+            // added to) the zone air by clamp enforcement. Positive = condensation
+            // (w_raw > w_sat, mass removed); negative = frost sublimation
+            // (w_raw < 0, mass added by clamping up to zero).
+            let condensation_mass_kg = (w_raw - w_new) * rho_air * volume_m3;
+            let condensation_occurred_flag = if condensation_mass_kg.abs() > f64::EPSILON {
+                1.0_f64
+            } else {
+                0.0_f64
+            };
+            self.condensation_kg.insert(zone_id, condensation_mass_kg);
 
             let rh = relative_humidity(t_zone_c, w_new, p_pa);
             let wet_bulb_c = wet_bulb_from_humidity_ratio(t_zone_c, w_new, p_pa);
 
             out.zone_temperatures_c.push((zone_id, t_zone_c));
-            // Humidity custom_payload format: [zone_id, w_new, rh, wet_bulb_c, alpha]
+            // Humidity custom_payload format: [zone_id, w_new, rh, wet_bulb_c, alpha,
+            // condensation_mass_kg, condensation_occurred_flag]
+            // (7 floats per zone).
             // alpha is the semi-implicit infiltration coupling coefficient (0.0 when no infiltration).
-            payload.extend_from_slice(&[f64::from(zone_id.0), w_new, rh, wet_bulb_c, alpha]);
+            payload.extend_from_slice(&[
+                f64::from(zone_id.0),
+                w_new,
+                rh,
+                wet_bulb_c,
+                alpha,
+                condensation_mass_kg,
+                condensation_occurred_flag,
+            ]);
         }
         out.zone_temperatures_c.sort_by_key(|(zone_id, _)| *zone_id);
     }
@@ -503,7 +555,14 @@ mod tests {
         let w_sat =
             hares_physics::psychrometrics::humidity_ratio_from_tdp(20.0, env.weather.pressure_pa());
         assert!(w_hi <= w_sat);
+        // Condensation mass must be positive when w_raw exceeds w_sat.
+        assert!(
+            solver.condensation_mass_kg(ZoneId(1)) > 0.0,
+            "condensation mass must be > 0 when clamped at w_sat"
+        );
 
+        // Reset the solver for the below-zero test.
+        let mut solver = HumiditySolver::new(HumiditySolverConfig::default(), &env);
         let ports_lo = PortSlots {
             thermal: vec![ThermalAccumulator {
                 zone: ZoneId(1),
@@ -516,6 +575,12 @@ mod tests {
         let _ = solver.resolve_new(&ports_lo, &env, Duration::from_secs(60));
         let w_lo = solver.humidity_ratio(ZoneId(1));
         assert!(w_lo >= 0.0);
+        // When w_raw < 0, condensation mass is negative (moisture added to air
+        // by clamping up to zero — frost sublimation).
+        assert!(
+            solver.condensation_mass_kg(ZoneId(1)) < 0.0,
+            "condensation mass must be < 0 when clamped at zero from below"
+        );
     }
 
     /// Regression: latent heat was inconsistent between modules (2450 vs 2501 kJ/kg).
@@ -1706,6 +1771,117 @@ mod tests {
             "moisture mass balance: delta_m={delta_m:.9e} kg, source={source_m:.9e} kg, \
              diff={:.9e} kg",
             (delta_m - source_m).abs()
+        );
+    }
+
+    // ── Condensation mass tracking tests (T-0180) ─────────────────────────
+
+    /// When latent gain drives w_raw above saturation, the solver clamps w_new
+    /// to w_sat and records the condensed mass.
+    #[test]
+    fn condensation_mass_recorded_when_above_saturation() {
+        let env = env_with_zone(20.0, 0.008);
+        let mut solver = HumiditySolver::new(HumiditySolverConfig::default(), &env);
+        let w_sat =
+            hares_physics::psychrometrics::humidity_ratio_from_tdp(20.0, env.weather.pressure_pa());
+
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: ZoneId(1),
+                sensible_gain_w: 0.0,
+                latent_gain_w: 1.0e9, // guarantees w_raw >> w_sat
+                ..ThermalAccumulator::new(ZoneId(1))
+            }],
+            ..Default::default()
+        };
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+
+        let w_new = solver.humidity_ratio(ZoneId(1));
+        assert!(
+            (w_new - w_sat).abs() < f64::EPSILON,
+            "w_new must equal w_sat"
+        );
+
+        let condensation = solver.condensation_mass_kg(ZoneId(1));
+        assert!(condensation > 0.0, "condensation mass must be positive");
+        assert!(
+            solver.condensation_occurred(ZoneId(1)),
+            "condensation flag must be set"
+        );
+    }
+
+    /// When latent gain is negative enough to drive w_raw below zero, the
+    /// solver clamps w_new to 0 and records a negative condensation mass
+    /// (frost sublimation — moisture added to the air).
+    #[test]
+    fn condensation_mass_recorded_when_below_zero() {
+        let env = env_with_zone(20.0, 0.008);
+        let mut solver = HumiditySolver::new(HumiditySolverConfig::default(), &env);
+
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: ZoneId(1),
+                sensible_gain_w: 0.0,
+                latent_gain_w: -1.0e9, // guarantees w_raw << 0
+                ..ThermalAccumulator::new(ZoneId(1))
+            }],
+            ..Default::default()
+        };
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+
+        let w_new = solver.humidity_ratio(ZoneId(1));
+        assert!((w_new - 0.0).abs() < f64::EPSILON, "w_new must equal 0");
+
+        let condensation = solver.condensation_mass_kg(ZoneId(1));
+        assert!(
+            condensation < 0.0,
+            "condensation mass must be negative (frost sublimation)"
+        );
+        assert!(
+            solver.condensation_occurred(ZoneId(1)),
+            "condensation flag must be set"
+        );
+    }
+
+    /// Multi-step simulation with cold surface: each step applies a latent
+    /// gain large enough to drive w_raw above w_sat, then the solver clamps.
+    /// Cumulative condensation mass must be monotonic non-decreasing and
+    /// non-negative across steps.
+    #[test]
+    fn cumulative_condensation_mass_monotonic() {
+        let env = env_with_zone(20.0, 0.008);
+        let mut solver = HumiditySolver::new(
+            HumiditySolverConfig {
+                moisture_buffering_multiplier: 1.0,
+                ..HumiditySolverConfig::default()
+            },
+            &env,
+        );
+
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: ZoneId(1),
+                sensible_gain_w: 0.0,
+                latent_gain_w: 1.0e9,
+                ..ThermalAccumulator::new(ZoneId(1))
+            }],
+            ..Default::default()
+        };
+
+        let mut total_condensation = 0.0_f64;
+        for _step in 0..10 {
+            let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+            let step_condensation = solver.condensation_mass_kg(ZoneId(1));
+            assert!(
+                step_condensation >= 0.0,
+                "per-step condensation must be non-negative"
+            );
+            total_condensation += step_condensation;
+        }
+
+        assert!(
+            total_condensation > 0.0,
+            "cumulative condensation must be positive"
         );
     }
 

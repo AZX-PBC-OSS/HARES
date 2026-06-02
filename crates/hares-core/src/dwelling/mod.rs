@@ -4291,16 +4291,6 @@ impl Dwelling {
             if d_w.abs() < f64::EPSILON {
                 continue;
             }
-            // Skip if the humidity solver clamped w_new (at 0 or w_sat).
-            // Clamping breaks mass conservation by design.
-            if w_new <= 0.0 {
-                continue;
-            }
-            let w_sat =
-                hares_physics::psychrometrics::humidity_ratio_from_tdp(zone.temperature_c, p_pa);
-            if (w_new - w_sat).abs() < f64::EPSILON {
-                continue;
-            }
             // Skip if humidity ratio change exceeds 50% of the zone moisture level.
             // Such large jumps only occur during initialization transients (warm-up)
             // when the initial HPXML humidity ratio is far from the steady-state value
@@ -4320,6 +4310,12 @@ impl Dwelling {
             // do NOT multiply by it again — the old code's delta_m = dW * rho * V * M
             // was the algebraic twin of Q_latent * dt / h_fg and made the check self-referential.
             let actual_delta_kg = d_w * rho_air * zone.volume_m3;
+            // Condensation mass: moisture removed from (or added to) the zone air by
+            // humidity-ratio clamp enforcement. This mass was silently discarded before
+            // T-0180; now it is tracked and included in the moisture inventory so the
+            // invariant check accounts for it as a sink rather than skipping clamped zones.
+            let condensation_kg = self.humidity_solver.condensation_mass_kg(zone.id);
+            let solver_total_kg = actual_delta_kg + condensation_kg;
             // Approximate zone air moisture mass for tolerance scaling.
             let gross_moisture_kg = w_new * rho_air * zone.volume_m3;
 
@@ -4351,31 +4347,36 @@ impl Dwelling {
                 .get(&zone.id)
                 .copied()
                 .unwrap_or(0.0);
-            let w_outdoor = self
-                .invariant_infiltration_w_outdoor
-                .get(&zone.id)
-                .copied()
-                .unwrap_or(0.0);
 
             // Compute independent physical net moisture mass (without buffering multiplier).
             // All equipment moisture effects are tracked through the thermal port's
-            // latent_gain_w, converted to mass via h_fg. Equipment that writes both
-            // thermal.latent_gain_w and humidity.moisture_mass_flow_kg_s (dehumidifiers,
-            // ACs with latent cooling, ideal HVAC) communicates the same physical
-            // quantity through both ports — using only the thermal port avoids
-            // double-counting and cancellation.
+            // latent_gain_w, converted to mass via h_fg.
+            //
+            // For semi-implicit infiltration, the solver's unclamped humidity change is:
+            //   w_raw - w_old = dt * L / (h_fg * rho * V * M * (1 + alpha))
+            // where L = total latent power and alpha = m_dot * dt / (rho * V * M).
+            //
+            // The independent physical mass (air + materials, no buffering) is:
+            //   independent_physical_kg = (w_raw - w_old) * rho * V * M = dt * L / (h_fg * (1 + alpha))
+            //
+            // The expected air moisture change (after buffering) is:
+            //   expected_balance_kg = dt * L / (h_fg * M * (1 + alpha))
+            //
+            // For the explicit case (alpha = 0), this simplifies to:
+            //   independent_physical_kg = dt * L / h_fg
+            //   expected_balance_kg = dt * L / (h_fg * M)
+            let total_latent = independent_latent_w + latent_from_infiltration;
             let independent_physical_kg = if m_dot_inf > 0.0 {
-                // Semi-implicit infiltration: the solver uses w_{n+1} in the infiltration
-                // moisture exchange term. Independently compute the physical mass transfer.
-                let equipment_kg = independent_latent_w * dt_s / h_fg;
-                let infiltration_kg = m_dot_inf * (w_outdoor - w_new) * dt_s;
-                equipment_kg + infiltration_kg
+                // Semi-implicit infiltration: the (1+alpha) denominator from the solver's
+                // implicit coupling. Without it, the explicit approximation diverges from
+                // the solver output — especially when condensation reduces w_new below w_sat
+                // and the explicit m_dot*(w_outdoor - w_new)*dt expression differs from
+                // the solver's implicit w_{n+1} usage.
+                let alpha = m_dot_inf * dt_s / (rho_air * zone.volume_m3 * moisture_mult);
+                total_latent * dt_s / (h_fg * (1.0 + alpha))
             } else {
-                // Explicit (no significant infiltration coupling). The solver adds
-                // the thermal domain's latent payload directly.
-                let equipment_kg = independent_latent_w * dt_s / h_fg;
-                let infiltration_kg = latent_from_infiltration * dt_s / h_fg;
-                equipment_kg + infiltration_kg
+                // Explicit (no significant infiltration coupling).
+                total_latent * dt_s / h_fg
             };
 
             // Expected balanced moisture mass: the independent physical mass with
@@ -4388,7 +4389,7 @@ impl Dwelling {
             checker.check_moisture(
                 independent_physical_kg,
                 expected_balance_kg,
-                actual_delta_kg,
+                solver_total_kg,
                 gross_moisture_kg,
             )?;
 
@@ -4397,24 +4398,33 @@ impl Dwelling {
                 any(debug_assertions, feature = "check_invariants")
             ))]
             {
+                let w_outdoor = self
+                    .invariant_infiltration_w_outdoor
+                    .get(&zone.id)
+                    .copied()
+                    .unwrap_or(0.0);
                 let (sources_kg, sinks_kg) = if m_dot_inf > 0.0 {
-                    // Equipment moisture effect is captured through independent_latent_w / h_fg;
-                    // the humidity port is redundant (not an independent additional contribution).
-                    let src = independent_latent_w * dt_s / h_fg + m_dot_inf * w_outdoor * dt_s;
-                    let snk = m_dot_inf * w_new * dt_s;
+                    // Semi-implicit infiltration: sources include outdoor moisture
+                    // brought in by infiltration; sinks remove indoor moisture carried
+                    // out by exfiltration plus condensation mass.
+                    let src = independent_physical_kg + m_dot_inf * w_outdoor * dt_s;
+                    let snk = m_dot_inf * w_new * dt_s + condensation_kg;
                     (src, snk)
                 } else {
-                    let src = (independent_latent_w + latent_from_infiltration) * dt_s / h_fg;
-                    let snk = 0.0;
+                    // Explicit path: sources are the raw mass from equipment and
+                    // thermal-domain latent; sinks are condensation only.
+                    let src = independent_physical_kg;
+                    let snk = condensation_kg;
                     (src, snk)
                 };
-                let sorption_kg = sources_kg - sinks_kg - actual_delta_kg;
+                let sorption_kg = sources_kg - sinks_kg - solver_total_kg;
                 self.invariant_moisture_capture.push(MoistureZoneInvariant {
                     zone_id: zone.id,
                     expected_sources_kg: sources_kg,
                     expected_sinks_kg: sinks_kg,
                     solver_delta_kg: actual_delta_kg,
                     sorption_residual_kg: sorption_kg,
+                    condensation_kg,
                 });
             }
         }

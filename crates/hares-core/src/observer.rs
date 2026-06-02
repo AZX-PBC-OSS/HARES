@@ -282,4 +282,7 @@ pub struct MoistureZoneInvariant {
     pub solver_delta_kg: f64,
     /// Net material sorption/desorption: expected_sources_kg − expected_sinks_kg − solver_delta_kg [kg].
     pub sorption_residual_kg: f64,
+    /// Mass of moisture removed from (positive) or added to (negative) the zone
+    /// air by humidity-ratio clamp enforcement (condensation / frost deposition) [kg].
+    pub condensation_kg: f64,
 }

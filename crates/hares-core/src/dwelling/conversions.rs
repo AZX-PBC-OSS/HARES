@@ -493,13 +493,15 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
         .equipment_telemetry
         .remove(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
         .unwrap_or_default();
-    for chunk in payload.chunks_exact(5) {
+    for chunk in payload.chunks_exact(7) {
         let zone_raw = chunk[0];
         let humidity_ratio = chunk[1];
         // chunk[2] and chunk[3] are relative_humidity and wet_bulb_c — no longer
         // stored in ZoneState; they are derived from humidity_ratio + temperature_c
         // on every read via zone_relative_humidity / zone_wet_bulb_c.
         let alpha = chunk[4];
+        // chunk[5] = condensation_mass_kg, chunk[6] = condensation_occurred_flag
+        // — consumed by the invariant checker and observer, not needed here.
 
         if !zone_raw.is_finite() || zone_raw < 0.0 || zone_raw > f64::from(u16::MAX) {
             continue;
@@ -1252,7 +1254,9 @@ mod tests {
         let update = hares_types::DomainUpdate {
             domain_id: hares_types::HUMIDITY,
             zone_temperatures_c: vec![(hares_types::ZoneId(zone_id), 22.0)],
-            custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, alpha]),
+            // 7-float per-zone humidity payload: [zone_id, w_new, rh, wet_bulb_c,
+            // alpha, condensation_mass_kg, condensation_occurred_flag]
+            custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, alpha, 0.0, 0.0]),
         };
 
         super::apply_humidity_update_to_zones(&mut env, &update);
@@ -1282,7 +1286,9 @@ mod tests {
         let update = hares_types::DomainUpdate {
             domain_id: hares_types::HUMIDITY,
             zone_temperatures_c: vec![(hares_types::ZoneId(zone_id), 22.0)],
-            custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, 0.0]),
+            // 7-float per-zone humidity payload: [zone_id, w_new, rh, wet_bulb_c,
+            // alpha, condensation_mass_kg, condensation_occurred_flag]
+            custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, 0.0, 0.0, 0.0]),
         };
 
         super::apply_humidity_update_to_zones(&mut env, &update);
@@ -1320,7 +1326,9 @@ mod tests {
         let update = hares_types::DomainUpdate {
             domain_id: hares_types::HUMIDITY,
             zone_temperatures_c: vec![(hares_types::ZoneId(zone_id), 22.0)],
-            custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, alpha]),
+            // 7-float per-zone humidity payload: [zone_id, w_new, rh, wet_bulb_c,
+            // alpha, condensation_mass_kg, condensation_occurred_flag]
+            custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, alpha, 0.0, 0.0]),
         };
 
         super::apply_humidity_update_to_zones(&mut env, &update);

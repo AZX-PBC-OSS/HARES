@@ -679,6 +679,54 @@ mod tests {
         );
     }
 
+    /// Condensation mass is included in the moisture balance: when the solver
+    /// clamps w_new at w_sat, the portion of moisture that condensed is added
+    /// back so that `|expected − (actual + condensation)|` stays within tolerance.
+    #[test]
+    fn moisture_balance_passes_with_condensation_sink() {
+        let h_fg = 2_501_000.0;
+        let dt_s = 600.0;
+        let moisture_mult: f64 = 15.0;
+        let gross_kg = 2.33;
+        // 300 W latent drives w_raw above w_sat, then condensation removes
+        // ~0.0048 kg from the air. The solver sees only the post-clamp dW.
+        let q_latent = 300.0;
+        let physical_source = q_latent * dt_s / h_fg; // ~0.072 kg
+        let expected_balance = physical_source / moisture_mult; // ~0.0048 kg
+        // Simulate condensation removing 0.002 kg (air moisture change smaller
+        // than expected because clamp truncated the peak).
+        let condensation_kg = 0.002;
+        let actual_delta = expected_balance - condensation_kg; // 0.0028 kg
+        let adjusted_actual = actual_delta + condensation_kg; // 0.0048 kg = expected
+        let result =
+            checker().check_moisture(physical_source, expected_balance, adjusted_actual, gross_kg);
+        assert!(
+            result.is_ok(),
+            "balance with condensation sink must pass; got {result:?}"
+        );
+    }
+
+    /// Without accounting for condensation mass, a clamped step that would
+    /// otherwise balance fails the invariant — this is the bug T-0180 fixes.
+    #[test]
+    fn moisture_balance_fails_when_condensation_not_accounted() {
+        let h_fg = 2_501_000.0;
+        let dt_s = 600.0;
+        let moisture_mult: f64 = 15.0;
+        let gross_kg = 2.33;
+        let q_latent = 300.0;
+        let physical_source = q_latent * dt_s / h_fg;
+        let expected_balance = physical_source / moisture_mult;
+        let condensation_kg = 0.002;
+        let actual_delta = expected_balance - condensation_kg;
+        // Passing actual_delta without adding condensation back — the old (buggy) call.
+        // Residual = |expected − actual| = |0.0048 − 0.0028| = 0.002 kg
+        // > max(5e-4, 1e-4*2.33=2.33e-4) = 5e-4 → must fail.
+        let result =
+            checker().check_moisture(physical_source, expected_balance, actual_delta, gross_kg);
+        assert!(result.is_err(), "condensation-unaware check must fail");
+    }
+
     // ── temperature bounds ────────────────────────────────────────────────────
 
     #[test]
