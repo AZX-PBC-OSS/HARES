@@ -1356,8 +1356,6 @@ impl Dwelling {
         )
         .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
 
-        let occupancy_column_idx = environment.occupancy_column_idx();
-
         let mut warnings = Vec::new();
         let defaults_dir = config
             .defaults_path
@@ -1471,6 +1469,11 @@ impl Dwelling {
             Some(&resolved_defaults_dir),
         );
 
+        // occupancy_column_idx must be resolved AFTER inject_schedule_into_specs,
+        // which may generate an occupancy column from HPXML extension fractions or
+        // the default schedule profile when the schedule CSV lacks one.
+        let occupancy_column_idx = environment.occupancy_column_idx();
+
         // Gated invariant: ensure every HVAC spec has a setpoint source.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
@@ -1501,21 +1504,38 @@ impl Dwelling {
             None => 1.0,
         };
 
-        // Construction-time validation: if an Occupancy spec was configured but
-        // the schedule has no occupancy column, the dwelling cannot compute
-        // occupant heat gains and must error loudly per `feedback_no_silent_defaults`.
-        // HPXML Schedule CSV files, ASHRAE HoF 2021 Ch.18 §18.4 — occupant heat gain is a
-        // primary driver of cooling load; silently zeroing it produces a systematic
-        // underestimate.
+        // Invariant: if an Occupancy spec was configured the schedule MUST have an
+        // occupancy column. `inject_schedule_into_specs` is responsible for generating
+        // the column from HPXML extension fractions or the default profile when the
+        // schedule CSV lacks one. Absence of both a column AND schedule fractions on the
+        // spec is a data integrity error — either the defaults CSV is missing or the
+        // Occupancy spec was created without any schedule data source.
+        //
+        // An absent Occupancy spec is valid (e.g. BESTEST unconditioned structures).
+        // ASHRAE HoF 2021 Ch.18 §18.4 — occupant heat gain is a primary driver of
+        // cooling load; silently zeroing it produces a systematic underestimate.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         if has_occupancy_spec && occupancy_column_idx.is_none() {
-            return Err(HaresError::Dwelling(
-                "Occupancy spec configured but no occupancy column found in schedule. \
-                 An occupancy schedule column (e.g. 'Occupancy (Persons)') is required \
-                 when an Occupancy equipment spec with number_of_occupants is present. \
-                 If this dwelling intentionally has no occupants, remove the Occupancy \
-                 spec from the equipment configuration."
-                    .into(),
-            ));
+            let has_hpxml_fractions = equipment_specs
+                .iter()
+                .find(|s| s.name == "Occupancy")
+                .map(|s| {
+                    s.parameters.contains_key("weekday_schedule_fractions")
+                        || s.parameters.contains_key("weekend_schedule_fractions")
+                })
+                .unwrap_or(false);
+            let detail = if has_hpxml_fractions {
+                "Occupancy spec has HPXML extension schedule fractions but the \
+                 occupancy column was not generated in the schedule timeseries. \
+                 This is a bug in schedule_resolve::inject_occupancy_schedule — \
+                 the HPXML profile should have been converted to a schedule column."
+            } else {
+                "Occupancy spec configured but no occupancy column found in schedule \
+                 AND no HPXML schedule fractions available on the spec. The default \
+                 Occupancy profile from Default Schedule Parameters.csv may be missing \
+                 or unreadable."
+            };
+            return Err(HaresError::Dwelling(detail.into()));
         }
 
         // Build zone-to-role map for equipment auto-routing.
@@ -8143,16 +8163,15 @@ occupancy = 1.0
         );
     }
 
-    /// Verify that construction-time validation rejects a dwelling with an
-    /// Occupancy equipment spec but no occupancy schedule column.
+    /// Verify that construct-time validation REJECTS a dwelling where the
+    /// Occupancy spec is present but NO occupancy schedule data source exists
+    /// (no CSV column, no HPXML extension fractions, and no default profile).
     ///
-    /// The guard at `from_preparsed` lines 1073–1082 must return
-    /// `Err(HaresError::Dwelling(...))` because the dwelling cannot compute
-    /// occupant heat gains from a missing schedule domain. Without this test,
-    /// deleting the guard would pass the entire test suite — the primary new
-    /// behaviour introduced by T-0090 would be unverified.
+    /// This guards against a data integrity error: `inject_schedule_into_specs`
+    /// should always generate the occupancy column when any data source is
+    /// available, so this error path only triggers when all sources are missing.
     #[test]
-    fn occupied_dwelling_missing_occupancy_schedule_errors_at_construction() {
+    fn occupied_dwelling_no_occupancy_data_source_errors_at_construction() {
         use hares_io::hpxml::building::XmlNode;
         use std::collections::HashMap;
 
@@ -8213,11 +8232,15 @@ occupancy = 1.0
         };
         validate_sim_config(&sim_config).expect("valid sim config");
 
+        // Point defaults_path to a non-existent directory so the default
+        // Occupancy profile is NOT available, and the Occupancy spec has
+        // no HPXML extension fractions (only NumberofResidents).
+        let empty_defaults = tempfile::tempdir().expect("create empty temp dir");
         let dwelling_config = DwellingConfig {
             hpxml_path: base_path.clone(),
             schedule_path: base_path.clone(),
             weather_path: base_path.clone(),
-            defaults_path: None,
+            defaults_path: Some(empty_defaults.path().to_path_buf()),
             sim_config,
             overrides: config.overrides.clone(),
             bldg_id: config.building_id.unwrap_or(0),
@@ -8232,7 +8255,7 @@ occupancy = 1.0
         match Dwelling::from_preparsed(dwelling_config, building, weather, schedule) {
             Err(HaresError::Dwelling(msg)) => {
                 assert!(
-                    msg.contains("Occupancy spec configured but no occupancy column"),
+                    msg.contains("no occupancy column found in schedule"),
                     "error must identify the missing occupancy schedule column; got: {msg}"
                 );
             }
