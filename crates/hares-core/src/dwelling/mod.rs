@@ -9160,14 +9160,9 @@ master_seed = 0
                 Ok(())
             }
             fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
-                Err(HaresError::Equipment(
-                    "serialization failed".to_string(),
-                ))
+                Err(HaresError::Equipment("serialization failed".to_string()))
             }
-            fn load_state(
-                &mut self,
-                _: &[u8],
-            ) -> std::result::Result<(), HaresError> {
+            fn load_state(&mut self, _: &[u8]) -> std::result::Result<(), HaresError> {
                 Ok(())
             }
         }

@@ -65,11 +65,11 @@ const PEREZ_KAPPA: f64 = 1.041;
 
 /// Spencer (1971) EOT constant term. Corrected from original paper's
 /// misprint of 0.000075; pvlib-python documents the correct value as 0.0000075.
-const EOT_C0: f64 = 0.000_007_5;
-const EOT_C1: f64 = 0.001_868;
-const EOT_C2: f64 = -0.032_077;
-const EOT_C3: f64 = -0.014_615;
-const EOT_C4: f64 = -0.040_849;
+pub const EOT_C0: f64 = 0.000_007_5;
+pub const EOT_C1: f64 = 0.001_868;
+pub const EOT_C2: f64 = -0.032_077;
+pub const EOT_C3: f64 = -0.014_615;
+pub const EOT_C4: f64 = -0.040_849;
 
 const DAYS_PER_YEAR: f64 = 365.0;
 const MINUTES_PER_HOUR: f64 = 60.0;
@@ -181,21 +181,39 @@ pub fn extraterrestrial_normal_irradiance(day_of_year: u32) -> f64 {
     extraterrestrial_irradiance(day_of_year)
 }
 
+/// Compute ASHRAE 2013/2017 air mass exponents from beam and diffuse optical depths.
+///
+/// The exponents `ab` (beam) and `ad` (diffuse) are not fixed constants;
+/// they are derived from the optical depths via empirical formulas calibrated
+/// to the revised Tau model.
+///
+/// # References
+/// - ASHRAE HoF 2013 Ch.14 Eq.19-20 (p.14.9).
+/// - EnergyPlus WeatherManager.cc:4092-4093 (ASHRAE_Tau2017 model).
+fn ashrae_tau_exponents(tau_b: f64, tau_d: f64) -> (f64, f64) {
+    // ASHRAE HoF 2013 Ch.14 Eq.19: beam air mass exponent.
+    let ab = 1.454 - 0.406 * tau_b - 0.268 * tau_d + 0.021 * tau_b * tau_d;
+    // ASHRAE HoF 2013 Ch.14 Eq.20: diffuse air mass exponent.
+    let ad = 0.507 + 0.205 * tau_b - 0.080 * tau_d - 0.190 * tau_b * tau_d;
+    (ab, ad)
+}
+
 /// Clear-sky beam normal and diffuse horizontal irradiance at design conditions.
 ///
 /// Uses the ASHRAE HoF 2013 clear-sky model with optical depths appropriate
 /// for mid-latitude summer (July 21). Returns (dni_w_m2, dhi_w_m2, ghi_w_m2).
+/// Air mass exponents are derived from optical depths per ASHRAE HoF 2013
+/// Ch.14 Eq.19-20.
 ///
 /// # References
+/// - ASHRAE HoF 2013 Ch.14 Eq.19-20: air mass exponent formulas.
 /// - ASHRAE HoF 2013 Ch.33 Table 9.8: τ_b ≈ 0.556, τ_d ≈ 2.0 for July.
 /// - ASHRAE HoF 2021 Ch.14: clear-sky atmospheric transmittance for design-day
 ///   solar irradiance per ACCA Manual J.
 #[must_use]
 pub fn clear_sky_irradiance(day_of_year: u32, solar_altitude_deg: f64) -> (f64, f64, f64) {
     const BEAM_OPTICAL_DEPTH: f64 = 0.556;
-    const BEAM_EXPONENT: f64 = 0.9;
     const DIFFUSE_OPTICAL_DEPTH: f64 = 2.0;
-    const DIFFUSE_EXPONENT: f64 = 0.7;
 
     if solar_altitude_deg <= 0.0 {
         return (0.0, 0.0, 0.0);
@@ -205,13 +223,60 @@ pub fn clear_sky_irradiance(day_of_year: u32, solar_altitude_deg: f64) -> (f64, 
     let etr = extraterrestrial_irradiance(day_of_year);
     let am = relative_airmass(zenith_deg);
 
+    // ASHRAE HoF 2013 Ch.14 Eq.19-20: air mass exponents derived from optical depths.
+    let (ab, ad) = ashrae_tau_exponents(BEAM_OPTICAL_DEPTH, DIFFUSE_OPTICAL_DEPTH);
+
     // ASHRAE 2013 clear-sky beam normal irradiance:
     // E_bn = E_ext × exp(-τ_b × m^ab)
-    let dni = etr * (-BEAM_OPTICAL_DEPTH * am.powf(BEAM_EXPONENT)).exp();
+    let dni = etr * (-BEAM_OPTICAL_DEPTH * am.powf(ab)).exp();
 
     // ASHRAE 2013 clear-sky diffuse horizontal irradiance:
     // E_dh = E_ext × exp(-τ_d × m^ad)
-    let dhi = etr * (-DIFFUSE_OPTICAL_DEPTH * am.powf(DIFFUSE_EXPONENT)).exp();
+    let dhi = etr * (-DIFFUSE_OPTICAL_DEPTH * am.powf(ad)).exp();
+
+    // Global horizontal = beam normal × cos(zenith) + diffuse horizontal
+    let ghi = dni * zenith_deg.to_radians().cos() + dhi;
+
+    (dni, dhi.max(0.0), ghi.max(0.0))
+}
+
+/// Clear-sky irradiance with caller-supplied optical depths.
+///
+/// Same ASHRAE 2013 model as [`clear_sky_irradiance`], but with configurable
+/// atmospheric turbidity parameters. Used by synthetic weather when the TOML
+/// config overrides the default mid-latitude summer constants.
+///
+/// Air mass exponents are derived from optical depths per the ASHRAE 2013/2017
+/// empirical formulas (ASHRAE HoF 2013 Ch.14 Eq.19-20).
+///
+/// # References
+/// - ASHRAE HoF 2013 Ch.14 Eq.19-20: exponent formulas.
+/// - ASHRAE HoF 2013 Ch.33 Table 9.8: default τ_b ≈ 0.556, τ_d ≈ 2.0.
+#[must_use]
+pub fn clear_sky_irradiance_params(
+    day_of_year: u32,
+    solar_altitude_deg: f64,
+    beam_optical_depth: f64,
+    diffuse_optical_depth: f64,
+) -> (f64, f64, f64) {
+    if solar_altitude_deg <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let zenith_deg = 90.0 - solar_altitude_deg;
+    let etr = extraterrestrial_irradiance(day_of_year);
+    let am = relative_airmass(zenith_deg);
+
+    // ASHRAE HoF 2013 Ch.14 Eq.19-20: air mass exponents derived from optical depths.
+    let (ab, ad) = ashrae_tau_exponents(beam_optical_depth, diffuse_optical_depth);
+
+    // ASHRAE 2013 clear-sky beam normal irradiance:
+    // E_bn = E_ext × exp(-τ_b × m^ab)
+    let dni = etr * (-beam_optical_depth * am.powf(ab)).exp();
+
+    // ASHRAE 2013 clear-sky diffuse horizontal irradiance:
+    // E_dh = E_ext × exp(-τ_d × m^ad)
+    let dhi = etr * (-diffuse_optical_depth * am.powf(ad)).exp();
 
     // Global horizontal = beam normal × cos(zenith) + diffuse horizontal
     let ghi = dni * zenith_deg.to_radians().cos() + dhi;
@@ -2657,6 +2722,56 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // ASHRAE Tau model air mass exponent regression tests (T-0188 fix)
+    // -----------------------------------------------------------------------
+
+    /// ASHRAE HoF 2013 Ch.14 Eq.19-20: for default optical depths
+    /// τ_b = 0.556, τ_d = 2.0, the computed exponents should match
+    /// the values confirmed against EnergyPlus WeatherManager.cc:4092-4093.
+    #[test]
+    fn ashrae_tau_exponents_default_optical_depths() {
+        const TAU_B: f64 = 0.556;
+        const TAU_D: f64 = 2.0;
+
+        let (ab, ad) = ashrae_tau_exponents(TAU_B, TAU_D);
+
+        // EnergyPlus ASHRAE_Tau2017 coefficients:
+        // AB = 1.454 - 0.406·0.556 - 0.268·2.0 + 0.021·0.556·2.0 ≈ 0.716
+        // AD = 0.507 + 0.205·0.556 - 0.080·2.0 - 0.190·0.556·2.0 ≈ 0.250
+        let ab_expected = 0.715_616;
+        let ad_expected = 0.249_700;
+
+        assert!(
+            (ab - ab_expected).abs() < 1e-6,
+            "ab {ab} ≠ {ab_expected} for τ_b={TAU_B} τ_d={TAU_D}"
+        );
+        assert!(
+            (ad - ad_expected).abs() < 1e-6,
+            "ad {ad} ≠ {ad_expected} for τ_b={TAU_B} τ_d={TAU_D}"
+        );
+    }
+
+    /// Exponents vary monotonically with optical depths — sanity check.
+    #[test]
+    fn ashrae_tau_exponents_vary_with_optical_depths() {
+        // Higher beam optical depth → lower beam exponent (steeper attenuation).
+        let (ab1, _) = ashrae_tau_exponents(0.3, 2.0);
+        let (ab2, _) = ashrae_tau_exponents(0.8, 2.0);
+        assert!(
+            ab1 > ab2,
+            "ab should decrease as τ_b increases (ab(0.3)={ab1:.6}, ab(0.8)={ab2:.6})"
+        );
+
+        // Higher diffuse optical depth → lower diffuse exponent.
+        let (_, ad1) = ashrae_tau_exponents(0.556, 1.0);
+        let (_, ad2) = ashrae_tau_exponents(0.556, 3.0);
+        assert!(
+            ad1 > ad2,
+            "ad should decrease as τ_d increases (ad(1.0)={ad1:.6}, ad(3.0)={ad2:.6})"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Clear-sky irradiance for design-day autosizing (T-0119)
     // -----------------------------------------------------------------------
 
@@ -2698,5 +2813,35 @@ mod tests {
         assert_eq!(dni, 0.0);
         assert_eq!(dhi, 0.0);
         assert_eq!(ghi, 0.0);
+    }
+
+    /// At 10° solar altitude the air mass exponent correction matters — the old
+    /// hardcoded 0.9/0.7 would underestimate GHI by ~81%. This regression test
+    /// locks in the corrected exponent computation.
+    #[test]
+    fn clear_sky_low_altitude_correct_exponents() {
+        // July 21 (ordinal 202), solar altitude 10° → zenith 80°, am ≈ 5.76.
+        // Correct exponents: ab ≈ 0.716, ad ≈ 0.250 (from ashrae_tau_exponents).
+        // GHI should be in the range 50–180 W/m² for clean mid-latitude summer
+        // atmosphere. The old exponents (0.9/0.7) produce GHI ≈ 19 W/m²,
+        // which is well below this range.
+        let (dni, dhi, ghi) = clear_sky_irradiance(202, 10.0);
+        assert!(
+            ghi > 50.0,
+            "GHI at 10° altitude ({ghi:.1} W/m²) should exceed 50 W/m²; \
+             old exponents (0.9/0.7) would produce ~19 W/m²"
+        );
+        assert!(
+            ghi < 180.0,
+            "GHI at 10° altitude ({ghi:.1} W/m²) should be below 180 W/m²"
+        );
+        assert!(
+            dni > 0.0,
+            "DNI at 10° altitude ({dni:.1} W/m²) should be non-zero"
+        );
+        assert!(
+            dhi > 0.0,
+            "DHI at 10° altitude ({dhi:.1} W/m²) should be non-zero"
+        );
     }
 }

@@ -5,6 +5,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
+use hares_physics::solar::{EOT_C0, EOT_C1, EOT_C2, EOT_C3, EOT_C4};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -106,6 +107,22 @@ pub(crate) struct SyntheticWeatherConfig {
     /// Cite: Kusuda, T. and Achenbach, P.R. (1965), ASHRAE Trans. 71(1):61-74.
     #[serde(default)]
     pub(crate) ground_temp_c: Option<f64>,
+    /// Whether to compute clear-sky solar irradiance (default: true).
+    /// When disabled, GHI/DNI/DHI are all zero (the pre-T-0188 behaviour).
+    #[serde(default = "default_clear_sky_solar")]
+    pub(crate) clear_sky_solar: bool,
+    /// ASHRAE 2013 beam optical depth override. `None` uses the default
+    /// mid-latitude summer value (τ_b = 0.556 per HoF 2013 Ch.33 Table 9.8).
+    #[serde(default)]
+    pub(crate) beam_optical_depth: Option<f64>,
+    /// ASHRAE 2013 diffuse optical depth override. `None` uses the default
+    /// mid-latitude summer value (τ_d = 2.0 per HoF 2013 Ch.33 Table 9.8).
+    #[serde(default)]
+    pub(crate) diffuse_optical_depth: Option<f64>,
+}
+
+fn default_clear_sky_solar() -> bool {
+    true
 }
 
 impl Default for SyntheticWeatherConfig {
@@ -117,6 +134,9 @@ impl Default for SyntheticWeatherConfig {
             pressure_kpa: default_pressure_kpa(),
             epw_path: None,
             ground_temp_c: None,
+            clear_sky_solar: true,
+            beam_optical_depth: None,
+            diffuse_optical_depth: None,
         }
     }
 }
@@ -792,6 +812,72 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
     }
 }
 
+/// Spencer (1971) solar altitude for hourly synthetic weather.
+///
+/// Computes solar altitude [degrees] from latitude, longitude, and the
+/// hour-of-year index (0..8759). Uses the same Spencer Fourier-series
+/// declination/EOT model as `hares_physics::solar::solar_position`, but
+/// operates on hour index directly so no DateTime construction is needed.
+///
+/// # References
+/// - Spencer, J.W. (1971), Search 2(5):172.
+/// - ASHRAE HoF 2021 Ch.14 Eq.6: sin(α) = sin(φ)·sin(δ) + cos(φ)·cos(δ)·cos(ω).
+fn solar_altitude_spencer(latitude_deg: f64, longitude_deg: f64, hour: u32) -> f64 {
+    use std::f64::consts::PI;
+
+    const MINUTES_PER_HOUR_F64: f64 = 60.0;
+    const MINUTES_PER_DAY_F64: f64 = 1440.0;
+    const SOLAR_NOON_MINUTES_F64: f64 = 720.0;
+    const EOT_SCALE: f64 = 229.18;
+    const DEGREES_HALF_CIRCLE: f64 = 180.0;
+    const DEGREES_FULL_CIRCLE: f64 = 360.0;
+    const MINUTES_PER_DEGREE_LONGITUDE: f64 = 4.0;
+    const DEGREES_PER_MINUTE_SOLAR: f64 = 0.25;
+    const DAYS_PER_YEAR: f64 = 365.0;
+
+    // Spencer (1971) EOT constants from hares_physics::solar.
+    // Corrected from misprint noted in pvlib-python (0.000075 → 0.0000075).
+
+    let day = f64::from(hour / 24) + 1.0;
+    let minutes_utc = f64::from(hour % 24) * MINUTES_PER_HOUR_F64;
+
+    let gamma = 2.0 * PI / DAYS_PER_YEAR
+        * (day - 1.0 + (minutes_utc - SOLAR_NOON_MINUTES_F64) / MINUTES_PER_DAY_F64);
+
+    // Spencer (1971) Fourier series for declination.
+    let decl_rad = 0.006_918 - 0.399_912 * gamma.cos() + 0.070_257 * gamma.sin()
+        - 0.006_758 * (2.0 * gamma).cos()
+        + 0.000_907 * (2.0 * gamma).sin()
+        - 0.002_697 * (3.0 * gamma).cos()
+        + 0.001_48 * (3.0 * gamma).sin();
+
+    // Spencer (1971) equation of time [minutes].
+    let eq_time_min = EOT_SCALE
+        * (EOT_C0
+            + EOT_C1 * gamma.cos()
+            + EOT_C2 * gamma.sin()
+            + EOT_C3 * (2.0 * gamma).cos()
+            + EOT_C4 * (2.0 * gamma).sin());
+
+    let true_solar_time_min =
+        minutes_utc + eq_time_min + MINUTES_PER_DEGREE_LONGITUDE * longitude_deg;
+    let mut hour_angle_deg = true_solar_time_min * DEGREES_PER_MINUTE_SOLAR - DEGREES_HALF_CIRCLE;
+    if hour_angle_deg < -DEGREES_HALF_CIRCLE {
+        hour_angle_deg += DEGREES_FULL_CIRCLE;
+    } else if hour_angle_deg > DEGREES_HALF_CIRCLE {
+        hour_angle_deg -= DEGREES_FULL_CIRCLE;
+    }
+
+    let lat_rad = latitude_deg.to_radians();
+    let hour_angle_rad = hour_angle_deg.to_radians();
+
+    let cos_zenith = (lat_rad.sin() * decl_rad.sin()
+        + lat_rad.cos() * decl_rad.cos() * hour_angle_rad.cos())
+    .clamp(-1.0, 1.0);
+    let zenith_rad = cos_zenith.acos();
+    90.0 - zenith_rad.to_degrees()
+}
+
 pub(crate) fn build_synthetic_weather(
     config: &SyntheticTomlConfig,
     toml_path: &Path,
@@ -871,6 +957,103 @@ pub(crate) fn build_synthetic_weather(
     let temporal_mean_c = outdoor_temp_c;
     let ground_temp_c = config.weather.ground_temp_c.unwrap_or(temporal_mean_c);
 
+    // Clear-sky solar irradiance via the ASHRAE 2013 model.
+    //
+    // When clear_sky_solar is enabled (default) and no EPW path is provided,
+    // compute GHI, DNI, and DHI for all 8760 hours using the Spencer (1971)
+    // solar geometry and the ASHRAE HoF 2013 clear-sky model.
+    // Cite: Spencer, J.W. (1971), Search 2(5):172.
+    // Cite: ASHRAE HoF 2013 Ch.33 Table 9.8.
+    let (ghi_w_m2, dni_w_m2, dhi_w_m2) = if config.weather.clear_sky_solar {
+        let latitude_deg = meta.latitude;
+        let longitude_deg = meta.longitude;
+        let beam_tau = config.weather.beam_optical_depth.unwrap_or(0.556); // ASHRAE HoF 2013 Ch.33 Table 9.8
+        let diffuse_tau = config.weather.diffuse_optical_depth.unwrap_or(2.0); // ASHRAE HoF 2013 Ch.33 Table 9.8
+
+        let mut ghi = Vec::with_capacity(n);
+        let mut dni = Vec::with_capacity(n);
+        let mut dhi = Vec::with_capacity(n);
+
+        for hour in 0..n {
+            let day_of_year = (hour / 24) as u32 + 1;
+            let altitude_deg = solar_altitude_spencer(latitude_deg, longitude_deg, hour as u32);
+            let (dni_val, dhi_val, ghi_val) = hares_physics::solar::clear_sky_irradiance_params(
+                day_of_year,
+                altitude_deg,
+                beam_tau,
+                diffuse_tau,
+            );
+            ghi.push(ghi_val);
+            dni.push(dni_val);
+            dhi.push(dhi_val);
+        }
+
+        (ghi, dni, dhi)
+    } else {
+        (vec![0.0; n], vec![0.0; n], vec![0.0; n])
+    };
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // Invariant: if GHI[t] > 0, then DNI[t] ≥ 0, DHI[t] ≥ 0, and
+        // GHI ≈ DNI × cos(zenith) + DHI within tolerance.
+        for hour in 0..n {
+            if ghi_w_m2[hour] > 0.0 {
+                let altitude_deg =
+                    solar_altitude_spencer(meta.latitude, meta.longitude, hour as u32);
+                let zenith_deg = 90.0 - altitude_deg;
+                let ghi_check = dni_w_m2[hour] * zenith_deg.to_radians().cos() + dhi_w_m2[hour];
+                assert!(
+                    dni_w_m2[hour] >= 0.0,
+                    "step {hour}: DNI ({}) is negative while GHI > 0",
+                    dni_w_m2[hour]
+                );
+                assert!(
+                    dhi_w_m2[hour] >= 0.0,
+                    "step {hour}: DHI ({}) is negative while GHI > 0",
+                    dhi_w_m2[hour]
+                );
+                assert!(
+                    (ghi_w_m2[hour] - ghi_check).abs() < 1e-6,
+                    "step {hour}: GHI ({}) ≠ DNI·cos(zenith) + DHI ({})",
+                    ghi_w_m2[hour],
+                    ghi_check,
+                );
+            }
+        }
+        // Warn if all 8760 GHI values are zero: the clear-sky model was not integrated.
+        let all_zero = ghi_w_m2.iter().all(|&v| v < f64::EPSILON);
+        assert!(
+            !all_zero || !config.weather.clear_sky_solar,
+            "all 8760 GHI values are zero — clear-sky solar model not integrated"
+        );
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        let mut daily_ghi_sum = 0.0_f64;
+        let mut daily_count = 0_u32;
+        let mut peak_dni = 0.0_f64;
+        let mut ghi_daily_means: Vec<f64> = Vec::with_capacity(365);
+        for hour in 0..n {
+            daily_ghi_sum += ghi_w_m2[hour];
+            daily_count += 1;
+            peak_dni = peak_dni.max(dni_w_m2[hour]);
+            if daily_count == 24 {
+                ghi_daily_means.push(daily_ghi_sum / 24.0);
+                daily_ghi_sum = 0.0;
+                daily_count = 0;
+            }
+        }
+        let ghi_mean_daily = ghi_daily_means.iter().sum::<f64>() / ghi_daily_means.len() as f64;
+        tracing::info!(
+            weather.solar.ghi_mean_daily = ghi_mean_daily,
+            weather.solar.peak_dni = peak_dni,
+            n_hours = n,
+            "synthetic clear-sky solar telemetry"
+        );
+    }
+
     Ok(WeatherTimeSeries {
         meta,
         design_conditions: None,
@@ -878,9 +1061,9 @@ pub(crate) fn build_synthetic_weather(
         dew_point_c: vec![dew_point_c; n],
         rel_humidity_pct: vec![config.weather.rel_humidity_pct; n],
         pressure_kpa: vec![config.weather.pressure_kpa; n],
-        ghi_w_m2: vec![0.0; n],
-        dni_w_m2: vec![0.0; n],
-        dhi_w_m2: vec![0.0; n],
+        ghi_w_m2,
+        dni_w_m2,
+        dhi_w_m2,
         wind_speed_m_s: vec![0.0; n],
         wind_dir_deg: vec![0.0; n],
         opaque_sky_cover: vec![0.0; n],
@@ -950,6 +1133,360 @@ pub(crate) fn hot_path_alloc_counter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // T-0188: Clear-sky solar irradiance in synthetic weather
+    // -------------------------------------------------------------------------
+
+    /// Verify that build_synthetic_weather with default config produces GHI > 0
+    /// during daylight hours at a mid-latitude location (Denver 39.76° N) in July.
+    #[test]
+    fn synthetic_weather_produces_non_zero_ghi() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        // July 21 is day_of_year 202 (31+28+31+30+31+30+21).
+        // Hours (202-1)*24 = 4824 through 4824+23 represent July 21.
+        // Denver at -104.86° longitude: solar noon UTC ≈ hour 19 of each day,
+        // so peak DNI should be around hour 4824 + 19 = 4843.
+        let july_21_start = (202 - 1) * 24;
+        let mut peak_ghi = 0.0_f64;
+        let mut peak_hour = 0;
+        for hour in july_21_start..july_21_start + 24 {
+            if weather.ghi_w_m2[hour] > peak_ghi {
+                peak_ghi = weather.ghi_w_m2[hour];
+                peak_hour = hour;
+            }
+        }
+        let hour_of_day = peak_hour % 24;
+        assert!(
+            peak_ghi > 500.0,
+            "peak GHI {peak_ghi} at hour_of_day {hour_of_day} (Denver lat 39.76° N on Jul 21) should exceed 500 W/m²"
+        );
+        // Solar noon UTC at Denver longitude (-104.86°) should be near hour 19
+        assert!(
+            (17..=21).contains(&hour_of_day),
+            "peak hour_of_day {hour_of_day} should be near 19 UTC for Denver longitude"
+        );
+    }
+
+    /// Verify that GHI values from build_synthetic_weather match calling
+    /// clear_sky_irradiance directly with the same inputs.
+    #[test]
+    fn synthetic_clear_sky_ghi_matches_solar_model() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        let latitude = weather.meta.latitude;
+        let longitude = weather.meta.longitude;
+
+        // Check four hours spread across the year: noon of day 1, day 2, day 180,
+        // and day 364 (all within the 8760-hour series).
+        for hour in [12, 24 + 12, 179 * 24 + 12, 363 * 24 + 12] {
+            let day_of_year = (hour / 24) as u32 + 1;
+            let altitude_deg = solar_altitude_spencer(latitude, longitude, hour as u32);
+            let (dni_expected, dhi_expected, ghi_expected) =
+                hares_physics::solar::clear_sky_irradiance(day_of_year, altitude_deg);
+            let ghi_actual = weather.ghi_w_m2[hour];
+            let dni_actual = weather.dni_w_m2[hour];
+            let dhi_actual = weather.dhi_w_m2[hour];
+            assert!(
+                (ghi_actual - ghi_expected).abs() < 1e-9,
+                "hour {hour} (doy {day_of_year}, alt {altitude_deg:.2}°): \
+                 ghi={ghi_actual} expected {ghi_expected}"
+            );
+            assert!(
+                (dni_actual - dni_expected).abs() < 1e-9,
+                "hour {hour}: dni={dni_actual} expected {dni_expected}"
+            );
+            assert!(
+                (dhi_actual - dhi_expected).abs() < 1e-9,
+                "hour {hour}: dhi={dhi_actual} expected {dhi_expected}"
+            );
+        }
+    }
+
+    /// Verify GHI = 0 during nighttime hours (hours where solar altitude ≤ 0).
+    #[test]
+    fn synthetic_solar_is_zero_at_night() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        let latitude = weather.meta.latitude;
+        let longitude = weather.meta.longitude;
+
+        for hour in 0..8760 {
+            let altitude_deg = solar_altitude_spencer(latitude, longitude, hour as u32);
+            if altitude_deg <= 0.0 {
+                assert!(
+                    weather.ghi_w_m2[hour] < 0.01,
+                    "hour {hour}: GHI={} should be zero when solar altitude={altitude_deg:.2}° ≤ 0",
+                    weather.ghi_w_m2[hour]
+                );
+                assert!(
+                    weather.dni_w_m2[hour] < 0.01,
+                    "hour {hour}: DNI={} should be zero at night",
+                    weather.dni_w_m2[hour]
+                );
+                assert!(
+                    weather.dhi_w_m2[hour] < 0.01,
+                    "hour {hour}: DHI={} should be zero at night",
+                    weather.dhi_w_m2[hour]
+                );
+            }
+        }
+    }
+
+    /// Verify morning/afternoon symmetry of clear-sky irradiance about solar noon.
+    #[test]
+    fn synthetic_solar_symmetric_about_solar_noon() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-06-21T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        let latitude = weather.meta.latitude;
+        let longitude = weather.meta.longitude;
+
+        // Find the hour nearest to solar noon (when solar altitude peaks).
+        let mut max_alt = -1.0_f64;
+        let mut max_alt_hour = 0;
+        for hour in 0..24 {
+            let alt = solar_altitude_spencer(latitude, longitude, hour as u32);
+            if alt > max_alt {
+                max_alt = alt;
+                max_alt_hour = hour as i32;
+            }
+        }
+        // Check symmetry around solar noon for as many offset pairs as
+        // fall within the 24-hour window. The EOT varies over the day,
+        // so solar altitude is not perfectly symmetric about the UTC hour
+        // with peak altitude — a 15 W/m² tolerance on GHI accommodates this.
+        for offset in 1..=6 {
+            let before = max_alt_hour - offset;
+            let after = max_alt_hour + offset;
+            if before < 0 || after > 23 {
+                continue;
+            }
+            let before_idx = before as usize;
+            let after_idx = after as usize;
+            let ghi_diff = (weather.ghi_w_m2[before_idx] - weather.ghi_w_m2[after_idx]).abs();
+            assert!(
+                ghi_diff < 15.0,
+                "asymmetry at offset {offset} (before hour {before_idx}, after hour {after_idx}): \
+                 GHI difference {ghi_diff:.2} W/m² exceeds 15.0 W/m² tolerance",
+            );
+        }
+    }
+
+    /// Verify that disabling clear_sky_solar produces all-zero irradiance
+    /// (backward-compatibility with pre-T-0188 behaviour).
+    #[test]
+    fn synthetic_clear_sky_solar_disabled_produces_zero_irradiance() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-07-21T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+clear_sky_solar = false
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        for hour in 0..8760 {
+            assert!(
+                weather.ghi_w_m2[hour] < 0.01,
+                "hour {hour}: GHI={} should be zero when clear_sky_solar disabled",
+                weather.ghi_w_m2[hour]
+            );
+            assert!(
+                weather.dni_w_m2[hour] < 0.01,
+                "hour {hour}: DNI={} should be zero when clear_sky_solar disabled",
+                weather.dni_w_m2[hour]
+            );
+            assert!(
+                weather.dhi_w_m2[hour] < 0.01,
+                "hour {hour}: DHI={} should be zero when clear_sky_solar disabled",
+                weather.dhi_w_m2[hour]
+            );
+        }
+    }
+
+    /// Integration: BESTEST 600-like config without EPW path — verify thermal
+    /// balance includes non-zero solar gains through surfaces and windows.
+    #[test]
+    fn bestest600_no_epw_produces_solar_gains() {
+        use crate::dwelling::Dwelling;
+        use std::fs;
+
+        let toml_path = {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "hares-t0188-solar-{}.toml",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            path
+        };
+        // Minimum BESTEST-600-like config with no EPW path (synthetic weather),
+        // start time at solar noon UTC (~19:00) for Denver longitude (-104.86°).
+        let content = r#"building_id = 600
+[simulation]
+start_time = "2024-07-21T19:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+mass_multiplier = 1.0
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+[setpoints]
+heating_c = 20.0
+cooling_c = 27.0
+[schedule]
+occupancy = 0.0
+occupants_present = false
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = 0
+"#;
+
+        fs::write(&toml_path, content).expect("write temp TOML");
+
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&toml_path, Some(false))
+            .expect("build dwelling from synthetic BESTEST-600 config");
+
+        dwelling
+            .run_timestep(false)
+            .expect("run timestep at solar noon");
+        let env = dwelling.latest_env();
+
+        let ghi = env.weather.ghi_w_m2;
+        let dni = env.weather.dni_w_m2;
+        let dhi = env.weather.dhi_w_m2;
+
+        let _ = fs::remove_file(&toml_path);
+
+        // At Denver lat 39.76° N on July 21, 19:00 UTC ≈ solar noon → GHI >> 0.
+        assert!(
+            ghi > 500.0,
+            "GHI {ghi:.1} W/m² at Denver solar noon on Jul 21 should exceed 500 W/m²"
+        );
+        assert!(
+            dni > 100.0,
+            "DNI {dni:.1} W/m² at Denver solar noon should be substantial"
+        );
+        assert!(
+            dhi > 50.0,
+            "DHI {dhi:.1} W/m² should be non-zero for clear-sky mid-latitude summer"
+        );
+
+        // Solar altitude should be positive (sun is above horizon).
+        assert!(
+            env.weather.solar_altitude_deg > 0.0,
+            "solar altitude {}° should be above horizon at noon",
+            env.weather.solar_altitude_deg
+        );
+
+        // Surface irradiance should be allocated to opaque and glazed surfaces.
+        let total_irradiance: f64 = env
+            .weather
+            .solar_irradiance
+            .iter()
+            .map(|s| s.direct_w_m2 + s.diffuse_w_m2 + s.reflected_w_m2)
+            .sum();
+        assert!(
+            total_irradiance > 0.0,
+            "total surface irradiance should be non-zero with non-zero GHI"
+        );
+    }
 
     #[test]
     fn initialization_duration_s_parsed_from_toml() {
