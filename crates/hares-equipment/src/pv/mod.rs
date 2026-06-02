@@ -1173,6 +1173,11 @@ impl Equipment for PV {
             self.system_losses_fraction
         };
         self.core_output = CoreOutput::default();
+        // CoreOutput cannot be reconstructed from checkpoint data because
+        // PV generation depends on live irradiance and environmental
+        // conditions (cell temperature, DC power curves) that are not
+        // stored in PvCheckpoint.  Reconstruction would require a
+        // checkpoint format change.  See ticket Known Limitations.
         Ok(())
     }
 

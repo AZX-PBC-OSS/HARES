@@ -36,6 +36,8 @@ pub(crate) fn capture_environment(
         pv_actual_kw: env.electrical.actual_pv_kw,
         net_grid_kw: env.electrical.net_grid_kw,
         base_load_kw: env.electrical.base_load_kw,
+        equipment_core_size: env.equipment_core.len(),
+        equipment_telemetry_size: env.equipment_telemetry.len(),
     }
 }
 

@@ -958,7 +958,32 @@ impl Equipment for Ev {
         self.v2l_power_kw = 0.0;
 
         self.write_telemetry();
-        self.core_output = CoreOutput::default();
+        self.core_output = {
+            let mode = if self.active_power_kw > 1e-9 {
+                OperatingMode::Charging
+            } else if self.active_power_kw < -1e-9 {
+                OperatingMode::Discharging
+            } else {
+                OperatingMode::Off
+            };
+            CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Bidirectional(self.active_power_kw)),
+                    reactive_power_kvar: None,
+                    fuel_w: None,
+                    thermal_output_w: None,
+                    sensible_cooling_w: None,
+                    latent_cooling_w: None,
+                },
+                state: CoreState {
+                    operating_mode: Some(mode),
+                    soc: Soc::try_from(self.soc).ok(),
+                    speed_index: None,
+                    setpoint_c: None,
+                },
+                performance: CorePerformance::default(),
+            }
+        };
         Ok(())
     }
 

@@ -72,6 +72,12 @@ pub struct EnvironmentCapture {
     pub net_grid_kw: f64,
     /// Non-dispatchable load from `ElectricalSummary.base_load_kw`.
     pub base_load_kw: f64,
+    /// Size of `latest_env.equipment_core` at observation time.
+    /// Non-zero after at least one timestep has completed; zero on the first
+    /// step or if the checkpoint restore did not populate equipment state.
+    pub equipment_core_size: usize,
+    /// Size of `latest_env.equipment_telemetry` at observation time.
+    pub equipment_telemetry_size: usize,
 }
 
 /// Equipment telemetry + accumulated port state after an equipment phase.

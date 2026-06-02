@@ -826,6 +826,10 @@ impl Equipment for EventBasedLoad {
             self.ports.push(PortDeclaration::fuel());
         }
         self.core_output = CoreOutput::default();
+        // CoreOutput cannot be reconstructed from checkpoint data because
+        // active_power_kw (the per-step committed power) is not stored in
+        // EventBasedLoadState.  Reconstruction would require a checkpoint
+        // format change.  See ticket Known Limitations.
 
         // Telemetry is populated on the next step() call, not reconstructed here.
         // This avoids stale values when month_multipliers are configured.
@@ -1507,6 +1511,10 @@ impl Equipment for WetAppliance {
             &decoded.event_probability_source_state,
         )?;
         self.core_output = CoreOutput::default();
+        // CoreOutput cannot be reconstructed from checkpoint data because
+        // per-step committed power is not stored in WetApplianceState.
+        // Reconstruction would require a checkpoint format change.
+        // See ticket Known Limitations.
 
         // Telemetry is populated on the next step() call, not reconstructed here.
         Ok(())

@@ -151,12 +151,11 @@ fn assert_equipment_lifecycle(
     equipment
         .load_state(&saved)
         .expect("load_state must return Ok for valid snapshot bytes");
-    assert_eq!(
-        equipment.core_output(),
-        &CoreOutput::default(),
-        "load_state must reset cached core_output to default for '{}'",
-        equipment.descriptor().name
-    );
+    // After load_state(), core_output is reconstructed from restored internal
+    // state (not reset to default).  Equipment types that carry dynamic state
+    // (EV, Battery, ScheduledLoad) populate core_output from checkpointed
+    // fields so that snapshot_equipment_state() captures correct values for
+    // actor reads on the first post-restore step.
 
     let mut ports_after_restore = ports_for(equipment);
     equipment.update_control(env);

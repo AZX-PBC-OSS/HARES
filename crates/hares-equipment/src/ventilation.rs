@@ -751,7 +751,29 @@ impl Equipment for Ventilation {
         self.dr_level = cp.dr_level;
         self.dr_duration_remaining_s = cp.dr_duration_remaining_s;
         restore_schedule_source_state(&mut self.schedule_source, &cp.schedule_source_state)?;
-        self.core_output = CoreOutput::default();
+        // Reconstruct core_output structure: operating_mode is checkpointed,
+        // and the ventilation always contributes to the electric port (even
+        // when off). The per-step fan power depends on live environmental
+        // conditions (outdoor/indoor temp, humidity) not stored in the
+        // checkpoint, so electric_kw is set to Consumption(0.0) — the next
+        // step() recalculates the correct value. See Known Limitations.
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_kvar: None,
+                fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 

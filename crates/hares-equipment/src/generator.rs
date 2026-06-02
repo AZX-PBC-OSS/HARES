@@ -1603,7 +1603,32 @@ impl Equipment for Generator {
             self.telemetry
                 .set(tk::FUEL_CELL_STACK_HEAT_W, stack_cooling_w);
         }
-        self.core_output = CoreOutput::default();
+        let q_thermal_w = fuel_w * self.eta_thermal;
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Generation(self.current_power_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: Some(FuelPower {
+                    fuel_type: FuelType::Gas,
+                    consumption_w: fuel_w.max(0.0),
+                }),
+                thermal_output_w: if has_thermal && q_thermal_w > 0.0 && self.chp_loop_id.is_some()
+                {
+                    Some(q_thermal_w)
+                } else {
+                    None
+                },
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.mode),
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
 
         Ok(())
     }

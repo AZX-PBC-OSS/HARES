@@ -1016,7 +1016,36 @@ impl Equipment for ScheduledLoad {
         );
         self.telemetry
             .insert(tk::FUEL_INPUT_W, self.last_non_zero_gas_w);
-        self.core_output = CoreOutput::default();
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(
+                    self.last_non_zero_power_kw.max(0.0),
+                )),
+                reactive_power_kvar: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::REACTIVE)
+                    .then_some(decoded.last_reactive_power_kvar),
+                fuel_w: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::FUEL)
+                    .then_some(FuelPower {
+                        fuel_type: FuelType::Gas,
+                        consumption_w: self.last_non_zero_gas_w.max(0.0),
+                    }),
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 

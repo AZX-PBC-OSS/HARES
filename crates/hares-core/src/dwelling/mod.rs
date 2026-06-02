@@ -1110,6 +1110,10 @@ pub struct Dwelling {
         any(debug_assertions, feature = "check_invariants")
     ))]
     invariant_moisture_capture: Vec<MoistureZoneInvariant>,
+    /// Set to `true` when `load_checkpoint` restores state. The first
+    /// post-restore `run_timestep` asserts that `equipment_core` is populated
+    /// for every equipment instance, then resets this flag to `false`.
+    restored_from_checkpoint: bool,
     /// Per-zone conditioning status, aligned with `latest_env.zones` order.
     /// `true` = conditioned (HVAC-served), `false` = unconditioned (attic, garage, etc.).
     zone_is_conditioned: Vec<bool>,
@@ -1733,6 +1737,7 @@ impl Dwelling {
         let mut dwelling = Self {
             bldg_id: config.bldg_id,
             failed: false,
+            restored_from_checkpoint: false,
             #[cfg(debug_assertions)]
             test_panic_on_step: false,
             #[cfg(debug_assertions)]
@@ -2883,7 +2888,48 @@ impl Dwelling {
 
         self.prior_electrical_summary = cp.prior_electrical_summary;
 
+        // Populate latest_env.equipment_core and equipment_telemetry from the
+        // restored equipment state so that actors read correct SOC, power flows,
+        // and connection state on the first post-restore step.
+        self.snapshot_equipment_state();
+        self.restored_from_checkpoint = true;
+
         Ok(())
+    }
+
+    /// Populates `latest_env.equipment_core` and `latest_env.equipment_telemetry`
+    /// by snapshotting the current `core_output()` and `telemetry()` from every
+    /// equipment instance.  Called after `load_checkpoint` so that the first
+    /// post-restore step's actors see committed equipment state rather than an
+    /// empty map (which would force fallback paths in SOC-dependent actors like
+    /// `EvDriverActor` and `BatteryManagementActor`).
+    fn snapshot_equipment_state(&mut self) {
+        self.latest_env.equipment_core.clear();
+        self.latest_env
+            .equipment_telemetry
+            .retain(|name, _| name == hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY);
+
+        for eq in &self.equipment {
+            let desc = eq.descriptor();
+            let id = self
+                .equipment_id_by_name
+                .get(&desc.name)
+                .copied()
+                .expect("invariant: equipment_id_by_name is built from this equipment set");
+            self.latest_env
+                .equipment_core
+                .insert(id, eq.core_output().clone());
+
+            let telemetry = eq.telemetry();
+            match self.latest_env.equipment_telemetry.get_mut(&desc.name) {
+                Some(existing) => existing.clone_from(telemetry),
+                None => {
+                    self.latest_env
+                        .equipment_telemetry
+                        .insert(desc.name.clone(), telemetry.clone());
+                }
+            }
+        }
     }
 
     /// Accumulates occupancy-driven internal heat gains into zone thermal ports.
@@ -3131,6 +3177,45 @@ impl Dwelling {
             return Err(HaresError::Dwelling(
                 "simulation already reached configured end".to_string(),
             ));
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            // After the first step, every equipment instance must have a core
+            // output in the environment. Missing entries after checkpoint
+            // restore indicate that snapshot_equipment_state was not called in
+            // load_checkpoint.
+            if self.clock.current_step() > 0 {
+                for eq in &self.equipment {
+                    let desc = eq.descriptor();
+                    let id =
+                        self.equipment_id_by_name.get(&desc.name).copied().expect(
+                            "invariant: equipment_id_by_name is built from this equipment set",
+                        );
+                    debug_assert!(
+                        self.latest_env.equipment_core.contains_key(&id),
+                        "equipment_core missing entry for equipment '{}' (id={:?}) \
+                         at start of step {}; checkpoint restore must call \
+                         snapshot_equipment_state",
+                        desc.name,
+                        id,
+                        self.clock.current_step(),
+                    );
+                }
+            }
+
+            // First step after checkpoint restore: double-check that
+            // equipment_core is not accidentally empty when we expect
+            // restored state.
+            if self.restored_from_checkpoint && !self.equipment.is_empty() {
+                debug_assert!(
+                    !self.latest_env.equipment_core.is_empty(),
+                    "equipment_core is empty on first post-restore step {}; \
+                     load_checkpoint must call snapshot_equipment_state",
+                    self.clock.current_step(),
+                );
+                self.restored_from_checkpoint = false;
+            }
         }
 
         #[cfg(feature = "profiling")]

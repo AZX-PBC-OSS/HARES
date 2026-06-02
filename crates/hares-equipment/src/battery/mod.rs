@@ -1515,7 +1515,23 @@ impl Equipment for Battery {
         // Telemetry fields are recomputed on next step; not restored from checkpoint.
         // active_power_kw, ohmic_loss_w, terminal_voltage_v, current_a reset to idle
         // defaults above and will be updated on the next step() call.
-        self.core_output = CoreOutput::default();
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Bidirectional(0.0)),
+                reactive_power_kvar: None,
+                fuel_w: None,
+                thermal_output_w: None,
+                sensible_cooling_w: None,
+                latent_cooling_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.mode),
+                soc: Soc::try_from(self.soc).ok(),
+                speed_index: None,
+                setpoint_c: None,
+            },
+            performance: CorePerformance::default(),
+        };
         Ok(())
     }
 
