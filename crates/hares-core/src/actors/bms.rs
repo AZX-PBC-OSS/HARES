@@ -65,11 +65,13 @@ impl BatteryManagementActor {
         price_schedule: Option<Arc<[f64]>>,
         steps_per_day: usize,
     ) -> Self {
-        let mut telemetry = Telemetry::with_capacity(4);
+        let mut telemetry = Telemetry::with_capacity(6);
         telemetry.insert("bms_action", -1.0);
         telemetry.insert("soc", f64::NAN);
         telemetry.insert("pv_kw", 0.0);
         telemetry.insert("load_kw", 0.0);
+        telemetry.insert("bms_pv_stale_kw", 0.0);
+        telemetry.insert("bms_pv_actual_kw", 0.0);
         Self {
             name: name.to_string(),
             dispatch_target: DispatchTarget::ByName(Arc::from(battery_name)),
@@ -140,10 +142,13 @@ impl BatteryManagementActor {
 
     /// Clamp discharge power (negative `active_power_kw`) based on grid export rule.
     ///
+    /// `pv_kw` must be the actual current-step PV generation so that the clamp is
+    /// correct for both the primary evaluate-mode path and the re-evaluation path.
+    ///
     /// - `Unrestricted`: no clamping.
     /// - `Disabled`: clamp discharge so net export is zero (battery only offsets home load).
     /// - `SolarOnly`: clamp discharge so net export does not exceed PV generation.
-    fn clamp_discharge_for_export(&self, discharge_kw: f64, env: &EnvironmentState) -> f64 {
+    fn clamp_discharge_for_export(&self, discharge_kw: f64, pv_kw: f64, env: &EnvironmentState) -> f64 {
         // discharge_kw is the raw magnitude (positive value) of desired discharge.
         match self.grid_export_rule {
             GridExportRule::Unrestricted => discharge_kw,
@@ -154,8 +159,7 @@ impl BatteryManagementActor {
             GridExportRule::SolarOnly => {
                 // Battery may discharge up to load + PV, so net grid export
                 // (discharge - load) is at most PV generation.
-                let max_allowed = env.electrical.base_load_kw.max(0.0)
-                    + env.electrical.actual_pv_kw_or_fallback();
+                let max_allowed = env.electrical.base_load_kw.max(0.0) + pv_kw;
                 discharge_kw.min(max_allowed)
             }
         }
@@ -227,7 +231,7 @@ impl BatteryManagementActor {
                         }
                         GridExportRule::Disabled | GridExportRule::SolarOnly => {
                             let raw_discharge = (-surplus).min(self.max_discharge_kw);
-                            let clamped = self.clamp_discharge_for_export(raw_discharge, env);
+                            let clamped = self.clamp_discharge_for_export(raw_discharge, env.electrical.actual_pv_kw_or_fallback(), env);
                             self.emit(
                                 ControlSignal::PowerSetpoint {
                                     active_power_kw: -clamped,
@@ -283,7 +287,7 @@ impl BatteryManagementActor {
                     );
                     self.last_action = "tou:charge".into();
                 } else if price >= self.discharge_price_threshold && soc > *reserve_soc {
-                    let clamped = self.clamp_discharge_for_export(self.max_discharge_kw, env);
+                    let clamped = self.clamp_discharge_for_export(self.max_discharge_kw, env.electrical.actual_pv_kw_or_fallback(), env);
                     self.emit(
                         ControlSignal::PowerSetpoint {
                             active_power_kw: -clamped,
@@ -331,7 +335,7 @@ impl BatteryManagementActor {
                             out,
                         );
                     }
-                    self.last_action = "backup:charging".into();
+                    self.last_action = "backup:charge".into();
                 } else {
                     self.last_action = "idle:backup_at_target".into();
                 }
@@ -352,7 +356,7 @@ impl BatteryManagementActor {
                     };
                     if soc > *min_soc_during_dr {
                         let raw = dr_discharge_rate * self.max_discharge_kw;
-                        let clamped = self.clamp_discharge_for_export(raw, env);
+                        let clamped = self.clamp_discharge_for_export(raw, env.electrical.actual_pv_kw_or_fallback(), env);
                         self.emit(
                             ControlSignal::PowerSetpoint {
                                 active_power_kw: -clamped,
@@ -362,7 +366,7 @@ impl BatteryManagementActor {
                             },
                             out,
                         );
-                        self.last_action = "dr:discharging".into();
+                        self.last_action = "dr:discharge".into();
                     } else {
                         self.last_action = "dr:soc_too_low".into();
                     }
@@ -392,7 +396,7 @@ impl BatteryManagementActor {
                         }
                         BmsAction::Discharge { rate_fraction } => {
                             let raw = rate_fraction * self.max_discharge_kw;
-                            let clamped = self.clamp_discharge_for_export(raw, env);
+                            let clamped = self.clamp_discharge_for_export(raw, env.electrical.actual_pv_kw_or_fallback(), env);
                             self.emit(
                                 ControlSignal::PowerSetpoint {
                                     active_power_kw: -clamped,
@@ -515,6 +519,233 @@ impl BatteryManagementActor {
 
         current_price > 2.0 * self.daily_avg_price
     }
+
+    /// Re-evaluate SelfConsumption decision with actual (not prior-step) PV.
+    fn reevaluate_self_consumption(
+        &mut self,
+        pv_kw: f64,
+        env: &EnvironmentState,
+        min_soc: f64,
+        max_soc: f64,
+        solar_only_charging: bool,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        let Some(soc) = self.read_soc(env) else {
+            return;
+        };
+        let load = env.electrical.base_load_kw;
+        let surplus = pv_kw - load;
+
+        // If solar-only and actual PV is zero, disconnect from grid.
+        // This handles the case where stale PV was positive (grid connected)
+        // but actual PV is now zero — the battery should stop importing.
+        let force_solar_only = matches!(self.grid_export_rule, GridExportRule::Disabled);
+        let effective_solar_only = solar_only_charging || force_solar_only;
+
+        if effective_solar_only && pv_kw <= 0.0 {
+            // No real PV: disconnect from grid regardless of last_action.
+            self.emit(ControlSignal::GridConnect { connected: false }, out);
+            self.last_action = "grid_disconnect:solar_only".into();
+            return;
+        }
+
+        // Re-connect grid if PV is back and we were previously forced off.
+        if effective_solar_only && pv_kw > 0.0 && self.last_action.contains("grid_disconnect") {
+            self.emit(ControlSignal::GridConnect { connected: true }, out);
+            self.last_action = "self_consumption:grid_reconnected".into();
+            return;
+        }
+
+        // Compute surplus and decide charge/discharge/idle.
+        if surplus > 0.0 && soc < max_soc {
+            // PV surplus: charge battery.
+            // Only emit if the prior decision was not already charging.
+            if !self.is_last_action_charging() {
+                self.emit(
+                    ControlSignal::SelfConsumption {
+                        enabled: true,
+                        solar_only_charging: effective_solar_only,
+                    },
+                    out,
+                );
+                self.last_action = "self_consumption:charge".into();
+            }
+        } else if surplus < 0.0 && soc > min_soc {
+            // PV deficit: discharge battery.
+            if !self.is_last_action_discharging() {
+                match self.grid_export_rule {
+                    GridExportRule::Unrestricted => {
+                        self.emit(
+                            ControlSignal::SelfConsumption {
+                                enabled: true,
+                                solar_only_charging: false,
+                            },
+                            out,
+                        );
+                    }
+                    GridExportRule::Disabled | GridExportRule::SolarOnly => {
+                        let raw_discharge = (-surplus).min(self.max_discharge_kw);
+                        let clamped = self.clamp_discharge_for_export(raw_discharge, pv_kw, env);
+                        self.emit(
+                            ControlSignal::PowerSetpoint {
+                                active_power_kw: -clamped,
+                                reactive_power_kvar: None,
+                                min_soc: None,
+                                max_soc: None,
+                            },
+                            out,
+                        );
+                    }
+                }
+                self.last_action = "self_consumption:discharge".into();
+            }
+        } else if self.is_last_action_charging() || self.is_last_action_discharging() {
+            // Surplus was actionable but is now near-zero: disable self-consumption
+            // so the battery stops the prior charge/discharge.
+            self.emit(
+                ControlSignal::SelfConsumption {
+                    enabled: false,
+                    solar_only_charging: false,
+                },
+                out,
+            );
+            self.last_action = "idle:self_consumption".into();
+        }
+    }
+
+    /// Re-evaluate BackupReserve (no grid charging) with actual PV.
+    fn reevaluate_backup_no_grid(
+        &mut self,
+        pv_kw: f64,
+        _env: &EnvironmentState,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        // Stale PV was zero → grid was disconnected. Actual PV is positive
+        // → reconnect so the battery can charge from solar.
+        if pv_kw > 0.0 && self.last_action.contains("grid_disconnect") {
+            self.emit(ControlSignal::GridConnect { connected: true }, out);
+            self.last_action = "backup:grid_reconnected".into();
+        }
+        // Stale PV was positive (grid connected) but actual PV is zero
+        // and charge_from_grid is false → disconnect.
+        if pv_kw <= 0.0 && !self.last_action.contains("grid_disconnect") {
+            self.emit(ControlSignal::GridConnect { connected: false }, out);
+            self.last_action = "grid_disconnect:backup_no_pv".into();
+        }
+    }
+
+    /// Re-evaluate TimeOfUseOptimization (solar-only) with actual PV.
+    fn reevaluate_tou_solar_only(
+        &mut self,
+        pv_kw: f64,
+        _env: &EnvironmentState,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        if pv_kw > 0.0 && self.last_action.contains("grid_disconnect") {
+            self.emit(ControlSignal::GridConnect { connected: true }, out);
+            self.last_action = "tou:grid_reconnected".into();
+        }
+        if pv_kw <= 0.0 && !self.last_action.contains("grid_disconnect") {
+            self.emit(ControlSignal::GridConnect { connected: false }, out);
+            self.last_action = "grid_disconnect:tou_solar_only".into();
+        }
+    }
+
+    /// Re-evaluate the given mode (potentially nested) using actual-step PV data.
+    ///
+    /// Dispatches to the correct leaf re-evaluator (`reevaluate_self_consumption`,
+    /// `reevaluate_backup_no_grid`, `reevaluate_tou_solar_only`) for PV-dependent
+    /// leaf modes. For composite modes (`DemandResponse`, `StormWatch`), checks
+    /// whether the outer mode is active and, if inactive, recurses into the base
+    /// mode so that SelfConsumption (or equivalent) decisions use actual PV.
+    ///
+    /// Non-PV-dependent modes are a no-op.
+    fn adjust_for_pv_in_mode(
+        &mut self,
+        pv_kw: f64,
+        env: &EnvironmentState,
+        mode: &BmsMode,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        match mode {
+            BmsMode::SelfConsumption {
+                min_soc,
+                max_soc,
+                solar_only_charging,
+            } => {
+                self.reevaluate_self_consumption(
+                    pv_kw,
+                    env,
+                    *min_soc,
+                    *max_soc,
+                    *solar_only_charging,
+                    out,
+                );
+            }
+            BmsMode::BackupReserve {
+                charge_from_grid: false,
+                ..
+            } => {
+                self.reevaluate_backup_no_grid(pv_kw, env, out);
+            }
+            BmsMode::TimeOfUseOptimization {
+                solar_only_charging: true,
+                ..
+            } => {
+                self.reevaluate_tou_solar_only(pv_kw, env, out);
+            }
+            BmsMode::DemandResponse { base_mode, .. } if Self::recurse_pv_dependent(base_mode) => {
+                let price = env.price_signal.electricity_price.unwrap_or(0.0);
+                let dr_active = self.is_dr_active(env, price);
+                if !dr_active {
+                    self.adjust_for_pv_in_mode(pv_kw, env, base_mode, out);
+                }
+            }
+            BmsMode::StormWatch {
+                trigger, base_mode, ..
+            } if Self::recurse_pv_dependent(base_mode) => {
+                let sw_active = match trigger {
+                    StormWatchTrigger::ManualEnable => true,
+                    StormWatchTrigger::WeatherSignal {
+                        wind_speed_threshold_m_s,
+                    } => env.weather.wind_speed_m_s > *wind_speed_threshold_m_s,
+                };
+                if !sw_active {
+                    self.adjust_for_pv_in_mode(pv_kw, env, base_mode, out);
+                }
+            }
+            _ => { /* PV-independent mode: no re-evaluation needed */ }
+        }
+    }
+
+    /// Returns true if the BMS mode (potentially nested) depends on real-time PV.
+    fn recurse_pv_dependent(mode: &BmsMode) -> bool {
+        match mode {
+            BmsMode::SelfConsumption { .. } => true,
+            BmsMode::BackupReserve {
+                charge_from_grid: false,
+                ..
+            }
+            | BmsMode::TimeOfUseOptimization {
+                solar_only_charging: true,
+                ..
+            } => true,
+            BmsMode::DemandResponse { base_mode, .. } => Self::recurse_pv_dependent(base_mode),
+            BmsMode::StormWatch { base_mode, .. } => Self::recurse_pv_dependent(base_mode),
+            _ => false,
+        }
+    }
+
+    /// Returns true if `last_action` indicates the BMS decided to charge.
+    /// Uses colon-prefixed matching to distinguish `:charge` from `:discharge`.
+    fn is_last_action_charging(&self) -> bool {
+        self.last_action.contains(":charge")
+    }
+
+    /// Returns true if `last_action` indicates the BMS decided to discharge.
+    fn is_last_action_discharging(&self) -> bool {
+        self.last_action.contains(":discharge")
+    }
 }
 
 impl Actor for BatteryManagementActor {
@@ -536,9 +767,25 @@ impl Actor for BatteryManagementActor {
             .set("bms_action", bms_action_code(&self.last_action));
         self.telemetry
             .set("soc", self.read_soc(env).unwrap_or(f64::NAN));
-        self.telemetry
-            .set("pv_kw", env.electrical.actual_pv_kw_or_fallback());
+        let pv_stale = env.electrical.actual_pv_kw_or_fallback();
+        self.telemetry.set("pv_kw", pv_stale);
+        self.telemetry.set("bms_pv_stale_kw", pv_stale);
         self.telemetry.set("load_kw", env.electrical.base_load_kw);
+    }
+
+    fn adjust_for_pv(
+        &mut self,
+        pv_kw: f64,
+        env: &EnvironmentState,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        self.telemetry.set("bms_pv_actual_kw", pv_kw);
+
+        // Re-evaluate PV-dependent modes with actual-step PV data.
+        // Non-PV-dependent and active composite modes are no-ops.
+        let mode = std::mem::take(&mut self.bms_mode);
+        self.adjust_for_pv_in_mode(pv_kw, env, &mode, out);
+        self.bms_mode = mode;
     }
 }
 
@@ -563,14 +810,18 @@ fn compute_percentile(prices: &[f64], percentile: f64) -> f64 {
 }
 
 /// Maps `last_action` string to a numeric code for telemetry.
-/// 0=idle, 1=charge, 2=discharge, 3=grid_disconnect, -1=unknown.
+/// 0=idle, 1=charge, 2=discharge, 3=grid_disconnect, 4=reconnect, 5=storm_watch, -1=unknown.
 fn bms_action_code(action: &str) -> f64 {
-    if action.contains("charge") {
-        1.0
-    } else if action.contains("discharge") {
+    if action.contains("discharge") {
         2.0
+    } else if action.contains("charge") {
+        1.0
     } else if action.contains("grid_disconnect") {
         3.0
+    } else if action.contains("reconnect") {
+        4.0
+    } else if action.contains("storm_watch") {
+        5.0
     } else if action.contains("idle") {
         0.0
     } else {
@@ -2171,5 +2422,595 @@ mod tests {
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
+    }
+
+    // ── adjust_for_pv re-evaluation tests ──
+
+    #[test]
+    fn adjust_for_pv_stale_surplus_actual_deficit_switches_to_discharge() {
+        // Stale PV=4 kW, load=2 kW → surplus=+2 → decide() charges.
+        // Actual PV=1 kW, load=2 kW → deficit=-1 → adjust_for_pv should discharge.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 4.0,
+                actual_pv_kw: 4.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        // decide() with stale PV → charge (surplus=2)
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+
+        // adjust_for_pv with actual PV=1 → deficit=-1 → discharge
+        out.clear();
+        actor.adjust_for_pv(1.0, &env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+        assert_eq!(actor.last_action(), "self_consumption:discharge");
+    }
+
+    #[test]
+    fn adjust_for_pv_stale_deficit_actual_surplus_switches_to_charge() {
+        // Stale PV=1 kW, load=4 kW → deficit=-3 → decide() discharges.
+        // Actual PV=6 kW, load=4 kW → surplus=+2 → adjust_for_pv should charge.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 1.0,
+                actual_pv_kw: 1.0,
+                base_load_kw: 4.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        // decide() with stale PV → discharge (deficit=-3)
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(actor.last_action(), "self_consumption:discharge");
+
+        // adjust_for_pv with actual PV=6 → surplus=+2 → charge
+        out.clear();
+        actor.adjust_for_pv(6.0, &env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+    }
+
+    #[test]
+    fn adjust_for_pv_surplus_unchanged_no_re_emit() {
+        // Stale PV=4 kW, load=2 kW → surplus=+2 → decide() charges.
+        // Actual PV=4.1 kW, load=2 kW → surplus still positive → no re-emit needed.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 4.0,
+                actual_pv_kw: 4.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+
+        out.clear();
+        actor.adjust_for_pv(4.1, &env, &mut out);
+        assert!(
+            out.is_empty(),
+            "re-evaluation should not re-emit when surplus direction is unchanged"
+        );
+    }
+
+    #[test]
+    fn adjust_for_pv_zero_pv_high_load_idles_when_already_acting() {
+        // Stale PV=4 kW, load=2 kW → decide() charges.
+        // Actual PV=2 kW, load=2 kW → surplus = 0 → should idle.
+        // adjust_for_pv should disable self-consumption.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 4.0,
+                actual_pv_kw: 4.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+
+        // Actual PV=2.0 kW, load=2 kW → surplus = 0 → should idle
+        out.clear();
+        actor.adjust_for_pv(2.0, &env, &mut out);
+        assert!(!out.is_empty(), "should emit idle when surplus is zero");
+        match &out[0].signal {
+            ControlSignal::SelfConsumption {
+                enabled,
+                solar_only_charging,
+            } => {
+                assert!(!enabled, "should disable self-consumption");
+                assert!(!solar_only_charging);
+            }
+            other => panic!("expected SelfConsumption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adjust_for_pv_full_rated_pv_no_re_eval_for_charging() {
+        // Stale PV=0, load=5 → deficit=-5 → decide() may idle or discharge.
+        // Actual PV=10 kW (full-rated), load=5 → surplus=+5 → should charge.
+        // Batter max_charge_kw=5, so PV=10 exceeds it but that's fine.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 0.0,
+                actual_pv_kw: 0.0,
+                base_load_kw: 5.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.3);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "self_consumption:discharge");
+
+        // adjust_for_pv with full-rated PV → surplus=+5 → charge
+        out.clear();
+        actor.adjust_for_pv(10.0, &env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+    }
+
+    #[test]
+    fn adjust_for_pv_solar_only_actual_pv_zero_disconnects() {
+        // Stale PV=3 kW (solar_only), actual PV=0 → should disconnect grid.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: true,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 3.0,
+                actual_pv_kw: 3.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+
+        // Actual PV=0, solar_only → disconnect
+        out.clear();
+        actor.adjust_for_pv(0.0, &env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::GridConnect { connected: false }
+        ));
+        assert_eq!(actor.last_action(), "grid_disconnect:solar_only");
+    }
+
+    #[test]
+    fn adjust_for_pv_solar_only_actual_pv_restored_reconnects() {
+        // Stale PV=0, solar_only → decide() disconnected grid.
+        // Actual PV=5 → should reconnect grid.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: true,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 0.0,
+                actual_pv_kw: 0.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "grid_disconnect:solar_only");
+
+        // Actual PV=5 → reconnect
+        out.clear();
+        actor.adjust_for_pv(5.0, &env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::GridConnect { connected: true }
+        ));
+    }
+
+    #[test]
+    fn adjust_for_pv_manual_mode_no_op() {
+        // Manual mode never emits in decide or adjust_for_pv.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::Manual,
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let env = TestEnvBuilder::new().build();
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert!(out.is_empty());
+
+        out.clear();
+        actor.adjust_for_pv(10.0, &env, &mut out);
+        assert!(out.is_empty(), "Manual mode should not react to PV");
+    }
+
+    #[test]
+    fn adjust_for_pv_telemetry_populated() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 4.0,
+                actual_pv_kw: 4.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        let stale = actor
+            .telemetry()
+            .unwrap()
+            .get("bms_pv_stale_kw")
+            .unwrap_or(-1.0);
+        assert!(
+            (stale - 4.0).abs() < 1e-9,
+            "bms_pv_stale_kw should be {stale}"
+        );
+
+        out.clear();
+        actor.adjust_for_pv(7.0, &env, &mut out);
+        let actual = actor
+            .telemetry()
+            .unwrap()
+            .get("bms_pv_actual_kw")
+            .unwrap_or(-1.0);
+        assert!(
+            (actual - 7.0).abs() < 1e-9,
+            "bms_pv_actual_kw should be 7.0, got {actual}"
+        );
+    }
+
+    #[test]
+    fn adjust_for_pv_stale_zero_actual_surplus_starts_charging() {
+        // Stale PV=0 (night), load=2 → decide() may idle or discharge.
+        // Actual PV=5 → adjust_for_pv should initiate charge.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 0.0,
+                actual_pv_kw: 0.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        // With PV=0 and load=2, deficit → discharge
+        assert_eq!(actor.last_action(), "self_consumption:discharge");
+
+        // Actual PV=5, load=2 → surplus=+3 → charge
+        out.clear();
+        actor.adjust_for_pv(5.0, &env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+    }
+
+    #[test]
+    fn adjust_for_pv_dr_inactive_re_evaluates_base_with_actual_pv() {
+        // DemandResponse with a PV-dependent base (SelfConsumption).
+        // When DR is inactive, the base mode should be re-evaluated with
+        // actual-step PV — not re-read from the stale env.
+        let prices: Vec<f64> = vec![0.10; 24];
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::DemandResponse {
+                base_mode: Box::new(BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                }),
+                dr_discharge_rate: 0.8,
+                min_soc_during_dr: 0.1,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices.into()),
+            24,
+        );
+
+        // Stale PV=4, load=2 → surplus=2 → decide() charges via base SelfConsumption.
+        let mut env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.10),
+                ..Default::default()
+            })
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 4.0,
+                actual_pv_kw: 4.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+
+        // Actual PV=0 → deficit=-2 → should switch to discharge.
+        out.clear();
+        actor.adjust_for_pv(0.0, &env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(
+                out[0].signal,
+                ControlSignal::SelfConsumption { enabled: true, .. }
+            ),
+            "expected SelfConsumption discharge signal, got {:?}",
+            out[0].signal
+        );
+        assert_eq!(actor.last_action(), "self_consumption:discharge");
+    }
+
+    #[test]
+    fn adjust_for_pv_storm_watch_inactive_re_evaluates_base_with_actual_pv() {
+        // StormWatch with a PV-dependent base (SelfConsumption).
+        // When StormWatch is inactive (wind below threshold), the base mode
+        // should be re-evaluated with actual-step PV.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::StormWatch {
+                target_soc: 1.0,
+                trigger: StormWatchTrigger::WeatherSignal {
+                    wind_speed_threshold_m_s: 25.0,
+                },
+                base_mode: Box::new(BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                }),
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        // Wind below threshold → storm watch inactive → delegates to SelfConsumption.
+        // Stale PV=4, load=2 → surplus=2 → decide() charges.
+        let mut env = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 5.0,
+                ..Default::default()
+            })
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 4.0,
+                actual_pv_kw: 4.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+
+        // Actual PV=0 → deficit=-2 → should switch to discharge.
+        out.clear();
+        actor.adjust_for_pv(0.0, &env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(
+                out[0].signal,
+                ControlSignal::SelfConsumption { enabled: true, .. }
+            ),
+            "expected SelfConsumption discharge signal, got {:?}",
+            out[0].signal
+        );
+        assert_eq!(actor.last_action(), "self_consumption:discharge");
+    }
+
+    #[test]
+    fn bms_action_code_correct_for_all_reachable_actions() {
+        // Code 0: idle
+        assert_eq!(bms_action_code("idle"), 0.0);
+        assert_eq!(bms_action_code("idle:no_soc"), 0.0);
+        assert_eq!(bms_action_code("idle:self_consumption"), 0.0);
+        assert_eq!(bms_action_code("idle:backup_at_target"), 0.0);
+        assert_eq!(bms_action_code("idle:tou"), 0.0);
+        assert_eq!(bms_action_code("idle:no_window"), 0.0);
+        assert_eq!(bms_action_code("scheduled:idle"), 0.0);
+
+        // Code 1: charge
+        assert_eq!(bms_action_code("self_consumption:charge"), 1.0);
+        assert_eq!(bms_action_code("tou:charge"), 1.0);
+        assert_eq!(bms_action_code("scheduled:charge"), 1.0);
+        assert_eq!(bms_action_code("backup:charge"), 1.0);
+
+        // Code 2: discharge (must return 2, not 1 — substring bug verification)
+        assert_eq!(bms_action_code("self_consumption:discharge"), 2.0);
+        assert_eq!(bms_action_code("tou:discharge"), 2.0);
+        assert_eq!(bms_action_code("scheduled:discharge"), 2.0);
+        assert_eq!(bms_action_code("dr:discharge"), 2.0);
+
+        // Code 3: grid_disconnect
+        assert_eq!(bms_action_code("grid_disconnect:solar_only"), 3.0);
+        assert_eq!(bms_action_code("grid_disconnect:tou_solar_only"), 3.0);
+        assert_eq!(bms_action_code("grid_disconnect:backup_no_pv"), 3.0);
+
+        // Code 4: reconnect
+        assert_eq!(bms_action_code("self_consumption:grid_reconnected"), 4.0);
+        assert_eq!(bms_action_code("backup:grid_reconnected"), 4.0);
+        assert_eq!(bms_action_code("tou:grid_reconnected"), 4.0);
+
+        // Code 5: storm_watch
+        assert_eq!(bms_action_code("storm_watch:active"), 5.0);
+
+        // Code -1: unknown
+        assert_eq!(bms_action_code("dr:soc_too_low"), -1.0);
+        assert_eq!(bms_action_code("scheduled:hold"), -1.0);
     }
 }

@@ -64,11 +64,33 @@ pub trait Actor: Send + Sync + 'static {
     /// * `out` - Pre-allocated output buffer to append dispatch requests to.
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>);
 
+    /// Called after Independent-stage equipment (including PV) has stepped
+    /// but before Electrical-stage equipment (including battery) steps.
+    ///
+    /// Allows the actor to revise its decision based on actual (not prior-step)
+    /// PV generation. The dwelling loop gates this behind a configurable
+    /// timestep threshold (default: ≥ 5 minutes). Default implementation
+    /// is a no-op.
+    ///
+    /// # Arguments
+    ///
+    /// * `pv_kw` - Actual PV generation from current-step Independent equipment
+    ///   ports [kW], positive = producing.
+    /// * `env` - Current environment state.
+    /// * `out` - Pre-allocated output buffer to append revised dispatch requests to.
+    fn adjust_for_pv(
+        &mut self,
+        _pv_kw: f64,
+        _env: &EnvironmentState,
+        _out: &mut Vec<DispatchRequest>,
+    ) {
+    }
+
     /// Returns a reference to the actor's telemetry, or `None` if the actor
     /// has no observable internal state.
     ///
     /// The default returns `None`. Actors that hold observable decision
-    /// state (presence, setpoint, BMS action, DR compliance, EV SoC/phase)
+    /// state (presence, setpoint, BMS action, DV compliance, EV SoC/phase)
     /// override this to return `Some(&self.telemetry)`.
     fn telemetry(&self) -> Option<&Telemetry> {
         None

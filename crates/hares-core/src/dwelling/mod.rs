@@ -437,9 +437,11 @@ fn targets_conflict(
         (DispatchTarget::ByName(an), DispatchTarget::ByName(bn)) => an == bn,
         (DispatchTarget::ByEndUse(ae), DispatchTarget::ByEndUse(be)) => ae == be,
         (DispatchTarget::ByName(name), DispatchTarget::ByEndUse(end_use))
-        | (DispatchTarget::ByEndUse(end_use), DispatchTarget::ByName(name)) => equipment
-            .iter()
-            .any(|eq| eq.descriptor().name.as_str() == &**name && eq.descriptor().end_use == *end_use),
+        | (DispatchTarget::ByEndUse(end_use), DispatchTarget::ByName(name)) => {
+            equipment.iter().any(|eq| {
+                eq.descriptor().name.as_str() == &**name && eq.descriptor().end_use == *end_use
+            })
+        }
     }
 }
 
@@ -554,11 +556,7 @@ impl ControlDispatcher {
                 let requests: Vec<&DispatchRequest> = head.iter().chain(tail.iter()).collect();
                 for i in 0..requests.len() {
                     for j in (i + 1)..requests.len() {
-                        if targets_conflict(
-                            &requests[i].target,
-                            &requests[j].target,
-                            equipment,
-                        ) {
+                        if targets_conflict(&requests[i].target, &requests[j].target, equipment) {
                             let tier = PriorityTier::from_index(tier_idx);
                             let already_warned = (0..i).any(|k| {
                                 targets_conflict(
@@ -571,11 +569,7 @@ impl ControlDispatcher {
                                 let conflict_signals: Vec<&ControlSignal> = requests
                                     .iter()
                                     .filter(|r| {
-                                        targets_conflict(
-                                            &r.target,
-                                            &requests[i].target,
-                                            equipment,
-                                        )
+                                        targets_conflict(&r.target, &requests[i].target, equipment)
                                     })
                                     .map(|r| &r.signal)
                                     .collect();
@@ -3511,14 +3505,79 @@ impl Dwelling {
         }
 
         // Step 3b: non-thermal stage equipment (Independent, Electrical).
-        // Runs AFTER actor dispatch so that PV/Battery/EV control signals
-        // issued by actors (e.g. derating, SOC targets, charge power) take
-        // effect on the same timestep rather than the following one.
+        // Two-phase flow: Independent equipment (including PV) steps first,
+        // depositing generation data to ports. Then BMS actors re-evaluate
+        // based on actual PV generation from ports. Then Electrical equipment
+        // (including battery) steps with the revised signals.
+        //
+        // The re-evaluation pass is gated behind a timestep threshold (default:
+        // ≥ 5 minutes) because 1-minute timesteps have <1%/s PV ramp rates
+        // where the one-step PV lag has negligible impact.
         #[cfg(feature = "observe")]
         let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
+
+        // Phase 1: Independent-stage equipment (PV, generators).
         for &idx in &self.equipment_execution_order {
             let stage = self.equipment[idx].descriptor().stage;
-            if stage == ExecutionStage::Thermal {
+            if stage != ExecutionStage::Independent {
+                continue;
+            }
+            #[cfg(feature = "observe")]
+            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
+
+            let _ = self.equipment[idx].update_control(&self.latest_env);
+            if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
+                self.warnings.push(format!(
+                    "equipment step failed for '{}' : {err}",
+                    self.equipment[idx].descriptor().name
+                ));
+            } else {
+                validate_core_contract(
+                    self.equipment[idx].descriptor(),
+                    self.equipment[idx].core_output(),
+                )?;
+                step_succeeded[idx] = true;
+            }
+
+            #[cfg(feature = "observe")]
+            if let Some(ref mut snapshot) = pre_snapshot {
+                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                nonthermal_obs.push(observer_capture::capture_single_equipment(
+                    self.equipment[idx].as_ref(),
+                    contribution,
+                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+                ));
+                *snapshot = self.ports.clone();
+            }
+        }
+
+        // PV-BMS re-evaluation: after Independent-stage equipment has
+        // deposited generation data to ports, re-evaluate BMS actors
+        // with actual (not prior-step) PV generation so that battery
+        // charge power setpoints reflect same-step PV availability.
+        {
+            const RE_EVAL_MIN_STEP_SECS: f64 = 300.0; // 5 minutes
+            let time_step_secs = self.latest_env.time_step_secs();
+            if time_step_secs >= RE_EVAL_MIN_STEP_SECS {
+                let pv_kw = -power_w_to_kw(self.ports.electrical.generation_power_w);
+                self.actor_dispatch_buf.clear();
+                for actor in &mut self.actors {
+                    actor.adjust_for_pv(pv_kw, &self.latest_env, &mut self.actor_dispatch_buf);
+                }
+                if !self.actor_dispatch_buf.is_empty() {
+                    for req in self.actor_dispatch_buf.drain(..) {
+                        self.control_dispatcher.queue(req);
+                    }
+                    self.control_dispatcher
+                        .dispatch_into(&mut self.equipment, &mut self.warnings);
+                }
+            }
+        }
+
+        // Phase 2: Electrical-stage equipment (Battery, EV).
+        for &idx in &self.equipment_execution_order {
+            let stage = self.equipment[idx].descriptor().stage;
+            if stage != ExecutionStage::Electrical {
                 continue;
             }
             #[cfg(feature = "observe")]
@@ -3642,6 +3701,39 @@ impl Dwelling {
         );
 
         apply_humidity_update_to_zones(&mut self.latest_env, &self.humidity_update_buf);
+
+        // BMS PV staleness diagnostic: after the electrical solver runs at
+        // Step 4 and the timestep is ≥ 5 min, compare the PV generation used
+        // in the BMS decision (bms_pv_stale_kw) against the actual PV
+        // generation from the current step (bms_pv_actual_kw). If the
+        // re-evaluation pass ran, both telemetry fields are populated and
+        // the difference is the stale-data error from the one-step ordering.
+        {
+            const BMS_PV_STALE_MIN_STEP_S: f64 = 300.0;
+            if self.latest_env.time_step_secs() >= BMS_PV_STALE_MIN_STEP_S {
+                for actor in &self.actors {
+                    let Some(tel) = actor.telemetry() else {
+                        continue;
+                    };
+                    let stale = tel.get("bms_pv_stale_kw").unwrap_or(0.0);
+                    let actual = tel.get("bms_pv_actual_kw").unwrap_or(0.0);
+                    let diff = (actual - stale).abs();
+                    // Emit diagnostic when the stale-data error exceeds a
+                    // configurable fraction of the larger PV value (default 5%).
+                    let max_pv = stale.max(actual).max(0.01); // avoid div-by-zero
+                    if diff > 0.05 * max_pv {
+                        tracing::debug!(
+                            actor = actor.name(),
+                            bms_pv_stale_kw = stale,
+                            bms_pv_actual_kw = actual,
+                            diff_kw = diff,
+                            pct = diff / max_pv * 100.0,
+                            "BMS PV staleness: step-ordering data gap exceeds 5% of PV",
+                        );
+                    }
+                }
+            }
+        }
 
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
