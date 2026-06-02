@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::checksum;
-use hares_types::{HaresError, ZoneId};
+use hares_types::{ElectricalSummary, HaresError, ZoneId};
 use serde::{Deserialize, Serialize};
 
 /// Bump whenever checkpoint schema or state encoding changes.
-pub const CHECKPOINT_VERSION: u32 = 4;
+pub const CHECKPOINT_VERSION: u32 = 5;
 
 /// Serializable snapshot of all state required to resume a dwelling run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -31,6 +31,10 @@ pub struct DwellingCheckpoint {
     /// Actor decision-state blobs, one per registered actor (name, blob).
     /// Actors with no mutable state contribute an empty blob.
     pub actor_states: Vec<(String, Vec<u8>)>,
+    /// Prior-step electrical summary (grid, PV, base load, battery, EV)
+    /// so the first post-restore step sees the same env.electrical that
+    /// the original continuous run would have at the same step index.
+    pub prior_electrical_summary: ElectricalSummary,
 }
 
 impl DwellingCheckpoint {
@@ -107,7 +111,7 @@ fn temp_checkpoint_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{CHECKPOINT_VERSION, DwellingCheckpoint};
-    use hares_types::ZoneId;
+    use hares_types::{ElectricalSummary, ZoneId};
 
     fn unique_temp_name(base: &str, ext: &str) -> String {
         let nanos = std::time::SystemTime::now()
@@ -141,6 +145,7 @@ mod tests {
             thermal_last_u: vec![0.1],
             lwr_t_prev_c: vec![15.0, 18.0],
             actor_states: vec![("test_actor".into(), vec![1, 2, 3])],
+            prior_electrical_summary: ElectricalSummary::default(),
         };
 
         let path =
@@ -167,6 +172,7 @@ mod tests {
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
             actor_states: vec![],
+            prior_electrical_summary: ElectricalSummary::default(),
         };
 
         let path =
@@ -196,6 +202,7 @@ mod tests {
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
             actor_states: vec![],
+            prior_electrical_summary: ElectricalSummary::default(),
         };
 
         let path =
@@ -226,6 +233,7 @@ mod tests {
             thermal_last_u: vec![],
             lwr_t_prev_c: vec![],
             actor_states: vec![],
+            prior_electrical_summary: ElectricalSummary::default(),
         };
 
         let path = std::env::temp_dir().join(unique_temp_name(
@@ -250,5 +258,42 @@ mod tests {
             msg.contains("SHA-256") || msg.contains("checksum"),
             "expected SHA-256 checksum error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn prior_electrical_summary_round_trip() {
+        let summary = ElectricalSummary {
+            pv_generation_kw: 5.0,
+            base_load_kw: 2.5,
+            net_grid_kw: 1.0,
+            battery_power_kw: 1.5,
+            ev_power_kw: 3.0,
+            actual_pv_kw: 4.5,
+        };
+        let cp = DwellingCheckpoint {
+            format_version: CHECKPOINT_VERSION,
+            bldg_id: 7,
+            timestep_index: 12,
+            equipment_states: vec![],
+            rng_state: [0; 32],
+            envelope_state: vec![],
+            humidity_states: vec![(ZoneId(1), 0.005)],
+            fluid_states: vec![],
+            rng_stream: 0,
+            rng_word_pos: 0,
+            thermal_last_u: vec![],
+            lwr_t_prev_c: vec![],
+            actor_states: vec![],
+            prior_electrical_summary: summary.clone(),
+        };
+
+        let path = std::env::temp_dir().join(unique_temp_name(
+            "hares_core_checkpoint_electrical_summary",
+            "json",
+        ));
+        let _guard = TempFile(path.clone());
+        cp.save(&path).unwrap();
+        let loaded = DwellingCheckpoint::load(&path).unwrap();
+        assert_eq!(loaded.prior_electrical_summary, summary);
     }
 }

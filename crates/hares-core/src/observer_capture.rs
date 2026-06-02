@@ -34,6 +34,8 @@ pub(crate) fn capture_environment(
         wf_allows_leap_years,
         pv_generation_kw: env.electrical.pv_generation_kw,
         pv_actual_kw: env.electrical.actual_pv_kw,
+        net_grid_kw: env.electrical.net_grid_kw,
+        base_load_kw: env.electrical.base_load_kw,
     }
 }
 

@@ -68,6 +68,10 @@ pub struct EnvironmentCapture {
     pub pv_generation_kw: f64,
     /// Actual PV generation from `ElectricalSummary.actual_pv_kw` (observed).
     pub pv_actual_kw: f64,
+    /// Net grid power from `ElectricalSummary.net_grid_kw` (positive = importing).
+    pub net_grid_kw: f64,
+    /// Non-dispatchable load from `ElectricalSummary.base_load_kw`.
+    pub base_load_kw: f64,
 }
 
 /// Equipment telemetry + accumulated port state after an equipment phase.

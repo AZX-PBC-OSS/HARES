@@ -2802,6 +2802,7 @@ impl Dwelling {
                 .iter()
                 .map(|a| a.save_state().map(|blob| (a.name().to_string(), blob)))
                 .collect::<std::result::Result<Vec<_>, HaresError>>()?,
+            prior_electrical_summary: self.prior_electrical_summary.clone(),
         })
     }
 
@@ -2879,6 +2880,8 @@ impl Dwelling {
                 tracing::debug!(actor = actor.name(), "post-restore actor state",);
             }
         }
+
+        self.prior_electrical_summary = cp.prior_electrical_summary;
 
         Ok(())
     }
