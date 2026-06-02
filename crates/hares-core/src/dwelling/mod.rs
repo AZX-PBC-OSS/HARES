@@ -416,6 +416,33 @@ struct ControlDispatcher {
     seen_targets: Vec<(DispatchTarget, usize)>,
 }
 
+/// Returns true if two dispatch targets route to the same physical equipment,
+/// accounting for `ByEndUse` expansion against the equipment list.
+///
+/// Unlike `DispatchTarget::conflicts_with()`, this resolves `ByEndUse` targets
+/// to the equipment names they match, so cross-variant pairs (e.g.
+/// `ByEndUse(BATTERY)` vs `ByName("Battery #1")`) are correctly detected as
+/// conflicting when they target the same physical equipment.
+///
+/// Used by the same-tier conflict pre-scans in `dispatch_into_observed` and
+/// the debug invariant block in `drain_tiers`, which operate on raw
+/// pre-expansion queue entries where cross-variant calls are expected.
+#[cfg(any(feature = "observe", debug_assertions, feature = "check_invariants"))]
+fn targets_conflict(
+    a: &DispatchTarget,
+    b: &DispatchTarget,
+    equipment: &[Box<dyn Equipment>],
+) -> bool {
+    match (a, b) {
+        (DispatchTarget::ByName(an), DispatchTarget::ByName(bn)) => an == bn,
+        (DispatchTarget::ByEndUse(ae), DispatchTarget::ByEndUse(be)) => ae == be,
+        (DispatchTarget::ByName(name), DispatchTarget::ByEndUse(end_use))
+        | (DispatchTarget::ByEndUse(end_use), DispatchTarget::ByName(name)) => equipment
+            .iter()
+            .any(|eq| eq.descriptor().name.as_str() == &**name && eq.descriptor().end_use == *end_use),
+    }
+}
+
 impl Default for ControlDispatcher {
     fn default() -> Self {
         Self {
@@ -453,16 +480,24 @@ impl ControlDispatcher {
             let requests: Vec<&DispatchRequest> = head.iter().chain(tail.iter()).collect();
             for i in 0..requests.len() {
                 for j in (i + 1)..requests.len() {
-                    if requests[i].target.conflicts_with(&requests[j].target) {
+                    if targets_conflict(&requests[i].target, &requests[j].target, equipment) {
                         let tier = PriorityTier::from_index(tier_idx);
                         let already_recorded =
                             same_tier_conflicts.iter().any(|c: &SameTierConflict| {
-                                c.tier == tier && c.target == requests[i].target
+                                c.tier == tier
+                                    && targets_conflict(&c.target, &requests[i].target, equipment)
                             });
                         if !already_recorded {
                             let signals: Vec<_> = requests
                                 .iter()
-                                .filter(|r| r.target == requests[i].target && r.priority == tier)
+                                .filter(|r| {
+                                    r.priority == tier
+                                        && targets_conflict(
+                                            &r.target,
+                                            &requests[i].target,
+                                            equipment,
+                                        )
+                                })
                                 .map(|r| r.signal.clone())
                                 .collect();
                             same_tier_conflicts.push(SameTierConflict {
@@ -519,18 +554,29 @@ impl ControlDispatcher {
                 let requests: Vec<&DispatchRequest> = head.iter().chain(tail.iter()).collect();
                 for i in 0..requests.len() {
                     for j in (i + 1)..requests.len() {
-                        if requests[i].target.conflicts_with(&requests[j].target) {
+                        if targets_conflict(
+                            &requests[i].target,
+                            &requests[j].target,
+                            equipment,
+                        ) {
                             let tier = PriorityTier::from_index(tier_idx);
-                            // Log the conflict once per target group in this tier.
-                            // Avoid duplicate warnings by checking that we haven't
-                            // already warned for this specific pair's target in a
-                            // previous inner-loop iteration.
-                            let already_warned = (0..i)
-                                .any(|k| requests[k].target.conflicts_with(&requests[i].target));
+                            let already_warned = (0..i).any(|k| {
+                                targets_conflict(
+                                    &requests[k].target,
+                                    &requests[i].target,
+                                    equipment,
+                                )
+                            });
                             if !already_warned {
                                 let conflict_signals: Vec<&ControlSignal> = requests
                                     .iter()
-                                    .filter(|r| r.target.conflicts_with(&requests[i].target))
+                                    .filter(|r| {
+                                        targets_conflict(
+                                            &r.target,
+                                            &requests[i].target,
+                                            equipment,
+                                        )
+                                    })
                                     .map(|r| &r.signal)
                                     .collect();
                                 tracing::warn!(
@@ -547,39 +593,110 @@ impl ControlDispatcher {
             }
 
             for request in tier_que.drain(..) {
-                // Skip lower-priority signals when a strictly higher tier has
-                // already been applied to this target in any pass of the
-                // current step. This preserves priority ordering across the
-                // pre-thermal-FSM and post-actor dispatch passes.
-                let prior_higher = self.seen_targets.iter().any(|&(ref t, prev_tier)| {
-                    t.conflicts_with(&request.target) && tier_idx < prev_tier
-                });
-                if prior_higher {
-                    tracing::debug!(
-                        target_equipment = ?request.target,
-                        priority = ?request.priority,
-                        "lower priority signal rejected: a higher priority signal already applied to this target"
-                    );
-                    on_signal(&request, false, false, true);
-                    continue;
-                }
+                match &request.target {
+                    DispatchTarget::ByName(_) => {
+                        let prior_higher = self.seen_targets.iter().any(|&(ref t, prev_tier)| {
+                            t.conflicts_with(&request.target) && tier_idx < prev_tier
+                        });
+                        if prior_higher {
+                            tracing::debug!(
+                                target_equipment = ?request.target,
+                                priority = ?request.priority,
+                                "lower priority signal rejected: a higher priority signal already applied to this target"
+                            );
+                            on_signal(&request, false, false, true);
+                            continue;
+                        }
 
-                let overwrote = self.seen_targets.iter().any(|&(ref t, prev_tier)| {
-                    t.conflicts_with(&request.target) && tier_idx > prev_tier
-                });
-                if overwrote {
-                    tracing::debug!(
-                        target_equipment = ?request.target,
-                        priority = ?request.priority,
-                        "higher priority signal overwriting earlier signal for same equipment"
-                    );
-                }
-                self.seen_targets.push((request.target.clone(), tier_idx));
+                        let overwrote = self.seen_targets.iter().any(|&(ref t, prev_tier)| {
+                            t.conflicts_with(&request.target) && tier_idx > prev_tier
+                        });
+                        if overwrote {
+                            tracing::debug!(
+                                target_equipment = ?request.target,
+                                priority = ?request.priority,
+                                "higher priority signal overwriting earlier signal for same equipment"
+                            );
+                        }
+                        self.seen_targets.push((request.target.clone(), tier_idx));
 
-                let delivered = route_request(&request, equipment, warnings);
-                on_signal(&request, delivered, overwrote, false);
+                        let delivered = route_request(&request, equipment, warnings);
+                        on_signal(&request, delivered, overwrote, false);
+                    }
+                    DispatchTarget::ByEndUse(end_use) => {
+                        // Expand ByEndUse to individual ByName targets per
+                        // matching equipment. This ensures seen_targets contains
+                        // only homogeneous ByName entries, so conflicts_with
+                        // comparisons are reliable across dispatch passes.
+                        let mut any_delivered = false;
+                        let mut any_overwrote = false;
+                        let mut any_skipped = false;
+
+                        for eq in equipment.iter_mut() {
+                            if eq.descriptor().end_use != *end_use {
+                                continue;
+                            }
+                            let eq_name = eq.descriptor().name.clone();
+                            let by_name = DispatchTarget::ByName(Arc::from(eq_name.as_str()));
+
+                            let prior_higher =
+                                self.seen_targets.iter().any(|&(ref t, prev_tier)| {
+                                    t.conflicts_with(&by_name) && tier_idx < prev_tier
+                                });
+                            if prior_higher {
+                                tracing::debug!(
+                                    target_equipment = eq_name,
+                                    priority = ?request.priority,
+                                    "lower priority ByEndUse signal rejected: a higher priority signal already applied to this target"
+                                );
+                                any_skipped = true;
+                                continue;
+                            }
+
+                            let overwrote = self.seen_targets.iter().any(|&(ref t, prev_tier)| {
+                                t.conflicts_with(&by_name) && tier_idx > prev_tier
+                            });
+                            if overwrote {
+                                any_overwrote = true;
+                                tracing::debug!(
+                                    target_equipment = eq_name,
+                                    priority = ?request.priority,
+                                    "higher priority signal overwriting earlier signal for same equipment via ByEndUse expansion"
+                                );
+                            }
+
+                            self.seen_targets.push((by_name, tier_idx));
+
+                            if let Err(err) = eq.apply_control(&request.signal) {
+                                warnings.push(format!(
+                                    "control apply failed for '{}' : {err}",
+                                    eq_name
+                                ));
+                            } else {
+                                any_delivered = true;
+                            }
+                        }
+
+                        if !any_delivered && !any_skipped {
+                            warnings.push(format!(
+                                "control target not found by end-use: {:?}",
+                                end_use
+                            ));
+                        }
+
+                        on_signal(&request, any_delivered, any_overwrote, any_skipped);
+                    }
+                }
             }
         }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            self.seen_targets
+                .iter()
+                .all(|(t, _)| matches!(t, DispatchTarget::ByName(_))),
+            "seen_targets must contain only ByName entries — ByEndUse targets must be expanded before recording"
+        );
     }
 }
 
@@ -6595,6 +6712,94 @@ occupancy = 1.0
         );
     }
 
+    #[cfg(feature = "observe")]
+    #[test]
+    fn by_end_use_and_by_name_same_equipment_same_tier_observer_captures_conflict() {
+        let mut eq = TestEquipment::new("Battery #1", ControlCapabilities::POWER_SETPOINT);
+        eq.descriptor.end_use = EndUse::BATTERY;
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::BATTERY),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery #1")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 8.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            capture.same_tier_conflicts.len(),
+            1,
+            "observer must detect mixed-variant (ByEndUse vs ByName) same-tier conflict"
+        );
+        let conflict = &capture.same_tier_conflicts[0];
+        assert_eq!(conflict.tier, PriorityTier::Schedule);
+        assert_eq!(conflict.signals.len(), 2);
+        // Last-write-wins: the ByName signal (8.0) overwrites the ByEndUse signal (5.0).
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(8.0));
+    }
+
+    #[cfg(feature = "observe")]
+    #[test]
+    fn by_end_use_and_by_name_different_equipment_no_false_observer_conflict() {
+        let mut battery = TestEquipment::new("Battery #1", ControlCapabilities::POWER_SETPOINT);
+        battery.descriptor.end_use = EndUse::BATTERY;
+        let mut heater = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+        heater.descriptor.end_use = EndUse::HVAC_HEATING;
+
+        let mut dispatcher = ControlDispatcher::default();
+        // ByEndUse for BATTERY targets Battery #1, ByName("Heater") targets Heater.
+        // These are different equipment — no same-tier conflict.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::BATTERY),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 3.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery), Box::new(heater)];
+        let capture = dispatcher.dispatch_into_observed(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert!(
+            capture.same_tier_conflicts.is_empty(),
+            "no conflict expected for ByEndUse vs ByName targeting different equipment"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Dispatch wiring: ByEndUse targets all matching equipment
     // -----------------------------------------------------------------------
@@ -6668,6 +6873,215 @@ occupancy = 1.0
         );
         // Battery should NOT have received it
         assert_eq!(equipment[1].telemetry().get("last_dr_level"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispatch: cross-variant priority inversion prevention
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn by_end_use_expanded_to_by_name_detects_cross_pass_priority_inversion() {
+        // Regression: T-0181 — ByEndUse targets must expand to ByName so that
+        // seen_targets entries are homogeneous and a lower-priority ByName
+        // signal in a later pass is correctly rejected when a higher-priority
+        // ByEndUse signal was applied to the same equipment in an earlier pass.
+        let mut eq = TestEquipment::new("Battery #1", ControlCapabilities::POWER_SETPOINT);
+        eq.descriptor.end_use = EndUse::BATTERY;
+
+        let mut dispatcher = ControlDispatcher::default();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        let mut warnings = Vec::new();
+
+        // Begin the step (reset cross-pass ledger).
+        dispatcher.begin_step();
+
+        // Pass 1: Safety-tier signal targeting ByEndUse(BATTERY)
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::BATTERY),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Safety,
+        });
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, _, _, _| {});
+        // Pass 1: Safety setpoint applied.
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        assert!(warnings.is_empty());
+
+        // Pass 2: Schedule-tier signal targeting the same battery by name.
+        // This MUST be rejected because Safety > Schedule.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery #1")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        let mut skipped = false;
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, _, _, s| {
+            if s {
+                skipped = true;
+            }
+        });
+        assert!(
+            skipped,
+            "Schedule signal should be skipped — higher-priority Safety signal already applied"
+        );
+        // The Safety setpoint must still be in effect.
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(10.0),
+            "Safety setpoint must survive lower-priority overwrite"
+        );
+    }
+
+    #[test]
+    fn by_end_use_and_by_name_same_equipment_conflict_in_single_pass() {
+        // Two Schedule-tier signals for the same equipment — one by end-use,
+        // one by name — are correctly detected as conflicting through ByEndUse
+        // expansion, and last-queued wins.
+        let mut eq = TestEquipment::new("Battery #1", ControlCapabilities::POWER_SETPOINT);
+        eq.descriptor.end_use = EndUse::BATTERY;
+
+        let mut dispatcher = ControlDispatcher::default();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        let mut warnings = Vec::new();
+
+        // Queue by end-use first, then by name. Both Schedule-tier.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::BATTERY),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery #1")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 8.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut delivered_count = 0;
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, d, _, _| {
+            if d {
+                delivered_count += 1;
+            }
+        });
+        assert!(warnings.is_empty());
+        // Both signals should be "delivered" (the ByEndUse one applies, then
+        // the ByName one overwrites). Last-write-wins: 8.0 is the final value.
+        assert_eq!(delivered_count, 2);
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(8.0),
+            "last-queued ByName signal must overwrite ByEndUse signal at same tier"
+        );
+    }
+
+    #[test]
+    fn by_end_use_expansion_only_affects_matching_equipment() {
+        // Two batteries, one targeted by end-use. Only the matching one gets
+        // the signal. The other is untouched and does not appear in seen_targets.
+        let mut battery1 = TestEquipment::new("Battery #1", ControlCapabilities::POWER_SETPOINT);
+        battery1.descriptor.end_use = EndUse::BATTERY;
+        let mut battery2 = TestEquipment::new("Battery #2", ControlCapabilities::POWER_SETPOINT);
+        battery2.descriptor.end_use = EndUse::BATTERY;
+        let mut ev = TestEquipment::new("Home EV", ControlCapabilities::POWER_SETPOINT);
+        ev.descriptor.end_use = EndUse::EV;
+
+        let mut dispatcher = ControlDispatcher::default();
+        let mut equipment: Vec<Box<dyn Equipment>> =
+            vec![Box::new(battery1), Box::new(battery2), Box::new(ev)];
+        let mut warnings = Vec::new();
+
+        dispatcher.begin_step();
+
+        // Pass 1: Safety signal to all batteries via ByEndUse.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::BATTERY),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 10.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Safety,
+        });
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, _, _, _| {});
+
+        // Both batteries got the signal.
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        // EV was not affected.
+        assert_eq!(equipment[2].telemetry().get(tk::LAST_POWER_KW), None);
+
+        // Pass 2: Schedule signal to Battery #1 by name. Should be blocked
+        // because Safety already targeted it via ByEndUse expansion.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery #1")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        let mut skipped = false;
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, _, _, s| {
+            if s {
+                skipped = true;
+            }
+        });
+        assert!(
+            skipped,
+            "Schedule signal for Battery #1 must be skipped — Safety already applied"
+        );
+
+        // Battery #1 still has Safety value.
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        // Battery #2 still has Safety value.
+        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+
+        // Pass 3: Schedule signal to Battery #2 by name. Also blocked.
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Battery #2")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 2.0,
+                reactive_power_kvar: None,
+                min_soc: None,
+                max_soc: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        let mut skipped = false;
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, _, _, s| {
+            if s {
+                skipped = true;
+            }
+        });
+        assert!(
+            skipped,
+            "Schedule signal for Battery #2 must also be skipped"
+        );
+
+        // Both batteries still at Safety value.
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
     }
 
     // -----------------------------------------------------------------------

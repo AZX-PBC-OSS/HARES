@@ -113,14 +113,21 @@ fn de_arc_str<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Arc<str>, D::Er
 }
 
 impl DispatchTarget {
-    /// Returns true if two targets route to the same equipment.
+    /// Returns true if two same-variant targets route to the same equipment.
     ///
-    /// Used by the dispatcher to detect and log control signal conflicts
-    /// within a single timestep. Zero-allocation -- compares inner references.
+    /// Used for priority-ledger checks in `drain_tiers`, where `ByEndUse` has
+    /// already been expanded to `ByName`. This method compares references,
+    /// zero-allocation.
+    ///
+    /// Does **not** account for `ByEndUse` expansion — cross-variant pairs
+    /// always return `false`. Callers that operate on raw pre-expansion queue
+    /// entries (same-tier conflict scans in `dispatch_into_observed` and the
+    /// debug-mode invariant block in `drain_tiers`) must use a
+    /// `targets_conflict()` helper that resolves `ByEndUse` against the
+    /// equipment list to avoid missing mixed-variant conflicts.
     pub fn conflicts_with(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::ByName(a), Self::ByName(b)) => a == b,
-            (Self::ByEndUse(a), Self::ByEndUse(b)) => a == b,
             _ => false,
         }
     }
@@ -143,12 +150,27 @@ mod tests {
     use hares_types::EndUse;
 
     #[test]
-    fn dispatch_target_construction_for_both_variants() {
+    fn dispatch_target_variant_construction() {
+        // Both variants remain constructible — ByEndUse is an input-only convenience
+        // that is expanded to ByName at queue time in dwelling/mod.rs drain_tiers.
         let by_name = DispatchTarget::ByName(Arc::from("Battery #1"));
         let by_end_use = DispatchTarget::ByEndUse(EndUse::HVAC_HEATING);
 
         assert_eq!(by_name, DispatchTarget::ByName(Arc::from("Battery #1")));
         assert_eq!(by_end_use, DispatchTarget::ByEndUse(EndUse::HVAC_HEATING));
+    }
+
+    #[test]
+    fn conflicts_with_custom_end_use() {
+        // Custom end-use targets must expand through the drain_tiers path;
+        // conflicts_with itself only compares ByName. Verify that ByName
+        // comparisons detect conflicts for the same equipment name.
+        let hpwh_by_name = DispatchTarget::ByName(Arc::from("heat_pump_water_heater"));
+        let hpwh2_by_name = DispatchTarget::ByName(Arc::from("heat_pump_water_heater"));
+        let ice_by_name = DispatchTarget::ByName(Arc::from("ice_storage"));
+
+        assert!(hpwh_by_name.conflicts_with(&hpwh2_by_name));
+        assert!(!hpwh_by_name.conflicts_with(&ice_by_name));
     }
 
     #[test]
@@ -217,34 +239,19 @@ mod tests {
     }
 
     #[test]
-    fn conflicts_with_same_end_use() {
-        let a = DispatchTarget::ByEndUse(EndUse::HVAC_HEATING);
-        let b = DispatchTarget::ByEndUse(EndUse::HVAC_HEATING);
+    fn same_end_use_targets_conflict_when_both_by_name() {
+        // Two ByName targets referring to the same equipment name conflict,
+        // regardless of whether they originated from a ByEndUse expansion.
+        let a = DispatchTarget::ByName(Arc::from("Battery #1"));
+        let b = DispatchTarget::ByName(Arc::from("Battery #1"));
         assert!(a.conflicts_with(&b));
     }
 
     #[test]
-    fn conflicts_with_different_end_use() {
-        let a = DispatchTarget::ByEndUse(EndUse::HVAC_HEATING);
-        let b = DispatchTarget::ByEndUse(EndUse::BATTERY);
+    fn different_end_use_names_no_conflict() {
+        let a = DispatchTarget::ByName(Arc::from("Battery #1"));
+        let b = DispatchTarget::ByName(Arc::from("HVAC_Zone1"));
         assert!(!a.conflicts_with(&b));
-    }
-
-    #[test]
-    fn conflicts_with_different_variants_never_conflict() {
-        let by_name = DispatchTarget::ByName(Arc::from("hvac_heating"));
-        let by_end_use = DispatchTarget::ByEndUse(EndUse::HVAC_HEATING);
-        assert!(!by_name.conflicts_with(&by_end_use));
-    }
-
-    #[test]
-    fn conflicts_with_custom_end_use() {
-        let hpwh = DispatchTarget::ByEndUse(EndUse::custom("heat_pump_water_heater"));
-        let hpwh2 = DispatchTarget::ByEndUse(EndUse::custom("heat_pump_water_heater"));
-        let ice = DispatchTarget::ByEndUse(EndUse::custom("ice_storage"));
-
-        assert!(hpwh.conflicts_with(&hpwh2));
-        assert!(!hpwh.conflicts_with(&ice));
     }
 
     #[test]
