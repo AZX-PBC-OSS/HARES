@@ -119,10 +119,49 @@ pub(crate) struct SyntheticWeatherConfig {
     /// mid-latitude summer value (τ_d = 2.0 per HoF 2013 Ch.33 Table 9.8).
     #[serde(default)]
     pub(crate) diffuse_optical_depth: Option<f64>,
+    /// Diurnal temperature amplitude [°C].
+    ///
+    /// When zero (default), the dry-bulb temperature is constant across all
+    /// hours — backward-compatible with pre-T-0189 BESTEST configurations.
+    /// When > 0, a sinusoidal diurnal profile with peak in the afternoon is
+    /// applied (see `build_synthetic_weather` for the model formula).
+    ///
+    /// Typical values: 5–10 °C for mid-latitude continental climates
+    /// (ASHRAE HoF 2021 Ch.14 Fig.14.7).
+    #[serde(default)]
+    pub(crate) diurnal_amplitude_c: f64,
+    /// Thermal lag from solar noon to peak air temperature [hours].
+    ///
+    /// Reflects the observed 2–3 hour lag between peak solar irradiance and
+    /// peak air temperature due to surface-to-air convective heat transfer
+    /// delay. Used as the phase offset in the diurnal sinusoid model.
+    ///
+    /// ASHRAE HoF 2021 Ch.14 §4 Table 14.6: typical range 2–3 hours for
+    /// mid-latitude sites.
+    #[serde(default = "default_thermal_lag_h")]
+    pub(crate) thermal_lag_h: f64,
+    /// Seasonal modulation factor for diurnal amplitude (dimensionless).
+    ///
+    /// Controls how much larger the diurnal amplitude is in summer versus
+    /// winter. The effective amplitude for each day is:
+    /// A_effective = A_base × [1 + B × cos(2π × (doy − 172) / 365)]
+    /// where `B` is this value and day 172 is the summer solstice (June 21).
+    /// First-order astronomical model: annual cosine envelope peaking at the
+    /// summer solstice. ASHRAE HoF 2021 Ch.14 §4: design-day and seasonal
+    /// temperature variation utilise sinusoidal models anchored to the solstices.
+    ///
+    /// Zero = no seasonal modulation (constant amplitude year-round).
+    /// Typical: 0.3–0.5 for continental climates with strong seasonal variation.
+    #[serde(default)]
+    pub(crate) seasonal_modulation: f64,
 }
 
 fn default_clear_sky_solar() -> bool {
     true
+}
+
+fn default_thermal_lag_h() -> f64 {
+    2.5
 }
 
 impl Default for SyntheticWeatherConfig {
@@ -137,6 +176,9 @@ impl Default for SyntheticWeatherConfig {
             clear_sky_solar: true,
             beam_optical_depth: None,
             diffuse_optical_depth: None,
+            diurnal_amplitude_c: 0.0,
+            thermal_lag_h: default_thermal_lag_h(),
+            seasonal_modulation: 0.0,
         }
     }
 }
@@ -945,18 +987,6 @@ pub(crate) fn build_synthetic_weather(
         hares_io::SkyTempModel::default(),
     );
 
-    // Ground temperature: temporal mean of the dry-bulb series, or an explicit
-    // TOML override via `weather.ground_temp_c`.
-    //
-    // For a constant dry-bulb profile the temporal mean equals the per-record
-    // value (outdoor_temp_c), making this a no-op for all existing callers.
-    // For future time-varying synthetic profiles the temporal mean is the
-    // physically correct zero-amplitude limit of the Kusuda-Achenbach model:
-    // T(z,t) → T̄_s as ΔT̄_s → 0.
-    // Cite: Kusuda, T. and Achenbach, P.R. (1965), ASHRAE Trans. 71(1):61-74.
-    let temporal_mean_c = outdoor_temp_c;
-    let ground_temp_c = config.weather.ground_temp_c.unwrap_or(temporal_mean_c);
-
     // Clear-sky solar irradiance via the ASHRAE 2013 model.
     //
     // When clear_sky_solar is enabled (default) and no EPW path is provided,
@@ -1054,10 +1084,146 @@ pub(crate) fn build_synthetic_weather(
         );
     }
 
+    // Diurnal temperature model.
+    //
+    // T(hour) = T_mean + A_effective × sin(2π × (hour_of_day − 6 − t_lag) / 24)
+    //
+    // The sin wave peaks at hour_of_day = 12 + t_lag (solar noon + thermal lag),
+    // which for the default t_lag = 2.5 h gives a peak at 14:30 local time.
+    // This matches the observed 2–3 h lag between peak solar irradiance and
+    // peak air temperature (ASHRAE HoF 2021 Ch.14 §4 Table 14.6).
+    //
+    // Seasonal amplitude envelope:
+    //   A_effective = A_base × [1 + B × cos(2π × (doy − 172) / 365)]
+    // where doy 172 = June 21 (summer solstice) and B controls seasonal modulation.
+    // With B > 0, summer diurnal amplitude exceeds winter amplitude.
+    // The cos peaks at the solstice (1 + B) and troughs at the winter
+    // solstice (1 − B). ASHRAE HoF 2021 Ch.14 §4.
+    //
+    // Ticket T-0189 specified sin(2π × (hour − t_lag − 12) / 24) which would
+    // place the peak at hour 18 + t_lag (~20:30), inconsistent with the
+    // invariant that the peak should fall in hours 13–17. The constant 12 was
+    // corrected to 6 so the peak occurs at solar noon + lag.
+    let diurnal_amp = config.weather.diurnal_amplitude_c;
+    let thermal_lag_h = config.weather.thermal_lag_h;
+    let seasonal_mod = config.weather.seasonal_modulation;
+    let dry_bulb_c: Vec<f64> = if diurnal_amp > 0.0 {
+        (0..n)
+            .map(|hour| {
+                let day_of_year = (hour / 24) as u32 + 1; // 1-based day-of-year
+                let hour_of_day = (hour % 24) as f64;
+                // Seasonal amplitude envelope: peak at summer solstice (doy 172).
+                // cos(TAU * (doy − 172) / 365) = 1 at doy 172, −1 at doy 355.
+                let season_factor = 1.0
+                    + seasonal_mod
+                        * (std::f64::consts::TAU * (day_of_year as f64 - 172.0) / 365.0).cos();
+                let a_effective = diurnal_amp * season_factor;
+                outdoor_temp_c
+                    + a_effective
+                        * (std::f64::consts::TAU * (hour_of_day - 6.0 - thermal_lag_h) / 24.0).sin()
+            })
+            .collect()
+    } else {
+        vec![outdoor_temp_c; n]
+    };
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // Invariant: if diurnal amplitude > 0, the output must have non-zero
+        // variance (the diurnal model produced actual variation).
+        if diurnal_amp > 0.0 {
+            let min = dry_bulb_c.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = dry_bulb_c.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let range = max - min;
+            assert!(
+                range > 0.01,
+                "diurnal_amplitude_c ({diurnal_amp}) > 0 but dry_bulb_c range ({range:.6}) ≈ 0 — \
+                 diurnal model produced degenerate flat output"
+            );
+            // Invariant: the daily peak temperature should occur during
+            // afternoon hours (13–17 local time at timezone offset 0), not
+            // at midnight or dawn.
+            //
+            // Check day 180 (June 29): summer, peak should be well into
+            // afternoon. Day index 179 (0-based, hour 4296..4319).
+            let day_start = 179 * 24;
+            let day_end = day_start + 24;
+            if day_end <= n {
+                let mut peak_hour = 0;
+                let mut peak_val = f64::NEG_INFINITY;
+                for (h, &val) in dry_bulb_c.iter().enumerate().take(day_end).skip(day_start) {
+                    if val > peak_val {
+                        peak_val = val;
+                        peak_hour = h % 24;
+                    }
+                }
+                assert!(
+                    (13..=17).contains(&peak_hour),
+                    "day 180 (June 29) peak dry-bulb hour ({peak_hour}) should be in 13–17 \
+                     (afternoon local time); diurnal_amplitude_c = {diurnal_amp}, \
+                     thermal_lag_h = {thermal_lag_h}",
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        let mut daily_ranges: Vec<f64> = Vec::with_capacity(365);
+        let mut daily_peak_hours: Vec<u32> = Vec::with_capacity(365);
+        for day in 0..365 {
+            let day_start = day * 24;
+            let day_end = (day_start + 24).min(n);
+            if day_end <= day_start {
+                continue;
+            }
+            let day_slice = &dry_bulb_c[day_start..day_end];
+            let min = day_slice.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = day_slice.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            daily_ranges.push(max - min);
+            let peak_idx = day_slice
+                .iter()
+                .enumerate()
+                .fold(0, |idx, (i, &v)| if v > day_slice[idx] { i } else { idx });
+            daily_peak_hours.push(peak_idx as u32);
+        }
+        let mean_daily_range = daily_ranges.iter().sum::<f64>() / daily_ranges.len() as f64;
+        let mode_peak_hour = {
+            let mut counts: [u32; 24] = [0; 24];
+            for &h in &daily_peak_hours {
+                if (h as usize) < 24 {
+                    counts[h as usize] += 1;
+                }
+            }
+            counts
+                .iter()
+                .enumerate()
+                .fold(0, |best, (i, &c)| if c > counts[best] { i } else { best })
+        };
+        tracing::info!(
+            weather.dry_bulb.daily_range = mean_daily_range,
+            weather.dry_bulb.hour_of_peak = mode_peak_hour,
+            diurnal_amplitude_c = diurnal_amp,
+            thermal_lag_h = thermal_lag_h,
+            seasonal_modulation = seasonal_mod,
+            "synthetic dry-bulb diurnal telemetry"
+        );
+    }
+
+    // Ground temperature: temporal mean of the dry-bulb series.
+    //
+    // Recomputes ground_temp_c from the actual time-varying dry_bulb series
+    // so the deep-ground approximation tracks the true annual mean when a
+    // diurnal profile is active. The Kusuda-Achenbach zero-amplitude limit
+    // T(z,t) → T̄_s applies to the actual series, not the config constant.
+    // Cite: Kusuda, T. and Achenbach, P.R. (1965), ASHRAE Trans. 71(1):61-74.
+    let temporal_mean_c = dry_bulb_c.iter().sum::<f64>() / dry_bulb_c.len() as f64;
+    let ground_temp_c = config.weather.ground_temp_c.unwrap_or(temporal_mean_c);
+
     Ok(WeatherTimeSeries {
         meta,
         design_conditions: None,
-        dry_bulb_c: vec![outdoor_temp_c; n],
+        dry_bulb_c,
         dew_point_c: vec![dew_point_c; n],
         rel_humidity_pct: vec![config.weather.rel_humidity_pct; n],
         pressure_kpa: vec![config.weather.pressure_kpa; n],
@@ -1763,5 +1929,236 @@ ground_temp_c = 8.0
                 "step {i}: ground_temp_c ({gt}) should be 8.0"
             );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // T-0189: Diurnal temperature profile in synthetic weather
+    // -------------------------------------------------------------------------
+
+    /// With `diurnal_amplitude_c = 10.0`, the dry-bulb series must not be
+    /// constant: daily temperature should swing between a minimum and maximum.
+    #[test]
+    fn synthetic_diurnal_produces_variation() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+diurnal_amplitude_c = 10.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        let min = weather
+            .dry_bulb_c
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let max = weather
+            .dry_bulb_c
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let range = max - min;
+        assert!(
+            range > 5.0,
+            "dry_bulb_c range ({range:.2}) °C with amplitude 10 °C should exceed 5 °C"
+        );
+        assert_ne!(
+            min, max,
+            "dry_bulb_c min ({min}) must differ from max ({max})"
+        );
+    }
+
+    /// The daily peak dry-bulb temperature must occur during afternoon hours
+    /// (13–17 local time), not at midnight or dawn.
+    #[test]
+    fn synthetic_diurnal_peak_in_afternoon() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+diurnal_amplitude_c = 10.0
+thermal_lag_h = 2.5
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        // Check first full day (hours 0..23).
+        let mut peak_hour = 0;
+        let mut peak_val = f64::NEG_INFINITY;
+        for h in 0..24 {
+            if weather.dry_bulb_c[h] > peak_val {
+                peak_val = weather.dry_bulb_c[h];
+                peak_hour = h;
+            }
+        }
+        assert!(
+            peak_hour > 12,
+            "peak hour ({peak_hour}) must be after solar noon (12)"
+        );
+        assert!(
+            peak_hour < 18,
+            "peak hour ({peak_hour}) must be before sunset (~18)"
+        );
+        // Also verify the minimum occurs at dawn (~hour 2–5 local time).
+        let mut trough_hour = 0;
+        let mut trough_val = f64::INFINITY;
+        for h in 0..24 {
+            if weather.dry_bulb_c[h] < trough_val {
+                trough_val = weather.dry_bulb_c[h];
+                trough_hour = h;
+            }
+        }
+        assert!(
+            trough_hour < 12,
+            "trough hour ({trough_hour}) should be before noon"
+        );
+    }
+
+    /// With `diurnal_amplitude_c = 0.0`, the output must be constant
+    /// (backward-compatible with pre-T-0189 behavior).
+    #[test]
+    fn synthetic_diurnal_zero_amplitude_is_constant() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+diurnal_amplitude_c = 0.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+        let first = weather.dry_bulb_c[0];
+        for (i, &t) in weather.dry_bulb_c.iter().enumerate() {
+            assert!(
+                (t - first).abs() < 1e-9,
+                "step {i}: dry_bulb_c ({t}) differs from first ({first}) with zero amplitude"
+            );
+        }
+    }
+
+    /// When seasonal modulation is enabled (`seasonal_modulation = 0.4`), the
+    /// diurnal temperature range in summer (July) must exceed the range in
+    /// winter (January).
+    #[test]
+    fn synthetic_diurnal_seasonal_envelope() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+diurnal_amplitude_c = 10.0
+thermal_lag_h = 2.5
+seasonal_modulation = 0.4
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let weather = build_synthetic_weather(&config, Path::new(".")).expect("weather");
+
+        fn daily_range_at_doy(weather: &WeatherTimeSeries, doy: u32) -> f64 {
+            let start = (doy as usize - 1) * 24;
+            let end = start + 24;
+            let max = weather.dry_bulb_c[start..end]
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let min = weather.dry_bulb_c[start..end]
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            max - min
+        }
+
+        let solstice_range = daily_range_at_doy(&weather, 172); // June 21
+        let winter_range = daily_range_at_doy(&weather, 355); // Dec 21
+        assert!(
+            solstice_range > winter_range,
+            "Summer solstice range ({solstice_range:.2}) must exceed winter solstice range ({winter_range:.2}) \
+             with seasonal_modulation = 0.4"
+        );
+
+        // The seasonal envelope cos peaks at solstice: A_eff = A_base × (1 + B) = 14.0 °C,
+        // so the full diurnal swing = 2 × 14.0 = 28.0 °C. Allow ±0.5 °C for floating-point
+        // with the diurnal phase offset.
+        assert!(
+            (solstice_range - 28.0).abs() < 0.5,
+            "Summer solstice range ({solstice_range:.2}) should be ~28.0 °C"
+        );
+        assert!(
+            (winter_range - 12.0).abs() < 0.5,
+            "Winter solstice range ({winter_range:.2}) should be ~12.0 °C (A_eff = 6.0 °C)"
+        );
+
+        // Cross-check: July (doy 202) still exceeds January (doy 15).
+        let july_range = daily_range_at_doy(&weather, 202);
+        let jan_range = daily_range_at_doy(&weather, 15);
+        assert!(
+            july_range > jan_range,
+            "July daily range ({july_range:.2}) must exceed January daily range ({jan_range:.2}) \
+             with seasonal_modulation = 0.4"
+        );
     }
 }
