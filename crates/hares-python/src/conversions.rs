@@ -65,6 +65,24 @@ pub fn record_batches_to_polars_df(py: Python<'_>, batches: &[RecordBatch]) -> P
         }
     }
 
+    // Detect duplicate field names before writing IPC. Arrow IPC readers
+    // (including Polars) deduplicate schemas by field name, causing a
+    // panic when batch-column-count and schema-column-count diverge.
+    // This guard catches duplicate column names produced by schema
+    // builders so the failure is a clean PyValueError instead of a panic.
+    {
+        let mut seen = std::collections::HashSet::new();
+        for field in schema.fields() {
+            if !seen.insert(field.name()) {
+                return Err(PyValueError::new_err(format!(
+                    "duplicate column name in output schema: '{}'. \
+                     This is a bug in the schema builder — report it.",
+                    field.name()
+                )));
+            }
+        }
+    }
+
     let mut ipc_buffer = Vec::new();
     {
         let mut writer = FileWriter::try_new(&mut ipc_buffer, &schema)

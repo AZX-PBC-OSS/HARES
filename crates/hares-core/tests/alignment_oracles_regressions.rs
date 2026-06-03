@@ -568,56 +568,56 @@ fn debug_ashp_channel_delta_report() {
             &["Total Electric Power (kW)"],
         ),
         (
-            "HVAC Heating Electric Power (kW)",
+            "HVAC Heating End Use Electric Power (kW)",
             &[
-                "HVAC Heating Electric Power (kW)",
+                "HVAC Heating End Use Electric Power (kW)",
                 "ASHP Heater Electric Power (kW)",
                 "MSHP Heater Electric Power (kW)",
                 "Gas Furnace Electric Power (kW)",
                 "Electric Furnace Electric Power (kW)",
             ],
-            &["HVAC Heating Electric Power (kW)"],
+            &["HVAC Heating End Use Electric Power (kW)"],
         ),
         (
-            "HVAC Cooling Electric Power (kW)",
+            "HVAC Cooling End Use Electric Power (kW)",
             &[
-                "HVAC Cooling Electric Power (kW)",
+                "HVAC Cooling End Use Electric Power (kW)",
                 "ASHP Cooler Electric Power (kW)",
                 "MSHP Cooler Electric Power (kW)",
                 "Air Conditioner Electric Power (kW)",
                 "Room AC Electric Power (kW)",
             ],
-            &["HVAC Cooling Electric Power (kW)"],
+            &["HVAC Cooling End Use Electric Power (kW)"],
         ),
         (
-            "Other Electric Power (kW)",
+            "Other End Use Electric Power (kW)",
             &[
-                "Other Electric Power (kW)",
+                "Other End Use Electric Power (kW)",
                 "MELs Electric Power (kW)",
                 "TV Electric Power (kW)",
                 "Refrigerator Electric Power (kW)",
                 "Ventilation Fan Electric Power (kW)",
             ],
-            &["Other Electric Power (kW)"],
+            &["Other End Use Electric Power (kW)"],
         ),
         (
-            "Lighting Electric Power (kW)",
+            "Lighting End Use Electric Power (kW)",
             &[
-                "Lighting Electric Power (kW)",
+                "Lighting End Use Electric Power (kW)",
                 "Indoor Lighting Electric Power (kW)",
                 "Exterior Lighting Electric Power (kW)",
             ],
-            &["Lighting Electric Power (kW)"],
+            &["Lighting End Use Electric Power (kW)"],
         ),
         (
-            "Water Heating Electric Power (kW)",
+            "Water Heating End Use Electric Power (kW)",
             &[
-                "Water Heating Electric Power (kW)",
+                "Water Heating End Use Electric Power (kW)",
                 "Heat Pump Water Heater Electric Power (kW)",
                 "Resistance Water Heater Electric Power (kW)",
                 "Gas Water Heater Electric Power (kW)",
             ],
-            &["Water Heating Electric Power (kW)"],
+            &["Water Heating End Use Electric Power (kW)"],
         ),
         (
             "Temperature - Indoor (C)",
@@ -653,13 +653,13 @@ fn debug_ashp_channel_delta_report() {
             &actual,
             &reference,
             &[
-                "HVAC Heating Electric Power (kW)",
+                "HVAC Heating End Use Electric Power (kW)",
                 "ASHP Heater Electric Power (kW)",
                 "MSHP Heater Electric Power (kW)",
                 "Gas Furnace Electric Power (kW)",
                 "Electric Furnace Electric Power (kW)",
             ],
-            &["HVAC Heating Electric Power (kW)"],
+            &["HVAC Heating End Use Electric Power (kW)"],
         ),
         paired_aggregate(
             &actual,
@@ -701,10 +701,10 @@ fn debug_ashp_peak_step_details() {
         &actual,
         &reference,
         &[
-            "HVAC Heating Electric Power (kW)",
+            "HVAC Heating End Use Electric Power (kW)",
             "ASHP Heater Electric Power (kW)",
         ],
-        &["HVAC Heating Electric Power (kW)"],
+        &["HVAC Heating End Use Electric Power (kW)"],
     )
     .expect("heating series");
 
@@ -794,7 +794,7 @@ fn debug_minisplit_channel_delta_report() {
         &actual,
         &reference,
         &["MSHP Heater Electric Power (kW)"],
-        &["HVAC Heating Electric Power (kW)"],
+        &["HVAC Heating End Use Electric Power (kW)"],
     )
     .expect("series");
     let actual_center =

@@ -37,14 +37,17 @@ pub use epw::{
 // Re-export canonical physical constants from hares-physics (preserving public API names).
 pub use hares_physics::constants::CELSIUS_TO_KELVIN as KELVIN_OFFSET_C;
 pub use hares_physics::constants::STEFAN_BOLTZMANN;
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub use hpxml::building::check_foundation_zone_invariant;
 pub use hpxml::{
     Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml, resolve_equipment,
 };
 pub use output::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
     OutputSummary, SimulationMetrics, StreamingRecorder, build_schema, display_name_to_end_use_key,
-    end_use_display_name, equipment_name_to_end_use, expected_columns_at_verbosity,
-    mode_to_ordinal,
+    end_use_display_name, end_use_electric_power_column, equipment_name_to_end_use,
+    expected_columns_at_verbosity, mode_to_ordinal, parse_end_use_electric_power_column,
+    parse_end_use_electric_power_column_key,
 };
 pub use psm3::parse_psm3;
 pub use resstock::{

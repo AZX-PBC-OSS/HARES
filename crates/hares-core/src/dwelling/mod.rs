@@ -31,7 +31,7 @@ use hares_equipment::{
 };
 use hares_io::{
     Building, DefaultsStore, PvPanelDefaults, ScheduleTimeSeries, SimulationConfig,
-    StreamingRecorder, WeatherTimeSeries, build_schema, end_use_display_name,
+    StreamingRecorder, WeatherTimeSeries, build_schema, end_use_electric_power_column,
     equipment_name_to_end_use, parse_hpxml, parse_schedule_csv, parse_weather, resolve_equipment,
 };
 use hares_physics::constants::{
@@ -1530,6 +1530,7 @@ impl Dwelling {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             hares_io::check_hvac_setpoint_invariants(&equipment_specs);
+            hares_io::check_foundation_zone_invariant(&building);
         }
         let override_root = config
             .overrides
@@ -1795,8 +1796,7 @@ impl Dwelling {
             .iter()
             .map(|spec| {
                 let end_use = equipment_name_to_end_use(&spec.name);
-                let display = end_use_display_name(&end_use);
-                let col_name = format!("{display} Electric Power (kW)");
+                let col_name = end_use_electric_power_column(&end_use);
                 output_column_index.get(&col_name).copied()
             })
             .collect();
@@ -2671,8 +2671,7 @@ impl Dwelling {
                     .iter()
                     .map(|spec| {
                         let end_use = equipment_name_to_end_use(&spec.name);
-                        let display = end_use_display_name(&end_use);
-                        let col_name = format!("{display} Electric Power (kW)");
+                        let col_name = end_use_electric_power_column(&end_use);
                         self.output_column_index.get(&col_name).copied()
                     })
                     .collect()
@@ -4681,7 +4680,7 @@ impl Dwelling {
         // Per-EndUse aggregate electric power columns.
         // Each equipment's electric power is accumulated into the aggregate column
         // for its EndUse category (e.g. all HVAC_HEATING equipment contribute to
-        // "HVAC Heating Electric Power (kW)").
+        // "HVAC Heating End Use Electric Power (kW)").
         for (eq, &agg_idx_opt) in self.equipment.iter().zip(&self.end_use_aggregate_indices) {
             if let Some(idx) = agg_idx_opt {
                 let co = eq.core_output();

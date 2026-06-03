@@ -227,6 +227,73 @@ pub fn display_name_to_end_use_key(display_name: &str) -> Option<String> {
     }
 }
 
+/// Suffix for end-use aggregate electric power column names.
+/// Aggregate columns use the form `"{DisplayName} End Use Electric Power (kW)"`
+/// to avoid collisions with per-equipment columns.
+const END_USE_AGGREGATE_SUFFIX: &str = " End Use Electric Power (kW)";
+
+/// Returns the output column name for an end-use aggregate electric power column.
+///
+/// The return value is always distinct from any per-equipment electric-power
+/// column, avoiding collision-based panics in Arrow IPC readers (including
+/// Polars) that deduplicate schemas by field name.
+///
+/// # Examples
+/// - `end_use_electric_power_column(&EndUse::HVAC_HEATING)` → `"HVAC Heating End Use Electric Power (kW)"`
+/// - `end_use_electric_power_column(&EndUse::CEILING_FAN)` → `"Ceiling Fan End Use Electric Power (kW)"`
+pub fn end_use_electric_power_column(end_use: &EndUse) -> String {
+    format!(
+        "{} End Use Electric Power (kW)",
+        end_use_display_name(end_use)
+    )
+}
+
+/// If `name` is an end-use aggregate electric power column, returns the
+/// `EndUse` variant it represents. Returns `None` for per-equipment columns,
+/// totals, and other column types.
+///
+/// Recognised format: `"{DisplayName} End Use Electric Power (kW)"`.
+pub fn parse_end_use_electric_power_column(name: &str) -> Option<EndUse> {
+    let key = parse_end_use_electric_power_column_key(name)?;
+    end_use_from_key(&key)
+}
+
+/// Like [`parse_end_use_electric_power_column`] but returns the canonical
+/// EndUse key string (e.g. `"hvac_heating"`) directly, avoiding a round-trip
+/// through display name and EndUse variant.
+pub fn parse_end_use_electric_power_column_key(name: &str) -> Option<String> {
+    let display = name.strip_suffix(END_USE_AGGREGATE_SUFFIX)?;
+    display_name_to_end_use_key(display)
+}
+
+/// Maps an EndUse key string (e.g. `"hvac_heating"`) back to its EndUse variant.
+fn end_use_from_key(key: &str) -> Option<EndUse> {
+    match key {
+        "hvac_heating" => Some(EndUse::HVAC_HEATING),
+        "hvac_cooling" => Some(EndUse::HVAC_COOLING),
+        "water_heating" => Some(EndUse::WATER_HEATING),
+        "lighting" => Some(EndUse::LIGHTING),
+        "plug_loads" => Some(EndUse::PLUG_LOADS),
+        "refrigeration" => Some(EndUse::REFRIGERATION),
+        "ventilation" => Some(EndUse::VENTILATION),
+        "battery" => Some(EndUse::BATTERY),
+        "pv" => Some(EndUse::PV),
+        "ev" => Some(EndUse::EV),
+        "generator" => Some(EndUse::GENERATOR),
+        "cooking" => Some(EndUse::COOKING),
+        "laundry" => Some(EndUse::LAUNDRY),
+        "dishwasher" => Some(EndUse::DISHWASHER),
+        "pool_pump" => Some(EndUse::POOL_PUMP),
+        "pool_heater" => Some(EndUse::POOL_HEATER),
+        "spa_pump" => Some(EndUse::SPA_PUMP),
+        "spa_heater" => Some(EndUse::SPA_HEATER),
+        "ceiling_fan" => Some(EndUse::CEILING_FAN),
+        "dehumidifier" => Some(EndUse::DEHUMIDIFIER),
+        "other" => Some(EndUse::OTHER),
+        _ => None,
+    }
+}
+
 /// Builds an Arrow schema for the output based on equipment list, zone names,
 /// and verbosity.
 ///
@@ -281,14 +348,18 @@ pub fn build_schema(
         // One column per EndUse category that has at least one equipment,
         // summing all equipment contributions so metrics aggregation keys
         // on EndUse category rather than equipment instance name.
+        //
+        // Aggregate columns use end_use_electric_power_column() for a
+        // stable, guaranteed-unique namespace (e.g. "HVAC Heating End Use
+        // Electric Power (kW)").  This avoids collisions with per-equipment
+        // columns whose equipment name may match the end-use display name.
         let mut seen_end_uses: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
         for spec in equipment_list {
             let end_use = equipment_name_to_end_use(&spec.name);
-            let display = end_use_display_name(&end_use).to_string();
-            if seen_end_uses.insert(display.clone()) {
+            if seen_end_uses.insert(end_use_display_name(&end_use).to_string()) {
                 fields.push(Field::new(
-                    format!("{display} {ELECTRIC_POWER_SUFFIX}"),
+                    end_use_electric_power_column(&end_use),
                     DataType::Float64,
                     true,
                 ));
@@ -957,7 +1028,7 @@ mod tests {
     // ── End‑use aggregate column tests ──────────────────────────────────
 
     /// Multiple HVAC_HEATING equipment (ASHP Heater + Gas Furnace) produce a
-    /// single `"HVAC Heating Electric Power (kW)"` aggregate column.
+    /// single `"HVAC Heating End Use Electric Power (kW)"` aggregate column.
     #[test]
     fn multiple_hvac_heating_equipment_produce_single_aggregate_column() {
         let specs = vec![
@@ -973,8 +1044,8 @@ mod tests {
         assert!(names.contains(&"Electric Baseboard Electric Power (kW)"));
         // Single aggregate column for all HVAC_HEATING equipment.
         assert!(
-            names.contains(&"HVAC Heating Electric Power (kW)"),
-            "schema must contain 'HVAC Heating Electric Power (kW)' aggregate column"
+            names.contains(&"HVAC Heating End Use Electric Power (kW)"),
+            "schema must contain 'HVAC Heating End Use Electric Power (kW)' aggregate column"
         );
         // No separate aggregate columns for individual equipment names.
         assert!(!names.contains(&"ASHP Heater HVAC Heating Electric Power (kW)"));
@@ -989,8 +1060,8 @@ mod tests {
         let s1 = build_schema(&specs, 1, &[]);
         let n0: Vec<&str> = s0.fields().iter().map(|f| f.name().as_str()).collect();
         let n1: Vec<&str> = s1.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(!n0.contains(&"HVAC Heating Electric Power (kW)"));
-        assert!(n1.contains(&"HVAC Heating Electric Power (kW)"));
+        assert!(!n0.contains(&"HVAC Heating End Use Electric Power (kW)"));
+        assert!(n1.contains(&"HVAC Heating End Use Electric Power (kW)"));
     }
 
     /// Mixed end-use equipment produce one aggregate column per EndUse category.
@@ -1005,10 +1076,10 @@ mod tests {
         ];
         let schema = build_schema(&specs, 1, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(names.contains(&"HVAC Heating Electric Power (kW)"));
-        assert!(names.contains(&"HVAC Cooling Electric Power (kW)"));
-        assert!(names.contains(&"Battery Electric Power (kW)"));
-        assert!(names.contains(&"PV Electric Power (kW)"));
+        assert!(names.contains(&"HVAC Heating End Use Electric Power (kW)"));
+        assert!(names.contains(&"HVAC Cooling End Use Electric Power (kW)"));
+        assert!(names.contains(&"Battery End Use Electric Power (kW)"));
+        assert!(names.contains(&"PV End Use Electric Power (kW)"));
     }
 
     /// `equipment_name_to_end_use` maps canonical equipment names to the
@@ -1210,5 +1281,123 @@ mod tests {
                 "display_name_to_end_use_key('{display}') round-trip failed for {expected_key}"
             );
         }
+    }
+
+    /// `end_use_electric_power_column` returns column names that are distinct
+    /// from per-equipment column names, even when the equipment name matches an
+    /// EndUse display name (e.g. "Battery", "PV", "Ceiling Fan").  This
+    /// prevents schema collisions in Arrow IPC readers.
+    #[test]
+    fn end_use_electric_power_column_has_unique_names() {
+        use hares_types::EndUse;
+        // Equipment names that collide with their EndUse display name.
+        let collision_prone: &[(&str, EndUse)] = &[
+            ("Battery", EndUse::BATTERY),
+            ("PV", EndUse::PV),
+            ("Ceiling Fan", EndUse::CEILING_FAN),
+            ("Lighting", EndUse::LIGHTING),
+            ("Plug Loads", EndUse::PLUG_LOADS),
+            ("Refrigeration", EndUse::REFRIGERATION),
+            ("Ventilation", EndUse::VENTILATION),
+            ("Cooking", EndUse::COOKING),
+            ("Generator", EndUse::GENERATOR),
+            ("Dehumidifier", EndUse::DEHUMIDIFIER),
+        ];
+        for (eq_name, end_use) in collision_prone {
+            let per_eq = format!("{eq_name} {ELECTRIC_POWER_SUFFIX}");
+            let aggregate = end_use_electric_power_column(end_use);
+            assert_ne!(
+                per_eq, aggregate,
+                "per-equipment column '{per_eq}' must differ from aggregate column '{aggregate}'"
+            );
+        }
+    }
+
+    /// Using collision-prone equipment (Ceiling Fan, Battery, PV) whose names
+    /// match EndUse display names, the schema must contain both per-equipment
+    /// and aggregate columns without any duplicate field names.
+    #[test]
+    fn no_duplicate_column_names_in_schema() {
+        let specs = vec![
+            make_spec("Ceiling Fan", FuelType::Electric),
+            make_spec("Battery", FuelType::Electric),
+            make_spec("PV", FuelType::Electric),
+        ];
+        let schema = build_schema(&specs, 1, &[]);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        // Aggregate columns use the "End Use" suffix.
+        assert!(
+            names.contains(&"Ceiling Fan End Use Electric Power (kW)"),
+            "missing aggregate: 'Ceiling Fan End Use Electric Power (kW)'; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"Battery End Use Electric Power (kW)"),
+            "missing aggregate: 'Battery End Use Electric Power (kW)'; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"PV End Use Electric Power (kW)"),
+            "missing aggregate: 'PV End Use Electric Power (kW)'; got: {names:?}"
+        );
+        // Per-equipment columns are still present.
+        assert!(
+            names.contains(&"Ceiling Fan Electric Power (kW)"),
+            "missing per-equipment: 'Ceiling Fan Electric Power (kW)'; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"Battery Electric Power (kW)"),
+            "missing per-equipment: 'Battery Electric Power (kW)'; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"PV Electric Power (kW)"),
+            "missing per-equipment: 'PV Electric Power (kW)'; got: {names:?}"
+        );
+        // No duplicate field names anywhere in the schema.
+        let mut seen = std::collections::HashSet::new();
+        for name in &names {
+            assert!(
+                seen.insert(*name),
+                "duplicate column name '{name}' in schema"
+            );
+        }
+    }
+
+    /// `parse_end_use_electric_power_column` round-trips correctly for all
+    /// standard end-uses and rejects per-equipment and total columns.
+    #[test]
+    fn parse_end_use_electric_power_column_round_trip() {
+        use hares_types::EndUse;
+        let end_uses: &[EndUse] = &[
+            EndUse::HVAC_HEATING,
+            EndUse::HVAC_COOLING,
+            EndUse::BATTERY,
+            EndUse::PV,
+            EndUse::CEILING_FAN,
+            EndUse::WATER_HEATING,
+            EndUse::LIGHTING,
+            EndUse::DEHUMIDIFIER,
+            EndUse::OTHER,
+        ];
+        for end_use in end_uses {
+            let col = end_use_electric_power_column(end_use);
+            let parsed = parse_end_use_electric_power_column(&col);
+            assert_eq!(
+                parsed,
+                Some(end_use.clone()),
+                "round-trip failed for {end_use:?}: column='{col}', parsed={parsed:?}"
+            );
+        }
+        // Per-equipment columns should not parse as end-use aggregate.
+        assert_eq!(
+            parse_end_use_electric_power_column("Battery Electric Power (kW)"),
+            None
+        );
+        assert_eq!(
+            parse_end_use_electric_power_column("ASHP Heater Electric Power (kW)"),
+            None
+        );
+        assert_eq!(
+            parse_end_use_electric_power_column("Total Electric Power (kW)"),
+            None
+        );
     }
 }

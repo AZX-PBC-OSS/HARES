@@ -686,7 +686,7 @@ mod tests {
     /// HVAC_HEATING equipment. After end-use aggregate column changes
     /// (T‑0139), `energy_by_end_use["hvac_heating"]` must be populated
     /// and non-zero because all HVAC_HEATING equipment electric power
-    /// is summed into the `"HVAC Heating Electric Power (kW)"` aggregate
+    /// is summed into the `"HVAC Heating End Use Electric Power (kW)"` aggregate
     /// column, which `discover_end_use_columns` maps to key `"hvac_heating"`.
     #[test]
     fn beopt_smoke_end_use_aggregates_by_category() {

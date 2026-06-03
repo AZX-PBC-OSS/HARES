@@ -568,41 +568,66 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     // Foundation type name for LUT matching of foundation wall boundaries.
     // OCHRE hpxml.py:276-286: FoundationType child tag → "Crawlspace" | "Unfinished Basement" | "Finished Basement".
-    let foundation_name = details
-        .path(&["Enclosure", "Foundations", "Foundation", "FoundationType"])
-        .and_then(|ft| ft.children.first())
-        .and_then(|child| {
-            let tag = child.name.as_str();
-            match tag {
-                "Crawlspace" => Some("Crawlspace".to_string()),
-                "Basement" => {
-                    // Prefer HPXML 4.x <Conditioned> element if present.
-                    // Fall back to OCHRE heuristic: total_floors > floors_above_grade
-                    // means basement is conditioned (finished).
-                    let explicit = child
-                        .child("Conditioned")
-                        .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
-                    let inferred = match (total_conditioned_floors, floors_above_grade) {
-                        (Some(total), Some(above)) => total > above,
-                        _ => false,
-                    };
-                    let is_finished = explicit.unwrap_or(inferred);
-                    if is_finished {
-                        Some("Finished Basement".to_string())
-                    } else {
-                        Some("Unfinished Basement".to_string())
+    //
+    // When <Foundations> is absent, apply a conservative slab-on-grade default:
+    // no Foundation thermal zone, foundation_name=None, with a warning.
+    // When <FoundationType> is present but unrecognised, fail loudly matching
+    // OCHRE's OCHREException for unknown foundation types.
+    let has_foundations_group = details.path(&["Enclosure", "Foundations"]).is_some();
+
+    let foundation_name = if has_foundations_group {
+        let ft_child = details
+            .path(&["Enclosure", "Foundations", "Foundation", "FoundationType"])
+            .and_then(|ft| ft.children.first());
+
+        match ft_child {
+            Some(child) => {
+                let tag = child.name.as_str();
+                match tag {
+                    "Crawlspace" => Some("Crawlspace".to_string()),
+                    "Basement" => {
+                        // Prefer HPXML 4.x <Conditioned> element if present.
+                        // Fall back to OCHRE heuristic: total_floors > floors_above_grade
+                        // means basement is conditioned (finished).
+                        let explicit = child
+                            .child("Conditioned")
+                            .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
+                        let inferred = match (total_conditioned_floors, floors_above_grade) {
+                            (Some(total), Some(above)) => total > above,
+                            _ => false,
+                        };
+                        let is_finished = explicit.unwrap_or(inferred);
+                        if is_finished {
+                            Some("Finished Basement".to_string())
+                        } else {
+                            Some("Unfinished Basement".to_string())
+                        }
+                    }
+                    "SlabOnGrade" | "Ambient" | "AboveApartment" => None,
+                    other => {
+                        tracing::error!(
+                            foundation_type = other,
+                            "Unrecognized FoundationType child tag"
+                        );
+                        return Err(HpxmlError::Parse(
+                            format!(
+                                "Unrecognized FoundationType '{}' in <Foundations> group",
+                                other
+                            )
+                            .into(),
+                        ));
                     }
                 }
-                "SlabOnGrade" | "Ambient" | "AboveApartment" => None,
-                other => {
-                    tracing::warn!(
-                        foundation_type = other,
-                        "Unrecognized FoundationType child tag; ignoring foundation"
-                    );
-                    None
-                }
             }
-        });
+            None => None,
+        }
+    } else {
+        tracing::warn!(
+            "HPXML has no <Foundations> group; applying slab-on-grade default. \
+             Foundation thermal mass and below-grade zone air buffering will not be modeled."
+        );
+        None
+    };
     let foundation_floor_area_m2 = details
         .path(&["Enclosure", "Foundations"])
         .and_then(|group| group.children_named("Foundation").next())
@@ -3374,6 +3399,30 @@ fn normalize_name(name: &str) -> String {
     name.to_string()
 }
 
+/// Gated invariant: every dwelling with a named foundation type (Basement or
+/// Crawlspace) must have a Foundation thermal zone. A missing zone when the
+/// foundation type is set means foundation thermal mass is absent from the RC
+/// network.
+///
+/// This guard only runs in debug or when `feature = "check_invariants"`.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub fn check_foundation_zone_invariant(building: &Building) {
+    let has_foundation_zone = building
+        .zones
+        .iter()
+        .any(|z| z.zone_type == ZoneType::Foundation);
+
+    if !has_foundation_zone {
+        if let Some(ref fnd_name) = building.foundation_name {
+            tracing::warn!(
+                foundation_name = %fnd_name,
+                "Foundation zone missing despite foundation type being set. \
+                 Foundation thermal mass is absent from the RC network."
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -4304,6 +4353,56 @@ mod tests {
         );
         let building = parse_building(&xml).expect("parse should succeed");
         assert!(building.foundation_name.is_none());
+    }
+
+    #[test]
+    fn unknown_foundation_type_rejected_with_parse_error() {
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><UnknownType/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let result = parse_building(&xml);
+        assert!(
+            result.is_err(),
+            "expected parse error for unknown FoundationType"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HpxmlError::Parse(msg) if msg.message.contains("UnknownType")),
+            "expected Parse error mentioning UnknownType, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn missing_foundations_group_applies_slab_on_grade_default() {
+        // Remove <Foundations> entirely — the parser should succeed and apply
+        // slab-on-grade defaults (foundation_name=None). A Foundation zone may
+        // still be created by ensure_referenced_zones_exist when boundaries
+        // reference it, but foundation_name stays None.
+        let xml = SAMPLE_XML.replace(
+            "\n        <Foundations>\n          <Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>\n        </Foundations>",
+            "",
+        );
+        let building = parse_building(&xml).expect("parse should succeed without <Foundations>");
+        // Slab-on-grade default: foundation_name is None.
+        assert!(
+            building.foundation_name.is_none(),
+            "foundation_name must be None for slab-on-grade default, got {:?}",
+            building.foundation_name
+        );
+        // Verify the parse produced a valid building with zones.
+        assert!(
+            !building.zones.is_empty(),
+            "building must have at least one zone"
+        );
+        assert!(
+            building
+                .zones
+                .iter()
+                .any(|z| z.zone_type == ZoneType::Conditioned),
+            "conditioned zone expected"
+        );
     }
 
     // ── Slab insulation detail tests ────────────────────────────────────
