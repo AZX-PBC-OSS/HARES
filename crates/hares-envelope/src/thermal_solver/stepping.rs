@@ -126,9 +126,11 @@ impl ThermalSolver {
 
         // Perturb the HVAC input by 1 W, recompute the steady state, and
         // measure the output difference to get the DC gain in K/W.
+        // Perturbation is base + 1 W (not a fixed 1 W) so that internal
+        // gains and other non-zero base contributions are preserved.
         const UNIT_PERTURBATION_W: f64 = 1.0;
         let saved = u_design[input_idx];
-        u_design[input_idx] = UNIT_PERTURBATION_W;
+        u_design[input_idx] = saved + UNIT_PERTURBATION_W;
         let x_ss_pert = match self.model.steady_state(u_design) {
             Some(x) => x,
             None => {
@@ -160,7 +162,7 @@ impl ThermalSolver {
     }
 
     /// Compute the cooling HVAC capacity (W) required to maintain `target_c` at
-    /// design outdoor conditions with peak solar gains.
+    /// design outdoor conditions with peak solar gains and internal gains.
     ///
     /// Unlike [`autosize_capacity`] which zeros all solar inputs, this method
     /// computes clear-sky solar irradiance for July 21 solar noon at the given
@@ -171,7 +173,9 @@ impl ThermalSolver {
     /// Per ACCA Manual J-2016: cooling design uses peak solar conditions
     /// (July 21 solar noon). Solar irradiance is computed using the ASHRAE
     /// clear-sky model and the Perez (1990) anisotropic tilted irradiance model
-    /// for each surface.
+    /// for each surface. Internal gains from occupancy, lighting, and appliances
+    /// are also included per ACCA Manual J-2016 §7 (cooling load includes
+    /// internal gains).
     ///
     /// As with [`autosize_capacity`], the steady-state capacity is computed
     /// from the DC gain of the state-space model rather than a one-step back-
@@ -190,6 +194,7 @@ impl ThermalSolver {
         design_outdoor_c: f64,
         site_lat_deg: f64,
         site_lon_deg: f64,
+        internal_gains_w: f64,
     ) -> f64 {
         use chrono::{Datelike, FixedOffset, TimeZone};
 
@@ -293,6 +298,34 @@ impl ThermalSolver {
 
             let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
             u_design[info.input_index] += info.absorptance * info.area_m2 * poa_w_m2;
+        }
+
+        // ── Internal gains ────────────────────────────────────────────────
+        // ACCA Manual J-2016 §7: cooling design loads must include sensible
+        // internal gains from occupancy, lighting, and appliances.
+        // ASHRAE HoF 2021 Ch.18 Table 1: occupant sensible gain = 66 W/person,
+        //     latent gain = 51.2 W/person at typical indoor conditions.
+        // ASHRAE 62.2-2022 Appendix B: typical lights/plug density ≈ 5 W/m².
+        // Internal gains enter through the zone sensible input column; the DC
+        // gain method saves/restores this value, so the perturbation is
+        // correctly always 1 W while the baseline includes internal gains.
+        u_design[input_idx] += internal_gains_w;
+
+        // ── Invariant: cooling internal gains must be non-negative and
+        //    plausible for a single-family residence (< 5 kW sensible) ──
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                internal_gains_w >= 0.0,
+                "autosize_capacity_cooling: internal_gains_w ({}) must be non-negative",
+                internal_gains_w
+            );
+            assert!(
+                internal_gains_w < 5_000.0,
+                "autosize_capacity_cooling: internal_gains_w ({}) implausibly large \
+                 for a single-family residence (≥ 5 kW)",
+                internal_gains_w
+            );
         }
 
         // ── Steady-state capacity via DC gain ─────────────────────────────
@@ -1052,7 +1085,7 @@ impl ThermalSolver {
         target_c: f64,
         design_outdoor_c: f64,
     ) -> f64 {
-        self.run_design_day(zone, target_c, design_outdoor_c, 0.0, None)
+        self.run_design_day(zone, target_c, design_outdoor_c, 0.0, None, 0.0)
     }
 
     /// Run a design-day simulation for cooling equipment sizing.
@@ -1066,6 +1099,9 @@ impl ThermalSolver {
     /// clear-sky model and Perez (1990) anisotropic tilted irradiance model
     /// for each window and opaque surface.
     ///
+    /// Internal gains (`internal_gains_w` sensible) are included per ACCA
+    /// Manual J-2016 §7.
+    ///
     /// Returns the peak HVAC input (positive) across the recording day
     /// timesteps as the sizing capacity, or 0.0 if the zone is unknown or
     /// solving fails.
@@ -1076,6 +1112,7 @@ impl ThermalSolver {
         design_outdoor_c: f64,
         site_lat_deg: f64,
         site_lon_deg: f64,
+        internal_gains_w: f64,
     ) -> f64 {
         let solar = precompute_hourly_solar_july21(site_lat_deg, site_lon_deg);
         self.run_design_day(
@@ -1084,6 +1121,7 @@ impl ThermalSolver {
             design_outdoor_c,
             COOLING_DESIGN_DAY_RANGE_C,
             Some(&solar),
+            internal_gains_w,
         )
     }
 
@@ -1094,6 +1132,9 @@ impl ThermalSolver {
     ///   (0 for constant — heating; ∼12 °C for cooling)
     /// - `solar_data`: pre-computed hourly solar data for the design day,
     ///   or `None` for zero solar (heating design day)
+    /// - `internal_gains_w`: sensible internal gains [W]; added to the
+    ///   HVAC load for cooling design days (solar_data is `Some`).
+    ///   Zero for heating design days (conservative per Manual J).
     fn run_design_day(
         &self,
         zone: ZoneId,
@@ -1101,6 +1142,7 @@ impl ThermalSolver {
         design_outdoor_c: f64,
         daily_range_c: f64,
         solar_data: Option<&[Option<HourlySolar>]>,
+        internal_gains_w: f64,
     ) -> f64 {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
@@ -1241,7 +1283,12 @@ impl ThermalSolver {
 
             // ── Record on the recording day ────────────────────────────
             if t >= WARMUP_DAYS * timesteps_per_day {
-                let load = hvac_input.abs();
+                // ACCA Manual J-2016 §7: cooling design loads must include
+                // internal gains from occupancy, lighting, and appliances.
+                // Internal gains are added to the required HVAC input:
+                // they increase the cooling requirement because the HVAC
+                // must remove additional heat generated inside the zone.
+                let load = hvac_input.abs() + internal_gains_w;
                 if load > peak_load {
                     peak_load = load;
                     #[cfg(feature = "observe")]
@@ -1276,6 +1323,17 @@ impl ThermalSolver {
                 "design-day autosizing: peak_load ({}) must be non-negative and finite",
                 peak_load
             );
+            assert!(
+                internal_gains_w >= 0.0,
+                "design-day autosizing: internal_gains_w ({}) must be non-negative",
+                internal_gains_w
+            );
+            assert!(
+                internal_gains_w < 5_000.0,
+                "design-day autosizing: internal_gains_w ({}) implausibly large \
+                 for a single-family residence (≥ 5 kW)",
+                internal_gains_w
+            );
         }
 
         // ── Telemetry ──────────────────────────────────────────────────────
@@ -1299,6 +1357,7 @@ impl ThermalSolver {
                 sizing.mean_zone_db_c = mean_temp,
                 sizing.daily_range_c = daily_range_c,
                 sizing.timesteps_per_day = timesteps_per_day,
+                sizing.internal_gains_w = internal_gains_w,
                 "design-day autosizing complete"
             );
         }

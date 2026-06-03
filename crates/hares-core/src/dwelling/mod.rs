@@ -1449,6 +1449,8 @@ impl Dwelling {
                 weather_lat,
                 weather_lon,
                 duct_params,
+                internal_gains_w: 0.0,
+                internal_gains_latent_w: 0.0,
             };
 
             crate::dwelling::autosize::autosize_equipment_capacities(

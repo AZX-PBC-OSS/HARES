@@ -17,6 +17,7 @@ use hares_io::{
     hpxml::resolve_hvac::{DuctDseParams, rebuild_hvac_typed_config},
 };
 use hares_physics::ashrae152::design_temperatures_f;
+use hares_physics::constants::{OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W};
 use hares_physics::units::{temperature_c_to_f, temperature_f_to_c};
 use hares_types::ZoneId;
 use serde_json::json;
@@ -37,6 +38,21 @@ const COOLING_OVERSIZE_FACTOR: f64 = 1.15;
 /// (overridden by HPXML `<BackupHeatingAutosizingFactor>`).
 const BACKUP_CAPACITY_FACTOR: f64 = 1.0;
 
+/// Default lighting and plug load density for cooling autosizing [W/m²].
+///
+/// ASHRAE 62.2-2022 Appendix B: typical residential plug and lighting load
+/// density ≈ 5 W/m². Used as a default when HPXML Lighting/PlugLoad elements
+/// are absent.
+const DEFAULT_LIGHTING_PLUG_DENSITY_W_M2: f64 = 5.0;
+
+/// Default number of occupants for cooling autosizing.
+///
+/// ASHRAE 62.2-2022 Appendix B: two occupants for a typical single-family
+/// residence. Sensible and latent gains per occupant are taken from
+///    ASHRAE HoF 2021 Ch.18 Table 1 (OCCUPANT_SENSIBLE_GAIN_W,
+///    OCCUPANT_LATENT_GAIN_W).
+const DEFAULT_OCCUPANTS: f64 = 2.0;
+
 /// Context bundle for autosizing: weather-derived design conditions and
 /// duct parameters needed to rebuild typed equipment configs.
 ///
@@ -52,6 +68,84 @@ pub struct AutosizeContext {
     pub weather_lon: f64,
     /// Duct DSE parameters for rebuilding typed equipment configs.
     pub duct_params: DuctDseParams,
+    /// Sensible internal gains [W] for cooling autosizing.
+    ///
+    /// ACCA Manual J-2016 §7: cooling design loads must include sensible
+    /// internal gains from occupancy, lighting, and appliances.
+    /// Default: 2 occupants × 66 W/person (ASHRAE HoF 2021 Ch.18 Table 1)
+    /// = 132 W + 5 W/m² lights/plug loads.
+    /// Overridable via HPXML internal gains data.
+    pub internal_gains_w: f64,
+    /// Latent internal gains [W] for cooling autosizing latent load estimation.
+    ///
+    /// Default: 2 occupants × 51.2 W/person (ASHRAE HoF 2021 Ch.18 Table 1)
+    /// = 102.4 W.
+    /// Overridable via HPXML internal gains data.
+    pub internal_gains_latent_w: f64,
+}
+
+/// Compute default internal gains for cooling autosizing from building geometry.
+///
+/// Returns `(sensible_w, latent_w)`:
+/// - Occupancy: `DEFAULT_OCCUPANTS` × per-capita gains from ASHRAE HoF 2021 Ch.18 Table 1
+///   (OCCUPANT_SENSIBLE_GAIN_W, OCCUPANT_LATENT_GAIN_W).
+/// - Lighting/plug: `DEFAULT_LIGHTING_PLUG_DENSITY_W_M2` × conditioned floor area.
+///
+/// Floor area is derived from `building.conditioned_volume_m3 / building.ceiling_height_m`,
+/// falling back to the first conditioned zone's `floor_area_m2`.
+///
+/// If floor area cannot be determined (both sources are absent or zero), a `warn!` is
+/// emitted and gains are returned based on occupancy only (zero lighting/plug component).
+///
+/// Override: when `ctx.internal_gains_w > 0.0`, the context-supplied values
+/// take precedence (HPXML override path).
+pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building) -> (f64, f64) {
+    // Override via AutosizeContext (HPXML-supplied values).
+    if ctx.internal_gains_w > 0.0 {
+        return (ctx.internal_gains_w, ctx.internal_gains_latent_w);
+    }
+
+    // Occupancy: DEFAULT_OCCUPANTS × per-capita gains.
+    // ASHRAE HoF 2021 Ch.18 Table 1: sedentary occupant sensible = 66 W,
+    // latent = 51.2 W at typical indoor comfort conditions.
+    let occ_sensible = DEFAULT_OCCUPANTS * OCCUPANT_SENSIBLE_GAIN_W;
+    let occ_latent = DEFAULT_OCCUPANTS * OCCUPANT_LATENT_GAIN_W;
+
+    // Floor area from building geometry.
+    let floor_area_m2 = building
+        .conditioned_volume_m3
+        .zip(building.ceiling_height_m)
+        .filter(|&(_v, h)| h > 0.0)
+        .map(|(v, h)| v / h)
+        .or_else(|| {
+            building
+                .zones
+                .iter()
+                .find(|z| {
+                    matches!(
+                        z.zone_type,
+                        hares_io::hpxml::building::ZoneType::Conditioned
+                    )
+                })
+                .and_then(|z| z.floor_area_m2)
+        });
+
+    match floor_area_m2 {
+        Some(area) if area > 0.0 => {
+            let lights_and_plug = area * DEFAULT_LIGHTING_PLUG_DENSITY_W_M2;
+            let sensible = occ_sensible + lights_and_plug;
+            (sensible, occ_latent)
+        }
+        _ => {
+            tracing::warn!(
+                occupancy_sensible_w = occ_sensible,
+                occupancy_latent_w = occ_latent,
+                "cooling autosizing: conditioned floor area is zero or missing — \
+                 internal gains limited to occupancy only; sizing may be conservative"
+            );
+            (occ_sensible, occ_latent)
+        }
+    }
 }
 
 /// Autosize HVAC equipment capacities for all specs that are missing
@@ -100,6 +194,11 @@ pub fn autosize_equipment_capacities(
         building.site.latitude_deg,
         building.site.longitude_deg,
     );
+
+    // Compute internal gains for cooling autosizing.
+    // ACCA Manual J-2016 §7: cooling design loads must include sensible
+    // internal gains from occupancy, lighting, and appliances.
+    let (internal_gains_w, internal_gains_latent_w) = compute_default_internal_gains(ctx, building);
 
     for spec in specs.iter_mut() {
         let needs_heating = spec
@@ -218,6 +317,7 @@ pub fn autosize_equipment_capacities(
                     cooling_design_c,
                     ctx.weather_lat,
                     ctx.weather_lon,
+                    internal_gains_w,
                 )
                 .abs();
 
@@ -272,6 +372,8 @@ pub fn autosize_equipment_capacities(
                     factor,
                     design_outdoor_c = cooling_design_c,
                     indoor_setpoint_c = cooling_setpoint_c,
+                    internal_gains_w = internal_gains_w,
+                    internal_gains_latent_w = internal_gains_latent_w,
                     "autosized cooling capacity"
                 );
             } else {
@@ -630,6 +732,8 @@ mod tests {
             weather_lat: 0.0,
             weather_lon: 0.0,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
         let building = minimal_building();
 
@@ -681,6 +785,8 @@ mod tests {
             weather_lat: 0.0,
             weather_lon: 0.0,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
         let building = minimal_building();
 
@@ -737,6 +843,8 @@ mod tests {
             weather_lat: 0.0,
             weather_lon: 0.0,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
         let building = minimal_building();
 
@@ -749,9 +857,22 @@ mod tests {
             .and_then(|v| v.as_f64())
             .expect("cooling_capacity_w must be set after autosizing");
 
+        // minimal_building() has no floor area → occupancy-only gains: 132 W.
+        let (internal_gains_w, _internal_gains_latent_w) =
+            compute_default_internal_gains(&ctx, &building);
         let raw_capacity = thermal
-            .autosize_capacity(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0)
+            .autosize_design_day_cooling(
+                ZONE,
+                DEFAULT_COOLING_SETPOINT_C,
+                35.0,
+                0.0,
+                0.0,
+                internal_gains_w,
+            )
             .abs();
+        // internal_gains_w = 132.0 (occupancy-only, no floor area in
+        // minimal_building).  This matches what autosize_equipment_capacities
+        // computes via compute_default_internal_gains.
         let with_override = raw_capacity * 1.0;
         let with_default = raw_capacity * COOLING_OVERSIZE_FACTOR;
         assert!(
@@ -794,6 +915,8 @@ mod tests {
             weather_lat: 0.0,
             weather_lon: 0.0,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
         let building = minimal_building();
 
@@ -898,6 +1021,7 @@ mod tests {
                 35.0,
                 39.74, // Denver
                 -104.87,
+                0.0, // zero internal gains for baseline
             )
             .abs();
 
@@ -980,6 +1104,8 @@ mod tests {
             weather_lat: 0.0,
             weather_lon: 0.0,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
         let building = minimal_building();
 
@@ -1037,6 +1163,8 @@ mod tests {
             weather_lat: 0.0,
             weather_lon: 0.0,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
         let building = minimal_building();
 
@@ -1098,6 +1226,8 @@ mod tests {
             weather_lat: 0.0,
             weather_lon: 0.0,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
         let building = minimal_building();
 
@@ -1127,7 +1257,7 @@ mod tests {
             .autosize_capacity(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0)
             .abs();
         let solar = thermal
-            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0)
+            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0)
             .abs();
 
         assert!(
@@ -1421,6 +1551,8 @@ mod tests {
             weather_lat: 39.74,
             weather_lon: -104.87,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
 
         let mut specs = vec![spec];
@@ -1498,6 +1630,8 @@ mod tests {
             weather_lat: 39.74,
             weather_lon: -104.87,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
 
         let mut specs = vec![spec];
@@ -1578,6 +1712,8 @@ mod tests {
             weather_lat: 39.74,
             weather_lon: -104.87,
             duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
         };
 
         let mut specs = vec![spec];
@@ -1631,7 +1767,7 @@ mod tests {
         let env = one_zone_env(target + 2.0, design_outdoor);
         let thermal = build_1r1c_solver(&env, target + 2.0);
 
-        let peak = thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0);
+        let peak = thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0);
         assert!(peak.is_finite(), "cooling peak load must be finite");
         assert!(peak >= 0.0, "cooling capacity must be non-negative");
         assert!(
@@ -1682,7 +1818,7 @@ mod tests {
             .autosize_capacity(ZONE, target, design_outdoor)
             .abs();
         let design_day_capacity =
-            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0);
+            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0);
 
         // The design-day method uses a diurnal range of 11.7 °C, so the
         // outdoor temperature cycles between 23.3 and 35.0 °C. The peak
@@ -1759,8 +1895,213 @@ mod tests {
         assert!(h >= 0.0, "heating capacity must be non-negative");
 
         // Cooling
-        let c = thermal.autosize_design_day_cooling(ZONE, 24.0, 35.0, 0.0, 0.0);
+        let c = thermal.autosize_design_day_cooling(ZONE, 24.0, 35.0, 0.0, 0.0, 0.0);
         assert!(c.is_finite(), "cooling design-day must return finite value");
         assert!(c >= 0.0, "cooling capacity must be non-negative");
+    }
+
+    // ── Internal gains cooling autosizing tests (T-0193) ────────────────
+
+    #[test]
+    fn cooling_autosize_internal_gains_increases_capacity() {
+        // With non-zero internal gains, the cooling capacity should increase
+        // because the HVAC must remove additional heat generated inside the zone.
+        let env = one_zone_env(26.0, 35.0);
+        let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 26.0);
+
+        let zero_gains_capacity = thermal
+            .autosize_capacity_cooling(
+                ZONE,
+                DEFAULT_COOLING_SETPOINT_C,
+                35.0,
+                39.74, // Denver
+                -104.87,
+                0.0,
+            )
+            .abs();
+
+        let with_gains_capacity = thermal
+            .autosize_capacity_cooling(
+                ZONE,
+                DEFAULT_COOLING_SETPOINT_C,
+                35.0,
+                39.74, // Denver
+                -104.87,
+                500.0, // 500 W internal gains
+            )
+            .abs();
+
+        // Cooling with internal gains should be larger than without by
+        // approximately the amount of the internal gains (within a small
+        // tolerance for DC-gain linearity).
+        let delta = with_gains_capacity - zero_gains_capacity;
+        assert!(
+            delta > 400.0,
+            "internal gains increase should be close to 500 W, got {delta} W: \
+             zero_gains={zero_gains_capacity}, with_gains={with_gains_capacity}"
+        );
+        assert!(
+            (delta - 500.0).abs() < 10.0,
+            "internal gains delta {delta} should be within 10 W of 500 W \
+             (DC gain method is linear to machine precision for linear models)"
+        );
+    }
+
+    #[test]
+    fn cooling_autosize_zero_internal_gains_preserves_baseline() {
+        // Backward compatibility: zone with internal gains = 0 should produce
+        // the same sizing result as before the internal gains change.
+        let env = one_zone_env(26.0, 35.0);
+        let thermal = build_1r1c_solver(&env, 26.0);
+
+        // DC-gain without solar (autosize_capacity)
+        let dc_gain = thermal
+            .autosize_capacity(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0)
+            .abs();
+
+        // Cooling-specific method with zero internal gains and zero solar
+        // should match the DC-gain baseline.
+        let cooling_zero_gains = thermal
+            .autosize_capacity_cooling(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0, 0.0, 0.0, 0.0)
+            .abs();
+
+        assert!(
+            (cooling_zero_gains - dc_gain).abs() < 1e-6,
+            "with zero internal gains and zero solar, \
+             autosize_capacity_cooling ({cooling_zero_gains}) \
+             must match autosize_capacity ({dc_gain})"
+        );
+    }
+
+    #[test]
+    fn compute_default_internal_gains_matches_ashrae_defaults() {
+        // Verify that the default internal gains match:
+        // - Occupancy: 2 × 66 W/person = 132 W sensible (ASHRAE HoF 2021 Ch.18 Table 1)
+        // - Lighting/plug: 5 W/m² per ASHRAE 62.2-2022 Appendix B
+        // - Occupancy latent: 2 × 51.2 W/person = 102.4 W (ASHRAE HoF 2021 Ch.18 Table 1)
+
+        let building = minimal_building();
+        let ctx = AutosizeContext {
+            design_conditions: None,
+            weather_lat: 39.74,
+            weather_lon: -104.87,
+            duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
+        };
+
+        // minimal_building() has no conditioned volume or floor area, so
+        // the function should return occupancy-only gains with a warning.
+        let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
+
+        // Sensible from occupancy only (no floor area → no lights/plug component).
+        let expected_occ_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W; // 132 W
+        let expected_occ_latent = 2.0 * OCCUPANT_LATENT_GAIN_W; // 102.4 W
+
+        assert!(
+            (sensible - expected_occ_sensible).abs() < 1e-6,
+            "occupancy-only sensible gains {sensible} should match \
+             2 × {OCCUPANT_SENSIBLE_GAIN_W} = {expected_occ_sensible}"
+        );
+        assert!(
+            (latent - expected_occ_latent).abs() < 1e-6,
+            "occupancy-only latent gains {latent} should match \
+             2 × {OCCUPANT_LATENT_GAIN_W} = {expected_occ_latent}"
+        );
+    }
+
+    #[test]
+    fn compute_default_internal_gains_includes_lighting_plug_from_floor_area() {
+        // When the building has a conditioned floor area, the default internal
+        // gains should include occupancy + 5 W/m² lights/plug loads.
+        use hares_io::hpxml::building::{Zone, ZoneType};
+
+        let mut building = minimal_building();
+        building.conditioned_volume_m3 = Some(180.0); // 150 m² × 2.4 m ceiling
+        building.ceiling_height_m = Some(2.4);
+        building.zones = vec![Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(75.0),
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        }];
+
+        let ctx = AutosizeContext {
+            design_conditions: None,
+            weather_lat: 39.74,
+            weather_lon: -104.87,
+            duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
+        };
+
+        let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
+
+        // conditioned_volume / ceiling_height = 180 / 2.4 = 75 m²
+        // Occupancy: 2 × 66 = 132 W
+        // Lighting/plug: 75 × 5 = 375 W
+        // Total sensible: 132 + 375 = 507 W
+        let expected_sensible = 132.0 + 75.0 * 5.0;
+        assert!(
+            (sensible - expected_sensible).abs() < 1e-6,
+            "gains with floor area: sensible {sensible} should match \
+             occupancy (132 W) + lighting/plug (75m² × 5W/m² = 375 W) = {expected_sensible} W"
+        );
+        assert!(
+            (latent - 102.4).abs() < 1e-6,
+            "latent gains {latent} should match 2 × {OCCUPANT_LATENT_GAIN_W} = 102.4 W"
+        );
+    }
+
+    #[test]
+    fn compute_default_internal_gains_respects_context_override() {
+        // When AutosizeContext provides non-zero internal gains (HPXML override),
+        // those should take precedence over the computed defaults.
+        let building = minimal_building();
+        let ctx = AutosizeContext {
+            design_conditions: None,
+            weather_lat: 39.74,
+            weather_lon: -104.87,
+            duct_params: DuctDseParams::default(),
+            internal_gains_w: 800.0,
+            internal_gains_latent_w: 200.0,
+        };
+
+        let (sensible, latent) = compute_default_internal_gains(&ctx, &building);
+
+        assert!(
+            (sensible - 800.0).abs() < 1e-6,
+            "override: sensible should be 800 W, got {sensible}"
+        );
+        assert!(
+            (latent - 200.0).abs() < 1e-6,
+            "override: latent should be 200 W, got {latent}"
+        );
+    }
+
+    #[test]
+    fn design_day_cooling_internal_gains_increases_peak() {
+        // Design-day cooling with internal gains should produce higher peak
+        // than without (conservative sizing with gains).
+        let target = 24.0;
+        let design_outdoor = 35.0;
+        let env = one_zone_env(target + 2.0, design_outdoor);
+        let thermal = build_1r1c_solver(&env, target + 2.0);
+
+        let zero_gains =
+            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 0.0);
+        let with_gains =
+            thermal.autosize_design_day_cooling(ZONE, target, design_outdoor, 0.0, 0.0, 500.0);
+
+        assert!(
+            with_gains > zero_gains + 400.0,
+            "design-day cooling with 500 W internal gains ({with_gains} W) \
+             should exceed zero-gains peak ({zero_gains} W) by ~500 W"
+        );
+        assert!(with_gains.is_finite(), "with-gains peak must be finite");
     }
 }
