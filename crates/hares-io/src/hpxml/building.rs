@@ -2139,6 +2139,10 @@ fn build_zone_map(
 
                 let (ventilation_ach, ventilation_sla) = parse_ventilation_rate(node);
 
+                tracing::debug!(
+                    vented,
+                    "build_zone_map creating attic zone from <Attics> group"
+                );
                 zones.entry("attic".to_string()).or_insert(Zone {
                     zone_type: ZoneType::Attic,
                     floor_area_m2,
@@ -2213,15 +2217,23 @@ fn ensure_referenced_zones_exist(boundaries: &[Boundary], zones: &mut HashMap<St
         {
             match zone_type {
                 ZoneType::Attic | ZoneType::Garage | ZoneType::Foundation => {
-                    zones.entry(zone_key(zone_type)).or_insert_with(|| Zone {
-                        zone_type: zone_type.clone(),
-                        floor_area_m2: None,
-                        volume_m3: None,
-                        attached_wall_ids: Vec::new(),
-                        duct_systems: Vec::new(),
-                        vented: false,
-                        ventilation_ach: None,
-                        ventilation_sla: None,
+                    let vented = matches!(zone_type, ZoneType::Attic);
+                    zones.entry(zone_key(zone_type)).or_insert_with(|| {
+                        tracing::debug!(
+                            zone_type = ?zone_type,
+                            vented,
+                            "ensure_referenced_zones_exist creating zone"
+                        );
+                        Zone {
+                            zone_type: zone_type.clone(),
+                            floor_area_m2: None,
+                            volume_m3: None,
+                            attached_wall_ids: Vec::new(),
+                            duct_systems: Vec::new(),
+                            vented,
+                            ventilation_ach: None,
+                            ventilation_sla: None,
+                        }
                     });
                 }
                 ZoneType::Conditioned
@@ -3677,6 +3689,78 @@ mod tests {
             .find(|z| matches!(z.zone_type, ZoneType::Attic))
             .expect("attic zone");
         assert!(attic_vol.volume_m3.is_none());
+    }
+
+    #[test]
+    fn attic_vented_true_by_default_when_no_attic_type_specified() {
+        // SAMPLE_XML has <Attics><Attic> with FloorArea but no <AtticType>.
+        // Default vented = true (OCHRE hpxml.py:635 Vented=True).
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let attic = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Attic))
+            .expect("attic zone expected");
+        assert!(
+            attic.vented,
+            "attic zone without <AtticType> must default to vented: true"
+        );
+    }
+
+    #[test]
+    fn attic_vented_true_from_explicit_vented_element() {
+        let xml = SAMPLE_XML.replace(
+            "<Attics>\n          <Attic>\n            <FloorArea units=\"ft2\">500</FloorArea>\n          </Attic>\n        </Attics>",
+            "<Attics>\n          <Attic>\n            <AtticType>\n              <Attic>\n                <Vented>true</Vented>\n              </Attic>\n            </AtticType>\n            <FloorArea units=\"ft2\">500</FloorArea>\n          </Attic>\n        </Attics>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let attic = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Attic))
+            .expect("attic zone expected");
+        assert!(
+            attic.vented,
+            "explicit <Vented>true</Vented> → vented: true"
+        );
+    }
+
+    #[test]
+    fn attic_vented_false_from_explicit_vented_element() {
+        let xml = SAMPLE_XML.replace(
+            "<Attics>\n          <Attic>\n            <FloorArea units=\"ft2\">500</FloorArea>\n          </Attic>\n        </Attics>",
+            "<Attics>\n          <Attic>\n            <AtticType>\n              <Attic>\n                <Vented>false</Vented>\n              </Attic>\n            </AtticType>\n            <FloorArea units=\"ft2\">500</FloorArea>\n          </Attic>\n        </Attics>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let attic = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Attic))
+            .expect("attic zone expected");
+        assert!(
+            !attic.vented,
+            "explicit <Vented>false</Vented> → vented: false"
+        );
+    }
+
+    #[test]
+    fn attic_vented_true_when_created_by_boundary_reference_only() {
+        // Remove <Attics> group entirely; attic zone created solely by
+        // ensure_referenced_zones_exist when Roof boundary references "attic vented".
+        let xml = SAMPLE_XML.replace(
+            "\n        <Attics>\n          <Attic>\n            <FloorArea units=\"ft2\">500</FloorArea>\n          </Attic>\n        </Attics>",
+            "",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let attic = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Attic))
+            .expect("attic zone expected from boundary reference");
+        assert!(
+            attic.vented,
+            "attic created by boundary reference (no <Attics> group) must default to vented: true"
+        );
     }
 
     #[test]

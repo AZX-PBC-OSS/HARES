@@ -210,6 +210,7 @@ impl DomainSolver for FluidSolver {
                 .iter()
                 .map(|e| cp * e.total_flow_kg_s * (e.mean_supply_temp_c - e.mean_return_temp_c))
                 .sum();
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
             let total_declared_thermal_w: f64 =
                 entries.iter().map(|e| e.total_thermal_power_w).sum();
 

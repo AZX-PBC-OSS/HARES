@@ -11,6 +11,7 @@ use hares_types::{
     telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
+#[allow(unused_imports)]
 use tracing::warn;
 
 use hares_physics::constants::{

@@ -21,6 +21,7 @@ use hares_types::{
     telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
+#[allow(unused_imports)]
 use tracing::warn;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};

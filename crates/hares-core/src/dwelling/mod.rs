@@ -44,12 +44,14 @@ use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 #[cfg(test)]
 use hares_types::LoopId;
 use hares_types::{
-    ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver,
-    ElectricalSummary, EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState,
-    HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID,
-    ScheduleSource, ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
-    validate_core_contract, validate_fluid_type_consistency,
+    ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
+    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
+    ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
+    validate_fluid_type_consistency,
 };
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use hares_types::ControlCapabilities;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
@@ -1539,10 +1541,14 @@ impl Dwelling {
 
         // Read number_of_occupants from the Occupancy spec to scale the raw
         // schedule fraction (0–1) into a person count for internal heat gains.
-        let mut has_occupancy_spec = false;
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        let has_occupancy_spec;
         let occupancy_scale = match equipment_specs.iter().find(|s| s.name == "Occupancy") {
             Some(spec) => {
-                has_occupancy_spec = true;
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    has_occupancy_spec = true;
+                }
                 let val = spec.parameters.get("number_of_occupants").ok_or_else(|| {
                     HaresError::Equipment(
                         "Occupancy spec is missing required key 'number_of_occupants'".into(),
@@ -1554,7 +1560,13 @@ impl Dwelling {
                     ))
                 })?
             }
-            None => 1.0,
+            None => {
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                {
+                    has_occupancy_spec = false;
+                }
+                1.0
+            }
         };
 
         // Invariant: number_of_occupants must be non-negative regardless of
@@ -1634,6 +1646,25 @@ impl Dwelling {
             }
             map
         };
+
+        // Invariant: after zone map construction, verify that every Attic zone's
+        // `vented` flag is consistent. By default (no `<Attics>` group in HPXML),
+        // attics are vented (ASHRAE 152-2004 default; OCHRE hpxml.py:635 Vented=True).
+        // An unvented attic must come from an explicit `<AtticType><Attic><Vented>false`
+        // declaration — if one appears without that declaration, it signals that
+        // `ensure_referenced_zones_exist` diverged from `build_zone_map`.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            for zone in &building.zones {
+                if zone.zone_type == hares_io::hpxml::ZoneType::Attic {
+                    tracing::debug!(
+                        vented = zone.vented,
+                        floor_area_m2 = zone.floor_area_m2,
+                        "dwelling assembly: Attic zone vented status"
+                    );
+                }
+            }
+        }
 
         // Equipment names whose loads are handled outside the registry (e.g. directly in the
         // simulation loop) -- silently skip them rather than emitting a warning.

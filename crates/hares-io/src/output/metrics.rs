@@ -13,8 +13,6 @@ use hares_types::telemetry_keys as tk;
 
 use crate::SimulationConfig;
 
-/// Suffix used by end-use electric power telemetry columns (OCHRE style).
-const ELECTRIC_POWER_SUFFIX: &str = " Electric Power (kW)";
 /// Suffix used by gas power telemetry columns (OCHRE style).
 #[allow(dead_code)]
 const GAS_POWER_SUFFIX: &str = " Gas Power (therms/hour)";
@@ -402,7 +400,8 @@ impl MetricsCalculator {
             optional_float64_column(schema, &["HVAC Heating End Use Electric Power (kW)"])?;
         let hvac_cooling_kw_idx =
             optional_float64_column(schema, &["HVAC Cooling End Use Electric Power (kW)"])?;
-        let battery_kw_idx = optional_float64_column(schema, &["Battery End Use Electric Power (kW)"])?;
+        let battery_kw_idx =
+            optional_float64_column(schema, &["Battery End Use Electric Power (kW)"])?;
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
@@ -863,12 +862,13 @@ fn discover_end_use_columns(
 ///
 /// Used by invariant checks to gate warnings about missing aggregate columns
 /// on the actual presence of equipment for that end-use category.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 fn schema_has_equipment_for(schema: &Schema, target: &hares_types::EndUse) -> bool {
     for field in schema.fields() {
         let name = field.name().as_str();
-        if name.ends_with(ELECTRIC_POWER_SUFFIX) {
+        if name.ends_with(" Electric Power (kW)") {
             let prefix = name
-                .strip_suffix(ELECTRIC_POWER_SUFFIX)
+                .strip_suffix(" Electric Power (kW)")
                 .unwrap_or(name)
                 .trim();
             // Strip instance qualifier suffix (" #N") for multi-instance
@@ -1119,8 +1119,10 @@ mod tests {
 
     #[test]
     fn annual_energy_total_matches_8760_constant_load() {
-        let schema =
-            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "HVAC Heating End Use Electric Power (kW)"]);
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating End Use Electric Power (kW)",
+        ]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
 
         let rows = 8_760;
@@ -1136,7 +1138,8 @@ mod tests {
 
     #[test]
     fn peak_power_uses_max_across_batches() {
-        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "EV End Use Electric Power (kW)"]);
+        let schema =
+            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "EV End Use Electric Power (kW)"]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
 
         let b1 = build_batch(vec![
@@ -1197,7 +1200,8 @@ mod tests {
 
     #[test]
     fn renewable_fraction_uses_abs_for_negative_pv() {
-        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
+        let schema =
+            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
         calc.accumulate(&build_batch(vec![
             (TOTAL_ELECTRIC_POWER_KW, vec![4.0, 4.0]),
@@ -1466,7 +1470,10 @@ mod tests {
 
     #[test]
     fn battery_round_trip_efficiency_computed() {
-        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "Battery End Use Electric Power (kW)"]);
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Battery End Use Electric Power (kW)",
+        ]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
 
         // 10 kWh in, 9 kWh out → 90% round trip
@@ -1621,8 +1628,10 @@ mod tests {
     /// under the same `"hvac_heating"` end-use key.
     #[test]
     fn energy_by_end_use_aggregates_multiple_hvac_heating_equipment() {
-        let schema =
-            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "HVAC Heating End Use Electric Power (kW)"]);
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating End Use Electric Power (kW)",
+        ]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
         // Simulate two hours at constant 3 kW
         calc.accumulate(&build_batch(vec![
@@ -1686,8 +1695,10 @@ mod tests {
         );
 
         // Battery is not HVAC.
-        let battery_schema =
-            schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "Battery End Use Electric Power (kW)"]);
+        let battery_schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Battery End Use Electric Power (kW)",
+        ]);
         assert!(
             !schema_has_equipment_for(&battery_schema, &hares_types::EndUse::HVAC_HEATING),
             "must NOT detect Battery as HVAC_HEATING equipment"
