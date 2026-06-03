@@ -1948,7 +1948,50 @@ impl Dwelling {
         dwelling.auto_register_actors();
 
         if let Some(_init_dur) = config.initialization_duration {
-            dwelling.run_warmup_converged(0.5, 25)?;
+            // Save RNG state before warmup. The clock is reset after warmup for
+            // weather replay; restoring the RNG ensures the production phase
+            // starts from the same RNG position regardless of how many warmup
+            // iterations were needed. Two runs with the same initial seed
+            // produce identical stochastic output even when warmup converges
+            // in a different number of iterations.
+            let rng_seed_before = dwelling.rng.get_seed();
+            let rng_stream_before = dwelling.rng.get_stream();
+            let rng_word_pos_before = dwelling.rng.get_word_pos();
+
+            #[allow(
+                unused_variables,
+                reason = "iterations is logged in the observe feature block below; #[cfg(feature = \"observe\")] gates the only use site"
+            )]
+            let iterations = dwelling.run_warmup_converged(0.5, 25)?;
+
+            #[cfg(feature = "observe")]
+            let rng_word_pos_after_warmup = dwelling.rng.get_word_pos();
+
+            // Restore RNG state to pre-warmup position.
+            let mut restored_rng = ChaCha8Rng::from_seed(rng_seed_before);
+            restored_rng.set_stream(rng_stream_before);
+            restored_rng.set_word_pos(rng_word_pos_before);
+            dwelling.rng = restored_rng;
+
+            #[cfg(feature = "observe")]
+            {
+                let rng_delta = (rng_word_pos_after_warmup as i128) - (rng_word_pos_before as i128);
+                tracing::debug!(
+                    warmup_iterations = iterations,
+                    rng_word_pos_delta = rng_delta,
+                    "warmup complete; RNG restored for production-phase reproducibility"
+                );
+            }
+
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                assert_eq!(
+                    dwelling.rng.get_word_pos(),
+                    rng_word_pos_before,
+                    "RNG word_pos changed during warmup; restoration failed"
+                );
+            }
+
             clock = SimClock::new(
                 local_start,
                 config.sim_config.time_res,
@@ -9946,5 +9989,196 @@ master_seed = 0
             "functional equipment's core output must be snapshotted; id={:?}",
             functional_id
         );
+    }
+
+    /// Two dwellings built from the same config (with warmup) and simulated
+    /// produce identical step results — verifying deterministic reproducibility.
+    #[test]
+    fn same_seed_produces_identical_simulation_with_warmup() {
+        let toml_path_a = {
+            let mut path = std::env::temp_dir();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-core-repro-a-{nanos}.toml"));
+            path
+        };
+        let toml_path_b = {
+            let mut path = std::env::temp_dir();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-core-repro-b-{nanos}.toml"));
+            path
+        };
+
+        let toml_content = r#"building_id = 2002
+
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 3600
+duration_s = 172800
+initialization_duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 42
+"#;
+
+        fs::write(&toml_path_a, toml_content).expect("write TOML A");
+        fs::write(&toml_path_b, toml_content).expect("write TOML B");
+
+        let mut dwelling_a =
+            Dwelling::from_toml_config_with_write_output(&toml_path_a, Some(false))
+                .expect("build dwelling A");
+        let mut dwelling_b =
+            Dwelling::from_toml_config_with_write_output(&toml_path_b, Some(false))
+                .expect("build dwelling B");
+
+        let _ = fs::remove_file(&toml_path_a);
+        let _ = fs::remove_file(&toml_path_b);
+
+        let results_a = dwelling_a.simulate().expect("simulate A");
+        let results_b = dwelling_b.simulate().expect("simulate B");
+
+        assert_eq!(
+            results_a.steps.len(),
+            results_b.steps.len(),
+            "step counts must match"
+        );
+
+        for (i, (step_a, step_b)) in results_a
+            .steps
+            .iter()
+            .zip(results_b.steps.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                step_a.zone_temperatures_c, step_b.zone_temperatures_c,
+                "zone temperatures must match at step {i}"
+            );
+        }
+    }
+
+    /// Two dwellings without warmup also produce identical results — the RNG
+    /// restoration code must not break the no-warmup path.
+    #[test]
+    fn same_seed_produces_identical_simulation_without_warmup() {
+        let toml_path_a = {
+            let mut path = std::env::temp_dir();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-core-nowu-repro-a-{nanos}.toml"));
+            path
+        };
+        let toml_path_b = {
+            let mut path = std::env::temp_dir();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-core-nowu-repro-b-{nanos}.toml"));
+            path
+        };
+
+        let toml_content = r#"building_id = 2003
+
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 60
+duration_s = 600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 7
+"#;
+
+        fs::write(&toml_path_a, toml_content).expect("write TOML A");
+        fs::write(&toml_path_b, toml_content).expect("write TOML B");
+
+        let mut dwelling_a =
+            Dwelling::from_toml_config_with_write_output(&toml_path_a, Some(false))
+                .expect("build dwelling A");
+        let mut dwelling_b =
+            Dwelling::from_toml_config_with_write_output(&toml_path_b, Some(false))
+                .expect("build dwelling B");
+
+        let _ = fs::remove_file(&toml_path_a);
+        let _ = fs::remove_file(&toml_path_b);
+
+        let results_a = dwelling_a.simulate().expect("simulate A");
+        let results_b = dwelling_b.simulate().expect("simulate B");
+
+        assert_eq!(
+            results_a.steps.len(),
+            results_b.steps.len(),
+            "step counts must match"
+        );
+
+        for (i, (step_a, step_b)) in results_a
+            .steps
+            .iter()
+            .zip(results_b.steps.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                step_a.zone_temperatures_c, step_b.zone_temperatures_c,
+                "zone temperatures must match at step {i}"
+            );
+        }
     }
 }
