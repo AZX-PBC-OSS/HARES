@@ -1334,6 +1334,7 @@ mod tests {
     fn build_1r1c_solver_with_window(
         env: &EnvironmentState,
         indoor_temp_c: f64,
+        azimuth_deg: f64,
     ) -> (ThermalSolver, u32) {
         let ua = UA;
         let c = C;
@@ -1376,7 +1377,7 @@ mod tests {
                     radiation_frac: 0.2,
                     glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(2.0, 0.5),
                     tilt_deg: 90.0,
-                    azimuth_deg: 180.0,
+                    azimuth_deg,
                 },
             )]),
             ..ThermalSolverConfig::default()
@@ -1393,7 +1394,7 @@ mod tests {
         // With outdoor at 35 °C and a south-facing window adding solar gain,
         // more cooling capacity is required than the zero-solar case.
         let env = one_zone_env(26.0, 35.0);
-        let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 26.0);
+        let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 26.0, 180.0);
 
         let zero_solar_capacity = thermal
             .autosize_capacity(ZONE, DEFAULT_COOLING_SETPOINT_C, 35.0)
@@ -1435,7 +1436,7 @@ mod tests {
         // within a tolerance that accounts for thermal mass lag across warmup
         // and recording days.
         let env = one_zone_env(18.0, -10.0);
-        let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 18.0);
+        let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 18.0, 180.0);
 
         let heating_design_day =
             thermal.autosize_design_day_heating(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0);
@@ -2284,6 +2285,133 @@ mod tests {
         assert!(c >= 0.0, "cooling capacity must be non-negative");
     }
 
+    // ── Diurnal solar scan orientation regression tests (T-0195) ─────────
+
+    #[test]
+    fn west_window_diurnal_exceeds_noon_only_capacity() {
+        // A zone with only west-facing windows should produce a higher peak
+        // cooling capacity from the design-day diurnal simulation than from
+        // the single-point noon-only DC gain method. At solar noon, the sun
+        // azimuth is ~180° (south), which is nearly orthogonal to a west-facing
+        // (270°) vertical window — yielding negligible direct beam gain. The
+        // diurnal simulation captures the 4–6 PM solar peak where the sun
+        // azimuth aligns with the window, producing significantly higher solar
+        // gain and therefore a larger cooling requirement.
+        // ACCA Manual J-2016 §7–8: hour-by-hour solar profiles per exposure
+        // are required for accurate design cooling loads.
+        let target = DEFAULT_COOLING_SETPOINT_C;
+        let design_outdoor = 35.0;
+
+        let env_west = one_zone_env(target + 2.0, design_outdoor);
+        let (thermal, _win_id) = build_1r1c_solver_with_window(&env_west, target + 2.0, 270.0);
+
+        let noon_only = thermal
+            .autosize_capacity_cooling(
+                ZONE,
+                target,
+                design_outdoor,
+                39.74, // Denver
+                -104.87,
+                0.0,
+            )
+            .abs();
+
+        let diurnal = thermal
+            .autosize_design_day_cooling(
+                ZONE,
+                target,
+                design_outdoor,
+                39.74, // Denver
+                -104.87,
+                0.0,
+            )
+            .abs();
+
+        // Both should produce positive cooling capacity.
+        assert!(
+            noon_only > 0.0,
+            "noon-only cooling capacity {noon_only} must be positive"
+        );
+        assert!(
+            diurnal > 0.0,
+            "diurnal cooling capacity {diurnal} must be positive"
+        );
+
+        // The diurnal simulation must exceed noon-only by a meaningful
+        // margin: the west-facing window receives substantial solar at
+        // 4 PM that the noon-only method entirely misses.
+        assert!(
+            diurnal > noon_only + 25.0,
+            "west-facing (270°) diurnal peak {diurnal} W must exceed noon-only \
+             {noon_only} W (diurnal captures 4 PM west solar; noon misses it)"
+        );
+    }
+
+    #[test]
+    fn south_window_diurnal_matches_noon_only_within_tolerance() {
+        // A zone with only south-facing windows should produce approximately
+        // the same peak cooling capacity from the diurnal simulation as from
+        // the single-point noon-only method. Solar noon (solar azimuth ~180°
+        // for Northern Hemisphere) aligns well with a south-facing (180°)
+        // vertical window, so the noon-only snapshot captures the peak solar
+        // condition for this orientation. The remaining discrepancy comes
+        // from the diurnal outdoor temperature profile (peak at 3 PM) and
+        // thermal mass lag — both second-order effects compared to the
+        // dominant solar-gain timing match.
+        // ACCA Manual J-2016 §7–8: south-facing peak load coincides with
+        // solar noon.
+        let target = DEFAULT_COOLING_SETPOINT_C;
+        let design_outdoor = 35.0;
+
+        let env_south = one_zone_env(target + 2.0, design_outdoor);
+        let (thermal, _win_id) = build_1r1c_solver_with_window(&env_south, target + 2.0, 180.0);
+
+        let noon_only = thermal
+            .autosize_capacity_cooling(
+                ZONE,
+                target,
+                design_outdoor,
+                39.74, // Denver
+                -104.87,
+                0.0,
+            )
+            .abs();
+
+        let diurnal = thermal
+            .autosize_design_day_cooling(
+                ZONE,
+                target,
+                design_outdoor,
+                39.74, // Denver
+                -104.87,
+                0.0,
+            )
+            .abs();
+
+        // Both should produce positive cooling capacity.
+        assert!(
+            noon_only > 0.0,
+            "noon-only cooling capacity {noon_only} must be positive"
+        );
+        assert!(
+            diurnal > 0.0,
+            "diurnal cooling capacity {diurnal} must be positive"
+        );
+
+        // South-facing windows peak near solar noon, so the diurnal result
+        // should be close to the noon-only DC gain. Allow 10 % tolerance
+        // for diurnal outdoor temperature profile (11.7 °C range peaking
+        // at 3 PM) and thermal mass lag effects.
+        let rel_error = (diurnal - noon_only).abs() / noon_only;
+        assert!(
+            rel_error < 0.10,
+            "south-facing (180°) diurnal peak {diurnal:.3} W deviates from \
+             noon-only {noon_only:.3} W by {:.2} % (> 10 % tolerance); \
+             south windows peak near noon so the two methods should agree",
+            rel_error * 100.0
+        );
+    }
+
     // ── Internal gains cooling autosizing tests (T-0193) ────────────────
 
     #[test]
@@ -2291,7 +2419,7 @@ mod tests {
         // With non-zero internal gains, the cooling capacity should increase
         // because the HVAC must remove additional heat generated inside the zone.
         let env = one_zone_env(26.0, 35.0);
-        let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 26.0);
+        let (thermal, _win_id) = build_1r1c_solver_with_window(&env, 26.0, 180.0);
 
         let zero_gains_capacity = thermal
             .autosize_capacity_cooling(
