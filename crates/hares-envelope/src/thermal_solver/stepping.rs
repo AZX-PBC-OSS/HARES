@@ -1,8 +1,12 @@
 //! State-space integration and ideal HVAC capacity solving.
 //!
 //! Contains `resolve_internal` (the per-timestep ZOH step with semi-implicit
-//! infiltration coupling) and the ideal capacity solving method:
+//! infiltration coupling), the ideal capacity solving method, and design-day
+//! autosizing simulation.
+//!
 //! - `solve_ideal_capacity_for_target`: compute HVAC capacity needed to reach an explicit target
+//! - `autosize_design_day_heating`: iterative design-day simulation for heating sizing
+//! - `autosize_design_day_cooling`: iterative design-day simulation for cooling sizing
 //!
 //! All methods operate on pre-allocated buffers owned by `ThermalSolver` -- zero per-step heap
 //! allocation.
@@ -1017,4 +1021,374 @@ impl ThermalSolver {
         self.prepare_inputs_inner(ports, env);
         self.integrate_inner(ports, env, out);
     }
+
+    // ── Design-day autosizing (T-0192) ──────────────────────────────────────────
+
+    /// Run a design-day simulation for heating equipment sizing.
+    ///
+    /// Simulates `WARMUP_DAYS` warmup days + 1 recording day at the heating
+    /// design outdoor condition. Outdoor temperature is constant at
+    /// `design_outdoor_c` (heating design days have minimal diurnal variation;
+    /// constant is worst-case for sizing). Zero solar, zero internal gains,
+    /// zero infiltration.
+    ///
+    /// At each timestep the ideal HVAC input that drives zone temperature to
+    /// `target_c` in one step is computed via
+    /// [`StateSpaceModel::solve_for_output_input`], applied to the input
+    /// vector, and the solver is stepped. The peak HVAC input across the
+    /// recording day timesteps is the sizing capacity.
+    ///
+    /// Uses the solver's native timestep `dt_s`. Does NOT modify the solver's
+    /// persistent state (`x`, `last_u`, couplings).
+    ///
+    /// Returns the required heating capacity in watts (positive), or 0.0 if
+    /// the zone is unknown or solving fails.
+    ///
+    /// Reference: EnergyPlus `SizingManager.cc:285-390` (ZoneSizingCalc
+    /// design-day methodology using ideal loads).
+    pub fn autosize_design_day_heating(
+        &self,
+        zone: ZoneId,
+        target_c: f64,
+        design_outdoor_c: f64,
+    ) -> f64 {
+        self.run_design_day(zone, target_c, design_outdoor_c, 0.0, None)
+    }
+
+    /// Run a design-day simulation for cooling equipment sizing.
+    ///
+    /// Simulates `WARMUP_DAYS` warmup days + 1 recording day on July 21 with
+    /// ASHRAE cooling design-day diurnal dry-bulb profile and clear-sky solar.
+    ///
+    /// Outdoor temperature follows the ASHRAE 2017 HoF Ch.14 Table 1 profile
+    /// with a diurnal range of [`COOLING_DESIGN_DAY_RANGE_C`]. Clear-sky
+    /// solar irradiance is computed at hourly intervals using the ASHRAE
+    /// clear-sky model and Perez (1990) anisotropic tilted irradiance model
+    /// for each window and opaque surface.
+    ///
+    /// Returns the peak HVAC input (positive) across the recording day
+    /// timesteps as the sizing capacity, or 0.0 if the zone is unknown or
+    /// solving fails.
+    pub fn autosize_design_day_cooling(
+        &self,
+        zone: ZoneId,
+        target_c: f64,
+        design_outdoor_c: f64,
+        site_lat_deg: f64,
+        site_lon_deg: f64,
+    ) -> f64 {
+        let solar = precompute_hourly_solar_july21(site_lat_deg, site_lon_deg);
+        self.run_design_day(
+            zone,
+            target_c,
+            design_outdoor_c,
+            COOLING_DESIGN_DAY_RANGE_C,
+            Some(&solar),
+        )
+    }
+
+    /// Shared design-day simulation loop.
+    ///
+    /// Parameters:
+    /// - `daily_range_c`: diurnal range for the outdoor temperature profile
+    ///   (0 for constant — heating; ∼12 °C for cooling)
+    /// - `solar_data`: pre-computed hourly solar data for the design day,
+    ///   or `None` for zero solar (heating design day)
+    fn run_design_day(
+        &self,
+        zone: ZoneId,
+        target_c: f64,
+        design_outdoor_c: f64,
+        daily_range_c: f64,
+        solar_data: Option<&[Option<HourlySolar>]>,
+    ) -> f64 {
+        let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
+            return 0.0;
+        };
+        let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
+            return 0.0;
+        };
+
+        let dt_s = self.dt_s;
+        let timesteps_per_hour = (3600.0 / dt_s).round().max(1.0) as usize;
+        let timesteps_per_day = 24 * timesteps_per_hour;
+        let total_timesteps = (WARMUP_DAYS + 1) * timesteps_per_day;
+
+        let n_inputs = self.model.input_dim();
+        let n_states = self.model.state_dim();
+        let mut x = self.x.clone();
+        let mut u = DVector::zeros(n_inputs);
+        let mut x_next = DVector::zeros(n_states);
+
+        let mut peak_load: f64 = 0.0;
+        #[cfg(feature = "observe")]
+        let mut peak_timestep: usize = 0;
+
+        #[cfg(feature = "observe")]
+        let zone_state_idx = self.wiring.zone_state_indices.get(&zone).copied();
+        #[cfg(feature = "observe")]
+        let (mut observe_loads, mut observe_temps) = (
+            Vec::with_capacity(timesteps_per_day),
+            Vec::with_capacity(timesteps_per_day),
+        );
+
+        for t in 0..total_timesteps {
+            let timestep_in_day = t % timesteps_per_day;
+            // Hour of day at the midpoint of the timestep
+            let hour_of_day = (timestep_in_day as f64 + 0.5) * dt_s / 3600.0;
+            let t_out = ashrae_design_day_dry_bulb(design_outdoor_c, daily_range_c, hour_of_day);
+
+            // ── Build simplified input vector ──────────────────────────
+            u.fill(0.0);
+
+            // Outdoor temperature inputs
+            for &col in &self.wiring.outdoor_temp_input_indices {
+                if col < n_inputs {
+                    u[col] = t_out;
+                }
+            }
+
+            // Ground temperature: approximate as design_outdoor_c for
+            // conservative sizing (cold ground for heating, warm for cooling).
+            for &col in &self.wiring.ground_temp_input_indices {
+                if col < n_inputs {
+                    u[col] = design_outdoor_c;
+                }
+            }
+
+            // Solar gains — cooling design day only
+            if let Some(solar) = solar_data {
+                let hour_idx = (hour_of_day as usize).min(23);
+                if let Some(sol) = solar.get(hour_idx).and_then(|o| o.as_ref()) {
+                    let ghi = sol.0;
+                    let dni = sol.1;
+                    let dhi = sol.2;
+                    let zenith_deg = sol.3;
+                    let azimuth_deg = sol.4;
+                    if zenith_deg < 90.0 {
+                        let doy: u32 = 202; // July 21 (non-leap year)
+                        // Window solar
+                        for (surface_id, win_props) in &self.config.window_properties {
+                            let Some(&solar_idx) = self.wiring.solar_input_indices.get(surface_id)
+                            else {
+                                continue;
+                            };
+                            if solar_idx >= n_inputs {
+                                continue;
+                            }
+                            let irr = perez_tilted_irradiance(
+                                *surface_id,
+                                ghi,
+                                dni,
+                                dhi,
+                                zenith_deg,
+                                azimuth_deg,
+                                win_props.tilt_deg,
+                                win_props.azimuth_deg,
+                                doy,
+                                DEFAULT_GROUND_ALBEDO,
+                            );
+                            let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
+                            u[solar_idx] += poa_w_m2 * win_props.shgc * win_props.area_m2;
+                        }
+                        // Opaque surface solar
+                        for info in &self.config.exterior_surfaces {
+                            if info.input_index >= n_inputs {
+                                continue;
+                            }
+                            if self.config.window_properties.contains_key(&info.surface_id) {
+                                continue;
+                            }
+                            let irr = perez_tilted_irradiance(
+                                info.surface_id,
+                                ghi,
+                                dni,
+                                dhi,
+                                zenith_deg,
+                                azimuth_deg,
+                                info.tilt_deg,
+                                info.azimuth_deg,
+                                doy,
+                                DEFAULT_GROUND_ALBEDO,
+                            );
+                            let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
+                            u[info.input_index] += info.absorptance * info.area_m2 * poa_w_m2;
+                        }
+                    }
+                }
+            }
+
+            // ── Solve for ideal HVAC input ─────────────────────────────
+            let hvac_input = match self
+                .model
+                .solve_for_output_input(&x, &u, target_c, output_idx, input_idx)
+            {
+                Ok(val) if val.is_finite() => val,
+                _other => {
+                    tracing::debug!(
+                        timestep = t,
+                        "design-day solve_for_output_input returned non-finite or \
+                         errored; using 0.0 for this timestep"
+                    );
+                    0.0
+                }
+            };
+            u[input_idx] = hvac_input;
+
+            // ── Step the state-space model forward ─────────────────────
+            self.model.step_into(&x, &u, &mut x_next);
+            std::mem::swap(&mut x, &mut x_next);
+
+            // ── Record on the recording day ────────────────────────────
+            if t >= WARMUP_DAYS * timesteps_per_day {
+                let load = hvac_input.abs();
+                if load > peak_load {
+                    peak_load = load;
+                    #[cfg(feature = "observe")]
+                    {
+                        peak_timestep = timestep_in_day;
+                    }
+                }
+                #[cfg(feature = "observe")]
+                {
+                    observe_loads.push(hvac_input);
+                    let zone_db = if let Some(si) = zone_state_idx {
+                        observe_temps.push(x[si]);
+                        x[si]
+                    } else {
+                        f64::NAN
+                    };
+                    tracing::debug!(
+                        sizing.timestep = timestep_in_day,
+                        sizing.zone_db_c = zone_db,
+                        sizing.hvac_input_w = hvac_input,
+                        "design-day per-timestep telemetry"
+                    );
+                }
+            }
+        }
+
+        // ── Invariant: peak load must be non-negative and finite ───────────
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                peak_load.is_finite() && peak_load >= 0.0,
+                "design-day autosizing: peak_load ({}) must be non-negative and finite",
+                peak_load
+            );
+        }
+
+        // ── Telemetry ──────────────────────────────────────────────────────
+        #[cfg(feature = "observe")]
+        {
+            let mean_load = if observe_loads.is_empty() {
+                f64::NAN
+            } else {
+                observe_loads.iter().sum::<f64>() / observe_loads.len() as f64
+            };
+            let mean_temp = if observe_temps.is_empty() {
+                f64::NAN
+            } else {
+                observe_temps.iter().sum::<f64>() / observe_temps.len() as f64
+            };
+            tracing::info!(
+                sizing.peak_load_w = peak_load,
+                sizing.peak_timestep = peak_timestep,
+                sizing.num_warmup_days = WARMUP_DAYS,
+                sizing.mean_load_w = mean_load,
+                sizing.mean_zone_db_c = mean_temp,
+                sizing.daily_range_c = daily_range_c,
+                sizing.timesteps_per_day = timesteps_per_day,
+                "design-day autosizing complete"
+            );
+        }
+
+        peak_load
+    }
+}
+
+// ── Helper functions ────────────────────────────────────────────────────────
+
+/// ASHRAE 2017 HoF Ch.14 daily dry-bulb temperature range for a clear-sky
+/// cooling design day [°C]. The range is the difference between maximum
+/// and minimum dry-bulb temperature over a 24-hour period.
+///
+/// ASHRAE 2017 HoF Ch.14 §4 Table 1: "Profile for Daily Dry-Bulb Temperature"
+/// uses a mean coincident dry-bulb range of 11.7 °C (21 °F) for cooling
+/// design days.
+const COOLING_DESIGN_DAY_RANGE_C: f64 = 11.7;
+
+/// Number of warmup days to run before recording the design-day peak load.
+///
+/// EnergyPlus uses 1–3 warmup days (SizingManager.cc:122–126). Two warmup
+/// days are sufficient for the building thermal mass to reach a steady
+/// periodic state for typical residential constructions with time constants
+/// of 12–72 hours.
+const WARMUP_DAYS: usize = 2;
+
+/// Solar irradiance data at a single hour: (ghi, dni, dhi, zenith_deg, azimuth_deg)
+/// all in [W/m²] for irradiance and [°] for angles.
+type HourlySolar = (f64, f64, f64, f64, f64);
+
+/// ASHRAE 2017 HoF Ch.14 design-day dry-bulb temperature [°C].
+///
+/// Returns the outdoor dry-bulb temperature at the given fractional hour of
+/// day (0.0–23.999...) using a sinusoidal approximation to the ASHRAE
+/// design-day profile:
+///
+/// ```text
+///   T(h) = T_design − DR × f(h)
+///   f(h) = 0.5 − 0.5 × sin(2π × (h − 9) / 24)
+/// ```
+///
+/// The profile peaks at h = 15 (3 PM local, the hottest part of the day)
+/// and troughs at h = 3 (3 AM local). This matches the observed 2–3 hour
+/// lag between peak solar irradiance (noon) and peak air temperature
+/// (ASHRAE HoF 2021 Ch.14 §4 Table 14.6).
+///
+/// When `daily_range_c` ≤ 0, returns `design_db_c` constant (used for
+/// heating design days where sustained cold is the worst case).
+fn ashrae_design_day_dry_bulb(design_db_c: f64, daily_range_c: f64, hour_of_day: f64) -> f64 {
+    if daily_range_c <= 0.0 {
+        return design_db_c;
+    }
+    // f(h) = 0.5 - 0.5 × sin(2π × (h − 9) / 24)
+    let fraction = 0.5 - 0.5 * (std::f64::consts::TAU * (hour_of_day - 9.0) / 24.0).sin();
+    design_db_c - daily_range_c * fraction
+}
+
+/// Pre-compute hourly solar position and clear-sky irradiance for July 21.
+///
+/// Returns 24 entries, one per hour (0..23), each `None` when the sun is
+/// below the horizon or `Some((ghi, dni, dhi, zenith_deg, azimuth_deg))`
+/// when the sun is above the horizon.
+///
+/// ASHRAE 2017 HoF Ch.14 clear-sky model for direct normal and diffuse
+/// horizontal irradiance. Perez (1990) anisotropic model for tilted
+/// irradiance is applied downstream by the caller.
+fn precompute_hourly_solar_july21(
+    site_lat_deg: f64,
+    site_lon_deg: f64,
+) -> Vec<Option<HourlySolar>> {
+    use chrono::{Datelike, FixedOffset, TimeZone};
+    let mut data = Vec::with_capacity(24);
+    // July 21 = day 202 (non-leap year, 2025)
+    if let Some(base) =
+        FixedOffset::east_opt(0).and_then(|tz| tz.with_ymd_and_hms(2025, 7, 21, 0, 0, 0).single())
+    {
+        for h in 0..24 {
+            let dt = base + chrono::Duration::hours(h);
+            let pos = solar_position(site_lat_deg, site_lon_deg, dt);
+            let zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
+            if pos.altitude_deg > 0.0 {
+                let (dni, dhi, ghi) = clear_sky_irradiance(dt.ordinal(), pos.altitude_deg);
+                data.push(Some((ghi, dni, dhi, zenith_deg, pos.azimuth_deg)));
+            } else {
+                data.push(None);
+            }
+        }
+    } else {
+        data.resize(24, None);
+    }
+    data
 }
