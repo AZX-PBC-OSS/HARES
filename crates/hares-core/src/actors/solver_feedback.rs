@@ -11,7 +11,7 @@
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_envelope::ThermalSolver;
 use hares_equipment::Equipment;
-use hares_types::{ControlSignal, EnvironmentState, ZoneId};
+use hares_types::{ControlSignal, EnvironmentState};
 
 use crate::Actor;
 
@@ -22,8 +22,8 @@ use crate::Actor;
 /// the actor decision phase.
 pub struct SolverFeedbackActor {
     /// Pre-allocated buffer for pending ideal capacity dispatches.
-    /// Each entry is (equipment_index, capacity_w).
-    pending: Vec<(usize, f64)>,
+    /// Each entry is (equipment_index, capacity_w, degraded).
+    pending: Vec<(usize, f64, bool)>,
     /// Pre-cached dispatch targets indexed by equipment position.
     /// Set once at init via `set_dispatch_targets()`, avoids per-step name cloning.
     dispatch_targets: Vec<DispatchTarget>,
@@ -48,15 +48,21 @@ impl SolverFeedbackActor {
     ///
     /// For each equipment with `ideal_target() -> Some((zone, target_c))`,
     /// calls the solver to compute the required capacity and queues it
-    /// for dispatch. Uses equipment indices (zero allocation).
+    /// for dispatch. After solving, checks whether the solver declared
+    /// the capacity as degraded (last-good fallback) and records the flag.
     pub fn collect_and_solve(
         &mut self,
         equipment: &[Box<dyn Equipment>],
         solver: &mut ThermalSolver,
     ) {
-        self.collect_with(equipment, |zone, target_c| {
-            solver.solve_ideal_capacity_for_target(zone, target_c)
-        });
+        self.pending.clear();
+        for (idx, eq) in equipment.iter().enumerate() {
+            if let Some((zone, target_c)) = eq.ideal_target() {
+                let capacity_w = solver.solve_ideal_capacity_for_target(zone, target_c);
+                let degraded = solver.zone_capacity_degraded(zone);
+                self.pending.push((idx, capacity_w, degraded));
+            }
+        }
     }
 
     /// Test-friendly variant: collect ideal targets and resolve capacities via closure.
@@ -64,21 +70,30 @@ impl SolverFeedbackActor {
     pub(crate) fn collect_and_solve_test(
         &mut self,
         equipment: &[Box<dyn Equipment>],
-        solve: impl FnMut(ZoneId, f64) -> f64,
+        solve: impl FnMut(hares_types::ZoneId, f64) -> f64,
     ) {
         self.collect_with(equipment, solve);
     }
 
+    /// Test-friendly: directly push a capacity value with its degradation status
+    /// into the pending buffer. Used to test degraded-capacity signal propagation
+    /// without a real ThermalSolver.
+    #[cfg(test)]
+    pub(crate) fn push_pending_test(&mut self, equipment_index: usize, capacity_w: f64, degraded: bool) {
+        self.pending.push((equipment_index, capacity_w, degraded));
+    }
+
+    #[cfg(test)]
     fn collect_with(
         &mut self,
         equipment: &[Box<dyn Equipment>],
-        mut solve: impl FnMut(ZoneId, f64) -> f64,
+        mut solve: impl FnMut(hares_types::ZoneId, f64) -> f64,
     ) {
         self.pending.clear();
         for (idx, eq) in equipment.iter().enumerate() {
             if let Some((zone, target_c)) = eq.ideal_target() {
                 let capacity_w = solve(zone, target_c);
-                self.pending.push((idx, capacity_w));
+                self.pending.push((idx, capacity_w, false));
             }
         }
     }
@@ -96,7 +111,7 @@ impl Actor for SolverFeedbackActor {
     }
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
-        for (idx, capacity_w) in self.pending.drain(..) {
+        for (idx, capacity_w, degraded) in self.pending.drain(..) {
             let Some(target) = self.dispatch_targets.get(idx) else {
                 tracing::warn!(
                     idx,
@@ -111,7 +126,7 @@ impl Actor for SolverFeedbackActor {
             // take precedence over solver-computed ideal capacity.
             out.push(DispatchRequest {
                 target: target.clone(),
-                signal: ControlSignal::IdealCapacity { capacity_w },
+                signal: ControlSignal::IdealCapacity { capacity_w, degraded },
                 priority: PriorityTier::Schedule,
             });
         }
@@ -144,7 +159,7 @@ mod tests {
     fn decide_produces_correct_dispatch_request() {
         let mut actor = SolverFeedbackActor::new();
         actor.set_dispatch_targets(mock_targets());
-        actor.pending.push((0, 5000.0));
+        actor.pending.push((0, 5000.0, false));
 
         let env = crate::actor::testing::test_env().build();
         let mut out = Vec::new();
@@ -154,8 +169,9 @@ mod tests {
         assert_eq!(out[0].target, DispatchTarget::ByName(Arc::from("HVAC_0")));
         assert_eq!(out[0].priority, PriorityTier::Schedule);
         match &out[0].signal {
-            ControlSignal::IdealCapacity { capacity_w } => {
+            ControlSignal::IdealCapacity { capacity_w, degraded } => {
                 assert!((*capacity_w - 5000.0).abs() < 1e-9);
+                assert!(!degraded);
             }
             _ => panic!("expected IdealCapacity signal"),
         }
@@ -165,8 +181,8 @@ mod tests {
     fn decide_drains_pending_buffer() {
         let mut actor = SolverFeedbackActor::new();
         actor.set_dispatch_targets(mock_targets());
-        actor.pending.push((0, 5000.0));
-        actor.pending.push((1, -3000.0));
+        actor.pending.push((0, 5000.0, false));
+        actor.pending.push((1, -3000.0, false));
 
         let env = crate::actor::testing::test_env().build();
         let mut out = Vec::new();

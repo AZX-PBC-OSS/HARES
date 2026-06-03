@@ -213,6 +213,7 @@ fn make_solver(env: &EnvironmentState) -> ThermalSolver {
         boundary_diagnostics: Vec::new(),
         film_coefficient_model: FilmCoefficientModel::default(),
         interior_convection_injections: Vec::new(),
+        ideal_capacity_degraded_threshold: 3,
     };
 
     ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()

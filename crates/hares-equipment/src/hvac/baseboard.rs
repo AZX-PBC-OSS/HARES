@@ -488,7 +488,7 @@ mod tests {
         })
         .unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 1_500.0,
+            capacity_w: 1_500.0, degraded: false,
         })
         .unwrap();
 

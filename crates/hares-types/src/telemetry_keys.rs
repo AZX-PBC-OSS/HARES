@@ -30,6 +30,11 @@ pub const COIL_LATENT_COOLING_W: &str = "coil_latent_cooling_w";
 pub const LATENT_GAINS_W: &str = "latent_gains_w";
 pub const FAN_HEAT_W: &str = "fan_heat_w";
 pub const IDEAL_CAPACITY_W: &str = "ideal_capacity_w";
+/// 1.0 when the ideal capacity dispatch is degraded (consecutive solver failures
+/// exceeded threshold and last-good capacity was used as fallback); 0.0 otherwise.
+/// Records the `degraded` flag from `ControlSignal::IdealCapacity` for diagnostic
+/// CSV outputs.
+pub const IDEAL_CAPACITY_DEGRADED: &str = "ideal_capacity_degraded";
 
 // ── Simulation context (available at all output verbosity levels) ────────────
 pub const OUTDOOR_TEMP_C: &str = "outdoor_temp_c";

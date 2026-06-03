@@ -1599,7 +1599,7 @@ impl CoolingCore {
                 self.apply_dr_level(*level);
                 self.dr_duration_remaining_s = *duration_s;
             }
-            ControlSignal::IdealCapacity { capacity_w } => {
+            ControlSignal::IdealCapacity { capacity_w, .. } => {
                 // Solver-provided load: negative = cooling needed.
                 self.ideal_capacity_w = *capacity_w;
             }
@@ -2809,7 +2809,7 @@ mod tests {
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment).unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: -5_000.0,
+            capacity_w: -5_000.0, degraded: false,
         })
         .unwrap();
         eq.update_control(&environment);
@@ -3474,7 +3474,7 @@ mod tests {
             (
                 "IdealCapacity",
                 ControlSignal::IdealCapacity {
-                    capacity_w: -3_000.0,
+                    capacity_w: -3_000.0, degraded: false,
                 },
             ),
             (
@@ -4618,7 +4618,7 @@ mod ideal_capacity_tests {
         eq.init(&cfg, &env).unwrap();
         // Signal provides half-rated load; must be ignored when use_ideal=false.
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: -4_000.0,
+            capacity_w: -4_000.0, degraded: false,
         })
         .unwrap();
         eq.update_control(&env);
@@ -4645,7 +4645,7 @@ mod ideal_capacity_tests {
         eq.init(&cfg, &env).unwrap();
         // Half rated capacity: 4000 W of 8000 W rated → load_fraction = 0.5.
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: -4_000.0,
+            capacity_w: -4_000.0, degraded: false,
         })
         .unwrap();
         eq.update_control(&env);
@@ -4691,7 +4691,7 @@ mod ideal_capacity_tests {
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment).unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: -8_000.0,
+            capacity_w: -8_000.0, degraded: false,
         })
         .unwrap();
         eq.update_control(&environment);
@@ -4718,7 +4718,7 @@ mod ideal_capacity_tests {
         eq2.apply_control(&ControlSignal::MaxCapacityFraction { fraction: 0.5 })
             .unwrap();
         eq2.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: -8_000.0,
+            capacity_w: -8_000.0, degraded: false,
         })
         .unwrap();
         eq2.update_control(&environment);

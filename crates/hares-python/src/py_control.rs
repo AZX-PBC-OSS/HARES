@@ -73,7 +73,7 @@ impl PyControlSignal {
     #[staticmethod]
     pub fn ideal_capacity(capacity_w: f64) -> Self {
         Self {
-            signal: ControlSignal::IdealCapacity { capacity_w },
+            signal: ControlSignal::IdealCapacity { capacity_w, degraded: false },
         }
     }
 
@@ -373,6 +373,7 @@ impl PyControlSignal {
             },
             "IdealCapacity" => ControlSignal::IdealCapacity {
                 capacity_w: dict_required(d, "capacity_w")?,
+                degraded: false,
             },
             "ThermalSetpointDelta" => ControlSignal::ThermalSetpointDelta {
                 heating_delta_c: dict_optional(d, "heating_delta_c")?,
@@ -605,9 +606,13 @@ impl PyControlSignal {
                 dict.set_item("protocol", protocol.0)?;
                 dict.set_item("payload", PyBytes::new(py, payload))?;
             }
-            ControlSignal::IdealCapacity { capacity_w } => {
+            ControlSignal::IdealCapacity {
+                capacity_w,
+                degraded,
+            } => {
                 dict.set_item("type", "IdealCapacity")?;
                 dict.set_item("capacity_w", capacity_w)?;
+                dict.set_item("degraded", degraded)?;
             }
             ControlSignal::IdealCapacityModeOverride { mode } => {
                 dict.set_item("type", "IdealCapacityModeOverride")?;

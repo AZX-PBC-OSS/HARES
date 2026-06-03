@@ -187,6 +187,25 @@ pub struct ThermalSolver {
     /// warn-level diagnostic logs — only the first failure in a run emits `warn!`;
     /// subsequent consecutive failures emit `debug!` to avoid log flood.
     ideal_capacity_failure_counts: HashMap<ZoneId, usize>,
+    /// Per-zone last successfully computed capacity [W]. On solver convergence
+    /// the computed capacity is stored here. On failure when
+    /// `consecutive failures >= ideal_capacity_degraded_threshold`, this value
+    /// is returned as a degraded fallback instead of 0.0.
+    last_good_capacity_w: HashMap<ZoneId, f64>,
+    /// Zones that received a degraded (last-good) capacity value during the
+    /// most recent call to `solve_ideal_capacity_for_target`. Cleared at the
+    /// start of each step via `begin_step_degradation_tracking`.
+    ideal_capacity_degraded_zones: HashSet<ZoneId>,
+    /// Zones for which an `error!` log has already been emitted during the
+    /// current degradation run. Guards against per-timestep log flood when a
+    /// zone remains stuck in the degraded fallback path across many consecutive
+    /// steps. Cleared on recovery, mirroring `ideal_capacity_warned_zones`.
+    ideal_capacity_degraded_warned_zones: HashSet<ZoneId>,
+    /// Per-zone consecutive non-convergence count behind the `observe` feature.
+    /// Mirrors `ideal_capacity_failure_counts` but available for observer
+    /// capture when the observe feature is active.
+    #[cfg(feature = "observe")]
+    consecutive_nonconvergence_count: HashMap<ZoneId, usize>,
     /// Zones for which an ideal-capacity solve-failure warn has already been emitted
     /// during the current failure run. Guards against per-timestep log spam in
     /// pathological runs where the target is unreachable every step.
@@ -282,6 +301,23 @@ impl ThermalSolver {
     /// bypass/defrost state).
     pub fn config_mut(&mut self) -> &mut ThermalSolverConfig {
         &mut self.config
+    }
+
+    /// Returns true when the zone's most recent `solve_ideal_capacity_for_target`
+    /// call returned a degraded fallback (last-good capacity after consecutive
+    /// solver failures exceeded the threshold). False otherwise.
+    ///
+    /// This is a step-local flag — it is cleared at the start of each
+    /// `prepare_inputs` call.
+    pub fn zone_capacity_degraded(&self, zone: ZoneId) -> bool {
+        self.ideal_capacity_degraded_zones.contains(&zone)
+    }
+
+    /// Returns true when an `error!` log has already been emitted for this
+    /// zone's current degradation run. Used to guard against log flood when
+    /// a zone remains stuck in the degraded fallback path.
+    pub fn zone_capacity_degraded_warned(&self, zone: ZoneId) -> bool {
+        self.ideal_capacity_degraded_warned_zones.contains(&zone)
     }
 
     /// Per-component envelope gains from the most recent `resolve()` call.
@@ -644,6 +680,11 @@ impl ThermalSolver {
             lwr_linearised_warned_zones: HashSet::new(),
             energy_balance_residuals: HashMap::with_capacity(n_zones_for_latent),
             ideal_capacity_failure_counts: HashMap::with_capacity(n_zones_for_latent),
+            last_good_capacity_w: HashMap::with_capacity(n_zones_for_latent),
+            ideal_capacity_degraded_zones: HashSet::new(),
+            ideal_capacity_degraded_warned_zones: HashSet::new(),
+            #[cfg(feature = "observe")]
+            consecutive_nonconvergence_count: HashMap::with_capacity(n_zones_for_latent),
             ideal_capacity_warned_zones: HashSet::new(),
             zone_temps_buf,
             latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
@@ -1251,6 +1292,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
     }
@@ -1339,6 +1381,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
     }
@@ -1475,6 +1518,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();
         let state = solver.state();
@@ -1572,6 +1616,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
         solver.x[0] = 20.0;
@@ -2031,6 +2076,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -2084,6 +2130,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -2260,6 +2307,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2331,6 +2379,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2386,6 +2435,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2445,6 +2495,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2524,6 +2575,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2586,6 +2638,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2658,6 +2711,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -2680,6 +2734,159 @@ mod tests {
         assert!(
             !solver.ideal_capacity_warned_zones.contains(&ZoneId(1)),
             "warned zone must be cleared on recovery"
+        );
+    }
+
+    /// When the solver has previously converged and stored a last-good capacity,
+    /// reaching the degraded threshold should return that last-good value instead
+    /// of 0.0. This prevents the simulation from silently zeroing HVAC capacity
+    /// during transient solver failures.
+    #[test]
+    fn solve_ideal_capacity_returns_last_good_after_threshold() {
+        let zone_temp = 20.0;
+        let outdoor_temp = 10.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+
+        // Failing model: HVAC column (index 1) has zero gain →
+        // solve_for_scalar_input returns ZeroEffectiveGain.
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (2.0 * 50_000.0)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (2.0 * 50_000.0), 0.0]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
+        };
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+
+        // Inject fake last-good capacity and 3 prior failures.
+        solver.last_good_capacity_w.insert(ZoneId(1), 4500.0);
+        solver.ideal_capacity_failure_counts.insert(ZoneId(1), 3);
+
+        // This call should fail (zero effective gain), but because count (3)
+        // meets the threshold (3) and last-good exists, it returns last-good.
+        let q = solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
+        assert!(
+            (q - 4500.0).abs() < 1e-9,
+            "threshold failure should return last-good capacity: expected 4500, got {q:.1}"
+        );
+
+        // The degraded flag must be set.
+        assert!(
+            solver.zone_capacity_degraded(ZoneId(1)),
+            "degraded flag must be set when last-good fallback is used"
+        );
+
+        // After prepare_inputs (new step), the degraded flag must be cleared.
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        solver.prepare_inputs(&ports, &env);
+        assert!(
+            !solver.zone_capacity_degraded(ZoneId(1)),
+            "degraded flag must be cleared at start of new step"
+        );
+    }
+
+    /// When the observe feature is active, the consecutive non-convergence count
+    /// must be incremented on each solve failure and cleared on recovery.
+    #[test]
+    #[cfg(feature = "observe")]
+    fn consecutive_nonconvergence_count_incremented_on_failure() {
+        let zone_temp = 20.0;
+        let outdoor_temp = 10.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+
+        // Failing model.
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (2.0 * 50_000.0)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (2.0 * 50_000.0), 0.0]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
+        };
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+
+        solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
+        assert_eq!(
+            solver.consecutive_nonconvergence_count.get(&ZoneId(1)),
+            Some(&1),
+            "consecutive_nonconvergence_count must increment to 1 after first failure"
+        );
+
+        solver.solve_ideal_capacity_for_target(ZoneId(1), 25.0);
+        assert_eq!(
+            solver.consecutive_nonconvergence_count.get(&ZoneId(1)),
+            Some(&2),
+            "consecutive_nonconvergence_count must increment to 2 after second failure"
         );
     }
 
@@ -2804,6 +3011,7 @@ mod tests {
                 film_coefficient_model: FilmCoefficientModel::default(),
                 interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+                ideal_capacity_degraded_threshold: 3,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -2962,6 +3170,7 @@ mod tests {
                 film_coefficient_model: FilmCoefficientModel::default(),
                 interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+                ideal_capacity_degraded_threshold: 3,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, &env, zone_temp)
@@ -3131,6 +3340,7 @@ mod tests {
                 film_coefficient_model: FilmCoefficientModel::default(),
                 interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+                ideal_capacity_degraded_threshold: 3,
             };
             let env = make_env();
             let mut s =
@@ -3485,6 +3695,7 @@ mod tests {
                 film_coefficient_model: FilmCoefficientModel::default(),
                 interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+                ideal_capacity_degraded_threshold: 3,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -3604,6 +3815,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver_nv =
             ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
@@ -3691,6 +3903,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver_nv =
             ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
@@ -3792,6 +4005,7 @@ mod tests {
                 film_coefficient_model: FilmCoefficientModel::default(),
                 interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+                ideal_capacity_degraded_threshold: 3,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -3949,6 +4163,7 @@ mod tests {
                 film_coefficient_model: FilmCoefficientModel::default(),
                 interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+                ideal_capacity_degraded_threshold: 3,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -4069,6 +4284,7 @@ mod tests {
                     boundary_diagnostics: Vec::new(),
                     film_coefficient_model: FilmCoefficientModel::default(),
                     interior_convection_injections: Vec::new(),
+                    ideal_capacity_degraded_threshold: 3,
                 };
                 let mut s =
                     ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -4413,6 +4629,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 300.0, &env, 22.0).unwrap();
         solver.x[0] = 30.0;
@@ -4482,6 +4699,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -4672,6 +4890,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver_combined = ThermalSolver::new(
             model,
@@ -4839,6 +5058,7 @@ mod tests {
                 film_coefficient_model: FilmCoefficientModel::default(),
                 interior_convection_injections: Vec::new(),
                 interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+                ideal_capacity_degraded_threshold: 3,
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -5157,6 +5377,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
 
@@ -5295,6 +5516,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, t_zone).unwrap();
         solver.x[0] = t_zone;
@@ -5552,6 +5774,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
 
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
@@ -5688,6 +5911,7 @@ mod tests {
             }],
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
 
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();
@@ -5861,6 +6085,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
 
         let mut solver = ThermalSolver::new(
@@ -6052,6 +6277,7 @@ mod tests {
             boundary_diagnostics: Vec::new(),
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         };
 
         let mut solver = ThermalSolver::new(

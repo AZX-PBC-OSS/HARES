@@ -951,7 +951,7 @@ fn simple_heaters_ideal_capacity_scales_output() {
     );
     gas_furnace
         .apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 5_000.0,
+            capacity_w: 5_000.0, degraded: false,
         })
         .unwrap();
     assert_eq!(gas_furnace.update_control(&env), OperatingMode::Heating);
@@ -971,7 +971,7 @@ fn simple_heaters_ideal_capacity_scales_output() {
     electric_furnace.init(&electric_furnace_cfg, &env).unwrap();
     electric_furnace
         .apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 5_000.0,
+            capacity_w: 5_000.0, degraded: false,
         })
         .unwrap();
     assert_eq!(
@@ -998,7 +998,7 @@ fn simple_heaters_ideal_capacity_scales_output() {
     electric_boiler.init(&electric_boiler_cfg, &env).unwrap();
     electric_boiler
         .apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 5_000.0,
+            capacity_w: 5_000.0, degraded: false,
         })
         .unwrap();
     assert_eq!(electric_boiler.update_control(&env), OperatingMode::Heating);
@@ -1051,7 +1051,7 @@ fn simple_heaters_ideal_capacity_scales_output() {
     baseboard.init(&baseboard_cfg, &env).unwrap();
     baseboard
         .apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 1_500.0,
+            capacity_w: 1_500.0, degraded: false,
         })
         .unwrap();
     assert_eq!(baseboard.update_control(&env), OperatingMode::Heating);
@@ -1686,7 +1686,7 @@ fn ideal_capacity_produces_continuous_output() {
 
     // Simulate solver feedback: inject 4000 W (40% of rated).
     eq.apply_control(&ControlSignal::IdealCapacity {
-        capacity_w: INJECTED_W,
+        capacity_w: INJECTED_W, degraded: false,
     })
     .unwrap();
 
@@ -1782,7 +1782,7 @@ fn auto_mode_selects_ideal_at_5min_timestep() {
 
     // Inject solver-computed capacity (simulating SolverFeedbackActor dispatch).
     eq.apply_control(&ControlSignal::IdealCapacity {
-        capacity_w: INJECTED_W,
+        capacity_w: INJECTED_W, degraded: false,
     })
     .unwrap();
     eq.update_control(&env);

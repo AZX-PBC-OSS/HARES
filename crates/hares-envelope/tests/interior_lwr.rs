@@ -394,6 +394,7 @@ fn lwr_zone_without_scriptf_must_error_at_construction() {
         boundary_diagnostics: Vec::new(),
         film_coefficient_model: FilmCoefficientModel::default(),
         interior_convection_injections: Vec::new(),
+        ideal_capacity_degraded_threshold: 3,
     };
 
     let result = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0);
@@ -596,6 +597,7 @@ fn interior_lwr_converges_by_flux_residual_within_iter_budget() {
         boundary_diagnostics: Vec::new(),
         film_coefficient_model: FilmCoefficientModel::default(),
         interior_convection_injections: Vec::new(),
+        ideal_capacity_degraded_threshold: 3,
     };
 
     let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();

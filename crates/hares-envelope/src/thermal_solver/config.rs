@@ -580,6 +580,13 @@ pub struct ThermalSolverConfig {
     /// Populated when `film_coefficient_model == PerStepTarp` and the boundary
     /// has RC nodes. Empty vec when using `AshraeSimple` (backward compat).
     pub interior_convection_injections: Vec<InteriorConvectionInjection>,
+    /// Maximum number of consecutive solver non-convergence events before the
+    /// solver falls back to the last-good capacity value for a zone.
+    ///
+    /// Default 3 consecutive convergence failures is a reasonable signal that
+    /// the solver is unable to reach the setpoint under current conditions
+    /// (extreme weather, sizing mismatch, or numerical ill-conditioning).
+    pub ideal_capacity_degraded_threshold: usize,
 }
 
 impl Default for ThermalSolverConfig {
@@ -601,6 +608,7 @@ impl Default for ThermalSolverConfig {
             interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
             film_coefficient_model: FilmCoefficientModel::default(),
             interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
         }
     }
 }

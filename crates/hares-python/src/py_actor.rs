@@ -244,6 +244,7 @@ pub enum PySignal {
     },
     IdealCapacity {
         capacity_w: f64,
+        degraded: bool,
     },
     EvPlugIn {
         state: PyEvConnectionState,
@@ -406,7 +407,7 @@ impl PySignal {
                 level: level.into_dr_level(),
                 duration_s,
             },
-            PySignal::IdealCapacity { capacity_w } => ControlSignal::IdealCapacity { capacity_w },
+            PySignal::IdealCapacity { capacity_w, degraded } => ControlSignal::IdealCapacity { capacity_w, degraded },
             PySignal::EvPlugIn { state } => ControlSignal::EvPlugIn {
                 state: EvConnectionState::from(state),
             },
@@ -722,7 +723,7 @@ impl PyDispatchRequest {
     ) -> PyResult<Self> {
         Ok(Self {
             target,
-            signal: PySignal::IdealCapacity { capacity_w },
+            signal: PySignal::IdealCapacity { capacity_w, degraded: false },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
     }
@@ -1040,7 +1041,7 @@ impl PySignal {
 
     #[staticmethod]
     fn ideal_capacity(capacity_w: f64) -> Self {
-        PySignal::IdealCapacity { capacity_w }
+        PySignal::IdealCapacity { capacity_w, degraded: false }
     }
 
     #[staticmethod]

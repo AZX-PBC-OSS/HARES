@@ -6343,7 +6343,7 @@ occupancy = 1.0
         );
         assert_eq!(requests[0].priority, PriorityTier::Schedule);
         match &requests[0].signal {
-            ControlSignal::IdealCapacity { capacity_w } => {
+            ControlSignal::IdealCapacity { capacity_w, .. } => {
                 assert!((*capacity_w - 5000.0).abs() < 1e-9);
             }
             _ => panic!("expected IdealCapacity signal"),
@@ -6445,7 +6445,7 @@ occupancy = 1.0
             &mut self,
             signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
-            if let ControlSignal::IdealCapacity { capacity_w } = signal {
+            if let ControlSignal::IdealCapacity { capacity_w, .. } = signal {
                 self.ideal_capacity_w = *capacity_w;
                 self.telemetry.insert(tk::IDEAL_CAPACITY_W, *capacity_w);
             }
@@ -6487,6 +6487,15 @@ occupancy = 1.0
         );
         assert_eq!(requests[0].priority, PriorityTier::Schedule);
 
+        // Verify the IdealCapacity signal is NOT degraded (normal operation).
+        match &requests[0].signal {
+            ControlSignal::IdealCapacity { capacity_w, degraded } => {
+                assert!((*capacity_w - 5000.0).abs() < 1e-9);
+                assert!(!degraded, "normal solver output must not be flagged as degraded");
+            }
+            _ => panic!("expected IdealCapacity signal"),
+        }
+
         // Step 3: dispatch to equipment
         let mut dispatcher = ControlDispatcher::default();
         for req in requests {
@@ -6506,6 +6515,36 @@ occupancy = 1.0
                 < 1e-9,
             "equipment should have received 5000W ideal capacity"
         );
+    }
+
+    /// When the solver feedback actor dispatches a degraded ideal capacity,
+    /// the `degraded` flag must propagate through the signal to equipment.
+    #[test]
+    fn solver_feedback_degraded_capacity_propagates_to_signal() {
+        use crate::Actor;
+        use crate::actors::SolverFeedbackActor;
+
+        let eq = TestIdealEquipment::new("IdealHVAC", ZoneId(1), 20.0);
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+
+        let mut actor = SolverFeedbackActor::new();
+        actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+
+        // Simulate solver returning a degraded (last-good) capacity.
+        actor.push_pending_test(0, 4500.0, true);
+
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 1);
+        match &requests[0].signal {
+            ControlSignal::IdealCapacity { capacity_w, degraded } => {
+                assert!((*capacity_w - 4500.0).abs() < 1e-9);
+                assert!(*degraded, "degraded flag must be true when capacity is a fallback");
+            }
+            _ => panic!("expected IdealCapacity signal"),
+        }
     }
 
     #[test]
@@ -7493,13 +7532,13 @@ occupancy = 1.0
         assert_eq!(requests.len(), 2, "exactly 2 ideal equipment → 2 signals");
         // Verify correct zone→capacity mapping
         match &requests[0].signal {
-            ControlSignal::IdealCapacity { capacity_w } => {
+            ControlSignal::IdealCapacity { capacity_w, .. } => {
                 assert!((capacity_w - 3000.0).abs() < 1e-9, "zone 1 → 3000W");
             }
             _ => panic!("expected IdealCapacity"),
         }
         match &requests[1].signal {
-            ControlSignal::IdealCapacity { capacity_w } => {
+            ControlSignal::IdealCapacity { capacity_w, .. } => {
                 assert!((capacity_w - (-2000.0)).abs() < 1e-9, "zone 2 → -2000W");
             }
             _ => panic!("expected IdealCapacity"),
@@ -7533,7 +7572,7 @@ occupancy = 1.0
         // Step 2: User actor emits override at Grid priority (e.g., DR curtailment)
         requests.push(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("HVAC")),
-            signal: ControlSignal::IdealCapacity { capacity_w: 0.0 },
+            signal: ControlSignal::IdealCapacity { capacity_w: 0.0, degraded: false },
             priority: PriorityTier::Grid,
         });
 

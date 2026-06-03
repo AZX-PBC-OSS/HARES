@@ -95,6 +95,7 @@ pub struct IdealHvac {
     zone_id: ZoneId,
     thermostat_fsm: ThermostatFsm,
     ideal_capacity_w: f64,
+    ideal_capacity_degraded: bool,
     current_target_c: f64,
     ideal_capacity_mode: IdealCapacityMode,
     rated_capacity_w: f64,
@@ -186,6 +187,7 @@ impl IdealHvac {
                 cooling_c: 24.0,
             }),
             ideal_capacity_w: 0.0,
+            ideal_capacity_degraded: false,
             current_target_c: 20.0,
             ideal_capacity_mode: IdealCapacityMode::default(),
             rated_capacity_w: 10_000.0,
@@ -285,6 +287,7 @@ impl IdealHvac {
         self.thermostat_fsm.set_mode(mode, when);
         if prev != mode && mode == ThermostatMode::Deadband {
             self.ideal_capacity_w = 0.0;
+            self.ideal_capacity_degraded = false;
         }
     }
 
@@ -531,6 +534,7 @@ impl Equipment for IdealHvac {
         // a now-inappropriate capacity.
         if self.cached_ideal_target.is_none() {
             self.ideal_capacity_w = 0.0;
+            self.ideal_capacity_degraded = false;
         }
         // Set end_use based on FSM mode so that ByEndUse dispatch routing
         // sees the correct value before step() runs. Deadband mode preserves
@@ -719,6 +723,8 @@ impl Equipment for IdealHvac {
         self.telemetry
             .set(tk::IDEAL_CAPACITY_W, self.ideal_capacity_w);
         self.telemetry
+            .set(tk::IDEAL_CAPACITY_DEGRADED, if self.ideal_capacity_degraded { 1.0 } else { 0.0 });
+        self.telemetry
             .set(tk::CURRENT_TARGET_C, self.current_target_c);
         self.telemetry.set(tk::FAN_KW, fan_kw);
         let sp = self.thermostat_fsm.effective_setpoints();
@@ -856,8 +862,12 @@ impl Equipment for IdealHvac {
 
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
-            ControlSignal::IdealCapacity { capacity_w } => {
+            ControlSignal::IdealCapacity {
+                capacity_w,
+                degraded,
+            } => {
                 self.ideal_capacity_w = *capacity_w;
+                self.ideal_capacity_degraded = *degraded;
             }
             ControlSignal::ThermalSetpoint {
                 heating_setpoint_c,
@@ -882,6 +892,7 @@ impl Equipment for IdealHvac {
                 } else {
                     self.thermostat_fsm.mode = ThermostatMode::Deadband;
                     self.ideal_capacity_w = 0.0;
+                    self.ideal_capacity_degraded = false;
                 }
             }
             ControlSignal::ThermalSetpointDelta {
@@ -916,6 +927,7 @@ impl Equipment for IdealHvac {
                         self.thermostat_fsm.mode = ThermostatMode::Deadband;
                     }
                     self.ideal_capacity_w = 0.0;
+                    self.ideal_capacity_degraded = false;
                 }
             }
             _ => {}
@@ -936,10 +948,11 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn ideal_hvac_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(17);
+    let mut telemetry = Telemetry::with_capacity(18);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::IDEAL_CAPACITY_W, 0.0);
+    telemetry.insert(tk::IDEAL_CAPACITY_DEGRADED, 0.0);
     telemetry.insert(tk::CURRENT_TARGET_C, 0.0);
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::COIL_SENSIBLE_COOLING_W, 0.0);
@@ -974,6 +987,12 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::IDEAL_CAPACITY_W.to_string(),
             unit: "W".to_string(),
             description: "Ideal capacity from solver (positive=heating, negative=cooling)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: tk::IDEAL_CAPACITY_DEGRADED.to_string(),
+            unit: "bool".to_string(),
+            description: "1.0 if capacity is degraded (fallback after consecutive solver failures)"
                 .to_string(),
         },
         TelemetryField {
@@ -1199,7 +1218,7 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
 
-        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 5000.0 };
+        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 5000.0, degraded: false };
         eq.apply_control(&signal).unwrap();
         assert!((eq.ideal_capacity_w - 5000.0).abs() < 1e-9);
     }
@@ -1906,7 +1925,7 @@ mod tests {
         assert_eq!(eq.thermostat_fsm.mode, super::ThermostatMode::Heating);
 
         // Solver dispatches capacity while in Heating.
-        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 5000.0 };
+        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 5000.0, degraded: false };
         eq.apply_control_unchecked(&signal).unwrap();
         assert!((eq.ideal_capacity_w - 5000.0).abs() < 1e-9);
 
@@ -1953,7 +1972,7 @@ mod tests {
         assert_eq!(eq.thermostat_fsm.mode, super::ThermostatMode::Cooling);
 
         // Solver mistakenly returns positive capacity (e.g. outdoor dropped).
-        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 3000.0 };
+        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 3000.0, degraded: false };
         eq.apply_control_unchecked(&signal).unwrap();
 
         let mut ports = PortSlots {
@@ -1992,6 +2011,7 @@ mod tests {
         // Solver returns negative capacity (zone overshot, cooling needed).
         let signal = hares_types::ControlSignal::IdealCapacity {
             capacity_w: -2000.0,
+            degraded: false,
         };
         eq.apply_control_unchecked(&signal).unwrap();
 

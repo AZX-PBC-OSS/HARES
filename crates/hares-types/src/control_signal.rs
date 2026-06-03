@@ -110,6 +110,11 @@ pub enum ControlSignal {
     },
     IdealCapacity {
         capacity_w: f64,
+        /// True when the ideal capacity value is a degraded fallback
+        /// (last-good capacity used after consecutive solver failures).
+        /// False for normal, converged solver output.
+        #[serde(default)]
+        degraded: bool,
     },
     /// Relative setpoint adjustment applied on top of the equipment's current
     /// effective setpoints. Positive `heating_delta_c` raises the heating
@@ -314,7 +319,7 @@ mod tests {
                 protocol: ProtocolId(17),
                 payload: vec![1, 2, 3, 4, 5],
             },
-            ControlSignal::IdealCapacity { capacity_w: 3500.0 },
+            ControlSignal::IdealCapacity { capacity_w: 3500.0, degraded: false },
             ControlSignal::ThermalSetpointDelta {
                 heating_delta_c: Some(2.0),
                 cooling_delta_c: Some(-2.0),
@@ -390,9 +395,9 @@ mod tests {
 
     #[test]
     fn ideal_capacity_variant_constructs_and_matches() {
-        let signal = ControlSignal::IdealCapacity { capacity_w: 1000.0 };
+        let signal = ControlSignal::IdealCapacity { capacity_w: 1000.0, degraded: false };
         match signal {
-            ControlSignal::IdealCapacity { capacity_w } => assert_eq!(capacity_w, 1000.0),
+            ControlSignal::IdealCapacity { capacity_w, .. } => assert_eq!(capacity_w, 1000.0),
             _ => panic!("wrong variant"),
         }
     }
@@ -406,7 +411,7 @@ mod tests {
 
     #[test]
     fn ideal_capacity_signal_requires_ideal_capacity_capability() {
-        let signal = ControlSignal::IdealCapacity { capacity_w: 500.0 };
+        let signal = ControlSignal::IdealCapacity { capacity_w: 500.0, degraded: false };
         assert_eq!(
             signal.required_capability(),
             ControlCapabilities::IDEAL_CAPACITY
@@ -416,7 +421,7 @@ mod tests {
     #[test]
     fn ideal_capacity_signal_rejected_without_capability() {
         let capabilities = ControlCapabilities::POWER_SETPOINT;
-        let signal = ControlSignal::IdealCapacity { capacity_w: 500.0 };
+        let signal = ControlSignal::IdealCapacity { capacity_w: 500.0, degraded: false };
         let result = ensure_signal_supported(capabilities, &signal);
         assert!(result.is_err());
     }
@@ -424,7 +429,7 @@ mod tests {
     #[test]
     fn ideal_capacity_signal_accepted_with_capability() {
         let capabilities = ControlCapabilities::IDEAL_CAPACITY;
-        let signal = ControlSignal::IdealCapacity { capacity_w: 500.0 };
+        let signal = ControlSignal::IdealCapacity { capacity_w: 500.0, degraded: false };
         let result = ensure_signal_supported(capabilities, &signal);
         assert!(result.is_ok());
     }

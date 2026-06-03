@@ -412,19 +412,31 @@ impl ThermalSolver {
 
         match total.map(|raw| raw - capacity_value) {
             Ok(capacity) => {
-                if self.ideal_capacity_warned_zones.remove(&zone) {
+                self.last_good_capacity_w.insert(zone, capacity);
+                let prethreshold = self.ideal_capacity_warned_zones.remove(&zone);
+                let degraded = self.ideal_capacity_degraded_warned_zones.remove(&zone);
+                if prethreshold || degraded {
                     let count = self
                         .ideal_capacity_failure_counts
                         .remove(&zone)
                         .unwrap_or(0);
+                    #[cfg(feature = "observe")]
+                    {
+                        self.consecutive_nonconvergence_count.remove(&zone);
+                    }
                     tracing::info!(
                         zone_id = zone.0,
                         consecutive_failures = count,
+                        degraded_fallback = degraded,
                         "solve_ideal_capacity_for_target: recovered after {count} \
                          consecutive failures"
                     );
                 } else {
                     self.ideal_capacity_failure_counts.remove(&zone);
+                    #[cfg(feature = "observe")]
+                    {
+                        self.consecutive_nonconvergence_count.remove(&zone);
+                    }
                 }
                 capacity
             }
@@ -434,6 +446,45 @@ impl ThermalSolver {
                     .entry(zone)
                     .and_modify(|c| *c += 1)
                     .or_insert(1);
+
+                #[cfg(feature = "observe")]
+                {
+                    self.consecutive_nonconvergence_count
+                        .entry(zone)
+                        .and_modify(|c| *c += 1)
+                        .or_insert(1);
+                }
+
+                let threshold = self.config.ideal_capacity_degraded_threshold;
+                if *count >= threshold {
+                    if let Some(&last_good) = self.last_good_capacity_w.get(&zone) {
+                        self.ideal_capacity_degraded_zones.insert(zone);
+                        if self.ideal_capacity_degraded_warned_zones.insert(zone) {
+                            tracing::error!(
+                                zone_id = zone.0,
+                                target_c,
+                                t_zone_c = t_zone,
+                                oat_c = t_out,
+                                consecutive_failures = count,
+                                last_good_capacity_w = last_good,
+                                error = %e,
+                                "solve_ideal_capacity_for_target: threshold {threshold} exceeded, \
+                                 falling back to last-good capacity {last_good:.0} W"
+                            );
+                        } else {
+                            tracing::debug!(
+                                zone_id = zone.0,
+                                target_c,
+                                consecutive_failures = count,
+                                last_good_capacity_w = last_good,
+                                "solve_ideal_capacity_for_target: degraded fallback \
+                                 (suppressed), using last-good {last_good:.0} W"
+                            );
+                        }
+                        return last_good;
+                    }
+                }
+
                 if self.ideal_capacity_warned_zones.insert(zone) {
                     tracing::warn!(
                         zone_id = zone.0,
@@ -441,6 +492,8 @@ impl ThermalSolver {
                         t_zone_c = t_zone,
                         oat_c = t_out,
                         capacity_w = capacity_value,
+                        consecutive_failures = count,
+                        threshold,
                         error = %e,
                         "solve_ideal_capacity_for_target failed, returning 0"
                     );
@@ -449,6 +502,7 @@ impl ThermalSolver {
                         zone_id = zone.0,
                         target_c,
                         consecutive_failures = count,
+                        threshold,
                         error = %e,
                         "solve_ideal_capacity_for_target failed (suppressed), returning 0"
                     );
@@ -585,6 +639,9 @@ impl ThermalSolver {
     /// Does NOT cache u for the integration step -- `integrate` rebuilds it from
     /// post-dispatch ports.
     pub(super) fn prepare_inputs_inner(&mut self, ports: &PortSlots, env: &EnvironmentState) {
+        // Clear per-step degradation tracking — a new step starts fresh.
+        self.ideal_capacity_degraded_zones.clear();
+
         let saved_ext_temps = self.exterior_surface_temps.clone();
         let (u, _latent) = self.build_input_vector(ports, env);
         self.exterior_surface_temps = saved_ext_temps;

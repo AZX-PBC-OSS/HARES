@@ -2413,7 +2413,7 @@ impl HeatPumpHeaterCore {
                 self.apply_dr_level(*level);
                 self.dr_duration_remaining_s = *duration_s;
             }
-            ControlSignal::IdealCapacity { capacity_w } => {
+            ControlSignal::IdealCapacity { capacity_w, .. } => {
                 self.ideal_capacity_w = *capacity_w;
             }
             ControlSignal::MaxCapacityFraction { fraction } => {
@@ -3182,7 +3182,7 @@ mod tests {
         let mode = eq.update_control(&env_cold);
         assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out");
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: backup_capacity_w * 0.5,
+            capacity_w: backup_capacity_w * 0.5, degraded: false,
         })
         .expect("ideal-capacity control accepted");
         eq.step(&env_cold, Duration::from_secs(60), &mut ports)
@@ -3305,7 +3305,7 @@ mod tests {
         assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out");
         // Request 3 kW — only 1 stage (5 kW) needed
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 3_000.0,
+            capacity_w: 3_000.0, degraded: false,
         })
         .expect("ideal-capacity control accepted");
         eq.step(&env_cold, Duration::from_secs(60), &mut ports)
@@ -3332,7 +3332,7 @@ mod tests {
         eq2.init(&cfg, &env_cold).unwrap();
         eq2.update_control(&env_cold);
         eq2.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 7_000.0,
+            capacity_w: 7_000.0, degraded: false,
         })
         .expect("ideal-capacity control accepted");
         eq2.step(&env_cold, Duration::from_secs(60), &mut ports2)
@@ -5835,7 +5835,7 @@ mod tests {
 
         // Request full rated capacity via ideal-capacity signal.
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: rated_cap,
+            capacity_w: rated_cap, degraded: false,
         })
         .expect("ideal-capacity control accepted");
         eq.step(&environment, Duration::from_secs(60), &mut ports)
@@ -6374,7 +6374,7 @@ mod tests {
         let e = env(18.0, -5.0, 0.006);
         eq.init(&cfg, &e).unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 8_000.0,
+            capacity_w: 8_000.0, degraded: false,
         })
         .unwrap();
         eq.update_control(&e);
@@ -6641,7 +6641,7 @@ mod ideal_capacity_tests {
         eq.init(&cfg, &env).unwrap();
         // Signal provides half-rated load; must be ignored when use_ideal=false.
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 4_000.0,
+            capacity_w: 4_000.0, degraded: false,
         })
         .unwrap();
         eq.update_control(&env);
@@ -6693,7 +6693,7 @@ mod ideal_capacity_tests {
         eq.init(&cfg, &env).unwrap();
         // Half rated capacity: 4000 W of 8000 W rated → load_ratio = 0.5.
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 4_000.0,
+            capacity_w: 4_000.0, degraded: false,
         })
         .unwrap();
         eq.update_control(&env);
@@ -6720,7 +6720,7 @@ mod ideal_capacity_tests {
         let env = make_env(20.5, 900);
         eq.init(&cfg, &env).unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: 4_000.0,
+            capacity_w: 4_000.0, degraded: false,
         })
         .unwrap();
         eq.update_control(&env);
@@ -6852,7 +6852,7 @@ mod ideal_capacity_tests {
         };
         eq.init(&cfg, &env).unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: IDEAL_W,
+            capacity_w: IDEAL_W, degraded: false,
         })
         .unwrap();
         eq.update_control(&env);
@@ -6901,7 +6901,7 @@ mod ideal_capacity_tests {
         };
         eq.init(&cfg, &env).unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: IDEAL_W,
+            capacity_w: IDEAL_W, degraded: false,
         })
         .unwrap();
         eq.update_control(&env);
@@ -7101,7 +7101,7 @@ mod ideal_capacity_tests {
         let mut eq = ASHPHeater::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: IDEAL_W,
+            capacity_w: IDEAL_W, degraded: false,
         })
         .unwrap();
         eq.update_control(&env);
@@ -7143,7 +7143,7 @@ mod ideal_capacity_tests {
         };
         eq.init(&cfg, &env).unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: IDEAL_W,
+            capacity_w: IDEAL_W, degraded: false,
         })
         .unwrap();
         eq.update_control(&env);

@@ -337,7 +337,7 @@ mod tier_mapping_tests {
             ControlSignal::grid_connect(true),
             ControlSignal::self_consumption(true, false),
             ControlSignal::protocol_native(ProtocolId(1), vec![]),
-            ControlSignal::IdealCapacity { capacity_w: 3500.0 },
+            ControlSignal::IdealCapacity { capacity_w: 3500.0, degraded: false },
             ControlSignal::IdealCapacityModeOverride {
                 mode: IdealCapacityMode::On,
             },
@@ -385,7 +385,7 @@ mod tier_mapping_tests {
             ControlSignal::InverterPriorityMode {
                 priority: InverterPriority::Watt,
             },
-            ControlSignal::IdealCapacity { capacity_w: 3500.0 },
+            ControlSignal::IdealCapacity { capacity_w: 3500.0, degraded: false },
             ControlSignal::ThermalSetpointDelta {
                 heating_delta_c: Some(2.0),
                 cooling_delta_c: Some(-2.0),

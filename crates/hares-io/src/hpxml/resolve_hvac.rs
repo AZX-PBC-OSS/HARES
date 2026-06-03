@@ -5800,7 +5800,7 @@ mod tests {
             ..PortSlots::default()
         };
         let _ = eq.apply_control_unchecked(&ControlSignal::IdealCapacity {
-            capacity_w: f64::MAX,
+            capacity_w: f64::MAX, degraded: false,
         });
         eq.update_control(&env);
         eq.step(&env, std::time::Duration::from_secs(60), &mut ports)
@@ -5887,7 +5887,7 @@ mod tests {
             ..PortSlots::default()
         };
         let _ = eq.apply_control_unchecked(&ControlSignal::IdealCapacity {
-            capacity_w: f64::MAX,
+            capacity_w: f64::MAX, degraded: false,
         });
         eq.update_control(&env);
         eq.step(&env, std::time::Duration::from_secs(60), &mut ports)
