@@ -361,6 +361,7 @@ fn lifecycle_battery() {
             discharge_efficiency: None,
             bms_mode: None,
             grid_export_rule: None,
+            min_dwell_steps: 0,
         },
     );
 
@@ -1049,6 +1050,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 discharge_efficiency: None,
                 bms_mode: None,
                 grid_export_rule: None,
+                min_dwell_steps: 0,
             },
         ),
         "PV" => typed_alias_config(

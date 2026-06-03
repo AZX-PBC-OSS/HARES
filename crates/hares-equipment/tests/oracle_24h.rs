@@ -557,6 +557,7 @@ fn oracle_battery_self_discharge_24h() {
             discharge_efficiency: Some(1.0),
             bms_mode: None,
             grid_export_rule: None,
+            min_dwell_steps: 0,
         },
     );
 

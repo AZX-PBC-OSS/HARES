@@ -2569,6 +2569,7 @@ impl PyBmsMode {
         discharge_threshold_percentile = 75.0,
         solar_only_charging = false,
         price_deadband = 0.0,
+        min_duration_steps = None,
     ))]
     fn time_of_use_optimization(
         reserve_soc: f64,
@@ -2576,6 +2577,7 @@ impl PyBmsMode {
         discharge_threshold_percentile: f64,
         solar_only_charging: bool,
         price_deadband: f64,
+        min_duration_steps: Option<usize>,
     ) -> PyResult<Self> {
         validate_soc("reserve_soc", reserve_soc)?;
         if !charge_threshold_percentile.is_finite()
@@ -2599,6 +2601,7 @@ impl PyBmsMode {
                 discharge_threshold_percentile,
                 solar_only_charging,
                 price_deadband,
+                min_duration_steps,
             },
         })
     }
@@ -2624,12 +2627,13 @@ impl PyBmsMode {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (base_mode, dr_discharge_rate = 1.0, min_soc_during_dr = 0.1, dr_deactivation_multiplier = 0.0))]
+    #[pyo3(signature = (base_mode, dr_discharge_rate = 1.0, min_soc_during_dr = 0.1, dr_deactivation_multiplier = 0.0, min_duration_steps = None))]
     fn demand_response(
         base_mode: PyBmsMode,
         dr_discharge_rate: f64,
         min_soc_during_dr: f64,
         dr_deactivation_multiplier: f64,
+        min_duration_steps: Option<usize>,
     ) -> PyResult<Self> {
         validate_soc("dr_discharge_rate", dr_discharge_rate)?;
         validate_soc("min_soc_during_dr", min_soc_during_dr)?;
@@ -2639,6 +2643,7 @@ impl PyBmsMode {
                 dr_discharge_rate,
                 min_soc_during_dr,
                 dr_deactivation_multiplier,
+                min_duration_steps,
             },
         })
     }
@@ -2658,13 +2663,14 @@ impl PyBmsMode {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target_soc = 1.0, trigger = "manual", base_mode = None, wind_speed_threshold_m_s = 25.0, wind_speed_deactivation_threshold_m_s = 0.0))]
+    #[pyo3(signature = (target_soc = 1.0, trigger = "manual", base_mode = None, wind_speed_threshold_m_s = 25.0, wind_speed_deactivation_threshold_m_s = 0.0, min_duration_steps = None))]
     fn storm_watch(
         target_soc: f64,
         trigger: &str,
         base_mode: Option<PyBmsMode>,
         wind_speed_threshold_m_s: f64,
         wind_speed_deactivation_threshold_m_s: f64,
+        min_duration_steps: Option<usize>,
     ) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
         let trigger = match trigger {
@@ -2687,6 +2693,7 @@ impl PyBmsMode {
                 target_soc,
                 trigger,
                 base_mode: Box::new(base.inner),
+                min_duration_steps,
             },
         })
     }
@@ -2721,6 +2728,7 @@ impl PyBmsMode {
                 discharge_threshold_percentile,
                 solar_only_charging,
                 price_deadband,
+                ..
             } => {
                 let sc = if *solar_only_charging {
                     "True"
@@ -2747,6 +2755,7 @@ impl PyBmsMode {
                 dr_discharge_rate,
                 min_soc_during_dr,
                 dr_deactivation_multiplier,
+                ..
             } => {
                 let base_repr = PyBmsMode {
                     inner: *base_mode.clone(),
@@ -2763,6 +2772,7 @@ impl PyBmsMode {
                 target_soc,
                 trigger,
                 base_mode,
+                ..
             } => {
                 let base_repr = PyBmsMode {
                     inner: *base_mode.clone(),

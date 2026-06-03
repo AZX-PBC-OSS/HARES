@@ -35,6 +35,7 @@ pub enum ActorSeed {
         grid_export_rule: GridExportRule,
         max_charge_kw: f64,
         max_discharge_kw: f64,
+        min_dwell_steps: usize,
     },
     Ev {
         strategy: ChargingStrategy,

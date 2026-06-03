@@ -241,6 +241,7 @@ impl BatterySpec {
                 discharge_efficiency: Some(eta),
                 bms_mode: None,
                 grid_export_rule: None,
+                min_dwell_steps: 0,
             },
         )
     }
@@ -749,6 +750,7 @@ mod tests {
             discharge_efficiency: Some(0.97),
             bms_mode: None,
             grid_export_rule: None,
+            min_dwell_steps: 0,
         };
         // n_series derived: round(50.4 / 3.2) = round(15.75) = 16
         // Verify through init: create battery, init, check n_series
@@ -1410,6 +1412,7 @@ mod tests {
                     discharge_efficiency: Some(eta),
                     bms_mode: None,
                     grid_export_rule: None,
+                    min_dwell_steps: 0,
                 },
             )
         }

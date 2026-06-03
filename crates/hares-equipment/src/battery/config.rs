@@ -72,6 +72,11 @@ pub struct BatteryConfig {
     // BMS / grid rules (serialised as string, parsed at init)
     pub bms_mode: Option<String>,
     pub grid_export_rule: Option<String>,
+
+    // Actor-level dwell: minimum steps a mode/action must persist before it can change.
+    // Defaults to 0 (no dwell enforcement) for backward compatibility.
+    #[serde(default)]
+    pub min_dwell_steps: usize,
 }
 
 impl EquipmentTypedConfig for BatteryConfig {
@@ -191,6 +196,7 @@ mod tests {
             discharge_efficiency: None,
             bms_mode: None,
             grid_export_rule: None,
+            min_dwell_steps: 0,
         }
     }
 

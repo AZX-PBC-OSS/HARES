@@ -144,6 +144,7 @@ fn bms_telemetry_reports_action_and_state() {
         5.0,
         None,
         1440,
+        0,
     );
 
     let env = test_env().build();
@@ -290,6 +291,7 @@ fn all_observable_actors_return_some_telemetry() {
             5.0,
             None,
             1440,
+            0,
         );
         assert_actor_has_telemetry(&mut bms, &env);
     }

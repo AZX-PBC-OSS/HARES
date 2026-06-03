@@ -96,6 +96,7 @@ fn base_battery_config() -> BatteryConfig {
         discharge_efficiency: Some(0.97),
         bms_mode: None,
         grid_export_rule: None,
+        min_dwell_steps: 0,
     }
 }
 
@@ -205,6 +206,7 @@ fn soc_clamped_at_min_max() {
             "Battery".to_string(),
             BatteryConfig {
                 initial_soc: Some(0.16),
+                min_dwell_steps: 0,
                 ..base_battery_config()
             },
         );
@@ -238,6 +240,7 @@ fn soc_clamped_at_min_max() {
             "Battery".to_string(),
             BatteryConfig {
                 initial_soc: Some(0.94),
+                min_dwell_steps: 0,
                 ..base_battery_config()
             },
         );

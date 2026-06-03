@@ -161,6 +161,7 @@ pub(super) fn resolve_batteries(
             discharge_efficiency: None,
             bms_mode: None,
             grid_export_rule: None,
+            min_dwell_steps: 0,
         };
         specs.push(build_typed_spec(
             "Battery".to_string(),

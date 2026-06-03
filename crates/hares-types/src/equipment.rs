@@ -759,6 +759,11 @@ pub enum BmsMode {
         /// toggling when the price signal oscillates. Default 0.0.
         #[serde(default)]
         price_deadband: f64,
+        /// Minimum number of steps the TOU charge or discharge action must
+        /// persist before changing. `None` (or missing in serialisation) falls
+        /// back to the actor-level `min_dwell_steps`.
+        #[serde(default)]
+        min_duration_steps: Option<usize>,
     },
     BackupReserve {
         target_soc: f64,
@@ -780,6 +785,11 @@ pub enum BmsMode {
         /// activate, then fall below 1.8× avg to deactivate.
         #[serde(default)]
         dr_deactivation_multiplier: f64,
+        /// Minimum number of steps the DR discharge action must persist once
+        /// activated before deactivating. `None` (or missing in serialisation)
+        /// falls back to the actor-level `min_dwell_steps`.
+        #[serde(default)]
+        min_duration_steps: Option<usize>,
     },
     Scheduled {
         windows: Vec<BmsScheduleWindow>,
@@ -788,6 +798,11 @@ pub enum BmsMode {
         target_soc: f64,
         trigger: StormWatchTrigger,
         base_mode: Box<BmsMode>,
+        /// Minimum number of steps the storm watch must persist once activated
+        /// before deactivating. `None` (or missing in serialisation) falls back
+        /// to the actor-level `min_dwell_steps`.
+        #[serde(default)]
+        min_duration_steps: Option<usize>,
     },
     #[default]
     Manual,
@@ -818,6 +833,7 @@ impl BmsMode {
                 charge_threshold_percentile,
                 discharge_threshold_percentile,
                 price_deadband,
+                min_duration_steps,
                 ..
             } => {
                 validate_fraction("reserve_soc", *reserve_soc)?;
@@ -826,7 +842,8 @@ impl BmsMode {
                     "discharge_threshold_percentile",
                     *discharge_threshold_percentile,
                 )?;
-                validate_finite_non_negative("price_deadband", *price_deadband)
+                validate_finite_non_negative("price_deadband", *price_deadband)?;
+                validate_positive_if_present("min_duration_steps", *min_duration_steps)
             }
             Self::BackupReserve {
                 target_soc,
@@ -843,6 +860,7 @@ impl BmsMode {
                 dr_discharge_rate,
                 min_soc_during_dr,
                 dr_deactivation_multiplier,
+                min_duration_steps,
             } => {
                 validate_fraction("dr_discharge_rate", *dr_discharge_rate)?;
                 validate_fraction("min_soc_during_dr", *min_soc_during_dr)?;
@@ -850,6 +868,7 @@ impl BmsMode {
                     "dr_deactivation_multiplier",
                     *dr_deactivation_multiplier,
                 )?;
+                validate_positive_if_present("min_duration_steps", *min_duration_steps)?;
                 base_mode.validate()
             }
             Self::Scheduled { windows } => {
@@ -863,9 +882,11 @@ impl BmsMode {
                 target_soc,
                 trigger,
                 base_mode,
+                min_duration_steps,
             } => {
                 validate_fraction("target_soc", *target_soc)?;
                 trigger.validate()?;
+                validate_positive_if_present("min_duration_steps", *min_duration_steps)?;
                 base_mode.validate()
             }
             Self::Manual => Ok(()),
@@ -887,6 +908,17 @@ fn validate_finite_non_negative(name: &str, v: f64) -> Result<(), crate::HaresEr
         return Err(crate::HaresError::Equipment(format!(
             "{name} must be finite and >= 0.0, got {v}"
         )));
+    }
+    Ok(())
+}
+
+fn validate_positive_if_present(name: &str, v: Option<usize>) -> Result<(), crate::HaresError> {
+    if let Some(n) = v {
+        if n == 0 {
+            return Err(crate::HaresError::Equipment(format!(
+                "{name} must be > 0 when set, got 0; use None to disable"
+            )));
+        }
     }
     Ok(())
 }
@@ -1723,6 +1755,7 @@ mod tests {
             discharge_threshold_percentile: 0.75,
             solar_only_charging: false,
             price_deadband: 0.0,
+            min_duration_steps: None,
         };
         let json = serde_json::to_string(&mode).unwrap();
         let back: BmsMode = serde_json::from_str(&json).unwrap();
@@ -1754,6 +1787,7 @@ mod tests {
             dr_discharge_rate: 0.8,
             min_soc_during_dr: 0.15,
             dr_deactivation_multiplier: 0.0,
+            min_duration_steps: None,
         };
         let json = serde_json::to_string(&mode).unwrap();
         let back: BmsMode = serde_json::from_str(&json).unwrap();
@@ -1791,6 +1825,7 @@ mod tests {
                 solar_only_charging: true,
                 surplus_deadband_kw: 0.0,
             }),
+            min_duration_steps: None,
         };
         let json = serde_json::to_string(&mode).unwrap();
         let back: BmsMode = serde_json::from_str(&json).unwrap();
@@ -1812,7 +1847,9 @@ mod tests {
                 dr_discharge_rate: 0.7,
                 min_soc_during_dr: 0.2,
                 dr_deactivation_multiplier: 0.0,
+                min_duration_steps: None,
             }),
+            min_duration_steps: None,
         };
         let json = serde_json::to_string(&mode).unwrap();
         let back: BmsMode = serde_json::from_str(&json).unwrap();

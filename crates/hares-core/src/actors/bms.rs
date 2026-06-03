@@ -34,9 +34,14 @@ pub struct BatteryManagementActor {
     storm_watch_active: bool,
     dr_active: bool,
     telemetry: Telemetry,
+    step_count: usize,
+    current_mode_entered_step: usize,
+    min_dwell_steps: usize,
+    dwell_blocked_count: f64,
 }
 
 impl BatteryManagementActor {
+    #[allow(clippy::too_many_arguments)] // Why: all fields are distinct BMS configuration parameters; introducing a builder adds complexity for no structural benefit
     pub fn new(
         battery_name: &str,
         bms_mode: BmsMode,
@@ -45,6 +50,7 @@ impl BatteryManagementActor {
         max_discharge_kw: f64,
         price_schedule: Option<Arc<[f64]>>,
         steps_per_day: usize,
+        min_dwell_steps: usize,
     ) -> Self {
         Self::with_name(
             &format!("BatteryManagementActor:{battery_name}"),
@@ -55,6 +61,7 @@ impl BatteryManagementActor {
             max_discharge_kw,
             price_schedule,
             steps_per_day,
+            min_dwell_steps,
         )
     }
 
@@ -68,8 +75,9 @@ impl BatteryManagementActor {
         max_discharge_kw: f64,
         price_schedule: Option<Arc<[f64]>>,
         steps_per_day: usize,
+        min_dwell_steps: usize,
     ) -> Self {
-        let mut telemetry = Telemetry::with_capacity(7);
+        let mut telemetry = Telemetry::with_capacity(8);
         telemetry.insert("bms_action", -1.0);
         telemetry.insert("soc", f64::NAN);
         telemetry.insert("pv_kw", 0.0);
@@ -77,6 +85,7 @@ impl BatteryManagementActor {
         telemetry.insert("bms_pv_stale_kw", 0.0);
         telemetry.insert("bms_pv_actual_kw", 0.0);
         telemetry.insert("bms_toggled", 0.0);
+        telemetry.insert("bms_dwell_blocked", 0.0);
         Self {
             name: name.to_string(),
             dispatch_target: DispatchTarget::ByName(Arc::from(battery_name)),
@@ -95,6 +104,10 @@ impl BatteryManagementActor {
             storm_watch_active: false,
             dr_active: false,
             telemetry,
+            step_count: 0,
+            current_mode_entered_step: 0,
+            min_dwell_steps,
+            dwell_blocked_count: 0.0,
         }
     }
 
@@ -276,6 +289,7 @@ impl BatteryManagementActor {
                 discharge_threshold_percentile,
                 solar_only_charging,
                 price_deadband,
+                min_duration_steps,
             } => {
                 let day_ordinal0 = env.current_time.ordinal0();
                 if day_ordinal0 != self.current_day_ordinal0 {
@@ -292,23 +306,84 @@ impl BatteryManagementActor {
                 };
                 let price = env.price_signal.electricity_price.unwrap_or(0.0);
                 let deadband = *price_deadband;
+                let effective_dwell = min_duration_steps.unwrap_or(self.min_dwell_steps);
 
                 let was_charging = self.last_action.contains("tou:charge")
                     && !self.last_action.contains(":discharge");
                 let was_discharging = self.last_action.contains("tou:discharge");
 
+                // Dwell-time suppression for TOU action changes.
+                let dwell_blocked = effective_dwell > 0
+                    && self.steps_since_mode_change() < effective_dwell
+                    && (was_charging || was_discharging);
+
                 let should_charge = if was_charging {
                     price <= self.charge_price_threshold + deadband && soc < (1.0 - reserve_soc)
+                } else if dwell_blocked && was_discharging {
+                    // Dwell forces staying in discharge — suppress charge evaluation.
+                    false
                 } else {
                     price <= self.charge_price_threshold && soc < (1.0 - reserve_soc)
                 };
                 let should_discharge = if was_discharging {
                     price >= self.discharge_price_threshold - deadband && soc > *reserve_soc
+                } else if dwell_blocked && was_charging {
+                    // Dwell forces staying in charge — suppress discharge evaluation.
+                    false
                 } else {
                     price >= self.discharge_price_threshold && soc > *reserve_soc
                 };
 
-                if should_charge {
+                if dwell_blocked && was_charging && !should_charge {
+                    // Dwell suppressed an action change away from charging.
+                    self.dwell_blocked_count += 1.0;
+                    tracing::warn!(
+                        current_mode = "TimeOfUseOptimization:charge",
+                        proposed = "idle/discharge",
+                        dwell_remaining = effective_dwell - self.steps_since_mode_change(),
+                        "BMS dwell timer suppressed TOU action change"
+                    );
+                    // Keep charging — re-instate the charge path.
+                    if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
+                        self.emit(ControlSignal::GridConnect { connected: false }, out);
+                        self.last_action = "grid_disconnect:tou_solar_only".into();
+                        return;
+                    }
+                    self.emit(
+                        ControlSignal::PowerSetpoint {
+                            active_power_kw: self.max_charge_kw,
+                            reactive_power_kvar: None,
+                            min_soc: None,
+                            max_soc: None,
+                        },
+                        out,
+                    );
+                    self.last_action = "tou:charge".into();
+                } else if dwell_blocked && was_discharging && !should_discharge {
+                    // Dwell suppressed an action change away from discharging.
+                    self.dwell_blocked_count += 1.0;
+                    tracing::warn!(
+                        current_mode = "TimeOfUseOptimization:discharge",
+                        proposed = "idle/charge",
+                        dwell_remaining = effective_dwell - self.steps_since_mode_change(),
+                        "BMS dwell timer suppressed TOU action change"
+                    );
+                    let clamped = self.clamp_discharge_for_export(
+                        self.max_discharge_kw,
+                        env.electrical.actual_pv_kw_or_fallback(),
+                        env,
+                    );
+                    self.emit(
+                        ControlSignal::PowerSetpoint {
+                            active_power_kw: -clamped,
+                            reactive_power_kvar: None,
+                            min_soc: None,
+                            max_soc: None,
+                        },
+                        out,
+                    );
+                    self.last_action = "tou:discharge".into();
+                } else if should_charge {
                     if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:tou_solar_only".into();
@@ -398,11 +473,28 @@ impl BatteryManagementActor {
                 dr_discharge_rate,
                 min_soc_during_dr,
                 dr_deactivation_multiplier,
+                min_duration_steps,
             } => {
                 let price = env.price_signal.electricity_price.unwrap_or(0.0);
                 let dr_active = self.is_dr_active(env, price, *dr_deactivation_multiplier);
+                let effective_dwell = min_duration_steps.unwrap_or(self.min_dwell_steps);
 
-                if dr_active {
+                // Suppress DR deactivation if within dwell time.
+                let force_active = self.dr_active
+                    && !dr_active
+                    && effective_dwell > 0
+                    && self.steps_since_mode_change() < effective_dwell;
+
+                if dr_active || force_active {
+                    if force_active {
+                        self.dwell_blocked_count += 1.0;
+                        tracing::warn!(
+                            current_mode = "DemandResponse",
+                            proposed = "inactive",
+                            dwell_remaining = effective_dwell - self.steps_since_mode_change(),
+                            "BMS dwell timer suppressed DemandResponse deactivation"
+                        );
+                    }
                     self.dr_active = true;
                     let Some(soc) = self.read_soc(env) else {
                         self.last_action = "idle:no_soc".into();
@@ -495,6 +587,7 @@ impl BatteryManagementActor {
                 target_soc,
                 trigger,
                 base_mode,
+                min_duration_steps,
             } => {
                 let active = match trigger {
                     StormWatchTrigger::ManualEnable => true,
@@ -515,7 +608,24 @@ impl BatteryManagementActor {
                     }
                 };
 
-                if active {
+                let effective_dwell = min_duration_steps.unwrap_or(self.min_dwell_steps);
+
+                // Suppress storm watch deactivation if within dwell time.
+                let force_active = self.storm_watch_active
+                    && !active
+                    && effective_dwell > 0
+                    && self.steps_since_mode_change() < effective_dwell;
+
+                if active || force_active {
+                    if force_active {
+                        self.dwell_blocked_count += 1.0;
+                        tracing::warn!(
+                            current_mode = "StormWatch",
+                            proposed = "inactive",
+                            dwell_remaining = effective_dwell - self.steps_since_mode_change(),
+                            "BMS dwell timer suppressed StormWatch deactivation"
+                        );
+                    }
                     self.storm_watch_active = true;
                     self.emit(
                         ControlSignal::SOCTarget {
@@ -870,6 +980,10 @@ impl BatteryManagementActor {
     fn is_last_action_discharging(&self) -> bool {
         self.last_action.contains(":discharge")
     }
+
+    fn steps_since_mode_change(&self) -> usize {
+        self.step_count - self.current_mode_entered_step
+    }
 }
 
 /// Serializable snapshot of BatteryManagementActor mutable runtime state for checkpointing.
@@ -882,6 +996,9 @@ struct BmsSnapshot {
     last_action: String,
     storm_watch_active: bool,
     dr_active: bool,
+    step_count: usize,
+    current_mode_entered_step: usize,
+    dwell_blocked_count: f64,
 }
 
 impl Actor for BatteryManagementActor {
@@ -894,6 +1011,7 @@ impl Actor for BatteryManagementActor {
     }
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        self.step_count += 1;
         let action_before = self.last_action.clone();
         let mode = std::mem::take(&mut self.bms_mode);
         self.evaluate_mode(&mode, env, out);
@@ -909,8 +1027,13 @@ impl Actor for BatteryManagementActor {
         self.telemetry.set("bms_pv_stale_kw", pv_stale);
         self.telemetry.set("load_kw", env.electrical.base_load_kw);
         let toggled = self.last_action != action_before;
+        if toggled {
+            self.current_mode_entered_step = self.step_count;
+        }
         self.telemetry
             .set("bms_toggled", if toggled { 1.0 } else { 0.0 });
+        self.telemetry
+            .set("bms_dwell_blocked", self.dwell_blocked_count);
     }
 
     fn adjust_for_pv(
@@ -937,6 +1060,9 @@ impl Actor for BatteryManagementActor {
             last_action: self.last_action.clone(),
             storm_watch_active: self.storm_watch_active,
             dr_active: self.dr_active,
+            step_count: self.step_count,
+            current_mode_entered_step: self.current_mode_entered_step,
+            dwell_blocked_count: self.dwell_blocked_count,
         };
         postcard::to_allocvec(&snap)
             .map_err(|e| HaresError::Io(format!("BatteryManagementActor save_state: {e}")))
@@ -955,6 +1081,9 @@ impl Actor for BatteryManagementActor {
         self.last_action = snap.last_action;
         self.storm_watch_active = snap.storm_watch_active;
         self.dr_active = snap.dr_active;
+        self.step_count = snap.step_count;
+        self.current_mode_entered_step = snap.current_mode_entered_step;
+        self.dwell_blocked_count = snap.dwell_blocked_count;
         Ok(())
     }
 }
@@ -1041,6 +1170,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let env = TestEnvBuilder::new().build();
         let mut out = Vec::new();
@@ -1063,6 +1193,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut id_by_name = std::collections::HashMap::new();
         id_by_name.insert("bat1".to_string(), EquipmentId(1));
@@ -1094,6 +1225,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -1130,6 +1262,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -1171,6 +1304,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -1202,12 +1336,14 @@ mod tests {
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1244,12 +1380,14 @@ mod tests {
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1286,12 +1424,14 @@ mod tests {
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1324,6 +1464,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new().build();
@@ -1371,6 +1512,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new().build();
@@ -1392,12 +1534,14 @@ mod tests {
                 dr_discharge_rate: 0.8,
                 min_soc_during_dr: 0.1,
                 dr_deactivation_multiplier: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1437,12 +1581,14 @@ mod tests {
                 dr_discharge_rate: 0.8,
                 min_soc_during_dr: 0.1,
                 dr_deactivation_multiplier: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1487,6 +1633,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let env = TestEnvBuilder::new().hour(6).build();
@@ -1523,6 +1670,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         // 2026-01-05 is a Monday (weekday), so weekend window won't match
@@ -1541,12 +1689,14 @@ mod tests {
                 target_soc: 1.0,
                 trigger: StormWatchTrigger::ManualEnable,
                 base_mode: Box::new(BmsMode::Manual),
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             None,
             24,
+            0,
         );
 
         let env = TestEnvBuilder::new().build();
@@ -1573,12 +1723,14 @@ mod tests {
                     wind_speed_deactivation_threshold_m_s: 0.0,
                 },
                 base_mode: Box::new(BmsMode::Manual),
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             None,
             24,
+            0,
         );
 
         let env = TestEnvBuilder::new()
@@ -1610,12 +1762,14 @@ mod tests {
                     solar_only_charging: false,
                     surplus_deadband_kw: 0.0,
                 }),
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1652,12 +1806,14 @@ mod tests {
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1694,12 +1850,14 @@ mod tests {
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1732,6 +1890,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -1763,6 +1922,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new().build();
@@ -1789,6 +1949,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -1816,12 +1977,14 @@ mod tests {
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: true,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1862,6 +2025,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let env = TestEnvBuilder::new().build();
         let mut out = Vec::new();
@@ -1882,12 +2046,14 @@ mod tests {
                 discharge_threshold_percentile: 0.7,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Disabled,
             5.0,
             5.0,
             Some(Arc::from(prices.as_slice())),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1935,12 +2101,14 @@ mod tests {
                 discharge_threshold_percentile: 0.7,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Disabled,
             5.0,
             5.0,
             Some(Arc::from(prices.as_slice())),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -1988,12 +2156,14 @@ mod tests {
                 discharge_threshold_percentile: 0.7,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(Arc::from(prices.as_slice())),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2041,12 +2211,14 @@ mod tests {
                 discharge_threshold_percentile: 0.7,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::SolarOnly,
             5.0,
             5.0,
             Some(Arc::from(prices.as_slice())),
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2099,6 +2271,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2146,6 +2319,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2191,6 +2365,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2232,6 +2407,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2281,6 +2457,7 @@ mod tests {
             0.5, // max_discharge_kw is small
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2328,6 +2505,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2373,6 +2551,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         let mut env = TestEnvBuilder::new()
@@ -2414,12 +2593,14 @@ mod tests {
                         wind_speed_deactivation_threshold_m_s: 0.0,
                     },
                     base_mode: Box::new(BmsMode::Manual),
+                    min_duration_steps: None,
                 },
                 GridExportRule::Unrestricted,
                 5.0,
                 5.0,
                 None,
                 24,
+                0,
             )
         };
 
@@ -2467,6 +2648,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let id_by_name: HashMap<String, EquipmentId> = HashMap::new();
         actor.resolve_equipment_id(&id_by_name);
@@ -2486,6 +2668,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut id_by_name = HashMap::new();
         id_by_name.insert("bat1".to_string(), EquipmentId(42));
@@ -2517,6 +2700,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2562,6 +2746,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2604,6 +2789,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2649,6 +2835,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2698,6 +2885,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2743,6 +2931,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2785,6 +2974,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2836,6 +3026,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2878,6 +3069,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2921,6 +3113,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2957,6 +3150,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let env = TestEnvBuilder::new().build();
         let mut out = Vec::new();
@@ -2983,6 +3177,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -3036,6 +3231,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -3081,12 +3277,14 @@ mod tests {
                 dr_discharge_rate: 0.8,
                 min_soc_during_dr: 0.1,
                 dr_deactivation_multiplier: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
 
         // Stale PV=4, load=2 → surplus=2 → decide() charges via base SelfConsumption.
@@ -3147,12 +3345,14 @@ mod tests {
                     solar_only_charging: false,
                     surplus_deadband_kw: 0.0,
                 }),
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             None,
             24,
+            0,
         );
 
         // Wind below threshold → storm watch inactive → delegates to SelfConsumption.
@@ -3214,6 +3414,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         // decide() with surplus=0.0 → idle (0.0 not > 0.5 deadband)
         let mut env = TestEnvBuilder::new()
@@ -3329,12 +3530,14 @@ mod tests {
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
         // Force state to a known non-default value
         actor.daily_avg_price = 0.15;
@@ -3357,12 +3560,14 @@ mod tests {
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
                 price_deadband: 0.0,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             None,
             24,
+            0,
         );
         restored
             .load_state(&blob)
@@ -3392,6 +3597,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -3457,12 +3663,14 @@ mod tests {
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
                 price_deadband: 0.05,
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             Some(prices.into()),
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .hour(14)
@@ -3508,12 +3716,14 @@ mod tests {
                         wind_speed_deactivation_threshold_m_s: 15.0,
                     },
                     base_mode: Box::new(BmsMode::Manual),
+                    min_duration_steps: None,
                 },
                 GridExportRule::Unrestricted,
                 5.0,
                 5.0,
                 None,
                 24,
+                0,
             )
         };
 
@@ -3577,6 +3787,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
 
         // SOC at 0.73 (0.8 - 0.05 = 0.75): below target - deadband → charge
@@ -3620,6 +3831,7 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -3668,12 +3880,14 @@ mod tests {
                     wind_speed_deactivation_threshold_m_s: 0.0,
                 },
                 base_mode: Box::new(BmsMode::Manual),
+                min_duration_steps: None,
             },
             GridExportRule::Unrestricted,
             5.0,
             5.0,
             None,
             24,
+            0,
         );
         actor.storm_watch_active = true;
         actor.dr_active = true;
@@ -3687,11 +3901,188 @@ mod tests {
             5.0,
             None,
             24,
+            0,
         );
         restored
             .load_state(&blob)
             .expect("load_state should succeed");
         assert!(restored.storm_watch_active);
         assert!(restored.dr_active);
+    }
+
+    // ── dwell-time enforcement tests ──
+
+    #[test]
+    fn demand_response_dwell_prevents_immediate_deactivation() {
+        // DemandResponse with min_duration_steps=3: a price spike that lasts
+        // 1 step should keep DR active for at least 3 steps.
+        let prices: Vec<f64> = vec![0.10; 24];
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::DemandResponse {
+                base_mode: Box::new(BmsMode::Manual),
+                dr_discharge_rate: 0.8,
+                min_soc_during_dr: 0.1,
+                dr_deactivation_multiplier: 0.0,
+                min_duration_steps: Some(3),
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices.into()),
+            24,
+            0,
+        );
+
+        // Step 1: price spike → DR activates.
+        let mut env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.50),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.6);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].signal, ControlSignal::PowerSetpoint { .. }));
+        assert!(actor.dr_active, "DR should be active after price spike");
+        assert_eq!(actor.last_action(), "dr:discharge");
+
+        // Step 2: price drops to normal — dwell should suppress deactivation.
+        let mut env2 = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.10),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env2, "bat1", 0.6);
+        out.clear();
+        actor.decide(&env2, &mut out);
+        assert!(
+            actor.dr_active,
+            "DR should still be active at step 2 (dwell blocked)"
+        );
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].signal, ControlSignal::PowerSetpoint { .. }));
+
+        // Step 3: dwell still not expired (3 steps since activation at step 1).
+        out.clear();
+        actor.decide(&env2, &mut out);
+        assert!(
+            actor.dr_active,
+            "DR should still be active at step 3 (dwell blocked)"
+        );
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].signal, ControlSignal::PowerSetpoint { .. }));
+
+        // Step 4: dwell expired — DR should deactivate and delegate to base.
+        out.clear();
+        actor.decide(&env2, &mut out);
+        assert!(
+            !actor.dr_active,
+            "DR should be inactive at step 4 (dwell expired)"
+        );
+        // Base is Manual → no output.
+        assert!(
+            out.is_empty(),
+            "DR deactivated should delegate to Manual (no output)"
+        );
+
+        // Verify telemetry tracked the blocked transitions.
+        let blocked = actor
+            .telemetry()
+            .unwrap()
+            .get("bms_dwell_blocked")
+            .unwrap_or(-1.0);
+        assert!(
+            (blocked - 2.0).abs() < 1e-9,
+            "bms_dwell_blocked should be 2 (suppressed at steps 2 and 3), got {blocked}"
+        );
+    }
+
+    #[test]
+    fn storm_watch_dwell_prevents_immediate_deactivation() {
+        // StormWatch with min_duration_steps=3: a single-step wind gust
+        // (wind above threshold for 1 step, then drops) should keep
+        // storm watch active for at least 3 steps.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::StormWatch {
+                target_soc: 1.0,
+                trigger: StormWatchTrigger::WeatherSignal {
+                    wind_speed_threshold_m_s: 25.0,
+                    wind_speed_deactivation_threshold_m_s: 0.0,
+                },
+                base_mode: Box::new(BmsMode::Manual),
+                min_duration_steps: Some(3),
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+            0,
+        );
+
+        // Step 1: high wind → storm watch activates.
+        let env_high = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 30.0,
+                ..Default::default()
+            })
+            .build();
+        let mut out = Vec::new();
+        actor.decide(&env_high, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].signal, ControlSignal::SOCTarget { .. }));
+        assert!(actor.storm_watch_active, "SW should be active at step 1");
+
+        // Step 2: wind drops — dwell should suppress deactivation.
+        let env_low = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 5.0,
+                ..Default::default()
+            })
+            .build();
+        out.clear();
+        actor.decide(&env_low, &mut out);
+        assert!(
+            actor.storm_watch_active,
+            "SW should still be active at step 2 (dwell blocked)"
+        );
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].signal, ControlSignal::SOCTarget { .. }));
+
+        // Step 3: still within dwell.
+        out.clear();
+        actor.decide(&env_low, &mut out);
+        assert!(
+            actor.storm_watch_active,
+            "SW should still be active at step 3 (dwell blocked)"
+        );
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].signal, ControlSignal::SOCTarget { .. }));
+
+        // Step 4: dwell expired — storm watch should deactivate.
+        out.clear();
+        actor.decide(&env_low, &mut out);
+        assert!(
+            !actor.storm_watch_active,
+            "SW should be inactive at step 4 (dwell expired)"
+        );
+        // Base is Manual → no output.
+        assert!(out.is_empty());
+
+        // Verify telemetry tracked the blocked transitions.
+        let blocked = actor
+            .telemetry()
+            .unwrap()
+            .get("bms_dwell_blocked")
+            .unwrap_or(-1.0);
+        assert!(
+            (blocked - 2.0).abs() < 1e-9,
+            "bms_dwell_blocked should be 2 (suppressed at steps 2 and 3), got {blocked}"
+        );
     }
 }

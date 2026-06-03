@@ -389,6 +389,7 @@ pub struct Battery {
 
     bms_mode: BmsMode,
     grid_export_rule: GridExportRule,
+    min_dwell_steps: usize,
 }
 
 impl Battery {
@@ -482,6 +483,7 @@ impl Battery {
             custom_u_neg: false,
             bms_mode: BmsMode::Manual,
             grid_export_rule: GridExportRule::Unrestricted,
+            min_dwell_steps: 0,
         }
     }
 
@@ -1022,6 +1024,7 @@ impl Battery {
             self.grid_export_rule = serde_json::from_str(rule_str)
                 .map_err(|e| HaresError::Equipment(format!("invalid grid_export_rule: {e}")))?;
         }
+        self.min_dwell_steps = c.min_dwell_steps;
 
         let initial_soc = c.initial_soc.unwrap_or(DEFAULT_INITIAL_SOC);
         self.soc = initial_soc.clamp(self.min_soc, self.max_soc);
@@ -1419,6 +1422,7 @@ impl Equipment for Battery {
             grid_export_rule: self.grid_export_rule,
             max_charge_kw: self.max_charge_kw,
             max_discharge_kw: self.max_discharge_kw,
+            min_dwell_steps: self.min_dwell_steps,
         })
     }
 
@@ -1893,6 +1897,7 @@ mod tests {
             discharge_efficiency: None,
             bms_mode: None,
             grid_export_rule: None,
+            min_dwell_steps: 0,
         };
         for (k, v) in overrides {
             match *k {
@@ -1963,6 +1968,7 @@ mod tests {
             discharge_efficiency: None,
             bms_mode: bms_mode.as_ref().map(|m| serde_json::to_string(m).unwrap()),
             grid_export_rule: None,
+            min_dwell_steps: 0,
         };
         EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
     }
@@ -2528,6 +2534,7 @@ mod tests {
                 heater_threshold_c: Some(5.0),
                 self_discharge_pct_per_day: Some(0.0),
                 heater_on_discharge: Some(true),
+                min_dwell_steps: 0,
                 ..battery_config(&[])
                     .typed::<BatteryConfig>()
                     .expect("typed battery config")

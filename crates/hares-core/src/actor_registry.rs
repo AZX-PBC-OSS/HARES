@@ -462,6 +462,10 @@ impl ActorRegistry {
                             .get_bool("solar_only_charging")
                             .unwrap_or(false),
                         price_deadband: config.get_f64("price_deadband").unwrap_or(0.0),
+                        min_duration_steps: config
+                            .get_f64("min_duration_steps")
+                            .map(|v| if v > 0.0 { Some(v as usize) } else { None })
+                            .unwrap_or(None),
                     },
                     "backup" | "backup_reserve" => BmsMode::BackupReserve {
                         target_soc: config.get_f64("target_soc").unwrap_or(0.8),
@@ -505,6 +509,10 @@ impl ActorRegistry {
                                 .into(),
                         )
                     })?;
+                let min_dwell_steps = config
+                    .get_f64("min_dwell_steps")
+                    .map(|v| v as usize)
+                    .unwrap_or(0);
                 let actor = BatteryManagementActor::with_name(
                     &config.name,
                     &target,
@@ -514,6 +522,7 @@ impl ActorRegistry {
                     max_discharge_kw,
                     None,
                     steps_per_day,
+                    min_dwell_steps,
                 );
                 Ok(Box::new(actor))
             }),

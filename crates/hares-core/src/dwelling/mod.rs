@@ -4930,6 +4930,7 @@ fn build_actors_from_seeds(
                 grid_export_rule,
                 max_charge_kw,
                 max_discharge_kw,
+                min_dwell_steps,
             } => {
                 let actor_name = format!("BatteryManagementActor:{name}");
                 if existing_names.contains(&actor_name) {
@@ -4964,6 +4965,7 @@ fn build_actors_from_seeds(
                     max_discharge_kw,
                     price_schedule.clone(),
                     steps_per_day,
+                    min_dwell_steps,
                 );
                 let mut actor = actor;
                 actor.resolve_equipment_id(equipment_id_by_name);
@@ -7697,6 +7699,7 @@ occupancy = 1.0
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
                 max_discharge_kw: 5.0,
+                min_dwell_steps: 0,
             }),
         ));
 
@@ -7784,10 +7787,12 @@ occupancy = 1.0
                     discharge_threshold_percentile: 0.75,
                     solar_only_charging: false,
                     price_deadband: 0.0,
+                    min_duration_steps: None,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
                 max_discharge_kw: 5.0,
+                min_dwell_steps: 0,
             }),
         ));
 
@@ -7849,6 +7854,7 @@ occupancy = 1.0
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
                 max_discharge_kw: 5.0,
+                min_dwell_steps: 0,
             }),
         ));
 
@@ -7886,6 +7892,7 @@ occupancy = 1.0
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
                 max_discharge_kw: 5.0,
+                min_dwell_steps: 0,
             }),
         ));
 
@@ -7923,6 +7930,7 @@ occupancy = 1.0
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
                 max_discharge_kw: 5.0,
+                min_dwell_steps: 0,
             }),
         ));
         let eq2: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
@@ -7937,6 +7945,7 @@ occupancy = 1.0
                 grid_export_rule: hares_types::GridExportRule::Disabled,
                 max_charge_kw: 3.0,
                 max_discharge_kw: 3.0,
+                min_dwell_steps: 0,
             }),
         ));
 

@@ -285,6 +285,7 @@ fn actors_observe_previous_equipment_core_snapshot() {
         5.0,
         None,
         24,
+        0,
     );
     let battery_id = EquipmentId(42);
     let mut id_map = std::collections::HashMap::new();

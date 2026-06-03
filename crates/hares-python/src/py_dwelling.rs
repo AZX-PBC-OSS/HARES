@@ -416,6 +416,7 @@ fn battery_config_from_py(battery: &PyBattery) -> EquipmentConfig {
         discharge_efficiency: battery.discharge_efficiency,
         bms_mode: None,
         grid_export_rule: None,
+        min_dwell_steps: 0,
     };
     EquipmentConfig::from_typed(battery.name.clone(), "Battery".to_string(), cfg)
 }

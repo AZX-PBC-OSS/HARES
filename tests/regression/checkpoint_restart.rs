@@ -430,6 +430,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         5.0,
         None,
         1440,
+        0,
     )));
 
     let ref_results = match dwelling_ref.simulate() {
@@ -490,6 +491,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         5.0,
         None,
         1440,
+        0,
     )));
 
     for _ in 0..CHECKPOINT_AT_STEP {
@@ -585,6 +587,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         5.0,
         None,
         1440,
+        0,
     )));
 
     if let Err(err) = dwelling_b.load_checkpoint(loaded_cp) {
