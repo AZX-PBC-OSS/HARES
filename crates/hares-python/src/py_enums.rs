@@ -2229,6 +2229,8 @@ pub struct PyStormWatchTrigger {
     pub is_manual: bool,
     #[pyo3(get)]
     pub wind_speed_threshold_m_s: f64,
+    #[pyo3(get)]
+    pub wind_speed_deactivation_threshold_m_s: f64,
 }
 
 impl Eq for PyStormWatchTrigger {}
@@ -2237,6 +2239,9 @@ impl std::hash::Hash for PyStormWatchTrigger {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.is_manual.hash(state);
         self.wind_speed_threshold_m_s.to_bits().hash(state);
+        self.wind_speed_deactivation_threshold_m_s
+            .to_bits()
+            .hash(state);
     }
 }
 
@@ -2247,15 +2252,20 @@ impl PyStormWatchTrigger {
         Self {
             is_manual: true,
             wind_speed_threshold_m_s: 0.0,
+            wind_speed_deactivation_threshold_m_s: 0.0,
         }
     }
 
     #[staticmethod]
-    #[pyo3(signature = (wind_speed_threshold_m_s = 25.0))]
-    fn weather_signal(wind_speed_threshold_m_s: f64) -> Self {
+    #[pyo3(signature = (wind_speed_threshold_m_s = 25.0, wind_speed_deactivation_threshold_m_s = 0.0))]
+    fn weather_signal(
+        wind_speed_threshold_m_s: f64,
+        wind_speed_deactivation_threshold_m_s: f64,
+    ) -> Self {
         Self {
             is_manual: false,
             wind_speed_threshold_m_s,
+            wind_speed_deactivation_threshold_m_s,
         }
     }
 
@@ -2264,8 +2274,8 @@ impl PyStormWatchTrigger {
             "StormWatchTrigger.manual_enable()".to_string()
         } else {
             format!(
-                "StormWatchTrigger.weather_signal(wind_speed_threshold_m_s={})",
-                self.wind_speed_threshold_m_s
+                "StormWatchTrigger.weather_signal(wind_speed_threshold_m_s={}, wind_speed_deactivation_threshold_m_s={})",
+                self.wind_speed_threshold_m_s, self.wind_speed_deactivation_threshold_m_s
             )
         }
     }
@@ -2278,6 +2288,7 @@ impl From<PyStormWatchTrigger> for RustStormWatchTrigger {
         } else {
             Self::WeatherSignal {
                 wind_speed_threshold_m_s: v.wind_speed_threshold_m_s,
+                wind_speed_deactivation_threshold_m_s: v.wind_speed_deactivation_threshold_m_s,
             }
         }
     }
@@ -2289,12 +2300,15 @@ impl From<RustStormWatchTrigger> for PyStormWatchTrigger {
             RustStormWatchTrigger::ManualEnable => Self {
                 is_manual: true,
                 wind_speed_threshold_m_s: 0.0,
+                wind_speed_deactivation_threshold_m_s: 0.0,
             },
             RustStormWatchTrigger::WeatherSignal {
                 wind_speed_threshold_m_s,
+                wind_speed_deactivation_threshold_m_s,
             } => Self {
                 is_manual: false,
                 wind_speed_threshold_m_s,
+                wind_speed_deactivation_threshold_m_s,
             },
         }
     }
@@ -2524,8 +2538,13 @@ pub struct PyBmsMode {
 #[pymethods]
 impl PyBmsMode {
     #[staticmethod]
-    #[pyo3(signature = (min_soc = 0.1, max_soc = 1.0, solar_only_charging = false))]
-    fn self_consumption(min_soc: f64, max_soc: f64, solar_only_charging: bool) -> PyResult<Self> {
+    #[pyo3(signature = (min_soc = 0.1, max_soc = 1.0, solar_only_charging = false, surplus_deadband_kw = 0.0))]
+    fn self_consumption(
+        min_soc: f64,
+        max_soc: f64,
+        solar_only_charging: bool,
+        surplus_deadband_kw: f64,
+    ) -> PyResult<Self> {
         validate_soc("min_soc", min_soc)?;
         validate_soc("max_soc", max_soc)?;
         if min_soc > max_soc {
@@ -2538,6 +2557,7 @@ impl PyBmsMode {
                 min_soc,
                 max_soc,
                 solar_only_charging,
+                surplus_deadband_kw,
             },
         })
     }
@@ -2548,12 +2568,14 @@ impl PyBmsMode {
         charge_threshold_percentile = 25.0,
         discharge_threshold_percentile = 75.0,
         solar_only_charging = false,
+        price_deadband = 0.0,
     ))]
     fn time_of_use_optimization(
         reserve_soc: f64,
         charge_threshold_percentile: f64,
         discharge_threshold_percentile: f64,
         solar_only_charging: bool,
+        price_deadband: f64,
     ) -> PyResult<Self> {
         validate_soc("reserve_soc", reserve_soc)?;
         if !charge_threshold_percentile.is_finite()
@@ -2576,16 +2598,18 @@ impl PyBmsMode {
                 charge_threshold_percentile,
                 discharge_threshold_percentile,
                 solar_only_charging,
+                price_deadband,
             },
         })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target_soc = 0.8, charge_from_grid = true, charge_rate_fraction = 1.0))]
+    #[pyo3(signature = (target_soc = 0.8, charge_from_grid = true, charge_rate_fraction = 1.0, soc_deadband = 0.0))]
     fn backup_reserve(
         target_soc: f64,
         charge_from_grid: bool,
         charge_rate_fraction: f64,
+        soc_deadband: f64,
     ) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
         validate_soc("charge_rate_fraction", charge_rate_fraction)?;
@@ -2594,16 +2618,18 @@ impl PyBmsMode {
                 target_soc,
                 charge_from_grid,
                 charge_rate_fraction,
+                soc_deadband,
             },
         })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (base_mode, dr_discharge_rate = 1.0, min_soc_during_dr = 0.1))]
+    #[pyo3(signature = (base_mode, dr_discharge_rate = 1.0, min_soc_during_dr = 0.1, dr_deactivation_multiplier = 0.0))]
     fn demand_response(
         base_mode: PyBmsMode,
         dr_discharge_rate: f64,
         min_soc_during_dr: f64,
+        dr_deactivation_multiplier: f64,
     ) -> PyResult<Self> {
         validate_soc("dr_discharge_rate", dr_discharge_rate)?;
         validate_soc("min_soc_during_dr", min_soc_during_dr)?;
@@ -2612,6 +2638,7 @@ impl PyBmsMode {
                 base_mode: Box::new(base_mode.inner),
                 dr_discharge_rate,
                 min_soc_during_dr,
+                dr_deactivation_multiplier,
             },
         })
     }
@@ -2631,18 +2658,20 @@ impl PyBmsMode {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target_soc = 1.0, trigger = "manual", base_mode = None, wind_speed_threshold_m_s = 25.0))]
+    #[pyo3(signature = (target_soc = 1.0, trigger = "manual", base_mode = None, wind_speed_threshold_m_s = 25.0, wind_speed_deactivation_threshold_m_s = 0.0))]
     fn storm_watch(
         target_soc: f64,
         trigger: &str,
         base_mode: Option<PyBmsMode>,
         wind_speed_threshold_m_s: f64,
+        wind_speed_deactivation_threshold_m_s: f64,
     ) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
         let trigger = match trigger {
             "manual" => RustStormWatchTrigger::ManualEnable,
             "weather_signal" => RustStormWatchTrigger::WeatherSignal {
                 wind_speed_threshold_m_s,
+                wind_speed_deactivation_threshold_m_s,
             },
             other => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -2675,6 +2704,7 @@ impl PyBmsMode {
                 min_soc,
                 max_soc,
                 solar_only_charging,
+                surplus_deadband_kw,
             } => {
                 let sc = if *solar_only_charging {
                     "True"
@@ -2682,7 +2712,7 @@ impl PyBmsMode {
                     "False"
                 };
                 format!(
-                    "BmsMode.self_consumption(min_soc={min_soc}, max_soc={max_soc}, solar_only_charging={sc})"
+                    "BmsMode.self_consumption(min_soc={min_soc}, max_soc={max_soc}, solar_only_charging={sc}, surplus_deadband_kw={surplus_deadband_kw})"
                 )
             }
             RustBmsMode::TimeOfUseOptimization {
@@ -2690,6 +2720,7 @@ impl PyBmsMode {
                 charge_threshold_percentile,
                 discharge_threshold_percentile,
                 solar_only_charging,
+                price_deadband,
             } => {
                 let sc = if *solar_only_charging {
                     "True"
@@ -2697,30 +2728,32 @@ impl PyBmsMode {
                     "False"
                 };
                 format!(
-                    "BmsMode.time_of_use_optimization(reserve_soc={reserve_soc}, charge_threshold_percentile={charge_threshold_percentile}, discharge_threshold_percentile={discharge_threshold_percentile}, solar_only_charging={sc})"
+                    "BmsMode.time_of_use_optimization(reserve_soc={reserve_soc}, charge_threshold_percentile={charge_threshold_percentile}, discharge_threshold_percentile={discharge_threshold_percentile}, solar_only_charging={sc}, price_deadband={price_deadband})"
                 )
             }
             RustBmsMode::BackupReserve {
                 target_soc,
                 charge_from_grid,
                 charge_rate_fraction,
+                soc_deadband,
             } => {
                 let cfg = if *charge_from_grid { "True" } else { "False" };
                 format!(
-                    "BmsMode.backup_reserve(target_soc={target_soc}, charge_from_grid={cfg}, charge_rate_fraction={charge_rate_fraction})"
+                    "BmsMode.backup_reserve(target_soc={target_soc}, charge_from_grid={cfg}, charge_rate_fraction={charge_rate_fraction}, soc_deadband={soc_deadband})"
                 )
             }
             RustBmsMode::DemandResponse {
                 base_mode,
                 dr_discharge_rate,
                 min_soc_during_dr,
+                dr_deactivation_multiplier,
             } => {
                 let base_repr = PyBmsMode {
                     inner: *base_mode.clone(),
                 }
                 .__repr__();
                 format!(
-                    "BmsMode.demand_response(base_mode={base_repr}, dr_discharge_rate={dr_discharge_rate}, min_soc_during_dr={min_soc_during_dr})"
+                    "BmsMode.demand_response(base_mode={base_repr}, dr_discharge_rate={dr_discharge_rate}, min_soc_during_dr={min_soc_during_dr}, dr_deactivation_multiplier={dr_deactivation_multiplier})"
                 )
             }
             RustBmsMode::Scheduled { windows } => {

@@ -448,6 +448,7 @@ impl ActorRegistry {
                         solar_only_charging: config
                             .get_bool("solar_only_charging")
                             .unwrap_or(false),
+                        surplus_deadband_kw: config.get_f64("surplus_deadband_kw").unwrap_or(0.0),
                     },
                     "tou" | "time_of_use" => BmsMode::TimeOfUseOptimization {
                         reserve_soc: config.get_f64("reserve_soc").unwrap_or(0.2),
@@ -460,11 +461,13 @@ impl ActorRegistry {
                         solar_only_charging: config
                             .get_bool("solar_only_charging")
                             .unwrap_or(false),
+                        price_deadband: config.get_f64("price_deadband").unwrap_or(0.0),
                     },
                     "backup" | "backup_reserve" => BmsMode::BackupReserve {
                         target_soc: config.get_f64("target_soc").unwrap_or(0.8),
                         charge_from_grid: config.get_bool("charge_from_grid").unwrap_or(true),
                         charge_rate_fraction: config.get_f64("charge_rate_fraction").unwrap_or(1.0),
+                        soc_deadband: config.get_f64("soc_deadband").unwrap_or(0.0),
                     },
                     "manual" => BmsMode::Manual,
                     other => {

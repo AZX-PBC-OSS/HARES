@@ -4398,6 +4398,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 1.0,
             solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
         };
         let config = typed_battery_config(None, Some(bms));
         let mut bat = Battery::new(config.clone());
@@ -4409,6 +4410,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 1.0,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             }
         );
     }
@@ -4436,6 +4438,7 @@ mod tests {
             min_soc: 0.15,
             max_soc: 0.95,
             solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
         };
         let config = typed_battery_config(None, Some(bms));
         let mut bat = Battery::new(config.clone());

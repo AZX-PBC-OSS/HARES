@@ -627,7 +627,40 @@ pub enum GridExportRule {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum StormWatchTrigger {
     ManualEnable,
-    WeatherSignal { wind_speed_threshold_m_s: f64 },
+    WeatherSignal {
+        wind_speed_threshold_m_s: f64,
+        /// Deactivation threshold; defaults to `wind_speed_threshold_m_s * 0.9`
+        /// when zero (backward-compatible). Provides Schmitt-trigger hysteresis
+        /// to prevent single-step toggling on noisy wind-speed signals.
+        #[serde(default)]
+        wind_speed_deactivation_threshold_m_s: f64,
+    },
+}
+
+impl StormWatchTrigger {
+    pub fn validate(&self) -> Result<(), crate::HaresError> {
+        match self {
+            Self::ManualEnable => Ok(()),
+            Self::WeatherSignal {
+                wind_speed_threshold_m_s,
+                wind_speed_deactivation_threshold_m_s,
+            } => {
+                if !wind_speed_threshold_m_s.is_finite() || *wind_speed_threshold_m_s < 0.0 {
+                    return Err(crate::HaresError::Equipment(format!(
+                        "wind_speed_threshold_m_s must be finite and >= 0.0, got {wind_speed_threshold_m_s}"
+                    )));
+                }
+                if !wind_speed_deactivation_threshold_m_s.is_finite()
+                    || *wind_speed_deactivation_threshold_m_s < 0.0
+                {
+                    return Err(crate::HaresError::Equipment(format!(
+                        "wind_speed_deactivation_threshold_m_s must be finite and >= 0.0, got {wind_speed_deactivation_threshold_m_s}"
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -711,22 +744,42 @@ pub enum BmsMode {
         min_soc: f64,
         max_soc: f64,
         solar_only_charging: bool,
+        /// Deadband (kW) around surplus=0 to prevent charge/discharge toggling.
+        /// Surplus must exceed +deadband to enter charge and drop below -deadband
+        /// to enter discharge. Default 0.0 preserves prior behaviour.
+        #[serde(default)]
+        surplus_deadband_kw: f64,
     },
     TimeOfUseOptimization {
         reserve_soc: f64,
         charge_threshold_percentile: f64,
         discharge_threshold_percentile: f64,
         solar_only_charging: bool,
+        /// Deadband applied around charge/discharge price thresholds to prevent
+        /// toggling when the price signal oscillates. Default 0.0.
+        #[serde(default)]
+        price_deadband: f64,
     },
     BackupReserve {
         target_soc: f64,
         charge_from_grid: bool,
         charge_rate_fraction: f64,
+        /// Deadband around `target_soc`. Charging starts when `soc < target_soc - deadband`
+        /// and stops when `soc > target_soc + deadband`. Default 0.0.
+        #[serde(default)]
+        soc_deadband: f64,
     },
     DemandResponse {
         base_mode: Box<BmsMode>,
         dr_discharge_rate: f64,
         min_soc_during_dr: f64,
+        /// Deactivation multiplier: when DR is active, it stays active until
+        /// `current_price < multiplier * daily_avg_price`. Default 0.0 uses the
+        /// activation threshold (2.0 * daily_avg_price) for backward compatibility.
+        /// Values like 1.8 provide hysteresis: price must rise above 2.0× avg to
+        /// activate, then fall below 1.8× avg to deactivate.
+        #[serde(default)]
+        dr_deactivation_multiplier: f64,
     },
     Scheduled {
         windows: Vec<BmsScheduleWindow>,
@@ -745,7 +798,10 @@ impl BmsMode {
     pub fn validate(&self) -> Result<(), crate::HaresError> {
         match self {
             Self::SelfConsumption {
-                min_soc, max_soc, ..
+                min_soc,
+                max_soc,
+                surplus_deadband_kw,
+                ..
             } => {
                 validate_fraction("min_soc", *min_soc)?;
                 validate_fraction("max_soc", *max_soc)?;
@@ -754,12 +810,14 @@ impl BmsMode {
                         "min_soc must be <= max_soc".into(),
                     ));
                 }
+                validate_finite_non_negative("surplus_deadband_kw", *surplus_deadband_kw)?;
                 Ok(())
             }
             Self::TimeOfUseOptimization {
                 reserve_soc,
                 charge_threshold_percentile,
                 discharge_threshold_percentile,
+                price_deadband,
                 ..
             } => {
                 validate_fraction("reserve_soc", *reserve_soc)?;
@@ -767,23 +825,31 @@ impl BmsMode {
                 validate_fraction(
                     "discharge_threshold_percentile",
                     *discharge_threshold_percentile,
-                )
+                )?;
+                validate_finite_non_negative("price_deadband", *price_deadband)
             }
             Self::BackupReserve {
                 target_soc,
                 charge_rate_fraction,
+                soc_deadband,
                 ..
             } => {
                 validate_fraction("target_soc", *target_soc)?;
-                validate_fraction("charge_rate_fraction", *charge_rate_fraction)
+                validate_fraction("charge_rate_fraction", *charge_rate_fraction)?;
+                validate_finite_non_negative("soc_deadband", *soc_deadband)
             }
             Self::DemandResponse {
                 base_mode,
                 dr_discharge_rate,
                 min_soc_during_dr,
+                dr_deactivation_multiplier,
             } => {
                 validate_fraction("dr_discharge_rate", *dr_discharge_rate)?;
                 validate_fraction("min_soc_during_dr", *min_soc_during_dr)?;
+                validate_finite_non_negative(
+                    "dr_deactivation_multiplier",
+                    *dr_deactivation_multiplier,
+                )?;
                 base_mode.validate()
             }
             Self::Scheduled { windows } => {
@@ -795,10 +861,11 @@ impl BmsMode {
             }
             Self::StormWatch {
                 target_soc,
+                trigger,
                 base_mode,
-                ..
             } => {
                 validate_fraction("target_soc", *target_soc)?;
+                trigger.validate()?;
                 base_mode.validate()
             }
             Self::Manual => Ok(()),
@@ -810,6 +877,15 @@ fn validate_fraction(name: &str, v: f64) -> Result<(), crate::HaresError> {
     if !v.is_finite() || !(0.0..=1.0).contains(&v) {
         return Err(crate::HaresError::Equipment(format!(
             "{name} must be finite and in [0.0, 1.0], got {v}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_finite_non_negative(name: &str, v: f64) -> Result<(), crate::HaresError> {
+    if !v.is_finite() || v < 0.0 {
+        return Err(crate::HaresError::Equipment(format!(
+            "{name} must be finite and >= 0.0, got {v}"
         )));
     }
     Ok(())
@@ -1632,6 +1708,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: true,
+            surplus_deadband_kw: 0.0,
         };
         let json = serde_json::to_string(&mode).unwrap();
         let back: BmsMode = serde_json::from_str(&json).unwrap();
@@ -1645,6 +1722,7 @@ mod tests {
             charge_threshold_percentile: 0.25,
             discharge_threshold_percentile: 0.75,
             solar_only_charging: false,
+            price_deadband: 0.0,
         };
         let json = serde_json::to_string(&mode).unwrap();
         let back: BmsMode = serde_json::from_str(&json).unwrap();
@@ -1657,6 +1735,7 @@ mod tests {
             target_soc: 0.8,
             charge_from_grid: true,
             charge_rate_fraction: 0.5,
+            soc_deadband: 0.0,
         };
         let json = serde_json::to_string(&mode).unwrap();
         let back: BmsMode = serde_json::from_str(&json).unwrap();
@@ -1670,9 +1749,11 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             }),
             dr_discharge_rate: 0.8,
             min_soc_during_dr: 0.15,
+            dr_deactivation_multiplier: 0.0,
         };
         let json = serde_json::to_string(&mode).unwrap();
         let back: BmsMode = serde_json::from_str(&json).unwrap();
@@ -1702,11 +1783,13 @@ mod tests {
             target_soc: 1.0,
             trigger: StormWatchTrigger::WeatherSignal {
                 wind_speed_threshold_m_s: 25.0,
+                wind_speed_deactivation_threshold_m_s: 0.0,
             },
             base_mode: Box::new(BmsMode::SelfConsumption {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: true,
+                surplus_deadband_kw: 0.0,
             }),
         };
         let json = serde_json::to_string(&mode).unwrap();
@@ -1724,9 +1807,11 @@ mod tests {
                     min_soc: 0.1,
                     max_soc: 0.9,
                     solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
                 }),
                 dr_discharge_rate: 0.7,
                 min_soc_during_dr: 0.2,
+                dr_deactivation_multiplier: 0.0,
             }),
         };
         let json = serde_json::to_string(&mode).unwrap();
@@ -1767,6 +1852,7 @@ mod tests {
             min_soc: -0.1,
             max_soc: 0.9,
             solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
         };
         assert!(bad_soc.validate().is_err());
 
@@ -1774,6 +1860,7 @@ mod tests {
             target_soc: 0.8,
             charge_from_grid: true,
             charge_rate_fraction: f64::NAN,
+            soc_deadband: 0.0,
         };
         assert!(nan_rate.validate().is_err());
 
@@ -1781,6 +1868,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 1.5,
             solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
         };
         assert!(over_one.validate().is_err());
     }
@@ -1791,6 +1879,7 @@ mod tests {
             min_soc: 0.9,
             max_soc: 0.1,
             solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
         };
         assert!(inverted.validate().is_err());
     }
@@ -1801,6 +1890,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.9,
             solar_only_charging: false,
+            surplus_deadband_kw: 0.0,
         };
         assert!(mode.validate().is_ok());
 

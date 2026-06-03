@@ -31,6 +31,8 @@ pub struct BatteryManagementActor {
     price_schedule: Option<Arc<[f64]>>,
     steps_per_day: usize,
     last_action: String,
+    storm_watch_active: bool,
+    dr_active: bool,
     telemetry: Telemetry,
 }
 
@@ -67,13 +69,14 @@ impl BatteryManagementActor {
         price_schedule: Option<Arc<[f64]>>,
         steps_per_day: usize,
     ) -> Self {
-        let mut telemetry = Telemetry::with_capacity(6);
+        let mut telemetry = Telemetry::with_capacity(7);
         telemetry.insert("bms_action", -1.0);
         telemetry.insert("soc", f64::NAN);
         telemetry.insert("pv_kw", 0.0);
         telemetry.insert("load_kw", 0.0);
         telemetry.insert("bms_pv_stale_kw", 0.0);
         telemetry.insert("bms_pv_actual_kw", 0.0);
+        telemetry.insert("bms_toggled", 0.0);
         Self {
             name: name.to_string(),
             dispatch_target: DispatchTarget::ByName(Arc::from(battery_name)),
@@ -89,6 +92,8 @@ impl BatteryManagementActor {
             price_schedule,
             steps_per_day,
             last_action: String::new(),
+            storm_watch_active: false,
+            dr_active: false,
             telemetry,
         }
     }
@@ -187,6 +192,7 @@ impl BatteryManagementActor {
                 min_soc,
                 max_soc,
                 solar_only_charging,
+                surplus_deadband_kw,
             } => {
                 let Some(soc) = self.read_soc(env) else {
                     self.last_action = "idle:no_soc".into();
@@ -195,21 +201,30 @@ impl BatteryManagementActor {
                 let pv = env.electrical.actual_pv_kw_or_fallback();
                 let load = env.electrical.base_load_kw;
                 let surplus = pv - load;
+                let deadband = *surplus_deadband_kw;
 
-                // `actual_pv_kw` directly for the binary "is PV present?" guard:
-                // the sentinel value is 0.0 (no actual equipment output).
-                // If actual PV output is zero, grid-disconnect regardless of
-                // the forecast pv_generation_kw value.
                 if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
                     self.emit(ControlSignal::GridConnect { connected: false }, out);
                     self.last_action = "grid_disconnect:solar_only".into();
                     return;
                 }
 
-                if surplus > 0.0 && soc < *max_soc {
-                    // When GridExportRule::Disabled, force solar-only charging
-                    // to prevent grid-to-battery import that would increase
-                    // net grid consumption.
+                let was_charging = self.last_action.contains("self_consumption:charge")
+                    && !self.last_action.contains(":discharge");
+                let was_discharging = self.last_action.contains("self_consumption:discharge");
+
+                let should_charge = if was_charging {
+                    surplus >= -deadband && soc < *max_soc
+                } else {
+                    surplus > deadband && soc < *max_soc
+                };
+                let should_discharge = if was_discharging {
+                    surplus <= deadband && soc > *min_soc
+                } else {
+                    surplus < -deadband && soc > *min_soc
+                };
+
+                if should_charge {
                     let force_solar_only =
                         matches!(self.grid_export_rule, GridExportRule::Disabled);
                     self.emit(
@@ -220,12 +235,7 @@ impl BatteryManagementActor {
                         out,
                     );
                     self.last_action = "self_consumption:charge".into();
-                } else if surplus < 0.0 && soc > *min_soc {
-                    // The battery equipment's SelfConsumption handler already caps
-                    // discharge to net_load_kw, so Unrestricted is inherently safe.
-                    // For Disabled/SolarOnly we emit an explicit clamped PowerSetpoint
-                    // as defense-in-depth (the actor is the authoritative export policy
-                    // layer, not the equipment).
+                } else if should_discharge {
                     match self.grid_export_rule {
                         GridExportRule::Unrestricted => {
                             self.emit(
@@ -265,6 +275,7 @@ impl BatteryManagementActor {
                 charge_threshold_percentile,
                 discharge_threshold_percentile,
                 solar_only_charging,
+                price_deadband,
             } => {
                 let day_ordinal0 = env.current_time.ordinal0();
                 if day_ordinal0 != self.current_day_ordinal0 {
@@ -280,8 +291,24 @@ impl BatteryManagementActor {
                     return;
                 };
                 let price = env.price_signal.electricity_price.unwrap_or(0.0);
+                let deadband = *price_deadband;
 
-                if price <= self.charge_price_threshold && soc < (1.0 - reserve_soc) {
+                let was_charging = self.last_action.contains("tou:charge")
+                    && !self.last_action.contains(":discharge");
+                let was_discharging = self.last_action.contains("tou:discharge");
+
+                let should_charge = if was_charging {
+                    price <= self.charge_price_threshold + deadband && soc < (1.0 - reserve_soc)
+                } else {
+                    price <= self.charge_price_threshold && soc < (1.0 - reserve_soc)
+                };
+                let should_discharge = if was_discharging {
+                    price >= self.discharge_price_threshold - deadband && soc > *reserve_soc
+                } else {
+                    price >= self.discharge_price_threshold && soc > *reserve_soc
+                };
+
+                if should_charge {
                     if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:tou_solar_only".into();
@@ -297,7 +324,7 @@ impl BatteryManagementActor {
                         out,
                     );
                     self.last_action = "tou:charge".into();
-                } else if price >= self.discharge_price_threshold && soc > *reserve_soc {
+                } else if should_discharge {
                     let clamped = self.clamp_discharge_for_export(
                         self.max_discharge_kw,
                         env.electrical.actual_pv_kw_or_fallback(),
@@ -322,12 +349,22 @@ impl BatteryManagementActor {
                 target_soc,
                 charge_from_grid,
                 charge_rate_fraction,
+                soc_deadband,
             } => {
                 let Some(soc) = self.read_soc(env) else {
                     self.last_action = "idle:no_soc".into();
                     return;
                 };
-                if soc < *target_soc {
+                let deadband = *soc_deadband;
+                let was_charging = self.last_action.contains("backup:charge");
+
+                let need_charge = if was_charging {
+                    soc < *target_soc + deadband
+                } else {
+                    soc < *target_soc - deadband
+                };
+
+                if need_charge {
                     if !charge_from_grid && env.electrical.actual_pv_kw <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:backup_no_pv".into();
@@ -360,11 +397,13 @@ impl BatteryManagementActor {
                 base_mode,
                 dr_discharge_rate,
                 min_soc_during_dr,
+                dr_deactivation_multiplier,
             } => {
                 let price = env.price_signal.electricity_price.unwrap_or(0.0);
-                let dr_active = self.is_dr_active(env, price);
+                let dr_active = self.is_dr_active(env, price, *dr_deactivation_multiplier);
 
                 if dr_active {
+                    self.dr_active = true;
                     let Some(soc) = self.read_soc(env) else {
                         self.last_action = "idle:no_soc".into();
                         return;
@@ -390,6 +429,7 @@ impl BatteryManagementActor {
                         self.last_action = "dr:soc_too_low".into();
                     }
                 } else {
+                    self.dr_active = false;
                     self.evaluate_mode(base_mode, env, out);
                 }
             }
@@ -460,10 +500,23 @@ impl BatteryManagementActor {
                     StormWatchTrigger::ManualEnable => true,
                     StormWatchTrigger::WeatherSignal {
                         wind_speed_threshold_m_s,
-                    } => env.weather.wind_speed_m_s > *wind_speed_threshold_m_s,
+                        wind_speed_deactivation_threshold_m_s,
+                    } => {
+                        let deactivation = if *wind_speed_deactivation_threshold_m_s > 0.0 {
+                            *wind_speed_deactivation_threshold_m_s
+                        } else {
+                            wind_speed_threshold_m_s * 0.9
+                        };
+                        if self.storm_watch_active {
+                            env.weather.wind_speed_m_s >= deactivation
+                        } else {
+                            env.weather.wind_speed_m_s > *wind_speed_threshold_m_s
+                        }
+                    }
                 };
 
                 if active {
+                    self.storm_watch_active = true;
                     self.emit(
                         ControlSignal::SOCTarget {
                             target_soc: *target_soc,
@@ -474,6 +527,7 @@ impl BatteryManagementActor {
                     );
                     self.last_action = "storm_watch:active".into();
                 } else {
+                    self.storm_watch_active = false;
                     self.evaluate_mode(base_mode, env, out);
                 }
             }
@@ -529,7 +583,12 @@ impl BatteryManagementActor {
         self.discharge_price_threshold = compute_percentile(today_prices, discharge_percentile);
     }
 
-    fn is_dr_active(&mut self, env: &EnvironmentState, current_price: f64) -> bool {
+    fn is_dr_active(
+        &mut self,
+        env: &EnvironmentState,
+        current_price: f64,
+        dr_deactivation_multiplier: f64,
+    ) -> bool {
         self.ensure_daily_prices(env);
 
         if self.price_schedule.is_none() {
@@ -540,9 +599,22 @@ impl BatteryManagementActor {
             return false;
         }
 
-        current_price > 2.0 * self.daily_avg_price
+        if self.dr_active {
+            let deactivation = if dr_deactivation_multiplier > 0.0 {
+                dr_deactivation_multiplier
+            } else {
+                2.0
+            };
+            current_price > deactivation * self.daily_avg_price
+        } else {
+            current_price > 2.0 * self.daily_avg_price
+        }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    // Why: all arguments are distinct SelfConsumption configuration parameters
+    // and per-step context; bundling them into a struct would add indirection
+    // for no structural benefit.
     /// Re-evaluate SelfConsumption decision with actual (not prior-step) PV.
     fn reevaluate_self_consumption(
         &mut self,
@@ -551,6 +623,7 @@ impl BatteryManagementActor {
         min_soc: f64,
         max_soc: f64,
         solar_only_charging: bool,
+        surplus_deadband_kw: f64,
         out: &mut Vec<DispatchRequest>,
     ) {
         let Some(soc) = self.read_soc(env) else {
@@ -558,6 +631,7 @@ impl BatteryManagementActor {
         };
         let load = env.electrical.base_load_kw;
         let surplus = pv_kw - load;
+        let deadband = surplus_deadband_kw;
 
         // If solar-only and actual PV is zero, disconnect from grid.
         // This handles the case where stale PV was positive (grid connected)
@@ -579,10 +653,22 @@ impl BatteryManagementActor {
             return;
         }
 
-        // Compute surplus and decide charge/discharge/idle.
-        if surplus > 0.0 && soc < max_soc {
-            // PV surplus: charge battery.
-            // Only emit if the prior decision was not already charging.
+        let was_charging = self.last_action.contains("self_consumption:charge")
+            && !self.last_action.contains(":discharge");
+        let was_discharging = self.last_action.contains("self_consumption:discharge");
+
+        let should_charge = if was_charging {
+            surplus >= -deadband && soc < max_soc
+        } else {
+            surplus > deadband && soc < max_soc
+        };
+        let should_discharge = if was_discharging {
+            surplus <= deadband && soc > min_soc
+        } else {
+            surplus < -deadband && soc > min_soc
+        };
+
+        if should_charge {
             if !self.is_last_action_charging() {
                 self.emit(
                     ControlSignal::SelfConsumption {
@@ -591,10 +677,9 @@ impl BatteryManagementActor {
                     },
                     out,
                 );
-                self.last_action = "self_consumption:charge".into();
             }
-        } else if surplus < 0.0 && soc > min_soc {
-            // PV deficit: discharge battery.
+            self.last_action = "self_consumption:charge".into();
+        } else if should_discharge {
             if !self.is_last_action_discharging() {
                 match self.grid_export_rule {
                     GridExportRule::Unrestricted => {
@@ -620,11 +705,9 @@ impl BatteryManagementActor {
                         );
                     }
                 }
-                self.last_action = "self_consumption:discharge".into();
             }
+            self.last_action = "self_consumption:discharge".into();
         } else if self.is_last_action_charging() || self.is_last_action_discharging() {
-            // Surplus was actionable but is now near-zero: disable self-consumption
-            // so the battery stops the prior charge/discharge.
             self.emit(
                 ControlSignal::SelfConsumption {
                     enabled: false,
@@ -695,6 +778,7 @@ impl BatteryManagementActor {
                 min_soc,
                 max_soc,
                 solar_only_charging,
+                surplus_deadband_kw,
             } => {
                 self.reevaluate_self_consumption(
                     pv_kw,
@@ -702,6 +786,7 @@ impl BatteryManagementActor {
                     *min_soc,
                     *max_soc,
                     *solar_only_charging,
+                    *surplus_deadband_kw,
                     out,
                 );
             }
@@ -717,9 +802,13 @@ impl BatteryManagementActor {
             } => {
                 self.reevaluate_tou_solar_only(pv_kw, env, out);
             }
-            BmsMode::DemandResponse { base_mode, .. } if Self::recurse_pv_dependent(base_mode) => {
+            BmsMode::DemandResponse {
+                base_mode,
+                dr_deactivation_multiplier,
+                ..
+            } if Self::recurse_pv_dependent(base_mode) => {
                 let price = env.price_signal.electricity_price.unwrap_or(0.0);
-                let dr_active = self.is_dr_active(env, price);
+                let dr_active = self.is_dr_active(env, price, *dr_deactivation_multiplier);
                 if !dr_active {
                     self.adjust_for_pv_in_mode(pv_kw, env, base_mode, out);
                 }
@@ -731,7 +820,19 @@ impl BatteryManagementActor {
                     StormWatchTrigger::ManualEnable => true,
                     StormWatchTrigger::WeatherSignal {
                         wind_speed_threshold_m_s,
-                    } => env.weather.wind_speed_m_s > *wind_speed_threshold_m_s,
+                        wind_speed_deactivation_threshold_m_s,
+                    } => {
+                        let deactivation = if *wind_speed_deactivation_threshold_m_s > 0.0 {
+                            *wind_speed_deactivation_threshold_m_s
+                        } else {
+                            wind_speed_threshold_m_s * 0.9
+                        };
+                        if self.storm_watch_active {
+                            env.weather.wind_speed_m_s >= deactivation
+                        } else {
+                            env.weather.wind_speed_m_s > *wind_speed_threshold_m_s
+                        }
+                    }
                 };
                 if !sw_active {
                     self.adjust_for_pv_in_mode(pv_kw, env, base_mode, out);
@@ -779,6 +880,8 @@ struct BmsSnapshot {
     charge_price_threshold: f64,
     discharge_price_threshold: f64,
     last_action: String,
+    storm_watch_active: bool,
+    dr_active: bool,
 }
 
 impl Actor for BatteryManagementActor {
@@ -791,6 +894,7 @@ impl Actor for BatteryManagementActor {
     }
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        let action_before = self.last_action.clone();
         let mode = std::mem::take(&mut self.bms_mode);
         self.evaluate_mode(&mode, env, out);
         self.bms_mode = mode;
@@ -804,6 +908,9 @@ impl Actor for BatteryManagementActor {
         self.telemetry.set("pv_kw", pv_stale);
         self.telemetry.set("bms_pv_stale_kw", pv_stale);
         self.telemetry.set("load_kw", env.electrical.base_load_kw);
+        let toggled = self.last_action != action_before;
+        self.telemetry
+            .set("bms_toggled", if toggled { 1.0 } else { 0.0 });
     }
 
     fn adjust_for_pv(
@@ -828,6 +935,8 @@ impl Actor for BatteryManagementActor {
             charge_price_threshold: self.charge_price_threshold,
             discharge_price_threshold: self.discharge_price_threshold,
             last_action: self.last_action.clone(),
+            storm_watch_active: self.storm_watch_active,
+            dr_active: self.dr_active,
         };
         postcard::to_allocvec(&snap)
             .map_err(|e| HaresError::Io(format!("BatteryManagementActor save_state: {e}")))
@@ -844,6 +953,8 @@ impl Actor for BatteryManagementActor {
         self.charge_price_threshold = snap.charge_price_threshold;
         self.discharge_price_threshold = snap.discharge_price_threshold;
         self.last_action = snap.last_action;
+        self.storm_watch_active = snap.storm_watch_active;
+        self.dr_active = snap.dr_active;
         Ok(())
     }
 }
@@ -945,6 +1056,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -975,6 +1087,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1010,6 +1123,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1050,6 +1164,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: true,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1086,6 +1201,7 @@ mod tests {
                 charge_threshold_percentile: 0.25,
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1127,6 +1243,7 @@ mod tests {
                 charge_threshold_percentile: 0.25,
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1168,6 +1285,7 @@ mod tests {
                 charge_threshold_percentile: 0.25,
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1199,6 +1317,7 @@ mod tests {
                 target_soc: 0.8,
                 charge_from_grid: true,
                 charge_rate_fraction: 0.5,
+                soc_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1245,6 +1364,7 @@ mod tests {
                 target_soc: 0.8,
                 charge_from_grid: true,
                 charge_rate_fraction: 0.5,
+                soc_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1271,6 +1391,7 @@ mod tests {
                 base_mode: Box::new(BmsMode::Manual),
                 dr_discharge_rate: 0.8,
                 min_soc_during_dr: 0.1,
+                dr_deactivation_multiplier: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1311,9 +1432,11 @@ mod tests {
                     min_soc: 0.1,
                     max_soc: 0.95,
                     solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
                 }),
                 dr_discharge_rate: 0.8,
                 min_soc_during_dr: 0.1,
+                dr_deactivation_multiplier: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1447,6 +1570,7 @@ mod tests {
                 target_soc: 1.0,
                 trigger: StormWatchTrigger::WeatherSignal {
                     wind_speed_threshold_m_s: 25.0,
+                    wind_speed_deactivation_threshold_m_s: 0.0,
                 },
                 base_mode: Box::new(BmsMode::Manual),
             },
@@ -1478,11 +1602,13 @@ mod tests {
                 target_soc: 1.0,
                 trigger: StormWatchTrigger::WeatherSignal {
                     wind_speed_threshold_m_s: 25.0,
+                    wind_speed_deactivation_threshold_m_s: 0.0,
                 },
                 base_mode: Box::new(BmsMode::SelfConsumption {
                     min_soc: 0.1,
                     max_soc: 0.95,
                     solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
                 }),
             },
             GridExportRule::Unrestricted,
@@ -1525,6 +1651,7 @@ mod tests {
                 charge_threshold_percentile: 0.25,
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1566,6 +1693,7 @@ mod tests {
                 charge_threshold_percentile: 0.25,
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1597,6 +1725,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1627,6 +1756,7 @@ mod tests {
                 target_soc: 0.8,
                 charge_from_grid: true,
                 charge_rate_fraction: 1.0,
+                soc_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1652,6 +1782,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1684,6 +1815,7 @@ mod tests {
                 charge_threshold_percentile: 0.25,
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: true,
+                price_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1749,6 +1881,7 @@ mod tests {
                 charge_threshold_percentile: 0.3,
                 discharge_threshold_percentile: 0.7,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Disabled,
             5.0,
@@ -1801,6 +1934,7 @@ mod tests {
                 charge_threshold_percentile: 0.3,
                 discharge_threshold_percentile: 0.7,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Disabled,
             5.0,
@@ -1853,6 +1987,7 @@ mod tests {
                 charge_threshold_percentile: 0.3,
                 discharge_threshold_percentile: 0.7,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -1905,6 +2040,7 @@ mod tests {
                 charge_threshold_percentile: 0.3,
                 discharge_threshold_percentile: 0.7,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::SolarOnly,
             5.0,
@@ -1956,6 +2092,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Disabled,
             5.0,
@@ -2002,6 +2139,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Disabled,
             5.0,
@@ -2046,6 +2184,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2086,6 +2225,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::SolarOnly,
             5.0,
@@ -2134,6 +2274,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Disabled,
             5.0,
@@ -2179,7 +2320,8 @@ mod tests {
             BmsMode::SelfConsumption {
                 min_soc: 0.1,
                 max_soc: 0.9,
-                solar_only_charging: false, // user says allow grid charging
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.0, // user says allow grid charging
             },
             GridExportRule::Disabled, // but export rule says no grid interaction
             5.0,
@@ -2224,6 +2366,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2268,6 +2411,7 @@ mod tests {
                     target_soc: 1.0,
                     trigger: StormWatchTrigger::WeatherSignal {
                         wind_speed_threshold_m_s: 20.0,
+                        wind_speed_deactivation_threshold_m_s: 0.0,
                     },
                     base_mode: Box::new(BmsMode::Manual),
                 },
@@ -2366,6 +2510,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2410,6 +2555,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: true,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2451,6 +2597,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::SolarOnly,
             5.0,
@@ -2495,6 +2642,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2543,6 +2691,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2587,6 +2736,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2619,14 +2769,16 @@ mod tests {
     #[test]
     fn adjust_for_pv_zero_pv_high_load_idles_when_already_acting() {
         // Stale PV=4 kW, load=2 kW → decide() charges.
-        // Actual PV=2 kW, load=2 kW → surplus = 0 → should idle.
-        // adjust_for_pv should disable self-consumption.
+        // Actual PV=2 kW, load=2 kW → surplus=0, was_charging, deadband=0.0.
+        // With hysteresis: surplus >= -deadband → stays charging (no idle).
+        // To trigger idle, use surplus that crosses below the exit threshold.
         let mut actor = BatteryManagementActor::new(
             "bat1",
             BmsMode::SelfConsumption {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2648,20 +2800,22 @@ mod tests {
         actor.decide(&env, &mut out);
         assert_eq!(actor.last_action(), "self_consumption:charge");
 
-        // Actual PV=2.0 kW, load=2 kW → surplus = 0 → should idle
+        // Actual PV=2.0 kW, load=2 kW → surplus = 0.
+        // With deadband=0.0 and was_charging: surplus >= 0.0 stays charging.
         out.clear();
         actor.adjust_for_pv(2.0, &env, &mut out);
-        assert!(!out.is_empty(), "should emit idle when surplus is zero");
-        match &out[0].signal {
-            ControlSignal::SelfConsumption {
-                enabled,
-                solar_only_charging,
-            } => {
-                assert!(!enabled, "should disable self-consumption");
-                assert!(!solar_only_charging);
-            }
-            other => panic!("expected SelfConsumption, got {other:?}"),
-        }
+        assert_eq!(
+            actor.last_action(),
+            "self_consumption:charge",
+            "surplus=0 with deadband=0.0 stays charging (hysteresis)"
+        );
+
+        // Actual PV=1.0 kW, load=2 kW → surplus = -1.0.
+        // Surplus < -deadband (0.0) → should switch to discharge.
+        out.clear();
+        actor.adjust_for_pv(1.0, &env, &mut out);
+        assert!(!out.is_empty(), "should emit when switching to discharge");
+        assert_eq!(actor.last_action(), "self_consumption:discharge");
     }
 
     #[test]
@@ -2675,6 +2829,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2716,6 +2871,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: true,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2758,6 +2914,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: true,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2819,6 +2976,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2871,6 +3029,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2917,9 +3076,11 @@ mod tests {
                     min_soc: 0.1,
                     max_soc: 0.95,
                     solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
                 }),
                 dr_discharge_rate: 0.8,
                 min_soc_during_dr: 0.1,
+                dr_deactivation_multiplier: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -2978,11 +3139,13 @@ mod tests {
                 target_soc: 1.0,
                 trigger: StormWatchTrigger::WeatherSignal {
                     wind_speed_threshold_m_s: 25.0,
+                    wind_speed_deactivation_threshold_m_s: 0.0,
                 },
                 base_mode: Box::new(BmsMode::SelfConsumption {
                     min_soc: 0.1,
                     max_soc: 0.95,
                     solar_only_charging: false,
+                    surplus_deadband_kw: 0.0,
                 }),
             },
             GridExportRule::Unrestricted,
@@ -3030,6 +3193,88 @@ mod tests {
             out[0].signal
         );
         assert_eq!(actor.last_action(), "self_consumption:discharge");
+    }
+
+    #[test]
+    fn adjust_for_pv_respects_surplus_deadband_does_not_toggle_within_deadband() {
+        // Regression: the re-evaluate path (`adjust_for_pv` → `reevaluate_self_consumption`)
+        // must apply the same deadband hysteresis as the main `evaluate_mode` path.
+        // Without this fix, actual PV that oscillates within the deadband zone causes
+        // charge/discharge toggling on every step.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.5,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        // decide() with surplus=0.0 → idle (0.0 not > 0.5 deadband)
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 2.0,
+                actual_pv_kw: 2.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "idle:self_consumption");
+
+        // adjust_for_pv: surplus=+0.4 (within deadband) → must stay idle
+        // (old code: surplus > 0.0 would have triggered charge — the bypass bug)
+        out.clear();
+        actor.adjust_for_pv(2.4, &env, &mut out);
+        assert_eq!(
+            actor.last_action(),
+            "idle:self_consumption",
+            "surplus +0.4 within deadband 0.5 must stay idle"
+        );
+
+        // adjust_for_pv: surplus=-0.4 (within deadband) → must stay idle
+        out.clear();
+        actor.adjust_for_pv(1.6, &env, &mut out);
+        assert_eq!(
+            actor.last_action(),
+            "idle:self_consumption",
+            "surplus -0.4 within deadband 0.5 must stay idle"
+        );
+
+        // adjust_for_pv: surplus=+1.0 (above deadband) → should charge
+        out.clear();
+        actor.adjust_for_pv(3.0, &env, &mut out);
+        assert_eq!(
+            actor.last_action(),
+            "self_consumption:charge",
+            "surplus +1.0 above deadband 0.5 should charge"
+        );
+
+        // adjust_for_pv: surplus drops to +0.2 (within hysteresis band but was_charging)
+        // → should stay charging (surplus >= -deadband)
+        out.clear();
+        actor.adjust_for_pv(2.2, &env, &mut out);
+        assert_eq!(
+            actor.last_action(),
+            "self_consumption:charge",
+            "was_charging should stay charging (surplus +0.2 >= -deadband -0.5)"
+        );
+
+        // adjust_for_pv: surplus=-0.6 (below -deadband) → switch to discharge
+        out.clear();
+        actor.adjust_for_pv(1.4, &env, &mut out);
+        assert_eq!(
+            actor.last_action(),
+            "self_consumption:discharge",
+            "surplus -0.6 below -deadband -0.5 should discharge"
+        );
     }
 
     #[test]
@@ -3083,6 +3328,7 @@ mod tests {
                 charge_threshold_percentile: 0.25,
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -3110,6 +3356,7 @@ mod tests {
                 charge_threshold_percentile: 0.25,
                 discharge_threshold_percentile: 0.75,
                 solar_only_charging: false,
+                price_deadband: 0.0,
             },
             GridExportRule::Unrestricted,
             5.0,
@@ -3126,5 +3373,325 @@ mod tests {
         assert!((restored.charge_price_threshold - 0.05).abs() < 1e-12);
         assert!((restored.discharge_price_threshold - 0.25).abs() < 1e-12);
         assert_eq!(restored.last_action, "idle:no_soc");
+    }
+
+    // ── hysteresis regression tests ──
+
+    #[test]
+    fn self_consumption_hysteresis_stays_charging_within_deadband() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.5,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 5.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        // Step 1: surplus = +3.0 > +0.5 deadband → enter charge
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+
+        // Step 2: surplus drops to +0.2, still within deadband (≥ -0.5)
+        // Should stay charging because we were charging.
+        let mut env2 = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 3.0,
+                base_load_kw: 2.8,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env2, "bat1", 0.5);
+        out.clear();
+        actor.decide(&env2, &mut out);
+        assert_eq!(
+            actor.last_action(),
+            "self_consumption:charge",
+            "should stay charging within deadband"
+        );
+
+        // Step 3: surplus drops below -deadband → should exit charge
+        let mut env3 = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 1.0,
+                base_load_kw: 3.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env3, "bat1", 0.5);
+        out.clear();
+        actor.decide(&env3, &mut out);
+        assert_eq!(
+            actor.last_action(),
+            "self_consumption:discharge",
+            "should switch to discharge when surplus < -deadband"
+        );
+    }
+
+    #[test]
+    fn tou_hysteresis_does_not_toggle_on_price_noise() {
+        let prices: Vec<f64> = vec![
+            0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30,
+            0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30, 0.10, 0.30,
+        ];
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.2,
+                charge_threshold_percentile: 0.25,
+                discharge_threshold_percentile: 0.75,
+                solar_only_charging: false,
+                price_deadband: 0.05,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices.into()),
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .hour(14)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.30),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "tou:discharge");
+
+        // Price fluctuates to 0.28 (still >= 0.25 - 0.05 = 0.20)
+        // Should stay discharging.
+        let mut env2 = TestEnvBuilder::new()
+            .hour(14)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.28),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env2, "bat1", 0.5);
+        out.clear();
+        actor.decide(&env2, &mut out);
+        assert_eq!(
+            actor.last_action(),
+            "tou:discharge",
+            "should stay discharging within price deadband"
+        );
+    }
+
+    #[test]
+    fn storm_watch_schmitt_trigger_activates_and_deactivates_at_separate_thresholds() {
+        let make_actor = || {
+            BatteryManagementActor::new(
+                "bat1",
+                BmsMode::StormWatch {
+                    target_soc: 1.0,
+                    trigger: StormWatchTrigger::WeatherSignal {
+                        wind_speed_threshold_m_s: 20.0,
+                        wind_speed_deactivation_threshold_m_s: 15.0,
+                    },
+                    base_mode: Box::new(BmsMode::Manual),
+                },
+                GridExportRule::Unrestricted,
+                5.0,
+                5.0,
+                None,
+                24,
+            )
+        };
+
+        // Wind at 22 m/s: above activation threshold → active
+        let mut actor = make_actor();
+        let env1 = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 22.0,
+                ..Default::default()
+            })
+            .build();
+        let mut out = Vec::new();
+        actor.decide(&env1, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].signal, ControlSignal::SOCTarget { .. }));
+
+        // Wind drops to 17 m/s: below activation (20) but above deactivation (15)
+        // Should stay active (Schmitt trigger hysteresis).
+        let env2 = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 17.0,
+                ..Default::default()
+            })
+            .build();
+        out.clear();
+        actor.decide(&env2, &mut out);
+        assert_eq!(
+            out.len(),
+            1,
+            "should stay active above deactivation threshold"
+        );
+
+        // Wind drops to 12 m/s: below deactivation threshold → deactivate
+        let env3 = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 12.0,
+                ..Default::default()
+            })
+            .build();
+        out.clear();
+        actor.decide(&env3, &mut out);
+        assert!(
+            out.is_empty(),
+            "should deactivate below deactivation threshold"
+        );
+    }
+
+    #[test]
+    fn backup_reserve_hysteresis_starts_below_target_minus_deadband_stops_above_target_plus_deadband()
+     {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::BackupReserve {
+                target_soc: 0.8,
+                charge_from_grid: true,
+                charge_rate_fraction: 1.0,
+                soc_deadband: 0.05,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        // SOC at 0.73 (0.8 - 0.05 = 0.75): below target - deadband → charge
+        let mut env = TestEnvBuilder::new().build();
+        set_soc(&mut actor, &mut env, "bat1", 0.73);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "backup:charge");
+
+        // SOC rises to 0.78 (still below target + deadband = 0.85) → keep charging
+        let mut env2 = TestEnvBuilder::new().build();
+        set_soc(&mut actor, &mut env2, "bat1", 0.78);
+        out.clear();
+        actor.decide(&env2, &mut out);
+        assert_eq!(
+            actor.last_action(),
+            "backup:charge",
+            "should stay charging while soc is between target-deadband and target+deadband"
+        );
+
+        // SOC rises to 0.86 (> target + deadband = 0.85) → stop charging
+        let mut env3 = TestEnvBuilder::new().build();
+        set_soc(&mut actor, &mut env3, "bat1", 0.86);
+        out.clear();
+        actor.decide(&env3, &mut out);
+        assert_eq!(actor.last_action(), "idle:backup_at_target");
+    }
+
+    #[test]
+    fn bms_toggled_telemetry_set_on_action_change() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+                surplus_deadband_kw: 0.0,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 5.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        // First step: action changes from "" to "self_consumption:charge" → toggled
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        let toggled_after_first = actor
+            .telemetry()
+            .unwrap()
+            .get("bms_toggled")
+            .unwrap_or(-1.0);
+        assert!(
+            (toggled_after_first - 1.0).abs() < 1e-9,
+            "first step should be toggled"
+        );
+
+        // Second step: same surplus → same action → not toggled
+        out.clear();
+        actor.decide(&env, &mut out);
+        let toggled_after_second = actor
+            .telemetry()
+            .unwrap()
+            .get("bms_toggled")
+            .unwrap_or(-1.0);
+        assert!(
+            (toggled_after_second - 0.0).abs() < 1e-9,
+            "same action should not be toggled"
+        );
+    }
+
+    #[test]
+    fn bms_save_load_preserves_storm_watch_and_dr_state() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::StormWatch {
+                target_soc: 1.0,
+                trigger: StormWatchTrigger::WeatherSignal {
+                    wind_speed_threshold_m_s: 20.0,
+                    wind_speed_deactivation_threshold_m_s: 0.0,
+                },
+                base_mode: Box::new(BmsMode::Manual),
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        actor.storm_watch_active = true;
+        actor.dr_active = true;
+
+        let blob = actor.save_state().expect("save_state should succeed");
+        let mut restored = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::Manual,
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        restored
+            .load_state(&blob)
+            .expect("load_state should succeed");
+        assert!(restored.storm_watch_active);
+        assert!(restored.dr_active);
     }
 }
