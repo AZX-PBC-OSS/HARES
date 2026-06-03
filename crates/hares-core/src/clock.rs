@@ -34,8 +34,30 @@ pub struct SimClock {
 
 impl SimClock {
     /// Create a simulation clock starting at `start_time` (local time).
+    ///
+    /// The total number of steps is the integer floor `duration / time_res`.
+    /// If `duration` is not an exact multiple of `time_res`, the remainder is
+    /// truncated and a warning is emitted. Callers should ensure `duration`
+    /// is divisible by `time_res` to avoid unintended horizon shortening.
     #[must_use]
     pub fn new(start_time: DateTime<FixedOffset>, time_res: Duration, duration: Duration) -> Self {
+        let res = time_res.num_seconds();
+        if res > 0 {
+            let duration_secs = duration.num_seconds();
+            if duration_secs > 0 {
+                let remainder = duration_secs % res;
+                if remainder != 0 {
+                    let effective = duration_secs - remainder;
+                    tracing::warn!(
+                        duration_secs = duration_secs,
+                        time_res_secs = res,
+                        truncated_remainder_secs = remainder,
+                        effective_duration_secs = effective,
+                        "SimClock duration is not an exact multiple of time resolution; remainder will be truncated"
+                    );
+                }
+            }
+        }
         Self {
             start_time,
             time_res,
@@ -122,5 +144,28 @@ mod tests {
         let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("parse");
         let clock = SimClock::new(start, Duration::minutes(30), Duration::weeks(2));
         assert_eq!(clock.total_steps(), 672);
+    }
+
+    #[test]
+    fn total_steps_truncates_remainder_for_non_dividing_duration() {
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("parse");
+        // 86400s duration / 3300s resolution = 26.18... → 26 steps (600s truncated)
+        let clock = SimClock::new(start, Duration::seconds(3300), Duration::days(1));
+        assert_eq!(clock.total_steps(), 26);
+    }
+
+    #[test]
+    fn total_steps_exact_for_evenly_dividing_duration() {
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("parse");
+        // 86400s duration / 3600s resolution = 24 steps exactly
+        let clock = SimClock::new(start, Duration::hours(1), Duration::days(1));
+        assert_eq!(clock.total_steps(), 24);
+    }
+
+    #[test]
+    fn total_steps_zero_when_duration_shorter_than_resolution() {
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("parse");
+        let clock = SimClock::new(start, Duration::hours(1), Duration::minutes(30));
+        assert_eq!(clock.total_steps(), 0);
     }
 }
