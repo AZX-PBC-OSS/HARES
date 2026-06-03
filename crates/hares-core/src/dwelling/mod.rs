@@ -1504,6 +1504,19 @@ impl Dwelling {
             None => 1.0,
         };
 
+        // Invariant: number_of_occupants must be non-negative regardless of
+        // derivation path (HPXML NumberofResidents, derived from bedrooms, or default).
+        // A negative value indicates a data error in the parser or input.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if has_occupancy_spec && occupancy_scale < 0.0 {
+            return Err(HaresError::Dwelling(format!(
+                "Occupancy 'number_of_occupants' must be non-negative; got {}; \
+                 this indicates a data problem in the HPXML parser's occupant-count \
+                 derivation",
+                occupancy_scale
+            )));
+        }
+
         // Invariant: if an Occupancy spec was configured the schedule MUST have an
         // occupancy column. `inject_schedule_into_specs` is responsible for generating
         // the column from HPXML extension fractions or the default profile when the

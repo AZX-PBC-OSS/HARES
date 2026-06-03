@@ -37,6 +37,62 @@ const DRYER_ELECTRIC_SENSIBLE_GAIN: f64 = 0.90;
 /// Source: OCHRE hpxml.py parse_clothes_dryer.
 const BTU_PER_KWH: f64 = 3412.0;
 
+/// Resolve a bedroom count for appliance energy calculations.
+///
+/// Reads `NumberofBedrooms` from HPXML first. When absent, derives from
+/// `NumberofResidents` using `max(1, n_occ - 1)` — a house-type-agnostic
+/// approximation. HARES diverges from OCHRE `hpxml.py:791-800`, which uses
+/// house-type-specific regression formulas (-1.47+1.69*n_occ for detached,
+/// -0.68+1.09*n_occ for attached). HARES cannot access the house type at
+/// this point in the parse (it is resolved later in building construction).
+///
+/// Falls back to ANSI/RESNET 301-2014 Table 4.2.2(1) Reference Home default
+/// of 3 bedrooms when neither `NumberofBedrooms` nor `NumberofResidents`
+/// is available in HPXML.
+fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> f64 {
+    if let Some(n) = details
+        .path(&[
+            "BuildingSummary",
+            "BuildingConstruction",
+            "NumberofBedrooms",
+        ])
+        .and_then(|n| n.text.trim().parse::<f64>().ok())
+    {
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            bedroom_source = "HPXML NumberofBedrooms",
+            n_bedrooms = n,
+            "bedroom count read directly from HPXML"
+        );
+        return n;
+    }
+    if let Some(n_occ) = details
+        .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
+        .and_then(|n| n.text.trim().parse::<f64>().ok())
+    {
+        // Diverges from OCHRE hpxml.py:791-800 which uses house-type-specific
+        // regression formulas (-1.47+1.69*n_occ for detached, -0.68+1.09*n_occ
+        // for attached). HARES uses max(1, n_occ - 1) as a house-type-agnostic
+        // approximation because house type is not yet resolved at this point.
+        let derived = (n_occ - 1.0).max(1.0);
+        tracing::warn!(
+            derived_bedrooms = derived,
+            n_occupants = n_occ,
+            "NumberofBedrooms absent from HPXML; derived = max(1, NumberofResidents - 1)"
+        );
+        #[cfg(feature = "observe")]
+        tracing::info!(
+            bedroom_source = "derived from occupants",
+            n_bedrooms = derived,
+            n_occupants = n_occ,
+            "bedroom count imputed from occupant count"
+        );
+        return derived;
+    }
+    // ANSI/RESNET 301-2014 Table 4.2.2(1) Reference Home: 3 bedrooms.
+    3.0
+}
+
 pub(super) fn resolve_scheduled_loads(
     building: &Building,
     defaults: &DefaultsStore,
@@ -49,29 +105,75 @@ pub(super) fn resolve_scheduled_loads(
         let mut params = Map::new();
         if let Some(n) = child_f64(occupancy, "NumberofResidents") {
             params.insert("number_of_occupants".to_string(), json!(n));
+            #[cfg(feature = "observe")]
+            tracing::info!(
+                occupant_source = "HPXML NumberofResidents",
+                n_occupants = n,
+                "occupant count read directly from HPXML"
+            );
+        } else if let Some(n_bedrooms) = details
+            .path(&[
+                "BuildingSummary",
+                "BuildingConstruction",
+                "NumberofBedrooms",
+            ])
+            .and_then(|n| n.text.trim().parse::<f64>().ok())
+        {
+            // ANSI/RESNET 301-2014 §4.2.2.2.1: occupant count from bedrooms
+            // (2 occupants for the first bedroom + 1 for each additional).
+            // For n bedrooms this is 2 + (n - 1) = n + 1.
+            let derived = n_bedrooms + 1.0;
+            tracing::warn!(
+                derived_occupants = derived,
+                n_bedrooms = n_bedrooms,
+                "NumberofResidents absent from HPXML; derived occupant count = \
+                 NumberofBedrooms + 1 per ANSI/RESNET 301-2014 §4.2.2.2.1"
+            );
+            params.insert("number_of_occupants".to_string(), json!(derived));
+            #[cfg(feature = "observe")]
+            tracing::info!(
+                occupant_source = "derived from bedrooms",
+                n_occupants = derived,
+                n_bedrooms = n_bedrooms,
+                "occupant count imputed from bedroom count"
+            );
         }
         for (k, v) in parse_schedule_extension_params(occupancy, "") {
             params.insert(k, v);
         }
         if !params.is_empty() {
+            if !params.contains_key("number_of_occupants") {
+                // Extension schedule params exist but neither NumberofResidents nor
+                // NumberofBedrooms is present in HPXML. Default to 3 occupants —
+                // ANSI/RESNET 301-2014 Table 4.2.2(1) Reference Home occupant count.
+                tracing::error!(
+                    "BuildingOccupancy has extension schedule fractions but neither \
+                     NumberofResidents nor NumberofBedrooms present in HPXML; \
+                     defaulting to 3 occupants (ANSI/RESNET 301-2014 Table 4.2.2(1))"
+                );
+                params.insert("number_of_occupants".to_string(), json!(3.0));
+                #[cfg(feature = "observe")]
+                tracing::info!(
+                    occupant_source = "default 3 occupants",
+                    "occupant count defaulted; neither HPXML field nor bedroom proxy available"
+                );
+            }
             specs.push(build_spec(
                 "Occupancy".to_string(),
                 FuelType::Electric,
                 params,
                 defaults,
             ));
+        } else {
+            tracing::error!(
+                "BuildingOccupancy present but NumberofResidents, NumberofBedrooms, \
+                 and schedule extension params are all absent; skipping Occupancy spec"
+            );
         }
     }
 
     if let Some(appliances) = details.child("Appliances") {
-        let n_bedrooms = details
-            .path(&[
-                "BuildingSummary",
-                "BuildingConstruction",
-                "NumberofBedrooms",
-            ])
-            .and_then(|n| n.text.parse::<f64>().ok())
-            .unwrap_or(3.0);
+        let n_bedrooms = resolve_bedroom_count_for_appliances(details);
 
         // Pre-extract washer params for dryer energy calculation (OCHRE passes
         // the actual ClothesWasher to parse_clothes_dryer).
@@ -519,15 +621,8 @@ pub(super) fn resolve_scheduled_loads(
 
         if let Some(ceiling_fan) = lighting.child("CeilingFan") {
             let mut params = Map::new();
-            let n_bedrooms = details
-                .path(&[
-                    "BuildingSummary",
-                    "BuildingConstruction",
-                    "NumberofBedrooms",
-                ])
-                .and_then(|n| n.text.parse::<f64>().ok());
-            let n_fans =
-                child_f64(ceiling_fan, "Count").unwrap_or_else(|| n_bedrooms.unwrap_or(3.0) + 1.0);
+            let n_bedrooms = resolve_bedroom_count_for_appliances(details);
+            let n_fans = child_f64(ceiling_fan, "Count").unwrap_or(n_bedrooms + 1.0);
             let efficiency_cfm_per_w = ceiling_fan
                 .path(&["Airflow", "Efficiency"])
                 .and_then(|n| n.text.parse::<f64>().ok())
@@ -968,8 +1063,9 @@ fn garage_floor_area_m2(building: &Building) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::building::parse_xml_document;
+    use super::super::building::{parse_building, parse_xml_document};
     use super::*;
+    use crate::defaults::DefaultsStore;
 
     #[test]
     fn is_conditioned_location_classifies_hpxml_and_field_strings() {
@@ -1047,5 +1143,179 @@ mod tests {
             .and_then(|e| child_f64(e, "AdjustedAnnualkWh"))
             .or_else(|| child_f64(&node, "RatedAnnualkWh"));
         assert_eq!(result, Some(500.0));
+    }
+
+    #[test]
+    fn bedroom_count_from_hpxml_numberofbedrooms() {
+        let details = parse_xml_document(
+            r#"<BuildingDetails>
+                <BuildingSummary>
+                    <BuildingConstruction>
+                        <NumberofBedrooms>4</NumberofBedrooms>
+                    </BuildingConstruction>
+                </BuildingSummary>
+            </BuildingDetails>"#,
+        )
+        .expect("parse");
+        assert_eq!(resolve_bedroom_count_for_appliances(&details), 4.0);
+    }
+
+    #[test]
+    fn bedroom_count_derived_from_residents() {
+        let details = parse_xml_document(
+            r#"<BuildingDetails>
+                <BuildingSummary>
+                    <BuildingOccupancy>
+                        <NumberofResidents>3</NumberofResidents>
+                    </BuildingOccupancy>
+                </BuildingSummary>
+            </BuildingDetails>"#,
+        )
+        .expect("parse");
+        assert_eq!(resolve_bedroom_count_for_appliances(&details), 2.0);
+    }
+
+    #[test]
+    fn bedroom_count_defaults_to_3_when_no_fields() {
+        let details = parse_xml_document(
+            r#"<BuildingDetails>
+                <BuildingSummary>
+                </BuildingSummary>
+            </BuildingDetails>"#,
+        )
+        .expect("parse");
+        assert_eq!(resolve_bedroom_count_for_appliances(&details), 3.0);
+    }
+
+    #[test]
+    fn bedroom_count_derived_minimum_is_1() {
+        // NumberofResidents=1 → max(1, 1-1) → max(1, 0) → 1
+        let details = parse_xml_document(
+            r#"<BuildingDetails>
+                <BuildingSummary>
+                    <BuildingOccupancy>
+                        <NumberofResidents>1</NumberofResidents>
+                    </BuildingOccupancy>
+                </BuildingSummary>
+            </BuildingDetails>"#,
+        )
+        .expect("parse");
+        assert_eq!(resolve_bedroom_count_for_appliances(&details), 1.0);
+    }
+
+    #[test]
+    fn occupancy_derived_from_bedrooms_when_residents_absent() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingOccupancy>
+                      <extension>
+                        <WeekdayScheduleFractions>0.1,0.1,0.1,0.1,0.1,0.1,0.4,0.6,0.6,0.6,0.6,0.6,0.6,0.6,0.6,0.6,0.6,0.6,0.6,0.6,0.4,0.4,0.2,0.1</WeekdayScheduleFractions>
+                      </extension>
+                    </BuildingOccupancy>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure><Walls /></Enclosure>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = parse_building(xml).expect("building should parse");
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+
+        let occ = specs
+            .iter()
+            .find(|s| s.name == "Occupancy")
+            .expect("Occupancy spec should exist");
+        let n_occ = occ
+            .parameters
+            .get("number_of_occupants")
+            .and_then(|v| v.as_f64())
+            .expect("number_of_occupants should be present");
+        // NumberofBedrooms=3 → derived = 3 + 1 = 4
+        assert_eq!(n_occ, 4.0);
+    }
+
+    #[test]
+    fn occupancy_uses_residents_when_both_fields_present() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingOccupancy>
+                      <NumberofResidents>2</NumberofResidents>
+                    </BuildingOccupancy>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>5</NumberofBedrooms>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure><Walls /></Enclosure>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = parse_building(xml).expect("building should parse");
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+
+        let occ = specs
+            .iter()
+            .find(|s| s.name == "Occupancy")
+            .expect("Occupancy spec should exist");
+        let n_occ = occ
+            .parameters
+            .get("number_of_occupants")
+            .and_then(|v| v.as_f64())
+            .expect("number_of_occupants should be present");
+        // Both fields present → use NumberofResidents=2 directly, not bedrooms+1=6
+        assert_eq!(n_occ, 2.0);
+    }
+
+    #[test]
+    fn occupancy_spec_skipped_when_no_fields_and_no_extensions() {
+        let xml = r#"
+            <HPXML xmlns="http://hpxmlonline.com/2019/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <Site><SiteType>suburban</SiteType></Site>
+                    <BuildingOccupancy>
+                    </BuildingOccupancy>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea>1000</ConditionedFloorArea>
+                      <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <Enclosure><Walls /></Enclosure>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let building = parse_building(xml).expect("building should parse");
+        let mut specs = Vec::new();
+        resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect("resolve_scheduled_loads");
+
+        assert!(
+            !specs.iter().any(|s| s.name == "Occupancy"),
+            "Occupancy spec should not be created when no occupant fields and no extension params"
+        );
     }
 }
