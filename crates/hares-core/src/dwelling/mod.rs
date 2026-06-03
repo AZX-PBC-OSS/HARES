@@ -1144,6 +1144,11 @@ pub struct Dwelling {
     /// timestep following a failed `step()` call.
     #[cfg(feature = "observe")]
     rolled_back_port_equipment: usize,
+    /// Number of zone temperature NaN values detected this timestep by the
+    /// always-on invariant check. Incremented per-zone when any zone temperature
+    /// is non-finite; resets to 0 each step.
+    #[cfg(feature = "observe")]
+    nan_temperature_count: usize,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     envelope_diagnostics: EnvelopeDiagnostics,
 }
@@ -1934,6 +1939,8 @@ impl Dwelling {
             observer_buf: None,
             #[cfg(feature = "observe")]
             rolled_back_port_equipment: 0,
+            #[cfg(feature = "observe")]
+            nan_temperature_count: 0,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             envelope_diagnostics: solvers.envelope_diagnostics,
         };
@@ -2537,6 +2544,11 @@ impl Dwelling {
                     schema.fields().iter().map(|f| f.as_ref().clone()).collect();
                 fields.push(arrow::datatypes::Field::new(
                     "port_rollback_count",
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(arrow::datatypes::Field::new(
+                    "nan_temperature_count",
                     DataType::Float64,
                     true,
                 ));
@@ -3291,11 +3303,9 @@ impl Dwelling {
                 .map(|t| t.sensible_gain_w + t.radiant_gain_w + t.latent_gain_w)
                 .sum::<f64>();
         let discarded_electrical_w: f64 =
-            self.rollback_ports.electrical.net_active_w()
-                - self.ports.electrical.net_active_w();
-        let discarded_electrical_kvar: f64 =
-            self.rollback_ports.electrical.reactive_power_kvar
-                - self.ports.electrical.reactive_power_kvar;
+            self.rollback_ports.electrical.net_active_w() - self.ports.electrical.net_active_w();
+        let discarded_electrical_kvar: f64 = self.rollback_ports.electrical.reactive_power_kvar
+            - self.ports.electrical.reactive_power_kvar;
         let discarded_fuel_w: f64 = ALL_FUEL_TYPES
             .iter()
             .map(|&ft| self.rollback_ports.fuel.get(ft))
@@ -3389,6 +3399,7 @@ impl Dwelling {
         #[cfg(feature = "observe")]
         {
             self.rolled_back_port_equipment = 0;
+            self.nan_temperature_count = 0;
         }
 
         // Step 1: update environment at current clock state.
@@ -4137,6 +4148,59 @@ impl Dwelling {
                 .max(current_process_hwm_kb());
         }
 
+        // Always-on invariant checks — unconditional in all build configurations.
+        // These catch unrecoverable data corruption (NaN/Inf) in the two domains
+        // where silent propagation would corrupt output records and downstream
+        // metrics. O(n_zones + O(1)) per step — cheap enough to run every timestep.
+
+        // Electrical finiteness: NaN or Inf in the electrical solver output is
+        // unrecoverable data corruption. The check mirrors the one inside the
+        // cfg-gated check_invariants() so that release builds without the feature
+        // still catch it.
+        {
+            let net_kw = self.electrical_solver.net_active_kw();
+            if !net_kw.is_finite() {
+                tracing::error!(
+                    electrical_net_kw = net_kw,
+                    "electrical solver output is non-finite — quarantining dwelling"
+                );
+                return Err(HaresError::InvariantViolation {
+                    check_name: "electrical_net_finite".to_string(),
+                    value: net_kw,
+                    tolerance: 0.0,
+                });
+            }
+        }
+
+        // Zone temperature NaN: silently propagating a NaN zone temperature
+        // corrupts output recording, equipment control, and downstream metrics
+        // for the remainder of the simulation. Every non-finite zone is logged
+        // before quarantining.
+        {
+            let mut any_nan = false;
+            for zone in &self.latest_env.zones {
+                if !zone.temperature_c.is_finite() {
+                    any_nan = true;
+                    tracing::error!(
+                        zone_id = %zone.id,
+                        temperature_c = zone.temperature_c,
+                        "zone temperature is NaN — quarantining dwelling"
+                    );
+                    #[cfg(feature = "observe")]
+                    {
+                        self.nan_temperature_count += 1;
+                    }
+                }
+            }
+            if any_nan {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "zone_temperature_nan".to_string(),
+                    value: f64::NAN,
+                    tolerance: 0.0,
+                });
+            }
+        }
+
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         self.check_invariants(dt)?;
 
@@ -4377,6 +4441,10 @@ impl Dwelling {
         #[cfg(feature = "observe")]
         if let Some(&idx) = self.output_column_index.get("port_rollback_count") {
             row[idx] = self.rolled_back_port_equipment as f64;
+        }
+        #[cfg(feature = "observe")]
+        if let Some(&idx) = self.output_column_index.get("nan_temperature_count") {
+            row[idx] = self.nan_temperature_count as f64;
         }
 
         // Per-equipment columns via pre-resolved index map.

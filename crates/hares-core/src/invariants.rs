@@ -43,6 +43,32 @@ impl InvariantChecker {
         delta_e_storage: f64,
         q_loss: f64,
     ) -> Result<(), HaresError> {
+        // Guard against NaN/Inf propagating through the comparison below:
+        // `NaN >= tolerance` evaluates to `false`, silently passing the check.
+        // `check_temperatures` uses the same `is_finite()` guard pattern.
+        for &q in q_gains {
+            if !q.is_finite() {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "thermal_balance".to_string(),
+                    value: q,
+                    tolerance: 0.0,
+                });
+            }
+        }
+        if !delta_e_storage.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "thermal_balance".to_string(),
+                value: delta_e_storage,
+                tolerance: 0.0,
+            });
+        }
+        if !q_loss.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "thermal_balance".to_string(),
+                value: q_loss,
+                tolerance: 0.0,
+            });
+        }
         let q_sum: f64 = q_gains.iter().sum();
         let residual = (q_sum - delta_e_storage - q_loss).abs();
         // Use gross flux (sum of absolute values) for relative tolerance,
@@ -69,6 +95,25 @@ impl InvariantChecker {
         p_grid: f64,
         p_equipment_ports: &[f64],
     ) -> Result<(), HaresError> {
+        // Guard against NaN/Inf propagating through the comparison below:
+        // `NaN >= tolerance` evaluates to `false`, silently passing the check.
+        // `check_temperatures` uses the same `is_finite()` guard pattern.
+        if !p_grid.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "electrical_balance".to_string(),
+                value: p_grid,
+                tolerance: 0.0,
+            });
+        }
+        for &p in p_equipment_ports {
+            if !p.is_finite() {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "electrical_balance".to_string(),
+                    value: p,
+                    tolerance: 0.0,
+                });
+            }
+        }
         let p_sum: f64 = p_equipment_ports.iter().sum();
         let residual = (p_grid + p_sum).abs();
         // Use gross flux (sum of absolute values of all terms on the bus)
@@ -121,6 +166,37 @@ impl InvariantChecker {
         actual_delta_kg: f64,
         gross_moisture_mass_kg: f64,
     ) -> Result<(), HaresError> {
+        // Guard against NaN/Inf propagating through the comparison below:
+        // `NaN >= tolerance` evaluates to `false`, silently passing the check.
+        // `check_temperatures` uses the same `is_finite()` guard pattern.
+        if !independent_physical_kg.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "moisture_balance".to_string(),
+                value: independent_physical_kg,
+                tolerance: 0.0,
+            });
+        }
+        if !expected_balance_kg.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "moisture_balance".to_string(),
+                value: expected_balance_kg,
+                tolerance: 0.0,
+            });
+        }
+        if !actual_delta_kg.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "moisture_balance".to_string(),
+                value: actual_delta_kg,
+                tolerance: 0.0,
+            });
+        }
+        if !gross_moisture_mass_kg.is_finite() {
+            return Err(HaresError::InvariantViolation {
+                check_name: "moisture_balance".to_string(),
+                value: gross_moisture_mass_kg,
+                tolerance: 0.0,
+            });
+        }
         // Check 1: moisture balance — independent accounting vs solver output.
         let balance_residual = (expected_balance_kg - actual_delta_kg).abs();
         // Floor of 5e-4 kg (0.5 g) absorbs floating-point noise from the
@@ -898,6 +974,138 @@ mod tests {
         // Negative contributions shouldn't appear for fuel but the check
         // only flags positive values to avoid false alarms.
         let result = checker().check_fuel_electric_absent(-50.0);
+        assert!(result.is_ok());
+    }
+
+    // ── NaN bypass guards ──────────────────────────────────────────────────
+
+    #[test]
+    fn thermal_balance_fails_on_nan_gain() {
+        // NaN in q_gains previously bypassed the check (NaN >= tolerance == false).
+        // After fix: the is_finite() guard fires first.
+        let result = checker().check_thermal(&[f64::NAN], 200.0, 800.0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "thermal_balance"
+        ));
+    }
+
+    #[test]
+    fn thermal_balance_fails_on_nan_delta_e() {
+        let result = checker().check_thermal(&[1000.0], f64::NAN, 800.0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "thermal_balance"
+        ));
+    }
+
+    #[test]
+    fn thermal_balance_fails_on_nan_loss() {
+        let result = checker().check_thermal(&[1000.0], 200.0, f64::NAN);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "thermal_balance"
+        ));
+    }
+
+    #[test]
+    fn thermal_balance_fails_on_nan_alongside_finite_gains() {
+        // A mixed slice: finite values plus one NaN — the guard catches the NaN.
+        let result = checker().check_thermal(&[100.0, f64::NAN, 200.0], 300.0, 100.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn moisture_balance_fails_on_nan_physical() {
+        let result = checker().check_moisture(f64::NAN, 0.001, 0.001, 2.0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "moisture_balance"
+        ));
+    }
+
+    #[test]
+    fn moisture_balance_fails_on_nan_expected() {
+        let result = checker().check_moisture(0.024, f64::NAN, 0.001, 2.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn moisture_balance_fails_on_nan_actual() {
+        let result = checker().check_moisture(0.024, 0.001, f64::NAN, 2.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn moisture_balance_fails_on_nan_gross() {
+        let result = checker().check_moisture(0.024, 0.001, 0.001, f64::NAN);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn electrical_balance_fails_on_nan_grid() {
+        let result = checker().check_electrical(f64::NAN, &[-3.0]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "electrical_balance"
+        ));
+    }
+
+    #[test]
+    fn electrical_balance_fails_on_nan_in_ports() {
+        let result = checker().check_electrical(3.0, &[f64::NAN]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "electrical_balance"
+        ));
+    }
+
+    #[test]
+    fn electrical_balance_fails_on_nan_alongside_finite_ports() {
+        let result = checker().check_electrical(3.0, &[-1.0, f64::NAN, -2.0]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "electrical_balance"
+        ));
+    }
+
+    #[test]
+    fn electrical_balance_fails_on_nan_infinity_grid() {
+        // ∞ is also non-finite and should be caught by the same guard.
+        let result = checker().check_electrical(f64::INFINITY, &[-3.0]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn electrical_balance_fails_on_nan_infinity_port() {
+        let result = checker().check_electrical(3.0, &[f64::NEG_INFINITY]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn existing_thermal_balance_tests_still_pass() {
+        // Regression: previously passing tests are unaffected by the is_finite guard.
+        let result = checker().check_thermal(&[1000.0], 200.0, 800.0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn existing_moisture_balance_tests_still_pass() {
+        let result = checker().check_moisture(0.024, 0.0016, 0.0016, 2.33);
         assert!(result.is_ok());
     }
 }
