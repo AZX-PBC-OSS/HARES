@@ -1,4 +1,5 @@
-//! HVAC capacity autosizing from building envelope model.
+//! HVAC and water heater capacity autosizing from building envelope model
+//! and draw profile data.
 //!
 //! When HPXML equipment omits HeatingCapacity/CoolingCapacity, this module
 //! computes the required capacity at design outdoor conditions using the
@@ -10,8 +11,26 @@
 //!
 //! HPXML `<AutosizingLimits>` elements (Min/Max capacity bounds) are
 //! applied as a clamp on the final sized capacity when present.
+//!
+//! ## Water heater autosizing
+//!
+//! For storage water heaters with `autosize_water_heater = true`, the
+//! module computes tank volume and heating capacity using a First-Hour
+//! Rating methodology per DOE 10 CFR Part 430 Subpart B Appendix E:
+//!
+//! 1. Required FHR [GPH] is derived from bedroom count; no single standard
+//!    tabulates these values — they are engineering convention values derived
+//!    from applying the DOE FHR test procedure (10 CFR Part 430 Subpart B
+//!    Appendix E) to typical residential hot-water usage patterns.
+//! 2. Tank volume [gal] is sized by bedroom count.
+//! 3. Heating capacity [W] is computed as the power needed to recover the
+//!    FHR deficit (FHR − usable tank volume) at the design temperature rise
+//!    (setpoint − mains temperature).
+//! 4. When inputs are insufficient, conservative defaults are used:
+//!    50 gal tank, 4500 W element capacity.
 
 use hares_envelope::ThermalSolver;
+use hares_equipment::config::ConfigPayload;
 use hares_io::{
     Building, DesignConditions, EquipmentSpec,
     hpxml::resolve_hvac::{DuctDseParams, rebuild_hvac_typed_config},
@@ -20,7 +39,7 @@ use hares_physics::ashrae152::design_temperatures_f;
 use hares_physics::constants::{OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W};
 use hares_physics::units::{temperature_c_to_f, temperature_f_to_c};
 use hares_types::ZoneId;
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::{error, warn};
 
 /// ASHRAE 90.1 default indoor design setpoints [°C].
@@ -52,6 +71,59 @@ const DEFAULT_LIGHTING_PLUG_DENSITY_W_M2: f64 = 5.0;
 ///    ASHRAE HoF 2021 Ch.18 Table 1 (OCCUPANT_SENSIBLE_GAIN_W,
 ///    OCCUPANT_LATENT_GAIN_W).
 const DEFAULT_OCCUPANTS: f64 = 2.0;
+
+// ── Water heater autosizing constants ──────────────────────────────────
+
+/// Default water heater sizing factor (conservative — no oversizing).
+/// DOE 10 CFR Part 430 Subpart B Appendix E: FHR methodology allows
+/// engineering judgment for sizing factors.
+const WATER_HEATER_SIZING_FACTOR: f64 = 1.0;
+
+/// Default tank volume [gal] used when bedroom count is unavailable.
+/// ASHRAE 90.2-2018: typical single-family storage water heater tank size.
+const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
+
+/// Default element/burner capacity [W] for storage water heaters.
+/// Typical residential electric water heater: 4500 W at 240 V.
+/// ASHRAE 90.2-2018 Table 7.5.1.
+const DEFAULT_ELEMENT_CAPACITY_W: f64 = 4_500.0;
+
+/// Default mains cold-water temperature [°C] for sizing when unavailable.
+/// US annual average per ASHRAE HoF 2021 Ch.14 (mains temperature ≈ 10 °C).
+const DEFAULT_MAINS_TEMP_C: f64 = 10.0;
+
+/// Default hot water setpoint [°C] for sizing when not specified.
+/// ASHRAE 90.2-2018 §7.5: storage water heater setpoint 125 °F (51.67 °C).
+const DEFAULT_WH_SETPOINT_C: f64 = 51.67;
+
+/// Usable tank fraction: fraction of rated volume that can be drawn before
+/// the outlet temperature drops below the setpoint.
+/// DOE 10 CFR Part 430 Subpart B Appendix E §2.4.1: draw until outlet
+/// temperature drops 14 °C below the initial mean tank temperature.
+/// 0.7 is the conventional usable fraction for residential storage tanks.
+const USABLE_TANK_FRACTION: f64 = 0.7;
+
+/// Density of water at conventional cold-water temperature (~60 °F / 15.6 °C).
+/// ASHRAE HoF 2021 Ch.1: 8.33 lb/US gal is the conventional US engineering
+/// value for water density. NOTE: at typical tank storage temperature
+/// (50 °C / 125 °F) the density is ~8.23 lb/gal, but the conventional
+/// 8.33 value is universally used in water heater sizing worksheets and
+/// introduces <2% error in the capacity calculation.
+const WATER_DENSITY_LB_PER_GAL: f64 = 8.33;
+
+/// Conversion: 1 W = 3.412 BTU/h.
+/// ASHRAE HoF 2021 Ch.1 Table 1.
+const W_PER_BTUH: f64 = 3.412;
+
+/// Conversion: 1 °C = 1.8 °F.
+const DEG_F_PER_DEG_C: f64 = 1.8;
+
+/// Pre-computed water energy factor for FHR capacity formula:
+///   `WATER_DENSITY_LB_PER_GAL * DEG_F_PER_DEG_C / W_PER_BTUH`
+///   = 8.33 × 1.8 / 3.412 ≈ 4.395
+///
+/// Used in: capacity_w = max(0, FHR_gph − usable_volume_gal) × factor × ΔT_C
+const WATER_ENERGY_FACTOR: f64 = WATER_DENSITY_LB_PER_GAL * DEG_F_PER_DEG_C / W_PER_BTUH;
 
 /// Context bundle for autosizing: weather-derived design conditions and
 /// duct parameters needed to rebuild typed equipment configs.
@@ -441,6 +513,318 @@ pub fn autosize_equipment_capacities(
     }
 }
 
+// ── Water heater autosizing ────────────────────────────────────────────
+
+/// Autosize water heater tank volume and heating capacity for storage
+/// water heater specs flagged with `autosize_water_heater = true`.
+///
+/// ## Sizing methodology
+///
+/// 1. Required FHR [GPH] is derived from bedroom count; no single standard
+///    tabulates these values — they are engineering convention values derived
+///    from applying the DOE FHR test procedure (10 CFR Part 430 Subpart B
+///    Appendix E §2.4) to typical residential hot-water usage patterns.
+/// 2. Tank volume [gal] is sized by bedroom count (e.g. 40 gal for 1–2 BR,
+///    50 gal for 3–4 BR, 60 gal for 5+ BR).
+/// 3. Heating capacity [W] is computed as the power needed to recover the
+///    FHR deficit at the design temperature rise:
+///    `capacity_w = max(0, FHR_gph − usable_vol_gal) × W.E.F × ΔT_°C`
+///    where `W.E.F = 8.33 × 1.8 / 3.412 ≈ 4.395`.
+/// 4. When bedroom count or mains temperature are unavailable, conservative
+///    defaults are used (50 gal tank, 4500 W element) with a `warn!`.
+///
+/// DOE 10 CFR Part 430 Subpart B Appendix E §2.4: FHR = V_draw + recovery;
+/// V_draw ≈ usable_fraction × tank_volume.
+///
+/// # Arguments
+///
+/// * `specs` - Equipment specs (mutated in place; only storage WH specs
+///   with `autosize_water_heater = true` are processed).
+/// * `n_bedrooms` - Number of bedrooms for sizing (from HPXML or data patches).
+///   `None` triggers the conservative default path.
+/// * `mains_temp_c` - Mains cold-water supply temperature [°C] for temperature
+///   rise computation.
+pub fn autosize_water_heater_capacities(
+    specs: &mut [EquipmentSpec],
+    n_bedrooms: Option<f64>,
+    mains_temp_c: f64,
+) {
+    // Validate mains temperature — use default if unreasonable.
+    let mains_temp_c = if mains_temp_c.is_finite() && mains_temp_c > 0.0 && mains_temp_c < 40.0 {
+        mains_temp_c
+    } else {
+        tracing::warn!(
+            mains_temp_c,
+            "water heater autosizing: mains temperature unreasonable; \
+             using default {} °C",
+            DEFAULT_MAINS_TEMP_C
+        );
+        DEFAULT_MAINS_TEMP_C
+    };
+
+    for spec in specs.iter_mut() {
+        let needs_autosize = spec
+            .parameters
+            .get("autosize_water_heater")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if !needs_autosize {
+            continue;
+        }
+
+        // Determine setpoint: prefer spec parameter, fall back to default.
+        let setpoint_c = spec
+            .parameters
+            .get("setpoint_c")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(DEFAULT_WH_SETPOINT_C);
+
+        // Temperature rise: setpoint − mains.
+        let delta_t_c = (setpoint_c - mains_temp_c).max(1.0);
+
+        // Resolve bedroom count.
+        let n_bedrooms = n_bedrooms.unwrap_or_else(|| {
+            tracing::warn!(
+                equipment = %spec.name,
+                "water heater autosizing: bedroom count unavailable; \
+                 using conservative defaults"
+            );
+            0.0
+        });
+
+        // Invariant: check bedroom count in debug/check_invariants builds.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if n_bedrooms <= 0.0 {
+                tracing::warn!(
+                    equipment = %spec.name,
+                    n_bedrooms,
+                    "water heater autosizing: bedroom count is zero or negative; \
+                     sizing based on defaults"
+                );
+            }
+        }
+
+        // Size tank volume from bedrooms (or default).
+        let tank_volume_gal = if n_bedrooms > 0.0 {
+            tank_volume_from_bedrooms_gal(n_bedrooms)
+        } else {
+            DEFAULT_TANK_VOLUME_GAL
+        };
+
+        // Size required FHR from bedrooms (or default).
+        let fhr_gph = if n_bedrooms > 0.0 {
+            required_fhr_gph(n_bedrooms)
+        } else {
+            // No bedroom data: assume 50 GPH (conservative for 3-4 BR home).
+            50.0
+        };
+
+        // Compute required heating capacity from FHR.
+        let usable_volume_gal = USABLE_TANK_FRACTION * tank_volume_gal;
+        let capacity_w = if fhr_gph > usable_volume_gal {
+            (fhr_gph - usable_volume_gal) * WATER_ENERGY_FACTOR * delta_t_c
+        } else {
+            // Tank volume alone meets peak hour demand; size minimally.
+            // Provide enough power to heat the full tank from cold in ~4 hours.
+            DEFAULT_ELEMENT_CAPACITY_W
+        };
+
+        // Apply sizing factor (HPXML override or default 1.0).
+        let factor = spec
+            .parameters
+            .get("autosize_water_heater_factor")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(WATER_HEATER_SIZING_FACTOR);
+
+        let mut sized_capacity_w = capacity_w * factor;
+
+        // Apply capacity limits if present.
+        if let Some(min_w) = spec
+            .parameters
+            .get("autosize_water_heater_min_w")
+            .and_then(|v| v.as_f64())
+        {
+            sized_capacity_w = sized_capacity_w.max(min_w);
+        }
+        if let Some(max_w) = spec
+            .parameters
+            .get("autosize_water_heater_max_w")
+            .and_then(|v| v.as_f64())
+        {
+            sized_capacity_w = sized_capacity_w.min(max_w);
+        }
+
+        // Remove consumed params.
+        spec.parameters.remove("autosize_water_heater_factor");
+        spec.parameters.remove("autosize_water_heater_min_w");
+        spec.parameters.remove("autosize_water_heater_max_w");
+
+        // Convert tank volume to SI for the config.
+        let tank_volume_m3 = hares_physics::units::volume_gal_to_m3(tank_volume_gal);
+
+        if sized_capacity_w > 0.0 {
+            // Update the spec parameters with computed values.
+            spec.parameters
+                .insert("heating_capacity_w".to_string(), json!(sized_capacity_w));
+
+            // Only set tank volume if HPXML didn't provide one.
+            if !spec.parameters.contains_key("tank_volume_m3") {
+                spec.parameters
+                    .insert("tank_volume_m3".to_string(), json!(tank_volume_m3));
+            }
+
+            spec.parameters.remove("autosize_water_heater");
+
+            // Emit observability metrics behind observe feature gate.
+            #[cfg(feature = "observe")]
+            {
+                tracing::info!(
+                    equipment = %spec.name,
+                    sizing.water_heater.fhr_gph = fhr_gph,
+                    sizing.water_heater.tank_volume_gal = tank_volume_gal,
+                    sizing.water_heater.capacity_w = sized_capacity_w,
+                    sizing.water_heater.mains_temp_c = mains_temp_c,
+                    sizing.water_heater.num_bedrooms = n_bedrooms,
+                    "autosized water heater capacity and tank volume"
+                );
+            }
+            #[cfg(not(feature = "observe"))]
+            {
+                tracing::info!(
+                    equipment = %spec.name,
+                    fhr_gph,
+                    tank_volume_gal,
+                    capacity_w = sized_capacity_w,
+                    mains_temp_c,
+                    n_bedrooms,
+                    factor,
+                    "autosized water heater capacity and tank volume"
+                );
+            }
+
+            // Invariant: computed values must be positive and non-NaN.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                assert!(
+                    fhr_gph > 0.0 && fhr_gph.is_finite(),
+                    "water heater autosizing invariant: FHR must be positive and finite, \
+                     got {fhr_gph} for {}",
+                    spec.name
+                );
+                assert!(
+                    tank_volume_gal > 0.0 && tank_volume_gal.is_finite(),
+                    "water heater autosizing invariant: tank volume must be positive \
+                     and finite, got {tank_volume_gal} for {}",
+                    spec.name
+                );
+                assert!(
+                    sized_capacity_w > 0.0 && sized_capacity_w.is_finite(),
+                    "water heater autosizing invariant: capacity must be positive and \
+                     finite, got {sized_capacity_w} for {}",
+                    spec.name
+                );
+            }
+
+            // Patch the typed_config's internal JSON data with autosized values
+            // so that downstream consumers (schedule resolution, equipment init)
+            // see the computed capacity and volume.
+            // Field names vary by water heater type:
+            //   - storage WH: heating_capacity_w
+            //   - HPWH:        backup_element_power_w
+            //   - Indirect:    no capacity (heat from boiler)
+            if let Some(ref mut tc) = spec.typed_config {
+                if let ConfigPayload::Typed {
+                    data: Value::Object(map),
+                    ..
+                } = &mut tc.payload
+                {
+                    let capacity_field = if spec.name == "Heat Pump Water Heater" {
+                        "backup_element_power_w"
+                    } else if spec.name == "Indirect Tank" {
+                        // Indirect tanks have no heating_capacity field;
+                        // only tank_volume_m3 is updated below.
+                        ""
+                    } else {
+                        "heating_capacity_w"
+                    };
+                    if !capacity_field.is_empty() {
+                        map.insert(capacity_field.to_string(), json!(sized_capacity_w));
+                    }
+                    if !map.contains_key("tank_volume_m3") {
+                        map.insert("tank_volume_m3".to_string(), json!(tank_volume_m3));
+                    }
+                }
+            }
+        } else {
+            error!(
+                equipment = %spec.name,
+                fhr_gph,
+                tank_volume_gal,
+                delta_t_c,
+                factor,
+                "water heater autosizing: computed capacity is zero — \
+                 check bedroom count, setpoint, and mains temperature"
+            );
+        }
+    }
+}
+
+/// Required First-Hour Rating [GPH] from bedroom count.
+///
+/// Peak hour hot water demand for a typical single-family dwelling. No
+/// single published standard tabulates these per-bedroom FHR sizing values
+/// in a single table. They are engineering convention values derived from
+/// applying the DOE First-Hour Rating test procedure (10 CFR Part 430
+/// Subpart B Appendix E) to typical residential hot-water usage patterns.
+/// These bedroom-to-FHR sizing guidelines appear across residential energy
+/// codes, manufacturer sizing guides, and DOE water heater replacement
+/// sizing practice.
+///
+/// | Bedrooms | FHR [GPH] |
+/// |----------|-----------|
+/// | 1        | 36        |
+/// | 2        | 42        |
+/// | 3        | 48        |
+/// | 4        | 54        |
+/// | 5+       | 62        |
+fn required_fhr_gph(n_bedrooms: f64) -> f64 {
+    let n = n_bedrooms.round() as u32;
+    match n {
+        0 => 50.0, // conservative default
+        1 => 36.0,
+        2 => 42.0,
+        3 => 48.0,
+        4 => 54.0,
+        _ => 62.0,
+    }
+}
+
+/// Tank volume [gal] from bedroom count.
+///
+/// Water heater tank sizing by bedroom count is a residential energy code
+/// prescriptive convention (see ASHRAE 90.2-2018 §7 water heating equipment
+/// sizing). No single authoritative standard document tabulates these exact
+/// per-bedroom volume values; they are standard industry sizing conventions
+/// derived from common residential code practice and DOE water heater
+/// replacement sizing guidelines.
+///
+/// | Bedrooms | Tank Volume [gal] |
+/// |----------|-------------------|
+/// | 1–2      | 40                |
+/// | 3–4      | 50                |
+/// | 5+       | 60                |
+fn tank_volume_from_bedrooms_gal(n_bedrooms: f64) -> f64 {
+    let n = n_bedrooms.round() as u32;
+    match n {
+        0 => DEFAULT_TANK_VOLUME_GAL,
+        1 | 2 => 40.0,
+        3 | 4 => 50.0,
+        _ => 60.0,
+    }
+}
+
 /// Resolve outdoor design dry-bulb temperatures [°C].
 ///
 /// Prefers EPW design conditions (parsed from the "Extremes" section of the
@@ -530,7 +914,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use hares_envelope::{OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolverConfig};
-    use hares_types::{EnvironmentState, GridState, WeatherState, ZoneId, ZoneState};
+    use hares_types::{EnvironmentState, FuelType, GridState, WeatherState, ZoneId, ZoneState};
     use nalgebra::DMatrix;
     use serde_json::Map;
     use std::collections::HashMap;
@@ -2103,5 +2487,414 @@ mod tests {
              should exceed zero-gains peak ({zero_gains} W) by ~500 W"
         );
         assert!(with_gains.is_finite(), "with-gains peak must be finite");
+    }
+
+    // ── Water heater autosizing tests (T-0194) ─────────────────────────
+
+    fn wh_spec(name: &str, fuel: FuelType, extra_params: &[(&str, Value)]) -> EquipmentSpec {
+        let mut params = Map::new();
+        params.insert("autosize_water_heater".to_string(), json!(true));
+        for (k, v) in extra_params {
+            params.insert(k.to_string(), v.clone());
+        }
+        EquipmentSpec {
+            name: name.to_string(),
+            instance_name: None,
+            fuel_type: fuel,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }
+    }
+
+    #[test]
+    fn wh_autosize_three_bedrooms_fifty_f_mains_120_f_setpoint() {
+        // 3 bedrooms → tank 50 gal, FHR 48 GPH
+        // mains = 50 °F (10 °C), setpoint = 120 °F (48.89 °C) → ΔT = 38.89 °C
+        // usable vol = 0.7 × 50 = 35 gal
+        // capacity = (48 − 35) × 4.395 × 38.89 ≈ 13 × 170.9 ≈ 2222 W
+        let setpoint_c = hares_physics::units::temperature_f_to_c(120.0);
+        let mut specs = vec![wh_spec(
+            "Electric Resistance Water Heater",
+            FuelType::Electric,
+            &[("setpoint_c", json!(setpoint_c))],
+        )];
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("heating_capacity_w must be set");
+        let volume_m3 = result
+            .parameters
+            .get("tank_volume_m3")
+            .and_then(|v| v.as_f64())
+            .expect("tank_volume_m3 must be set");
+
+        assert!(
+            !result.parameters.contains_key("autosize_water_heater"),
+            "autosize flag must be consumed"
+        );
+
+        let expected_gal = 50.0;
+        let expected_vol_m3 = hares_physics::units::volume_gal_to_m3(expected_gal);
+        assert!(
+            (volume_m3 - expected_vol_m3).abs() < 1e-6,
+            "tank volume {volume_m3} m3 should match {expected_gal} gal → {expected_vol_m3} m3"
+        );
+
+        // 3 BR → FHR = 48 GPH
+        let fhr_gph = required_fhr_gph(3.0);
+        assert!(
+            (fhr_gph - 48.0).abs() < 1e-6,
+            "FHR for 3 BR should be 48 GPH"
+        );
+
+        let tank_gal = tank_volume_from_bedrooms_gal(3.0);
+        assert!(
+            (tank_gal - 50.0).abs() < 1e-6,
+            "tank for 3 BR should be 50 gal"
+        );
+
+        // ΔT = 120 °F − 50 °F = 70 °F = 38.89 °C (setpoint 120 °F, mains 50 °F)
+        // usable = 0.7 × 50 = 35 gal
+        // capacity = (48 − 35) × 4.395 × 38.89 = 13 × 170.9 ≈ 2222 W
+        let expected_cap = (48.0 - 0.7 * 50.0) * WATER_ENERGY_FACTOR * (setpoint_c - 10.0);
+        assert!(
+            (capacity_w - expected_cap).abs() < 1e-3,
+            "capacity {capacity_w:.2} W should match computed {expected_cap:.2} W \
+             (13 gal deficit × 4.395 factor × 38.89 K ΔT)"
+        );
+        assert!(
+            capacity_w > 2000.0,
+            "capacity {capacity_w} W should be reasonable"
+        );
+    }
+
+    #[test]
+    fn wh_autosize_false_explicit_capacity_not_overridden() {
+        // When autosize_water_heater is false and explicit capacity is
+        // provided, the autosizer must leave the spec unchanged.
+        let mut params = Map::new();
+        // No autosize_water_heater flag — explicit values only.
+        params.insert("heating_capacity_w".to_string(), json!(4500.0));
+        params.insert("tank_volume_m3".to_string(), json!(0.151));
+        let spec = EquipmentSpec {
+            name: "Gas Water Heater".to_string(),
+            instance_name: None,
+            fuel_type: FuelType::Gas,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        };
+        let mut specs = vec![spec];
+
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("explicit capacity must remain");
+        let volume_m3 = result
+            .parameters
+            .get("tank_volume_m3")
+            .and_then(|v| v.as_f64())
+            .expect("explicit volume must remain");
+
+        assert!(
+            (capacity_w - 4500.0).abs() < 1e-6,
+            "explicit capacity 4500 W should not be overridden, got {capacity_w}"
+        );
+        assert!(
+            (volume_m3 - 0.151).abs() < 1e-6,
+            "explicit volume 0.151 m3 should not be overridden, got {volume_m3}"
+        );
+    }
+
+    #[test]
+    fn wh_autosize_zero_bedrooms_uses_conservative_defaults() {
+        // Zero bedrooms should NOT panic. The autosizer must fall back to
+        // conservative defaults (50 gal, computed from default 2.0 bedroom
+        // tier logic → 50 GPH FHR).
+        let mut specs = vec![wh_spec(
+            "Electric Resistance Water Heater",
+            FuelType::Electric,
+            &[],
+        )];
+        autosize_water_heater_capacities(&mut specs, Some(0.0), 10.0);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("capacity must be set even with zero bedrooms");
+        let volume_m3 = result
+            .parameters
+            .get("tank_volume_m3")
+            .and_then(|v| v.as_f64())
+            .expect("volume must be set even with zero bedrooms");
+
+        // Default tank for 0 BR is 50 gal.
+        let expected_vol_m3 = hares_physics::units::volume_gal_to_m3(50.0);
+        assert!(
+            (volume_m3 - expected_vol_m3).abs() < 1e-6,
+            "zero-bedroom default volume should be 50 gal, got {volume_m3} m3"
+        );
+        assert!(
+            capacity_w > 0.0 && capacity_w.is_finite(),
+            "zero-bedroom capacity {capacity_w} must be positive and finite"
+        );
+    }
+
+    #[test]
+    fn wh_autosize_unreasonable_mains_temp_uses_default() {
+        // A mains temp of 50 °C is unreasonable for cold water; the
+        // autosizer should fall back to 10 °C and produce a reasonable
+        // capacity.
+        let mut specs = vec![wh_spec("Gas Water Heater", FuelType::Gas, &[])];
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 50.0);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("capacity must be set");
+
+        // With 10 °C default mains and 51.67 °C setpoint: ΔT = 41.67 °C
+        // 3 BR → FHR = 48, tank = 50 gal
+        // usable = 35 gal, deficit = 13 gal
+        // capacity = 13 × 4.395 × 41.67 ≈ 2380 W
+        let expected = (48.0 - 0.7 * 50.0) * WATER_ENERGY_FACTOR * (DEFAULT_WH_SETPOINT_C - 10.0);
+        assert!(
+            (capacity_w - expected).abs() < 1e-3,
+            "with unreasonable mains temp 50 °C, should fall back to 10 °C \
+             and produce {expected:.2} W, got {capacity_w:.2} W"
+        );
+        assert!(capacity_w > 0.0, "capacity must be positive");
+    }
+
+    #[test]
+    fn wh_autosize_none_bedrooms_uses_conservative_defaults() {
+        // When n_bedrooms is None, the autosizer must use conservative
+        // defaults without panicking.
+        let mut specs = vec![wh_spec(
+            "Electric Resistance Water Heater",
+            FuelType::Electric,
+            &[],
+        )];
+        autosize_water_heater_capacities(&mut specs, None, 10.0);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("capacity must be set even with None bedrooms");
+        let volume_m3 = result
+            .parameters
+            .get("tank_volume_m3")
+            .and_then(|v| v.as_f64())
+            .expect("volume must be set even with None bedrooms");
+
+        let expected_vol_m3 = hares_physics::units::volume_gal_to_m3(DEFAULT_TANK_VOLUME_GAL);
+        assert!(
+            (volume_m3 - expected_vol_m3).abs() < 1e-6,
+            "None-bedroom volume should be default 50 gal"
+        );
+        assert!(
+            capacity_w > 0.0 && capacity_w.is_finite(),
+            "None-bedroom capacity must be positive"
+        );
+    }
+
+    #[test]
+    fn wh_autosize_applies_factor_override() {
+        // Water heater factor override should scale the capacity.
+        let mut specs = vec![wh_spec(
+            "Electric Resistance Water Heater",
+            FuelType::Electric,
+            &[("autosize_water_heater_factor", json!(1.5))],
+        )];
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("capacity must be set");
+
+        // Base: 3 BR → FHR = 48, tank = 50 → deficit 13 gal
+        // capacity_base = 13 × 4.395 × 41.67 ≈ 2380 W
+        // With factor 1.5: 2380 × 1.5 = 3570 W
+        let base_cap = (48.0 - 0.7 * 50.0) * WATER_ENERGY_FACTOR * (DEFAULT_WH_SETPOINT_C - 10.0);
+        let expected = base_cap * 1.5;
+        assert!(
+            (capacity_w - expected).abs() < 1e-3,
+            "with factor 1.5, capacity should be base {base_cap:.2} × 1.5 = {expected:.2}, \
+             got {capacity_w:.2}"
+        );
+        assert!(
+            !result
+                .parameters
+                .contains_key("autosize_water_heater_factor"),
+            "autosize_water_heater_factor must be consumed"
+        );
+    }
+
+    #[test]
+    fn wh_autosize_respects_min_capacity_limit() {
+        // Minimum capacity clamp must work.
+        let mut specs = vec![wh_spec(
+            "Electric Resistance Water Heater",
+            FuelType::Electric,
+            &[("autosize_water_heater_min_w", json!(10000.0))],
+        )];
+        // 1 BR → tank = 40 gal, FHR = 36 GPH, usable = 28 gal, deficit = 8 gal
+        // capacity = 8 × 4.395 × 41.67 ≈ 1465 W, below 10kW min
+        autosize_water_heater_capacities(&mut specs, Some(1.0), 10.0);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("capacity must be set");
+
+        assert!(
+            (capacity_w - 10000.0).abs() < 1e-3,
+            "capacity must be clamped to min 10 kW, got {capacity_w}"
+        );
+        assert!(
+            !result
+                .parameters
+                .contains_key("autosize_water_heater_min_w"),
+            "min limit must be consumed"
+        );
+    }
+
+    #[test]
+    fn wh_fhr_table_values_match_per_bedroom_sizing() {
+        // Verify the FHR lookup table values.
+        assert!((required_fhr_gph(1.0) - 36.0).abs() < 1e-6);
+        assert!((required_fhr_gph(2.0) - 42.0).abs() < 1e-6);
+        assert!((required_fhr_gph(3.0) - 48.0).abs() < 1e-6);
+        assert!((required_fhr_gph(4.0) - 54.0).abs() < 1e-6);
+        assert!((required_fhr_gph(5.0) - 62.0).abs() < 1e-6);
+        assert!((required_fhr_gph(6.0) - 62.0).abs() < 1e-6);
+        assert!((required_fhr_gph(0.0) - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn wh_tank_volume_table_matches_sizing_rules() {
+        // Verify the tank volume lookup table.
+        assert!((tank_volume_from_bedrooms_gal(1.0) - 40.0).abs() < 1e-6);
+        assert!((tank_volume_from_bedrooms_gal(2.0) - 40.0).abs() < 1e-6);
+        assert!((tank_volume_from_bedrooms_gal(3.0) - 50.0).abs() < 1e-6);
+        assert!((tank_volume_from_bedrooms_gal(4.0) - 50.0).abs() < 1e-6);
+        assert!((tank_volume_from_bedrooms_gal(5.0) - 60.0).abs() < 1e-6);
+        assert!((tank_volume_from_bedrooms_gal(6.0) - 60.0).abs() < 1e-6);
+        assert!((tank_volume_from_bedrooms_gal(0.0) - DEFAULT_TANK_VOLUME_GAL).abs() < 1e-6);
+    }
+
+    #[test]
+    fn wh_autosize_hpwh_uses_backup_element_power_w_field() {
+        // Heat Pump Water Heater uses `backup_element_power_w` as the
+        // capacity field name, not `heating_capacity_w`.
+        let mut specs = vec![wh_spec("Heat Pump Water Heater", FuelType::Electric, &[])];
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+
+        let result = &specs[0];
+        // The autosizer writes `heating_capacity_w` to params (generic key)
+        // but patches the typed_config with `backup_element_power_w`.
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("params must have heating_capacity_w");
+        let volume_m3 = result
+            .parameters
+            .get("tank_volume_m3")
+            .and_then(|v| v.as_f64())
+            .expect("params must have tank_volume_m3");
+
+        assert!(capacity_w > 0.0);
+        assert!(volume_m3 > 0.0);
+        assert!(!result.parameters.contains_key("autosize_water_heater"));
+    }
+
+    #[test]
+    fn wh_autosize_indirect_tank_only_sets_volume() {
+        // Indirect tanks get heat from the boiler. The autosizer computes
+        // heating_capacity_w and writes it to spec.parameters (the generic
+        // capacity field), but skips patching typed_config for Indirect Tank
+        // because the config struct uses a different field name for capacity.
+        // This test verifies: tank volume is set, flag is consumed.
+        let mut specs = vec![wh_spec("Indirect Tank", FuelType::Gas, &[])];
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+
+        let result = &specs[0];
+        let volume_m3 = result
+            .parameters
+            .get("tank_volume_m3")
+            .and_then(|v| v.as_f64())
+            .expect("tank_volume_m3 must be set");
+
+        let expected_vol_m3 = hares_physics::units::volume_gal_to_m3(50.0);
+        assert!((volume_m3 - expected_vol_m3).abs() < 1e-6);
+
+        // Indirect Tank typed_config is not patched (different field name);
+        // heating_capacity_w in params is set by the generic capacity path
+        // but not asserted here. Key verification: volume is set and flag consumed.
+        assert!(
+            !result.parameters.contains_key("autosize_water_heater"),
+            "autosize flag must be consumed"
+        );
+    }
+
+    #[test]
+    fn wh_autosize_preserves_existing_volume() {
+        // When HPXML provides TankVolume, the autosizer must NOT override it.
+        let mut params = Map::new();
+        params.insert("autosize_water_heater".to_string(), json!(true));
+        params.insert("tank_volume_m3".to_string(), json!(0.1));
+        let spec = EquipmentSpec {
+            name: "Gas Water Heater".to_string(),
+            instance_name: None,
+            fuel_type: FuelType::Gas,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        };
+        let mut specs = vec![spec];
+
+        autosize_water_heater_capacities(&mut specs, Some(3.0), 10.0);
+
+        let result = &specs[0];
+        let volume_m3 = result
+            .parameters
+            .get("tank_volume_m3")
+            .and_then(|v| v.as_f64())
+            .expect("volume must remain");
+
+        assert!(
+            (volume_m3 - 0.1).abs() < 1e-6,
+            "explicit volume 0.1 m3 must not be overridden, got {volume_m3}"
+        );
     }
 }

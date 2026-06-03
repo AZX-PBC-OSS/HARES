@@ -1462,6 +1462,33 @@ impl Dwelling {
             );
         }
 
+        // ── Autosize water heater capacities ────────────────────────────────
+        //
+        // When HPXML water heaters omit HeatingCapacity or TankVolume,
+        // compute the required capacity and storage volume using a First-Hour
+        // Rating methodology (DOE 10 CFR Part 430 Subpart B Appendix E).
+        // Tank volume is sized by bedroom count; heating capacity is computed
+        // from the required FHR, usable tank volume, and design temperature
+        // rise (setpoint − mains temperature).
+        //
+        // Runs after HVAC autosizing (no dependency between them) and before
+        // equipment creation.
+        {
+            // FHR sizing by bedroom count is a structural property (number of
+            // bedrooms), not an occupancy proxy. The occupancy-adjusted bedroom
+            // count used by parse_avg_water_draw_and_bedrooms for draw estimation
+            // is intentionally NOT used here so the structural count drives the
+            // per-bedroom FHR values (DOE 10 CFR Part 430 App E test procedure
+            // bases sizing on the dwelling, not on occupancy).
+            let n_bedrooms =
+                hares_io::hpxml::extract_bedroom_count(&building, config.patches.as_ref());
+            crate::dwelling::autosize::autosize_water_heater_capacities(
+                &mut equipment_specs,
+                Some(n_bedrooms),
+                initial_env.weather.mains_temp_c,
+            );
+        }
+
         // Enable ideal HVAC on the indoor zone when both heating AND cooling
         // setpoints are configured -- the thermal solver back-calculates the exact
         // load needed to maintain the setpoint at each timestep.

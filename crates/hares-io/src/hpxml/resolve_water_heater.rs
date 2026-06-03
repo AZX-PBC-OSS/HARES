@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 
+use serde_json::json;
+
 use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
@@ -353,6 +355,34 @@ pub(super) fn resolve_water_heaters(
             spec.related_hvac_idref = related_hvac_idref;
         }
         spec.system_id = element_id(wh);
+
+        // Set autosize_water_heater flag when capacity or tank volume is
+        // absent for storage-type water heaters. Tankless water heaters
+        // are sized by flow rate, not FHR/tank volume, and are excluded.
+        let is_storage_type = matches!(
+            name.as_str(),
+            "Electric Resistance Water Heater"
+                | "Gas Water Heater"
+                | "Heat Pump Water Heater"
+                | "Indirect Tank"
+        );
+        if is_storage_type {
+            let needs_capacity = heating_capacity_w.is_none();
+            let needs_volume = tank_volume_m3.is_none();
+            if needs_capacity || needs_volume {
+                spec.parameters
+                    .insert("autosize_water_heater".to_string(), json!(true));
+                // Parse factor from extension if present.
+                if let Some(factor) = wh
+                    .path(&["extension"])
+                    .and_then(|ext| child_f64(ext, "WaterHeaterAutosizingFactor"))
+                {
+                    spec.parameters
+                        .insert("autosize_water_heater_factor".to_string(), json!(factor));
+                }
+            }
+        }
+
         specs.push(spec);
     }
     // Invariant: when multiple WaterHeatingSystem elements are present, each
@@ -463,6 +493,25 @@ fn parse_avg_water_draw_and_bedrooms(
     );
 
     (Some(draw_l_per_day), Some(n_bedrooms))
+}
+
+/// Public entry point: extract the bedroom count from a parsed [`Building`].
+///
+/// Reads `<BuildingSummary>/<BuildingConstruction>/<NumberofBedrooms>` from
+/// the building's details XML. Falls back to data patches when the HPXML field
+/// is absent; falls back to 2.0 (the RESNET 301 default) when neither source
+/// is available.
+pub fn extract_bedroom_count(building: &Building, data_patches: Option<&HpxmlDataPatches>) -> f64 {
+    let details = &building.details_xml;
+    let raw = details
+        .path(&[
+            "BuildingSummary",
+            "BuildingConstruction",
+            "NumberofBedrooms",
+        ])
+        .and_then(|n| n.text.trim().parse::<f64>().ok());
+    raw.or_else(|| data_patches.and_then(|p| p.number_of_bedrooms))
+        .unwrap_or(2.0)
 }
 
 fn typed_spec<T>(
