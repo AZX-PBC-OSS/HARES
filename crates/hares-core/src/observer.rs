@@ -10,8 +10,8 @@ use chrono::{DateTime, FixedOffset};
 use hares_control::{DispatchTarget, PriorityTier};
 use hares_envelope::EnvelopeComponentGains;
 use hares_types::{
-    ControlSignal, DomainUpdate, EndUse, FluidType, FuelType, LoopId, PortDeclaration, Telemetry,
-    ZoneId,
+    ControlSignal, DomainId, DomainUpdate, EndUse, FluidType, FuelType, LoopId, PortDeclaration,
+    Telemetry, ZoneId,
 };
 
 /// Complete snapshot of a single simulation timestep, populated incrementally
@@ -40,6 +40,7 @@ pub struct PhaseSnapshots {
     pub post_nonthermal_equipment: Option<EquipmentPhaseCapture>,
     pub post_thermal_equipment: Option<EquipmentPhaseCapture>,
     pub post_solvers: Option<SolverCapture>,
+    pub post_custom_solvers: Option<CustomSolverCapture>,
     pub post_zone_update: Option<ZoneUpdateCapture>,
 }
 
@@ -172,6 +173,20 @@ pub struct SolverCapture {
 pub struct ZoneUpdateCapture {
     pub zone_temps_c: Vec<(ZoneId, f64)>,
     pub zone_humidity_ratios: Vec<(ZoneId, f64)>,
+}
+
+/// Per-custom-solver observation: domain identity and a state snapshot
+/// from `DomainSolver::observation_state()`.
+#[derive(Debug, Clone)]
+pub struct CustomSolverObservation {
+    pub domain_id: DomainId,
+    pub state: Vec<f64>,
+}
+
+/// Capture of all custom domain solver outputs after `resolve()`.
+#[derive(Debug, Clone)]
+pub struct CustomSolverCapture {
+    pub solvers: Vec<CustomSolverObservation>,
 }
 
 /// Capture of all dispatched control signals and their resolution.

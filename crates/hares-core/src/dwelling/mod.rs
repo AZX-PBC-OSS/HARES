@@ -4252,6 +4252,20 @@ impl Dwelling {
                 .upsert_domain_ref(&self.custom_update_bufs[i]);
         }
 
+        #[cfg(feature = "observe")]
+        if self.observer_buf.is_some() {
+            let capture = observer_capture::capture_custom_solvers(&self.custom_domain_solvers);
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                debug_assert_eq!(
+                    capture.solvers.len(),
+                    self.custom_domain_solvers.len(),
+                    "custom solver capture count mismatch"
+                );
+            }
+            obs_phases.post_custom_solvers = Some(capture);
+        }
+
         #[cfg(feature = "profiling")]
         {
             let elapsed = envelope_started.elapsed();
@@ -10261,5 +10275,235 @@ master_seed = 7
                 "zone temperatures must match at step {i}"
             );
         }
+    }
+
+    #[cfg(feature = "observe")]
+    #[test]
+    fn custom_solvers_captured_in_observer_snapshot() {
+        use hares_types::{DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots};
+        use std::time::Duration;
+
+        struct StubSolver {
+            id: DomainId,
+            state: Vec<f64>,
+        }
+
+        impl DomainSolver for StubSolver {
+            fn domain_id(&self) -> DomainId {
+                self.id
+            }
+            fn resolve(
+                &mut self,
+                _ports: &PortSlots,
+                _env: &EnvironmentState,
+                _dt: Duration,
+                _out: &mut DomainUpdate,
+            ) {
+            }
+            fn observation_state(&self) -> Vec<f64> {
+                self.state.clone()
+            }
+        }
+
+        let toml_path = {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-custom-solver-capture-{nanos}.toml"));
+            path
+        };
+
+        std::fs::write(
+            &toml_path,
+            r#"building_id = 999
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 60
+duration_s = 120
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[weather]
+outdoor_temp_c = -10.0
+dew_point_c = -5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.5
+
+[schedule]
+occupancy = 1.0
+
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#,
+        )
+        .expect("write synthetic TOML");
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let _ = std::fs::remove_file(&toml_path);
+
+        dwelling
+            .custom_update_bufs
+            .push(hares_types::DomainUpdate::empty(hares_types::DomainId(0)));
+
+        dwelling.custom_domain_solvers.push(Box::new(StubSolver {
+            id: DomainId(42),
+            state: vec![1.0, 2.0, 3.0],
+        }));
+
+        dwelling.enable_observer(10);
+
+        dwelling.run_timestep(false).expect("step");
+
+        let snapshots = dwelling.drain_observations();
+        assert_eq!(snapshots.len(), 1, "expected one snapshot after one step");
+
+        let snapshot = &snapshots[0];
+        let custom_capture = snapshot
+            .phases
+            .post_custom_solvers
+            .as_ref()
+            .expect("post_custom_solvers must be populated");
+
+        assert_eq!(custom_capture.solvers.len(), 1);
+        assert_eq!(custom_capture.solvers[0].domain_id, DomainId(42));
+        assert_eq!(custom_capture.solvers[0].state, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[cfg(feature = "observe")]
+    #[test]
+    fn builtin_and_custom_solver_captures_coexist() {
+        use hares_types::{DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots};
+        use std::time::Duration;
+
+        struct StubSolver {
+            id: DomainId,
+        }
+
+        impl DomainSolver for StubSolver {
+            fn domain_id(&self) -> DomainId {
+                self.id
+            }
+            fn resolve(
+                &mut self,
+                _ports: &PortSlots,
+                _env: &EnvironmentState,
+                _dt: Duration,
+                _out: &mut DomainUpdate,
+            ) {
+            }
+        }
+
+        let toml_path = {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-coexist-capture-{nanos}.toml"));
+            path
+        };
+
+        std::fs::write(
+            &toml_path,
+            r#"building_id = 999
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 60
+duration_s = 120
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[weather]
+outdoor_temp_c = -10.0
+dew_point_c = -5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.5
+
+[schedule]
+occupancy = 1.0
+
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#,
+        )
+        .expect("write synthetic TOML");
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let _ = std::fs::remove_file(&toml_path);
+
+        dwelling
+            .custom_update_bufs
+            .push(hares_types::DomainUpdate::empty(hares_types::DomainId(0)));
+
+        dwelling
+            .custom_domain_solvers
+            .push(Box::new(StubSolver { id: DomainId(77) }));
+
+        dwelling.enable_observer(10);
+
+        dwelling.run_timestep(false).expect("step");
+
+        let snapshots = dwelling.drain_observations();
+        assert_eq!(snapshots.len(), 1);
+
+        let snapshot = &snapshots[0];
+
+        let solver_capture = snapshot
+            .phases
+            .post_solvers
+            .as_ref()
+            .expect("post_solvers must be populated for built-in solvers");
+
+        assert!(
+            !solver_capture.thermal_update.zone_temperatures_c.is_empty(),
+            "thermal update must contain zone temperatures"
+        );
+
+        let custom_capture = snapshot
+            .phases
+            .post_custom_solvers
+            .as_ref()
+            .expect("post_custom_solvers must be populated for custom solvers");
+
+        assert_eq!(custom_capture.solvers.len(), 1);
+        assert_eq!(custom_capture.solvers[0].domain_id, DomainId(77));
     }
 }

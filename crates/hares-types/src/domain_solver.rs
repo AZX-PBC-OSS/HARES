@@ -47,6 +47,15 @@ pub trait DomainSolver: Send + Sync {
         out: &mut DomainUpdate,
     );
 
+    /// Optional observation state for the observer framework.
+    ///
+    /// Returns a snapshot of the solver's internal state vector or key output
+    /// scalars. The default returns an empty vector; override to provide
+    /// domain-specific observability.
+    fn observation_state(&self) -> Vec<f64> {
+        Vec::new()
+    }
+
     /// Convenience wrapper that allocates and returns a new `DomainUpdate`.
     /// Prefer passing a reusable buffer via `resolve` in hot loops.
     fn resolve_new(

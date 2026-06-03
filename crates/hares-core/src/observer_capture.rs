@@ -5,11 +5,12 @@
 
 use hares_envelope::ThermalSolver;
 use hares_equipment::Equipment;
-use hares_types::{DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneId};
+use hares_types::{DomainSolver, DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneId};
 
 use crate::observer::{
-    EnvironmentCapture, EquipmentContribution, EquipmentObservation, EquipmentPhaseCapture,
-    FluidContributionCapture, FluidPortCapture, PortsCapture, SolverCapture, ZoneUpdateCapture,
+    CustomSolverCapture, CustomSolverObservation, EnvironmentCapture, EquipmentContribution,
+    EquipmentObservation, EquipmentPhaseCapture, FluidContributionCapture, FluidPortCapture,
+    PortsCapture, SolverCapture, ZoneUpdateCapture,
 };
 
 /// Captures weather + zone state from the environment.
@@ -215,6 +216,20 @@ pub(crate) fn capture_zone_update(env: &EnvironmentState) -> ZoneUpdateCapture {
     ZoneUpdateCapture {
         zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
         zone_humidity_ratios: env.zones.iter().map(|z| (z.id, z.humidity_ratio)).collect(),
+    }
+}
+
+/// Captures observation state from all custom domain solvers after their
+/// resolve step.
+pub(crate) fn capture_custom_solvers(solvers: &[Box<dyn DomainSolver>]) -> CustomSolverCapture {
+    CustomSolverCapture {
+        solvers: solvers
+            .iter()
+            .map(|s| CustomSolverObservation {
+                domain_id: s.domain_id(),
+                state: s.observation_state(),
+            })
+            .collect(),
     }
 }
 
@@ -486,5 +501,58 @@ mod tests {
             .iter()
             .find(|(ft, _)| *ft == FuelType::Coal);
         assert!(coal.is_none(), "zero delta must be filtered out");
+    }
+
+    #[test]
+    fn capture_custom_solvers_records_domain_id_and_state() {
+        use hares_types::{DomainId, DomainSolver, EnvironmentState, PortSlots};
+        use std::time::Duration;
+
+        struct StubSolver {
+            id: DomainId,
+            state: Vec<f64>,
+        }
+
+        impl DomainSolver for StubSolver {
+            fn domain_id(&self) -> DomainId {
+                self.id
+            }
+            fn resolve(
+                &mut self,
+                _ports: &PortSlots,
+                _env: &EnvironmentState,
+                _dt: Duration,
+                _out: &mut DomainUpdate,
+            ) {
+            }
+            fn observation_state(&self) -> Vec<f64> {
+                self.state.clone()
+            }
+        }
+
+        let s1: Box<dyn DomainSolver> = Box::new(StubSolver {
+            id: DomainId(42),
+            state: vec![1.0, 2.0, 3.0],
+        });
+        let s2: Box<dyn DomainSolver> = Box::new(StubSolver {
+            id: DomainId(99),
+            state: vec![],
+        });
+        let solvers: Vec<Box<dyn DomainSolver>> = vec![s1, s2];
+
+        let capture = capture_custom_solvers(&solvers);
+
+        assert_eq!(capture.solvers.len(), 2);
+        assert_eq!(capture.solvers[0].domain_id, DomainId(42));
+        assert_eq!(capture.solvers[0].state, vec![1.0, 2.0, 3.0]);
+        assert_eq!(capture.solvers[1].domain_id, DomainId(99));
+        assert!(capture.solvers[1].state.is_empty());
+    }
+
+    #[test]
+    fn capture_custom_solvers_empty_input_yields_empty_capture() {
+        let solvers: Vec<Box<dyn DomainSolver>> = vec![];
+        let capture = capture_custom_solvers(&solvers);
+        assert!(capture.solvers.is_empty());
     }
 }
