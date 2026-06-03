@@ -477,7 +477,7 @@ fn pv_generation_visible_to_thermal_in_same_step() {
         ExecutionStage::Electrical,
         ExecutionStage::Thermal,
     ];
-    let ordered_correctly = order.windows(3).any(|w| **w == *expected_triple);
+    let ordered_correctly = order.windows(3).any(|w| w == expected_triple);
     assert!(
         ordered_correctly,
         "expected Independent→Electrical→Thermal ordering; got: {order:?}",

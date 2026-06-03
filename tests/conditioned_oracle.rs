@@ -25,7 +25,9 @@ mod tests {
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
     use hares_equipment::hvac::heating_config::IdealCapacityModeConfig;
-    use hares_equipment::{EquipmentConfig, EquipmentRegistry, IdealHvacConfig};
+    use hares_equipment::{
+        EquipmentConfig, EquipmentRegistry, HvacSetpointConfig, IdealHvacConfig,
+    };
     use hares_io::OutputFormat;
     use hares_physics::solar::GlazingCurve;
     use hares_types::{EndUse, ScheduleSourceConfig, ZoneId};
@@ -94,6 +96,7 @@ mod tests {
             bldg_id: 1,
             initialization_duration: None,
             resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
+            patches: None,
         }
     }
 
@@ -171,18 +174,21 @@ mod tests {
                 ideal_capacity_mode: Some(IdealCapacityModeConfig::On),
                 heating_capacity_w: Some(10_000.0),
                 cooling_capacity_w: Some(10_000.0),
-                heating_setpoint_source: Some(ScheduleSourceConfig::DailyProfile {
-                    weekday: heating_arr,
-                    weekend: heating_arr,
-                    month_multipliers: [1.0; 12],
-                    max_value: 1.0,
-                }),
-                cooling_setpoint_source: Some(ScheduleSourceConfig::DailyProfile {
-                    weekday: cooling_arr,
-                    weekend: cooling_arr,
-                    month_multipliers: [1.0; 12],
-                    max_value: 1.0,
-                }),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_source: Some(ScheduleSourceConfig::DailyProfile {
+                        weekday: heating_arr,
+                        weekend: heating_arr,
+                        month_multipliers: [1.0; 12],
+                        max_value: 1.0,
+                    }),
+                    cooling_setpoint_source: Some(ScheduleSourceConfig::DailyProfile {
+                        weekday: cooling_arr,
+                        weekend: cooling_arr,
+                        month_multipliers: [1.0; 12],
+                        max_value: 1.0,
+                    }),
+                    ..HvacSetpointConfig::default()
+                },
                 ..IdealHvacConfig::default()
             },
         )

@@ -65,6 +65,8 @@ use crate::telemetry::DwellingTelemetry;
 use crate::{Actor, ActorInterest, EnvironmentManager, SimClock, derive_dwelling_rng};
 
 #[cfg(feature = "observe")]
+use crate::diagnostics::DiagnosticAccumulator;
+#[cfg(feature = "observe")]
 use crate::observer::{
     DispatchCapture, DispatchedSignal, EquipmentObservation, MoistureInvariantCapture,
     MoistureZoneInvariant, ObserverBuffer, PhaseSnapshots, SameTierConflict, StepSnapshot,
@@ -1149,6 +1151,11 @@ pub struct Dwelling {
     /// is non-finite; resets to 0 each step.
     #[cfg(feature = "observe")]
     nan_temperature_count: usize,
+    /// Accumulates per-step data for post-hoc diagnostic checks (unmet hours,
+    /// short-cycling, freezing excursions, simultaneous heating/cooling).
+    /// Evaluated at end-of-run by `run_post_hoc_checks()`.
+    #[cfg(feature = "observe")]
+    diagnostic_accum: Option<DiagnosticAccumulator>,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     envelope_diagnostics: EnvelopeDiagnostics,
 }
@@ -1941,6 +1948,8 @@ impl Dwelling {
             rolled_back_port_equipment: 0,
             #[cfg(feature = "observe")]
             nan_temperature_count: 0,
+            #[cfg(feature = "observe")]
+            diagnostic_accum: None,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             envelope_diagnostics: solvers.envelope_diagnostics,
         };
@@ -2049,6 +2058,19 @@ impl Dwelling {
             self.run_timestep(self.write_output)?;
         }
         self.finalize_billing();
+
+        // --- Post-hoc diagnostic checks on accumulated observer data ---
+        #[cfg(feature = "observe")]
+        {
+            let violations = self.run_diagnostic_checks();
+            if violations > 0 {
+                tracing::warn!(
+                    violation_count = violations,
+                    "post-hoc diagnostic checks found {violations} violation(s)"
+                );
+            }
+        }
+
         if let Some(recorder) = self.recorder.as_mut() {
             recorder
                 .flush_and_close()
@@ -2059,6 +2081,29 @@ impl Dwelling {
                 .map_err(|err| HaresError::Io(format!("diagnostic close failed: {err}")))?;
         }
         Ok(self.simulation_results.clone())
+    }
+
+    /// Runs post-hoc diagnostic checks on accumulated observer data and returns
+    /// the number of violations found.
+    #[cfg(feature = "observe")]
+    fn run_diagnostic_checks(&mut self) -> usize {
+        let Some(accum) = &self.diagnostic_accum else {
+            return 0;
+        };
+        let zone_names: Vec<String> = self
+            .latest_env
+            .zones
+            .iter()
+            .map(|z| {
+                if z.id == ZoneId(1) {
+                    "Indoor".to_string()
+                } else {
+                    format!("Zone{}", z.id.0)
+                }
+            })
+            .collect();
+        let time_res_s = self.latest_env.time_step_secs();
+        accum.run_post_hoc_checks(&mut self.diagnostic_writer, &zone_names, time_res_s)
     }
 
     /// Emit the final partial billing period (if any). Call after the last
@@ -2888,9 +2933,36 @@ impl Dwelling {
     /// Enables the step observer with a ring buffer of the given capacity.
     ///
     /// Calling this again replaces any existing buffer and discards buffered snapshots.
+    /// Also initialises the post-hoc diagnostic accumulator when called for the
+    /// first time or re-created.
     #[cfg(feature = "observe")]
     pub fn enable_observer(&mut self, capacity: usize) {
         self.observer_buf = Some(ObserverBuffer::new(capacity));
+        self.initialize_diagnostic_accum();
+    }
+
+    /// Initialises (or re-initialises) the post-hoc diagnostic accumulator from
+    /// current zone and equipment state.  Call after `enable_observer()` and
+    /// after any equipment add/remove that changes the equipment list.
+    #[cfg(feature = "observe")]
+    fn initialize_diagnostic_accum(&mut self) {
+        let zone_ids: Vec<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
+        let equipment_names: Vec<String> = self
+            .equipment
+            .iter()
+            .map(|eq| eq.descriptor().name.clone())
+            .collect();
+        let equipment_zones: Vec<Option<ZoneId>> = self
+            .equipment
+            .iter()
+            .map(|eq| eq.descriptor().zone)
+            .collect();
+        self.diagnostic_accum = Some(DiagnosticAccumulator::new(
+            &zone_ids,
+            &self.zone_is_conditioned,
+            &equipment_names,
+            &equipment_zones,
+        ));
     }
 
     /// Drains all buffered step snapshots.
@@ -4253,11 +4325,11 @@ impl Dwelling {
         if let Some(buf) = &mut self.observer_buf {
             obs_phases.post_zone_update =
                 Some(observer_capture::capture_zone_update(&self.latest_env));
-            let moisture_invariant = #[cfg(all(
+            #[cfg(all(
                 feature = "observe",
                 any(debug_assertions, feature = "check_invariants")
             ))]
-            if self.invariant_moisture_capture.is_empty() {
+            let moisture_invariant = if self.invariant_moisture_capture.is_empty() {
                 None
             } else {
                 Some(MoistureInvariantCapture {
@@ -4277,6 +4349,15 @@ impl Dwelling {
                 actor_calls,
                 moisture_invariant,
             });
+        }
+
+        // Record per-step diagnostic data for post-hoc checks (unmet hours,
+        // short-cycling, freezing, simultaneous heating/cooling).  Runs when
+        // the observer is active so check data is available for end-of-run
+        // analysis.
+        #[cfg(feature = "observe")]
+        if let Some(accum) = &mut self.diagnostic_accum {
+            accum.record_from_state(&self.latest_env.zones, &self.equipment);
         }
 
         // Snapshot end-of-timestep equipment state into latest_env so that the

@@ -84,6 +84,7 @@ mod tests {
             // Use ZOH resampling for all continuous weather fields to match
             // OCHRE's pandas resample().ffill() convention for parity testing.
             resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
+            patches: None,
         }
     }
 

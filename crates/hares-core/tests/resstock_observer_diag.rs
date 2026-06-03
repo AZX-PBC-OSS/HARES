@@ -102,6 +102,7 @@ mod tests {
             bldg_id: 300,
             initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
             resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
+            patches: None,
         };
 
         let engine = SimulationEngine::new();
