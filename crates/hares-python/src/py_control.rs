@@ -73,7 +73,10 @@ impl PyControlSignal {
     #[staticmethod]
     pub fn ideal_capacity(capacity_w: f64) -> Self {
         Self {
-            signal: ControlSignal::IdealCapacity { capacity_w, degraded: false },
+            signal: ControlSignal::IdealCapacity {
+                capacity_w,
+                degraded: false,
+            },
         }
     }
 

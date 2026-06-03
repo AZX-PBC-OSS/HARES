@@ -44,11 +44,11 @@ use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 #[cfg(test)]
 use hares_types::LoopId;
 use hares_types::{
-    BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver, ElectricalSummary,
-    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
-    ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
-    validate_fluid_type_consistency,
+    ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlCapabilities, ControlSignal, DomainSolver,
+    ElectricalSummary, EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState,
+    HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID,
+    ScheduleSource, ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
+    validate_core_contract, validate_fluid_type_consistency,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -943,6 +943,13 @@ pub struct Dwelling {
     pub clock: SimClock,
     pub environment: EnvironmentManager,
     pub ports: PortSlots,
+    /// Pre-allocated snapshot buffer for equipment port rollback.
+    /// On each equipment step the current `ports` state is copied into this
+    /// buffer (reusing existing Vec capacities) via [`PortSlots::copy_into`].
+    /// If the step fails, `ports` and `rollback_ports` are swapped (O(1),
+    /// no allocation) to restore the pre-step state.  Initialised from the
+    /// same port declarations as `ports` so capacities always match.
+    rollback_ports: PortSlots,
     pub recorder: Option<StreamingRecorder>,
     pub rng: ChaCha8Rng,
     pub warnings: Vec<String>,
@@ -1133,6 +1140,10 @@ pub struct Dwelling {
     actor_name_cache: Vec<String>,
     #[cfg(feature = "observe")]
     observer_buf: Option<ObserverBuffer>,
+    /// Number of equipment whose port contributions were rolled back this
+    /// timestep following a failed `step()` call.
+    #[cfg(feature = "observe")]
+    rolled_back_port_equipment: usize,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     envelope_diagnostics: EnvelopeDiagnostics,
 }
@@ -1690,6 +1701,7 @@ impl Dwelling {
         validate_equipment_loops(&declarations, &allocated_loop_ids)?;
 
         let ports = PortSlots::from_declarations(&declarations);
+        let rollback_ports = PortSlots::from_declarations(&declarations);
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
@@ -1815,6 +1827,7 @@ impl Dwelling {
             clock: clock.clone(),
             environment,
             ports,
+            rollback_ports,
             recorder,
             rng,
             warnings,
@@ -1919,6 +1932,8 @@ impl Dwelling {
             actor_name_cache: Vec::new(),
             #[cfg(feature = "observe")]
             observer_buf: None,
+            #[cfg(feature = "observe")]
+            rolled_back_port_equipment: 0,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             envelope_diagnostics: solvers.envelope_diagnostics,
         };
@@ -2516,6 +2531,18 @@ impl Dwelling {
                     .collect::<Vec<_>>(),
             );
             schema = extend_schema_with_actor_columns(&schema, &self.actors);
+            {
+                use arrow::datatypes::DataType;
+                let mut fields: Vec<arrow::datatypes::Field> =
+                    schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+                fields.push(arrow::datatypes::Field::new(
+                    "port_rollback_count",
+                    DataType::Float64,
+                    true,
+                ));
+                schema =
+                    arrow::datatypes::Schema::new_with_metadata(fields, schema.metadata().clone());
+            }
             self.output_value_count = schema.fields().len() - 1;
             self.output_column_index = build_output_column_index(&schema);
             self.equipment_column_map =
@@ -3233,6 +3260,65 @@ impl Dwelling {
         }
     }
 
+    /// Roll back port contributions from a failed equipment step.
+    ///
+    /// Called after `self.rollback_ports.copy_into(&self.ports)` captured
+    /// the pre-step snapshot and the equipment's `step()` returned `Err`.
+    /// Swaps `self.ports` ↔ `self.rollback_ports` (restoring pre-step state),
+    /// computes discarded contribution totals, pushes a warning, increments
+    /// the observe-gated counter, and emits a `tracing::warn!`.
+    fn rollback_failed_equipment_ports(&mut self, idx: usize, err: &HaresError) {
+        self.warnings.push(format!(
+            "equipment step failed for '{}' : {err}",
+            self.equipment[idx].descriptor().name
+        ));
+        // self.rollback_ports holds the pre-step snapshot (from copy_into);
+        // self.ports holds the polluted post-step state.
+        std::mem::swap(&mut self.ports, &mut self.rollback_ports);
+        // Now self.ports is restored, self.rollback_ports is polluted.
+        let name = &self.equipment[idx].descriptor().name;
+        let id = self.equipment[idx].descriptor().id;
+        let discarded_thermal_w: f64 = self
+            .rollback_ports
+            .thermal
+            .iter()
+            .map(|t| t.sensible_gain_w + t.radiant_gain_w + t.latent_gain_w)
+            .sum::<f64>()
+            - self
+                .ports
+                .thermal
+                .iter()
+                .map(|t| t.sensible_gain_w + t.radiant_gain_w + t.latent_gain_w)
+                .sum::<f64>();
+        let discarded_electrical_w: f64 =
+            self.rollback_ports.electrical.net_active_w()
+                - self.ports.electrical.net_active_w();
+        let discarded_electrical_kvar: f64 =
+            self.rollback_ports.electrical.reactive_power_kvar
+                - self.ports.electrical.reactive_power_kvar;
+        let discarded_fuel_w: f64 = ALL_FUEL_TYPES
+            .iter()
+            .map(|&ft| self.rollback_ports.fuel.get(ft))
+            .sum::<f64>()
+            - ALL_FUEL_TYPES
+                .iter()
+                .map(|&ft| self.ports.fuel.get(ft))
+                .sum::<f64>();
+        #[cfg(feature = "observe")]
+        {
+            self.rolled_back_port_equipment += 1;
+        }
+        tracing::warn!(
+            equipment = %name,
+            equipment_id = %id,
+            discarded_thermal_w,
+            discarded_electrical_w,
+            discarded_electrical_kvar,
+            discarded_fuel_w,
+            "rolled back port contributions from failed equipment step"
+        );
+    }
+
     fn run_timestep(&mut self, record_output: bool) -> Result<()> {
         if self.failed {
             return Err(HaresError::Dwelling(
@@ -3299,6 +3385,11 @@ impl Dwelling {
 
         #[cfg(feature = "observe")]
         let mut obs_phases = PhaseSnapshots::default();
+
+        #[cfg(feature = "observe")]
+        {
+            self.rolled_back_port_equipment = 0;
+        }
 
         // Step 1: update environment at current clock state.
         // Feed zone temperatures back first so the borrow on self.latest_env.zones
@@ -3678,7 +3769,8 @@ impl Dwelling {
             Vec::with_capacity(self.equipment_execution_order.len());
 
         // Phase 1: Independent-stage equipment (PV, generators).
-        for &idx in &self.equipment_execution_order {
+        for _oi in 0..self.equipment_execution_order.len() {
+            let idx = self.equipment_execution_order[_oi];
             let stage = self.equipment[idx].descriptor().stage;
             if stage != ExecutionStage::Independent {
                 continue;
@@ -3687,11 +3779,9 @@ impl Dwelling {
             let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
+            self.rollback_ports.copy_into(&self.ports);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.warnings.push(format!(
-                    "equipment step failed for '{}' : {err}",
-                    self.equipment[idx].descriptor().name
-                ));
+                self.rollback_failed_equipment_ports(idx, &err);
             } else {
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
@@ -3744,7 +3834,8 @@ impl Dwelling {
         }
 
         // Phase 2: Electrical-stage equipment (Battery, EV).
-        for &idx in &self.equipment_execution_order {
+        for _oi in 0..self.equipment_execution_order.len() {
+            let idx = self.equipment_execution_order[_oi];
             let stage = self.equipment[idx].descriptor().stage;
             if stage != ExecutionStage::Electrical {
                 continue;
@@ -3753,11 +3844,9 @@ impl Dwelling {
             let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
+            self.rollback_ports.copy_into(&self.ports);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.warnings.push(format!(
-                    "equipment step failed for '{}' : {err}",
-                    self.equipment[idx].descriptor().name
-                ));
+                self.rollback_failed_equipment_ports(idx, &err);
             } else {
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
@@ -3792,18 +3881,17 @@ impl Dwelling {
         // only .step() is called here. Thermal equipment commits heating/cooling
         // power to ports with full visibility of same-step PV generation and
         // storage dispatch from Phases 1–2.
-        for &idx in &self.equipment_execution_order {
+        for _oi in 0..self.equipment_execution_order.len() {
+            let idx = self.equipment_execution_order[_oi];
             if self.equipment[idx].descriptor().stage != ExecutionStage::Thermal {
                 continue;
             }
             #[cfg(feature = "observe")]
             let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
 
+            self.rollback_ports.copy_into(&self.ports);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.warnings.push(format!(
-                    "equipment step failed for '{}' : {err}",
-                    self.equipment[idx].descriptor().name
-                ));
+                self.rollback_failed_equipment_ports(idx, &err);
             } else {
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
@@ -4285,6 +4373,10 @@ impl Dwelling {
         }
         if let Some(&idx) = self.output_column_index.get("Total Reactive Power (kVAR)") {
             row[idx] = self.electrical_solver.net_reactive_kvar();
+        }
+        #[cfg(feature = "observe")]
+        if let Some(&idx) = self.output_column_index.get("port_rollback_count") {
+            row[idx] = self.rolled_back_port_equipment as f64;
         }
 
         // Per-equipment columns via pre-resolved index map.
@@ -5465,6 +5557,7 @@ mod tests {
             declarations.extend_from_slice(eq.ports());
         }
         dwelling.ports = PortSlots::from_declarations(&declarations);
+        dwelling.rollback_ports = PortSlots::from_declarations(&declarations);
     }
 
     struct TestEquipment {
@@ -6489,9 +6582,15 @@ occupancy = 1.0
 
         // Verify the IdealCapacity signal is NOT degraded (normal operation).
         match &requests[0].signal {
-            ControlSignal::IdealCapacity { capacity_w, degraded } => {
+            ControlSignal::IdealCapacity {
+                capacity_w,
+                degraded,
+            } => {
                 assert!((*capacity_w - 5000.0).abs() < 1e-9);
-                assert!(!degraded, "normal solver output must not be flagged as degraded");
+                assert!(
+                    !degraded,
+                    "normal solver output must not be flagged as degraded"
+                );
             }
             _ => panic!("expected IdealCapacity signal"),
         }
@@ -6539,9 +6638,15 @@ occupancy = 1.0
 
         assert_eq!(requests.len(), 1);
         match &requests[0].signal {
-            ControlSignal::IdealCapacity { capacity_w, degraded } => {
+            ControlSignal::IdealCapacity {
+                capacity_w,
+                degraded,
+            } => {
                 assert!((*capacity_w - 4500.0).abs() < 1e-9);
-                assert!(*degraded, "degraded flag must be true when capacity is a fallback");
+                assert!(
+                    *degraded,
+                    "degraded flag must be true when capacity is a fallback"
+                );
             }
             _ => panic!("expected IdealCapacity signal"),
         }
@@ -7572,7 +7677,10 @@ occupancy = 1.0
         // Step 2: User actor emits override at Grid priority (e.g., DR curtailment)
         requests.push(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("HVAC")),
-            signal: ControlSignal::IdealCapacity { capacity_w: 0.0, degraded: false },
+            signal: ControlSignal::IdealCapacity {
+                capacity_w: 0.0,
+                degraded: false,
+            },
             priority: PriorityTier::Grid,
         });
 
@@ -9371,5 +9479,404 @@ master_seed = 0
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
         }
+    }
+
+    // --- Port rollback test equipment ---
+
+    struct FailingPortEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        ports: Vec<PortDeclaration>,
+    }
+
+    impl FailingPortEquipment {
+        fn new(name: &str, stage: ExecutionStage) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(999),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("FailingPortEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::empty(),
+                    telemetry_fields: vec![],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::default(),
+                core_output: CoreOutput::default(),
+                ports: vec![
+                    PortDeclaration::electrical(),
+                    PortDeclaration::thermal(ZoneId(1)),
+                ],
+            }
+        }
+    }
+
+    impl Equipment for FailingPortEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            // Write electrical contribution then fail — this exercises the
+            // rollback path.
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_w: 500.0,
+                reactive_power_kvar: 0.1,
+            })?;
+            ports.accumulate(&PortContribution::Thermal {
+                zone: ZoneId(1),
+                sensible_gain_w: 1000.0,
+                radiant_gain_w: 200.0,
+                latent_gain_w: 50.0,
+                category: ThermalCategory::InternalGain,
+            })?;
+            Err(HaresError::Equipment("simulated step failure".to_string()))
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+    }
+
+    struct FunctionalPortEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        power_w: f64,
+        ports: Vec<PortDeclaration>,
+    }
+
+    impl FunctionalPortEquipment {
+        fn new(name: &str, power_w: f64, stage: ExecutionStage) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(1000),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("FunctionalPortEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::empty(),
+                    telemetry_fields: vec![],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::default(),
+                core_output: CoreOutput::default(),
+                power_w,
+                ports: vec![PortDeclaration::electrical()],
+            }
+        }
+    }
+
+    impl Equipment for FunctionalPortEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_w: self.power_w,
+                reactive_power_kvar: 0.0,
+            })?;
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+    }
+
+    struct SpyPortEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        ports: Vec<PortDeclaration>,
+    }
+
+    impl SpyPortEquipment {
+        fn new(name: &str, stage: ExecutionStage) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(1001),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("SpyPortEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::empty(),
+                    telemetry_fields: vec![],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::default(),
+                core_output: CoreOutput::default(),
+                ports: vec![PortDeclaration::electrical()],
+            }
+        }
+    }
+
+    impl Equipment for SpyPortEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            // Record the electrical load state this equipment observes.
+            self.telemetry
+                .insert("observed_load_power_w", ports.electrical.load_power_w);
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_equipment_step_prevents_snapshot_and_surfaces_warning() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let failing = FailingPortEquipment::new("FailingEq", ExecutionStage::Independent);
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(failing)]);
+
+        dwelling.run_timestep(false).expect("dwelling step");
+
+        // The failing equipment's step() returns Err, so its core output must
+        // not be snapshotted into equipment_core.
+        let failing_id = EquipmentId(999);
+        assert!(
+            !dwelling.latest_env.equipment_core.contains_key(&failing_id),
+            "failed equipment core output must not be in equipment_core; id={:?}",
+            failing_id
+        );
+
+        // Warning must be pushed.
+        assert!(
+            dwelling.warnings.iter().any(|w| w.contains("FailingEq")),
+            "warning must contain failing equipment name; warnings: {:?}",
+            dwelling.warnings
+        );
+    }
+
+    #[test]
+    fn failing_equipment_does_not_contaminate_downstream_equipment_ports() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        // Failing equipment writes 500 W to electrical port, then Err.
+        let failing = FailingPortEquipment::new("FailingEq", ExecutionStage::Independent);
+        // Spy observes the electrical port state when its step() is called.
+        let spy = SpyPortEquipment::new("SpyEq", ExecutionStage::Electrical);
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(failing), Box::new(spy)]);
+
+        dwelling.run_timestep(false).expect("dwelling step");
+
+        // After rollback, the spy should see 0 W from the failing equipment.
+        // If rollback didn't happen, spy would see 500 W.
+        assert_eq!(dwelling.equipment[1].descriptor().name, "SpyEq",);
+        // The spy records observed_load_power_w in telemetry during step().
+        let spy_observed = dwelling.equipment[1]
+            .telemetry()
+            .get("observed_load_power_w")
+            .unwrap_or(-1.0);
+        assert_eq!(
+            spy_observed, 0.0,
+            "spy should observe 0 W load power after rollback; got {}",
+            spy_observed
+        );
+        assert!(
+            dwelling.warnings.iter().any(|w| w.contains("FailingEq")),
+            "warning must contain failing equipment name"
+        );
+        // The failing equipment's core output must not be snapshotted.
+        let failing_id = EquipmentId(999);
+        let spy_id = EquipmentId(1001);
+        assert!(
+            !dwelling.latest_env.equipment_core.contains_key(&failing_id),
+            "failed equipment core output must not be in equipment_core; id={:?}",
+            failing_id
+        );
+        assert!(
+            dwelling.latest_env.equipment_core.contains_key(&spy_id),
+            "spy equipment core output must be snapshotted; id={:?}",
+            spy_id
+        );
+    }
+
+    #[test]
+    fn failed_equipment_core_output_not_snapshotted_to_environment() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let failing = FailingPortEquipment::new("FailingEq", ExecutionStage::Independent);
+        let functional =
+            FunctionalPortEquipment::new("FunctionalEq", 100.0, ExecutionStage::Independent);
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(failing), Box::new(functional)]);
+
+        dwelling.run_timestep(false).expect("dwelling step");
+
+        // Failing equipment's core output must NOT be in equipment_core.
+        let failing_id = EquipmentId(999);
+        let functional_id = EquipmentId(1000);
+
+        assert!(
+            !dwelling.latest_env.equipment_core.contains_key(&failing_id),
+            "failed equipment's core output must not be snapshotted; id={:?}",
+            failing_id
+        );
+        assert!(
+            dwelling
+                .latest_env
+                .equipment_core
+                .contains_key(&functional_id),
+            "functional equipment's core output must be snapshotted; id={:?}",
+            functional_id
+        );
     }
 }

@@ -722,8 +722,14 @@ impl Equipment for IdealHvac {
             .set(tk::OPERATING_MODE, operating_mode_code(operating_mode));
         self.telemetry
             .set(tk::IDEAL_CAPACITY_W, self.ideal_capacity_w);
-        self.telemetry
-            .set(tk::IDEAL_CAPACITY_DEGRADED, if self.ideal_capacity_degraded { 1.0 } else { 0.0 });
+        self.telemetry.set(
+            tk::IDEAL_CAPACITY_DEGRADED,
+            if self.ideal_capacity_degraded {
+                1.0
+            } else {
+                0.0
+            },
+        );
         self.telemetry
             .set(tk::CURRENT_TARGET_C, self.current_target_c);
         self.telemetry.set(tk::FAN_KW, fan_kw);
@@ -1218,7 +1224,10 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
 
-        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 5000.0, degraded: false };
+        let signal = hares_types::ControlSignal::IdealCapacity {
+            capacity_w: 5000.0,
+            degraded: false,
+        };
         eq.apply_control(&signal).unwrap();
         assert!((eq.ideal_capacity_w - 5000.0).abs() < 1e-9);
     }
@@ -1925,7 +1934,10 @@ mod tests {
         assert_eq!(eq.thermostat_fsm.mode, super::ThermostatMode::Heating);
 
         // Solver dispatches capacity while in Heating.
-        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 5000.0, degraded: false };
+        let signal = hares_types::ControlSignal::IdealCapacity {
+            capacity_w: 5000.0,
+            degraded: false,
+        };
         eq.apply_control_unchecked(&signal).unwrap();
         assert!((eq.ideal_capacity_w - 5000.0).abs() < 1e-9);
 
@@ -1972,7 +1984,10 @@ mod tests {
         assert_eq!(eq.thermostat_fsm.mode, super::ThermostatMode::Cooling);
 
         // Solver mistakenly returns positive capacity (e.g. outdoor dropped).
-        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 3000.0, degraded: false };
+        let signal = hares_types::ControlSignal::IdealCapacity {
+            capacity_w: 3000.0,
+            degraded: false,
+        };
         eq.apply_control_unchecked(&signal).unwrap();
 
         let mut ports = PortSlots {

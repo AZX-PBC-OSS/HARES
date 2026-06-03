@@ -79,7 +79,12 @@ impl SolverFeedbackActor {
     /// into the pending buffer. Used to test degraded-capacity signal propagation
     /// without a real ThermalSolver.
     #[cfg(test)]
-    pub(crate) fn push_pending_test(&mut self, equipment_index: usize, capacity_w: f64, degraded: bool) {
+    pub(crate) fn push_pending_test(
+        &mut self,
+        equipment_index: usize,
+        capacity_w: f64,
+        degraded: bool,
+    ) {
         self.pending.push((equipment_index, capacity_w, degraded));
     }
 
@@ -126,7 +131,10 @@ impl Actor for SolverFeedbackActor {
             // take precedence over solver-computed ideal capacity.
             out.push(DispatchRequest {
                 target: target.clone(),
-                signal: ControlSignal::IdealCapacity { capacity_w, degraded },
+                signal: ControlSignal::IdealCapacity {
+                    capacity_w,
+                    degraded,
+                },
                 priority: PriorityTier::Schedule,
             });
         }
@@ -169,7 +177,10 @@ mod tests {
         assert_eq!(out[0].target, DispatchTarget::ByName(Arc::from("HVAC_0")));
         assert_eq!(out[0].priority, PriorityTier::Schedule);
         match &out[0].signal {
-            ControlSignal::IdealCapacity { capacity_w, degraded } => {
+            ControlSignal::IdealCapacity {
+                capacity_w,
+                degraded,
+            } => {
                 assert!((*capacity_w - 5000.0).abs() < 1e-9);
                 assert!(!degraded);
             }

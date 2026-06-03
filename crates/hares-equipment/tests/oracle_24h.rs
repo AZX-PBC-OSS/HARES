@@ -145,8 +145,11 @@ fn oracle_gas_furnace_24h_constant_heating() {
         deadband_c: None,
     })
     .unwrap();
-    eq.apply_control(&ControlSignal::IdealCapacity { capacity_w, degraded: false })
-        .unwrap();
+    eq.apply_control(&ControlSignal::IdealCapacity {
+        capacity_w,
+        degraded: false,
+    })
+    .unwrap();
 
     let mut total_fuel_w_s = 0.0;
     let mut total_heat_w_s = 0.0;
@@ -201,8 +204,11 @@ fn oracle_electric_baseboard_24h_cop1() {
         deadband_c: None,
     })
     .unwrap();
-    eq.apply_control(&ControlSignal::IdealCapacity { capacity_w, degraded: false })
-        .unwrap();
+    eq.apply_control(&ControlSignal::IdealCapacity {
+        capacity_w,
+        degraded: false,
+    })
+    .unwrap();
 
     let mut total_electric_kw_s = 0.0;
     let mut total_heat_w_s = 0.0;

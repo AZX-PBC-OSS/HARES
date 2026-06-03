@@ -548,7 +548,10 @@ mod tests {
     #[test]
     fn equipment_without_ideal_capacity_capability_rejects_ideal_capacity_signal() {
         let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
-        let signal = ControlSignal::IdealCapacity { capacity_w: 1000.0, degraded: false };
+        let signal = ControlSignal::IdealCapacity {
+            capacity_w: 1000.0,
+            degraded: false,
+        };
         let result = eq.apply_control(&signal);
         assert!(result.is_err());
     }
@@ -807,7 +810,10 @@ mod tests {
                 ControlCapabilities::INVERTER_PRIORITY_MODE,
             ),
             (
-                ControlSignal::IdealCapacity { capacity_w: 1000.0, degraded: false },
+                ControlSignal::IdealCapacity {
+                    capacity_w: 1000.0,
+                    degraded: false,
+                },
                 ControlCapabilities::IDEAL_CAPACITY,
             ),
             (

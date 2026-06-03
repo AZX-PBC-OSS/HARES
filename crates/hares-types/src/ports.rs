@@ -552,6 +552,28 @@ impl PortSlots {
         }
     }
 
+    /// Copy `source` into `self`, reusing existing allocations.
+    ///
+    /// Unlike `clone_into` from the `ToOwned` trait (or `self.clone()`),
+    /// this method reuses the pre-allocated Vec capacities in `self`
+    /// (via `Vec::clone_from`) and copies the scalar accumulators by value.
+    /// When called on a `PortSlots` that was initialised from the same
+    /// declarations as `source`, no heap allocation occurs — only
+    /// element-wise copies whose cost is proportional to the number of
+    /// declared accumulators.
+    pub fn copy_into(&mut self, source: &Self) {
+        self.thermal.clone_from(&source.thermal);
+        self.electrical = source.electrical;
+        self.fuel = source.fuel;
+        self.fluid.clone_from(&source.fluid);
+        self.custom.clone_from(&source.custom);
+        self.humidity.clone_from(&source.humidity);
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            self.write_log.clone_from(&source.write_log);
+        }
+    }
+
     pub fn zero(&mut self) {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         self.warn_unwritten();
