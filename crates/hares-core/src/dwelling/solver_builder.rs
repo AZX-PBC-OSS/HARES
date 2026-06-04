@@ -1456,6 +1456,8 @@ fn attic_infiltration_method(
     }
 
     if zone.vented {
+        // ANSI/RESNET/ICC 301-2019 Table 4.2.2(1): default SLA = 1/300 ≈ 0.00333 for
+        // vented attics when no measured ventilation rate is provided.
         let sla = 0.00333;
         let floor_area_m2 = zone
             .floor_area_m2
@@ -2013,17 +2015,30 @@ mod tests {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
         let method = attic_infiltration_method(&zone, Some(100.0), 5.0, 3)
             .expect("vented attic with no rate must use default SLA");
+        let InfiltrationMethod::Ela { ela_m2, .. } = method else {
+            panic!("expected ELA method from default SLA, got {method:?}");
+        };
+        // ANSI/RESNET/ICC 301-2019 Table 4.2.2(1): SLA = 1/300 ≈ 0.00333.
+        // floor_area = 100 m² → ela = 100 × 0.00333 = 0.333 m².
         assert!(
-            matches!(method, InfiltrationMethod::Ela { .. }),
-            "expected ELA method from default SLA, got {method:?}"
+            (ela_m2 - 0.333).abs() < 1e-6,
+            "expected ela = 0.333 m² from default SLA=0.00333 × 100 m², got {ela_m2}"
         );
     }
 
     #[test]
     fn attic_vented_with_sla_builds_successfully() {
         let zone = attic_zone(Some(100.0), Some(120.0), true, None, Some(0.003));
-        attic_infiltration_method(&zone, Some(100.0), 5.0, 3)
+        let method = attic_infiltration_method(&zone, Some(100.0), 5.0, 3)
             .expect("vented attic with SLA=0.003 must succeed");
+        let InfiltrationMethod::Ela { ela_m2, .. } = method else {
+            panic!("expected ELA method from provided SLA, got {method:?}");
+        };
+        // SLA = 0.003 × 100 m² = 0.3 m².
+        assert!(
+            (ela_m2 - 0.3).abs() < 1e-9,
+            "expected ela = 0.3 m² from SLA=0.003 × 100 m², got {ela_m2}"
+        );
     }
 
     #[test]

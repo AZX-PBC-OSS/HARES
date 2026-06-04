@@ -9,9 +9,9 @@ use nalgebra::DMatrix;
 use thiserror::Error;
 
 use crate::NodeId;
-use crate::rc_network::{RCNetwork, parallel_resistance};
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use crate::rc_network::sorted_internal_nodes;
+use crate::rc_network::{RCNetwork, parallel_resistance};
 
 // ── Physical constants ──────────────────────────────────────────────────────
 

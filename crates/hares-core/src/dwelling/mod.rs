@@ -41,6 +41,8 @@ use hares_physics::constants::{
 use hares_physics::pv_sizing::RoofInfo;
 use hares_physics::units::power_w_to_kw;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use hares_types::ControlCapabilities;
 #[cfg(test)]
 use hares_types::LoopId;
 use hares_types::{
@@ -50,8 +52,6 @@ use hares_types::{
     ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
     validate_fluid_type_consistency,
 };
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-use hares_types::ControlCapabilities;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
@@ -1651,8 +1651,14 @@ impl Dwelling {
         // `vented` flag is consistent. By default (no `<Attics>` group in HPXML),
         // attics are vented (ASHRAE 152-2004 default; OCHRE hpxml.py:635 Vented=True).
         // An unvented attic must come from an explicit `<AtticType><Attic><Vented>false`
-        // declaration — if one appears without that declaration, it signals that
-        // `ensure_referenced_zones_exist` diverged from `build_zone_map`.
+        // declaration.
+        //
+        // Known limitation: this block emits observability logs but does not assert.
+        // The fix at crates/hares-io/src/hpxml/building.rs (T-0206) makes the
+        // `ensure_referenced_zones_exist` / `build_zone_map` divergence structurally
+        // impossible — both paths now set `vented: true` for attics — so a runtime
+        // assertion would never fire in practice. The `tracing::debug!` log remains as
+        // a low-cost diagnostic to confirm attic zone vented status during development.
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             for zone in &building.zones {
