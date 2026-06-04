@@ -357,7 +357,6 @@ impl ActorRegistry {
                 let fuel_economy = config.get_f64("fuel_economy_kwh_per_mi").unwrap_or(0.3);
                 let capacity_kwh = config.get_f64("capacity_kwh").unwrap_or(60.0);
                 let avg_speed = config.get_f64("average_speed_mph").unwrap_or(30.0);
-
                 let max_charge_kw = config.get_f64("max_charge_kw").unwrap_or(7.2);
                 let actor = EvDriverActor::new(
                     &config.name,
@@ -376,7 +375,7 @@ impl ActorRegistry {
                     config.get_f64("range_anxiety_miles").unwrap_or(20.0),
                     config.get_f64("away_charge_fraction").unwrap_or(0.0),
                     config.get_f64("away_charge_power_kw").unwrap_or(6.6),
-                    seed,
+                    seed_bytes,
                 );
                 Ok(Box::new(actor))
             }),

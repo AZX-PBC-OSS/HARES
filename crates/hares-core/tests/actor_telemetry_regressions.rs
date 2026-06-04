@@ -229,7 +229,7 @@ fn ev_driver_telemetry_reports_soc_and_phase() {
         20.0,
         0.0,
         0.0,
-        42,
+        [42u8; 32],
     );
 
     let env = test_env().build();
@@ -322,7 +322,7 @@ fn all_observable_actors_return_some_telemetry() {
             20.0,
             0.0,
             0.0,
-            42,
+            [42u8; 32],
         );
         assert_actor_has_telemetry(&mut ev, &env);
     }

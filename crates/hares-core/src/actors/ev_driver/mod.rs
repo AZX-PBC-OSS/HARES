@@ -262,7 +262,7 @@ pub struct EvDriverActor {
     telemetry: Telemetry,
 }
 
-use efficiency::{seed_bytes, temp_efficiency_multiplier};
+use efficiency::temp_efficiency_multiplier;
 
 impl EvDriverActor {
     /// Creates a new EV driver actor.
@@ -289,7 +289,7 @@ impl EvDriverActor {
         range_anxiety_miles: f64,
         away_charge_fraction: f64,
         away_charge_power_kw: f64,
-        seed: u64,
+        seed: [u8; 32],
     ) -> Self {
         let prefs = build_preferences(
             &strategy,
@@ -337,7 +337,7 @@ impl EvDriverActor {
             away_charge_fraction,
             away_charge_power_kw,
             composer,
-            rng: ChaCha8Rng::from_seed(seed_bytes(seed)),
+            rng: ChaCha8Rng::from_seed(seed),
             current_day_ordinal: -1,
             todays_event: None,
             phase: DriverPhase::HomePluggedIn,
@@ -868,6 +868,12 @@ mod tests {
     use crate::actor::testing::test_env;
     use hares_types::{CoreOutput, CoreState, ElectricalSummary, EquipmentId, PriceSignal, Soc};
 
+    fn seed_from_u64(seed: u64) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&seed.to_le_bytes());
+        bytes
+    }
+
     fn make_actor(strategy: ChargingStrategy, policy: PlugInPolicy, seed: u64) -> EvDriverActor {
         EvDriverActor::new(
             "TestDriver",
@@ -886,7 +892,7 @@ mod tests {
             20.0,                            // 20 miles range anxiety buffer
             0.0,                             // no away charging
             6.6,                             // workplace L2 default
-            seed,
+            seed_from_u64(seed),
         )
     }
 
@@ -1961,7 +1967,7 @@ mod tests {
             20.0,
             0.5, // 50% away charge
             6.6,
-            seed,
+            seed_from_u64(seed),
         )
     }
 
@@ -3074,7 +3080,7 @@ mod tests {
             20.0,
             0.0,
             0.0,
-            42,
+            seed_from_u64(42),
         );
 
         let mut out = Vec::new();
@@ -3151,7 +3157,7 @@ mod tests {
             20.0,
             0.0,
             0.0,
-            42,
+            seed_from_u64(42),
         );
 
         let mut out = Vec::new();
@@ -3226,7 +3232,7 @@ mod tests {
             20.0,
             0.0,
             0.0,
-            42,
+            seed_from_u64(42),
         );
 
         let mut actor_derived = EvDriverActor::new(
@@ -3246,7 +3252,7 @@ mod tests {
             20.0,
             0.0,
             0.0,
-            43,
+            seed_from_u64(43),
         );
 
         let mut out = Vec::new();

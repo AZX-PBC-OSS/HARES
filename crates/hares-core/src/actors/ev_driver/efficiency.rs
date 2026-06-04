@@ -35,13 +35,6 @@ pub(super) fn temp_efficiency_multiplier(ambient_c: f64) -> f64 {
     BREAKPOINTS[BREAKPOINTS.len() - 1].1
 }
 
-/// Expand a u64 seed to a [u8; 32] for ChaCha8Rng (LE bytes, zero-padded).
-pub(super) fn seed_bytes(seed: u64) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    bytes[..8].copy_from_slice(&seed.to_le_bytes());
-    bytes
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

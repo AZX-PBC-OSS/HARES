@@ -63,6 +63,7 @@ use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use crate::invariants::InvariantChecker;
+use crate::rng::{RNG_STREAM_EV_DRIVER_BASE, RNG_STREAM_EVENT_LOAD_BASE, advance_dwelling_rng, derive_sub_rng};
 use crate::scheduler::{ActorSlot, ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
 use crate::{Actor, ActorInterest, EnvironmentManager, SimClock, derive_dwelling_rng};
@@ -100,8 +101,10 @@ const PV_RE_EVAL_MIN_STEP_SECS: f64 = 300.0;
 fn create_equipment_from_spec(
     registry: &EquipmentRegistry,
     spec: &hares_io::EquipmentSpec,
+    rng_seed: Option<[u8; 32]>,
 ) -> Result<Box<dyn Equipment>> {
-    let base_cfg = equipment_config_from_spec(spec);
+    let mut base_cfg = equipment_config_from_spec(spec);
+    base_cfg.rng_seed = rng_seed;
     let name = base_cfg.name.clone();
     let ochre_class = base_cfg.ochre_class.clone();
     registry.create(&ochre_class, base_cfg).map_err(|err| {
@@ -1731,11 +1734,14 @@ impl Dwelling {
 
         let registry = EquipmentRegistry::new();
         let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
+        let mut rng_event_stream_idx: u64 = 0;
         for spec in &equipment_specs {
             if HANDLED_OUTSIDE_REGISTRY.contains(&spec.name.as_str()) {
                 continue;
             }
-            let mut eq = create_equipment_from_spec(&registry, spec)?;
+            let sub_rng = derive_sub_rng(&rng, RNG_STREAM_EVENT_LOAD_BASE + rng_event_stream_idx);
+            rng_event_stream_idx += 1;
+            let mut eq = create_equipment_from_spec(&registry, spec, Some(sub_rng.get_seed()))?;
 
             let mut merged_cfg = merged_equipment_config(spec, &override_root);
             setpoints_reconciled_by_equipment.insert(
@@ -1743,6 +1749,7 @@ impl Dwelling {
                 merged_cfg.setpoints_reconciled.clone(),
             );
             merged_cfg.zone_map = Some(zone_map.clone());
+            merged_cfg.rng_seed = Some(sub_rng.get_seed());
             match eq.init(&merged_cfg, &initial_env) {
                 Ok(()) => equipment.push(eq),
                 Err(err) => {
@@ -2439,6 +2446,7 @@ impl Dwelling {
             price_schedule,
             steps_per_day,
             &self.equipment_id_by_name,
+            &self.rng,
         );
 
         if !built_in_actors.is_empty() {
@@ -3567,6 +3575,16 @@ impl Dwelling {
             ));
         }
 
+        // Advance the dwelling RNG on every timestep so checkpoint captures
+        // reflect simulation progress.  The value is intentionally discarded;
+        // stochastic components use independent sub-RNGs derived from the
+        // dwelling RNG's seed via stream partitioning.
+        let rng_word_pos_before = self.rng.get_word_pos();
+        let _ = advance_dwelling_rng(&mut self.rng);
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        let rng_consumed_this_step = self.rng.get_word_pos() > rng_word_pos_before;
+
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             // After the first step, every equipment instance must have a core
@@ -4671,6 +4689,25 @@ impl Dwelling {
         let _ = self.clock.next();
 
         self.simulation_results.steps.push(step_result);
+
+        // Invariant: the dwelling RNG must have been consumed during this
+        // timestep.  A zero-delta means run_timestep never called
+        // advance_dwelling_rng, which would make checkpoint captures
+        // reflect a dead RNG state.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            rng_consumed_this_step,
+            "dwelling RNG was not consumed during timestep"
+        );
+
+        // Observe the dwelling RNG state for per-step auditability.
+        #[cfg(feature = "observe")]
+        tracing::debug!(
+            rng_stream = self.rng.get_stream(),
+            rng_word_pos = self.rng.get_word_pos(),
+            "dwelling RNG state at end of timestep"
+        );
+
         Ok(())
     }
 
@@ -5320,6 +5357,7 @@ fn build_actors_from_seeds(
     price_schedule: Option<Arc<[f64]>>,
     steps_per_day: usize,
     equipment_id_by_name: &HashMap<String, EquipmentId>,
+    rng: &ChaCha8Rng,
 ) -> Vec<Box<dyn Actor>> {
     let seeds: Vec<(String, ActorSeed)> = equipment
         .iter()
@@ -5335,6 +5373,7 @@ fn build_actors_from_seeds(
         .collect();
 
     let mut built_in_actors: Vec<Box<dyn Actor>> = Vec::new();
+    let mut ev_actor_index: u64 = 0;
 
     for (name, seed) in seeds {
         match seed {
@@ -5420,10 +5459,8 @@ fn build_actors_from_seeds(
                     }
                 }
 
-                let seed_val = name
-                    .as_bytes()
-                    .iter()
-                    .fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                let ev_seed = derive_sub_rng(rng, RNG_STREAM_EV_DRIVER_BASE + ev_actor_index).get_seed();
+                ev_actor_index += 1;
                 let mut actor = EvDriverActor::new(
                     &format!("EvDriver:{name}"),
                     &name,
@@ -5441,7 +5478,7 @@ fn build_actors_from_seeds(
                     20.0,
                     0.0,
                     6.6,
-                    seed_val,
+                    ev_seed,
                 );
 
                 if let Some(ref prices) = price_schedule {
@@ -8197,6 +8234,7 @@ occupancy = 1.0
             Some(Arc::from(vec![0.10; 24])),
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "BatteryManagementActor:Battery1");
@@ -8226,6 +8264,7 @@ occupancy = 1.0
             Some(Arc::from(vec![0.10; 24])),
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
@@ -8243,6 +8282,7 @@ occupancy = 1.0
             None,
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert!(actors.is_empty());
     }
@@ -8259,6 +8299,7 @@ occupancy = 1.0
             None,
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert!(actors.is_empty());
     }
@@ -8291,6 +8332,7 @@ occupancy = 1.0
             None,
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         // Should still register an actor (with fallback to SelfConsumption)
         assert_eq!(actors.len(), 1);
@@ -8322,6 +8364,7 @@ occupancy = 1.0
             None,
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
@@ -8357,6 +8400,7 @@ occupancy = 1.0
             None,
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert_eq!(built_in.len(), 1);
         assert_eq!(built_in[0].name(), "BatteryManagementActor:Battery1");
@@ -8396,6 +8440,7 @@ occupancy = 1.0
             None,
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert!(
             built_in.is_empty(),
@@ -8443,6 +8488,7 @@ occupancy = 1.0
             None,
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert_eq!(actors.len(), 2);
         assert_eq!(actors[0].name(), "BatteryManagementActor:Battery1");
@@ -8486,6 +8532,7 @@ occupancy = 1.0
             None,
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert_eq!(actors.len(), 2);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
@@ -8516,6 +8563,7 @@ occupancy = 1.0
             None,
             24,
             &std::collections::HashMap::new(),
+            &derive_dwelling_rng(0, 0),
         );
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
@@ -8827,7 +8875,7 @@ occupancy = 1.0
             primary_role: None,
         };
 
-        let err = match create_equipment_from_spec(&registry, &spec) {
+        let err = match create_equipment_from_spec(&registry, &spec, None) {
             Err(err) => err,
             Ok(_) => panic!("unknown equipment class must return Err"),
         };
@@ -10656,5 +10704,218 @@ master_seed = 0
 
         assert_eq!(custom_capture.solvers.len(), 1);
         assert_eq!(custom_capture.solvers[0].domain_id, DomainId(77));
+    }
+
+    // ── Dwelling RNG advancement tests ──
+
+    /// Construct a `Dwelling`, advance one timestep, and assert that the
+    /// dwelling RNG's word position has changed (i.e. it was sampled during
+    /// the timestep).  This verifies the core fix for T-0213.
+    #[test]
+    fn dwelling_rng_is_advanced_during_timestep() {
+        let toml_path = unique_temp_toml("rng_advance");
+        write_minimal_toml(&toml_path);
+        let _guard = TempFile(toml_path.clone());
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let pos_before = dwelling.rng.get_word_pos();
+        dwelling.step().expect("step succeeds");
+        let pos_after = dwelling.rng.get_word_pos();
+        assert!(
+            pos_after > pos_before,
+            "dwelling RNG word position {pos_before} must increase after step, got {pos_after}"
+        );
+    }
+
+    /// Construct two identical dwellings with the same `master_seed` and
+    /// `bldg_id`, run `simulate()` to completion on both, and assert that
+    /// all `StepResult` fields match within `f64::EPSILON`.  This is the
+    /// end-to-end reproducibility regression test from Recommendation #3
+    /// of the underlying review finding.
+    #[test]
+    fn identical_dwellings_produce_reproducible_results() {
+        let toml_path_a = unique_temp_toml("rng_repro_a");
+        write_minimal_toml(&toml_path_a);
+        let toml_path_b = unique_temp_toml("rng_repro_b");
+        fs::copy(&toml_path_a, &toml_path_b).expect("copy TOML");
+        let _guard_a = TempFile(toml_path_a.clone());
+        let _guard_b = TempFile(toml_path_b.clone());
+
+        let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
+        let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B");
+
+        let results_a = a.simulate().expect("simulate A");
+        let results_b = b.simulate().expect("simulate B");
+
+        assert_eq!(
+            results_a.steps.len(),
+            results_b.steps.len(),
+            "both dwellings must produce the same number of steps"
+        );
+
+        for (i, (step_a, step_b)) in results_a
+            .steps
+            .iter()
+            .zip(results_b.steps.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                step_a.timestamp, step_b.timestamp,
+                "step {i}: timestamps must match"
+            );
+            assert!(
+                (step_a.net_electric_power_kw - step_b.net_electric_power_kw).abs() < f64::EPSILON,
+                "step {i}: net_electric_power_kw mismatch: {} vs {}",
+                step_a.net_electric_power_kw,
+                step_b.net_electric_power_kw,
+            );
+            assert_eq!(
+                step_a.zone_temperatures_c.len(),
+                step_b.zone_temperatures_c.len(),
+                "step {i}: zone count mismatch"
+            );
+            for (z, (zt_a, zt_b)) in step_a
+                .zone_temperatures_c
+                .iter()
+                .zip(step_b.zone_temperatures_c.iter())
+                .enumerate()
+            {
+                assert!(
+                    (zt_a.1 - zt_b.1).abs() < f64::EPSILON,
+                    "step {i} zone {z}: temperature mismatch: {} vs {}",
+                    zt_a.1,
+                    zt_b.1,
+                );
+            }
+            assert!(
+                (step_a.hvac_heating_w - step_b.hvac_heating_w).abs() < f64::EPSILON,
+                "step {i}: hvac_heating_w mismatch"
+            );
+            assert!(
+                (step_a.hvac_cooling_w - step_b.hvac_cooling_w).abs() < f64::EPSILON,
+                "step {i}: hvac_cooling_w mismatch"
+            );
+            assert!(
+                (step_a.gas_power_w - step_b.gas_power_w).abs() < f64::EPSILON,
+                "step {i}: gas_power_w mismatch"
+            );
+        }
+    }
+
+    /// Checkpoint a dwelling mid-simulation, restore it into a fresh
+    /// dwelling, continue simulation, and assert that the restored
+    /// dwelling produces identical results to the uninterrupted dwelling
+    /// for all remaining timesteps.
+    #[test]
+    fn checkpoint_restart_produces_identical_continuation() {
+        let toml_path_a = unique_temp_toml("rng_ckpt_a");
+        {
+            let toml = format!(
+                r#"building_id = 9001
+
+[simulation]
+start_time = "2024-06-15T12:00:00Z"
+time_res_s = 60
+duration_s = {}
+# extra steps to allow restart+duration
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "none"
+
+[weather]
+outdoor_temp_c = 20.0
+dew_point_c = 10.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 0.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = 42
+"#,
+                // 5 min = 5 steps at 60s resolution.
+                300
+            );
+            fs::write(&toml_path_a, toml).expect("write TOML A");
+        }
+        let _guard_a = TempFile(toml_path_a.clone());
+
+        const CHECKPOINT_AT_STEP: u64 = 3;
+
+        // --- Uninterrupted reference run ---
+        let mut ref_dwelling =
+            Dwelling::from_toml_config(&toml_path_a).expect("build ref dwelling");
+        let ref_results = ref_dwelling.simulate().expect("simulate ref");
+
+        // --- Interrupted run: step to checkpoint, save, restore, continue ---
+        let mut dwelling_a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
+        for _ in 0..CHECKPOINT_AT_STEP {
+            dwelling_a.step().expect("step before checkpoint");
+        }
+        let checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+
+        let cp_path = unique_temp_toml("rng_ckpt_json");
+        let _cp_guard = TempFile(cp_path.clone());
+        checkpoint.save(&cp_path).expect("write checkpoint file");
+        let loaded_cp = DwellingCheckpoint::load(&cp_path).expect("load checkpoint");
+
+        let mut dwelling_b = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling B");
+        dwelling_b
+            .load_checkpoint(loaded_cp)
+            .expect("restore checkpoint");
+
+        let mut restarted_steps = Vec::new();
+        loop {
+            match dwelling_b.step() {
+                Ok(step) => restarted_steps.push(step),
+                Err(_) => break,
+            }
+        }
+
+        let ref_tail = &ref_results.steps[CHECKPOINT_AT_STEP as usize..];
+        let compare_len = ref_tail.len().min(restarted_steps.len());
+
+        assert!(
+            compare_len > 0,
+            "no steps to compare after checkpoint restart"
+        );
+
+        for i in 0..compare_len {
+            let ref_step = &ref_tail[i];
+            let res_step = &restarted_steps[i];
+            assert_eq!(
+                ref_step.timestamp, res_step.timestamp,
+                "step {i}: timestamps must match"
+            );
+            assert!(
+                (ref_step.net_electric_power_kw - res_step.net_electric_power_kw).abs()
+                    < f64::EPSILON,
+                "step {i}: net_electric_power_kw mismatch"
+            );
+            assert!(
+                (ref_step.hvac_heating_w - res_step.hvac_heating_w).abs() < f64::EPSILON,
+                "step {i}: hvac_heating_w mismatch"
+            );
+            assert!(
+                (ref_step.hvac_cooling_w - res_step.hvac_cooling_w).abs() < f64::EPSILON,
+                "step {i}: hvac_cooling_w mismatch"
+            );
+            assert!(
+                (ref_step.gas_power_w - res_step.gas_power_w).abs() < f64::EPSILON,
+                "step {i}: gas_power_w mismatch"
+            );
+        }
     }
 }

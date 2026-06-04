@@ -1788,19 +1788,26 @@ fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f
 }
 
 fn derive_rng_seed(config: &EquipmentConfig) -> [u8; 32] {
-    // Derive a deterministic per-equipment seed from master_seed, building_id,
-    // and the equipment name so sibling loads in one dwelling (and identical
-    // loads across dwellings) draw distinct but reproducible event streams.
+    // Pre-derived seed from the dwelling's hierarchical RNG stream
+    // partitioning — preferred path.  The dwelling injects a distinct seed
+    // per equipment via `EquipmentConfig.with_rng_seed()` before `init()`.
+    if let Some(seed) = config.rng_seed {
+        return seed;
+    }
+
+    // Legacy path for callers that do not use the hierarchical RNG system
+    // (e.g. standalone tests, synthetic configs).  Derives a deterministic
+    // per-equipment seed from master_seed, building_id, and the equipment
+    // name so sibling loads in one dwelling (and identical loads across
+    // dwellings) draw distinct but reproducible event streams.
     let master_seed = config.get_f64(KEY_MASTER_SEED).unwrap_or_default() as u64;
     let building_id = config.get_f64(KEY_BUILDING_ID).unwrap_or_default() as i64;
 
-    // Hash the equipment name to discriminate seeds for different equipment
-    // within the same building (e.g. two EventBasedLoads or a washer + dryer).
     let name_hash = {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in config.name.as_bytes() {
             h ^= *byte as u64;
-            h = h.wrapping_mul(0x0100_0000_01b3); // FNV-1a prime
+            h = h.wrapping_mul(0x0100_0000_01b3);
         }
         h
     };
@@ -2465,6 +2472,48 @@ mod tests {
         assert_ne!(
             eq_a.rng_seed, eq_b.rng_seed,
             "Different equipment names must produce different RNG seeds"
+        );
+    }
+
+    #[test]
+    fn derive_rng_seed_uses_injected_seed_when_present() {
+        let mut cfg = event_config("Dishwasher", "EventBasedLoad");
+        let injected = [0xABu8; 32];
+        cfg.rng_seed = Some(injected);
+        let result = super::derive_rng_seed(&cfg);
+        assert_eq!(
+            result, injected,
+            "derive_rng_seed must return the injected seed when config.rng_seed is Some"
+        );
+    }
+
+    #[test]
+    fn derive_rng_seed_falls_back_to_fnv1a_when_no_injected_seed() {
+        let env = base_env();
+        let config = event_config("Dishwasher", "EventBasedLoad");
+        let mut eq_a = EventBasedLoad::new(config.clone());
+        eq_a.init(&config, &env).unwrap();
+
+        let mut eq_b = EventBasedLoad::new(config.clone());
+        eq_b.init(&config, &env).unwrap();
+
+        assert_eq!(
+            eq_a.rng_seed, eq_b.rng_seed,
+            "Same config without rng_seed should produce identical seeds via FNV-1a fallback"
+        );
+    }
+
+    #[test]
+    fn injected_seed_survives_init_and_is_used_by_equipment() {
+        let env = base_env();
+        let mut cfg = event_config("Dishwasher", "EventBasedLoad");
+        let injected = [0x42u8; 32];
+        cfg.rng_seed = Some(injected);
+        let mut eq = EventBasedLoad::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        assert_eq!(
+            eq.rng_seed, injected,
+            "equipment must use injected seed after init, not the legacy FNV-1a fallback"
         );
     }
 

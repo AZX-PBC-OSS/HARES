@@ -176,6 +176,13 @@ pub struct EquipmentConfig {
     /// `None` for synthetic or test configs that do not have a building envelope.
     #[serde(skip, default)]
     pub zone_map: Option<hares_types::ZoneMap>,
+    /// Pre-derived RNG seed injected by the dwelling's hierarchical RNG
+    /// system at construction time.  When `Some`, stochastic equipment
+    /// uses this seed directly instead of hashing `master_seed` /
+    /// `building_id` / `name`.  Stream partitioning guarantees that sibling
+    /// equipment streams are non-overlapping and deterministic.
+    #[serde(skip, default)]
+    pub rng_seed: Option<[u8; 32]>,
     #[cfg(test)]
     #[serde(skip, default)]
     test_extras: HashMap<String, ConfigValue>,
@@ -189,6 +196,7 @@ impl EquipmentConfig {
             payload,
             setpoints_reconciled: None,
             zone_map: None,
+            rng_seed: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
@@ -200,6 +208,14 @@ impl EquipmentConfig {
         reconciliations: Option<Vec<SetpointReconciliation>>,
     ) -> Self {
         self.setpoints_reconciled = reconciliations;
+        self
+    }
+
+    /// Attach a pre-derived RNG seed for stochastic equipment that should
+    /// use the dwelling's hierarchical RNG stream partitioning instead of
+    /// the legacy name-based hash.
+    pub fn with_rng_seed(mut self, seed: [u8; 32]) -> Self {
+        self.rng_seed = Some(seed);
         self
     }
 
@@ -342,6 +358,7 @@ impl EquipmentConfig {
             },
             setpoints_reconciled: None,
             zone_map: None,
+            rng_seed: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
@@ -356,6 +373,7 @@ impl EquipmentConfig {
             payload: ConfigPayload::Raw { data },
             setpoints_reconciled: None,
             zone_map: None,
+            rng_seed: None,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }

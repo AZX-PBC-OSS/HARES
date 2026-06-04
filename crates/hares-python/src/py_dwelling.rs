@@ -1060,7 +1060,7 @@ impl PyDwelling {
             20.0, // range_anxiety_miles
             0.0,  // away_charge_fraction
             0.0,  // away_charge_power_kw
-            seed,
+            seed_bytes,
         );
 
         dwelling.add_actor(Box::new(actor));
