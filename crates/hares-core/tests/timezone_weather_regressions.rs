@@ -563,3 +563,86 @@ mod simclock_dst_tests {
         assert_eq!(civil3.hour(), 2);
     }
 }
+
+#[cfg(feature = "dst")]
+#[test]
+fn spring_forward_day_of_year_at_boundary_step_uses_civil_ordinal() {
+    let start = offset_west(5 * 3600)
+        .with_ymd_and_hms(2024, 3, 10, 0, 0, 0)
+        .single()
+        .expect("valid spring-forward start");
+    let mut manager = EnvironmentManager::new(
+        sequential_weather(20.0, 24, -5.0),
+        hourly_schedule(start),
+        &minimal_building(),
+        StdDuration::from_secs(3600),
+        start,
+        Some("America/New_York"),
+    )
+    .expect("manager");
+    let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(24));
+
+    // Step to step 23: wall-clock 23:00 EST on the fixed-offset clock.
+    // Civil time via America/New_York: 23:00 EST = 04:00 UTC March 11
+    // = 00:00 EDT March 11.  ordinal() on March 11 in leap year 2024 is 71
+    // (31 Jan + 29 Feb + 11 = 71).  Without the DST-aware fix the raw
+    // FixedOffset ordinal would be March 10 = 70.
+    for _ in 0..23 {
+        clock.next();
+    }
+    assert_eq!(clock.current_step(), 23);
+
+    let env = manager.update(&clock, &[]).unwrap();
+
+    assert_eq!(
+        env.weather.day_of_year, 71.0,
+        "at step 23 (civil time 00:00 EDT March 11), day_of_year must be 71 (March 11), \
+         not 70 (March 10 fixed-offset); got {}",
+        env.weather.day_of_year
+    );
+}
+
+#[cfg(feature = "dst")]
+#[test]
+fn spring_forward_day_of_year_at_15min_resolution_all_steps() {
+    let start = offset_west(5 * 3600)
+        .with_ymd_and_hms(2024, 3, 10, 0, 0, 0)
+        .single()
+        .expect("valid spring-forward start");
+    let mut manager = EnvironmentManager::new(
+        sequential_weather(20.0, 96, -5.0),
+        hourly_schedule(start),
+        &minimal_building(),
+        StdDuration::from_secs(900), // 15 minutes
+        start,
+        Some("America/New_York"),
+    )
+    .expect("manager");
+    let mut clock = SimClock::new(start, Duration::minutes(15), Duration::hours(24));
+
+    // 96 steps at 15-min resolution = 24 physical hours.
+    // Fixed-offset clock: all 96 steps are calendar March 10 (ordinal 70).
+    // Civil time: steps 0-91 are March 10 (ordinal 70), steps 92-95 are
+    // March 11 (ordinal 71) because 23:00 EST = 00:00 EDT March 11.
+    // ordinal() on March 10 in leap year 2024 = 70 (31+29+10).
+    // ordinal() on March 11 in leap year 2024 = 71 (31+29+11).
+    for step in 0..96 {
+        let env = manager.update(&clock, &[]).unwrap();
+        let doy = env.weather.day_of_year;
+        if step < 92 {
+            assert_eq!(
+                doy, 70.0,
+                "step {step}: before civil midnight, day_of_year must be 70 (March 10); got {doy}"
+            );
+        } else {
+            assert_eq!(
+                doy, 71.0,
+                "step {step}: after civil midnight, day_of_year must be 71 (March 11); got {doy}"
+            );
+        }
+        // Advance for next step (skip on last iteration).
+        if step < 95 {
+            clock.next();
+        }
+    }
+}

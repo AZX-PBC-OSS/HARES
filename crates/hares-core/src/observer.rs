@@ -85,6 +85,10 @@ pub struct EnvironmentCapture {
     pub equipment_core_size: usize,
     /// Size of `latest_env.equipment_telemetry` at observation time.
     pub equipment_telemetry_size: usize,
+    /// Raw day-of-year from `FixedOffset` clock before DST conversion.
+    pub raw_day_of_year: u32,
+    /// Day-of-year from DST-aware civil timezone (or same as raw when no timezone).
+    pub civil_day_of_year: u32,
 }
 
 /// Equipment telemetry + accumulated port state after an equipment phase.

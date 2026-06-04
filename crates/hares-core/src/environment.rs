@@ -107,6 +107,15 @@ pub struct EnvironmentManager {
     /// Computed by `update_in_place` and consumed by observer capture.
     #[cfg(feature = "observe")]
     pub(crate) raw_mains_temp_f: f64,
+    /// Raw day-of-year from `FixedOffset` clock (before DST conversion).
+    /// Captured alongside `civil_day_of_year` to surface DST transition
+    /// discrepancies in the per-step diagnostics CSV.
+    #[cfg(feature = "observe")]
+    pub(crate) obs_raw_day_of_year: u32,
+    /// Day-of-year from DST-aware civil timezone. Equal to `obs_raw_day_of_year`
+    /// when no civil timezone is configured or when DST is not in effect.
+    #[cfg(feature = "observe")]
+    pub(crate) obs_civil_day_of_year: u32,
     /// Annual mean ground surface temperature [°C] for Kusuda-Achenbach model.
     ground_t_mean_c: f64,
     /// Half-amplitude of yearly ground surface temperature variation [°C].
@@ -289,6 +298,10 @@ impl EnvironmentManager {
             mains_hemisphere,
             #[cfg(feature = "observe")]
             raw_mains_temp_f: 0.0,
+            #[cfg(feature = "observe")]
+            obs_raw_day_of_year: 0,
+            #[cfg(feature = "observe")]
+            obs_civil_day_of_year: 0,
             ground_t_mean_c: mains_t_annual_avg_c,
             ground_t_amplitude_c: mains_dt_annual_range_c / 2.0,
             ground_phase_day,
@@ -546,12 +559,33 @@ impl EnvironmentManager {
         // observe the civil wall-clock day, not the fixed-offset day which may
         // be wrong across DST transitions.
         #[cfg(feature = "dst")]
-        let day_of_year = clock
-            .current_civil_time()
-            .map(|ct| ct.ordinal())
+        let day_of_year = self
+            .civil_tz
+            .as_ref()
+            .map(|tz| now.with_timezone(tz).ordinal())
             .unwrap_or_else(|| now.ordinal());
         #[cfg(not(feature = "dst"))]
         let day_of_year = now.ordinal();
+
+        #[cfg(all(feature = "dst", any(debug_assertions, feature = "check_invariants")))]
+        if let Some(ref tz) = self.civil_tz {
+            let civil_ordinal = now.with_timezone(tz).ordinal();
+            debug_assert!(
+                civil_ordinal == day_of_year,
+                "DST-aware civil day-of-year ({civil_ordinal}) does not match computed day_of_year ({day_of_year})"
+            );
+            let raw_ordinal = now.ordinal();
+            if raw_ordinal != civil_ordinal {
+                let month = now.month();
+                tracing::warn!(
+                    raw_day_of_year = raw_ordinal,
+                    civil_day_of_year = civil_ordinal,
+                    month,
+                    "DST transition boundary: raw fixed-offset day_of_year ({raw_ordinal}) differs from civil day_of_year ({civil_ordinal})"
+                );
+            }
+        }
+
         let mains_temp_c = water_mains_temperature_c(
             self.mains_t_annual_avg_c,
             self.mains_dt_annual_range_c,
@@ -707,6 +741,8 @@ impl EnvironmentManager {
                 u16::try_from(day_of_year).unwrap_or(366),
                 self.mains_hemisphere,
             );
+            self.obs_raw_day_of_year = now.ordinal();
+            self.obs_civil_day_of_year = day_of_year;
         }
         state.weather.rainfall_m = self.weather.get(WeatherField::LiquidPrecipM, weather_idx);
         state.weather.ground_albedo = ground_albedo;

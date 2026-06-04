@@ -18,6 +18,8 @@ pub(crate) fn capture_environment(
     env: &EnvironmentState,
     wf_allows_leap_years: bool,
     raw_mains_temp_f: f64,
+    raw_day_of_year: u32,
+    civil_day_of_year: u32,
 ) -> EnvironmentCapture {
     use hares_physics::units::temperature_c_to_f;
     let clamped_mains_f = temperature_c_to_f(env.weather.mains_temp_c);
@@ -44,6 +46,8 @@ pub(crate) fn capture_environment(
         base_load_kw: env.electrical.base_load_kw,
         equipment_core_size: env.equipment_core.len(),
         equipment_telemetry_size: env.equipment_telemetry.len(),
+        raw_day_of_year,
+        civil_day_of_year,
     }
 }
 
