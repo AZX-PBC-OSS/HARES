@@ -1,5 +1,6 @@
 //! Shared error type for cross-crate HARES domain errors.
 
+use crate::environment::ZoneId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -29,6 +30,12 @@ pub enum HaresError {
         value: f64,
         tolerance: f64,
     },
+    #[error("NaN detected in '{value_name}' at step {step_index} (zone {zone_id:?})")]
+    NanDetected {
+        step_index: u64,
+        zone_id: Option<ZoneId>,
+        value_name: String,
+    },
 }
 
 /// Per-dwelling error wrapper for fleet-level error isolation.
@@ -45,6 +52,7 @@ pub enum SimError {
 #[cfg(test)]
 mod tests {
     use super::{HaresError, SimError};
+    use crate::ZoneId;
 
     #[test]
     fn error_round_trips_through_json() {
@@ -68,6 +76,11 @@ mod tests {
                 check_name: "thermal_balance".to_string(),
                 value: 1.23,
                 tolerance: 0.001,
+            },
+            HaresError::NanDetected {
+                step_index: 42,
+                zone_id: Some(ZoneId(1)),
+                value_name: "q_sum".to_string(),
             },
         ];
         for err in errors {

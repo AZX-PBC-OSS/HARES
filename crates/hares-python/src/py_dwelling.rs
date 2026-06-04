@@ -2172,7 +2172,8 @@ fn to_py_err(err: HaresError) -> PyErr {
         HaresError::Physics(_)
         | HaresError::Control(_)
         | HaresError::Tariff(_)
-        | HaresError::InvariantViolation { .. } => HaresSimulationError::new_err(msg),
+        | HaresError::InvariantViolation { .. }
+        | HaresError::NanDetected { .. } => HaresSimulationError::new_err(msg),
     }
 }
 

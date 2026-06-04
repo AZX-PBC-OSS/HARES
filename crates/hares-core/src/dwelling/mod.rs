@@ -3039,6 +3039,70 @@ impl Dwelling {
                 w >= 0.0,
                 "outdoor_humidity_ratio={w} is negative — invalid since humidity ratio mass must be non-negative"
             );
+            // NaN screening on every float field before the telemetry snapshot
+            // is emitted.  Non-finite values reach downstream consumers
+            // (RL agents, monitor scripts, fleet controller) and cause silent
+            // misbehaviour that is far more expensive to diagnose than the
+            // invariant check that could have caught it here.
+            let step = self.clock.current_step();
+            let _ = self.invariant_checker.check_nan_screen(
+                step,
+                &[(
+                    "outdoor_temp_c",
+                    None,
+                    self.latest_env.weather.outdoor_temp_c,
+                )],
+            );
+            for (i, &t) in zone_temperatures_c.iter().enumerate() {
+                if !t.is_finite() {
+                    let zid = zone_ids.get(i).copied();
+                    tracing::error!(
+                        step = step,
+                        zone = ?zid,
+                        field = "zone_temperature_c",
+                        value = t,
+                        "NaN/Inf in DwellingTelemetry construction"
+                    );
+                }
+            }
+            for (i, &p) in equipment_power_kw.iter().enumerate() {
+                if !p.is_finite() {
+                    let name = equipment_names.get(i).map(|s| s.as_str()).unwrap_or("?");
+                    tracing::error!(
+                        step = step,
+                        equipment = name,
+                        field = "equipment_power_kw",
+                        value = p,
+                        "NaN/Inf in DwellingTelemetry construction"
+                    );
+                }
+            }
+            for (i, &p) in energy_balance_residuals.iter().enumerate() {
+                if !p.is_finite() {
+                    let zid = zone_ids.get(i).copied();
+                    tracing::error!(
+                        step = step,
+                        zone = ?zid,
+                        field = "energy_balance_residuals",
+                        value = p,
+                        "NaN/Inf in DwellingTelemetry construction"
+                    );
+                }
+            }
+            if !self.electrical_solver.net_active_kw().is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "total_power_kw",
+                    "NaN/Inf in DwellingTelemetry construction"
+                );
+            }
+            if !self.electrical_solver.net_reactive_kvar().is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "reactive_power_kvar",
+                    "NaN/Inf in DwellingTelemetry construction"
+                );
+            }
         }
 
         DwellingTelemetry {
@@ -5068,15 +5132,9 @@ impl Dwelling {
             }
         }
 
-        // Electrical finiteness.
+        // Electrical finiteness — screened before any residual computation.
         let net_kw = self.electrical_solver.net_active_kw();
-        if !net_kw.is_finite() {
-            return Err(HaresError::InvariantViolation {
-                check_name: "electrical_net_finite".to_string(),
-                value: net_kw,
-                tolerance: 0.0,
-            });
-        }
+        checker.check_nan_screen(self.clock.current_step(), &[("net_kw", None, net_kw)])?;
 
         // Electrical balance: solver net must match ZIP-adjusted port accumulation.
         // The solver applies ZIP load scaling (`net_active_kw() = P_load·scale + P_gen`).

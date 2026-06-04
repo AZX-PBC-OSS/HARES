@@ -101,11 +101,23 @@ pub fn write_header(w: &mut impl Write, n_zones: usize) {
 }
 
 /// Writes one row of diagnostic data.
+///
+/// Every float field is screened for finiteness before CSV formatting:
+/// non-finite values produce an empty column to avoid corrupting
+/// downstream parsers with `NaN` or `inf` tokens.
 pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
     let mut vals: Vec<String> = vec![
         d.step.to_string(),
-        format!("{:.1}", d.timestamp_s),
-        format!("{:.2}", d.outdoor_temp_c),
+        if d.timestamp_s.is_finite() {
+            format!("{:.1}", d.timestamp_s)
+        } else {
+            String::new()
+        },
+        if d.outdoor_temp_c.is_finite() {
+            format!("{:.2}", d.outdoor_temp_c)
+        } else {
+            String::new()
+        },
     ];
     for i in 0..n_zones {
         let zone_id = ZoneId((i + 1) as u16);
@@ -114,7 +126,7 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
             .iter()
             .find(|(z, _)| *z == zone_id)
             .map(|(_, t)| *t)
-            .unwrap_or(f64::NAN);
+            .unwrap_or(0.0);
         let gain = d
             .thermal_gains_w
             .iter()
@@ -127,45 +139,97 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
             .find(|(z, _)| *z == zone_id)
             .map(|(_, l)| *l)
             .unwrap_or(0.0);
-        vals.push(format!("{:.4}", temp));
-        vals.push(format!("{:.1}", gain));
-        vals.push(format!("{:.1}", latent));
+        vals.push(if temp.is_finite() {
+            format!("{:.4}", temp)
+        } else {
+            String::new()
+        });
+        vals.push(if gain.is_finite() {
+            format!("{:.1}", gain)
+        } else {
+            String::new()
+        });
+        vals.push(if latent.is_finite() {
+            format!("{:.1}", latent)
+        } else {
+            String::new()
+        });
     }
-    vals.push(format!("{:.4}", d.electrical_net_kw));
+    vals.push(if d.electrical_net_kw.is_finite() {
+        format!("{:.4}", d.electrical_net_kw)
+    } else {
+        String::new()
+    });
     vals.push(
         d.envelope
             .as_ref()
-            .map(|e| format!("{:.1}", e.port_radiant_w))
+            .map(|e| {
+                if e.port_radiant_w.is_finite() {
+                    format!("{:.1}", e.port_radiant_w)
+                } else {
+                    String::new()
+                }
+            })
             .unwrap_or_default(),
     );
     vals.push(
         d.envelope
             .as_ref()
-            .map(|e| format!("{:.1}", e.port_convective_w))
+            .map(|e| {
+                if e.port_convective_w.is_finite() {
+                    format!("{:.1}", e.port_convective_w)
+                } else {
+                    String::new()
+                }
+            })
             .unwrap_or_default(),
     );
     vals.push(
         d.envelope
             .as_ref()
-            .map(|e| format!("{:.1}", e.window_solar_w))
+            .map(|e| {
+                if e.window_solar_w.is_finite() {
+                    format!("{:.1}", e.window_solar_w)
+                } else {
+                    String::new()
+                }
+            })
             .unwrap_or_default(),
     );
     vals.push(
         d.envelope
             .as_ref()
-            .map(|e| format!("{:.1}", e.opaque_solar_lwr_w))
+            .map(|e| {
+                if e.opaque_solar_lwr_w.is_finite() {
+                    format!("{:.1}", e.opaque_solar_lwr_w)
+                } else {
+                    String::new()
+                }
+            })
             .unwrap_or_default(),
     );
     vals.push(
         d.envelope
             .as_ref()
-            .map(|e| format!("{:.1}", e.interior_lwr_w))
+            .map(|e| {
+                if e.interior_lwr_w.is_finite() {
+                    format!("{:.1}", e.interior_lwr_w)
+                } else {
+                    String::new()
+                }
+            })
             .unwrap_or_default(),
     );
     vals.push(
         d.envelope
             .as_ref()
-            .map(|e| format!("{:.1}", e.internal_gain_w))
+            .map(|e| {
+                if e.internal_gain_w.is_finite() {
+                    format!("{:.1}", e.internal_gain_w)
+                } else {
+                    String::new()
+                }
+            })
             .unwrap_or_default(),
     );
     let _ = writeln!(w, "{}", vals.join(","));
@@ -196,6 +260,11 @@ pub fn write_equipment_init(w: &mut impl Write, equipment: &[(String, u16, Optio
 }
 
 /// Capture diagnostics from the current environment and port state.
+///
+/// Screens every float field for finiteness at the point of construction.
+/// Non-finite values are reported via `tracing::error!` and written as
+/// non-finite sentinels to the diagnostic snapshot so the invariant pass
+/// (and post-hoc checks) can detect and report them with full context.
 pub fn capture(
     step: u64,
     env: &EnvironmentState,
@@ -215,12 +284,113 @@ pub fn capture(
         .iter()
         .map(|t| (t.zone, t.latent_gain_w))
         .collect();
+    let outdoor_temp_c = env.weather.outdoor_temp_c;
     let electrical_net_kw = power_w_to_kw(ports.electrical.net_active_w());
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        for &(_, temp) in &zone_temps_c {
+            if !temp.is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "zone_temp_c",
+                    value = temp,
+                    "NaN/Inf in diagnostic capture input"
+                );
+            }
+        }
+        for &(_, gain) in &thermal_gains_w {
+            if !gain.is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "thermal_gain_w",
+                    value = gain,
+                    "NaN/Inf in diagnostic capture input"
+                );
+            }
+        }
+        for &(_, latent) in &thermal_latent_w {
+            if !latent.is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "thermal_latent_w",
+                    value = latent,
+                    "NaN/Inf in diagnostic capture input"
+                );
+            }
+        }
+        if !outdoor_temp_c.is_finite() {
+            tracing::error!(
+                step = step,
+                field = "outdoor_temp_c",
+                value = outdoor_temp_c,
+                "NaN/Inf in diagnostic capture input"
+            );
+        }
+        if !electrical_net_kw.is_finite() {
+            tracing::error!(
+                step = step,
+                field = "electrical_net_kw",
+                value = electrical_net_kw,
+                "NaN/Inf in diagnostic capture input"
+            );
+        }
+        if let Some(ref e) = envelope {
+            if !e.window_solar_w.is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "window_solar_w",
+                    value = e.window_solar_w,
+                    "NaN/Inf in envelope diagnostic"
+                );
+            }
+            if !e.opaque_solar_lwr_w.is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "opaque_solar_lwr_w",
+                    value = e.opaque_solar_lwr_w,
+                    "NaN/Inf in envelope diagnostic"
+                );
+            }
+            if !e.interior_lwr_w.is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "interior_lwr_w",
+                    value = e.interior_lwr_w,
+                    "NaN/Inf in envelope diagnostic"
+                );
+            }
+            if !e.internal_gain_w.is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "internal_gain_w",
+                    value = e.internal_gain_w,
+                    "NaN/Inf in envelope diagnostic"
+                );
+            }
+            if !e.port_convective_w.is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "port_convective_w",
+                    value = e.port_convective_w,
+                    "NaN/Inf in envelope diagnostic"
+                );
+            }
+            if !e.port_radiant_w.is_finite() {
+                tracing::error!(
+                    step = step,
+                    field = "port_radiant_w",
+                    value = e.port_radiant_w,
+                    "NaN/Inf in envelope diagnostic"
+                );
+            }
+        }
+    }
 
     StepDiagnostics {
         step,
         timestamp_s,
-        outdoor_temp_c: env.weather.outdoor_temp_c,
+        outdoor_temp_c,
         zone_temps_c,
         thermal_gains_w,
         thermal_latent_w,

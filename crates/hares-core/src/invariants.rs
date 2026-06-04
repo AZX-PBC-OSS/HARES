@@ -10,7 +10,7 @@
 
 use hares_types::ports::FuelAccumulator;
 use hares_types::ports::{ALL_FUEL_TYPES, FUEL_TYPE_COUNT, fuel_index_reverse};
-use hares_types::{ControlCapabilities, HaresError};
+use hares_types::{ControlCapabilities, HaresError, ZoneId};
 
 /// Entrypoint for per-timestep numerical invariant validation.
 ///
@@ -426,6 +426,37 @@ impl InvariantChecker {
         }
         Ok(())
     }
+
+    /// Screens key float values for NaN before any residual computation.
+    ///
+    /// NaN propagation is a silent correctness hazard: `NaN >= tolerance`
+    /// evaluates to `false`, so a NaN-bearer passes every comparison-based
+    /// invariant check without detection.  This method provides a dedicated,
+    /// context-rich NaN-screening gate that fires at the earliest possible
+    /// phase boundary — before any residual is computed.
+    ///
+    /// Called from the dwelling's [`check_invariants`] at the top of the
+    /// per-step invariant pass, and from diagnostic / telemetry construction
+    /// sites as a backstop.
+    ///
+    /// Returns `Err(HaresError::NanDetected { .. })` on the first non-finite
+    /// value found.
+    pub fn check_nan_screen(
+        &self,
+        step_index: u64,
+        values: &[(&str, Option<ZoneId>, f64)],
+    ) -> Result<(), HaresError> {
+        for &(name, zone_id, value) in values {
+            if !value.is_finite() {
+                return Err(HaresError::NanDetected {
+                    step_index,
+                    zone_id,
+                    value_name: name.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
@@ -466,6 +497,14 @@ impl InvariantChecker {
     }
 
     pub fn check_equipment_step_order(&self, _: &[u8]) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_nan_screen(
+        &self,
+        _: u64,
+        _: &[(&str, Option<ZoneId>, f64)],
+    ) -> Result<(), HaresError> {
         Ok(())
     }
 }
@@ -1227,5 +1266,73 @@ mod tests {
     fn existing_moisture_balance_tests_still_pass() {
         let result = checker().check_moisture(0.024, 0.0016, 0.0016, 2.33);
         assert!(result.is_ok());
+    }
+
+    // ── check_nan_screen ─────────────────────────────────────────────────────
+
+    /// Constructs a NaN-screen input with NaN in the position that would
+    /// represent `q_sum` (total thermal gain) and asserts the NaN-detection
+    /// path returns an error, not `Ok(())`.
+    #[test]
+    fn nan_screen_catches_nan_in_q_sum() {
+        let result = checker().check_nan_screen(
+            42,
+            &[
+                ("q_sum", None, f64::NAN),
+                ("net_kw", None, 1.5),
+                ("delta_m_water", None, 0.001),
+            ],
+        );
+        assert!(
+            result.is_err(),
+            "NaN in q_sum must be caught by check_nan_screen"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::NanDetected { value_name, .. } if value_name == "q_sum"
+        ));
+    }
+
+    /// All finite values pass the screen.
+    #[test]
+    fn nan_screen_passes_on_all_finite() {
+        let result = checker().check_nan_screen(
+            7,
+            &[
+                ("q_sum", None, 1000.0),
+                ("net_kw", None, 1.5),
+                ("delta_m_water", Some(ZoneId(1)), 0.001),
+            ],
+        );
+        assert!(result.is_ok());
+    }
+
+    /// Infinity is non-finite and is caught by the same guard.
+    #[test]
+    fn nan_screen_catches_infinity() {
+        let result = checker().check_nan_screen(1, &[("net_kw", None, f64::INFINITY)]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::NanDetected { value_name, .. } if value_name == "net_kw"
+        ));
+    }
+
+    /// Verifies that zone_id context is carried through to the error.
+    #[test]
+    fn nan_screen_carries_zone_context() {
+        let result = checker().check_nan_screen(99, &[("zone_temp_c", Some(ZoneId(3)), f64::NAN)]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::NanDetected {
+                step_index: 99,
+                zone_id: Some(ZoneId(3)),
+                ..
+            }
+        ));
     }
 }
