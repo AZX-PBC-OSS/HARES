@@ -360,7 +360,8 @@ pub fn parse_resstock_csv_str(
         // See Wilcox & Marion 2008, NREL/TP-581-43156 §3; confirmed by real NREL
         // ResStock AMY 2018 CSV files (G0100630_2018.csv, G5107750_2018.csv).
         midpoint_offset_secs: 1800,
-        has_embedded_location: false,    };
+        has_embedded_location: false,
+    };
 
     Ok(WeatherTimeSeries {
         meta,
@@ -508,6 +509,13 @@ mod tests {
         assert_eq!(result.len(), 8760);
         assert_eq!(result.meta.source_step_secs, 3600);
         assert_eq!(result.meta.elevation_m, 0.0);
+
+        // ResStock CSV carries no embedded location; the resolver must treat
+        // its lat/lon/timezone as caller-supplied, not file-authoritative.
+        assert!(
+            !result.meta.has_embedded_location,
+            "ResStock CSV has no location header; has_embedded_location must be false"
+        );
 
         // Pressure should be sea-level ISA.
         let p = result.pressure_kpa[0];

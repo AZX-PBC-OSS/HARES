@@ -9,7 +9,6 @@ use hares_io::schedule::ColumnAggregation;
 use hares_io::{ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
 use hares_types::SCHEDULE_DOMAIN_ID;
 
-#[cfg(feature = "dst")]
 fn offset_east(seconds: i32) -> FixedOffset {
     FixedOffset::east_opt(seconds).expect("valid offset")
 }
@@ -38,7 +37,8 @@ fn minimal_building() -> hares_io::Building {
             shielding_of_home: None,
             latitude_deg: Some(40.7128),
             longitude_deg: Some(-74.0060),
-            utc_offset_h: None,        },
+            utc_offset_h: None,
+        },
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
@@ -132,6 +132,7 @@ fn sequential_weather(start_temp_c: f64, rows: usize, timezone_offset_h: f64) ->
             wf_allows_leap_years: true,
             source_step_secs: 3600,
             midpoint_offset_secs: 0,
+            has_embedded_location: true,
         },
         design_conditions: None,
         dry_bulb_c: seq(start_temp_c),
@@ -160,6 +161,128 @@ fn schedule_value(env: &hares_types::EnvironmentState) -> f64 {
         .and_then(|payload| payload.first())
         .copied()
         .expect("schedule payload must exist")
+}
+
+/// Build a sunny-weather series so solar irradiance is non-zero at noon.
+fn sunny_weather(rows: usize, lat: f64, lon: f64, timezone_offset_h: f64) -> WeatherTimeSeries {
+    let mut w = sequential_weather(20.0, rows, timezone_offset_h);
+    w.meta.latitude = lat;
+    w.meta.longitude = lon;
+    // Clear-sky-ish magnitudes for every hour; the solar-position model gates
+    // actual surface irradiance by the sun's altitude, so what matters for the
+    // regression is the GEOMETRY at the simulated wall-clock time.
+    w.ghi_w_m2 = vec![900.0; rows];
+    w.dni_w_m2 = vec![800.0; rows];
+    w.dhi_w_m2 = vec![120.0; rows];
+    w
+}
+
+/// Regression for the PV-underproduction / timezone bug.
+///
+/// When `start_time`'s UTC offset matches the site's resolved standard-time
+/// offset (as `Dwelling::from_preparsed` now guarantees via the site-location
+/// resolver), `solar_position` at LOCAL solar noon must place the sun HIGH in
+/// the sky. The bug paired a naive `+00:00` offset with a far-west longitude,
+/// so "noon" was computed as early-morning sun (~14° altitude) — collapsing PV
+/// output. Here the building is at Birmingham, Alabama (lon ≈ -86.8, CST = -6h)
+/// and the simulation starts at local noon on a summer day.
+#[test]
+fn local_noon_with_correct_offset_yields_high_solar_altitude() {
+    let lat = 33.52;
+    let lon = -86.81;
+    let utc_offset_h = -6.0; // resolved CST for Alabama
+
+    // Local wall-clock noon, stamped with the resolved standard-time offset —
+    // exactly what from_preparsed produces after site-location resolution.
+    let start = offset_west((-utc_offset_h * 3600.0) as i32)
+        .with_ymd_and_hms(2024, 6, 21, 12, 0, 0)
+        .single()
+        .expect("valid local-noon start");
+
+    let mut building = minimal_building();
+    building.site.latitude_deg = Some(lat);
+    building.site.longitude_deg = Some(lon);
+    building.site.utc_offset_h = Some(utc_offset_h);
+
+    let mut manager = EnvironmentManager::new(
+        sunny_weather(24, lat, lon, utc_offset_h),
+        hourly_schedule(start),
+        &building,
+        StdDuration::from_secs(3600),
+        start,
+        None,
+    )
+    .expect("manager");
+    let clock = SimClock::new(start, Duration::hours(1), Duration::hours(1));
+
+    let env = manager.update(&clock, &[]).unwrap();
+    let altitude = env.weather.solar_altitude_deg;
+
+    // At Birmingham on the summer solstice, solar noon altitude ≈ 90 - (33.5 -
+    // 23.4) ≈ 80°. With the CORRECT offset the sun is high (>60°); the bug's
+    // wrong +00:00 offset would yield ≈14° (early-morning sun).
+    assert!(
+        altitude > 60.0,
+        "local-noon solar altitude with correct UTC offset must be high (sun overhead), \
+         got {altitude:.1}° — a low value indicates the timezone/solar-geometry regression"
+    );
+
+    // And surfaces must receive substantial irradiance at this geometry. The
+    // minimal building has only a south-facing VERTICAL wall (tilt 90°); with
+    // the sun nearly overhead the AOI is large, so POA is naturally lower than
+    // on a tilted panel — but it must be clearly non-collapsed (>150 W/m²),
+    // unlike the early-morning-sun bug where the high-magnitude weather was
+    // projected onto a near-horizon sun.
+    let max_poa = env
+        .weather
+        .solar_irradiance
+        .iter()
+        .map(|s| s.direct_w_m2 + s.diffuse_w_m2 + s.reflected_w_m2)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_poa > 150.0,
+        "plane-of-array irradiance at local noon must be substantial, got {max_poa:.0} W/m²"
+    );
+}
+
+/// The mirror image: feeding the WRONG offset (naive +00:00, the pre-fix
+/// behaviour) at this far-west longitude must produce a LOW solar altitude at
+/// nominal "noon". This locks in WHY the offset must be resolved correctly.
+#[test]
+fn local_noon_with_wrong_utc_offset_yields_low_solar_altitude() {
+    let lat = 33.52;
+    let lon = -86.81;
+
+    // Naive +00:00 — the buggy stamping the resolver now prevents.
+    let start = offset_east(0)
+        .with_ymd_and_hms(2024, 6, 21, 12, 0, 0)
+        .single()
+        .expect("valid start");
+
+    let mut building = minimal_building();
+    building.site.latitude_deg = Some(lat);
+    building.site.longitude_deg = Some(lon);
+
+    let mut manager = EnvironmentManager::new(
+        sunny_weather(24, lat, lon, 0.0),
+        hourly_schedule(start),
+        &building,
+        StdDuration::from_secs(3600),
+        start,
+        None,
+    )
+    .expect("manager");
+    let clock = SimClock::new(start, Duration::hours(1), Duration::hours(1));
+
+    let env = manager.update(&clock, &[]).unwrap();
+    let altitude = env.weather.solar_altitude_deg;
+
+    // 12:00 UTC at lon -86.8 is ~6 AM local → sun barely above the horizon.
+    assert!(
+        altitude < 30.0,
+        "12:00 UTC at lon -86.8° must be early-morning sun (low altitude), got {altitude:.1}°; \
+         this is the geometry the resolver corrects by stamping the right offset"
+    );
 }
 
 #[test]

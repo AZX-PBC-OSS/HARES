@@ -117,6 +117,7 @@ fn simulation_config(output_path: PathBuf) -> SimulationConfig {
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
+        site_location: hares_io::SiteLocationOverride::default(),
     }
 }
 

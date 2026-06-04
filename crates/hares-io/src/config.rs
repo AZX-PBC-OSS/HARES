@@ -10,6 +10,8 @@ use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
+use crate::site_location::SiteLocationOverride;
+
 /// Output file format.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -80,6 +82,14 @@ pub struct SimulationConfig {
     /// field will produce a runtime error.
     #[serde(default)]
     pub civil_timezone: Option<String>,
+    /// Explicit site-location override. Any field set here takes precedence
+    /// over both the HPXML `Site` element and the weather file's embedded
+    /// metadata during site-location resolution (see
+    /// [`crate::site_location`]). Mismatches with the other sources are
+    /// warned about but honoured — this is the deliberate escape hatch for
+    /// specifying coordinates/timezone explicitly.
+    #[serde(default)]
+    pub site_location: SiteLocationOverride,
 }
 
 impl SimulationConfig {

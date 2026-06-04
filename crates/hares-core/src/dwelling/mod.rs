@@ -33,6 +33,7 @@ use hares_io::{
     Building, DefaultsStore, PvPanelDefaults, ScheduleTimeSeries, SimulationConfig,
     StreamingRecorder, WeatherTimeSeries, build_schema, end_use_electric_power_column,
     equipment_name_to_end_use, parse_hpxml, parse_schedule_csv, parse_weather, resolve_equipment,
+    resolve_site_location,
 };
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
@@ -1230,6 +1231,7 @@ impl Dwelling {
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
         };
 
         let config = DwellingConfig {
@@ -1299,6 +1301,7 @@ impl Dwelling {
             setpoint_deadband_c: None,
             master_seed: config.output.master_seed,
             civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
         };
         validate_sim_config(&sim_config)?;
 
@@ -1333,14 +1336,39 @@ impl Dwelling {
     fn from_preparsed(
         config: DwellingConfig,
         mut building: Building,
-        weather: WeatherTimeSeries,
+        mut weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
     ) -> Result<Self> {
-        // Reinterpret the user's start time in the weather file's local timezone.
-        // The naive wall-clock components (year, month, day, hour, minute, second)
-        // are preserved and the offset is replaced with the EPW file's timezone.
+        // Resolve the authoritative site location ONCE from all available
+        // sources (explicit override → HPXML → weather file), then make it the
+        // single source of truth: written into both the weather metadata (which
+        // drives solar position) and the building's Site (which drives autosize
+        // and equipment placement). This guarantees solar geometry, weather
+        // magnitudes, and the start-time UTC offset are all mutually
+        // consistent. See `hares_io::site_location`.
+        let site_location = resolve_site_location(
+            &building.site,
+            &weather.meta,
+            &config.sim_config.site_location,
+        );
+        weather.meta.latitude = site_location.latitude_deg;
+        weather.meta.longitude = site_location.longitude_deg;
+        weather.meta.elevation_m = site_location.elevation_m;
+        weather.meta.timezone_offset_h = site_location.utc_offset_h;
+        weather.meta.has_embedded_location = true;
+        building.site.latitude_deg = Some(site_location.latitude_deg);
+        building.site.longitude_deg = Some(site_location.longitude_deg);
+        building.site.elevation_m = Some(site_location.elevation_m);
+        building.site.utc_offset_h = Some(site_location.utc_offset_h);
+
+        // Reinterpret the user's start time in the site's resolved standard-time
+        // zone. The naive wall-clock components (year, month, day, hour, minute,
+        // second) are preserved — the user passes local wall-clock time — and
+        // the offset is set to the resolved UTC offset so `solar_position`'s
+        // internal `to_utc()` yields the correct sun geometry. DST, when
+        // requested, is applied separately via `civil_timezone`.
         let tz_offset =
-            chrono::FixedOffset::east_opt((weather.meta.timezone_offset_h * 3600.0) as i32)
+            chrono::FixedOffset::east_opt((site_location.utc_offset_h * 3600.0).round() as i32)
                 .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC offset"));
         let local_start = config
             .sim_config
@@ -1363,8 +1391,6 @@ impl Dwelling {
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
         let weather_design_conditions = weather.design_conditions;
-        let weather_lat = weather.meta.latitude;
-        let weather_lon = weather.meta.longitude;
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
         let mut environment = EnvironmentManager::new_with_resample(
             weather,
@@ -1402,13 +1428,6 @@ impl Dwelling {
         };
 
         let empty_overrides = Value::Object(Map::new());
-
-        if building.site.latitude_deg.is_none() {
-            building.site.latitude_deg = Some(weather_lat);
-        }
-        if building.site.longitude_deg.is_none() {
-            building.site.longitude_deg = Some(weather_lon);
-        }
 
         let mut equipment_specs = resolve_equipment(
             &building,
@@ -1471,8 +1490,8 @@ impl Dwelling {
 
             let ctx = crate::dwelling::autosize::AutosizeContext {
                 design_conditions: weather_design_conditions,
-                weather_lat,
-                weather_lon,
+                weather_lat: site_location.latitude_deg,
+                weather_lon: site_location.longitude_deg,
                 duct_params,
                 internal_gains_w: 0.0,
                 internal_gains_latent_w: 0.0,
@@ -8676,6 +8695,7 @@ occupancy = 1.0
             setpoint_deadband_c: None,
             master_seed: config.output.master_seed,
             civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
         };
         validate_sim_config(&sim_config).expect("valid sim config");
 
@@ -8941,7 +8961,8 @@ occupancy = 1.0
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-                utc_offset_h: None,            },
+                utc_offset_h: None,
+            },
             zones: vec![
                 Zone {
                     zone_type: ZoneType::Conditioned,

@@ -19,6 +19,8 @@ uom = { workspace = true }
 quick-xml = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
+tzf-rs = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 serde = { workspace = true }

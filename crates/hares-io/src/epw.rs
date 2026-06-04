@@ -384,7 +384,8 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         // EPW uses hour-ending convention: row "12" covers 11:00–12:00.
         // Subtract half-period (30 min) from sim time to read the correct period.
         midpoint_offset_secs: 1800,
-        has_embedded_location: true,    })
+        has_embedded_location: true,
+    })
 }
 
 /// Parse the EPW HOLIDAYS/DAYLIGHT SAVINGS header (line 5).
@@ -1450,6 +1451,19 @@ mod tests {
             (parsed.horizontal_infrared_w_m2[0] - 350.0).abs() < 0.01,
             "first row infrared should be 350.0, got {}",
             parsed.horizontal_infrared_w_m2[0]
+        );
+    }
+
+    /// EPW headers embed site location, so `has_embedded_location` must be
+    /// `true` — this tells the site-location resolver to honour the file's
+    /// lat/lon/timezone rather than treating `0.0` as "unknown".
+    #[test]
+    fn epw_has_embedded_location_flag_set() {
+        let epw = build_synthetic_epw(8760, |_row, _fields| {});
+        let parsed = parse_epw_str(&epw).expect("synthetic EPW should parse");
+        assert!(
+            parsed.meta.has_embedded_location,
+            "EPW format embeds location in its header; has_embedded_location must be true"
         );
     }
 

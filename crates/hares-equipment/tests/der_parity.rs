@@ -455,6 +455,120 @@ fn pv_cell_temperature_noct_model() {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. PV PEAK GENERATION REGRESSION: a well-sized array in good conditions
+//     must produce a realistic fraction of its nameplate DC rating.
+//
+// Regression guard for the timezone/site-location bug class where a 10 kW DC
+// system silently produced only ~5.5 kW AC at solar noon because the solar
+// geometry was computed for the wrong time-of-day (sun low on the horizon)
+// while the weather magnitudes were near-peak. With a CONSISTENT, near-normal-
+// incidence POA (~950 W/m²), the AC output must land in the physically
+// expected band.
+//
+// Expected (PVWatts v8 chain, 10 kW DC, POA≈950, hot summer ambient):
+//   T_cell (SAM-NOCT, 34°C amb, 1.5 m/s wind, NOCT=45) ≈ 59°C
+//   temp_derate = 1 + (-0.0047)(59 - 25) ≈ 0.84
+//   DC = 10 × (950/1000) × 0.84            ≈ 7.98 kW
+//   DC after 14% system losses             ≈ 6.86 kW
+//   AC after 96% inverter                  ≈ 6.59 kW
+// A correct model lands ≈ 6.6 kW; the bug produced ≈ 5.5 kW. Assert the band
+// 6.0–7.6 kW: comfortably excludes the bug while tolerating model nuance.
+// ---------------------------------------------------------------------------
+#[test]
+fn pv_peak_generation_in_good_conditions() {
+    let tilt = 20.0;
+    let azimuth = 180.0;
+    let capacity_kw = 10.0;
+
+    let cfg = EquipmentConfig::from_typed(
+        "PV".to_string(),
+        "PV".to_string(),
+        PvConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kw,
+            tilt_deg: Some(tilt),
+            azimuth_deg: Some(azimuth),
+            module_type: None,
+            // Open-rack default NOCT (PVWatts v8).
+            noct_c: Some(45.0),
+            array_type: None,
+            // PVWatts v5 default 14% system losses + 96% inverter: the standard
+            // residential configuration whose output the bug suppressed.
+            system_losses_fraction: Some(0.14),
+            inverter_efficiency: Some(0.96),
+            inverter_capacity_kw: None,
+            power_factor: None,
+            surface_resolution_deg: Some(5.0),
+            sam_lut_path: None,
+            arrays: None,
+        },
+    );
+
+    let mut env = base_env();
+    // Hot, sunny summer noon — the exact conditions of the reported scenario.
+    env.weather.outdoor_temp_c = 34.0;
+    env.weather.wind_speed_m_s = 1.5;
+    env.weather.solar_altitude_deg = 79.0; // near-zenith summer sun
+    env.weather.solar_azimuth_deg = 180.0;
+
+    // Consistent plane-of-array irradiance for the panel orientation:
+    // near-normal incidence at solar noon, POA ≈ 950 W/m².
+    let surface_id = surface_id_for_orientation(tilt, azimuth, 5.0).unwrap();
+    env.weather.solar_irradiance = vec![SurfaceIrradiance {
+        surface_id,
+        direct_w_m2: 800.0,
+        diffuse_w_m2: 145.0,
+        reflected_w_m2: 5.0,
+        angle_of_incidence_rad: 0.17, // ≈10° — sun nearly normal to the panel
+    }];
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("PV", cfg.clone()).unwrap();
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = PortSlots::default();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let ac_power_kw = eq
+        .telemetry()
+        .get("ac_power_kw")
+        .expect("ac_power_kw must exist");
+    let dc_power_kw = eq
+        .telemetry()
+        .get("dc_power_kw")
+        .expect("dc_power_kw must exist");
+
+    let dc_ac_ratio = capacity_kw / ac_power_kw;
+    eprintln!(
+        "[der_parity] pv_peak: DC={dc_power_kw:.3} kW, AC={ac_power_kw:.3} kW \
+         ({:.0}% of {capacity_kw:.0} kW nameplate; bug produced ~5.5 kW)",
+        ac_power_kw / capacity_kw * 100.0
+    );
+
+    // The core regression assertion: a 10 kW DC system in good conditions must
+    // produce 6.0–7.6 kW AC. The pre-fix bug produced ~5.5 kW (below 6.0) by
+    // pairing near-peak irradiance with a low-altitude (wrong-time) sun.
+    assert!(
+        (6.0..=7.6).contains(&ac_power_kw),
+        "10 kW PV in good conditions produced {ac_power_kw:.3} kW AC, outside the expected \
+         6.0–7.6 kW band. Below 6.0 kW indicates the timezone/solar-geometry underproduction \
+         regression; above 7.6 kW indicates missing temperature/loss derates."
+    );
+
+    // DC must exceed AC (inverter efficiency < 1) and the DC/AC ratio must be
+    // sane (no runaway clipping or over-production).
+    assert!(
+        dc_power_kw > ac_power_kw,
+        "DC ({dc_power_kw:.3}) must exceed AC ({ac_power_kw:.3}) due to inverter losses"
+    );
+    assert!(
+        (1.2..=1.7).contains(&dc_ac_ratio),
+        "DC/AC nameplate ratio {dc_ac_ratio:.2} implausible for these conditions"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 6. PV DC power: temperature derating reduces output above 25°C
 //
 // OCHRE PV.py: P_dc = capacity × (POA / 1000) × [1 + gamma × (T_cell - T_ref)]

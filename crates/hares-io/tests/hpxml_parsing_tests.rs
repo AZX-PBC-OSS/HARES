@@ -61,6 +61,7 @@ fn empty_weather_meta() -> WeatherMeta {
         wf_allows_leap_years: true,
         source_step_secs: 3600,
         midpoint_offset_secs: 0,
+        has_embedded_location: false,
     }
 }
 

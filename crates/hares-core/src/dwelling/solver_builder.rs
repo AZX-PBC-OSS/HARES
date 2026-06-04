@@ -2315,7 +2315,8 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-                utc_offset_h: None,            },
+                utc_offset_h: None,
+            },
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: None,
@@ -2396,6 +2397,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: 0.9,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         }];
 
         // layer_info maps surface 0 to a NodeId(999) that does NOT exist in node_index.
@@ -2432,6 +2435,8 @@ mod tests {
             }],
             zone_capacitances_j_k: vec![1000.0],
             total_ua_w_per_k: 0.0,
+            #[cfg(feature = "observe")]
+            default_r_fallback_count: 0,
         };
 
         let rc = RCContext {
@@ -2495,7 +2500,8 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-                utc_offset_h: None,            },
+                utc_offset_h: None,
+            },
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: None,
@@ -2576,6 +2582,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: 0.9,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         }];
 
         // No layer_info entry for this surface (fallback-R path).
@@ -2604,6 +2612,8 @@ mod tests {
             }],
             zone_capacitances_j_k: vec![1000.0],
             total_ua_w_per_k: 0.0,
+            #[cfg(feature = "observe")]
+            default_r_fallback_count: 0,
         };
 
         let rc = RCContext {

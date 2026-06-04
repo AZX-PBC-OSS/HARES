@@ -78,6 +78,10 @@ pub struct PySimulationConfig {
     setpoint_deadband_c: Option<f64>,
     master_seed: u64,
     civil_timezone: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    elevation_m: Option<f64>,
+    utc_offset_h: Option<f64>,
 }
 
 #[pymethods]
@@ -96,6 +100,10 @@ impl PySimulationConfig {
             master_seed = None,
             civil_timezone = None,
             setpoint_deadband_c = None,
+            latitude = None,
+            longitude = None,
+            elevation_m = None,
+            utc_offset_h = None,
         )
     )]
     // PyO3 #[new] with kwargs maps 1:1 to Python kwargs; builder adds no value here.
@@ -112,6 +120,10 @@ impl PySimulationConfig {
         master_seed: Option<u64>,
         civil_timezone: Option<String>,
         setpoint_deadband_c: Option<f64>,
+        latitude: Option<f64>,
+        longitude: Option<f64>,
+        elevation_m: Option<f64>,
+        utc_offset_h: Option<f64>,
     ) -> PyResult<Self> {
         let start_time = start_time
             .map(|s| parse_datetime_str(&s))
@@ -148,6 +160,38 @@ impl PySimulationConfig {
             }
         }
 
+        if let Some(lat) = latitude {
+            if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+                return Err(PyValueError::new_err(
+                    "latitude must be finite and within [-90, 90]",
+                ));
+            }
+        }
+
+        if let Some(lon) = longitude {
+            if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+                return Err(PyValueError::new_err(
+                    "longitude must be finite and within [-180, 180]",
+                ));
+            }
+        }
+
+        if let Some(elev) = elevation_m {
+            if !elev.is_finite() || !(-500.0..=9000.0).contains(&elev) {
+                return Err(PyValueError::new_err(
+                    "elevation_m must be finite and within [-500, 9000]",
+                ));
+            }
+        }
+
+        if let Some(offset) = utc_offset_h {
+            if !offset.is_finite() || !(-14.0..=14.0).contains(&offset) {
+                return Err(PyValueError::new_err(
+                    "utc_offset_h must be finite and within [-14, 14]",
+                ));
+            }
+        }
+
         let output_chunk_size = output_chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
 
         Ok(Self {
@@ -162,6 +206,10 @@ impl PySimulationConfig {
             setpoint_deadband_c,
             master_seed: master_seed.unwrap_or(0),
             civil_timezone,
+            latitude,
+            longitude,
+            elevation_m,
+            utc_offset_h,
         })
     }
 
@@ -296,6 +344,78 @@ impl PySimulationConfig {
         self.civil_timezone = value;
     }
 
+    #[getter]
+    pub fn latitude(&self) -> Option<f64> {
+        self.latitude
+    }
+
+    #[setter]
+    pub fn set_latitude(&mut self, value: Option<f64>) -> PyResult<()> {
+        if let Some(lat) = value {
+            if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+                return Err(PyValueError::new_err(
+                    "latitude must be finite and within [-90, 90]",
+                ));
+            }
+        }
+        self.latitude = value;
+        Ok(())
+    }
+
+    #[getter]
+    pub fn longitude(&self) -> Option<f64> {
+        self.longitude
+    }
+
+    #[setter]
+    pub fn set_longitude(&mut self, value: Option<f64>) -> PyResult<()> {
+        if let Some(lon) = value {
+            if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+                return Err(PyValueError::new_err(
+                    "longitude must be finite and within [-180, 180]",
+                ));
+            }
+        }
+        self.longitude = value;
+        Ok(())
+    }
+
+    #[getter]
+    pub fn elevation_m(&self) -> Option<f64> {
+        self.elevation_m
+    }
+
+    #[setter]
+    pub fn set_elevation_m(&mut self, value: Option<f64>) -> PyResult<()> {
+        if let Some(elev) = value {
+            if !elev.is_finite() || !(-500.0..=9000.0).contains(&elev) {
+                return Err(PyValueError::new_err(
+                    "elevation_m must be finite and within [-500, 9000]",
+                ));
+            }
+        }
+        self.elevation_m = value;
+        Ok(())
+    }
+
+    #[getter]
+    pub fn utc_offset_h(&self) -> Option<f64> {
+        self.utc_offset_h
+    }
+
+    #[setter]
+    pub fn set_utc_offset_h(&mut self, value: Option<f64>) -> PyResult<()> {
+        if let Some(offset) = value {
+            if !offset.is_finite() || !(-14.0..=14.0).contains(&offset) {
+                return Err(PyValueError::new_err(
+                    "utc_offset_h must be finite and within [-14, 14]",
+                ));
+            }
+        }
+        self.utc_offset_h = value;
+        Ok(())
+    }
+
     pub fn __repr__(&self) -> String {
         format!(
             "SimulationConfig(start_time='{}', duration_s={}, time_res_s={}, write_output={}, output_to_parquet={}, master_seed={})",
@@ -333,6 +453,12 @@ impl PySimulationConfig {
             setpoint_deadband_c: self.setpoint_deadband_c,
             master_seed: self.master_seed,
             civil_timezone: self.civil_timezone.clone(),
+            site_location: hares_io::SiteLocationOverride {
+                latitude_deg: self.latitude,
+                longitude_deg: self.longitude,
+                elevation_m: self.elevation_m,
+                utc_offset_h: self.utc_offset_h,
+            },
         })
     }
 
@@ -352,6 +478,10 @@ impl PySimulationConfig {
             setpoint_deadband_c: config.setpoint_deadband_c,
             master_seed: config.master_seed,
             civil_timezone: config.civil_timezone.clone(),
+            latitude: config.site_location.latitude_deg,
+            longitude: config.site_location.longitude_deg,
+            elevation_m: config.site_location.elevation_m,
+            utc_offset_h: config.site_location.utc_offset_h,
         }
     }
 }
@@ -563,6 +693,7 @@ impl PyDwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
             });
 
         let resample_overrides: Option<ResampleOverrides> = self

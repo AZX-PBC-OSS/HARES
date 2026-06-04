@@ -16,7 +16,8 @@ use hares_equipment::{
     ProtocolBridgeConfig, PvConfig, config::ConfigValue,
 };
 use hares_io::{
-    OutputFormat, ResampleOverrides, SimulationConfig, output::metrics::MetricsCalculator,
+    OutputFormat, ResampleOverrides, SimulationConfig, SiteLocationOverride,
+    output::metrics::MetricsCalculator,
 };
 use hares_types::panic_hook::{self, PanicHookGuard};
 use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
@@ -1740,7 +1741,72 @@ const KNOWN_KWARGS: &[&str] = &[
     "defaults_path",
     "resample_overrides",
     "overrides",
+    "latitude",
+    "longitude",
+    "elevation_m",
+    "utc_offset_h",
 ];
+
+/// Extract an explicit [`SiteLocationOverride`] from the `latitude`,
+/// `longitude`, `elevation_m`, and `utc_offset_h` kwargs.
+///
+/// Each is optional; any provided value overrides the HPXML/weather-derived
+/// value during site-location resolution. Values are validated for finiteness
+/// and physical range so a typo fails fast rather than silently producing
+/// wrong solar geometry.
+fn extract_site_location_override(
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<SiteLocationOverride> {
+    let get = |name: &str| -> PyResult<Option<f64>> {
+        kwargs
+            .and_then(|k| k.get_item(name).ok().flatten())
+            .map(|obj| obj.extract::<f64>())
+            .transpose()
+    };
+
+    let latitude_deg = get("latitude")?;
+    if let Some(lat) = latitude_deg {
+        if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+            return Err(PyValueError::new_err(format!(
+                "latitude must be finite and within [-90, 90] degrees, got {lat}"
+            )));
+        }
+    }
+
+    let longitude_deg = get("longitude")?;
+    if let Some(lon) = longitude_deg {
+        if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+            return Err(PyValueError::new_err(format!(
+                "longitude must be finite and within [-180, 180] degrees, got {lon}"
+            )));
+        }
+    }
+
+    let elevation_m = get("elevation_m")?;
+    if let Some(elev) = elevation_m {
+        if !elev.is_finite() || !(-500.0..=9000.0).contains(&elev) {
+            return Err(PyValueError::new_err(format!(
+                "elevation_m must be finite and within [-500, 9000] m, got {elev}"
+            )));
+        }
+    }
+
+    let utc_offset_h = get("utc_offset_h")?;
+    if let Some(off) = utc_offset_h {
+        if !off.is_finite() || !(-14.0..=14.0).contains(&off) {
+            return Err(PyValueError::new_err(format!(
+                "utc_offset_h must be finite and within [-14, 14] hours, got {off}"
+            )));
+        }
+    }
+
+    Ok(SiteLocationOverride {
+        latitude_deg,
+        longitude_deg,
+        elevation_m,
+        utc_offset_h,
+    })
+}
 
 fn build_config(
     hpxml: String,
@@ -1860,6 +1926,8 @@ fn build_config(
             }
         }
 
+        let site_location = extract_site_location_override(kwargs.as_ref())?;
+
         if duration.num_milliseconds() % time_res.num_milliseconds() != 0 {
             return Err(PyValueError::new_err(format!(
                 "duration ({}s) must be an exact multiple of time_res ({}s)",
@@ -1884,6 +1952,7 @@ fn build_config(
             setpoint_deadband_c,
             master_seed,
             civil_timezone,
+            site_location,
         }
     };
 

@@ -783,7 +783,8 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-                utc_offset_h: None,            },
+                utc_offset_h: None,
+            },
             zones: vec![],
             boundaries: vec![],
             windows: vec![],
@@ -1952,7 +1953,8 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-                utc_offset_h: None,            },
+                utc_offset_h: None,
+            },
             zones: vec![
                 Zone {
                     zone_type: ZoneType::Conditioned,

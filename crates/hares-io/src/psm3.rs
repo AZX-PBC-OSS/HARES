@@ -307,7 +307,8 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         wf_allows_leap_years: true,
         source_step_secs: step_secs,
         midpoint_offset_secs: 0,
-        has_embedded_location: true,    };
+        has_embedded_location: true,
+    };
 
     Ok(WeatherTimeSeries {
         meta,
@@ -588,6 +589,11 @@ mod tests {
         assert!((ts.meta.latitude - 39.74).abs() < 1e-6);
         assert!((ts.meta.longitude - (-104.99)).abs() < 1e-6);
         assert_eq!(ts.meta.location, "TestCity");
+        // PSM3 headers embed location: resolver must honour the file's coords.
+        assert!(
+            ts.meta.has_embedded_location,
+            "PSM3 embeds location in its header; has_embedded_location must be true"
+        );
         // Pressure: 1013.25 mbar / 10 = 101.325 kPa
         assert!((ts.pressure_kpa[0] - 101.325).abs() < 1e-6);
     }

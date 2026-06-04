@@ -47,6 +47,7 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         master_seed: 0,
         setpoint_deadband_c: deadband,
         civil_timezone: None,
+        site_location: hares_io::SiteLocationOverride::default(),
     }
 }
 

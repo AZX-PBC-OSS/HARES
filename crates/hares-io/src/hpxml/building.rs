@@ -3707,6 +3707,70 @@ mod tests {
         assert!(attic_vol.volume_m3.is_none());
     }
 
+    /// A Site with explicit Latitude, Longitude, and TimeZone/UTCOffset is
+    /// parsed into the corresponding `Site` fields. These feed the
+    /// site-location resolver and ultimately the solar-position calculation.
+    #[test]
+    fn parses_site_latitude_longitude_and_utc_offset() {
+        const XML: &str = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <Latitude>33.52</Latitude>
+          <Longitude>-86.81</Longitude>
+          <Elevation units="ft">600</Elevation>
+          <TimeZone>
+            <UTCOffset>-6</UTCOffset>
+            <DSTObserved>true</DSTObserved>
+          </TimeZone>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls>
+          <Wall>
+            <SystemIdentifier id="Wall1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="ft2">100</Area>
+            <Insulation>
+              <Layer>
+                <Thickness units="in">5.5</Thickness>
+                <NominalRValue>19</NominalRValue>
+                <Density units="lb/ft3">0.5</Density>
+                <SpecificHeat units="Btu/lb-F">0.2</SpecificHeat>
+              </Layer>
+            </Insulation>
+          </Wall>
+        </Walls>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(XML).expect("parser success");
+        assert_eq!(building.site.latitude_deg, Some(33.52));
+        assert_eq!(building.site.longitude_deg, Some(-86.81));
+        assert_eq!(building.site.utc_offset_h, Some(-6.0));
+    }
+
+    /// When the Site omits TimeZone/UTCOffset (and lat/lon), those fields parse
+    /// as `None` so the resolver can fall back to the weather file or a
+    /// coordinate lookup rather than assuming a wrong offset.
+    #[test]
+    fn site_without_timezone_yields_none_utc_offset() {
+        // SAMPLE_XML's Site has Elevation/SiteType/ShieldingOfHome only.
+        let building = parse_building(SAMPLE_XML).expect("parser success");
+        assert_eq!(building.site.utc_offset_h, None);
+        assert_eq!(building.site.latitude_deg, None);
+        assert_eq!(building.site.longitude_deg, None);
+    }
+
     #[test]
     fn attic_vented_true_by_default_when_no_attic_type_specified() {
         // SAMPLE_XML has <Attics><Attic> with FloorArea but no <AtticType>.

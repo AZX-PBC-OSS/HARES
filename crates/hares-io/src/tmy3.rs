@@ -250,7 +250,8 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         // each hour is 30 minutes before the timestamp, so offset = 1800 s.
         // See Wilcox & Marion 2008, NREL/TP-581-43156. Consistent with EPW.
         midpoint_offset_secs: 1800,
-        has_embedded_location: true,    })
+        has_embedded_location: true,
+    })
 }
 
 /// Column index mapping for TMY3 data fields.
@@ -432,6 +433,11 @@ mod tests {
         assert!((ts.meta.timezone_offset_h - (-7.0)).abs() < 1e-6);
         assert!((ts.meta.elevation_m - 1650.0).abs() < 1e-6);
         assert_eq!(ts.meta.location, "Denver Intl AP");
+        // TMY3 headers embed location: resolver must honour the file's coords.
+        assert!(
+            ts.meta.has_embedded_location,
+            "TMY3 embeds location in its station header; has_embedded_location must be true"
+        );
     }
 
     #[test]

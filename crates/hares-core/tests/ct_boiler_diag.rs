@@ -94,6 +94,7 @@ mod tests {
                 setpoint_deadband_c: None,
                 master_seed: 42,
                 civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
             },
             overrides: None,
             bldg_id: 300,

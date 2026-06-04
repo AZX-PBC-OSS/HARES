@@ -33,7 +33,7 @@ arrow = { workspace = true }
 nalgebra = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
-chrono-tz = "0.10"
+chrono-tz = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]

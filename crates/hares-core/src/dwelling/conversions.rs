@@ -153,17 +153,18 @@ pub fn building_to_boundary_inputs(
                     if sum > 0.0 { Some(sum) } else { None }
                 });
 
-            let fallback_r = match material_r {
-                Some(r) => r,
-                None => {
+            #[cfg(feature = "observe")]
+            let used_default_r = material_r.is_none();
+
+            let fallback_r = material_r
+                .unwrap_or_else(|| {
                     tracing::warn!(
                         boundary_id = %bd.id,
                         "No R-value specified for boundary; applying default 2.5 m²·K/W (R-14 IP). Results may significantly understate heat loss."
                     );
                     DEFAULT_R_M2_K_W
-                }
-            }
-            .max(1e-6);
+                })
+                .max(1e-6);
 
             // ASHRAE F-factor perimeter method for slab-on-grade boundaries.
             // Replaces area-UA conduction with F2 × P × ΔT per ASHRAE HoF 2021
@@ -375,6 +376,8 @@ pub fn building_to_boundary_inputs(
                 framing_factor: bd.framing_factor,
                 interior_emissivity,
                 foundation_depth_m: bd.foundation_depth_m.unwrap_or(0.0),
+                #[cfg(feature = "observe")]
+                used_default_r,
             })
         })
         .collect::<std::result::Result<Vec<_>, HaresError>>()
@@ -825,7 +828,8 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-                utc_offset_h: None,            },
+                utc_offset_h: None,
+            },
             zones,
             boundaries,
             windows: Vec::new(),

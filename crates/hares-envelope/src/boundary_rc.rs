@@ -192,6 +192,11 @@ pub struct BoundaryInput {
     ///
     /// Default: 0.0 m (grade surface — matches pre-fix behaviour).
     pub foundation_depth_m: f64,
+    /// Whether this boundary used the default 2.5 m²·K/W R-value fallback
+    /// because neither `AssemblyEffectiveRValue` nor `NominalRValue` layers
+    /// were specified. Set by `building_to_boundary_inputs` in `hares-core`.
+    #[cfg(feature = "observe")]
+    pub used_default_r: bool,
 }
 
 /// Zone input: floor area, volume, and mass multiplier for capacitance derivation.
@@ -278,6 +283,10 @@ pub struct EnvelopeDiagnostics {
     pub boundaries: Vec<BoundaryDiagnostic>,
     pub zone_capacitances_j_k: Vec<f64>,
     pub total_ua_w_per_k: f64,
+    /// Number of boundaries that fell back to the default 2.5 m²·K/W
+    /// R-value because no HPXML R-value data was present.
+    #[cfg(feature = "observe")]
+    pub default_r_fallback_count: usize,
 }
 
 // ── Output ──────────────────────────────────────────────────────────────────
@@ -1227,10 +1236,14 @@ pub fn assemble_building_rc(
     let node_capacitances = rc.capacitances.clone();
 
     let boundary_ua: f64 = boundary_diagnostics.iter().map(|d| d.ua_w_per_k).sum();
+    #[cfg(feature = "observe")]
+    let default_r_fallback_count = boundaries.iter().filter(|b| b.used_default_r).count();
     let diagnostics = EnvelopeDiagnostics {
         boundaries: boundary_diagnostics,
         zone_capacitances_j_k: zone_capacitances.to_vec(),
         total_ua_w_per_k: boundary_ua + fallback_ua,
+        #[cfg(feature = "observe")]
+        default_r_fallback_count,
     };
 
     Ok((

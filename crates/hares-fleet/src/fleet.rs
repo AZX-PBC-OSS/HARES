@@ -699,6 +699,7 @@ fn default_resstock_sim_config() -> SimulationConfig {
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
+        site_location: hares_io::SiteLocationOverride::default(),
     }
 }
 
@@ -845,6 +846,7 @@ mod tests {
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
+            site_location: hares_io::SiteLocationOverride::default(),
         }
     }
 
