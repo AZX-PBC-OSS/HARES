@@ -119,6 +119,13 @@ pub trait Equipment: Send + Sync {
     fn save_state(&self) -> crate::Result<Vec<u8>>;
     fn load_state(&mut self, state: &[u8]) -> Result<()>;
 
+    /// Rename this equipment instance by updating its descriptor `name`.
+    ///
+    /// Called by `Dwelling::add_equipment` when auto-numbering colliding
+    /// names. Equipment types that store `EquipmentDescriptor` as a field
+    /// should set `self.descriptor.name = name`.
+    fn rename(&mut self, name: String);
+
     /// Version of this equipment's postcard checkpoint format.
     /// Override when the checkpoint struct for this equipment changes shape.
     fn checkpoint_version() -> u32
@@ -337,6 +344,10 @@ mod tests {
     impl Equipment for MockEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
         }
 
         fn ports(&self) -> &[PortDeclaration] {
@@ -916,6 +927,9 @@ mod tests {
         impl Equipment for BadSerializingEquipment {
             fn descriptor(&self) -> &EquipmentDescriptor {
                 &self.descriptor
+            }
+            fn rename(&mut self, name: String) {
+                self.descriptor.name = name;
             }
             fn ports(&self) -> &[PortDeclaration] {
                 &self.ports

@@ -1254,6 +1254,10 @@ impl Equipment for PV {
             ))),
         }
     }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {

@@ -511,6 +511,10 @@ impl Equipment for Ventilation {
         &self.descriptor
     }
 
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
     fn ports(&self) -> &[PortDeclaration] {
         &self.ports
     }

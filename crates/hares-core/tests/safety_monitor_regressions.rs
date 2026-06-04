@@ -124,6 +124,10 @@ impl Equipment for ModeTrackingEquipment {
         &self.descriptor
     }
 
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
     fn ports(&self) -> &[PortDeclaration] {
         &[]
     }

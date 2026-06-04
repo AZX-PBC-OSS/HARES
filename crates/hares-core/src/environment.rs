@@ -15,6 +15,9 @@ use hares_physics::{
     },
     water_mains::{Hemisphere, water_mains_temperature_c},
 };
+
+#[cfg(feature = "observe")]
+use hares_physics::water_mains::water_mains_raw_fahrenheit;
 use hares_types::{
     DomainId, EnvironmentState, GridState, HaresError, SCHEDULE_DOMAIN_ID, SurfaceIrradiance,
     WeatherState, ZoneId, ZoneState,
@@ -100,6 +103,10 @@ pub struct EnvironmentManager {
     mains_t_annual_avg_c: f64,
     mains_dt_annual_range_c: f64,
     mains_hemisphere: Hemisphere,
+    /// Raw (pre-clamp) water mains temperature in °F for the current step.
+    /// Computed by `update_in_place` and consumed by observer capture.
+    #[cfg(feature = "observe")]
+    pub(crate) raw_mains_temp_f: f64,
     /// Annual mean ground surface temperature [°C] for Kusuda-Achenbach model.
     ground_t_mean_c: f64,
     /// Half-amplitude of yearly ground surface temperature variation [°C].
@@ -280,6 +287,8 @@ impl EnvironmentManager {
             mains_t_annual_avg_c,
             mains_dt_annual_range_c,
             mains_hemisphere,
+            #[cfg(feature = "observe")]
+            raw_mains_temp_f: 0.0,
             ground_t_mean_c: mains_t_annual_avg_c,
             ground_t_amplitude_c: mains_dt_annual_range_c / 2.0,
             ground_phase_day,
@@ -539,6 +548,13 @@ impl EnvironmentManager {
             u16::try_from(day_of_year).unwrap_or(366),
             self.mains_hemisphere,
         )?;
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        debug_assert!(
+            mains_temp_c >= 0.0,
+            "water mains temperature ({mains_temp_c:.2} °C) must be ≥ 0 °C (32 °F minimum clamp)"
+        );
+
         let ground_albedo = self.weather.get(WeatherField::SurfaceAlbedo, weather_idx);
 
         self.solar_irradiance_buf.clear();
@@ -673,6 +689,15 @@ impl EnvironmentManager {
         state.weather.solar_altitude_deg = pos.altitude_deg;
         state.weather.solar_azimuth_deg = pos.azimuth_deg;
         state.weather.mains_temp_c = mains_temp_c;
+        #[cfg(feature = "observe")]
+        {
+            self.raw_mains_temp_f = water_mains_raw_fahrenheit(
+                self.mains_t_annual_avg_c,
+                self.mains_dt_annual_range_c,
+                u16::try_from(day_of_year).unwrap_or(366),
+                self.mains_hemisphere,
+            );
+        }
         state.weather.rainfall_m = self.weather.get(WeatherField::LiquidPrecipM, weather_idx);
         state.weather.ground_albedo = ground_albedo;
         state.weather.ground_t_mean_c = self.ground_t_mean_c;

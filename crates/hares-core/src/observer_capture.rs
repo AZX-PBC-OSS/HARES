@@ -17,7 +17,10 @@ use crate::observer::{
 pub(crate) fn capture_environment(
     env: &EnvironmentState,
     wf_allows_leap_years: bool,
+    raw_mains_temp_f: f64,
 ) -> EnvironmentCapture {
+    use hares_physics::units::temperature_c_to_f;
+    let clamped_mains_f = temperature_c_to_f(env.weather.mains_temp_c);
     EnvironmentCapture {
         outdoor_temp_c: env.weather.outdoor_temp_c,
         ghi_w_m2: env.weather.ghi_w_m2,
@@ -27,6 +30,8 @@ pub(crate) fn capture_environment(
         solar_azimuth_deg: env.weather.solar_azimuth_deg,
         wind_speed_m_s: env.weather.wind_speed_m_s,
         mains_temp_c: env.weather.mains_temp_c,
+        raw_water_mains_temp_f: raw_mains_temp_f,
+        clamped_water_mains_temp_f: clamped_mains_f,
         ground_temp_c: env.weather.ground_temp_c,
         sky_temp_c: env.weather.sky_temp_c,
         zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),

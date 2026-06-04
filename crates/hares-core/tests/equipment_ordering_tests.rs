@@ -310,6 +310,10 @@ impl Equipment for StepOrderSpy {
         &self.descriptor
     }
 
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
     fn ports(&self) -> &[PortDeclaration] {
         &[]
     }

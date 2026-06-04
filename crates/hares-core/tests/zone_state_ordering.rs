@@ -139,6 +139,9 @@ impl Equipment for ZoneTemperatureSniffer {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
     fn ports(&self) -> &[PortDeclaration] {
         &[]
     }

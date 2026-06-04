@@ -208,6 +208,10 @@ impl Equipment for HpCooler {
         &self.descriptor
     }
 
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
     fn zone_id_explicit(&self) -> bool {
         self.zone_id_explicit
     }
@@ -452,6 +456,10 @@ impl GshpCooler {
 impl Equipment for GshpCooler {
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
     }
 
     fn zone_id_explicit(&self) -> bool {
@@ -790,6 +798,10 @@ impl WshpCooler {
 impl Equipment for WshpCooler {
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
     }
 
     fn zone_id_explicit(&self) -> bool {

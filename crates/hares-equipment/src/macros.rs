@@ -73,6 +73,10 @@ macro_rules! delegate_equipment {
                 self.$inner.apply_control_unchecked(signal)
             }
 
+            fn rename(&mut self, name: String) {
+                self.$inner.rename(name)
+            }
+
             fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
                 self.$inner.ideal_target()
             }

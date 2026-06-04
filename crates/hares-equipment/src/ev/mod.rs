@@ -1193,6 +1193,10 @@ impl Equipment for Ev {
     fn has_custom_u_neg_table(&self) -> bool {
         self.custom_u_neg
     }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {

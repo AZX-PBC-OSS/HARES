@@ -403,6 +403,10 @@ impl Equipment for ResistanceWH {
         &self.descriptor
     }
 
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
     fn zone_id_explicit(&self) -> bool {
         self.zone_id_explicit
     }

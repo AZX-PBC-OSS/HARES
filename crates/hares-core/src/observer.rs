@@ -55,6 +55,12 @@ pub struct EnvironmentCapture {
     pub solar_azimuth_deg: f64,
     pub wind_speed_m_s: f64,
     pub mains_temp_c: f64,
+    /// Raw water mains temperature in °F from the Burch-Christensen model
+    /// before the EnergyPlus 32 °F minimum clamp is applied.
+    pub raw_water_mains_temp_f: f64,
+    /// Clamped water mains temperature in °F after the EnergyPlus 32 °F
+    /// minimum is applied (max(raw, 32 °F)).
+    pub clamped_water_mains_temp_f: f64,
     pub ground_temp_c: f64,
     pub sky_temp_c: f64,
     pub zone_temps_c: Vec<(ZoneId, f64)>,

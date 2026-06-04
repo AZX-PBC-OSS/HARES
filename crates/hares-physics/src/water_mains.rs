@@ -13,35 +13,47 @@ use std::f64::consts::PI;
 /// Degrees per day as specified in the Burch-Christensen (2007) paper (0.986).
 /// Note: this is not derived from 360/365.25 (≈ 0.9856); the paper uses 0.986
 /// directly, matching the value used in OCHRE and EnergyPlus.
-const DEG_PER_DAY: f64 = 0.986;
+pub(crate) const DEG_PER_DAY: f64 = 0.986;
 
 /// Fixed warm-bias offset from annual average outdoor temperature to annual
 /// average mains temperature (6 °F converted to Rankine/Fahrenheit difference,
 /// then left as-is because the formula operates in °F internally).
-const OFFSET_F: f64 = 6.0;
+pub(crate) const OFFSET_F: f64 = 6.0;
 
 /// Reference annual average temperature used to anchor ratio and lag (44 °F =
 /// ~6.67 °C -- the Building America benchmark calibration base).
-const T_REF_F: f64 = 44.0;
+pub(crate) const T_REF_F: f64 = 44.0;
 
 /// Ratio coefficient -- base value at T_ref.
-const RATIO_BASE: f64 = 0.4;
+pub(crate) const RATIO_BASE: f64 = 0.4;
 
 /// Linear sensitivity of ratio to annual average temperature (per °F).
-const RATIO_SLOPE: f64 = 0.01;
+pub(crate) const RATIO_SLOPE: f64 = 0.01;
 
 /// Lag base value at T_ref [days].
-const LAG_BASE: f64 = 35.0;
+pub(crate) const LAG_BASE: f64 = 35.0;
 
 /// Linear sensitivity of lag to annual average temperature (per °F).
-const LAG_SLOPE: f64 = 1.0;
+pub(crate) const LAG_SLOPE: f64 = 1.0;
 
 /// Degrees-to-radians conversion.
-const DEG_TO_RAD: f64 = PI / 180.0;
+pub(crate) const DEG_TO_RAD: f64 = PI / 180.0;
+
+/// EnergyPlus minimum water mains temperature [°F] (WeatherManager.cc:7206-7208).
+/// Buried water mains remain at or above 32 °F regardless of air temperature.
+const MAINS_TEMP_MIN_F: f64 = 32.0;
+
+/// Upper bound of the Burch-Christensen calibration range [°F].
+/// EnergyPlus ERM 24.1 §5.3.2: the model is calibrated for annual average
+/// −5 °C to 30 °C (≈ 23 °F to 86 °F). Mains temperatures above 104 °F (40 °C)
+/// indicate the model is extrapolating beyond its valid range.
+const MAINS_CALIBRATION_MAX_F: f64 = 104.0;
 
 use hares_types::HaresError;
 
 use crate::units::{temperature_c_to_f, temperature_delta_c_to_f, temperature_f_to_c};
+
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -112,6 +124,18 @@ pub fn water_mains_temperature_c(
     let amplitude = ratio * (dt_annual_range_f / 2.0);
 
     let t_mains_f = t_avg_f + OFFSET_F + amplitude * (angle_deg * DEG_TO_RAD).sin();
+
+    // EnergyPlus WeatherManager.cc:7206-7208: enforce 32 °F minimum.
+    // Buried water mains remain above freezing regardless of air temperature.
+    if t_mains_f > MAINS_CALIBRATION_MAX_F {
+        warn!(
+            raw_t_mains_f = t_mains_f,
+            calibration_max_f = MAINS_CALIBRATION_MAX_F,
+            "Burch-Christensen mains-water model operating outside calibrated range"
+        );
+    }
+    let t_mains_f = t_mains_f.max(MAINS_TEMP_MIN_F);
+
     let result = temperature_f_to_c(t_mains_f);
 
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -131,6 +155,40 @@ pub fn water_mains_temperature_c(
     }
 
     Ok(result)
+}
+
+/// Compute the raw (pre-clamp) water mains temperature in °F.
+///
+/// This is the value before the EnergyPlus minimum clamp (32 °F) and the
+/// upper-bound warning (104 °F) are applied. Exposed for observer/diagnostic
+/// capture so tooling can track how often the clamp activates.
+///
+/// The computation mirrors the Fahrenheit-phase of
+/// [`water_mains_temperature_c`] but returns the unclamped value so the
+/// observer can capture both the raw and clamped temperatures.
+#[cfg(feature = "observe")]
+pub fn water_mains_raw_fahrenheit(
+    t_annual_avg_c: f64,
+    dt_annual_range_c: f64,
+    day_of_year: u16,
+    hemisphere: Hemisphere,
+) -> f64 {
+    let t_avg_f = temperature_c_to_f(t_annual_avg_c);
+    let dt_annual_range_f = temperature_delta_c_to_f(dt_annual_range_c);
+
+    let ratio = (RATIO_BASE + RATIO_SLOPE * (t_avg_f - T_REF_F)).clamp(0.0, 1.0);
+    let lag = LAG_BASE - LAG_SLOPE * (t_avg_f - T_REF_F);
+
+    let sign: f64 = match hemisphere {
+        Hemisphere::Northern => -1.0,
+        Hemisphere::Southern => 1.0,
+    };
+
+    let day = f64::from(day_of_year);
+    let angle_deg = DEG_PER_DAY * (day - 15.0 - lag) + sign * 90.0;
+    let amplitude = ratio * (dt_annual_range_f / 2.0);
+
+    t_avg_f + OFFSET_F + amplitude * (angle_deg * DEG_TO_RAD).sin()
 }
 
 /// Hemisphere selector for [`water_mains_temperature_c`].
@@ -218,22 +276,71 @@ mod tests {
         );
     }
 
-    // --- Arctic climate (ratio clamping) ---
+    // --- Arctic climate (ratio clamping + 32 °F minimum) ---
 
     /// Verifies that at −40 °C (arctic, ratio would go negative without clamping)
-    /// the function returns a physically plausible, finite result rather than
-    /// producing an inverted seasonal curve.
+    /// the output is clamped to the EnergyPlus minimum of 32 °F (0 °C).
+    /// The Burch-Christensen model's ratio clamp alone would return a flat
+    /// `t_avg_f + OFFSET_F` which for −40 °C is ≈ −34.7 °C (−30.4 °F), but
+    /// the EnergyPlus 32 °F floor forces the result to 0 °C.
+    /// EnergyPlus WeatherManager.cc:7206-7208.
     #[test]
-    fn arctic_climate_neg40c_ratio_clamped_to_zero() {
-        // At −40 °C, unclamped ratio = 0.4 + 0.01*(−40 °C in °F − 44) = very negative.
-        // With clamping ratio = 0.0, amplitude = 0, and the result equals t_avg + offset.
+    fn arctic_climate_neg40c_clamped_to_0c() {
         let t_avg_c = -40.0_f64;
-        let expected_mean_c = temperature_f_to_c(temperature_c_to_f(t_avg_c) + OFFSET_F);
         for d in [1u16, 91, 182, 274, 365] {
             let t = water_mains_temperature_c(t_avg_c, 30.0, d, Hemisphere::Northern).unwrap();
             assert!(t.is_finite(), "arctic day {d} should be finite");
-            // With ratio=0 all days return the same flat value.
-            approx_eq(t, expected_mean_c, 0.001);
+            // EnergyPlus minimum clamp: result must be ≥ 0 °C (32 °F).
+            assert!(
+                t >= 0.0,
+                "arctic day {d}: expected mains >= 0 °C, got {t:.2}"
+            );
+            // With ratio=0 and 32 °F clamp: all days return exactly 0 °C.
+            approx_eq(t, 0.0, 0.001);
+        }
+    }
+
+    /// Verifies that for a cold-but-not-arctic climate (T_avg = 2 °C with
+    /// high seasonal swing) the 32 °F minimum clamp does **not** activate
+    /// when the raw model output is already at or above 0 °C, ensuring
+    /// the clamp doesn't corrupt valid outputs near the threshold.
+    #[test]
+    fn cold_climate_tavg_2c_clamp_does_not_corrupt_valid_output() {
+        // T_avg = 2 °C ≈ 35.6 °F → ratio ≈ 0.4 + 0.01*(35.6 − 44) ≈ 0.316
+        // dt_annual_range = 30 °C → dt_f/2 = 27 °F, amplitude ≈ 8.53 °F
+        // Min raw mains ≈ 35.6 + 6 − 8.53 ≈ 33.07 °F → well above 32 °F
+        let t_avg_c = 2.0;
+        let dt_annual_range_c = 30.0;
+        for d in [1u16, 91, 182, 274, 365] {
+            let t = water_mains_temperature_c(t_avg_c, dt_annual_range_c, d, Hemisphere::Northern)
+                .unwrap();
+            assert!(t.is_finite(), "day {d} should be finite");
+            assert!(
+                t > 0.0,
+                "day {d}: expected mains > 0 °C (clamp should not activate), got {t:.2}"
+            );
+        }
+    }
+
+    /// Verifies that at T_avg = 50 °C (above the model's calibrated range)
+    /// the function returns a finite, reasonable result rather than panicking
+    /// or producing an implausible value. The `warn!` for operating outside
+    /// the calibration range is verified indirectly: if the warning breaks
+    /// or the function panics, this test fails.
+    #[test]
+    fn hot_climate_tavg_50c_produces_reasonable_clamped_value() {
+        let t_avg_c = 50.0;
+        let dt_annual_range_c = 10.0;
+        for d in [1u16, 91, 182, 274, 365] {
+            let t = water_mains_temperature_c(t_avg_c, dt_annual_range_c, d, Hemisphere::Northern)
+                .unwrap();
+            assert!(t.is_finite(), "day {d} should be finite");
+            // At 50 °C, even the raw value should be well above 32 °F;
+            // the clamp should be a no-op and the mains temp should be hot.
+            assert!(
+                t > 30.0,
+                "day {d}: expected mains > 30 °C for 50 °C annual avg, got {t:.2}"
+            );
         }
     }
 

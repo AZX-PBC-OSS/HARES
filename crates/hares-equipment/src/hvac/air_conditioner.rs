@@ -263,6 +263,10 @@ impl Equipment for AirConditioner {
         &self.core.descriptor
     }
 
+    fn rename(&mut self, name: String) {
+        self.core.descriptor.name = name;
+    }
+
     fn zone_id_explicit(&self) -> bool {
         self.core.zone_id_explicit
     }
@@ -320,6 +324,10 @@ impl Equipment for RoomAC {
 
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.core.descriptor
+    }
+
+    fn rename(&mut self, name: String) {
+        self.core.descriptor.name = name;
     }
 
     fn zone_id_explicit(&self) -> bool {

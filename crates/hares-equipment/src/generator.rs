@@ -1678,6 +1678,10 @@ impl Equipment for Generator {
         }
         Ok(())
     }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
 }
 
 // ---------------------------------------------------------------------------

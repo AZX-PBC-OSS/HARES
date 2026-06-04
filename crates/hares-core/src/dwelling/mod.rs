@@ -3659,6 +3659,7 @@ impl Dwelling {
             obs_phases.post_environment = Some(observer_capture::capture_environment(
                 &self.latest_env,
                 self.environment.weather_meta.wf_allows_leap_years,
+                self.environment.raw_mains_temp_f,
             ));
         }
 
@@ -5912,6 +5913,10 @@ mod tests {
             &self.descriptor
         }
 
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &[]
         }
@@ -6035,6 +6040,10 @@ mod tests {
             &self.descriptor
         }
 
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -6130,6 +6139,10 @@ mod tests {
     impl Equipment for DispatchAwareThermalEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
         }
 
         fn ports(&self) -> &[PortDeclaration] {
@@ -6783,6 +6796,10 @@ occupancy = 1.0
     impl Equipment for TestIdealEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
         }
 
         fn ports(&self) -> &[PortDeclaration] {
@@ -8062,6 +8079,9 @@ occupancy = 1.0
     impl Equipment for SeedableTestEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             self.inner.descriptor()
+        }
+        fn rename(&mut self, name: String) {
+            self.inner.rename(name);
         }
         fn ports(&self) -> &[PortDeclaration] {
             self.inner.ports()
@@ -9653,6 +9673,9 @@ master_seed = 0
             fn descriptor(&self) -> &EquipmentDescriptor {
                 &self.descriptor
             }
+            fn rename(&mut self, name: String) {
+                self.descriptor.name = name;
+            }
             fn ports(&self) -> &[PortDeclaration] {
                 &self.ports
             }
@@ -9820,6 +9843,10 @@ master_seed = 0
             &self.descriptor
         }
 
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -9922,6 +9949,10 @@ master_seed = 0
             &self.descriptor
         }
 
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
         fn ports(&self) -> &[PortDeclaration] {
             &self.ports
         }
@@ -10011,6 +10042,10 @@ master_seed = 0
     impl Equipment for SpyPortEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
         }
 
         fn ports(&self) -> &[PortDeclaration] {

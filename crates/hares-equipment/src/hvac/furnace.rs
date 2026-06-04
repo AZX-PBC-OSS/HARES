@@ -148,6 +148,10 @@ impl Equipment for ElectricFurnace {
         &self.descriptor
     }
 
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
     fn zone_id_explicit(&self) -> bool {
         self.zone_id_explicit
     }
@@ -474,6 +478,10 @@ impl GasFurnace {
 impl Equipment for GasFurnace {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
     }
 
     fn zone_id_explicit(&self) -> bool {
