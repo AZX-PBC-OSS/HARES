@@ -116,6 +116,10 @@ pub struct EnvironmentManager {
     /// when no civil timezone is configured or when DST is not in effect.
     #[cfg(feature = "observe")]
     pub(crate) obs_civil_day_of_year: u32,
+    /// Day-of-year in UTC. Used to diagnose discrepancies between UTC and
+    /// civil day-of-year across DST transition boundaries.
+    #[cfg(feature = "observe")]
+    pub(crate) obs_utc_day_of_year: u32,
     /// Annual mean ground surface temperature [°C] for Kusuda-Achenbach model.
     ground_t_mean_c: f64,
     /// Half-amplitude of yearly ground surface temperature variation [°C].
@@ -302,6 +306,8 @@ impl EnvironmentManager {
             obs_raw_day_of_year: 0,
             #[cfg(feature = "observe")]
             obs_civil_day_of_year: 0,
+            #[cfg(feature = "observe")]
+            obs_utc_day_of_year: 0,
             ground_t_mean_c: mains_t_annual_avg_c,
             ground_t_amplitude_c: mains_dt_annual_range_c / 2.0,
             ground_phase_day,
@@ -549,13 +555,8 @@ impl EnvironmentManager {
         // then swap into state.weather.solar_irradiance so the old Vec's capacity is
         // returned to self.solar_irradiance_buf for reuse next step.
         let now = clock.current_time();
-        let pos = solar_position(self.weather_meta.latitude, self.weather_meta.longitude, now);
-        let ghi = self.weather.get(WeatherField::GhiWM2, weather_idx);
-        let dni = self.weather.get(WeatherField::DniWM2, weather_idx);
-        let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
-        let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
         // Day-of-year from DST-aware civil time when a timezone is configured,
-        // so that consumers relying on ordinal() (mains temp, weather field)
+        // so that consumers (solar_position, Perez irradiance, mains temp, weather field)
         // observe the civil wall-clock day, not the fixed-offset day which may
         // be wrong across DST transitions.
         #[cfg(feature = "dst")]
@@ -566,6 +567,17 @@ impl EnvironmentManager {
             .unwrap_or_else(|| now.ordinal());
         #[cfg(not(feature = "dst"))]
         let day_of_year = now.ordinal();
+
+        let pos = solar_position(
+            self.weather_meta.latitude,
+            self.weather_meta.longitude,
+            now,
+            day_of_year,
+        );
+        let ghi = self.weather.get(WeatherField::GhiWM2, weather_idx);
+        let dni = self.weather.get(WeatherField::DniWM2, weather_idx);
+        let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
+        let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
 
         #[cfg(all(feature = "dst", any(debug_assertions, feature = "check_invariants")))]
         if let Some(ref tz) = self.civil_tz {
@@ -585,6 +597,11 @@ impl EnvironmentManager {
                 );
             }
         }
+
+        // day_of_year is computed once (above) and passed unchanged to solar_position(),
+        // omni_directional_irradiance(), and perez_tilted_irradiance(). All three consumers
+        // read the same let-binding, so UTC-vs-civil divergence during DST transitions
+        // cannot produce a split between solar geometry and irradiance computation.
 
         let mains_temp_c = water_mains_temperature_c(
             self.mains_t_annual_avg_c,
@@ -743,6 +760,7 @@ impl EnvironmentManager {
             );
             self.obs_raw_day_of_year = now.ordinal();
             self.obs_civil_day_of_year = day_of_year;
+            self.obs_utc_day_of_year = now.to_utc().ordinal();
         }
         state.weather.rainfall_m = self.weather.get(WeatherField::LiquidPrecipM, weather_idx);
         state.weather.ground_albedo = ground_albedo;

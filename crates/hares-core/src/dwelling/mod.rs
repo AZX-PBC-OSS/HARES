@@ -3682,6 +3682,7 @@ impl Dwelling {
                 self.environment.raw_mains_temp_f,
                 self.environment.obs_raw_day_of_year,
                 self.environment.obs_civil_day_of_year,
+                self.environment.obs_utc_day_of_year,
             ));
         }
 

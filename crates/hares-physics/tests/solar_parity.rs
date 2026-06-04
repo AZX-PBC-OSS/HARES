@@ -9,7 +9,7 @@
 //! derived or cross-checked against pvlib-python 0.10.x (documentation-level
 //! tolerances of ±0.5°, ±1% for POA).
 
-use chrono::{FixedOffset, TimeZone};
+use chrono::{Datelike, FixedOffset, TimeZone};
 use hares_physics::solar::{
     angle_of_incidence, extraterrestrial_irradiance, perez_sky_diffuse, perez_tilted_irradiance,
     solar_position,
@@ -53,7 +53,7 @@ fn solar_declination_near_zero_at_vernal_equinox() {
         .with_ymd_and_hms(2024, 3, 20, 12, 0, 0)
         .single()
         .unwrap();
-    let pos = solar_position(0.0, 0.0, dt);
+    let pos = solar_position(0.0, 0.0, dt, dt.ordinal());
 
     // At equinox on equator at solar noon: altitude ≈ 90° (sun nearly overhead).
     // Declination ≈ 0° → altitude should be within 2.5° of 90° (Spencer 1971 ~2° error at equinox).
@@ -74,7 +74,7 @@ fn solar_declination_approx_23_4_at_summer_solstice() {
         .with_ymd_and_hms(2024, 6, 21, 12, 0, 0)
         .single()
         .unwrap();
-    let pos = solar_position(0.0, 0.0, dt);
+    let pos = solar_position(0.0, 0.0, dt, dt.ordinal());
 
     // Altitude at equator = 90° - declination ≈ 66.5°.
     // Tolerance: ±0.5° for Spencer model vs NREL calculation.
@@ -92,7 +92,7 @@ fn solar_declination_approx_neg_23_4_at_winter_solstice() {
         .with_ymd_and_hms(2024, 12, 21, 12, 0, 0)
         .single()
         .unwrap();
-    let pos = solar_position(0.0, 0.0, dt);
+    let pos = solar_position(0.0, 0.0, dt, dt.ordinal());
 
     let expected_altitude = 90.0 - 23.44;
     assert_approx(pos.altitude_deg, expected_altitude, 0.5);
@@ -313,7 +313,7 @@ fn solar_position_at_lat40_equinox_noon() {
         .with_ymd_and_hms(2024, 3, 20, 12, 0, 0)
         .single()
         .unwrap();
-    let pos = solar_position(40.0, 0.0, dt);
+    let pos = solar_position(40.0, 0.0, dt, dt.ordinal());
 
     // Altitude ≈ 50° (90° - 40° latitude at zero declination).
     assert_approx(pos.altitude_deg, 50.0, 2.0);
@@ -338,7 +338,7 @@ fn solar_altitude_negative_at_midnight_utc() {
         .with_ymd_and_hms(2024, 6, 21, 0, 0, 0)
         .single()
         .unwrap();
-    let pos = solar_position(40.0, 0.0, dt);
+    let pos = solar_position(40.0, 0.0, dt, dt.ordinal());
 
     assert!(
         pos.altitude_deg < 0.0,

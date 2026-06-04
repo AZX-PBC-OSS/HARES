@@ -237,8 +237,8 @@ impl ThermalSolver {
         let utc_hour = (12.0 - site_lon_deg / 15.0).round() as i64;
         let base_utc = dt.expect("valid July 21 noon UTC");
         let local_noon = base_utc + chrono::Duration::hours((utc_hour - 12).clamp(-12, 12));
-        let pos = solar_position(site_lat_deg, site_lon_deg, local_noon);
         let doy = local_noon.ordinal();
+        let pos = solar_position(site_lat_deg, site_lon_deg, local_noon, doy);
 
         let (dni_clear, dhi_clear, ghi_clear) = clear_sky_irradiance(doy, pos.altitude_deg);
         let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
@@ -1494,7 +1494,7 @@ fn precompute_hourly_solar_july21(
     {
         for h in 0..24 {
             let dt = base + chrono::Duration::hours(h);
-            let pos = solar_position(site_lat_deg, site_lon_deg, dt);
+            let pos = solar_position(site_lat_deg, site_lon_deg, dt, dt.ordinal());
             let zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
             if pos.altitude_deg > 0.0 {
                 let (dni, dhi, ghi) = clear_sky_irradiance(dt.ordinal(), pos.altitude_deg);

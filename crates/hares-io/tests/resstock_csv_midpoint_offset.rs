@@ -5,7 +5,7 @@
 //! convention. Both paths must agree on the midpoint offset (1800 s) and
 //! produce consistent solar position results for the same site/date.
 
-use chrono::FixedOffset;
+use chrono::{Datelike, FixedOffset};
 use hares_io::resstock_csv::parse_resstock_csv_str;
 use hares_io::tmy3::parse_tmy3_str;
 use hares_physics::solar::solar_position;
@@ -162,7 +162,7 @@ fn solar_zenith_at_noon_midpoint_matches_between_resstock_and_tmy3() {
         .single()
         .unwrap();
 
-    let pos = solar_position(DENVER_LAT, DENVER_LON, midpoint_dt);
+    let pos = solar_position(DENVER_LAT, DENVER_LON, midpoint_dt, midpoint_dt.ordinal());
     let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
 
     // Solar zenith at 11:30 local on Jan 1 in Denver should be in a

@@ -89,6 +89,9 @@ pub struct EnvironmentCapture {
     pub raw_day_of_year: u32,
     /// Day-of-year from DST-aware civil timezone (or same as raw when no timezone).
     pub civil_day_of_year: u32,
+    /// Day-of-year in UTC. Used to diagnose discrepancies between UTC and
+    /// civil day-of-year across DST transition boundaries.
+    pub utc_day_of_year: u32,
 }
 
 /// Equipment telemetry + accumulated port state after an equipment phase.

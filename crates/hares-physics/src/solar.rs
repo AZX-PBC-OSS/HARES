@@ -1,6 +1,6 @@
 //! Solar position, irradiance decomposition, and surface tilting.
 
-use chrono::{DateTime, Datelike, FixedOffset, Timelike};
+use chrono::{DateTime, FixedOffset, Timelike};
 use hares_types::{HaresError, SurfaceIrradiance};
 
 const MINUTES_PER_DAY: f64 = 1440.0;
@@ -85,14 +85,18 @@ pub struct SolarPosition {
 /// Solar position from local timestamp and site coordinates using a Spencer-style declination/EOT model.
 ///
 /// Converts to UTC internally -- solar geometry requires true UTC.
+/// `day_of_year` must be the 1-based ordinal (1–366) for the day of year.
+/// Callers are responsible for providing the correct ordinal consistent with
+/// the intended temporal reference (UTC, civil DST-aware, etc.).
 pub fn solar_position(
     latitude_deg: f64,
     longitude_deg: f64,
     local_datetime: DateTime<FixedOffset>,
+    day_of_year: u32,
 ) -> SolarPosition {
     let utc_datetime = local_datetime.to_utc();
     let lat_rad = latitude_deg.to_radians();
-    let day = f64::from(utc_datetime.ordinal() as u16);
+    let day = f64::from(day_of_year);
     let hour = utc_datetime.hour() as f64;
     let minute = utc_datetime.minute() as f64;
     let second = utc_datetime.second() as f64;
@@ -914,7 +918,7 @@ pub fn window_transmitted_solar_angular(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{FixedOffset, NaiveDate, TimeZone};
+    use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone};
     use hares_types::DEFAULT_GROUND_ALBEDO;
 
     use super::*;
@@ -943,7 +947,7 @@ mod tests {
                 )
                 .single()
                 .expect("valid minute timestamp");
-            let pos = solar_position(0.0, 0.0, dt);
+            let pos = solar_position(0.0, 0.0, dt, dt.ordinal());
             max_altitude = max_altitude.max(pos.altitude_deg);
         }
 
@@ -1226,7 +1230,7 @@ mod tests {
         let sunrise_pos = (0u32..(12 * 60))
             .filter_map(|m| {
                 let dt = day + chrono::Duration::minutes(m as i64);
-                let pos = solar_position(lat, lon, dt);
+                let pos = solar_position(lat, lon, dt, dt.ordinal());
                 if pos.altitude_deg > 0.0 {
                     Some(pos)
                 } else {
@@ -1268,7 +1272,7 @@ mod tests {
         let max_altitude = (0u32..(24 * 60))
             .map(|m| {
                 let dt = day + chrono::Duration::minutes(m as i64);
-                solar_position(lat, lon, dt).altitude_deg
+                solar_position(lat, lon, dt, dt.ordinal()).altitude_deg
             })
             .fold(f64::NEG_INFINITY, f64::max);
 
@@ -1294,7 +1298,7 @@ mod tests {
         let max_altitude = (0u32..(24 * 60))
             .map(|m| {
                 let dt = day + chrono::Duration::minutes(m as i64);
-                solar_position(lat, lon, dt).altitude_deg
+                solar_position(lat, lon, dt, dt.ordinal()).altitude_deg
             })
             .fold(f64::NEG_INFINITY, f64::max);
 
@@ -1322,7 +1326,7 @@ mod tests {
                 let dt = base
                     + chrono::Duration::hours(hour as i64)
                     + chrono::Duration::minutes(minute as i64);
-                let pos = solar_position(lat, lon, dt);
+                let pos = solar_position(lat, lon, dt, dt.ordinal());
                 assert!(
                     pos.azimuth_deg >= 0.0 && pos.azimuth_deg < 360.0,
                     "azimuth {} out of range at {:02}:{:02}",
@@ -1353,7 +1357,7 @@ mod tests {
             .unwrap()
             .with_ymd_and_hms(2003, 10, 17, 19, 30, 30)
             .unwrap();
-        let pos = solar_position(39.742476, -105.1786, dt);
+        let pos = solar_position(39.742476, -105.1786, dt, dt.ordinal());
         let zenith = 90.0 - pos.altitude_deg;
         assert!(
             (zenith - 50.11).abs() < 1.5,
@@ -1378,7 +1382,7 @@ mod tests {
         let (alt, az) = (0u32..(24 * 60))
             .map(|m| {
                 let dt = base + chrono::Duration::minutes(m as i64);
-                let pos = solar_position(lat, lon, dt);
+                let pos = solar_position(lat, lon, dt, dt.ordinal());
                 (pos.altitude_deg, pos.azimuth_deg)
             })
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
@@ -1410,7 +1414,7 @@ mod tests {
         let daylight_minutes = (0u32..(24 * 60))
             .filter(|&m| {
                 let dt = day + chrono::Duration::minutes(m as i64);
-                solar_position(lat, lon, dt).altitude_deg > 0.0
+                solar_position(lat, lon, dt, dt.ordinal()).altitude_deg > 0.0
             })
             .count();
 
@@ -1439,7 +1443,7 @@ mod tests {
         let max_altitude = (0u32..(24 * 60))
             .map(|m| {
                 let dt = day + chrono::Duration::minutes(m as i64);
-                solar_position(lat, lon, dt).altitude_deg
+                solar_position(lat, lon, dt, dt.ordinal()).altitude_deg
             })
             .fold(f64::NEG_INFINITY, f64::max);
 
@@ -1667,7 +1671,7 @@ mod tests {
         let morning_direct: f64 = (6u32..11)
             .map(|h| {
                 let dt = day + chrono::Duration::hours(h as i64);
-                let pos = solar_position(lat, lon, dt);
+                let pos = solar_position(lat, lon, dt, dt.ordinal());
                 if pos.altitude_deg <= 0.0 {
                     return 0.0;
                 }
@@ -1692,7 +1696,7 @@ mod tests {
         let afternoon_direct: f64 = (13u32..18)
             .map(|h| {
                 let dt = day + chrono::Duration::hours(h as i64);
-                let pos = solar_position(lat, lon, dt);
+                let pos = solar_position(lat, lon, dt, dt.ordinal());
                 if pos.altitude_deg <= 0.0 {
                     return 0.0;
                 }
@@ -2229,7 +2233,7 @@ mod tests {
         let denver_lon = -104.65;
 
         // Solar position at May 5 noon
-        let pos = solar_position(denver_lat, denver_lon, utc_time);
+        let pos = solar_position(denver_lat, denver_lon, utc_time, utc_time.ordinal());
         eprintln!("\n=== Solar Position at May 5 noon UTC ===");
         eprintln!("Solar altitude: {:.2}°", pos.altitude_deg);
         eprintln!("Solar azimuth: {:.2}°", pos.azimuth_deg);
@@ -2842,6 +2846,57 @@ mod tests {
         assert!(
             dhi > 0.0,
             "DHI at 10° altitude ({dhi:.1} W/m²) should be non-zero"
+        );
+    }
+
+    /// `solar_position()` must use the caller-provided `day_of_year`, not its
+    /// own UTC-derived ordinal.
+    ///
+    /// Same time-of-day but different day-of-year values must produce different
+    /// solar positions because declination and EOT are functions of day-of-year.
+    #[test]
+    fn solar_position_uses_explicit_day_of_year_not_utc_ordinal() {
+        // June 21 (summer solstice) at UTC+0 noon, day 172.
+        let dt_summer = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2024, 6, 21, 12, 0, 0)
+            .single()
+            .unwrap();
+        // December 21 (winter solstice) at UTC+0 noon, day 355.
+        let dt_winter = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2024, 12, 21, 12, 0, 0)
+            .single()
+            .unwrap();
+
+        // Both datetimes have the same hour/minute/second, so if the function
+        // used its own UTC ordinal the results would differ.
+        // Supply the same day_of_year to both — the results must be identical.
+        let pos_a = solar_position(40.0, 0.0, dt_summer, 172); // summer date, summer doy
+        let pos_b = solar_position(40.0, 0.0, dt_winter, 172); // winter date, summer doy
+
+        // With same day_of_year and same time-of-day, solar position must be identical
+        // regardless of the datetime's own ordinal.
+        assert!(
+            (pos_a.altitude_deg - pos_b.altitude_deg).abs() < 1e-6,
+            "altitude should match when day_of_year is the same: summer={:.4} winter={:.4}",
+            pos_a.altitude_deg,
+            pos_b.altitude_deg
+        );
+
+        // Now verify that different day_of_year values produce different results
+        // for the *same* datetime — proving the parameter is actually used.
+        let pos_summer = solar_position(40.0, 0.0, dt_summer, 172); // day 172
+        let pos_xmas = solar_position(40.0, 0.0, dt_summer, 355); // day 355, same datetime
+
+        // At 40°N, summer solstice noon altitude ≈ 73.4°; winter solstice ≈ 26.6°.
+        // The difference must be substantial — the parameter is driving the result.
+        assert!(
+            pos_summer.altitude_deg > pos_xmas.altitude_deg + 20.0,
+            "summer altitude ({:.1}°) must substantially exceed winter altitude ({:.1}°) \
+             at same date/time, proving day_of_year parameter is used",
+            pos_summer.altitude_deg,
+            pos_xmas.altitude_deg
         );
     }
 }
