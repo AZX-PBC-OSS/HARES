@@ -250,7 +250,7 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         // each hour is 30 minutes before the timestamp, so offset = 1800 s.
         // See Wilcox & Marion 2008, NREL/TP-581-43156. Consistent with EPW.
         midpoint_offset_secs: 1800,
-    })
+        has_embedded_location: true,    })
 }
 
 /// Column index mapping for TMY3 data fields.

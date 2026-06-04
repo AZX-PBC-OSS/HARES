@@ -300,6 +300,16 @@ pub struct WeatherMeta {
     /// align with period midpoints, matching OCHRE/pvlib's +30min convention.
     /// For hour-beginning formats (PSM3), this is 0.
     pub midpoint_offset_secs: u32,
+    /// Whether this weather format embeds its own site location (latitude,
+    /// longitude, timezone) in its header. EPW, PSM3, and TMY3 do (`true`);
+    /// ResStock CSV does not (`false`) and is parsed with `0.0` placeholders
+    /// that callers must supply from HPXML or an explicit override.
+    ///
+    /// The site-location resolver uses this to distinguish a genuine
+    /// equator/prime-meridian/UTC site from an absent value: a `0.0` from a
+    /// format with `has_embedded_location == false` means "unknown", not
+    /// "the prime meridian".
+    pub has_embedded_location: bool,
 }
 
 /// Upsampling interpolation strategy for continuous weather fields.

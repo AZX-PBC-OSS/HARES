@@ -8941,7 +8941,7 @@ occupancy = 1.0
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-            },
+                utc_offset_h: None,            },
             zones: vec![
                 Zone {
                     zone_type: ZoneType::Conditioned,

@@ -14,6 +14,7 @@ pub mod resstock;
 pub mod resstock_csv;
 pub mod schedule;
 pub mod schedule_resolve;
+pub mod site_location;
 pub mod tmy3;
 pub mod weather;
 
@@ -58,6 +59,9 @@ pub use schedule::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 pub use schedule_resolve::check_hvac_setpoint_invariants;
 pub use schedule_resolve::inject_schedule_into_specs;
+pub use site_location::{
+    FieldSource, SiteLocation, SiteLocationOverride, resolve_site_location,
+};
 pub use tmy3::parse_tmy3;
 pub use weather::{
     ResampleMethod, ResampleOverrides, WeatherField, WeatherMeta, WeatherTimeSeries,

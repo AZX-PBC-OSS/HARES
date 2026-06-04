@@ -38,7 +38,7 @@ fn minimal_building() -> hares_io::Building {
             shielding_of_home: None,
             latitude_deg: Some(40.7128),
             longitude_deg: Some(-74.0060),
-        },
+            utc_offset_h: None,        },
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),

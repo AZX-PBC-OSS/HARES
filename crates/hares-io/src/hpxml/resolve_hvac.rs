@@ -3671,7 +3671,7 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-            },
+                utc_offset_h: None,            },
             zones,
             boundaries: vec![],
             windows: vec![],

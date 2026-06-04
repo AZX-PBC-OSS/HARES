@@ -165,7 +165,7 @@ fn minimal_building() -> hares_io::Building {
             shielding_of_home: None,
             latitude_deg: Some(40.0),
             longitude_deg: Some(-105.0),
-        },
+            utc_offset_h: None,        },
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
@@ -623,7 +623,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
                 shielding_of_home: None,
                 latitude_deg: Some(40.0),
                 longitude_deg: Some(-105.0),
-            },
+                utc_offset_h: None,            },
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: Some(100.0),
@@ -832,7 +832,7 @@ fn wall_missing_azimuth_constructs_with_warning() {
             shielding_of_home: None,
             latitude_deg: Some(40.0),
             longitude_deg: Some(-105.0),
-        },
+            utc_offset_h: None,        },
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
@@ -937,7 +937,7 @@ fn roof_missing_azimuth_constructs_successfully() {
             shielding_of_home: None,
             latitude_deg: Some(40.0),
             longitude_deg: Some(-105.0),
-        },
+            utc_offset_h: None,        },
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),
@@ -1038,7 +1038,7 @@ fn window_missing_azimuth_returns_error() {
             shielding_of_home: None,
             latitude_deg: Some(40.0),
             longitude_deg: Some(-105.0),
-        },
+            utc_offset_h: None,        },
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(100.0),

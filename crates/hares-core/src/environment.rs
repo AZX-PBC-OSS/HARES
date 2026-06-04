@@ -1218,7 +1218,7 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: Some(40.0),
                 longitude_deg: Some(0.0),
-            },
+                utc_offset_h: None,            },
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: Some(100.0),

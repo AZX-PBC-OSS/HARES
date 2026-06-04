@@ -384,7 +384,7 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         // EPW uses hour-ending convention: row "12" covers 11:00–12:00.
         // Subtract half-period (30 min) from sim time to read the correct period.
         midpoint_offset_secs: 1800,
-    })
+        has_embedded_location: true,    })
 }
 
 /// Parse the EPW HOLIDAYS/DAYLIGHT SAVINGS header (line 5).

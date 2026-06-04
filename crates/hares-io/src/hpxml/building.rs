@@ -30,6 +30,12 @@ pub struct Site {
     pub shielding_of_home: Option<String>,
     pub latitude_deg: Option<f64>,
     pub longitude_deg: Option<f64>,
+    /// HPXML `<Site>/<TimeZone>/<UTCOffset>` — the site's offset from UTC in
+    /// **Standard Time** (no DST), e.g. `-5.0` for US Eastern. Optional in the
+    /// HPXML schema; `None` when the element is absent, in which case the
+    /// site-location resolver derives the offset from the weather file or
+    /// longitude. See HPXML Data Dictionary `Building/Site/TimeZone/UTCOffset`.
+    pub utc_offset_h: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -491,6 +497,15 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .path(&["Building", "Site", "Longitude"])
         .and_then(XmlNode::text_as_f64)
         .or_else(|| find_descendant_f64(root, "Longitude", ValueKind::Raw));
+
+    // HPXML Site/TimeZone/UTCOffset — standard-time offset from UTC (no DST).
+    // Optional; the site-location resolver falls back to the weather file's
+    // timezone or a longitude-derived estimate when this is absent.
+    let utc_offset_h = site_node
+        .child("TimeZone")
+        .and_then(|tz| tz.child("UTCOffset"))
+        .and_then(XmlNode::text_as_f64)
+        .or_else(|| find_descendant_f64(root, "UTCOffset", ValueKind::Raw));
 
     let conditioned_floor_area_m2 = summary
         .path(&["BuildingConstruction", "ConditionedFloorArea"])
@@ -1171,6 +1186,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             shielding_of_home,
             latitude_deg,
             longitude_deg,
+            utc_offset_h,
         },
         zones: zones_vec,
         boundaries,

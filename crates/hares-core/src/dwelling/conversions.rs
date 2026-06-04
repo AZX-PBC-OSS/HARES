@@ -145,15 +145,25 @@ pub fn building_to_boundary_inputs(
             // includes film per spec, so subtract computed film R to get material-only.
             // NominalRValue layers are already material-only. Film R is added back in
             // boundary_rc.rs for all three construction paths.
-            let fallback_r = bd
+            let material_r = bd
                 .assembly_r_value_m2_k_w
                 .map(|r| (r - r_film_int - r_film_ext).max(1e-6))
                 .or_else(|| {
                     let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
                     if sum > 0.0 { Some(sum) } else { None }
-                })
-                .unwrap_or(DEFAULT_R_M2_K_W)
-                .max(1e-6);
+                });
+
+            let fallback_r = match material_r {
+                Some(r) => r,
+                None => {
+                    tracing::warn!(
+                        boundary_id = %bd.id,
+                        "No R-value specified for boundary; applying default 2.5 m²·K/W (R-14 IP). Results may significantly understate heat loss."
+                    );
+                    DEFAULT_R_M2_K_W
+                }
+            }
+            .max(1e-6);
 
             // ASHRAE F-factor perimeter method for slab-on-grade boundaries.
             // Replaces area-UA conduction with F2 × P × ΔT per ASHRAE HoF 2021
@@ -815,7 +825,7 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-            },
+                utc_offset_h: None,            },
             zones,
             boundaries,
             windows: Vec::new(),
@@ -1847,6 +1857,126 @@ mod tests {
         assert!(
             msg.contains("EnergyPlus"),
             "error message must mention EnergyPlus correlation range, got: {msg}"
+        );
+    }
+
+    /// Boundary with no R-value sources (no AssemblyEffectiveRValue, no
+    /// NominalRValue layers) falls back to DEFAULT_R_M2_K_W in the output
+    /// `fallback_r_m2_k_w` field.
+    #[test]
+    fn no_r_value_sources_falls_back_to_default_r() {
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "no-r-wall".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 20.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: Vec::new(),
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                lut_boundary_name: Some("__test_no_match__".to_string()),
+                floor_or_ceiling: None,
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let inputs = building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs");
+        assert_eq!(inputs.len(), 1);
+        // The default R-value fallback is 2.5 m²·K/W.
+        const EXPECTED: f64 = 2.5;
+        assert!(
+            (inputs[0].fallback_r_m2_k_w - EXPECTED).abs() < 1e-9,
+            "boundary with no R-value sources should get default fallback_r_m2_k_w={EXPECTED}, got {}",
+            inputs[0].fallback_r_m2_k_w
+        );
+    }
+
+    /// Boundary with a valid AssemblyEffectiveRValue computes correct
+    /// material-only fallback R-value (assembly R minus film resistances)
+    /// without falling back to the default.
+    #[test]
+    fn valid_assembly_r_value_produces_correct_fallback_r() {
+        let assembly_r = 3.5; // m²·K/W
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "r35-wall".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 20.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: Some(assembly_r),
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: Vec::new(),
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                lut_boundary_name: Some("__test_no_match__".to_string()),
+                floor_or_ceiling: None,
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let inputs = building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs");
+        assert_eq!(inputs.len(), 1);
+        // Assembly R-value 3.5 m²·K/W includes film; material-only R is lower.
+        // The fallback_r_m2_k_w must be less than the assembly R and greater
+        // than zero (film subtracted, clamped to 1e-6).
+        let fallback = inputs[0].fallback_r_m2_k_w;
+        assert!(
+            fallback < assembly_r,
+            "material-only fallback_r_m2_k_w ({fallback}) must be less than assembly R ({assembly_r}) because film resistances are subtracted"
+        );
+        assert!(
+            fallback > 0.0,
+            "material-only fallback_r_m2_k_w ({fallback}) must be positive"
         );
     }
 

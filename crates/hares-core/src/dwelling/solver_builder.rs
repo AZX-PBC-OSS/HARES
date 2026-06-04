@@ -2315,7 +2315,7 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-            },
+                utc_offset_h: None,            },
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: None,
@@ -2495,7 +2495,7 @@ mod tests {
                 shielding_of_home: None,
                 latitude_deg: None,
                 longitude_deg: None,
-            },
+                utc_offset_h: None,            },
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: None,

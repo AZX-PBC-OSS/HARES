@@ -812,7 +812,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
             shielding_of_home: None,
             latitude_deg: Some(39.76),
             longitude_deg: Some(-104.86),
-        },
+            utc_offset_h: None,        },
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(floor_area),
