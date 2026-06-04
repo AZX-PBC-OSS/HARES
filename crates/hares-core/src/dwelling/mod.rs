@@ -3028,6 +3028,15 @@ impl Dwelling {
             }
         }
 
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let w = self.latest_env.weather.outdoor_humidity_ratio;
+            assert!(
+                w >= 0.0,
+                "outdoor_humidity_ratio={w} is negative — invalid since humidity ratio mass must be non-negative"
+            );
+        }
+
         DwellingTelemetry {
             timestep_index: self.clock.current_step(),
             current_time: self.latest_env.current_time,
@@ -3043,7 +3052,7 @@ impl Dwelling {
             total_power_kw: self.electrical_solver.net_active_kw(),
             reactive_power_kvar: self.electrical_solver.net_reactive_kvar(),
             outdoor_temp_c: self.latest_env.weather.outdoor_temp_c,
-            outdoor_rh: self.latest_env.weather.outdoor_humidity_ratio,
+            outdoor_humidity_ratio: self.latest_env.weather.outdoor_humidity_ratio,
             actor_telemetry,
             dwelling_failed: self.failed,
         }

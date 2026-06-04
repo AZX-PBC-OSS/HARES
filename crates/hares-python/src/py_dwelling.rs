@@ -1635,7 +1635,7 @@ impl PyDwelling {
         let dwelling = self.acquire_string()?;
         let telemetry = dwelling.telemetry();
         telemetry
-            .to_observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_rh"])
+            .to_observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio"])
             .map_err(|err| err.to_string())
     }
 

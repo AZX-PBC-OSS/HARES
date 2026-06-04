@@ -305,7 +305,7 @@ class TestTelemetry:
         zone = t.zone()
         assert isinstance(zone, dict)
         for key in ("temperature_c", "setpoint_heat_c", "setpoint_cool_c",
-                     "outdoor_temp_c", "outdoor_rh"):
+                     "outdoor_temp_c", "outdoor_humidity_ratio"):
             assert key in zone, f"Missing zone key: {key}"
 
         equip = t.equipment()

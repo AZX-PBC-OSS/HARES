@@ -219,8 +219,8 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
         if key in {"outdoor_temp", "outdoor_temp_c"}:
             out.append(float(zone.get("outdoor_temp_c", 0.0)))
             continue
-        if key in {"outdoor_rh"}:
-            out.append(float(zone.get("outdoor_rh", 0.0)))
+        if key in {"outdoor_humidity_ratio"}:
+            out.append(float(zone.get("outdoor_humidity_ratio", 0.0)))
             continue
         if key in {"total_power_kw", "total_electric_kw"}:
             out.append(float(telemetry.total_power_kw))

@@ -38,7 +38,7 @@ impl PyTelemetry {
         out.set_item("setpoint_heat_c", &self.inner.setpoint_heat_c)?;
         out.set_item("setpoint_cool_c", &self.inner.setpoint_cool_c)?;
         out.set_item("outdoor_temp_c", self.inner.outdoor_temp_c)?;
-        out.set_item("outdoor_rh", self.inner.outdoor_rh)?;
+        out.set_item("outdoor_humidity_ratio", self.inner.outdoor_humidity_ratio)?;
         out.set_item(
             "energy_balance_residuals",
             &self.inner.energy_balance_residuals,

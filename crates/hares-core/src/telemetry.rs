@@ -25,7 +25,8 @@ pub struct DwellingTelemetry {
     pub total_power_kw: f64,
     pub reactive_power_kvar: f64,
     pub outdoor_temp_c: f64,
-    pub outdoor_rh: f64,
+    /// Outdoor humidity ratio [kg water / kg dry air], typically 0.001–0.030.
+    pub outdoor_humidity_ratio: f64,
     /// Per-actor telemetry: actor_name → channel_name → value.
     pub actor_telemetry: HashMap<String, HashMap<String, f64>>,
     /// 0/1 flag indicating whether the dwelling has been marked as permanently
@@ -45,8 +46,8 @@ impl DwellingTelemetry {
                 out.push(self.outdoor_temp_c);
                 continue;
             }
-            if field == "outdoor_rh" {
-                out.push(self.outdoor_rh);
+            if field == "outdoor_humidity_ratio" {
+                out.push(self.outdoor_humidity_ratio);
                 continue;
             }
             if field == "total_electric_kw" || field == "total_power_kw" {
@@ -175,7 +176,7 @@ mod tests {
             total_power_kw: 1.2,
             reactive_power_kvar: 0.0,
             outdoor_temp_c: 10.0,
-            outdoor_rh: 0.45,
+            outdoor_humidity_ratio: 0.008,
             actor_telemetry: HashMap::new(),
             dwelling_failed: false,
         }
@@ -217,5 +218,25 @@ mod tests {
             .to_observation_vec(&["zone_energy_balance[Indoor]"])
             .unwrap();
         assert_eq!(obs, vec![150.0]);
+    }
+
+    #[test]
+    fn outdoor_humidity_ratio_observation_has_plausible_range() {
+        let t = sample();
+        // Humidity ratio in mild conditions is typically 0.001–0.030 kg/kg.
+        assert!(
+            (0.001..=0.030).contains(&t.outdoor_humidity_ratio),
+            "outdoor_humidity_ratio={} outside plausible outdoor range 0.001–0.030 kg/kg",
+            t.outdoor_humidity_ratio,
+        );
+        let obs = t.to_observation_vec(&["outdoor_humidity_ratio"]).unwrap();
+        assert_eq!(obs, vec![t.outdoor_humidity_ratio]);
+    }
+
+    #[test]
+    fn old_outdoor_rh_key_is_rejected() {
+        let t = sample();
+        let err = t.to_observation_vec(&["outdoor_rh"]).unwrap_err();
+        assert!(err.to_string().contains("unknown telemetry field"));
     }
 }
