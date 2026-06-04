@@ -179,6 +179,8 @@ fn heavyweight_concrete_wall_produces_two_rc_sub_layers() {
         framing_factor: None,
         interior_emissivity: 0.9,
         foundation_depth_m: 0.0,
+        #[cfg(feature = "observe")]
+        used_default_r: false,
     }];
 
     let (_, diag) =

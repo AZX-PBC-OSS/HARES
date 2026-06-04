@@ -1761,6 +1761,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         }
     }
 
@@ -2339,6 +2341,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         }
     }
 
@@ -2612,6 +2616,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         };
         let (rc, _diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -2673,6 +2679,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         };
         let (rc_no_ff, _) =
             assemble_building_rc(&[bd_no_ff], 1, &caps, InteriorLwrMethod::ScriptF).expect("no ff");
@@ -2690,6 +2698,8 @@ mod tests {
             framing_factor: Some(0.25),
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         };
         let (rc_ff, _) =
             assemble_building_rc(&[bd_ff], 1, &caps, InteriorLwrMethod::ScriptF).expect("with ff");
@@ -2941,6 +2951,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -2988,6 +3000,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -3036,6 +3050,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -3081,6 +3097,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -3125,6 +3143,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -3166,6 +3186,8 @@ mod tests {
             framing_factor: None,
             interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
             foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
         };
         let (_rc, diag) =
             assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
@@ -3226,6 +3248,8 @@ mod tests {
                 framing_factor: None,
                 interior_emissivity: emissivity,
                 foundation_depth_m: 0.0,
+                #[cfg(feature = "observe")]
+                used_default_r: false,
             })
             .collect();
 

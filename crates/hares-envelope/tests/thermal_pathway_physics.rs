@@ -379,6 +379,8 @@ fn rc_network_exposes_ground_column() {
         framing_factor: None,
         interior_emissivity: 0.9,
         foundation_depth_m: 0.0,
+        #[cfg(feature = "observe")]
+        used_default_r: false,
     }];
 
     let (rc, diag) =
