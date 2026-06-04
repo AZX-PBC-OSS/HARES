@@ -541,6 +541,16 @@ impl EnvironmentManager {
         let dni = self.weather.get(WeatherField::DniWM2, weather_idx);
         let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
         let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
+        // Day-of-year from DST-aware civil time when a timezone is configured,
+        // so that consumers relying on ordinal() (mains temp, weather field)
+        // observe the civil wall-clock day, not the fixed-offset day which may
+        // be wrong across DST transitions.
+        #[cfg(feature = "dst")]
+        let day_of_year = clock
+            .current_civil_time()
+            .map(|ct| ct.ordinal())
+            .unwrap_or_else(|| now.ordinal());
+        #[cfg(not(feature = "dst"))]
         let day_of_year = now.ordinal();
         let mains_temp_c = water_mains_temperature_c(
             self.mains_t_annual_avg_c,
@@ -703,7 +713,10 @@ impl EnvironmentManager {
         state.weather.ground_t_mean_c = self.ground_t_mean_c;
         state.weather.ground_t_amplitude_c = self.ground_t_amplitude_c;
         state.weather.ground_phase_day = self.ground_phase_day;
-        state.weather.day_of_year = clock.current_time().ordinal() as f64;
+        // Because `day_of_year` above may differ from `current_time().ordinal()`
+        // when DST is active, use the DST-aware value stored in `day_of_year`
+        // for consistency with mains temperature and other calendar-sensitive fields.
+        state.weather.day_of_year = day_of_year as f64;
 
         state.current_time = clock.current_time();
         state.time_res = clock.time_res;

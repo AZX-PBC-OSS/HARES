@@ -22,8 +22,8 @@ const LEVEL_0_COLUMNS: &[&str] = &[
 /// Per-end-use column name suffixes for verbosity 1.
 /// Each equipment contributes `"{name} Electric Power (kW)"` and/or
 /// `"{name} Gas Power (therms/hour)"` depending on its fuel type.
-const ELECTRIC_POWER_SUFFIX: &str = "Electric Power (kW)";
-const GAS_POWER_SUFFIX: &str = "Gas Power (therms/hour)";
+pub(crate) const ELECTRIC_POWER_SUFFIX: &str = "Electric Power (kW)";
+pub(crate) const GAS_POWER_SUFFIX: &str = "Gas Power (therms/hour)";
 
 /// Zone-level column templates for verbosity 2.
 /// OCHRE convention: `"Temperature - {zone} (C)"` with zone name between dashes.

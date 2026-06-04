@@ -18,18 +18,42 @@
 //! returns `start_time + total_steps() * time_res` (one step past the last
 //! simulated timestep).
 
+#[cfg(feature = "observe")]
+use std::cell::Cell;
+
 use chrono::{DateTime, Duration, FixedOffset};
+#[cfg(all(feature = "dst", feature = "observe"))]
+use chrono::{Datelike, Timelike};
 
 /// Monotonic simulation clock over a fixed horizon.
 ///
 /// Pass `start_time` with the intended local wall-clock time (see module docs).
 /// The `.hour()` component is used directly by schedule-based equipment.
+///
+/// When `civil_tz` is set (requires `dst` feature), [`current_civil_time`](Self::current_civil_time)
+/// provides DST-aware civil wall-clock time. The fixed-offset clock never adjusts
+/// for DST — its `.ordinal()` / `.hour()` may produce wrong calendar-field values
+/// during transitions. Use `current_civil_time()` for any calendar-sensitive computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimClock {
     pub start_time: DateTime<FixedOffset>,
     pub time_res: Duration,
     pub duration: Duration,
     pub(crate) current_step: u64,
+    /// DST-aware IANA timezone for civil time queries.
+    /// When set, [`current_civil_time`](Self::current_civil_time) converts the
+    /// fixed-offset clock position through DST rules.
+    #[cfg(feature = "dst")]
+    pub civil_tz: Option<chrono_tz::Tz>,
+    /// Observer capture: last civil hour computed by `current_civil_time()`.
+    #[cfg(feature = "observe")]
+    pub obs_civil_hour: Cell<Option<u32>>,
+    /// Observer capture: last civil ordinal (day of year) computed by `current_civil_time()`.
+    #[cfg(feature = "observe")]
+    pub obs_civil_ordinal: Cell<Option<u32>>,
+    /// Observer capture: last fixed-offset hour from `current_time()` at civil query time.
+    #[cfg(feature = "observe")]
+    pub obs_fixed_offset_hour: Cell<Option<u32>>,
 }
 
 impl SimClock {
@@ -63,6 +87,14 @@ impl SimClock {
             time_res,
             duration,
             current_step: 0,
+            #[cfg(feature = "dst")]
+            civil_tz: None,
+            #[cfg(feature = "observe")]
+            obs_civil_hour: Cell::new(None),
+            #[cfg(feature = "observe")]
+            obs_civil_ordinal: Cell::new(None),
+            #[cfg(feature = "observe")]
+            obs_fixed_offset_hour: Cell::new(None),
         }
     }
 
@@ -78,6 +110,52 @@ impl SimClock {
         let time_res_secs = self.time_res.num_seconds();
         let step_secs = i64::try_from(self.current_step).unwrap_or(i64::MAX);
         self.start_time + Duration::seconds(time_res_secs.saturating_mul(step_secs))
+    }
+
+    /// DST-aware civil (wall-clock) time at the current step.
+    ///
+    /// Returns `None` when no civil timezone is configured. When set, the
+    /// fixed-offset clock position is converted through the configured IANA
+    /// timezone, applying DST rules so that calendar fields (`.ordinal()`,
+    /// `.hour()`, `.minute()`) reflect the civil wall-clock time instead of the
+    /// fixed-offset digits.
+    ///
+    /// Invariant: the conversion from `DateTime<FixedOffset>` → `DateTime<Tz>`
+    /// is always unambiguous because both representations reference the same UTC
+    /// instant. The naive-local hour of the fixed-offset clock may differ from the
+    /// civil hour during DST transitions.
+    ///
+    /// Requires the `dst` cargo feature.
+    #[cfg(feature = "dst")]
+    #[must_use]
+    pub fn current_civil_time(&self) -> Option<DateTime<chrono_tz::Tz>> {
+        self.civil_tz.map(|tz| {
+            let fixed = self.current_time();
+            let civil = fixed.with_timezone(&tz);
+
+            // Invariant: verify the conversion is plausible. The conversion
+            // itself is always unambiguous (both representations reference the
+            // same UTC instant), so this check documents intent rather than
+            // catches a real failure path. It does verify that no internal
+            // panic occurred in chrono's timezone machinery.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                let _ = &civil;
+                debug_assert!(
+                    civil.naive_utc() == fixed.naive_utc(),
+                    "civil time UTC does not match fixed-offset UTC"
+                );
+            }
+
+            #[cfg(feature = "observe")]
+            {
+                self.obs_civil_hour.set(Some(civil.hour()));
+                self.obs_civil_ordinal.set(Some(civil.ordinal()));
+                self.obs_fixed_offset_hour.set(Some(fixed.hour()));
+            }
+
+            civil
+        })
     }
 
     /// Total number of simulation steps.

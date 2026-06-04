@@ -1395,11 +1395,27 @@ impl Dwelling {
             .initialization_duration
             .map(|d| Duration::seconds(d.as_secs() as i64))
             .unwrap_or(Duration::zero());
+
+        #[cfg(feature = "dst")]
+        let parsed_civil_tz: Option<chrono_tz::Tz> = config
+            .sim_config
+            .civil_timezone
+            .as_deref()
+            .map(|name| {
+                name.parse::<chrono_tz::Tz>()
+                    .map_err(|_| HaresError::Io(format!("invalid civil timezone: {name}")))
+            })
+            .transpose()?;
+
         let mut clock = SimClock::new(
             local_start,
             config.sim_config.time_res,
             config.sim_config.duration + init_chrono,
         );
+        #[cfg(feature = "dst")]
+        {
+            clock.civil_tz = parsed_civil_tz;
+        }
 
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
@@ -2075,6 +2091,10 @@ impl Dwelling {
                 config.sim_config.time_res,
                 config.sim_config.duration,
             );
+            #[cfg(feature = "dst")]
+            {
+                clock.civil_tz = parsed_civil_tz;
+            }
             dwelling.clock = clock;
         } else {
             tracing::warn!(
@@ -2569,15 +2589,12 @@ impl Dwelling {
     /// hot-loop efficiency. This method maintains those caches when adding
     /// equipment after construction.
     ///
-    /// # Panics
-    ///
-    /// Panics if the equipment name collides with an already-registered
-    /// equipment. Use unique names (e.g., `"PV #2"` instead of a second
-    /// `"PV"`) when adding equipment programmatically.
-    pub fn add_equipment(&mut self, eq: Box<dyn Equipment>) {
+    /// If an equipment with the same name already exists, the incoming
+    /// equipment is automatically renamed using the `"Name #N"` convention
+    /// (e.g. a second `"PV"` becomes `"PV #2"`).
+    pub fn add_equipment(&mut self, mut eq: Box<dyn Equipment>) {
         let name = eq.descriptor().name.clone();
-        let existing = self.equipment.iter().any(|e| e.descriptor().name == name);
-        if existing {
+        if self.equipment.iter().any(|e| e.descriptor().name == name) {
             let count = self
                 .equipment
                 .iter()
@@ -2587,10 +2604,13 @@ impl Dwelling {
                 })
                 .count()
                 + 1;
-            panic!(
-                "add_equipment: equipment named '{name}' already exists ({count} instances of this type). \
-                 Construct it with a unique name, e.g. '{name} #2'."
+            let new_name = format!("{name} #{count}");
+            tracing::warn!(
+                incoming = %name,
+                renamed = %new_name,
+                "add_equipment: renaming duplicate equipment to avoid collision"
             );
+            eq.rename(new_name);
         }
         self.equipment.push(eq);
         self.refresh_equipment_caches();

@@ -11,11 +11,11 @@ use thiserror::Error;
 
 use hares_types::telemetry_keys as tk;
 
+#[cfg(feature = "observe")]
+use crate::output::columns::ELECTRIC_POWER_SUFFIX;
+
 use crate::SimulationConfig;
 
-/// Suffix used by gas power telemetry columns (OCHRE style).
-#[allow(dead_code)]
-const GAS_POWER_SUFFIX: &str = " Gas Power (therms/hour)";
 const TOTAL_ELECTRIC_POWER_KW: &str = "Total Electric Power (kW)";
 const TOTAL_GAS_POWER_THERMS: &str = "Total Gas Power (therms/hour)";
 const GRID_ELECTRIC_POWER_KW: &str = "Grid Electric Power (kW)";

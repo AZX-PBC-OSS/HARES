@@ -453,3 +453,113 @@ fn invalid_civil_timezone_is_rejected() {
         "expected InvalidTimezone for bad tz name, got {err:?}"
     );
 }
+
+#[cfg(feature = "dst")]
+mod simclock_dst_tests {
+    use chrono::{Datelike, Duration, FixedOffset, TimeZone, Timelike};
+    use chrono_tz::America::New_York;
+    use hares_core::SimClock;
+
+    /// Spring-forward: at step 23 starting from 2024-03-10 00:00 EST (-05:00),
+    /// the fixed-offset clock says March 10 23:00 EST (ordinal0 = 69), but the
+    /// DST-aware civil time must be March 11 00:00 EDT (ordinal0 = 70).
+    #[test]
+    fn civil_time_skips_spring_forward_hour() {
+        let start = FixedOffset::west_opt(5 * 3600)
+            .expect("valid offset")
+            .with_ymd_and_hms(2024, 3, 10, 0, 0, 0)
+            .single()
+            .expect("valid start");
+
+        let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(24));
+        clock.civil_tz = Some(New_York);
+
+        // Step through to step 23 (= 23 hours elapsed).
+        for _ in 0..23 {
+            assert!(clock.next().is_some());
+        }
+        assert_eq!(clock.current_step(), 23);
+
+        // Fixed-offset time at step 23: March 10 23:00 EST (ordinal0 = 69).
+        let fixed = clock.current_time();
+        assert_eq!(fixed.hour(), 23);
+        assert_eq!(
+            fixed.ordinal0(),
+            69,
+            "fixed-offset ordinal0 should be March 10 (day 69)"
+        );
+
+        // Civil time at step 23: March 11 00:00 EDT (ordinal0 = 70).
+        let civil = clock.current_civil_time().expect("civil time must be Some");
+        assert_eq!(
+            civil.hour(),
+            0,
+            "civil hour at step 23 must be 00:00 EDT, not 23:00 EST"
+        );
+        assert_eq!(
+            civil.ordinal0(),
+            70,
+            "civil ordinal0 must be March 11 (day 70), not March 10 (day 69)"
+        );
+        // UTC instant is preserved: fixed-offset 23:00 EST = 04:00 UTC on March 11.
+        // Civil 00:00 EDT = 04:00 UTC on March 11.
+        let fixed_utc = fixed.naive_utc();
+        let civil_utc = civil.naive_utc();
+        assert_eq!(
+            civil_utc, fixed_utc,
+            "civil time must reference the same UTC instant as the fixed-offset clock"
+        );
+    }
+
+    /// Fall-back: starting from 2024-11-03 00:00 EDT (-04:00), steps 1 and 2
+    /// both map to civil hour 01:00 — first as 01:00 EDT (before the transition)
+    /// and then as 01:00 EST (after the transition). These are distinct UTC
+    /// instants.
+    #[test]
+    fn civil_time_repeats_fall_back_hour() {
+        let start = FixedOffset::west_opt(4 * 3600)
+            .expect("valid offset")
+            .with_ymd_and_hms(2024, 11, 3, 0, 0, 0)
+            .single()
+            .expect("valid start");
+
+        let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(4));
+        clock.civil_tz = Some(New_York);
+
+        // Step 0: civil = 00:00 EDT.
+        let civil0 = clock.current_civil_time().expect("civil step 0");
+        assert_eq!(civil0.hour(), 0);
+        clock.next();
+
+        // Step 1: civil = 01:00 EDT (first 01:00, before fall-back).
+        let civil1 = clock.current_civil_time().expect("civil step 1");
+        assert_eq!(civil1.hour(), 1);
+        let utc1 = civil1.naive_utc();
+        // At UTC 05:00 on Nov 3, America/New_York is still in EDT (UTC-4).
+        // 01:00 EDT maps from UTC 05:00.
+        clock.next();
+
+        // Step 2: civil = 01:00 EST (second 01:00, after fall-back).
+        let civil2 = clock.current_civil_time().expect("civil step 2");
+        assert_eq!(civil2.hour(), 1);
+        let utc2 = civil2.naive_utc();
+
+        // Both are hour 1, but with different UTC times.
+        assert_ne!(
+            utc1, utc2,
+            "fall-back repeated 01:00 hour must map to distinct UTC instants"
+        );
+        // Step 2 (UTC 06:00) is exactly 1 hour after step 1 (UTC 05:00),
+        // even though both civil hours appear as 01:00.
+        let diff_secs = (utc2 - utc1).num_seconds();
+        assert!(
+            diff_secs == 3600,
+            "UTC gap between repeated 01:00 hours must be exactly 1 hour, got {diff_secs}s"
+        );
+
+        clock.next();
+        // Step 3: civil = 02:00 EST.
+        let civil3 = clock.current_civil_time().expect("civil step 3");
+        assert_eq!(civil3.hour(), 2);
+    }
+}

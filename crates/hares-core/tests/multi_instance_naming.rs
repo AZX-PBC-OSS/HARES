@@ -199,11 +199,19 @@ fn spy_recorded(dwelling: &Dwelling, name: &str) -> f64 {
 }
 
 #[test]
-#[should_panic(expected = "equipment named 'PV' already exists")]
-fn add_equipment_panics_on_duplicate_name() {
-    let mut dwelling = build_dwelling("dup_name_panic");
+fn add_equipment_auto_renames_on_collision() {
+    let mut dwelling = build_dwelling("auto_rename");
     dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8001)));
     dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8002)));
+    dwelling.add_equipment(Box::new(TelemetryRecordSpy::new("PV", EndUse::PV, 0x8003)));
+
+    let names: Vec<&str> = dwelling
+        .equipment()
+        .iter()
+        .map(|e| e.descriptor().name.as_str())
+        .collect();
+    assert_eq!(names, vec!["PV", "PV #2", "PV #3"]);
+    assert_eq!(dwelling.equipment().len(), 3);
 }
 
 #[test]
