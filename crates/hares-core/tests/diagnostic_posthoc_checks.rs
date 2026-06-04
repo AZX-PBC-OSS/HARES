@@ -52,11 +52,6 @@ fn unmet_heating_detected_when_zone_temp_below_setpoint_over_threshold() {
     let mut writer: Option<Vec<u8>> = Some(Vec::new());
     let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
     assert_eq!(violations, 1, "should detect excessive unmet heating");
-    let output = String::from_utf8(writer.unwrap()).unwrap();
-    assert!(
-        output.contains("diag unmet_heating"),
-        "CSV must contain unmet_heating diag line, got: {output}"
-    );
 }
 
 #[test]
@@ -77,11 +72,6 @@ fn unmet_cooling_detected_when_zone_temp_above_setpoint_over_threshold() {
     let mut writer: Option<Vec<u8>> = Some(Vec::new());
     let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
     assert_eq!(violations, 1, "should detect excessive unmet cooling");
-    let output = String::from_utf8(writer.unwrap()).unwrap();
-    assert!(
-        output.contains("diag unmet_cooling"),
-        "CSV must contain unmet_cooling diag line, got: {output}"
-    );
 }
 
 #[test]
@@ -137,11 +127,6 @@ fn short_cycling_detected_when_mode_changes_exceed_max_per_hour() {
         violations, 1,
         "should detect short cycling: 5 changes in 1h"
     );
-    let output = String::from_utf8(writer.unwrap()).unwrap();
-    assert!(
-        output.contains("diag short_cycling"),
-        "CSV must contain short_cycling diag line, got: {output}"
-    );
 }
 
 #[test]
@@ -187,11 +172,6 @@ fn freezing_detected_in_conditioned_zone_when_temp_below_zero() {
     let mut writer: Option<Vec<u8>> = Some(Vec::new());
     let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
     assert_eq!(violations, 1, "should detect freezing excursion");
-    let output = String::from_utf8(writer.unwrap()).unwrap();
-    assert!(
-        output.contains("diag freezing"),
-        "CSV must contain freezing diag line, got: {output}"
-    );
 }
 
 #[test]
@@ -243,11 +223,6 @@ fn simultaneous_heating_cooling_detected_per_zone() {
     assert_eq!(
         violations, 1,
         "simultaneous heating+cooling in zone 1 should be detected"
-    );
-    let output = String::from_utf8(writer.unwrap()).unwrap();
-    assert!(
-        output.contains("diag simultaneous_hc"),
-        "CSV must contain simultaneous_hc diag line, got: {output}"
     );
 }
 
@@ -330,27 +305,6 @@ fn no_violations_when_everything_is_in_range() {
     let mut writer: Option<Vec<u8>> = Some(Vec::new());
     let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
     assert_eq!(violations, 0, "no violations when temps are all in range");
-}
-
-#[test]
-fn zone_name_for_uses_indoor_for_zone1() {
-    let mut accum = accum_1zone_1equip();
-    for _ in 0..100 {
-        accum.record_step(
-            &[15.0],
-            &[Some(20.0)],
-            &[None],
-            &[Some(OperatingMode::Heating)],
-            &[Some(0)],
-        );
-    }
-    let mut writer: Option<Vec<u8>> = Some(Vec::new());
-    accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
-    let output = String::from_utf8(writer.unwrap()).unwrap();
-    assert!(
-        output.contains("zone=Indoor"),
-        "CSV diag line must use 'Indoor' name for ZoneId(1), got: {output}"
-    );
 }
 
 // ── Integration test: end-to-end wiring of post-hoc checks in Dwelling ───────

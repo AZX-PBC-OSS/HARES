@@ -2131,6 +2131,10 @@ impl Dwelling {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| format!("dwelling_{}", dwelling.bldg_id));
             let diag_path = output_path.with_file_name(format!("{stem}_diagnostics.csv"));
+            tracing::info!(
+                path = %diag_path.display(),
+                "diagnostic CSV output enabled (output_verbosity >= 4)"
+            );
             let file = std::fs::File::create(&diag_path)
                 .map_err(|err| HaresError::Io(format!("diagnostic file create failed: {err}")))?;
             let mut writer = std::io::BufWriter::new(file);
@@ -4373,7 +4377,6 @@ impl Dwelling {
                 window_solar_w: gains.window_solar_w,
                 opaque_solar_lwr_w: gains.opaque_solar_lwr_w,
                 interior_lwr_w: gains.interior_lwr_w,
-                infiltration_by_zone: Vec::new(),
                 internal_gain_w: gains.internal_gain_w,
                 port_convective_w: gains.port_convective_w,
                 port_radiant_w: gains.port_radiant_w,

@@ -53,8 +53,6 @@ pub struct EnvelopeDiag {
     pub opaque_solar_lwr_w: f64,
     /// Total interior LWR exchange activity [W] (Σ|q_i|/2).
     pub interior_lwr_w: f64,
-    /// Per-zone infiltration+ventilation sensible [W].
-    pub infiltration_by_zone: Vec<(ZoneId, f64)>,
     /// Non-HVAC internal gains [W].
     pub internal_gain_w: f64,
     /// Total port convective [W] (HVAC + appliances).
@@ -726,4 +724,203 @@ fn zone_name_for(id: ZoneId, zone_names: &[String]) -> String {
         .get(id.0.saturating_sub(1) as usize)
         .cloned()
         .unwrap_or_else(|| format!("Zone({})", id.0))
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use chrono::{DateTime, Duration, FixedOffset};
+
+    use hares_types::{EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState};
+
+    use super::*;
+
+    /// Verifies that `capture()` extracts zone temperatures, thermal gains,
+    /// and electrical net power from live environment and port state, and
+    /// that `write_header()` + `write_row()` produce well-formed CSV with
+    /// expected headers and data values.
+    #[test]
+    fn capture_and_write_row_produce_valid_csv() {
+        let env = EnvironmentState {
+            zones: vec![ZoneState::new(ZoneId(1), 22.5, 0.008, 100.0)],
+            weather: WeatherState::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: DateTime::parse_from_rfc3339("2024-06-15T12:00:00Z").unwrap(),
+            time_res: Duration::seconds(60),
+            price_signal: hares_types::PriceSignal::default(),
+            electrical: hares_types::ElectricalSummary::default(),
+        };
+
+        let ports = PortSlots::default();
+
+        let diag = capture(42, &env, &ports, None);
+
+        assert_eq!(diag.step, 42);
+        assert!(
+            diag.timestamp_s > 0.0,
+            "timestamp_s must be positive, got {}",
+            diag.timestamp_s
+        );
+        assert_eq!(
+            diag.zone_temps_c.len(),
+            1,
+            "expected 1 zone, got {}",
+            diag.zone_temps_c.len()
+        );
+        assert_eq!(diag.zone_temps_c[0].0, ZoneId(1));
+        assert!(
+            (diag.zone_temps_c[0].1 - 22.5).abs() < 0.01,
+            "zone temp mismatch"
+        );
+
+        let mut buf = Cursor::new(Vec::new());
+        write_header(&mut buf, 1);
+        write_row(&mut buf, &diag, 1);
+
+        let csv = String::from_utf8(buf.into_inner()).expect("valid UTF-8");
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 2, "expected header + 1 data row, got {csv:?}");
+
+        let header = lines[0];
+        let expected_cols = [
+            "step",
+            "timestamp_s",
+            "outdoor_temp_c",
+            "zone1_temp_c",
+            "zone1_thermal_gain_w",
+            "zone1_latent_gain_w",
+            "electrical_net_kw",
+            "port_radiant_w",
+            "port_convective_w",
+            "window_solar_w",
+            "opaque_solar_lwr_w",
+            "interior_lwr_w",
+            "internal_gain_w",
+        ];
+        for &col in &expected_cols {
+            assert!(
+                header.contains(col),
+                "header missing column '{col}'; header: {header}"
+            );
+        }
+
+        let data = lines[1];
+        let fields: Vec<&str> = data.split(',').map(|s| s.trim()).collect();
+        assert_eq!(
+            fields.len(),
+            expected_cols.len(),
+            "data row field count mismatch"
+        );
+
+        // step column
+        assert_eq!(fields[0].parse::<u64>().unwrap(), 42);
+        // zone1_temp_c should be ~22.5
+        let temp_val: f64 = fields[3].parse().unwrap();
+        assert!(
+            (temp_val - 22.5).abs() < 0.1,
+            "zone1_temp_c mismatch: {temp_val}"
+        );
+    }
+
+    /// Verifies that `write_header()` emits the correct column count for
+    /// multi-zone configurations.
+    #[test]
+    fn write_header_scales_with_zone_count() {
+        let mut buf = Cursor::new(Vec::new());
+        write_header(&mut buf, 3);
+
+        let csv = String::from_utf8(buf.into_inner()).expect("valid UTF-8");
+        let header = csv.lines().next().expect("header must exist");
+
+        for i in 1..=3 {
+            assert!(header.contains(&format!("zone{i}_temp_c")));
+            assert!(header.contains(&format!("zone{i}_thermal_gain_w")));
+            assert!(header.contains(&format!("zone{i}_latent_gain_w")));
+        }
+        assert!(!header.contains("zone4_temp_c"));
+    }
+
+    /// Verifies that `write_row()` writes `unwrap_or(0.0)` for missing gain
+    /// columns and `unwrap_or_default()` for envelope columns.
+    #[test]
+    fn write_row_handles_missing_gains_and_nullable_envelope() {
+        let diag = StepDiagnostics {
+            step: 1,
+            timestamp_s: 3600.0,
+            outdoor_temp_c: 5.0,
+            zone_temps_c: vec![(ZoneId(1), 20.0)],
+            thermal_gains_w: vec![],  // missing — should default to 0.0
+            thermal_latent_w: vec![], // missing
+            electrical_net_kw: 0.5,
+            equipment: vec![],
+            equipment_sensible_w: vec![],
+            envelope: None, // nullable envelope
+        };
+
+        let mut buf = Cursor::new(Vec::new());
+        write_header(&mut buf, 1);
+        write_row(&mut buf, &diag, 1);
+
+        let csv = String::from_utf8(buf.into_inner()).expect("valid UTF-8");
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        let data = lines[1];
+        let fields: Vec<&str> = data.split(',').map(|s| s.trim()).collect();
+
+        // Missing thermal gain → unwrap_or(0.0)
+        let gain: f64 = fields[4].parse().unwrap();
+        assert_eq!(gain, 0.0, "missing thermal gain should default to 0.0");
+
+        let latent: f64 = fields[5].parse().unwrap();
+        assert_eq!(latent, 0.0, "missing latent should default to 0.0");
+
+        // Nullable envelope columns → unwrap_or_default() → empty string → could be ""
+        // We check at least that the row parses correctly (no panic).
+        assert_eq!(fields[0], "1");
+        assert_eq!(fields[1], "3600.0");
+    }
+
+    /// Verifies that `capture()` samples outdoor temperature from weather state.
+    #[test]
+    fn capture_smoke_test() {
+        let env = EnvironmentState {
+            zones: vec![ZoneState::new(ZoneId(1), 18.0, 0.006, 80.0)],
+            weather: WeatherState {
+                outdoor_temp_c: 12.3,
+                ..WeatherState::default()
+            },
+            grid: GridState {
+                voltage_pu: 0.98,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: DateTime::parse_from_rfc3339("2024-01-01T06:00:00Z").unwrap(),
+            time_res: Duration::seconds(300),
+            price_signal: hares_types::PriceSignal::default(),
+            electrical: hares_types::ElectricalSummary::default(),
+        };
+
+        let ports = PortSlots::default();
+        let diag = capture(1, &env, &ports, None);
+
+        assert_eq!(diag.step, 1);
+        assert!((diag.outdoor_temp_c - 12.3).abs() < 1e-9);
+        assert_eq!(diag.zone_temps_c.len(), 1);
+        assert_eq!(diag.zone_temps_c[0].0, ZoneId(1));
+        assert!((diag.zone_temps_c[0].1 - 18.0).abs() < 1e-9);
+    }
 }

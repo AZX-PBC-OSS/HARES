@@ -240,7 +240,11 @@ master_seed = 0
         })
         .collect();
 
-    let data_rows: Vec<&str> = diag_content.lines().skip(1).collect();
+    let data_rows: Vec<&str> = diag_content
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
+        .skip(1)
+        .collect();
     assert!(
         !data_rows.is_empty(),
         "diagnostic CSV must contain at least one data row"
