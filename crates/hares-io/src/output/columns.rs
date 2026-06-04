@@ -6,6 +6,7 @@
 use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::hpxml::EquipmentSpec;
+use crate::hpxml::equipment::canonical_instance_namer;
 use hares_types::{EndUse, FuelType, OperatingMode, ZoneId};
 
 /// Timestamp column included at every verbosity level.
@@ -659,23 +660,25 @@ const MODE_ORDINALS: &[(&str, u8)] = &[
 fn instance_qualified_names(specs: &[EquipmentSpec]) -> Vec<(String, FuelType)> {
     use std::collections::HashMap;
 
-    // Count occurrences of each name.
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for spec in specs {
         *counts.entry(&spec.name).or_insert(0) += 1;
     }
 
-    // Assign instance numbers.
     let mut indices: HashMap<&str, usize> = HashMap::new();
     let mut result = Vec::with_capacity(specs.len());
     for spec in specs {
-        let total = counts[spec.name.as_str()];
-        if total > 1 {
-            let idx = indices.entry(&spec.name).or_insert(0);
-            *idx += 1;
-            result.push((format!("{} #{}", spec.name, *idx), spec.fuel_type));
+        if let Some(ref instance_name) = spec.instance_name {
+            result.push((instance_name.clone(), spec.fuel_type));
         } else {
-            result.push((spec.name.clone(), spec.fuel_type));
+            let total = counts[spec.name.as_str()];
+            if total > 1 {
+                let idx = indices.entry(&spec.name).or_insert(0);
+                *idx += 1;
+                result.push((canonical_instance_namer(&spec.name, *idx), spec.fuel_type));
+            } else {
+                result.push((spec.name.clone(), spec.fuel_type));
+            }
         }
     }
     result
@@ -731,7 +734,6 @@ mod tests {
     use serde_json::Map;
 
     use super::*;
-    use crate::hpxml::EquipmentSpec;
 
     fn make_spec(name: &str, fuel: FuelType) -> EquipmentSpec {
         EquipmentSpec {

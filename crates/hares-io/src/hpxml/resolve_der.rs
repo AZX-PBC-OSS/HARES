@@ -87,12 +87,9 @@ pub(super) fn resolve_pv(
             arrays: None,
         };
 
-        specs.push(build_typed_spec(
-            "PV".to_string(),
-            FuelType::Electric,
-            cfg,
-            defaults,
-        ));
+        let mut spec = build_typed_spec("PV".to_string(), FuelType::Electric, cfg, defaults);
+        spec.system_id = element_id(pv);
+        specs.push(spec);
     }
 
     Ok(())
@@ -163,12 +160,9 @@ pub(super) fn resolve_batteries(
             grid_export_rule: None,
             min_dwell_steps: 0,
         };
-        specs.push(build_typed_spec(
-            "Battery".to_string(),
-            FuelType::Electric,
-            cfg,
-            defaults,
-        ));
+        let mut spec = build_typed_spec("Battery".to_string(), FuelType::Electric, cfg, defaults);
+        spec.system_id = element_id(battery);
+        specs.push(spec);
     }
     Ok(())
 }
@@ -232,12 +226,9 @@ pub(super) fn resolve_ev(
             power_limit_kw: None,
             initial_connection_state: None,
         };
-        specs.push(build_typed_spec(
-            "EV".to_string(),
-            FuelType::Electric,
-            cfg,
-            defaults,
-        ));
+        let mut spec = build_typed_spec("EV".to_string(), FuelType::Electric, cfg, defaults);
+        spec.system_id = element_id(ev);
+        specs.push(spec);
     }
     Ok(())
 }
@@ -309,12 +300,9 @@ pub(super) fn resolve_generators(
             heat_rec_max_temp_c: None,
         };
 
-        specs.push(build_typed_spec(
-            "Gas Generator".to_string(),
-            fuel,
-            cfg,
-            defaults,
-        ));
+        let mut spec = build_typed_spec("Gas Generator".to_string(), fuel, cfg, defaults);
+        spec.system_id = element_id(generator);
+        specs.push(spec);
     }
     Ok(())
 }

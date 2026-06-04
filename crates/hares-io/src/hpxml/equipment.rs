@@ -62,6 +62,7 @@ pub fn resolve_equipment(
 
     apply_overrides(&mut specs, overrides);
     resolve_loop_wiring(&mut specs);
+    assign_instance_names(&mut specs);
     Ok(specs)
 }
 
@@ -278,6 +279,29 @@ fn set_indirect_tank_boiler_loop_id(specs: &mut [EquipmentSpec], idx: usize, loo
                 loop_id,
                 "set_indirect_tank_boiler_loop_id: failed to deserialize IndirectTankConfig"
             );
+        }
+    }
+}
+
+pub fn canonical_instance_namer(name: &str, count: usize) -> String {
+    format!("{name} #{count}")
+}
+
+fn assign_instance_names(specs: &mut [EquipmentSpec]) {
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for spec in specs.iter() {
+        *counts.entry(spec.name.clone()).or_insert(0) += 1;
+    }
+
+    let mut indices: HashMap<String, usize> = HashMap::new();
+    for spec in specs.iter_mut() {
+        let total = counts.get(&spec.name).copied().unwrap_or(1);
+        if total > 1 {
+            let idx = indices.entry(spec.name.clone()).or_insert(0);
+            *idx += 1;
+            spec.instance_name = Some(canonical_instance_namer(&spec.name, *idx));
         }
     }
 }
@@ -2067,5 +2091,112 @@ mod tests {
 
         assert_eq!(boiler_cfg.loop_id, Some(1));
         assert_eq!(tank_cfg.boiler_loop_id, Some(1));
+    }
+
+    fn make_spec(name: &str) -> super::EquipmentSpec {
+        super::build_spec(
+            name.to_string(),
+            FuelType::Electric,
+            Map::new(),
+            &DefaultsStore::empty(),
+        )
+    }
+
+    #[test]
+    fn assign_instance_names_numbers_collisions_only() {
+        let mut specs = vec![
+            make_spec("PV"),
+            make_spec("PV"),
+            make_spec("Battery"),
+            make_spec("Gas Furnace"),
+            make_spec("Gas Furnace"),
+            make_spec("Gas Furnace"),
+            make_spec("EV"),
+        ];
+        super::assign_instance_names(&mut specs);
+
+        assert_eq!(specs[0].instance_name.as_deref(), Some("PV #1"));
+        assert_eq!(specs[1].instance_name.as_deref(), Some("PV #2"));
+        assert_eq!(specs[2].instance_name.as_deref(), None);
+        assert_eq!(specs[3].instance_name.as_deref(), Some("Gas Furnace #1"));
+        assert_eq!(specs[4].instance_name.as_deref(), Some("Gas Furnace #2"));
+        assert_eq!(specs[5].instance_name.as_deref(), Some("Gas Furnace #3"));
+        assert_eq!(specs[6].instance_name.as_deref(), None);
+    }
+
+    #[test]
+    fn single_instance_keeps_bare_name() {
+        let mut specs = vec![make_spec("PV"), make_spec("Battery"), make_spec("EV")];
+        super::assign_instance_names(&mut specs);
+        assert_eq!(specs[0].instance_name.as_deref(), None);
+        assert_eq!(specs[1].instance_name.as_deref(), None);
+        assert_eq!(specs[2].instance_name.as_deref(), None);
+        assert_eq!(specs[0].name, "PV");
+    }
+
+    #[test]
+    fn two_pv_from_hpxml_get_distinct_instance_names() {
+        let xml = minimal_wh_xml(
+            r#"<Photovoltaics>
+          <PVSystem>
+            <SystemIdentifier id="PV1"/>
+            <Tracking>fixed</Tracking>
+            <MaxPowerOutput>5000</MaxPowerOutput>
+            <ArrayTilt>30</ArrayTilt>
+            <ArrayAzimuth>180</ArrayAzimuth>
+            <ModuleType>standard</ModuleType>
+            <SystemLossesFraction>0.14</SystemLossesFraction>
+          </PVSystem>
+          <PVSystem>
+            <SystemIdentifier id="PV2"/>
+            <Tracking>fixed</Tracking>
+            <MaxPowerOutput>3000</MaxPowerOutput>
+            <ArrayTilt>20</ArrayTilt>
+            <ArrayAzimuth>200</ArrayAzimuth>
+            <ModuleType>premium</ModuleType>
+            <SystemLossesFraction>0.12</SystemLossesFraction>
+          </PVSystem>
+        </Photovoltaics>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+            .expect("resolve_equipment");
+
+        let pv_specs: Vec<_> = specs.iter().filter(|s| s.name == "PV").collect();
+        assert_eq!(pv_specs.len(), 2, "expected 2 PV specs");
+
+        assert_eq!(pv_specs[0].name, "PV");
+        assert_eq!(pv_specs[1].name, "PV");
+        assert_eq!(pv_specs[0].instance_name.as_deref(), Some("PV #1"));
+        assert_eq!(pv_specs[1].instance_name.as_deref(), Some("PV #2"));
+
+        assert_eq!(pv_specs[0].system_id.as_deref(), Some("PV1"));
+        assert_eq!(pv_specs[1].system_id.as_deref(), Some("PV2"));
+    }
+
+    #[test]
+    fn two_batteries_from_hpxml_get_distinct_instance_names() {
+        let xml = minimal_wh_xml(
+            r#"<Batteries>
+          <Battery>
+            <SystemIdentifier id="bat1"/>
+            <NominalCapacity><Value>10</Value><Units>kWh</Units></NominalCapacity>
+            <RatedPowerOutput>5000</RatedPowerOutput>
+          </Battery>
+          <Battery>
+            <SystemIdentifier id="bat2"/>
+            <NominalCapacity><Value>13.5</Value><Units>kWh</Units></NominalCapacity>
+            <RatedPowerOutput>7000</RatedPowerOutput>
+          </Battery>
+        </Batteries>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None)
+            .expect("resolve_equipment");
+
+        let bat_specs: Vec<_> = specs.iter().filter(|s| s.name == "Battery").collect();
+        assert_eq!(bat_specs.len(), 2);
+        assert_eq!(bat_specs[0].instance_name.as_deref(), Some("Battery #1"));
+        assert_eq!(bat_specs[1].instance_name.as_deref(), Some("Battery #2"));
     }
 }

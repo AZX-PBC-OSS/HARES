@@ -715,7 +715,20 @@ fn route_request(
                 eq.descriptor().name.as_str() == &**name
             });
             if !delivered {
-                warnings.push(format!("control target not found by name: {name}"));
+                let instance_count = equipment
+                    .iter()
+                    .filter(|eq| {
+                        let n = eq.descriptor().name.as_str();
+                        n == &**name || n.starts_with(&format!("{name} #"))
+                    })
+                    .count();
+                if instance_count >= 2 {
+                    warnings.push(format!(
+                        "control target '{name}' is ambiguous — {instance_count} instances exist. Use ByEndUse or a qualified name like '{name} #1'"
+                    ));
+                } else {
+                    warnings.push(format!("control target not found by name: {name}"));
+                }
             }
             delivered
         }
@@ -2555,7 +2568,27 @@ impl Dwelling {
     /// Equipment execution order and dispatch targets are pre-computed for
     /// hot-loop efficiency. This method maintains those caches when adding
     /// equipment after construction.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the equipment name collides with an already-registered
+    /// equipment. Use unique names (e.g., `"PV #2"` instead of a second
+    /// `"PV"`) when adding equipment programmatically.
     pub fn add_equipment(&mut self, eq: Box<dyn Equipment>) {
+        let name = eq.descriptor().name.clone();
+        let existing = self.equipment.iter().any(|e| e.descriptor().name == name);
+        if existing {
+            let count = self
+                .equipment
+                .iter()
+                .filter(|e| e.descriptor().name.starts_with(&name))
+                .count()
+                + 1;
+            panic!(
+                "add_equipment: equipment named '{name}' already exists ({count} instances of this type). \
+                 Construct it with a unique name, e.g. '{name} #2'."
+            );
+        }
         self.equipment.push(eq);
         self.refresh_equipment_caches();
     }

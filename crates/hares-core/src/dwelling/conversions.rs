@@ -575,8 +575,12 @@ pub(crate) fn merged_equipment_config(
     {
         let mut merged = base.clone();
         apply_equipment_overrides(&mut merged, overrides, &spec.name);
+        let display_name = spec
+            .instance_name
+            .clone()
+            .unwrap_or_else(|| typed.name.clone());
         let mut eq_cfg = EquipmentConfig::with_payload(
-            typed.name.clone(),
+            display_name,
             typed.ochre_class.clone(),
             ConfigPayload::Typed {
                 type_name: type_name.clone(),
