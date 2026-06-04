@@ -37,7 +37,7 @@ use hares_io::{
 };
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
-    OCCUPANT_RADIATIVE_FRACTION, OCCUPANT_SENSIBLE_GAIN_W,
+    OCCUPANT_RADIATIVE_FRACTION, OCCUPANT_SENSIBLE_GAIN_W, SECONDS_PER_HOUR,
 };
 use hares_physics::pv_sizing::RoofInfo;
 use hares_physics::units::power_w_to_kw;
@@ -1020,6 +1020,12 @@ pub struct Dwelling {
     /// broken balance terms, forcing `InvariantViolation { check_name: "thermal_balance" }`.
     #[cfg(debug_assertions)]
     test_thermal_invariant_failure: bool,
+    /// Test-only: causes the HVAC delivered-energy non-negativity invariant
+    /// checks in [`check_invariants`](Self::check_invariants) to receive a
+    /// deliberately negative `hvac_heating_w` and `hvac_cooling_w`, forcing
+    /// `NegativeDeliveredEnergy`.
+    #[cfg(debug_assertions)]
+    test_hvac_negative_energy_failure: bool,
     output_column_index: HashMap<String, usize>,
     /// Pre-resolved output column indices for each equipment piece, avoiding
     /// per-timestep name allocation in `record_step`.
@@ -1933,6 +1939,7 @@ impl Dwelling {
             test_assert_panic_on_step: false,
             #[cfg(debug_assertions)]
             test_thermal_invariant_failure: false,
+            test_hvac_negative_energy_failure: false,
             equipment,
             equipment_id_by_name,
             thermal_solver: solvers.thermal,
@@ -2260,6 +2267,14 @@ impl Dwelling {
     #[cfg(debug_assertions)]
     pub fn set_thermal_invariant_failure_for_test(&mut self) {
         self.test_thermal_invariant_failure = true;
+    }
+
+    /// Test-only: causes the next HVAC delivered-energy invariant checks to
+    /// receive deliberately negative values, forcing `NegativeDeliveredEnergy`.
+    /// The flag is reset to `false` after one check so the effect is scoped.
+    #[cfg(debug_assertions)]
+    pub fn set_hvac_negative_energy_failure_for_test(&mut self) {
+        self.test_hvac_negative_energy_failure = true;
     }
 
     /// Executes exactly one simulation timestep.
@@ -4662,9 +4677,19 @@ impl Dwelling {
 
         // HVAC thermal delivery: use component_gains which includes both equipment
         // port contributions and ideal HVAC loads from the thermal solver.
+        // Sign convention (EnvelopeComponentGains): positive = heat into zone.
+        // cooling_w is negative when cooling (heat removed); .abs() converts to
+        // delivered-energy magnitude for the StepResult/public API.
         let gains = self.thermal_solver.component_gains();
-        let hvac_heating_w = gains.hvac_heating_w.max(0.0);
+        let hvac_heating_w = gains.hvac_heating_w;
         let hvac_cooling_w = gains.hvac_cooling_w.abs();
+        if hvac_heating_w < 0.0 {
+            tracing::warn!(
+                hvac_heating_w = hvac_heating_w,
+                "negative HVAC heating delivered — sign error in equipment \
+                 port contributions or thermal solver gain inversion"
+            );
+        }
 
         let gas_power_w = self.ports.fuel.get(hares_types::FuelType::Gas);
 
@@ -4868,7 +4893,7 @@ impl Dwelling {
                 }
             }
             if let Some(idx) = cols.energy_kwh {
-                let dt_hours = self.latest_env.time_step_secs() / 3600.0;
+                let dt_hours = self.latest_env.time_step_secs() / SECONDS_PER_HOUR;
                 let electric_kw = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
                 row[idx] = electric_kw * dt_hours;
             }
@@ -4971,7 +4996,7 @@ impl Dwelling {
             // activity), not a net gain. By conservation, Σ q_i ≈ 0, so the
             // net contribution was always ~0 anyway.
             + gains.hvac_heating_w.max(0.0)
-            - gains.hvac_cooling_w.abs();
+            + gains.hvac_cooling_w;
         let envelope_cols: &[(&str, f64)] = &[
             ("Window Transmitted Solar Gain (W)", gains.window_solar_w),
             ("Infiltration Heat Gain - Indoor (W)", gains.infiltration_w),
@@ -4999,7 +5024,7 @@ impl Dwelling {
                 "Internal Mass Heat Gain - Indoor (W)",
                 gains.internal_mass_heat_gain_w,
             ),
-            ("HVAC Heating Delivered (W)", gains.hvac_heating_w.max(0.0)),
+            ("HVAC Heating Delivered (W)", gains.hvac_heating_w),
             ("HVAC Cooling Delivered (W)", gains.hvac_cooling_w.abs()),
         ];
         for &(col_name, value) in envelope_cols {
@@ -5065,7 +5090,7 @@ impl Dwelling {
     /// the engine then quarantines this dwelling rather than propagating a panic.
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     fn check_invariants(&mut self, dt: StdDuration) -> Result<()> {
-        let checker = &self.invariant_checker;
+        let checker = &mut self.invariant_checker;
 
         let dt_s = dt.as_secs_f64();
         if !dt_s.is_finite() || dt_s <= 0.0 {
@@ -5195,6 +5220,38 @@ impl Dwelling {
             {
                 checker.check_thermal(q_gains, delta_e_storage, q_loss)?;
             }
+        }
+
+        // HVAC delivered-energy non-negativity: per-step and cumulative checks.
+        // These fire before the historical clamping `max(0.0)` / `abs()` masked
+        // sign errors in equipment port contributions or thermal solver gains.
+        // Skipped during warm-up: the initial thermal transients can produce
+        // temporarily negative delivered-energy values before the solver converges.
+        if !self.is_warming_up {
+            let indoor_zone = self.thermal_solver.config().indoor_zone_id;
+            let gains = self.thermal_solver.component_gains();
+            let step = self.clock.current_step();
+            let dt_h = dt_s / SECONDS_PER_HOUR;
+            let (heating_w, cooling_w) = {
+                #[cfg(debug_assertions)]
+                {
+                    if self.test_hvac_negative_energy_failure {
+                        // Test seam: inject deliberately negative delivered-energy
+                        // values so the invariant checks always produce
+                        // NegativeDeliveredEnergy.
+                        self.test_hvac_negative_energy_failure = false;
+                        (-1000.0, -500.0)
+                    } else {
+                        (gains.hvac_heating_w, gains.hvac_cooling_w)
+                    }
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    (gains.hvac_heating_w, gains.hvac_cooling_w)
+                }
+            };
+            checker.check_heating_accumulator(step, indoor_zone, heating_w, cooling_w, dt_h)?;
+            checker.check_hvac_power_non_negative(step, indoor_zone, heating_w, cooling_w)?;
         }
 
         // Moisture balance: mass conservation across the humidity solver.

@@ -36,6 +36,15 @@ pub enum HaresError {
         zone_id: Option<ZoneId>,
         value_name: String,
     },
+    #[error(
+        "negative delivered energy: '{field}'={value:.6e} W at step {step_index} (zone {zone_id:?})"
+    )]
+    NegativeDeliveredEnergy {
+        zone_id: Option<ZoneId>,
+        field: String,
+        value: f64,
+        step_index: u64,
+    },
 }
 
 /// Per-dwelling error wrapper for fleet-level error isolation.
@@ -81,6 +90,12 @@ mod tests {
                 step_index: 42,
                 zone_id: Some(ZoneId(1)),
                 value_name: "q_sum".to_string(),
+            },
+            HaresError::NegativeDeliveredEnergy {
+                zone_id: Some(ZoneId(1)),
+                field: "hvac_heating_w".to_string(),
+                value: -500.0,
+                step_index: 10,
             },
         ];
         for err in errors {

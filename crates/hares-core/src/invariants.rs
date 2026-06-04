@@ -8,6 +8,8 @@
 //! In production release builds without the feature flag all public functions
 //! compile to nothing -- the compiler eliminates the bodies entirely.
 
+use std::collections::HashMap;
+
 use hares_types::ports::FuelAccumulator;
 use hares_types::ports::{ALL_FUEL_TYPES, FUEL_TYPE_COUNT, fuel_index_reverse};
 use hares_types::{ControlCapabilities, HaresError, ZoneId};
@@ -17,11 +19,25 @@ use hares_types::{ControlCapabilities, HaresError, ZoneId};
 /// Construct once per dwelling; call the `check_*` methods each timestep
 /// inside a `cfg(any(debug_assertions, feature = "check_invariants"))` block.
 /// All methods return `Ok(())` in unchecked builds.
-pub struct InvariantChecker;
+pub struct InvariantChecker {
+    /// Per-zone accumulated heating energy [Wh]. Used by
+    /// [`check_heating_accumulator`] to detect sign errors that produce
+    /// persistently negative cumulative totals.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    total_heating_wh: HashMap<ZoneId, f64>,
+    /// Per-zone accumulated cooling energy [Wh]. See [`total_heating_wh`].
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    total_cooling_wh: HashMap<ZoneId, f64>,
+}
 
 impl InvariantChecker {
     pub fn new() -> Self {
-        Self
+        Self {
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            total_heating_wh: HashMap::new(),
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            total_cooling_wh: HashMap::new(),
+        }
     }
 }
 
@@ -457,6 +473,100 @@ impl InvariantChecker {
         }
         Ok(())
     }
+
+    /// Checks that per-step HVAC delivered power follows the physical sign
+    /// convention.
+    ///
+    /// By the `EnvelopeComponentGains` convention, positive = heat flowing
+    /// **into** the indoor zone:
+    /// - `hvac_heating_w >= 0.0` — heating adds heat; negative would indicate
+    ///   a sign error in equipment port contributions or a COP reciprocity bug.
+    /// - `hvac_cooling_w <= 0.0` — cooling removes heat; positive would
+    ///   indicate a sign inversion (e.g. a cooling coil producing sensible
+    ///   gain instead of removal).
+    ///
+    /// This check fires on the raw component gains before the historical
+    /// clamping `max(0.0)` / `abs()` converted the signed convention to
+    /// delivered-energy magnitudes.
+    pub fn check_hvac_power_non_negative(
+        &self,
+        step_index: u64,
+        zone_id: ZoneId,
+        hvac_heating_w: f64,
+        hvac_cooling_w: f64,
+    ) -> Result<(), HaresError> {
+        if hvac_heating_w < 0.0 {
+            return Err(HaresError::NegativeDeliveredEnergy {
+                zone_id: Some(zone_id),
+                field: "hvac_heating_w".to_string(),
+                value: hvac_heating_w,
+                step_index,
+            });
+        }
+        if hvac_cooling_w > 0.0 {
+            return Err(HaresError::NegativeDeliveredEnergy {
+                zone_id: Some(zone_id),
+                field: "hvac_cooling_w".to_string(),
+                value: hvac_cooling_w,
+                step_index,
+            });
+        }
+        Ok(())
+    }
+
+    /// Accumulates per-zone heating/cooling energy and checks cumulative
+    /// sign-convention consistency.
+    ///
+    /// Each call adds this step's energy (`power_w × dt_h`) to the per-zone
+    /// running total.  Heating should accumulate non-negative; cooling should
+    /// accumulate non-positive (cooling removes heat from the zone by
+    /// convention).  The check tolerates floating-point drift proportional
+    /// to step count while catching genuine sign errors that produce a
+    /// persistent upward/downward trend in the wrong direction.
+    pub fn check_heating_accumulator(
+        &mut self,
+        step_index: u64,
+        zone_id: ZoneId,
+        hvac_heating_w: f64,
+        hvac_cooling_w: f64,
+        dt_h: f64,
+    ) -> Result<(), HaresError> {
+        let heating_wh = hvac_heating_w * dt_h;
+        let cooling_wh = hvac_cooling_w * dt_h;
+        let total_heating = self.total_heating_wh.entry(zone_id).or_insert(0.0);
+        *total_heating += heating_wh;
+        let total_cooling = self.total_cooling_wh.entry(zone_id).or_insert(0.0);
+        *total_cooling += cooling_wh;
+        // -1e-6 Wh ≈ -3.6 mJ absorbency: at f64 precision (≈ 15 decimal digits)
+        // a single Wh-order accumulation carries ~1e-15 relative error, far below
+        // this floor.  The floor at -1e-6 Wh prevents noise-triggered violations
+        // at step 0 (where the proportional term would be zero) while the
+        // -1e-6 × step_index term grows linearly to accommodate accumulated
+        // round-trip drift across many arithmetic operations over long runs.
+        let drift_neg = f64::min(-1e-6, -1e-6 * step_index as f64);
+        // Heating cumulative must not go negative (beyond drift).
+        if *total_heating < drift_neg {
+            return Err(HaresError::NegativeDeliveredEnergy {
+                zone_id: Some(zone_id),
+                field: "total_heating_wh".to_string(),
+                value: *total_heating,
+                step_index,
+            });
+        }
+        // Cooling cumulative must not go positive (beyond drift).
+        // Cooling stores negative values (heat removed from zone);
+        // a positive total indicates a sign error on the cooling path.
+        let drift_pos = -drift_neg;
+        if *total_cooling > drift_pos {
+            return Err(HaresError::NegativeDeliveredEnergy {
+                zone_id: Some(zone_id),
+                field: "total_cooling_wh".to_string(),
+                value: *total_cooling,
+                step_index,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(any(debug_assertions, feature = "check_invariants")))]
@@ -504,6 +614,27 @@ impl InvariantChecker {
         &self,
         _: u64,
         _: &[(&str, Option<ZoneId>, f64)],
+    ) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_hvac_power_non_negative(
+        &self,
+        _: u64,
+        _: ZoneId,
+        _: f64,
+        _: f64,
+    ) -> Result<(), HaresError> {
+        Ok(())
+    }
+
+    pub fn check_heating_accumulator(
+        &mut self,
+        _: u64,
+        _: ZoneId,
+        _: f64,
+        _: f64,
+        _: f64,
     ) -> Result<(), HaresError> {
         Ok(())
     }
@@ -1334,5 +1465,137 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ── check_hvac_power_non_negative ──────────────────────────────────────
+
+    /// Negative hvac_heating_w returns NegativeDeliveredEnergy error.
+    /// Heating convention: positive = heat into zone; negative is a sign error.
+    #[test]
+    fn hvac_power_negative_heating_fails() {
+        let result = checker().check_hvac_power_non_negative(10, ZoneId(1), -500.0, 0.0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::NegativeDeliveredEnergy { field, value, step_index, .. }
+                if field == "hvac_heating_w" && *value == -500.0 && *step_index == 10
+        ));
+    }
+
+    /// Positive hvac_cooling_w returns NegativeDeliveredEnergy error.
+    /// Cooling convention: negative = heat removed from zone; positive is a
+    /// sign inversion (e.g. a cooling coil producing sensible gain instead of
+    /// removal).
+    #[test]
+    fn hvac_power_positive_cooling_fails() {
+        let result = checker().check_hvac_power_non_negative(5, ZoneId(2), 0.0, 300.0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::NegativeDeliveredEnergy { field, value, step_index, .. }
+                if field == "hvac_cooling_w" && *value == 300.0 && *step_index == 5
+        ));
+    }
+
+    /// Valid signs pass the per-step check: heating ≥ 0, cooling ≤ 0.
+    #[test]
+    fn hvac_power_valid_signs_passes() {
+        let result = checker().check_hvac_power_non_negative(0, ZoneId(1), 500.0, -200.0);
+        assert!(result.is_ok());
+    }
+
+    /// Exactly zero passes (boundary case).
+    #[test]
+    fn hvac_power_zero_passes() {
+        let result = checker().check_hvac_power_non_negative(0, ZoneId(1), 0.0, 0.0);
+        assert!(result.is_ok());
+    }
+
+    // ── check_heating_accumulator ──────────────────────────────────────────
+
+    /// Accumulated positive heating and negative cooling (correct signs) pass.
+    #[test]
+    fn heating_accumulator_correct_signs_passes() {
+        let mut c = checker();
+        for step in 0..10 {
+            let result = c.check_heating_accumulator(step, ZoneId(1), 1000.0, -500.0, 0.25);
+            assert!(result.is_ok(), "step {step} should pass");
+        }
+    }
+
+    /// Negative heating step pushes cumulative heating below drift tolerance.
+    #[test]
+    fn heating_accumulator_negative_heating_fails() {
+        let mut c = checker();
+        c.check_heating_accumulator(0, ZoneId(1), 1000.0, 0.0, 1.0)
+            .unwrap();
+        // total_heating_wh = 1000 after step 0.
+        // Step 1: hvac_heating_w = -2000 W × 1 h = -2000 Wh → total = -1000 Wh.
+        // drift = f64::min(-1e-6, -1e-6*1) = -1e-6. -1000 < -1e-6 → must fail.
+        let result = c.check_heating_accumulator(1, ZoneId(1), -2000.0, 0.0, 1.0);
+        assert!(
+            result.is_err(),
+            "negative cumulative heating must fail accumulator check"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::NegativeDeliveredEnergy { field, .. }
+                if field == "total_heating_wh"
+        ));
+    }
+
+    /// Positive cooling step pushes cumulative cooling above drift tolerance
+    /// (cooling convention: stores negative values; positive is a sign error).
+    #[test]
+    fn cooling_accumulator_positive_cooling_fails() {
+        let mut c = checker();
+        c.check_heating_accumulator(0, ZoneId(1), 0.0, -500.0, 1.0)
+            .unwrap();
+        // total_cooling_wh = -500 after step 0.
+        // Step 1: cooling_w = +1000 W × 1 h = +1000 Wh → total = +500 Wh.
+        // drift_pos = -drift_neg = 1e-6. +500 > +1e-6 → must fail.
+        let result = c.check_heating_accumulator(1, ZoneId(1), 0.0, 1000.0, 1.0);
+        assert!(
+            result.is_err(),
+            "positive cumulative cooling must fail accumulator check"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::NegativeDeliveredEnergy { field, .. }
+                if field == "total_cooling_wh"
+        ));
+    }
+
+    /// Floating-point drift within tolerance does not trigger a violation.
+    #[test]
+    fn heating_accumulator_tolerates_floating_drift() {
+        let mut c = checker();
+        for step in 0..1000 {
+            let result = c.check_heating_accumulator(step, ZoneId(1), 0.0, 0.0, 1.0);
+            assert!(result.is_ok(), "step {step} with zero power should pass");
+        }
+    }
+
+    /// Drift tolerance scales with step_index.
+    #[test]
+    fn heating_accumulator_drift_tolerance_scales_with_steps() {
+        let mut c = checker();
+        // At step 100k, drift tolerance ≈ -1e-6 * 100k = -0.1 Wh.
+        // Tiny per-step drift of -1e-7 Wh accumulates to -0.01 Wh → within tolerance.
+        let steps = 100_000u64;
+        for step in 0..steps {
+            c.check_heating_accumulator(step, ZoneId(1), -1e-7, 0.0, 1.0)
+                .unwrap();
+        }
+        // Add a step that pushes cumulative past the tolerance.
+        let result = c.check_heating_accumulator(steps, ZoneId(1), -1.0, 0.0, 1.0);
+        assert!(
+            result.is_err(),
+            "cumulative exceeding drift tolerance must fail"
+        );
     }
 }
