@@ -515,6 +515,38 @@ mod tests {
     }
 
     #[test]
+    fn equipment_phase_capture_includes_wood_fuel() {
+        let mut fuel = FuelAccumulator::default();
+        fuel.add(FuelType::Wood, 2000.0).unwrap();
+        fuel.add(FuelType::Coal, 500.0).unwrap();
+        fuel.add(FuelType::WoodPellet, 750.0).unwrap();
+        fuel.add(FuelType::Gas, 100.0).unwrap();
+
+        let ports = PortSlots {
+            fuel,
+            ..Default::default()
+        };
+
+        let observations: Vec<EquipmentObservation> = vec![];
+        let phase_capture = capture_equipment_phase(observations, &ports);
+
+        let find = |ft: FuelType| -> f64 {
+            phase_capture
+                .ports
+                .fuel_consumption_w
+                .iter()
+                .find(|(t, _)| *t == ft)
+                .map_or(0.0, |(_, v)| *v)
+        };
+
+        assert_eq!(phase_capture.equipment.len(), 0);
+        approx_eq(find(FuelType::Wood), 2000.0);
+        approx_eq(find(FuelType::Coal), 500.0);
+        approx_eq(find(FuelType::WoodPellet), 750.0);
+        approx_eq(find(FuelType::Gas), 100.0);
+    }
+
+    #[test]
     fn capture_custom_solvers_records_domain_id_and_state() {
         use hares_types::{DomainId, DomainSolver, EnvironmentState, PortSlots};
         use std::time::Duration;

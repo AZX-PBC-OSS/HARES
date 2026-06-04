@@ -5083,6 +5083,11 @@ impl Dwelling {
         // accumulator.
         checker.check_fuel_electric_absent(self.ports.fuel.get(hares_types::FuelType::Electric))?;
 
+        // Verify that every non-zero fuel accumulator slot has observer coverage
+        // — catches desynchronisation between ALL_FUEL_TYPES and fuel_index that
+        // would silently drop fuel contributions from diagnostic output.
+        checker.check_fuel_coverage(&self.ports.fuel)?;
+
         // Thermal balance: full-system energy conservation check.
         //
         // The thermal solver computes three independently-verified energy

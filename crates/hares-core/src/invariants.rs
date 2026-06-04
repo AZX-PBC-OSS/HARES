@@ -8,6 +8,8 @@
 //! In production release builds without the feature flag all public functions
 //! compile to nothing -- the compiler eliminates the bodies entirely.
 
+use hares_types::ports::FuelAccumulator;
+use hares_types::ports::{ALL_FUEL_TYPES, FUEL_TYPE_COUNT, fuel_index_reverse};
 use hares_types::{ControlCapabilities, HaresError};
 
 /// Entrypoint for per-timestep numerical invariant validation.
@@ -324,6 +326,71 @@ impl InvariantChecker {
         Ok(())
     }
 
+    /// Verifies that every non-zero slot in the fuel accumulator maps to a fuel
+    /// type present in `ALL_FUEL_TYPES`, the single source of truth used by the
+    /// observer capture layer to enumerate captured fuel types.
+    ///
+    /// If `ALL_FUEL_TYPES` or `FUEL_TYPE_COUNT` is updated without the other,
+    /// a non-zero accumulator slot may have no corresponding observer entry,
+    /// silently dropping the fuel contribution from diagnostic output.
+    ///
+    /// Takes a `FuelAccumulator` reference and iterates `ALL_FUEL_TYPES` to
+    /// verify each accumulator index is covered; if a non-zero slot exists at
+    /// an index that maps to a fuel type absent from `ALL_FUEL_TYPES`, the
+    /// observer would not capture it — this check catches that desynchronisation.
+    pub fn check_fuel_coverage(&self, fuel: &FuelAccumulator) -> Result<(), HaresError> {
+        use hares_types::ports::fuel_index;
+        if ALL_FUEL_TYPES.len() != FUEL_TYPE_COUNT {
+            return Err(HaresError::InvariantViolation {
+                check_name: "fuel_observer_coverage".to_string(),
+                value: ALL_FUEL_TYPES.len() as f64,
+                tolerance: FUEL_TYPE_COUNT as f64,
+            });
+        }
+        for (i, &ft) in ALL_FUEL_TYPES.iter().enumerate() {
+            match fuel_index(ft) {
+                Some(idx) if idx == i => {}
+                Some(idx) => {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "fuel_observer_coverage".to_string(),
+                        value: idx as f64,
+                        tolerance: i as f64,
+                    });
+                }
+                None => {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "fuel_observer_coverage".to_string(),
+                        value: (ft as i32) as f64,
+                        tolerance: 0.0,
+                    });
+                }
+            }
+        }
+        for i in 0..FUEL_TYPE_COUNT {
+            let ft = match fuel_index_reverse(i) {
+                Some(ft) => ft,
+                None => {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "fuel_observer_coverage".to_string(),
+                        value: i as f64,
+                        tolerance: 0.0,
+                    });
+                }
+            };
+            // ALL_FUEL_TYPES is [0..FUEL_TYPE_COUNT), so ft must be in range.
+            let acc_value = fuel.get(ft);
+            if acc_value > 0.0 && !ALL_FUEL_TYPES.contains(&ft) {
+                tracing::warn!(
+                    fuel_type = ?ft,
+                    fuel_type_idx = i,
+                    accumulator_value_w = acc_value,
+                    "non-zero fuel accumulator slot has no observer coverage"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Verifies that the fuel accumulator contains no electric contributions.
     ///
     /// Electric power must route through `ElectricalAccumulator` — never through
@@ -390,6 +457,10 @@ impl InvariantChecker {
         Ok(())
     }
 
+    pub fn check_fuel_coverage(&self, _: &FuelAccumulator) -> Result<(), HaresError> {
+        Ok(())
+    }
+
     pub fn check_fuel_electric_absent(&self, _: f64) -> Result<(), HaresError> {
         Ok(())
     }
@@ -402,6 +473,7 @@ impl InvariantChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hares_types::FuelType;
 
     fn checker() -> InvariantChecker {
         InvariantChecker::new()
@@ -975,6 +1047,54 @@ mod tests {
         // only flags positive values to avoid false alarms.
         let result = checker().check_fuel_electric_absent(-50.0);
         assert!(result.is_ok());
+    }
+
+    // ── check_fuel_coverage ────────────────────────────────────────────────
+
+    #[test]
+    fn fuel_coverage_passes_with_all_types_covered() {
+        let mut fuel = hares_types::ports::FuelAccumulator::default();
+        fuel.add(FuelType::Wood, 1000.0).unwrap();
+        fuel.add(FuelType::Coal, 500.0).unwrap();
+        fuel.add(FuelType::WoodPellet, 750.0).unwrap();
+        let result = checker().check_fuel_coverage(&fuel);
+        assert!(
+            result.is_ok(),
+            "ALL_FUEL_TYPES covers all fuel types; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fuel_coverage_passes_on_empty_accumulator() {
+        let fuel = hares_types::ports::FuelAccumulator::default();
+        let result = checker().check_fuel_coverage(&fuel);
+        assert!(
+            result.is_ok(),
+            "empty accumulator must pass fuel coverage check"
+        );
+    }
+
+    #[test]
+    fn fuel_coverage_validates_index_consistency() {
+        // This test validates that the invariant checker's fuel_index / ALL_FUEL_TYPES
+        // consistency check passes when the data structures are properly aligned.
+        // A failure here indicates a static data corruption in ALL_FUEL_TYPES,
+        // FUEL_TYPE_COUNT, or fuel_index.
+        use hares_types::ports::fuel_index;
+        for (i, &ft) in ALL_FUEL_TYPES.iter().enumerate() {
+            let idx = fuel_index(ft).unwrap_or_else(|| panic!("fuel_index missing for {ft:?}"));
+            assert_eq!(
+                idx, i,
+                "ALL_FUEL_TYPES index mismatch: expected {i} for {ft:?}, got {idx}"
+            );
+        }
+        assert_eq!(
+            ALL_FUEL_TYPES.len(),
+            FUEL_TYPE_COUNT,
+            "ALL_FUEL_TYPES length {} != FUEL_TYPE_COUNT {}",
+            ALL_FUEL_TYPES.len(),
+            FUEL_TYPE_COUNT
+        );
     }
 
     // ── NaN bypass guards ──────────────────────────────────────────────────
