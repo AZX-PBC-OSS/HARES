@@ -107,6 +107,12 @@ pub trait Actor: Send + Sync + 'static {
     fn load_state(&mut self, _data: &[u8]) -> Result<(), HaresError> {
         Ok(())
     }
+
+    /// Returns the actor's RNG (seed, stream) pair, or `None` if the actor
+    /// is deterministic or uses a non-standard RNG scheme.
+    fn rng_pair(&self) -> Option<([u8; 32], u64)> {
+        None
+    }
 }
 
 pub mod testing {

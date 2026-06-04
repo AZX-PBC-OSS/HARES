@@ -267,8 +267,10 @@ use efficiency::temp_efficiency_multiplier;
 impl EvDriverActor {
     /// Creates a new EV driver actor.
     ///
-    /// `seed` is required for deterministic behavior. All stochastic draws
-    /// derive from this single seed.
+    /// `rng` is required for deterministic behavior. All stochastic draws
+    /// derive from this RNG. Callers using the dwelling RNG hierarchy should
+    /// pass a pre-configured `ChaCha8Rng` from `derive_sub_rng` so the stream
+    /// nonce is preserved.
     // Why: all parameters are independent behavioral inputs with no sensible defaults —
     // the actor's stochastic behavior depends on each being explicitly set by the caller.
     #[allow(clippy::too_many_arguments)]
@@ -289,7 +291,7 @@ impl EvDriverActor {
         range_anxiety_miles: f64,
         away_charge_fraction: f64,
         away_charge_power_kw: f64,
-        seed: [u8; 32],
+        rng: ChaCha8Rng,
     ) -> Self {
         let prefs = build_preferences(
             &strategy,
@@ -337,7 +339,7 @@ impl EvDriverActor {
             away_charge_fraction,
             away_charge_power_kw,
             composer,
-            rng: ChaCha8Rng::from_seed(seed),
+            rng,
             current_day_ordinal: -1,
             todays_event: None,
             phase: DriverPhase::HomePluggedIn,
@@ -852,6 +854,10 @@ impl Actor for EvDriverActor {
         self.needs_away_charge = snap.needs_away_charge;
         Ok(())
     }
+
+    fn rng_pair(&self) -> Option<([u8; 32], u64)> {
+        Some((self.rng.get_seed(), self.rng.get_stream()))
+    }
 }
 
 fn phase_as_f64(phase: DriverPhase) -> f64 {
@@ -868,10 +874,10 @@ mod tests {
     use crate::actor::testing::test_env;
     use hares_types::{CoreOutput, CoreState, ElectricalSummary, EquipmentId, PriceSignal, Soc};
 
-    fn seed_from_u64(seed: u64) -> [u8; 32] {
+    fn seed_from_u64(seed: u64) -> ChaCha8Rng {
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&seed.to_le_bytes());
-        bytes
+        ChaCha8Rng::from_seed(bytes)
     }
 
     fn make_actor(strategy: ChargingStrategy, policy: PlugInPolicy, seed: u64) -> EvDriverActor {

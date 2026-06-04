@@ -40,6 +40,8 @@ use crate::actors::{
     AlwaysComply, BatteryManagementActor, DrAction, DrCompliance, EquipmentBehavior, EvDriverActor,
     IdealThermostat, Occupant, Presence, Probabilistic, SafetyMonitor,
 };
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 
 pub type ActorFactory =
     Box<dyn Fn(ActorConfig) -> Result<Box<dyn Actor>, HaresError> + Send + Sync + 'static>;
@@ -375,7 +377,7 @@ impl ActorRegistry {
                     config.get_f64("range_anxiety_miles").unwrap_or(20.0),
                     config.get_f64("away_charge_fraction").unwrap_or(0.0),
                     config.get_f64("away_charge_power_kw").unwrap_or(6.6),
-                    seed_bytes,
+                    ChaCha8Rng::from_seed(seed_bytes),
                 );
                 Ok(Box::new(actor))
             }),

@@ -24,6 +24,7 @@ use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradi
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
+use rand::SeedableRng;
 use std::sync::MutexGuard;
 
 pyo3::create_exception!(_hares, HaresConfigError, pyo3::exceptions::PyValueError);
@@ -1060,7 +1061,7 @@ impl PyDwelling {
             20.0, // range_anxiety_miles
             0.0,  // away_charge_fraction
             0.0,  // away_charge_power_kw
-            seed_bytes,
+            hares_core::ChaCha8Rng::from_seed(seed_bytes),
         );
 
         dwelling.add_actor(Box::new(actor));

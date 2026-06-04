@@ -5357,6 +5357,38 @@ fn zone_display_name(
     }
 }
 
+/// Guards against EV driver RNG stream collisions during actor construction.
+///
+/// Records each `(seed, stream)` pair used for an EV driver actor and panics
+/// if the same pair has already been assigned to another actor.  This catches
+/// programming errors that would cause two EV drivers to share identical
+/// stochastic behaviour — silently correlated streams are a latent data-quality
+/// hazard that is nearly impossible to detect from simulation output alone.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+fn check_ev_rng_stream_no_collision(
+    seen: &mut HashMap<([u8; 32], u64), String>,
+    seed: [u8; 32],
+    stream: u64,
+    name: &str,
+) {
+    let key = (seed, stream);
+    if let Some(existing) = seen.get(&key) {
+        let seed_hex: String = key
+            .0
+            .iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join("");
+        panic!(
+            "EV driver RNG stream collision: actor '{name}' shares \
+             seed-stream pair (seed=0x{seed_hex}..., stream={stream}) \
+             with actor '{existing}'"
+        );
+    }
+    seen.insert(key, name.to_string());
+}
+
 /// Build actor instances from equipment seeds.
 ///
 /// Pure function for testability -- takes equipment, existing actors,
@@ -5385,6 +5417,9 @@ fn build_actors_from_seeds(
 
     let mut built_in_actors: Vec<Box<dyn Actor>> = Vec::new();
     let mut ev_actor_index: u64 = 0;
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    let mut seen_rng_pairs: HashMap<([u8; 32], u64), String> = HashMap::new();
 
     for (name, seed) in seeds {
         match seed {
@@ -5470,9 +5505,19 @@ fn build_actors_from_seeds(
                     }
                 }
 
-                let ev_seed =
-                    derive_sub_rng(rng, RNG_STREAM_EV_DRIVER_BASE + ev_actor_index).get_seed();
-                ev_actor_index += 1;
+                let ev_seed = {
+                    let stream = RNG_STREAM_EV_DRIVER_BASE + ev_actor_index;
+                    let sub = derive_sub_rng(rng, stream);
+                    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                    check_ev_rng_stream_no_collision(
+                        &mut seen_rng_pairs,
+                        sub.get_seed(),
+                        sub.get_stream(),
+                        &actor_name,
+                    );
+                    ev_actor_index += 1;
+                    sub
+                };
                 let mut actor = EvDriverActor::new(
                     &format!("EvDriver:{name}"),
                     &name,
@@ -8579,6 +8624,96 @@ occupancy = 1.0
         );
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
+    }
+
+    #[test]
+    fn ev_driver_similar_names_get_unique_rng_streams() {
+        let eq1: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "EV_001",
+            Some(ActorSeed::Ev {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: hares_types::PlugInPolicy::Always,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.6,
+                fuel_economy_kwh_per_mi: 0.3,
+            }),
+        ));
+        let eq2: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "EV_002",
+            Some(ActorSeed::Ev {
+                strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
+                plug_in_policy: hares_types::PlugInPolicy::Always,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.6,
+                fuel_economy_kwh_per_mi: 0.3,
+            }),
+        ));
+
+        let actors = build_actors_from_seeds(
+            &[eq1, eq2],
+            &[],
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+            &derive_dwelling_rng(42, 1),
+        );
+        assert_eq!(actors.len(), 2);
+        assert_eq!(actors[0].name(), "EvDriver:EV_001");
+        assert_eq!(actors[1].name(), "EvDriver:EV_002");
+
+        let pair0 = actors[0]
+            .rng_pair()
+            .expect("EvDriverActor must report its RNG pair");
+        let pair1 = actors[1]
+            .rng_pair()
+            .expect("EvDriverActor must report its RNG pair");
+        assert_ne!(
+            pair0, pair1,
+            "EV_001 and EV_002 must receive distinct (seed, stream) pairs, \
+             but both actors share the same RNG state"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "EV driver RNG stream collision")]
+    fn ev_driver_seed_stream_collision_is_detected() {
+        let rng = derive_dwelling_rng(42, 1);
+        let sub = derive_sub_rng(&rng, RNG_STREAM_EV_DRIVER_BASE);
+
+        let seed = sub.get_seed();
+        let stream = sub.get_stream();
+
+        let mut seen: HashMap<([u8; 32], u64), String> = HashMap::new();
+
+        // First insertion — should succeed.
+        check_ev_rng_stream_no_collision(&mut seen, seed, stream, "EvDriver:EV_001");
+
+        // Second insertion with identical (seed, stream) — must panic.
+        check_ev_rng_stream_no_collision(&mut seen, seed, stream, "EvDriver:EV_002");
+    }
+
+    #[test]
+    fn ev_driver_seed_stream_collision_check_passes_for_unique_pairs() {
+        let rng = derive_dwelling_rng(42, 1);
+        let sub_a = derive_sub_rng(&rng, RNG_STREAM_EV_DRIVER_BASE);
+        let sub_b = derive_sub_rng(&rng, RNG_STREAM_EV_DRIVER_BASE + 1);
+
+        let mut seen: HashMap<([u8; 32], u64), String> = HashMap::new();
+
+        // Different stream indices — must not panic.
+        check_ev_rng_stream_no_collision(
+            &mut seen,
+            sub_a.get_seed(),
+            sub_a.get_stream(),
+            "EvDriver:EV_001",
+        );
+        check_ev_rng_stream_no_collision(
+            &mut seen,
+            sub_b.get_seed(),
+            sub_b.get_stream(),
+            "EvDriver:EV_002",
+        );
     }
 
     #[test]

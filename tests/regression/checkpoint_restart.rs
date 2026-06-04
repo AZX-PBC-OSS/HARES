@@ -7,6 +7,7 @@ use hares_core::DwellingCheckpoint;
 use hares_equipment::{load_versioned, save_versioned};
 use hares_types::EquipmentId;
 use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource};
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 
 use super::helpers;
@@ -415,7 +416,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         30.0,
         0.8,
         7.2,
-        [42u8; 32],
+        hares_core::ChaCha8Rng::from_seed([42u8; 32]),
     )));
     dwelling_ref.add_actor(Box::new(hares_core::actors::BatteryManagementActor::new(
         "TestBattery",
@@ -476,7 +477,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         30.0,
         0.8,
         7.2,
-        [42u8; 32],
+        hares_core::ChaCha8Rng::from_seed([42u8; 32]),
     )));
     dwelling_a.add_actor(Box::new(hares_core::actors::BatteryManagementActor::new(
         "TestBattery",
@@ -572,7 +573,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         30.0,
         0.8,
         7.2,
-        [42u8; 32],
+        hares_core::ChaCha8Rng::from_seed([42u8; 32]),
     )));
     dwelling_b.add_actor(Box::new(hares_core::actors::BatteryManagementActor::new(
         "TestBattery",

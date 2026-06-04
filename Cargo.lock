@@ -1162,6 +1162,8 @@ dependencies = [
  "hares-types",
  "numpy",
  "pyo3",
+ "rand 0.10.0",
+ "rand_chacha 0.10.0",
  "rayon",
  "serde_json",
  "tracing",

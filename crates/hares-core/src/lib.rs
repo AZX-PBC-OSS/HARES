@@ -30,5 +30,6 @@ pub use dwelling::{
 pub use engine::{KernelTimer, SimStatus, SimulationEngine, SimulationResults};
 pub use environment::{EnvironmentInitOptions, EnvironmentManager};
 pub use hares_io::SimulationConfig;
+pub use rand_chacha::ChaCha8Rng;
 pub use rng::derive_dwelling_rng;
 pub use telemetry::DwellingTelemetry;

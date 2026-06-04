@@ -146,4 +146,65 @@ mod tests {
         assert_eq!(advance_dwelling_rng(&mut a), advance_dwelling_rng(&mut b));
         assert_eq!(a.get_word_pos(), b.get_word_pos());
     }
+
+    #[test]
+    fn ev_driver_seeds_from_different_streams_produce_distinct_outputs() {
+        let parent = derive_dwelling_rng(42, 1);
+
+        let sub_a = derive_sub_rng(&parent, RNG_STREAM_EV_DRIVER_BASE);
+        let sub_b = derive_sub_rng(&parent, RNG_STREAM_EV_DRIVER_BASE + 1);
+
+        let mut rng_a = ChaCha8Rng::from_seed(sub_a.get_seed());
+        rng_a.set_stream(sub_a.get_stream());
+        let mut rng_b = ChaCha8Rng::from_seed(sub_b.get_seed());
+        rng_b.set_stream(sub_b.get_stream());
+
+        let draws_a: Vec<f64> = (0..100).map(|_| rng_a.random()).collect();
+        let draws_b: Vec<f64> = (0..100).map(|_| rng_b.random()).collect();
+
+        assert_ne!(
+            draws_a, draws_b,
+            "EV drivers 'EV_001' and 'EV_002' with adjacent stream indices \
+             must produce non-identical RNG output sequences"
+        );
+    }
+
+    #[test]
+    fn ev_driver_same_seed_stream_produces_identical_output() {
+        let parent = derive_dwelling_rng(42, 1);
+
+        let sub = derive_sub_rng(&parent, RNG_STREAM_EV_DRIVER_BASE);
+
+        let mut rng_a = ChaCha8Rng::from_seed(sub.get_seed());
+        rng_a.set_stream(sub.get_stream());
+        let mut rng_b = ChaCha8Rng::from_seed(sub.get_seed());
+        rng_b.set_stream(sub.get_stream());
+
+        let draws_a: Vec<f64> = (0..100).map(|_| rng_a.random()).collect();
+        let draws_b: Vec<f64> = (0..100).map(|_| rng_b.random()).collect();
+
+        assert_eq!(
+            draws_a, draws_b,
+            "same (seed, stream) pair must produce identical RNG output \
+             (determinism regression check)"
+        );
+    }
+
+    #[test]
+    fn ev_driver_seed_stream_collision_detection() {
+        let parent = derive_dwelling_rng(42, 1);
+
+        // Two sub-RNGs sharing the same (seed, stream) pair — this is
+        // what the invariant check guards against.
+        let sub_a = derive_sub_rng(&parent, RNG_STREAM_EV_DRIVER_BASE);
+        let sub_b = derive_sub_rng(&parent, RNG_STREAM_EV_DRIVER_BASE);
+
+        let key_a = (sub_a.get_seed(), sub_a.get_stream());
+        let key_b = (sub_b.get_seed(), sub_b.get_stream());
+
+        assert_eq!(
+            key_a, key_b,
+            "same parent seed + same stream → identical (seed, stream) keys"
+        );
+    }
 }

@@ -8,6 +8,7 @@
 //! which have no observable internal state beyond the `DispatchRequest` they emit.
 
 use hares_control::DispatchRequest;
+use hares_core::ChaCha8Rng;
 use hares_core::actor::{Actor, testing::test_env};
 use hares_core::actors::{
     BatteryManagementActor, DrCompliance, EvDriverActor, IdealThermostat, Occupant,
@@ -16,6 +17,7 @@ use hares_types::{
     BmsMode, ChargingStrategy, DRLevel, EnvironmentState, GridExportRule, PlugInPolicy,
     ScheduleSource,
 };
+use rand::SeedableRng;
 
 // ---------------------------------------------------------------------------
 // Helper: minimal spy actor for default-behavior validation
@@ -229,7 +231,7 @@ fn ev_driver_telemetry_reports_soc_and_phase() {
         20.0,
         0.0,
         0.0,
-        [42u8; 32],
+        ChaCha8Rng::from_seed([42u8; 32]),
     );
 
     let env = test_env().build();
@@ -322,7 +324,7 @@ fn all_observable_actors_return_some_telemetry() {
             20.0,
             0.0,
             0.0,
-            [42u8; 32],
+            ChaCha8Rng::from_seed([42u8; 32]),
         );
         assert_actor_has_telemetry(&mut ev, &env);
     }

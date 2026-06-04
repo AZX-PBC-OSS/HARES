@@ -27,6 +27,8 @@ numpy = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 arrow = { workspace = true, features = ["ipc"] }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
 rayon = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
