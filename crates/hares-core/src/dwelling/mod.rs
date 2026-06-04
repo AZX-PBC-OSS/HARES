@@ -63,7 +63,9 @@ use crate::diagnostics::{self, EnvelopeDiag};
 use crate::environment::EnvironmentInitOptions;
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use crate::invariants::InvariantChecker;
-use crate::rng::{RNG_STREAM_EV_DRIVER_BASE, RNG_STREAM_EVENT_LOAD_BASE, advance_dwelling_rng, derive_sub_rng};
+use crate::rng::{
+    RNG_STREAM_EV_DRIVER_BASE, RNG_STREAM_EVENT_LOAD_BASE, advance_dwelling_rng, derive_sub_rng,
+};
 use crate::scheduler::{ActorSlot, ExecutionPhase, StepScheduler};
 use crate::telemetry::DwellingTelemetry;
 use crate::{Actor, ActorInterest, EnvironmentManager, SimClock, derive_dwelling_rng};
@@ -1321,8 +1323,12 @@ impl Dwelling {
         };
         validate_sim_config(&sim_config)?;
 
-        let hpxml_building = build_synthetic_building(&config);
-        let schedule = build_synthetic_schedule(&config)?;
+        let schedule_result = build_synthetic_schedule(&config)?;
+        let hpxml_building = build_synthetic_building(
+            &config,
+            schedule_result.event_window_schedule_col,
+            schedule_result.event_probability_schedule_col,
+        );
         let weather = build_synthetic_weather(&config, path)?;
         let dwelling_config = DwellingConfig {
             hpxml_path: path.to_path_buf(),
@@ -1340,7 +1346,12 @@ impl Dwelling {
             patches: None,
         };
 
-        Self::from_preparsed(dwelling_config, hpxml_building, weather, schedule)
+        Self::from_preparsed(
+            dwelling_config,
+            hpxml_building,
+            weather,
+            schedule_result.schedule,
+        )
     }
 
     /// PV panel defaults loaded from `defaults/pv/*.toml`, keyed by file stem.
@@ -5459,7 +5470,8 @@ fn build_actors_from_seeds(
                     }
                 }
 
-                let ev_seed = derive_sub_rng(rng, RNG_STREAM_EV_DRIVER_BASE + ev_actor_index).get_seed();
+                let ev_seed =
+                    derive_sub_rng(rng, RNG_STREAM_EV_DRIVER_BASE + ev_actor_index).get_seed();
                 ev_actor_index += 1;
                 let mut actor = EvDriverActor::new(
                     &format!("EvDriver:{name}"),
@@ -8779,8 +8791,8 @@ occupancy = 1.0
             "600.toml must have occupants_present = false"
         );
 
-        let mut building = build_synthetic_building(&config);
-        let schedule = build_synthetic_schedule(&config).expect("build schedule");
+        let mut building = build_synthetic_building(&config, None, None);
+        let schedule_result = build_synthetic_schedule(&config).expect("build schedule");
         let weather = build_synthetic_weather(&config, &base_path).expect("build weather");
 
         // Inject BuildingOccupancy / NumberofResidents into the HPXML details
@@ -8846,7 +8858,8 @@ occupancy = 1.0
             patches: None,
         };
 
-        match Dwelling::from_preparsed(dwelling_config, building, weather, schedule) {
+        match Dwelling::from_preparsed(dwelling_config, building, weather, schedule_result.schedule)
+        {
             Err(HaresError::Dwelling(msg)) => {
                 assert!(
                     msg.contains("no occupancy column found in schedule"),
@@ -10773,6 +10786,306 @@ master_seed = 0
                 step_a.zone_temperatures_c.len(),
                 step_b.zone_temperatures_c.len(),
                 "step {i}: zone count mismatch"
+            );
+            for (z, (zt_a, zt_b)) in step_a
+                .zone_temperatures_c
+                .iter()
+                .zip(step_b.zone_temperatures_c.iter())
+                .enumerate()
+            {
+                assert!(
+                    (zt_a.1 - zt_b.1).abs() < f64::EPSILON,
+                    "step {i} zone {z}: temperature mismatch: {} vs {}",
+                    zt_a.1,
+                    zt_b.1,
+                );
+            }
+            assert!(
+                (step_a.hvac_heating_w - step_b.hvac_heating_w).abs() < f64::EPSILON,
+                "step {i}: hvac_heating_w mismatch"
+            );
+            assert!(
+                (step_a.hvac_cooling_w - step_b.hvac_cooling_w).abs() < f64::EPSILON,
+                "step {i}: hvac_cooling_w mismatch"
+            );
+            assert!(
+                (step_a.gas_power_w - step_b.gas_power_w).abs() < f64::EPSILON,
+                "step {i}: gas_power_w mismatch"
+            );
+        }
+    }
+
+    /// Helper: write a synthetic TOML with a stochastic CookingRange event
+    /// load so the reproducibility test exercises RNG-dependent behaviour.
+    fn write_event_load_toml(path: &PathBuf, master_seed: u64) {
+        let content = format!(
+            r#"building_id = 9001
+
+[simulation]
+start_time = "2024-06-15T12:00:00Z"
+time_res_s = 60
+duration_s = 600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "none"
+
+[weather]
+outdoor_temp_c = 20.0
+dew_point_c = 10.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 0.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = {master_seed}
+
+[event_load]
+active_power_kw = 0.5
+active_duration_s = 60.0
+cooldown_duration_s = 60.0
+event_probability = 0.5
+sensible_gain_fraction = 0.72
+latent_gain_fraction = 0.08
+"#
+        );
+        fs::write(path, &content).expect("write event-load TOML");
+    }
+
+    /// Construct two identical dwellings with a stochastic event-based load
+    /// (CookingRange at p=0.5), run `simulate()` to completion, and assert
+    /// all `StepResult` fields match within `f64::EPSILON`.  The event load
+    /// consumes the dwelling's hierarchical RNG, so this test catches
+    /// non-determinism from RNG state leakage, hash-map iteration order, and
+    /// floating-point order-of-operations in stochastic code paths.
+    #[test]
+    fn identical_dwellings_with_stochastic_load_produce_reproducible_results() {
+        let toml_path_a = unique_temp_toml("rng_stoch_repro_a");
+        write_event_load_toml(&toml_path_a, 42);
+        let toml_path_b = unique_temp_toml("rng_stoch_repro_b");
+        fs::copy(&toml_path_a, &toml_path_b).expect("copy TOML");
+        let _guard_a = TempFile(toml_path_a.clone());
+        let _guard_b = TempFile(toml_path_b.clone());
+
+        let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
+        let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B");
+
+        let results_a = a.simulate().expect("simulate A");
+        let results_b = b.simulate().expect("simulate B");
+
+        assert_eq!(
+            results_a.steps.len(),
+            results_b.steps.len(),
+            "both dwellings must produce the same number of steps"
+        );
+
+        for (i, (step_a, step_b)) in results_a
+            .steps
+            .iter()
+            .zip(results_b.steps.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                step_a.timestamp, step_b.timestamp,
+                "step {i}: timestamps must match"
+            );
+            assert!(
+                (step_a.net_electric_power_kw - step_b.net_electric_power_kw).abs() < f64::EPSILON,
+                "step {i}: net_electric_power_kw mismatch: {} vs {}",
+                step_a.net_electric_power_kw,
+                step_b.net_electric_power_kw,
+            );
+            assert_eq!(
+                step_a.zone_temperatures_c.len(),
+                step_b.zone_temperatures_c.len(),
+                "step {i}: zone count mismatch"
+            );
+            for (z, (zt_a, zt_b)) in step_a
+                .zone_temperatures_c
+                .iter()
+                .zip(step_b.zone_temperatures_c.iter())
+                .enumerate()
+            {
+                assert!(
+                    (zt_a.1 - zt_b.1).abs() < f64::EPSILON,
+                    "step {i} zone {z}: temperature mismatch: {} vs {}",
+                    zt_a.1,
+                    zt_b.1,
+                );
+            }
+            assert!(
+                (step_a.hvac_heating_w - step_b.hvac_heating_w).abs() < f64::EPSILON,
+                "step {i}: hvac_heating_w mismatch"
+            );
+            assert!(
+                (step_a.hvac_cooling_w - step_b.hvac_cooling_w).abs() < f64::EPSILON,
+                "step {i}: hvac_cooling_w mismatch"
+            );
+            assert!(
+                (step_a.gas_power_w - step_b.gas_power_w).abs() < f64::EPSILON,
+                "step {i}: gas_power_w mismatch"
+            );
+        }
+    }
+
+    /// Smoke test: two dwellings with the same stochastic event-load config
+    /// but different `master_seed` values MUST produce meaningfully different
+    /// output trajectories.  The event load draws from the dwelling's
+    /// hierarchical RNG at each step to decide whether to start an event;
+    /// with `event_probability = 0.5`, different seeds produce different
+    /// event sequences, proving the RNG is actually consumed (not just a
+    /// fixed sequence) and that the stochastic pipeline is live.
+    #[test]
+    fn different_master_seeds_produce_different_event_load_outputs() {
+        let toml_path_a = unique_temp_toml("rng_smoke_seed_a");
+        write_event_load_toml(&toml_path_a, 42);
+        let toml_path_b = unique_temp_toml("rng_smoke_seed_b");
+        write_event_load_toml(&toml_path_b, 99);
+        let _guard_a = TempFile(toml_path_a.clone());
+        let _guard_b = TempFile(toml_path_b.clone());
+
+        let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A (seed 42)");
+        let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B (seed 99)");
+
+        let results_a = a.simulate().expect("simulate A");
+        let results_b = b.simulate().expect("simulate B");
+
+        assert_eq!(
+            results_a.steps.len(),
+            results_b.steps.len(),
+            "both dwellings must produce the same number of steps"
+        );
+
+        // At least one timestep must have a different net electric power.
+        // With event_probability = 0.5 and 10 independent RNG draws per
+        // dwelling, the chance of two different ChaCha8Rng seeds producing
+        // identical sequences is astronomically low (≈ 2^-10 < 0.1%).
+        let any_differ = results_a
+            .steps
+            .iter()
+            .zip(results_b.steps.iter())
+            .any(|(sa, sb)| {
+                (sa.net_electric_power_kw - sb.net_electric_power_kw).abs() > f64::EPSILON
+            });
+        assert!(
+            any_differ,
+            "different master seeds (42 vs 99) must produce different \
+             net_electric_power_kw on at least one timestep; \
+             if this fails consistently, the stochastic event-load RNG \
+             pipeline is likely dead or producing a fixed sequence"
+        );
+    }
+
+    /// Helper: write a synthetic TOML with a schedule-based event window and
+    /// probability (24-hour vectors) so the reproducibility test exercises
+    /// the `ColumnRef`-based schedule path through `build_synthetic_schedule`
+    /// and `parse_event_schedule_sources`.
+    fn write_event_load_schedule_toml(path: &PathBuf, master_seed: u64) {
+        let content = format!(
+            r#"building_id = 9002
+
+[simulation]
+start_time = "2024-06-15T12:00:00Z"
+time_res_s = 60
+duration_s = 600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "none"
+
+[weather]
+outdoor_temp_c = 20.0
+dew_point_c = 10.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 0.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+write_output = false
+master_seed = {master_seed}
+
+[event_load]
+active_power_kw = 0.5
+active_duration_s = 60.0
+cooldown_duration_s = 60.0
+event_probability = 0.5
+sensible_gain_fraction = 0.72
+latent_gain_fraction = 0.08
+event_window_schedule = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+event_probability_schedule = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0]
+"#
+        );
+        fs::write(path, &content).expect("write event-load schedule TOML");
+    }
+
+    /// Construct two identical dwellings with a schedule-based stochastic
+    /// event load, run `simulate()` to completion, and assert all
+    /// `StepResult` fields match within `f64::EPSILON`.  This exercises the
+    /// `ColumnRef` path through `build_synthetic_schedule` →
+    /// `parse_event_schedule_sources`, confirming that schedule-column-based
+    /// event window and probability sources produce deterministic output when
+    /// given the same master seed.
+    #[test]
+    fn identical_dwellings_with_schedule_based_stochastic_load_produce_reproducible_results() {
+        let toml_path_a = unique_temp_toml("rng_sched_repro_a");
+        write_event_load_schedule_toml(&toml_path_a, 42);
+        let toml_path_b = unique_temp_toml("rng_sched_repro_b");
+        fs::copy(&toml_path_a, &toml_path_b).expect("copy TOML");
+        let _guard_a = TempFile(toml_path_a.clone());
+        let _guard_b = TempFile(toml_path_b.clone());
+
+        let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A");
+        let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B");
+
+        let results_a = a.simulate().expect("simulate A");
+        let results_b = b.simulate().expect("simulate B");
+
+        assert_eq!(
+            results_a.steps.len(),
+            results_b.steps.len(),
+            "both dwellings must produce the same number of steps"
+        );
+
+        for (i, (step_a, step_b)) in results_a
+            .steps
+            .iter()
+            .zip(results_b.steps.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                step_a.timestamp, step_b.timestamp,
+                "step {i}: timestamps must match"
+            );
+            assert!(
+                (step_a.net_electric_power_kw - step_b.net_electric_power_kw).abs() < f64::EPSILON,
+                "step {i}: net_electric_power_kw mismatch: {} vs {}",
+                step_a.net_electric_power_kw,
+                step_b.net_electric_power_kw,
             );
             for (z, (zt_a, zt_b)) in step_a
                 .zone_temperatures_c

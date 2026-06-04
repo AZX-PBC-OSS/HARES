@@ -45,6 +45,78 @@ pub(crate) struct SyntheticTomlConfig {
     pub(crate) internal_gains_sensible_fraction: Option<f64>,
     #[serde(default)]
     pub(crate) internal_gains_radiant_fraction: Option<f64>,
+    /// Optional stochastic event-based load (CookingRange) for reproducibility
+    /// testing. When enabled, a single CookingRange equipment is injected into
+    /// the building. The event probability is controlled by
+    /// `event_probability_constant` — set to a value in (0, 1) to trigger
+    /// stochastic event starts via the dwelling's hierarchical RNG.
+    ///
+    /// When `event_window_schedule` is configured, the event window source
+    /// switches from constant to a per-timestep schedule column, enabling
+    /// time-of-day-dependent event windows without requiring a full HPXML
+    /// fixture with CSV schedule columns.
+    #[serde(default)]
+    pub(crate) event_load: Option<SyntheticEventLoadConfig>,
+}
+
+/// Configuration for a stochastic event-based load (CookingRange) injected
+/// into a synthetic dwelling for reproducibility and smoke testing.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SyntheticEventLoadConfig {
+    /// Active power draw during an event [kW].
+    #[serde(default = "default_event_active_power_kw")]
+    pub(crate) active_power_kw: f64,
+    /// Duration of each active event [s].
+    #[serde(default = "default_event_active_duration_s")]
+    pub(crate) active_duration_s: f64,
+    /// Cooldown period between events [s].
+    #[serde(default = "default_event_cooldown_duration_s")]
+    pub(crate) cooldown_duration_s: f64,
+    /// Probability of starting an event when the window is open, in (0, 1].
+    /// Values in (0, 1) produce stochastic behaviour via the dwelling RNG;
+    /// 1.0 always starts an event (deterministic but still consumes RNG).
+    #[serde(default = "default_event_probability")]
+    pub(crate) event_probability: f64,
+    /// Sensible gain fraction (0–1).  Default matches the HPXML resolver's
+    /// built-in value for an electric CookingRange.
+    #[serde(default = "default_event_sensible_fraction")]
+    pub(crate) sensible_gain_fraction: f64,
+    /// Latent gain fraction (0–1).  Default matches the HPXML resolver's
+    /// built-in value for an electric CookingRange.
+    #[serde(default = "default_event_latent_fraction")]
+    pub(crate) latent_gain_fraction: f64,
+    /// Optional 24-element hourly schedule for event window openness [0–1].
+    /// When present, the schedule is expanded to per-step values and the
+    /// column index is emitted in the HPXML extension instead of
+    /// `event_window_source = "constant"`. Each element is a binary window
+    /// (0 = closed, 1 = open); fractional values interpolate.
+    #[serde(default)]
+    pub(crate) event_window_schedule: Option<Vec<f64>>,
+    /// Optional 24-element hourly schedule for event start probability [0–1].
+    /// When present alongside `event_window_schedule`, uses a separate column.
+    /// When absent but `event_window_schedule` is present, defaults to the
+    /// same column index as the window schedule.
+    #[serde(default)]
+    pub(crate) event_probability_schedule: Option<Vec<f64>>,
+}
+
+fn default_event_active_power_kw() -> f64 {
+    1.5
+}
+fn default_event_active_duration_s() -> f64 {
+    300.0
+}
+fn default_event_cooldown_duration_s() -> f64 {
+    120.0
+}
+fn default_event_probability() -> f64 {
+    0.5
+}
+fn default_event_sensible_fraction() -> f64 {
+    0.72
+}
+fn default_event_latent_fraction() -> f64 {
+    0.08
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -386,7 +458,11 @@ fn parse_boundary_type(s: &str) -> hares_io::hpxml::BoundaryType {
     }
 }
 
-pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building {
+pub(crate) fn build_synthetic_building(
+    config: &SyntheticTomlConfig,
+    event_window_schedule_col: Option<usize>,
+    event_probability_schedule_col: Option<usize>,
+) -> Building {
     use hares_io::hpxml::{Boundary, BoundaryType, MaterialLayer, Site, Window, Zone, ZoneType};
     use hares_physics::units as conv;
 
@@ -637,6 +713,149 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
                 attrs: HashMap::new(),
                 text: String::new(),
                 children: plug_children,
+            }],
+        });
+    }
+
+    // Inject a stochastic CookingRange event-based load when configured.
+    // The HPXML resolver processes the `<Appliances><CookingRange>` node and
+    // creates an EventBasedLoad equipment with the parameters below.
+    // `event_probability_constant` controls stochastic behaviour via the
+    // dwelling's hierarchical RNG stream: values in (0, 1) produce
+    // seed-dependent event starts for reproducibility testing.
+    if let Some(el) = &config.event_load {
+        let mut extension_children: Vec<hares_io::hpxml::building::XmlNode> = vec![
+            hares_io::hpxml::building::XmlNode {
+                name: "active_power_kw".to_string(),
+                attrs: HashMap::new(),
+                text: el.active_power_kw.to_string(),
+                children: Vec::new(),
+            },
+            hares_io::hpxml::building::XmlNode {
+                name: "active_duration_s".to_string(),
+                attrs: HashMap::new(),
+                text: el.active_duration_s.to_string(),
+                children: Vec::new(),
+            },
+            hares_io::hpxml::building::XmlNode {
+                name: "cooldown_duration_s".to_string(),
+                attrs: HashMap::new(),
+                text: el.cooldown_duration_s.to_string(),
+                children: Vec::new(),
+            },
+        ];
+
+        // Emit column-based schedule sources when schedule columns were
+        // appended to the ScheduleTimeSeries by build_synthetic_schedule.
+        // The column index must match the position in the schedule's columns
+        // vector exactly — parse_event_schedule_sources reads it as a usize.
+        if let Some(col_idx) = event_window_schedule_col {
+            extension_children.push(hares_io::hpxml::building::XmlNode {
+                name: "event_window_schedule_col".to_string(),
+                attrs: HashMap::new(),
+                text: col_idx.to_string(),
+                children: Vec::new(),
+            });
+        } else {
+            extension_children.push(hares_io::hpxml::building::XmlNode {
+                name: "event_window_source".to_string(),
+                attrs: HashMap::new(),
+                text: "constant".to_string(),
+                children: Vec::new(),
+            });
+        }
+
+        if let Some(col_idx) = event_probability_schedule_col {
+            extension_children.push(hares_io::hpxml::building::XmlNode {
+                name: "event_probability_source".to_string(),
+                attrs: HashMap::new(),
+                text: "column".to_string(),
+                children: Vec::new(),
+            });
+            extension_children.push(hares_io::hpxml::building::XmlNode {
+                name: "event_probability_schedule_col".to_string(),
+                attrs: HashMap::new(),
+                text: col_idx.to_string(),
+                children: Vec::new(),
+            });
+        } else {
+            extension_children.push(hares_io::hpxml::building::XmlNode {
+                name: "event_probability_source".to_string(),
+                attrs: HashMap::new(),
+                text: "constant".to_string(),
+                children: Vec::new(),
+            });
+            extension_children.push(hares_io::hpxml::building::XmlNode {
+                name: "event_probability_constant".to_string(),
+                attrs: HashMap::new(),
+                text: el.event_probability.to_string(),
+                children: Vec::new(),
+            });
+        }
+
+        extension_children.extend([
+            hares_io::hpxml::building::XmlNode {
+                name: "sensible_gain_fraction".to_string(),
+                attrs: HashMap::new(),
+                text: el.sensible_gain_fraction.to_string(),
+                children: Vec::new(),
+            },
+            hares_io::hpxml::building::XmlNode {
+                name: "latent_gain_fraction".to_string(),
+                attrs: HashMap::new(),
+                text: el.latent_gain_fraction.to_string(),
+                children: Vec::new(),
+            },
+        ]);
+        // Add default schedule fractions so the HPXML resolver doesn't
+        // compute annual energy from the bedroom-count formula (which
+        // would override the explicitly-set per-cycle power/duration).
+        // A constant 24-element schedule fraction vector gives uniform
+        // distribution across the day.
+        let flat_24 = std::iter::repeat_n("0.04167", 24)
+            .collect::<Vec<_>>()
+            .join(", ");
+        extension_children.push(hares_io::hpxml::building::XmlNode {
+            name: "WeekdayScheduleFractions".to_string(),
+            attrs: HashMap::new(),
+            text: flat_24.clone(),
+            children: Vec::new(),
+        });
+        extension_children.push(hares_io::hpxml::building::XmlNode {
+            name: "WeekendScheduleFractions".to_string(),
+            attrs: HashMap::new(),
+            text: flat_24,
+            children: Vec::new(),
+        });
+
+        details_children.push(hares_io::hpxml::building::XmlNode {
+            name: "Appliances".to_string(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![hares_io::hpxml::building::XmlNode {
+                name: "CookingRange".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![
+                    hares_io::hpxml::building::XmlNode {
+                        name: "FuelType".to_string(),
+                        attrs: HashMap::new(),
+                        text: "electricity".to_string(),
+                        children: Vec::new(),
+                    },
+                    hares_io::hpxml::building::XmlNode {
+                        name: "RatedAnnualkWh".to_string(),
+                        attrs: HashMap::new(),
+                        text: "0".to_string(),
+                        children: Vec::new(),
+                    },
+                    hares_io::hpxml::building::XmlNode {
+                        name: "extension".to_string(),
+                        attrs: HashMap::new(),
+                        text: String::new(),
+                        children: extension_children,
+                    },
+                ],
             }],
         });
     }
@@ -1243,7 +1462,23 @@ pub(crate) fn build_synthetic_weather(
     })
 }
 
-pub(crate) fn build_synthetic_schedule(config: &SyntheticTomlConfig) -> Result<ScheduleTimeSeries> {
+/// Result of building a synthetic schedule, including optional column indices
+/// for event-load schedule data that must be communicated to
+/// `build_synthetic_building` so the HPXML extension XML emits matching
+/// `ColumnRef` indices.
+pub(crate) struct SyntheticScheduleResult {
+    pub(crate) schedule: ScheduleTimeSeries,
+    /// Column index for the event window schedule in the per-step columns, if
+    /// `event_load.event_window_schedule` was provided.
+    pub(crate) event_window_schedule_col: Option<usize>,
+    /// Column index for the event probability schedule in the per-step columns,
+    /// if `event_load.event_probability_schedule` was provided.
+    pub(crate) event_probability_schedule_col: Option<usize>,
+}
+
+pub(crate) fn build_synthetic_schedule(
+    config: &SyntheticTomlConfig,
+) -> Result<SyntheticScheduleResult> {
     use chrono::TimeDelta;
 
     let step_secs = duration_to_u32_secs(Duration::seconds(config.simulation.time_res_s))?;
@@ -1255,24 +1490,79 @@ pub(crate) fn build_synthetic_schedule(config: &SyntheticTomlConfig) -> Result<S
         timestamps.push(start + TimeDelta::seconds((i as i64) * i64::from(step_secs)));
     }
 
-    let (column_names, columns, column_index, column_aggregations) =
-        if config.schedule.occupants_present {
-            (
-                vec!["occupancy".to_string()],
-                vec![vec![config.schedule.occupancy; total_steps]],
-                HashMap::from([("occupancy".to_string(), 0usize)]),
-                vec![ColumnAggregation::Mean],
-            )
+    let mut column_names: Vec<String>;
+    let mut columns: Vec<Vec<f64>>;
+    let mut column_index: HashMap<String, usize>;
+    let mut column_aggregations: Vec<ColumnAggregation>;
+
+    if config.schedule.occupants_present {
+        column_names = vec!["occupancy".to_string()];
+        columns = vec![vec![config.schedule.occupancy; total_steps]];
+        column_index = HashMap::from([("occupancy".to_string(), 0usize)]);
+        column_aggregations = vec![ColumnAggregation::Mean];
+    } else {
+        column_names = vec![];
+        columns = vec![];
+        column_index = HashMap::new();
+        column_aggregations = vec![];
+    }
+
+    let event_window_schedule_col: Option<usize>;
+    let event_probability_schedule_col: Option<usize>;
+
+    if let Some(el) = &config.event_load {
+        // Expand the 24-hour event window schedule to per-step values when
+        // provided.  Each step's hour-of-day index selects the corresponding
+        // schedule fraction.
+        if let Some(ref window_sched) = el.event_window_schedule {
+            let expanded: Vec<f64> = (0..total_steps)
+                .map(|i| {
+                    let hour_of_day = ((i as u64 * u64::from(step_secs)) / 3600 % 24) as usize;
+                    window_sched[hour_of_day]
+                })
+                .collect();
+            let col_idx = columns.len();
+            column_names.push("event_load_window".to_string());
+            column_index.insert("event_load_window".to_string(), col_idx);
+            columns.push(expanded);
+            column_aggregations.push(ColumnAggregation::Mean);
+            event_window_schedule_col = Some(col_idx);
         } else {
-            (vec![], vec![], HashMap::new(), vec![])
-        };
-    Ok(ScheduleTimeSeries {
-        timestamps,
-        column_names,
-        columns,
-        column_index,
-        source_step_secs: step_secs,
-        column_aggregations,
+            event_window_schedule_col = None;
+        }
+
+        if let Some(ref prob_sched) = el.event_probability_schedule {
+            let expanded: Vec<f64> = (0..total_steps)
+                .map(|i| {
+                    let hour_of_day = ((i as u64 * u64::from(step_secs)) / 3600 % 24) as usize;
+                    prob_sched[hour_of_day]
+                })
+                .collect();
+            let col_idx = columns.len();
+            column_names.push("event_load_probability".to_string());
+            column_index.insert("event_load_probability".to_string(), col_idx);
+            columns.push(expanded);
+            column_aggregations.push(ColumnAggregation::Mean);
+            event_probability_schedule_col = Some(col_idx);
+        } else {
+            event_probability_schedule_col = None;
+        }
+    } else {
+        event_window_schedule_col = None;
+        event_probability_schedule_col = None;
+    }
+
+    Ok(SyntheticScheduleResult {
+        schedule: ScheduleTimeSeries {
+            timestamps,
+            column_names,
+            columns,
+            column_index,
+            source_step_secs: step_secs,
+            column_aggregations,
+        },
+        event_window_schedule_col,
+        event_probability_schedule_col,
     })
 }
 

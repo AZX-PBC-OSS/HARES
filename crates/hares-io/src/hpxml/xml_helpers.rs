@@ -345,6 +345,32 @@ pub(crate) fn parse_schedule_extension_params(
         out.push(("radiative_gain_fraction".to_string(), json!(frac)));
     }
 
+    // Passthrough keys for event-based load equipment configuration.
+    // EventBasedLoad::init() reads these keys directly from the config;
+    // synthetic TOML fixtures set them via `<extension>` children so
+    // they flow through the HPXML resolver into the EquipmentConfig.
+    for (ext_key, config_key) in &[
+        ("active_power_kw", "active_power_kw"),
+        ("active_duration_s", "active_duration_s"),
+        ("cooldown_duration_s", "cooldown_duration_s"),
+        ("event_window_source", "event_window_source"),
+        ("event_probability_source", "event_probability_source"),
+        ("event_probability_constant", "event_probability_constant"),
+        ("event_window_schedule_col", "event_window_schedule_col"),
+        (
+            "event_probability_schedule_col",
+            "event_probability_schedule_col",
+        ),
+        ("sensible_gain_fraction", "sensible_gain_fraction"),
+        ("latent_gain_fraction", "latent_gain_fraction"),
+    ] {
+        if let Some(val) = child_f64(ext, ext_key) {
+            out.push((config_key.to_string(), json!(val)));
+        } else if let Some(val) = child_text(ext, ext_key) {
+            out.push((config_key.to_string(), json!(val)));
+        }
+    }
+
     out
 }
 
