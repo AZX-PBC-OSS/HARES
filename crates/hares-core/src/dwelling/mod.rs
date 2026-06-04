@@ -2581,7 +2581,10 @@ impl Dwelling {
             let count = self
                 .equipment
                 .iter()
-                .filter(|e| e.descriptor().name.starts_with(&name))
+                .filter(|e| {
+                    let n = e.descriptor().name.as_str();
+                    n == name.as_str() || n.starts_with(&format!("{name} #"))
+                })
                 .count()
                 + 1;
             panic!(

@@ -39,7 +39,8 @@ pub(super) fn resolve_pv(
     }
 
     for pv in photovoltaics.children_named("PVSystem") {
-        let pv_id = element_id(pv).unwrap_or_else(|| "unknown".to_string());
+        let pv_id_opt = element_id(pv);
+        let pv_id = pv_id_opt.clone().unwrap_or_else(|| "unknown".to_string());
         if let Some(tracking) = child_text(pv, "Tracking") {
             if !tracking.trim().eq_ignore_ascii_case("fixed") {
                 return Err(HpxmlError::Parse(format!(
@@ -88,7 +89,7 @@ pub(super) fn resolve_pv(
         };
 
         let mut spec = build_typed_spec("PV".to_string(), FuelType::Electric, cfg, defaults);
-        spec.system_id = element_id(pv);
+        spec.system_id = pv_id_opt;
         specs.push(spec);
     }
 
@@ -105,7 +106,10 @@ pub(super) fn resolve_batteries(
     };
 
     for battery in batteries.children_named("Battery") {
-        let battery_id = element_id(battery).unwrap_or_else(|| "unknown".to_string());
+        let battery_id_opt = element_id(battery);
+        let battery_id = battery_id_opt
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         let rated_power_kw = child_f64(battery, "RatedPowerOutput")
             .map(|w| w / 1000.0)
             .ok_or_else(|| HpxmlError::MissingField {
@@ -161,7 +165,7 @@ pub(super) fn resolve_batteries(
             min_dwell_steps: 0,
         };
         let mut spec = build_typed_spec("Battery".to_string(), FuelType::Electric, cfg, defaults);
-        spec.system_id = element_id(battery);
+        spec.system_id = battery_id_opt;
         specs.push(spec);
     }
     Ok(())
@@ -176,7 +180,8 @@ pub(super) fn resolve_ev(
         return Ok(());
     };
     for ev in evs.children_named("ElectricVehicle") {
-        let ev_id = element_id(ev).unwrap_or_else(|| "unknown".to_string());
+        let ev_id_opt = element_id(ev);
+        let ev_id = ev_id_opt.clone().unwrap_or_else(|| "unknown".to_string());
         let capacity_kwh = child_energy_kwh(ev, "BatteryCapacity").ok_or_else(|| {
             HpxmlError::MissingField {
                 path: "ElectricVehicle/BatteryCapacity",
@@ -227,7 +232,7 @@ pub(super) fn resolve_ev(
             initial_connection_state: None,
         };
         let mut spec = build_typed_spec("EV".to_string(), FuelType::Electric, cfg, defaults);
-        spec.system_id = element_id(ev);
+        spec.system_id = ev_id_opt;
         specs.push(spec);
     }
     Ok(())
@@ -243,7 +248,8 @@ pub(super) fn resolve_generators(
     };
 
     for generator in generators.children_named("Generator") {
-        let generator_id = element_id(generator).unwrap_or_else(|| "unknown".to_string());
+        let gen_id_opt = element_id(generator);
+        let generator_id = gen_id_opt.clone().unwrap_or_else(|| "unknown".to_string());
         let fuel = parse_fuel(child_text(generator, "FuelType").as_deref())?;
         let annual_output_kwh = child_f64(generator, "AnnualOutputkWh");
         let annual_consumption_kbtu = child_f64(generator, "AnnualConsumptionkBtu");
@@ -301,7 +307,7 @@ pub(super) fn resolve_generators(
         };
 
         let mut spec = build_typed_spec("Gas Generator".to_string(), fuel, cfg, defaults);
-        spec.system_id = element_id(generator);
+        spec.system_id = gen_id_opt;
         specs.push(spec);
     }
     Ok(())

@@ -290,18 +290,21 @@ pub fn canonical_instance_namer(name: &str, count: usize) -> String {
 fn assign_instance_names(specs: &mut [EquipmentSpec]) {
     use std::collections::HashMap;
 
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for spec in specs.iter() {
-        *counts.entry(spec.name.clone()).or_insert(0) += 1;
+    let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for name in &names {
+        *counts.entry(name.as_str()).or_insert(0) += 1;
     }
 
-    let mut indices: HashMap<String, usize> = HashMap::new();
-    for spec in specs.iter_mut() {
-        let total = counts.get(&spec.name).copied().unwrap_or(1);
+    let mut indices: HashMap<&str, usize> = HashMap::new();
+    for (i, spec) in specs.iter_mut().enumerate() {
+        let name = &names[i];
+        let total = counts.get(name.as_str()).copied().unwrap_or(1);
         if total > 1 {
-            let idx = indices.entry(spec.name.clone()).or_insert(0);
+            let idx = indices.entry(name.as_str()).or_insert(0);
             *idx += 1;
-            spec.instance_name = Some(canonical_instance_namer(&spec.name, *idx));
+            spec.instance_name = Some(canonical_instance_namer(name, *idx));
         }
     }
 }
@@ -2198,5 +2201,7 @@ mod tests {
         assert_eq!(bat_specs.len(), 2);
         assert_eq!(bat_specs[0].instance_name.as_deref(), Some("Battery #1"));
         assert_eq!(bat_specs[1].instance_name.as_deref(), Some("Battery #2"));
+        assert_eq!(bat_specs[0].system_id.as_deref(), Some("bat1"));
+        assert_eq!(bat_specs[1].system_id.as_deref(), Some("bat2"));
     }
 }

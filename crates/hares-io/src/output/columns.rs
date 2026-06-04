@@ -7,7 +7,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::hpxml::EquipmentSpec;
 use crate::hpxml::equipment::canonical_instance_namer;
-use hares_types::{EndUse, FuelType, OperatingMode, ZoneId};
+use hares_types::{EndUse, FuelType, ZoneId};
 
 /// Timestamp column included at every verbosity level.
 const TIMESTAMP_COL: &str = "Time";
@@ -619,25 +619,6 @@ fn mode_ordinal_json() -> String {
     serde_json::to_string(&MODE_ORDINALS).expect("static map serialises")
 }
 
-/// Returns the integer ordinal for a given `OperatingMode`.
-pub fn mode_to_ordinal(mode: OperatingMode) -> f64 {
-    match mode {
-        OperatingMode::Off => 0.0,
-        OperatingMode::Heating => 1.0,
-        OperatingMode::Cooling => 2.0,
-        OperatingMode::Defrost => 3.0,
-        OperatingMode::Standby => 4.0,
-        OperatingMode::Charging => 5.0,
-        OperatingMode::Discharging => 6.0,
-        OperatingMode::HeatingHP => 7.0,
-        OperatingMode::HeatingER => 8.0,
-        OperatingMode::HeatingHPAndER => 9.0,
-        OperatingMode::HeatPumpWH => 10.0,
-        OperatingMode::BackupElement => 11.0,
-        OperatingMode::On => 12.0,
-    }
-}
-
 const MODE_ORDINALS: &[(&str, u8)] = &[
     ("Off", 0),
     ("Heating", 1),
@@ -651,6 +632,7 @@ const MODE_ORDINALS: &[(&str, u8)] = &[
     ("HeatingHPAndER", 9),
     ("HeatPumpWH", 10),
     ("BackupElement", 11),
+    ("On", 12),
 ];
 
 /// Generates instance-qualified names for multi-instance equipment.
@@ -671,7 +653,7 @@ fn instance_qualified_names(specs: &[EquipmentSpec]) -> Vec<(String, FuelType)> 
         if let Some(ref instance_name) = spec.instance_name {
             result.push((instance_name.clone(), spec.fuel_type));
         } else {
-            let total = counts[spec.name.as_str()];
+            let total = counts.get(spec.name.as_str()).copied().unwrap_or(1);
             if total > 1 {
                 let idx = indices.entry(&spec.name).or_insert(0);
                 *idx += 1;
@@ -731,6 +713,7 @@ fn is_cooling_equipment(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use hares_types::FuelType;
+    use hares_types::OperatingMode;
     use serde_json::Map;
 
     use super::*;
@@ -858,16 +841,16 @@ mod tests {
         assert!(meta.contains_key("hares_mode_map"));
         let json: serde_json::Value =
             serde_json::from_str(meta.get("hares_mode_map").unwrap()).unwrap();
-        // Should contain all 12 mode entries
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 12);
+        assert_eq!(arr.len(), 13);
     }
 
     #[test]
     fn mode_ordinal_round_trips() {
-        assert_eq!(mode_to_ordinal(OperatingMode::Off), 0.0);
-        assert_eq!(mode_to_ordinal(OperatingMode::Heating), 1.0);
-        assert_eq!(mode_to_ordinal(OperatingMode::BackupElement), 11.0);
+        assert_eq!(OperatingMode::Off.as_code(), 0.0);
+        assert_eq!(OperatingMode::Heating.as_code(), 1.0);
+        assert_eq!(OperatingMode::BackupElement.as_code(), 11.0);
+        assert_eq!(OperatingMode::On.as_code(), 12.0);
     }
 
     #[test]

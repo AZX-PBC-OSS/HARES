@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,11 +18,14 @@ use hares_types::{
     telemetry_keys as tk,
 };
 
-fn nanos_suffix() -> u128 {
-    SystemTime::now()
+fn nanos_suffix() -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut h);
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
-        .as_nanos()
+        .as_nanos();
+    format!("{nanos}-{:x}", h.finish())
 }
 
 fn unique_temp_toml(tag: &str) -> PathBuf {

@@ -2196,15 +2196,36 @@ fn build_zone_map(
                 let floor_area_m2 =
                     parse_value_with_units(node.child("FloorArea"), ValueKind::Area);
 
-                // Determine vented status from <FoundationType> child tag name
-                let vented = node
+                // Determine vented status from <FoundationType>.
+                // OCHRE hpxml.py:689-691: crawlspaces default to vented: true,
+                // basements default to vented: false.
+                let ft_child = node
                     .child("FoundationType")
-                    .and_then(|ft| ft.children.first())
-                    .map(|child| {
-                        let name = child.name.to_ascii_lowercase();
-                        name.contains("vented") && !name.contains("unvented")
-                    })
-                    .unwrap_or(false);
+                    .and_then(|ft| ft.children.first());
+                let foundation_type = ft_child.map(|child| child.name.as_str());
+                let vented_explicit = ft_child
+                    .and_then(|child| child.child("Vented"))
+                    .map(|v| v.text.trim().eq_ignore_ascii_case("true"));
+                let vented = match foundation_type {
+                    Some("Crawlspace") => vented_explicit.unwrap_or(true),
+                    Some("Basement") => vented_explicit.unwrap_or(false),
+                    _ => vented_explicit.unwrap_or(false),
+                };
+                if vented_explicit.is_none() {
+                    tracing::debug!(
+                        foundation_type = foundation_type.unwrap_or("unknown"),
+                        default_vented = vented,
+                        "Foundation zone has no explicit <Vented> element; applying default"
+                    );
+                }
+                #[cfg(feature = "observe")]
+                {
+                    tracing::debug!(
+                        target: "observe",
+                        foundation_type = foundation_type.unwrap_or("unknown"),
+                        vented,
+                    );
+                }
 
                 let (ventilation_ach, ventilation_sla) = parse_ventilation_rate(node);
 
@@ -4566,6 +4587,82 @@ mod tests {
                 .iter()
                 .any(|z| z.zone_type == ZoneType::Conditioned),
             "conditioned zone expected"
+        );
+    }
+
+    // ── Foundation zone vented defaults ─────────────────────────────────
+
+    #[test]
+    fn crawlspace_defaults_vented_true_when_no_explicit_vented_element() {
+        // OCHRE hpxml.py:689: crawlspaces default to vented: true.
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><Crawlspace/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let foundation = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Foundation))
+            .expect("foundation zone expected");
+        assert!(
+            foundation.vented,
+            "crawlspace without explicit <Vented> must default to vented: true"
+        );
+    }
+
+    #[test]
+    fn crawlspace_explicit_vented_false_overrides_default() {
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><Crawlspace><Vented>false</Vented></Crawlspace></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let foundation = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Foundation))
+            .expect("foundation zone expected");
+        assert!(
+            !foundation.vented,
+            "explicit <Vented>false</Vented> must override crawlspace default → vented: false"
+        );
+    }
+
+    #[test]
+    fn basement_defaults_vented_false_when_no_explicit_vented_element() {
+        // OCHRE hpxml.py:691: basements default to vented: false.
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><Basement/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let foundation = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Foundation))
+            .expect("foundation zone expected");
+        assert!(
+            !foundation.vented,
+            "basement without explicit <Vented> must default to vented: false"
+        );
+    }
+
+    #[test]
+    fn basement_explicit_vented_true_overrides_default() {
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><Basement><Vented>true</Vented></Basement></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let foundation = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Foundation))
+            .expect("foundation zone expected");
+        assert!(
+            foundation.vented,
+            "explicit <Vented>true</Vented> must override basement default → vented: true"
         );
     }
 
