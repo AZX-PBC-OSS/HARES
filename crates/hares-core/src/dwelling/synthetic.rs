@@ -470,8 +470,14 @@ pub(crate) fn build_synthetic_building(
     use hares_io::hpxml::{Boundary, BoundaryType, MaterialLayer, Site, Window, Zone, ZoneType};
     use hares_physics::units as conv;
 
-    let heating_capacity_kbtu_h = config.hvac.heating_capacity_kbtu_h.unwrap_or(30.0);
-    let heating_capacity_btu_h = heating_capacity_kbtu_h * 1000.0;
+    // Heating capacity: when explicitly set via TOML, emit as explicit
+    // HPXML <HeatingCapacity>; when absent (None), let the dwelling builder's
+    // autosizing path compute capacity from building UA and design temperatures
+    // per ACCA Manual S-2017 §4.
+    let heating_capacity_btu_h = config
+        .hvac
+        .heating_capacity_kbtu_h
+        .map(|kbtu| kbtu * 1000.0);
     let floor_area = if config.geometry.floor_area_m2 > 0.0 {
         config.geometry.floor_area_m2
     } else {
@@ -508,13 +514,19 @@ pub(crate) fn build_synthetic_building(
                 text: fuel.clone(),
                 children: Vec::new(),
             },
-            hares_io::hpxml::building::XmlNode {
+        ];
+        // Only emit explicit HeatingCapacity when the user provided one.
+        // When absent, the HPXML resolver sets autosize_heating = true,
+        // triggering ACCA Manual S-based autosizing from building UA and
+        // design temperatures (autosize.rs).
+        if let Some(btu_h) = heating_capacity_btu_h {
+            heating_children.push(hares_io::hpxml::building::XmlNode {
                 name: "HeatingCapacity".to_string(),
                 attrs: HashMap::new(),
-                text: heating_capacity_btu_h.to_string(),
+                text: btu_h.to_string(),
                 children: Vec::new(),
-            },
-        ];
+            });
+        }
 
         // Combustion-fuel furnaces/boilers need AFUE for the HPXML resolver.
         // 0.80 is the ANSI/RESNET 301 floor for existing equipment.
@@ -577,30 +589,36 @@ pub(crate) fn build_synthetic_building(
         });
     }
     if has_cooling {
+        let mut cooling_children = vec![
+            hares_io::hpxml::building::XmlNode {
+                name: "CoolingSystemType".to_string(),
+                attrs: HashMap::new(),
+                text: "central air conditioner".to_string(),
+                children: Vec::new(),
+            },
+            hares_io::hpxml::building::XmlNode {
+                name: "CoolingSystemFuel".to_string(),
+                attrs: HashMap::new(),
+                text: "electricity".to_string(),
+                children: Vec::new(),
+            },
+        ];
+        // Only emit explicit CoolingCapacity when the user provided one.
+        // When absent, the HPXML resolver sets autosize_cooling = true,
+        // allowing cooling to be sized independently from heating.
+        if let Some(btu_h) = heating_capacity_btu_h {
+            cooling_children.push(hares_io::hpxml::building::XmlNode {
+                name: "CoolingCapacity".to_string(),
+                attrs: HashMap::new(),
+                text: btu_h.to_string(),
+                children: Vec::new(),
+            });
+        }
         hvac_children.push(hares_io::hpxml::building::XmlNode {
             name: "CoolingSystem".to_string(),
             attrs: HashMap::new(),
             text: String::new(),
-            children: vec![
-                hares_io::hpxml::building::XmlNode {
-                    name: "CoolingSystemType".to_string(),
-                    attrs: HashMap::new(),
-                    text: "central air conditioner".to_string(),
-                    children: Vec::new(),
-                },
-                hares_io::hpxml::building::XmlNode {
-                    name: "CoolingSystemFuel".to_string(),
-                    attrs: HashMap::new(),
-                    text: "electricity".to_string(),
-                    children: Vec::new(),
-                },
-                hares_io::hpxml::building::XmlNode {
-                    name: "CoolingCapacity".to_string(),
-                    attrs: HashMap::new(),
-                    text: heating_capacity_btu_h.to_string(),
-                    children: Vec::new(),
-                },
-            ],
+            children: cooling_children,
         });
     }
 
@@ -1228,6 +1246,31 @@ pub(crate) fn build_synthetic_building(
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // Verify that explicit HVAC capacity is positive and finite relative
+        // to floor area. The ratio is not clamped to a tight residential band
+        // because synthetic test fixtures use deliberately extreme values
+        // (e.g. 500 kBTU/h for stress testing). Autosized capacity
+        // (hvac_capacity_w = None) is validated by the autosizer's internal
+        // invariants instead.
+        if let Some(capacity_w) = heating_capacity_btu_h.map(conv::power_btu_h_to_w)
+            && capacity_w > 0.0
+        {
+            assert!(
+                capacity_w.is_finite(),
+                "synthetic building explicit hvac_capacity_w is NaN or infinite"
+            );
+            let w_per_m2 = capacity_w / floor_area;
+            assert!(
+                w_per_m2 > 0.0 && w_per_m2.is_finite(),
+                "synthetic building with floor_area_m2 = {floor_area} has explicit \
+                 hvac_capacity_w = {capacity_w:.0} W → {w_per_m2:.1} W/m², which is \
+                 non-positive or non-finite"
+            );
+        }
+    }
+
     // Build 24-hour setpoint vectors when setpoints are configured.
     let (heating_weekday, cooling_weekday) = if let Some(sp) = &config.setpoints {
         let heating = if let Some(ref schedule) = sp.heating_schedule_c {
@@ -1281,7 +1324,7 @@ pub(crate) fn build_synthetic_building(
         infiltration_cfm_natural: None,
         infiltration_ela_cm2: None,
         infiltration_constant_ach,
-        hvac_capacity_w: Some(conv::power_btu_h_to_w(heating_capacity_btu_h)),
+        hvac_capacity_w: heating_capacity_btu_h.map(conv::power_btu_h_to_w),
         seer2: None,
         hspf2: None,
         water_heater_setpoint_c: None,
@@ -1821,8 +1864,13 @@ pub(crate) fn hot_path_alloc_counter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hares_io::hpxml::building::XmlNode;
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use std::collections::HashSet;
+
+    fn find_xml_child<'a>(children: &'a [XmlNode], name: &str) -> Option<&'a XmlNode> {
+        children.iter().find(|n| n.name == name)
+    }
 
     // -------------------------------------------------------------------------
     // T-0188: Clear-sky solar irradiance in synthetic weather
@@ -3511,6 +3559,285 @@ master_seed = 0
             "Benchmark synthetic building has marginally unstable discrete eigenvalue: \
              max magnitude = {:.6} (expected < 1.0).",
             max_mag
+        );
+    }
+
+    // ── T-0228: HVAC capacity autosizing for synthetic buildings ───────────
+
+    /// When `heating_capacity_kbtu_h` is NOT set in the TOML config,
+    /// `hvac_capacity_w` must be `None`, signalling to the dwelling builder
+    /// that capacity should be autosized from building UA and design
+    /// temperatures per ACCA Manual S-2017 §4.
+    #[test]
+    fn no_explicit_capacity_produces_none_hvac_capacity_w() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+
+[setpoints]
+cooling_c = 25.0
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+
+[schedule]
+occupancy = 1.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        assert!(
+            building.hvac_capacity_w.is_none(),
+            "hvac_capacity_w must be None when heating_capacity_kbtu_h is not set, \
+             got {:?}",
+            building.hvac_capacity_w
+        );
+    }
+
+    /// When `heating_capacity_kbtu_h` IS set in the TOML config,
+    /// `hvac_capacity_w` must carry the explicit value in watts.
+    #[test]
+    fn explicit_capacity_preserves_hvac_capacity_w() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 25.0
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+
+[schedule]
+occupancy = 1.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        let expected_w = hares_physics::units::power_btu_h_to_w(25.0 * 1000.0);
+        let actual_w = building
+            .hvac_capacity_w
+            .expect("hvac_capacity_w must be Some when capacity is set");
+        assert!(
+            (actual_w - expected_w).abs() < 0.01,
+            "hvac_capacity_w = {actual_w} W, expected ~{expected_w:.1} W for 25 kBTU/h"
+        );
+    }
+
+    /// When `heating_capacity_kbtu_h` is not set, the HPXML
+    /// `<HeatingCapacity>` element must be absent so the resolver flags
+    /// `autosize_heating = true`.
+    #[test]
+    fn no_explicit_capacity_omits_heating_capacity_from_xml() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+
+[setpoints]
+cooling_c = 25.0
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+
+[schedule]
+occupancy = 1.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        let hvac = find_xml_child(&building.details_xml.children, "Systems")
+            .and_then(|s| find_xml_child(&s.children, "HVAC"))
+            .expect("HVAC section must exist");
+        let heating_system = find_xml_child(&hvac.children, "HeatingSystem")
+            .expect("HeatingSystem must exist when equipment_name is 'Furnace'");
+        let heating_capacity = find_xml_child(&heating_system.children, "HeatingCapacity");
+        assert!(
+            heating_capacity.is_none(),
+            "HeatingCapacity must NOT be present when heating_capacity_kbtu_h is not set"
+        );
+    }
+
+    /// When `heating_capacity_kbtu_h` IS set, the HPXML
+    /// `<HeatingCapacity>` element must be present with the correct value.
+    #[test]
+    fn explicit_capacity_includes_heating_capacity_in_xml() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 25.0
+
+[setpoints]
+cooling_c = 25.0
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+
+[schedule]
+occupancy = 1.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        let hvac = find_xml_child(&building.details_xml.children, "Systems")
+            .and_then(|s| find_xml_child(&s.children, "HVAC"))
+            .expect("HVAC section must exist");
+        let heating_system = find_xml_child(&hvac.children, "HeatingSystem")
+            .expect("HeatingSystem must exist when equipment_name is 'Furnace'");
+        let heating_capacity = find_xml_child(&heating_system.children, "HeatingCapacity")
+            .expect("HeatingCapacity must be present when heating_capacity_kbtu_h is set");
+        let text: f64 = heating_capacity.text.parse().expect("must parse as f64");
+        let expected_btu_h = 25_000.0;
+        assert!(
+            (text - expected_btu_h).abs() < 1.0,
+            "HeatingCapacity = {text} BTU/h, expected {expected_btu_h}"
+        );
+    }
+
+    /// Cooling capacity must be independently autosized, not set to the
+    /// heating capacity value. When `heating_capacity_kbtu_h` is not set,
+    /// `<CoolingCapacity>` must be absent so the resolver flags
+    /// `autosize_cooling = true`.
+    #[test]
+    fn no_explicit_capacity_omits_cooling_capacity_from_xml() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+
+[setpoints]
+cooling_c = 25.0
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+
+[schedule]
+occupancy = 1.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        let hvac = find_xml_child(&building.details_xml.children, "Systems")
+            .and_then(|s| find_xml_child(&s.children, "HVAC"))
+            .expect("HVAC section must exist");
+        // CoolingSystem is present because setpoints are configured
+        // (has_cooling = true), but CoolingCapacity must be absent.
+        let cooling_system = find_xml_child(&hvac.children, "CoolingSystem");
+        assert!(
+            cooling_system.is_some(),
+            "CoolingSystem must exist when setpoints are configured"
+        );
+        let cooling_capacity =
+            cooling_system.and_then(|cs| find_xml_child(&cs.children, "CoolingCapacity"));
+        assert!(
+            cooling_capacity.is_none(),
+            "CoolingCapacity must NOT be present when heating_capacity_kbtu_h is not set"
         );
     }
 }
