@@ -124,7 +124,7 @@ pub fn building_to_boundary_inputs(
         .boundaries
         .iter()
         .map(|bd| {
-            let interior_zone_idx = find_zone_idx(building, bd.interior_zone.as_ref(), n_zones);
+            let interior_zone_idx = find_zone_idx(building, Some(&bd.id), bd.interior_zone.as_ref(), n_zones);
             let exterior = resolve_exterior(building, bd, n_zones);
 
             // Film resistances first -- needed to strip from assembly R-value.
@@ -399,9 +399,20 @@ pub(crate) fn zone_type_to_label(
     }
 }
 
-/// Find zone index by ZoneType equality (exact match including Other payload).
+/// Find zone index by zone identity.
+///
+/// Primary path: match on boundary ID (in the zone's `attached_wall_ids`) AND
+/// zone type. This disambiguates when multiple zones share the same `ZoneType`
+/// (e.g. two `Conditioned` zones in a duplex). The boundary ID must be present
+/// in the zone's `attached_wall_ids` — a relationship established during HPXML
+/// parsing by `assign_walls_to_zones`.
+///
+/// Fallback: type-only matching via `position()`. Used when the boundary ID is
+/// absent or the boundary is not tracked in `attached_wall_ids` (e.g. roofs,
+/// floors, auto-generated interior walls).
 pub(crate) fn find_zone_idx(
     building: &Building,
+    boundary_id: Option<&str>,
     zone_type: Option<&hares_io::hpxml::ZoneType>,
     n_zones: usize,
 ) -> usize {
@@ -419,6 +430,21 @@ pub(crate) fn find_zone_idx(
                 "Adjacent zone type reached find_zone_idx — the rewrite in building.rs was not applied"
             );
         }
+
+        // Primary: match by boundary ID + zone type for disambiguation when
+        // multiple zones share the same ZoneType. The boundary ID is tracked
+        // in `attached_wall_ids` for Wall and FoundationWall boundaries.
+        if let Some(bid) = boundary_id
+            && let Some(idx) = building.zones.iter().position(|z| {
+                z.zone_type == *target && z.attached_wall_ids.iter().any(|wid| wid == bid)
+            })
+        {
+            return idx.min(n_zones - 1);
+        }
+
+        // Fallback: type-only matching for boundaries not tracked in
+        // attached_wall_ids (roofs, floors, doors, windows, auto-generated
+        // interior walls).
         building
             .zones
             .iter()
@@ -427,6 +453,26 @@ pub(crate) fn find_zone_idx(
             .min(n_zones - 1)
     } else {
         0
+    }
+}
+
+/// Log an `info` message when multiple zones share the same `ZoneType`,
+/// indicating that zone resolution uses boundary ID + zone type matching
+/// (via `attached_wall_ids`) rather than type-only matching.
+pub(crate) fn check_multi_unit_zones(building: &Building) {
+    let has_duplicate_type = building.zones.iter().enumerate().any(|(i, zi)| {
+        building
+            .zones
+            .iter()
+            .skip(i + 1)
+            .any(|zj| zi.zone_type == zj.zone_type)
+    });
+    if has_duplicate_type {
+        tracing::info!(
+            n_zones = building.zones.len(),
+            "Multiple zones share the same ZoneType; zone resolution uses boundary ID + \
+             zone type matching (attached_wall_ids) rather than type-only matching"
+        );
     }
 }
 
@@ -439,7 +485,7 @@ pub(crate) fn resolve_exterior(
         Some(hares_io::hpxml::ZoneType::Outdoor) => ExteriorTarget::Outdoor,
         Some(hares_io::hpxml::ZoneType::Ground) => ExteriorTarget::Ground,
         Some(zt) => {
-            let idx = find_zone_idx(building, Some(zt), n_zones);
+            let idx = find_zone_idx(building, Some(&boundary.id), Some(zt), n_zones);
             ExteriorTarget::Zone(idx)
         }
         None => ExteriorTarget::Outdoor,
@@ -618,20 +664,18 @@ fn apply_equipment_overrides(base: &mut Map<String, Value>, overrides: &Value, n
     }
 }
 
+/// Map a boundary's interior or exterior zone to a solver zone index.
+///
+/// Primary path: match on boundary ID + zone type via `find_zone_idx`, which
+/// uses `attached_wall_ids` for disambiguation when multiple zones share the
+/// same `ZoneType`. Fallback: type-only matching for untracked boundaries.
 pub(crate) fn boundary_zone_index(
     building: &Building,
+    boundary_id: Option<&str>,
     zone_type: Option<&hares_io::hpxml::ZoneType>,
     n_zones: usize,
 ) -> usize {
-    if n_zones == 0 {
-        return 0;
-    }
-    if let Some(target) = zone_type
-        && let Some(idx) = building.zones.iter().position(|z| z.zone_type == *target)
-    {
-        return idx.min(n_zones - 1);
-    }
-    0
+    find_zone_idx(building, boundary_id, zone_type, n_zones)
 }
 
 pub(crate) fn duration_to_u32_secs(duration: Duration) -> Result<u32> {
@@ -1775,7 +1819,128 @@ mod tests {
         // Adjacent is filtered from the zones vec in building.rs and should
         // never reach find_zone_idx after the rewrite. This call asserts
         // that invariant.
-        let _ = find_zone_idx(&building, Some(&ZoneType::Adjacent), 1);
+        let _ = find_zone_idx(&building, None, Some(&ZoneType::Adjacent), 1);
+    }
+
+    /// `find_zone_idx` with boundary ID resolves the correct zone when two
+    /// zones share the same `ZoneType` but have different `attached_wall_ids`.
+    /// The boundary belonging to zone B (index 1) must map to index 1, not 0.
+    #[test]
+    fn find_zone_idx_disambiguates_shared_zone_type_by_boundary_id() {
+        let zone_a = Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(50.0),
+            volume_m3: Some(100.0),
+            attached_wall_ids: vec!["WallA".to_string()],
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        };
+        let zone_b = Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(50.0),
+            volume_m3: Some(100.0),
+            attached_wall_ids: vec!["WallB".to_string()],
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        };
+        let building = minimal_building(vec![zone_a, zone_b], Vec::new());
+
+        // WallA belongs to zone A (index 0).
+        assert_eq!(
+            find_zone_idx(&building, Some("WallA"), Some(&ZoneType::Conditioned), 2),
+            0
+        );
+        // WallB belongs to zone B (index 1) — must NOT map to zone 0.
+        assert_eq!(
+            find_zone_idx(&building, Some("WallB"), Some(&ZoneType::Conditioned), 2),
+            1
+        );
+    }
+
+    /// `boundary_zone_index` with a zone type that appears twice: the second
+    /// occurrence must not be displaced. Delegates to `find_zone_idx`.
+    #[test]
+    fn boundary_zone_index_disambiguates_duplicate_zone_type() {
+        let zone_a = Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(50.0),
+            volume_m3: Some(100.0),
+            attached_wall_ids: vec!["WallA".to_string()],
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        };
+        let zone_b = Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(50.0),
+            volume_m3: Some(100.0),
+            attached_wall_ids: vec!["WallB".to_string()],
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        };
+        let building = minimal_building(vec![zone_a, zone_b], Vec::new());
+
+        assert_eq!(
+            super::boundary_zone_index(&building, Some("WallA"), Some(&ZoneType::Conditioned), 2,),
+            0
+        );
+        assert_eq!(
+            super::boundary_zone_index(&building, Some("WallB"), Some(&ZoneType::Conditioned), 2,),
+            1
+        );
+    }
+
+    /// `find_zone_idx` falls back to type-only matching when boundary ID is
+    /// absent (e.g. for roofs, floors, doors — not tracked in attached_wall_ids).
+    #[test]
+    fn find_zone_idx_falls_back_to_type_matching_without_boundary_id() {
+        let zone = Zone {
+            zone_type: ZoneType::Attic,
+            floor_area_m2: None,
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: Vec::new(),
+            vented: true,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        };
+        let building = minimal_building(vec![zone], Vec::new());
+        // No boundary ID provided — uses type-only fallback.
+        assert_eq!(find_zone_idx(&building, None, Some(&ZoneType::Attic), 1), 0);
+    }
+
+    /// `find_zone_idx` returns 0 when n_zones is 0 (edge case).
+    #[test]
+    fn find_zone_idx_zero_zones_returns_zero() {
+        let building = minimal_building(Vec::new(), Vec::new());
+        assert_eq!(
+            find_zone_idx(&building, Some("W1"), Some(&ZoneType::Conditioned), 0),
+            0
+        );
+    }
+
+    /// `find_zone_idx` returns 0 when zone_type is None.
+    #[test]
+    fn find_zone_idx_none_zone_type_returns_zero() {
+        let zone = Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(50.0),
+            volume_m3: Some(100.0),
+            attached_wall_ids: vec![],
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        };
+        let building = minimal_building(vec![zone], Vec::new());
+        assert_eq!(find_zone_idx(&building, None, None, 1), 0);
     }
 
     /// Build a minimal DefaultsStore for tests that need one.

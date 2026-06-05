@@ -18,7 +18,7 @@ use hares_types::{EnvironmentState, FluidType, HaresError, LoopId, ZoneId};
 use super::Result;
 use super::conversions::{
     boundary_zone_index, building_to_boundary_inputs, building_to_zone_inputs,
-    has_vented_crawlspace, shielding_str_to_class, site_type_to_terrain,
+    check_multi_unit_zones, has_vented_crawlspace, shielding_str_to_class, site_type_to_terrain,
 };
 
 // ── Intermediate representation ─────────────────────────────────────────────
@@ -145,7 +145,12 @@ fn build_solver_boundaries(
             .map(|z| *z == hares_io::hpxml::ZoneType::Attic)
             .unwrap_or(false);
 
-        let zone_idx = boundary_zone_index(building, boundary.interior_zone.as_ref(), rc.n_zones);
+        let zone_idx = boundary_zone_index(
+            building,
+            Some(&boundary.id),
+            boundary.interior_zone.as_ref(),
+            rc.n_zones,
+        );
         let zone_id = env
             .zones
             .get(zone_idx)
@@ -432,6 +437,36 @@ fn build_solver_boundaries(
         });
     }
 
+    // Debug assertion: verify that all boundaries mapped to the same zone index
+    // originate from the same HPXML zone type. This catches the bug where
+    // position-based zone indexing would map boundaries from a second
+    // Conditioned zone in a duplex into zone 0 (the first Conditioned zone),
+    // creating phantom inter-zone coupling.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        for z_idx in 0..rc.n_zones {
+            // Only check boundaries that have an explicit interior zone type.
+            // Boundaries with None interior zone (e.g. some windows) naturally
+            // coexist with typed boundaries in the same zone.
+            let types_in_zone: Vec<&hares_io::hpxml::ZoneType> = solver_boundaries
+                .iter()
+                .filter(|sb| sb.zone_idx == z_idx)
+                .filter_map(|sb| building.boundaries[sb.surface_idx].interior_zone.as_ref())
+                .collect();
+            let has_multiple_types = types_in_zone
+                .iter()
+                .enumerate()
+                .any(|(i, t1)| types_in_zone.iter().skip(i + 1).any(|t2| t1 != t2));
+            assert!(
+                !has_multiple_types,
+                "Zone index {z_idx} contains boundaries from multiple HPXML zone types \
+                 ({types:?}); each solver zone index should map to exactly one HPXML zone — \
+                 position-based indexing may have conflated separate zones of the same type",
+                types = types_in_zone,
+            );
+        }
+    }
+
     Ok((solver_boundaries, n_ext_surface_inputs, int_col_counter))
 }
 
@@ -619,6 +654,9 @@ pub(crate) fn build_default_solvers(
     use nalgebra::DMatrix;
 
     let n_zones = env.zones.len().max(1);
+
+    // Log info when multiple zones share the same ZoneType (multi-unit building).
+    check_multi_unit_zones(building);
 
     // Convert building data to envelope-crate input types.
     let zone_inputs = building_to_zone_inputs(building, n_zones);
