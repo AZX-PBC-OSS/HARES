@@ -568,7 +568,10 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     }
 
     let export_mode = parse_export_mode(&root);
-    let clear_credits = matches!(export_mode, ExportMode::FlatRate(_) | ExportMode::None);
+    let clear_credits = matches!(
+        export_mode,
+        ExportMode::FlatRate(_) | ExportMode::HourlySchedule(_) | ExportMode::None
+    );
     let export_rate = ExportRate {
         mode: export_mode,
         tou_credits: if clear_credits {

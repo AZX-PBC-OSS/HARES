@@ -139,6 +139,11 @@ impl TieredBlock {
 pub enum ExportMode {
     NetMetering,
     NetBilling,
+    /// 8760 hourly export prices ($/kWh) indexed by hour-of-year (0-8759).
+    /// Used for CPUC-mandated Avoided Cost Calculator (ACC) profiles
+    /// (e.g., California NEM 3.0) and other time-varying avoided-cost models.
+    /// CPUC Decision 22-12-056 (December 2022): NEM 3.0 hourly avoided cost methodology.
+    HourlySchedule(Vec<f64>),
     FlatRate(f64),
     #[default]
     None,
@@ -162,12 +167,28 @@ impl Default for ExportRate {
 
 impl ExportRate {
     pub fn validate(&self) -> Result<(), HaresError> {
-        if let ExportMode::FlatRate(r) = self.mode {
-            if !r.is_finite() || r < 0.0 {
+        match &self.mode {
+            ExportMode::FlatRate(r) if !r.is_finite() || *r < 0.0 => {
                 return Err(HaresError::Tariff(format!(
                     "FlatRate must be finite and >= 0, got {r}"
                 )));
             }
+            ExportMode::HourlySchedule(schedule) => {
+                if schedule.len() != 8760 {
+                    return Err(HaresError::Tariff(format!(
+                        "HourlySchedule must have exactly 8760 entries, got {}",
+                        schedule.len()
+                    )));
+                }
+                for (i, price) in schedule.iter().enumerate() {
+                    if !price.is_finite() || *price < 0.0 {
+                        return Err(HaresError::Tariff(format!(
+                            "HourlySchedule[{i}] must be finite and >= 0, got {price}"
+                        )));
+                    }
+                }
+            }
+            _ => {}
         }
         for er in &self.tou_credits {
             er.validate()?;
@@ -703,6 +724,7 @@ mod tests {
         let modes = vec![
             ExportMode::NetMetering,
             ExportMode::NetBilling,
+            ExportMode::HourlySchedule(vec![0.08; 8760]),
             ExportMode::FlatRate(0.08),
             ExportMode::None,
         ];
@@ -1058,5 +1080,54 @@ mod tests {
             ..Default::default()
         };
         assert!(tariff.validate().is_err());
+    }
+
+    #[test]
+    fn export_rate_hourly_schedule_rejects_wrong_length() {
+        let er = ExportRate {
+            mode: ExportMode::HourlySchedule(vec![0.08; 100]),
+            tou_credits: vec![],
+        };
+        assert!(er.validate().is_err());
+    }
+
+    #[test]
+    fn export_rate_hourly_schedule_rejects_negative_price() {
+        let mut schedule = vec![0.08; 8760];
+        schedule[500] = -0.05;
+        let er = ExportRate {
+            mode: ExportMode::HourlySchedule(schedule),
+            tou_credits: vec![],
+        };
+        assert!(er.validate().is_err());
+    }
+
+    #[test]
+    fn export_rate_hourly_schedule_rejects_nan_price() {
+        let mut schedule = vec![0.08; 8760];
+        schedule[100] = f64::NAN;
+        let er = ExportRate {
+            mode: ExportMode::HourlySchedule(schedule),
+            tou_credits: vec![],
+        };
+        assert!(er.validate().is_err());
+    }
+
+    #[test]
+    fn export_rate_hourly_schedule_accepts_valid() {
+        let er = ExportRate {
+            mode: ExportMode::HourlySchedule(vec![0.08; 8760]),
+            tou_credits: vec![],
+        };
+        assert!(er.validate().is_ok());
+    }
+
+    #[test]
+    fn export_rate_hourly_schedule_accepts_zero_prices() {
+        let er = ExportRate {
+            mode: ExportMode::HourlySchedule(vec![0.0; 8760]),
+            tou_credits: vec![],
+        };
+        assert!(er.validate().is_ok());
     }
 }

@@ -463,6 +463,31 @@ impl PyTariffBuilder {
         Ok(slf)
     }
 
+    fn set_export_hourly_schedule(
+        slf: Py<Self>,
+        py: Python<'_>,
+        schedule: Vec<f64>,
+    ) -> PyResult<Py<Self>> {
+        if schedule.len() != 8760 {
+            return Err(PyValueError::new_err(format!(
+                "schedule must have exactly 8760 entries, got {}",
+                schedule.len()
+            )));
+        }
+        for (i, &price) in schedule.iter().enumerate() {
+            if !price.is_finite() || price < 0.0 {
+                return Err(PyValueError::new_err(format!(
+                    "schedule[{i}] must be finite and >= 0, got {price}"
+                )));
+            }
+        }
+        slf.borrow_mut(py).export_rate = ExportRate {
+            mode: ExportMode::HourlySchedule(schedule),
+            tou_credits: Vec::new(),
+        };
+        Ok(slf)
+    }
+
     fn set_minimum_charge(slf: Py<Self>, py: Python<'_>, amount: f64) -> PyResult<Py<Self>> {
         if !amount.is_finite() || amount < 0.0 {
             return Err(PyValueError::new_err(format!(

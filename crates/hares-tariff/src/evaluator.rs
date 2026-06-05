@@ -40,6 +40,25 @@ pub struct TariffEvaluator {
     /// Observer: cumulative kWh billed under the EV-specific rate.
     #[cfg(feature = "observe")]
     pub ev_rate_applied_kwh: f64,
+    /// Observer: number of timesteps the hourly export price schedule was used.
+    #[cfg(feature = "observe")]
+    pub export_price_schedule_used: u64,
+    /// Observer: number of timesteps the hourly schedule was defined but
+    /// the hour-of-year was out of bounds (guard against missing hours).
+    #[cfg(feature = "observe")]
+    pub tou_credits_fallback: u64,
+    /// Observer: minimum export price seen during the billing period ($/kWh).
+    #[cfg(feature = "observe")]
+    pub export_price_min: f64,
+    /// Observer: maximum export price seen during the billing period ($/kWh).
+    #[cfg(feature = "observe")]
+    pub export_price_max: f64,
+    /// Observer: sum of export prices seen (for mean computation).
+    #[cfg(feature = "observe")]
+    pub export_price_sum: f64,
+    /// Observer: number of export price samples (for mean computation).
+    #[cfg(feature = "observe")]
+    pub export_price_count: u64,
 }
 
 impl TariffEvaluator {
@@ -170,6 +189,9 @@ impl TariffEvaluator {
             let export_price = match &tariff.export_rate.mode {
                 ExportMode::NetMetering => import_price,
                 ExportMode::FlatRate(r) => *r,
+                ExportMode::HourlySchedule(schedule) => {
+                    schedule.get(hour_of_year).copied().unwrap_or(0.0)
+                }
                 ExportMode::NetBilling => {
                     if let Some(name) = matched_period {
                         tariff
@@ -287,6 +309,18 @@ impl TariffEvaluator {
             cpp_event_limit_hit: 0,
             #[cfg(feature = "observe")]
             ev_rate_applied_kwh: 0.0,
+            #[cfg(feature = "observe")]
+            export_price_schedule_used: 0,
+            #[cfg(feature = "observe")]
+            tou_credits_fallback: 0,
+            #[cfg(feature = "observe")]
+            export_price_min: f64::INFINITY,
+            #[cfg(feature = "observe")]
+            export_price_max: f64::NEG_INFINITY,
+            #[cfg(feature = "observe")]
+            export_price_sum: 0.0,
+            #[cfg(feature = "observe")]
+            export_price_count: 0,
         })
     }
 
@@ -437,6 +471,21 @@ impl TariffEvaluator {
                 self.rtp_price_used += 1;
             }
             self.ev_rate_applied_kwh += ev_import_kwh;
+            if matches!(&self.tariff.export_rate.mode, ExportMode::HourlySchedule(_)) {
+                self.export_price_schedule_used += 1;
+                let hoy = self.hour_of_year_array[ci];
+                if let ExportMode::HourlySchedule(ref schedule) = self.tariff.export_rate.mode {
+                    if hoy < schedule.len() {
+                        let price = schedule[hoy];
+                        self.export_price_min = self.export_price_min.min(price);
+                        self.export_price_max = self.export_price_max.max(price);
+                        self.export_price_sum += price;
+                        self.export_price_count += 1;
+                    } else {
+                        self.tou_credits_fallback += 1;
+                    }
+                }
+            }
         }
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -460,6 +509,24 @@ impl TariffEvaluator {
                     rtp[hoy] >= 0.0 && rtp[hoy].is_finite(),
                     "rtp_schedule[{hoy}] = {} is invalid",
                     rtp[hoy]
+                );
+            }
+            if let ExportMode::HourlySchedule(ref schedule) = self.tariff.export_rate.mode {
+                debug_assert_eq!(
+                    schedule.len(),
+                    8760,
+                    "HourlySchedule must have exactly 8760 entries"
+                );
+                let hoy = self.hour_of_year_array[ci];
+                debug_assert!(
+                    hoy < schedule.len(),
+                    "hour_of_year {hoy} out of bounds for HourlySchedule (len {})",
+                    schedule.len()
+                );
+                debug_assert!(
+                    schedule[hoy] >= 0.0 && schedule[hoy].is_finite(),
+                    "HourlySchedule[{hoy}] = {} is invalid",
+                    schedule[hoy]
                 );
             }
         }
@@ -2141,5 +2208,182 @@ mod tests {
             "zero EV power should produce standard cost; got {}",
             summary.energy_charge_usd
         );
+    }
+
+    // ── Hourly export schedule tests ────────────────────────────────────────
+
+    fn hourly_schedule_tariff(prices: Vec<f64>) -> ElectricTariff {
+        ElectricTariff {
+            name: Some("hourly-export-test".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "flat".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.10,
+            }],
+            export_rate: ExportRate {
+                mode: ExportMode::HourlySchedule(prices),
+                tou_credits: vec![],
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hourly_export_hour_0_is_jan1_midnight() {
+        // Hour 0 = Jan 1 00:00. Index 0 in schedule = $0.05
+        let prices: Vec<f64> = (0..8760).map(|i| i as f64 / 1000.0).collect();
+        let tariff = hourly_schedule_tariff(prices);
+
+        let start = New_York.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        assert!(
+            (ev.current_export_price() - 0.0).abs() < 1e-10,
+            "hour 0 export price should be 0.0, got {}",
+            ev.current_export_price()
+        );
+    }
+
+    #[test]
+    fn hourly_export_hour_8759_is_dec31_2300() {
+        // Hour 8759 = Dec 31 23:00. Index 8759 in schedule = 8.759
+        let prices: Vec<f64> = (0..8760).map(|i| i as f64 / 1000.0).collect();
+        let tariff = hourly_schedule_tariff(prices);
+
+        let start = New_York.with_ymd_and_hms(2025, 12, 31, 23, 0, 0).unwrap();
+        let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        assert!(
+            (ev.current_export_price() - 8.759).abs() < 1e-10,
+            "hour 8759 export price should be 8.759, got {}",
+            ev.current_export_price()
+        );
+    }
+
+    #[test]
+    fn hourly_export_tou_credits_not_taken() {
+        // HourlySchedule with known prices + tou_credits with a different value.
+        // The export price must come from the schedule, not tou_credits.
+        let mut prices = vec![0.08; 8760];
+        prices[6] = 0.15; // hour 6 (6:00 Jan 1) = $0.15
+
+        let tariff = ElectricTariff {
+            name: Some("hourly-export-bypass".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "flat".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.10,
+            }],
+            export_rate: ExportRate {
+                mode: ExportMode::HourlySchedule(prices),
+                // These tou_credits should be ignored because HourlySchedule is active.
+                tou_credits: vec![EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.99, // deliberately wrong to prove ignored
+                }],
+            },
+            ..Default::default()
+        };
+
+        let start = New_York.with_ymd_and_hms(2025, 1, 1, 6, 0, 0).unwrap();
+        let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        assert!(
+            (ev.current_export_price() - 0.15).abs() < 1e-10,
+            "export price should come from hourly schedule (0.15), not tou_credits (0.99); got {}",
+            ev.current_export_price()
+        );
+    }
+
+    #[test]
+    fn hourly_export_full_year_total_matches_expected() {
+        // Full year, constant 1 kW export at each hour.
+        // Use a constant export price of $0.08/kWh for all hours.
+        // Total export credit = 8760 kWh * $0.08/kWh = $700.80
+        let prices = vec![0.08; 8760];
+        let tariff = hourly_schedule_tariff(prices);
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2026, 1, 1);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let summaries = run_all_steps(&mut ev, |_| -1.0);
+
+        let total_export_credit: f64 = summaries.iter().map(|s| s.export_credit_usd).sum();
+        let expected = 8760.0 * 0.08;
+        assert!(
+            (total_export_credit - expected).abs() < 1e-6,
+            "full-year export credit should be {expected}; got {total_export_credit}"
+        );
+    }
+
+    #[test]
+    fn hourly_export_full_year_variable_prices() {
+        // Export prices vary by hour: price[i] = 0.05 if i < 4380, else 0.15.
+        // Export 1 kW every hour.
+        // Expected total (ignoring DST shifts): 4380*0.05 + 4380*0.15 = 876.00.
+        // DST spring-forward skips one hour-of-year, fall-back duplicates one;
+        // this can shift up to one hour between price bands, so the total may
+        // differ by ±$0.10. Use a tolerance of $0.50 to accommodate.
+        let mut prices = vec![0.05; 8760];
+        for i in 4380..8760 {
+            prices[i] = 0.15;
+        }
+        let tariff = hourly_schedule_tariff(prices);
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2026, 1, 1);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let summaries = run_all_steps(&mut ev, |_| -1.0);
+
+        let total_export_credit: f64 = summaries.iter().map(|s| s.export_credit_usd).sum();
+        let expected = 4380.0 * 0.05 + 4380.0 * 0.15;
+        assert!(
+            (total_export_credit - expected).abs() < 0.50,
+            "variable-price export credit should be ~{expected}; got {total_export_credit}"
+        );
+    }
+
+    #[test]
+    fn hourly_export_backward_compat_net_billing_tou_credits() {
+        // NetBilling mode with tou_credits but NO HourlySchedule.
+        // Must produce the same result as before the change.
+        let tariff = ElectricTariff {
+            tou_schedule: vec![TouPeriod {
+                name: "peak".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "peak".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.30,
+            }],
+            export_rate: ExportRate {
+                mode: ExportMode::NetBilling,
+                tou_credits: vec![EnergyRate {
+                    period_name: "peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.08,
+                }],
+            },
+            fixed_charges: FixedCharges::default(),
+            ..Default::default()
+        };
+        let start = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
+        let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        // Export price should come from tou_credits: 0.08
+        assert_eq!(ev.current_export_price(), 0.08);
     }
 }
