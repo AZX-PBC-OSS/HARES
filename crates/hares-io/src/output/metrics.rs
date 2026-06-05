@@ -143,6 +143,10 @@ pub struct SimulationMetrics {
     pub envelope_loads_kwh: Option<EnvelopeComponentLoadsKwh>,
     /// Per-equipment efficiency metrics. Always present (fields are Option).
     pub efficiency: EfficiencyMetrics,
+    /// Fraction of rows that lacked valid setpoint data but still
+    /// accumulated envelope/HVAC/battery energy. `None` if setpoints
+    /// are not configured.
+    pub rows_with_partial_setpoint_data_fraction: Option<f64>,
 }
 
 /// Extended metrics returned by [`MetricsCalculator::finish`], including gas tracking.
@@ -331,6 +335,10 @@ pub struct MetricsCalculator {
     battery_energy_in_kwh: f64,
     battery_energy_out_kwh: f64,
 
+    // Row counters for partial-setpoint diagnostics
+    total_row_count: u64,
+    setpoint_missing_row_count: u64,
+
     #[cfg(feature = "observe")]
     end_use_equipment_counts: BTreeMap<String, usize>,
     #[cfg(feature = "observe")]
@@ -499,6 +507,8 @@ impl MetricsCalculator {
             hvac_cooling_electric_wh: 0.0,
             battery_energy_in_kwh: 0.0,
             battery_energy_out_kwh: 0.0,
+            total_row_count: 0,
+            setpoint_missing_row_count: 0,
             #[cfg(feature = "observe")]
             end_use_equipment_counts: compute_equipment_counts_from_schema(schema),
             #[cfg(feature = "observe")]
@@ -517,6 +527,7 @@ impl MetricsCalculator {
         if batch.num_rows() == 0 {
             return;
         }
+        self.total_row_count += batch.num_rows() as u64;
 
         let total_arr = as_f64_array(batch, self.total_electric_power_idx);
         let gas_arr = self.total_gas_power_idx.map(|idx| as_f64_array(batch, idx));
@@ -602,42 +613,42 @@ impl MetricsCalculator {
             if let (Some(inputs), Some((heating, cooling, zone_temps, deadband_arr))) =
                 (self.setpoints.as_ref(), setpoint_arrays.as_ref())
             {
-                let Some(heating_c) = value_at(heating, row) else {
-                    continue;
-                };
-                let Some(cooling_c) = value_at(cooling, row) else {
-                    continue;
-                };
+                let heating_c = value_at(heating, row);
+                let cooling_c = value_at(cooling, row);
                 let deadband_c = match (&inputs.deadband, deadband_arr) {
                     (DeadbandSource::Constant(value), _) => *value,
                     (DeadbandSource::Column(_), Some(arr)) => value_at(arr, row).unwrap_or(0.0),
                     (DeadbandSource::Column(_), None) => 0.0,
                 };
 
-                if !deadband_c.is_finite() || deadband_c < 0.0 {
-                    continue;
-                }
+                if let (Some(heating_c), Some(cooling_c)) = (heating_c, cooling_c) {
+                    if deadband_c.is_finite() && deadband_c >= 0.0 {
+                        let lower_bound_c = heating_c - deadband_c / 2.0;
+                        let upper_bound_c = cooling_c + deadband_c / 2.0;
+                        let mut all_inside = true;
+                        let mut any_outside = false;
+                        for zone_arr in zone_temps {
+                            let Some(zone_c) = value_at(zone_arr, row) else {
+                                all_inside = false;
+                                continue;
+                            };
+                            if zone_c < lower_bound_c || zone_c > upper_bound_c {
+                                all_inside = false;
+                                any_outside = true;
+                            }
+                        }
+                        if all_inside {
+                            self.comfort_step_count += 1.0;
+                        }
 
-                let lower_bound_c = heating_c - deadband_c / 2.0;
-                let upper_bound_c = cooling_c + deadband_c / 2.0;
-                let mut all_inside = true;
-                let mut any_outside = false;
-                for zone_arr in zone_temps {
-                    let Some(zone_c) = value_at(zone_arr, row) else {
-                        all_inside = false;
-                        continue;
-                    };
-                    if zone_c < lower_bound_c || zone_c > upper_bound_c {
-                        all_inside = false;
-                        any_outside = true;
+                        if any_outside && is_hvac_at_capacity(&hvac_pairs, row) {
+                            self.unmet_step_count += 1.0;
+                        }
+                    } else {
+                        self.setpoint_missing_row_count += 1;
                     }
-                }
-                if all_inside {
-                    self.comfort_step_count += 1.0;
-                }
-
-                if any_outside && is_hvac_at_capacity(&hvac_pairs, row) {
-                    self.unmet_step_count += 1.0;
+                } else {
+                    self.setpoint_missing_row_count += 1;
                 }
             }
 
@@ -764,6 +775,20 @@ impl MetricsCalculator {
             }
         }
 
+        #[cfg(feature = "observe")]
+        {
+            if self.setpoints.is_some() && self.setpoint_missing_row_count > 0 {
+                tracing::debug!(
+                    rows_missing_setpoint_data = self.setpoint_missing_row_count,
+                    total_rows = self.total_row_count,
+                    fraction =
+                        self.setpoint_missing_row_count as f64 / self.total_row_count.max(1) as f64,
+                    "rows with missing/invalid setpoint data — comfort/unmet skipped, \
+                     envelope/HVAC/battery accumulation continued"
+                );
+            }
+        }
+
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             assert!(
@@ -814,6 +839,14 @@ impl MetricsCalculator {
             GasEnergyMetrics {
                 total_therms: therms,
                 total_kwh_equivalent: therms * THERMS_TO_KWH,
+            }
+        });
+
+        let rows_with_partial_setpoint_data_fraction = self.setpoints.as_ref().map(|_| {
+            if self.total_row_count > 0 {
+                self.setpoint_missing_row_count as f64 / self.total_row_count as f64
+            } else {
+                0.0
             }
         });
 
@@ -876,6 +909,7 @@ impl MetricsCalculator {
                         None
                     },
                 },
+                rows_with_partial_setpoint_data_fraction,
             },
             gas_energy,
         }
@@ -1918,5 +1952,265 @@ mod tests {
             "hvac cooling should be -6.0 kWh, got {}",
             loads.hvac_cooling_kwh
         );
+    }
+
+    // ── Nullable-setpoint regression tests ──────────────────────────────
+    // These tests verify that missing setpoint values only skip
+    // comfort/unmet calculations, not envelope/HVAC/battery accumulation.
+    // See: docs/reviews/output/output-03-output-metrics-computation.md
+    // Finding 2.
+
+    fn build_nullable_batch(columns: Vec<(&str, Vec<Option<f64>>)>) -> RecordBatch {
+        let fields = columns
+            .iter()
+            .map(|(name, _)| Field::new(*name, DataType::Float64, true))
+            .collect::<Vec<_>>();
+        let arrays: Vec<ArrayRef> = columns
+            .into_iter()
+            .map(|(_, values)| Arc::new(Float64Array::from(values)) as ArrayRef)
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+        RecordBatch::try_new(schema, arrays).expect("record batch")
+    }
+
+    #[test]
+    fn envelope_loads_accumulate_when_heating_setpoint_is_null() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Window Transmitted Solar Gain (W)",
+            "Infiltration Heat Gain - Indoor (W)",
+            "Temperature - Indoor (C)",
+            "HVAC Heating Setpoint (C)",
+            "HVAC Cooling Setpoint (C)",
+            "Setpoint Deadband (C)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // Row 0: heating setpoint is None → comfort/unmet skipped,
+        //         envelope still accumulates.
+        // Row 1: valid setpoints → comfort counted, envelope accumulates.
+        calc.accumulate(&build_nullable_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![Some(1.0), Some(1.0)]),
+            (
+                "Window Transmitted Solar Gain (W)",
+                vec![Some(1000.0), Some(500.0)],
+            ),
+            (
+                "Infiltration Heat Gain - Indoor (W)",
+                vec![Some(200.0), Some(300.0)],
+            ),
+            ("Temperature - Indoor (C)", vec![Some(21.5), Some(21.5)]),
+            // Row 0 heating setpoint = null
+            ("HVAC Heating Setpoint (C)", vec![None, Some(21.0)]),
+            ("HVAC Cooling Setpoint (C)", vec![Some(23.0), Some(23.0)]),
+            ("Setpoint Deadband (C)", vec![Some(1.0), Some(1.0)]),
+        ]));
+        let metrics = calc.finish();
+
+        let loads = metrics
+            .metrics
+            .envelope_loads_kwh
+            .as_ref()
+            .expect("envelope loads present");
+
+        // Row 0: 1000W × 1h = 1.0 kWh; Row 1: 500W × 1h = 0.5 kWh
+        assert!(
+            (loads.window_solar_kwh - 1.5).abs() < 1e-9,
+            "window solar should be 1.5 kWh, got {}",
+            loads.window_solar_kwh
+        );
+        // Row 0: 200W × 1h = 0.2 kWh; Row 1: 300W × 1h = 0.3 kWh
+        assert!(
+            (loads.infiltration_kwh - 0.5).abs() < 1e-9,
+            "infiltration should be 0.5 kWh, got {}",
+            loads.infiltration_kwh
+        );
+
+        // Only row 1 should contribute to comfort (1 row × 1h)
+        assert_eq!(metrics.comfort_hours, Some(1.0));
+        assert_eq!(metrics.unmet_load_hours, Some(0.0));
+
+        // 1 of 2 rows lacked valid setpoint data
+        let fraction = metrics
+            .rows_with_partial_setpoint_data_fraction
+            .expect("fraction present when setpoints configured");
+        assert!(
+            (fraction - 0.5).abs() < 1e-9,
+            "fraction should be 0.5, got {}",
+            fraction
+        );
+    }
+
+    #[test]
+    fn hvac_thermal_accumulates_when_cooling_setpoint_is_null() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating Delivered (W)",
+            "HVAC Cooling Delivered (W)",
+            "Temperature - Indoor (C)",
+            "HVAC Heating Setpoint (C)",
+            "HVAC Cooling Setpoint (C)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+
+        // Row 0: cooling setpoint is None → comfort/unmet skipped,
+        //         HVAC thermal delivered still accumulates.
+        // Row 1: valid setpoints → comfort counted, accumulates.
+        calc.accumulate(&build_nullable_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![Some(1.0), Some(1.0)]),
+            (
+                "HVAC Heating Delivered (W)",
+                vec![Some(4000.0), Some(3000.0)],
+            ),
+            (
+                "HVAC Cooling Delivered (W)",
+                vec![Some(-2000.0), Some(-1000.0)],
+            ),
+            ("Temperature - Indoor (C)", vec![Some(21.5), Some(21.5)]),
+            ("HVAC Heating Setpoint (C)", vec![Some(21.0), Some(21.0)]),
+            // Row 0 cooling setpoint = null
+            ("HVAC Cooling Setpoint (C)", vec![None, Some(23.0)]),
+        ]));
+        let metrics = calc.finish();
+
+        let loads = metrics
+            .metrics
+            .envelope_loads_kwh
+            .as_ref()
+            .expect("envelope loads present");
+
+        // Row 0: 4000W × 1h = 4 kWh; Row 1: 3000W × 1h = 3 kWh
+        assert!(
+            (loads.hvac_heating_kwh - 7.0).abs() < 1e-9,
+            "hvac heating should be 7.0 kWh, got {}",
+            loads.hvac_heating_kwh
+        );
+        // Row 0: -2000W × 1h = -2 kWh; Row 1: -1000W × 1h = -1 kWh
+        assert!(
+            (loads.hvac_cooling_kwh - (-3.0)).abs() < 1e-9,
+            "hvac cooling should be -3.0 kWh, got {}",
+            loads.hvac_cooling_kwh
+        );
+
+        // Only row 1 should contribute to comfort
+        assert_eq!(metrics.comfort_hours, Some(1.0));
+        assert_eq!(metrics.unmet_load_hours, Some(0.0));
+
+        let fraction = metrics
+            .rows_with_partial_setpoint_data_fraction
+            .expect("fraction present");
+        assert!((fraction - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn battery_energy_accumulates_when_setpoints_are_null() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Battery End Use Electric Power (kW)",
+            "Temperature - Indoor (C)",
+            "HVAC Heating Setpoint (C)",
+            "HVAC Cooling Setpoint (C)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+
+        // Row 0: both setpoints are None → comfort/unmet skipped,
+        //         battery energy still accumulated.
+        // Row 1: valid setpoints → comfort counted, battery accumulates.
+        calc.accumulate(&build_nullable_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![Some(10.0), Some(5.0)]),
+            (
+                "Battery End Use Electric Power (kW)",
+                vec![Some(10.0), Some(-5.0)],
+            ),
+            ("Temperature - Indoor (C)", vec![Some(21.5), Some(21.5)]),
+            // Both setpoints null for row 0
+            ("HVAC Heating Setpoint (C)", vec![None, Some(21.0)]),
+            ("HVAC Cooling Setpoint (C)", vec![None, Some(23.0)]),
+        ]));
+        let metrics = calc.finish();
+
+        // Row 0: 10 kW × 1h = 10 kWh in
+        // Row 1: -5 kW × 1h = 5 kWh out
+        let rte = metrics
+            .efficiency
+            .battery_round_trip_efficiency
+            .expect("RTE should be present");
+        assert!(
+            (rte - 0.5).abs() < 1e-9,
+            "RTE should be 5/10 = 0.5, got {}",
+            rte
+        );
+
+        // Only row 1 comfort
+        assert_eq!(metrics.comfort_hours, Some(1.0));
+        assert_eq!(metrics.unmet_load_hours, Some(0.0));
+
+        let fraction = metrics
+            .rows_with_partial_setpoint_data_fraction
+            .expect("fraction present");
+        assert!((fraction - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn deadband_invalid_does_not_skip_envelope() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Window Transmitted Solar Gain (W)",
+            "HVAC Heating Delivered (W)",
+            "Temperature - Indoor (C)",
+            "HVAC Heating Setpoint (C)",
+            "HVAC Cooling Setpoint (C)",
+            "Setpoint Deadband (C)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // Row 0: deadband is negative → invalid, comfort/unmet skipped,
+        //         envelope and HVAC thermal still accumulate.
+        // Row 1: deadband = 0.0 → valid (zero deadband), comfort counted.
+        calc.accumulate(&build_nullable_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![Some(1.0), Some(1.0)]),
+            (
+                "Window Transmitted Solar Gain (W)",
+                vec![Some(800.0), Some(400.0)],
+            ),
+            (
+                "HVAC Heating Delivered (W)",
+                vec![Some(2000.0), Some(1000.0)],
+            ),
+            ("Temperature - Indoor (C)", vec![Some(21.5), Some(21.5)]),
+            ("HVAC Heating Setpoint (C)", vec![Some(21.0), Some(21.0)]),
+            ("HVAC Cooling Setpoint (C)", vec![Some(23.0), Some(23.0)]),
+            // Row 0: negative deadband (invalid); Row 1: zero (valid)
+            ("Setpoint Deadband (C)", vec![Some(-1.0), Some(0.0)]),
+        ]));
+        let metrics = calc.finish();
+
+        let loads = metrics
+            .metrics
+            .envelope_loads_kwh
+            .as_ref()
+            .expect("envelope loads present");
+
+        // Row 0: 800W × 1h = 0.8 kWh; Row 1: 400W × 1h = 0.4 kWh
+        assert!(
+            (loads.window_solar_kwh - 1.2).abs() < 1e-9,
+            "window solar should be 1.2 kWh, got {}",
+            loads.window_solar_kwh
+        );
+        // Row 0: 2000W × 1h = 2 kWh; Row 1: 1000W × 1h = 1 kWh
+        assert!(
+            (loads.hvac_heating_kwh - 3.0).abs() < 1e-9,
+            "hvac heating should be 3.0 kWh, got {}",
+            loads.hvac_heating_kwh
+        );
+
+        // Only row 1 comfort (deadband is zero, temp inside)
+        assert_eq!(metrics.comfort_hours, Some(1.0));
+
+        // 1 of 2 rows had invalid deadband
+        let fraction = metrics
+            .rows_with_partial_setpoint_data_fraction
+            .expect("fraction present");
+        assert!((fraction - 0.5).abs() < 1e-9);
     }
 }

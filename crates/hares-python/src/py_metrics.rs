@@ -302,6 +302,11 @@ impl PySimulationMetrics {
     }
 
     #[getter]
+    fn rows_with_partial_setpoint_data_fraction(&self) -> Option<f64> {
+        self.inner.metrics.rows_with_partial_setpoint_data_fraction
+    }
+
+    #[getter]
     fn gas_energy(&self) -> Option<PyGasEnergyMetrics> {
         self.inner
             .gas_energy

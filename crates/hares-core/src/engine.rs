@@ -515,6 +515,7 @@ fn empty_metrics() -> SimulationMetrics {
         },
         envelope_loads_kwh: None,
         efficiency: hares_io::EfficiencyMetrics::default(),
+        rows_with_partial_setpoint_data_fraction: None,
     }
 }
 

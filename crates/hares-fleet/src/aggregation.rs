@@ -439,6 +439,7 @@ mod tests {
             },
             envelope_loads_kwh: None,
             efficiency: Default::default(),
+            rows_with_partial_setpoint_data_fraction: None,
         }
     }
 
