@@ -8,7 +8,7 @@ use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
-use hares_types::{FuelType, normalize_ascii};
+use hares_types::FuelType;
 
 use super::building::{Building, XmlNode};
 use super::data_patches::HpxmlDataPatches;
@@ -547,20 +547,7 @@ where
 /// Accepts the HPXML fuel type vocabulary and maps it to the canonical
 /// [`FuelType`] enum. Returns `Err` for unrecognised fuel type strings.
 fn parse_water_heater_fuel_from_str(raw: &str) -> Result<FuelType, super::HpxmlError> {
-    match normalize_ascii(raw).as_str() {
-        "electricity" | "electric" => Ok(FuelType::Electric),
-        "natural gas" | "natural_gas" | "gas" => Ok(FuelType::Gas),
-        "propane" => Ok(FuelType::Propane),
-        "oil" | "fuel oil" | "fuel_oil" | "fuel oil 1" | "fuel oil 2" | "fuel oil 4"
-        | "fuel oil 5/6" | "kerosene" | "diesel" => Ok(FuelType::Oil),
-        "wood" => Ok(FuelType::Wood),
-        "wood pellets" | "wood_pellets" => Ok(FuelType::WoodPellet),
-        "coal" | "anthracite coal" | "anthracite_coal" | "bituminous coal" | "bituminous_coal"
-        | "coke" => Ok(FuelType::Coal),
-        other => Err(super::HpxmlError::Parse(
-            format!("unsupported water-heater FuelType '{other}'").into(),
-        )),
-    }
+    super::xml_helpers::parse_fuel(Some(raw))
 }
 
 /// Resolve the fuel type for a `WaterHeatingSystem` element.
@@ -1397,10 +1384,7 @@ mod tests {
 
         let err = parse_water_heater_fuel(&wh, "storage water heater")
             .expect_err("invalid fuel must be rejected");
-        assert!(
-            err.to_string()
-                .contains("unsupported water-heater FuelType")
-        );
+        assert!(err.to_string().contains("unsupported FuelType"));
     }
 
     #[test]
@@ -1411,10 +1395,7 @@ mod tests {
             "\"none\" is not a valid HPXML fuel type and must be rejected"
         );
         let err = format!("{}", result.unwrap_err());
-        assert!(
-            err.contains("unsupported water-heater FuelType"),
-            "got: {err}"
-        );
+        assert!(err.contains("unsupported FuelType"), "got: {err}");
     }
 
     #[test]

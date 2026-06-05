@@ -2019,3 +2019,30 @@ fn unrecognized_fuel_type_on_cooling_system_returns_error() {
         "error message must name the unrecognized fuel, got: {msg}"
     );
 }
+
+#[test]
+fn missing_fuel_on_heating_system_returns_error() {
+    let xml = minimal_xml_with_systems(
+        r#"<Systems><HVAC>
+            <HeatingSystem>
+                <HeatingSystemType><Furnace/></HeatingSystemType>
+                <HeatingCapacity>36000</HeatingCapacity>
+                <AnnualHeatingEfficiency>
+                    <Units>AFUE</Units>
+                    <Value>0.80</Value>
+                </AnnualHeatingEfficiency>
+            </HeatingSystem>
+        </HVAC></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse XML structure");
+    let result = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}), None);
+    assert!(
+        result.is_err(),
+        "resolve_equipment must return Err when HeatingSystemFuel is absent"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("FuelType is required"),
+        "error message must name the missing field, got: {msg}"
+    );
+}
