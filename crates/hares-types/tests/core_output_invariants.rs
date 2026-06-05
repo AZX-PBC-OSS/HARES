@@ -114,6 +114,7 @@ fn operating_mode_codes_are_stable_and_unique() {
         OperatingMode::HeatingHPAndER,
         OperatingMode::HeatPumpWH,
         OperatingMode::BackupElement,
+        OperatingMode::On,
     ];
 
     let mut seen_codes = Vec::with_capacity(modes.len());

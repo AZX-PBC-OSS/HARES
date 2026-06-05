@@ -1907,6 +1907,7 @@ impl Dwelling {
         {
             hares_io::check_hvac_setpoint_invariants(&equipment_specs);
             hares_io::check_foundation_zone_invariant(&building);
+            hares_io::check_mode_ordinals_invariant();
         }
         let override_root = config
             .overrides

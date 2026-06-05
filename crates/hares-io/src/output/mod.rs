@@ -32,6 +32,9 @@ pub use metrics::{
 };
 pub use writer::{OutputError, StreamingRecorder};
 
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub use columns::check_mode_ordinals_invariant;
+
 /// Summary returned by [`StreamingRecorder::finish`].
 #[derive(Debug, Clone)]
 pub struct OutputSummary {

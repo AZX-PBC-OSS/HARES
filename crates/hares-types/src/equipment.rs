@@ -211,7 +211,7 @@ pub enum ExecutionStage {
 
 /// Runtime operating mode reported by equipment.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumIter)]
 pub enum OperatingMode {
     #[default]
     Off = 0,
@@ -252,6 +252,7 @@ impl TryFrom<u8> for OperatingMode {
             9 => Ok(Self::HeatingHPAndER),
             10 => Ok(Self::HeatPumpWH),
             11 => Ok(Self::BackupElement),
+            12 => Ok(Self::On),
             _ => Err(HaresError::Equipment(format!(
                 "unknown OperatingMode discriminant: {v}"
             ))),
@@ -1211,7 +1212,7 @@ pub fn validate_core_contract(
 
 bitflags! {
     /// Capabilities declared by equipment for CoreOutput validation.
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct CoreCapabilities: u16 {
         const ELECTRIC     = 0b0000_0000_0000_0001;
         const REACTIVE     = 0b0000_0000_0000_0010;
@@ -2360,6 +2361,7 @@ mod tests {
         assert_eq!(OperatingMode::HeatingHPAndER as u8, 9);
         assert_eq!(OperatingMode::HeatPumpWH as u8, 10);
         assert_eq!(OperatingMode::BackupElement as u8, 11);
+        assert_eq!(OperatingMode::On as u8, 12);
     }
 
     #[test]
@@ -2698,11 +2700,11 @@ mod tests {
 
     #[test]
     fn operating_mode_try_from_u8_round_trip() {
-        for v in 0u8..=11 {
+        for v in 0u8..=12 {
             let mode = OperatingMode::try_from(v).expect("valid discriminant");
             assert_eq!(mode as u8, v);
         }
-        assert!(OperatingMode::try_from(12).is_err());
+        assert!(OperatingMode::try_from(13).is_err());
         assert!(OperatingMode::try_from(255).is_err());
     }
 

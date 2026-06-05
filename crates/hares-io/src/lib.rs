@@ -43,6 +43,8 @@ pub use hpxml::building::check_foundation_zone_invariant;
 pub use hpxml::{
     Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml, resolve_equipment,
 };
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub use output::check_mode_ordinals_invariant;
 pub use output::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
     DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,

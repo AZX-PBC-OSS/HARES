@@ -72,3 +72,4 @@ tempfile = "3"
 sha2 = "0.10"
 crc = "3"
 proptest = "1"
+strum = { version = "0.26", features = ["derive"] }

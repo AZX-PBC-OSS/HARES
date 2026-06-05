@@ -7,7 +7,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::hpxml::EquipmentSpec;
 use crate::hpxml::equipment::canonical_instance_namer;
-use hares_types::{EndUse, FuelType, ZoneId};
+use hares_types::{EndUse, FuelType, OperatingMode, ZoneId};
+use strum::IntoEnumIterator;
 
 /// Timestamp column included at every verbosity level.
 const TIMESTAMP_COL: &str = "Time";
@@ -839,7 +840,7 @@ pub fn expected_columns_at_verbosity(
 /// Ordinal values:
 ///   Off=0, Heating=1, Cooling=2, Defrost=3, Standby=4, Charging=5,
 ///   Discharging=6, HeatingHP=7, HeatingER=8, HeatingHPAndER=9,
-///   HeatPumpWH=10, BackupElement=11
+///   HeatPumpWH=10, BackupElement=11, On=12
 fn mode_ordinal_json() -> String {
     serde_json::to_string(&MODE_ORDINALS).expect("static map serialises")
 }
@@ -859,6 +860,32 @@ const MODE_ORDINALS: &[(&str, u8)] = &[
     ("BackupElement", 11),
     ("On", 12),
 ];
+
+/// Gated invariant: every `OperatingMode` variant must have a corresponding
+/// entry in `MODE_ORDINALS` so that Parquet output files remain self-describing.
+///
+/// Uses `strum::EnumIter` to enumerate variants directly from the enum
+/// definition, eliminating the manually-maintained parallel list that was the
+/// root cause of the original drift.
+///
+/// This guard runs at startup in debug builds or when
+/// `feature = "check_invariants"` is enabled. It is not part of the hot path.
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+pub fn check_mode_ordinals_invariant() {
+    for mode in OperatingMode::iter() {
+        let ordinal = mode as u8;
+        let found = MODE_ORDINALS.iter().any(|(_, o)| *o == ordinal);
+        if !found {
+            tracing::error!(
+                ordinal,
+                variant = ?mode,
+                "MODE_ORDINALS is missing entry for OperatingMode variant; \
+                 Parquet metadata will not be self-describing for files \
+                 containing this mode"
+            );
+        }
+    }
+}
 
 /// Generates instance-qualified names for multi-instance equipment.
 ///
@@ -1109,7 +1136,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(meta.get("hares_mode_map").unwrap()).unwrap();
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 13);
+        assert_eq!(arr.len(), OperatingMode::iter().count());
     }
 
     #[test]
@@ -1118,6 +1145,45 @@ mod tests {
         assert_eq!(OperatingMode::Heating.as_code(), 1.0);
         assert_eq!(OperatingMode::BackupElement.as_code(), 11.0);
         assert_eq!(OperatingMode::On.as_code(), 12.0);
+    }
+
+    /// Asserts that `MODE_ORDINALS` has one entry for every `OperatingMode`
+    /// variant. Adding a new variant without updating `MODE_ORDINALS` causes
+    /// this test to fail, guarding against future drift.
+    ///
+    /// Uses `strum::EnumIter` to enumerate variants directly from the enum
+    /// definition. There is no manually-maintained parallel list that could
+    /// drift out of sync.
+    #[test]
+    fn test_mode_ordinals_covers_all_variants() {
+        assert_eq!(
+            MODE_ORDINALS.len(),
+            OperatingMode::iter().count(),
+            "MODE_ORDINALS entry count must match OperatingMode variant count"
+        );
+        for mode in OperatingMode::iter() {
+            let ordinal = mode as u8;
+            let name = format!("{mode:?}");
+            let found = MODE_ORDINALS
+                .iter()
+                .any(|(n, o)| *o == ordinal && *n == name);
+            assert!(
+                found,
+                "MODE_ORDINALS missing entry for {name} (ordinal {ordinal})"
+            );
+        }
+    }
+
+    /// `OperatingMode::On` round-trips through `as_code()` and the metadata
+    /// entry `("On", 12)` exists in `MODE_ORDINALS`.
+    #[test]
+    fn test_on_mode_roundtrips() {
+        assert_eq!(OperatingMode::On.as_code(), 12.0);
+        let entry = MODE_ORDINALS
+            .iter()
+            .find(|(name, _)| *name == "On")
+            .expect("On entry must exist in MODE_ORDINALS");
+        assert_eq!(entry, &("On", 12));
     }
 
     #[test]
