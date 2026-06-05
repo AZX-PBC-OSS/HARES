@@ -150,7 +150,7 @@ fn build_solver_boundaries(
             Some(&boundary.id),
             boundary.interior_zone.as_ref(),
             rc.n_zones,
-        );
+        )?;
         let zone_id = env
             .zones
             .get(zone_idx)

@@ -124,8 +124,8 @@ pub fn building_to_boundary_inputs(
         .boundaries
         .iter()
         .map(|bd| {
-            let interior_zone_idx = find_zone_idx(building, Some(&bd.id), bd.interior_zone.as_ref(), n_zones);
-            let exterior = resolve_exterior(building, bd, n_zones);
+            let interior_zone_idx = find_zone_idx(building, Some(&bd.id), bd.interior_zone.as_ref(), n_zones)?;
+            let exterior = resolve_exterior(building, bd, n_zones)?;
 
             // Film resistances first -- needed to strip from assembly R-value.
             let tilt_deg = bd.tilt_deg.unwrap_or(90.0);
@@ -421,44 +421,60 @@ pub(crate) fn find_zone_idx(
     boundary_id: Option<&str>,
     zone_type: Option<&hares_io::hpxml::ZoneType>,
     n_zones: usize,
-) -> usize {
+) -> Result<usize> {
     if n_zones == 0 {
-        return 0;
+        return Ok(0);
     }
-    if let Some(target) = zone_type {
-        // Adjacent zones are rewritten to the non-Adjacent side's type during
-        // HPXML parsing (building.rs:rewrite_adjacent_zone_pair). If an Adjacent
-        // zone reaches this function, it indicates a bug in that rewrite.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
-        {
-            assert!(
-                !matches!(target, hares_io::hpxml::ZoneType::Adjacent),
-                "Adjacent zone type reached find_zone_idx — the rewrite in building.rs was not applied"
+    let target = match zone_type {
+        Some(zt) => zt,
+        None => {
+            let bid = boundary_id.unwrap_or("<unknown>");
+            tracing::warn!(
+                boundary_id = %bid,
+                "Boundary has no interior zone type; falling back to zone index 0"
             );
+            return Ok(0);
         }
+    };
 
-        // Primary: match by boundary ID + zone type for disambiguation when
-        // multiple zones share the same ZoneType. The boundary ID is tracked
-        // in `attached_wall_ids` for Wall and FoundationWall boundaries.
-        if let Some(bid) = boundary_id
-            && let Some(idx) = building.zones.iter().position(|z| {
-                z.zone_type == *target && z.attached_wall_ids.iter().any(|wid| wid == bid)
-            })
-        {
-            return idx.min(n_zones - 1);
-        }
+    // Adjacent zones are rewritten to the non-Adjacent side's type during
+    // HPXML parsing (building.rs:rewrite_adjacent_zone_pair). If an Adjacent
+    // zone reaches this function, it indicates a bug in that rewrite.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        assert!(
+            !matches!(target, hares_io::hpxml::ZoneType::Adjacent),
+            "Adjacent zone type reached find_zone_idx — the rewrite in building.rs was not applied"
+        );
+    }
 
-        // Fallback: type-only matching for boundaries not tracked in
-        // attached_wall_ids (roofs, floors, doors, windows, auto-generated
-        // interior walls).
-        building
-            .zones
-            .iter()
-            .position(|z| z.zone_type == *target)
-            .unwrap_or(0)
-            .min(n_zones - 1)
+    // Primary: match by boundary ID + zone type for disambiguation when
+    // multiple zones share the same ZoneType. The boundary ID is tracked
+    // in `attached_wall_ids` for Wall and FoundationWall boundaries.
+    if let Some(bid) = boundary_id
+        && let Some(idx) = building.zones.iter().position(|z| {
+            z.zone_type == *target && z.attached_wall_ids.iter().any(|wid| wid == bid)
+        })
+    {
+        return Ok(idx.min(n_zones - 1));
+    }
+
+    // Fallback: type-only matching for boundaries not tracked in
+    // attached_wall_ids (roofs, floors, doors, windows, auto-generated
+    // interior walls).
+    if let Some(idx) = building.zones.iter().position(|z| z.zone_type == *target) {
+        Ok(idx.min(n_zones - 1))
     } else {
-        0
+        let bid = boundary_id.unwrap_or("<unknown>");
+        tracing::warn!(
+            boundary_id = %bid,
+            zone_type = ?target,
+            n_zones = n_zones,
+            "No zone matches the boundary's interior zone type; failing build — no valid zone to connect to"
+        );
+        Err(HaresError::Dwelling(format!(
+            "boundary '{bid}': no zone found for interior zone type {target:?} (n_zones={n_zones})"
+        )))
     }
 }
 
@@ -486,28 +502,28 @@ pub(crate) fn resolve_exterior(
     building: &Building,
     boundary: &hares_io::hpxml::Boundary,
     n_zones: usize,
-) -> ExteriorTarget {
+) -> Result<ExteriorTarget> {
     match boundary.exterior_zone.as_ref() {
-        Some(hares_io::hpxml::ZoneType::Outdoor) => ExteriorTarget::Outdoor,
-        Some(hares_io::hpxml::ZoneType::Ground) => ExteriorTarget::Ground,
+        Some(hares_io::hpxml::ZoneType::Outdoor) => Ok(ExteriorTarget::Outdoor),
+        Some(hares_io::hpxml::ZoneType::Ground) => Ok(ExteriorTarget::Ground),
         Some(hares_io::hpxml::ZoneType::Other(raw)) => {
             tracing::warn!(
                 boundary_id = %boundary.id,
                 zone_type = %raw,
                 "Unrecognised exterior zone type; defaulting to Outdoor"
             );
-            ExteriorTarget::Outdoor
+            Ok(ExteriorTarget::Outdoor)
         }
         Some(zt) => {
-            let idx = find_zone_idx(building, Some(&boundary.id), Some(zt), n_zones);
-            ExteriorTarget::Zone(idx)
+            let idx = find_zone_idx(building, Some(&boundary.id), Some(zt), n_zones)?;
+            Ok(ExteriorTarget::Zone(idx))
         }
         None => {
             tracing::warn!(
                 boundary_id = %boundary.id,
                 "Boundary has no exterior zone; defaulting to Outdoor"
             );
-            ExteriorTarget::Outdoor
+            Ok(ExteriorTarget::Outdoor)
         }
     }
 }
@@ -694,7 +710,7 @@ pub(crate) fn boundary_zone_index(
     boundary_id: Option<&str>,
     zone_type: Option<&hares_io::hpxml::ZoneType>,
     n_zones: usize,
-) -> usize {
+) -> Result<usize> {
     find_zone_idx(building, boundary_id, zone_type, n_zones)
 }
 
@@ -1871,12 +1887,12 @@ mod tests {
 
         // WallA belongs to zone A (index 0).
         assert_eq!(
-            find_zone_idx(&building, Some("WallA"), Some(&ZoneType::Conditioned), 2),
+            find_zone_idx(&building, Some("WallA"), Some(&ZoneType::Conditioned), 2).unwrap(),
             0
         );
         // WallB belongs to zone B (index 1) — must NOT map to zone 0.
         assert_eq!(
-            find_zone_idx(&building, Some("WallB"), Some(&ZoneType::Conditioned), 2),
+            find_zone_idx(&building, Some("WallB"), Some(&ZoneType::Conditioned), 2).unwrap(),
             1
         );
     }
@@ -1908,11 +1924,13 @@ mod tests {
         let building = minimal_building(vec![zone_a, zone_b], Vec::new());
 
         assert_eq!(
-            super::boundary_zone_index(&building, Some("WallA"), Some(&ZoneType::Conditioned), 2,),
+            super::boundary_zone_index(&building, Some("WallA"), Some(&ZoneType::Conditioned), 2,)
+                .unwrap(),
             0
         );
         assert_eq!(
-            super::boundary_zone_index(&building, Some("WallB"), Some(&ZoneType::Conditioned), 2,),
+            super::boundary_zone_index(&building, Some("WallB"), Some(&ZoneType::Conditioned), 2,)
+                .unwrap(),
             1
         );
     }
@@ -1933,20 +1951,27 @@ mod tests {
         };
         let building = minimal_building(vec![zone], Vec::new());
         // No boundary ID provided — uses type-only fallback.
-        assert_eq!(find_zone_idx(&building, None, Some(&ZoneType::Attic), 1), 0);
-    }
-
-    /// `find_zone_idx` returns 0 when n_zones is 0 (edge case).
-    #[test]
-    fn find_zone_idx_zero_zones_returns_zero() {
-        let building = minimal_building(Vec::new(), Vec::new());
         assert_eq!(
-            find_zone_idx(&building, Some("W1"), Some(&ZoneType::Conditioned), 0),
+            find_zone_idx(&building, None, Some(&ZoneType::Attic), 1).unwrap(),
             0
         );
     }
 
-    /// `find_zone_idx` returns 0 when zone_type is None.
+    /// `find_zone_idx` returns Ok(0) when n_zones is 0 (edge case).
+    #[test]
+    fn find_zone_idx_zero_zones_returns_zero() {
+        let building = minimal_building(Vec::new(), Vec::new());
+        assert_eq!(
+            find_zone_idx(&building, Some("W1"), Some(&ZoneType::Conditioned), 0).unwrap(),
+            0
+        );
+    }
+
+    /// `find_zone_idx` returns Ok(0) with a warning when zone_type is None.
+    /// Doors and windows in HPXML legitimately lack explicit interior_zone
+    /// elements; they inherit from parent walls. The warning alerts operators
+    /// to boundaries missing zone assignments, but wiring proceeds with zone 0
+    /// as a fallback rather than failing.
     #[test]
     fn find_zone_idx_none_zone_type_returns_zero() {
         let zone = Zone {
@@ -1960,7 +1985,72 @@ mod tests {
             ventilation_sla: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
-        assert_eq!(find_zone_idx(&building, None, None, 1), 0);
+        assert_eq!(find_zone_idx(&building, Some("Door1"), None, 1).unwrap(), 0);
+    }
+
+    /// `find_zone_idx` returns Err when the zone type exists nowhere in the
+    /// building's zone list.
+    #[test]
+    fn find_zone_idx_unmatched_zone_type_returns_error() {
+        let zone = Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(50.0),
+            volume_m3: Some(100.0),
+            attached_wall_ids: vec![],
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        };
+        let building = minimal_building(vec![zone], Vec::new());
+        let result = find_zone_idx(&building, Some("Roof1"), Some(&ZoneType::Attic), 1);
+        assert!(
+            result.is_err(),
+            "expected Err for unmatched Attic zone type, got {result:?}"
+        );
+    }
+
+    /// `boundary_zone_index` returns Ok(0) with a warning when zone_type is None.
+    #[test]
+    fn boundary_zone_index_none_zone_type_returns_zero() {
+        let zone = Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(50.0),
+            volume_m3: Some(100.0),
+            attached_wall_ids: vec![],
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        };
+        let building = minimal_building(vec![zone], Vec::new());
+        assert_eq!(
+            super::boundary_zone_index(&building, Some("Door1"), None, 1).unwrap(),
+            0
+        );
+    }
+
+    /// `boundary_zone_index` returns Err when the zone type has zero matches in
+    /// the building's zone list.
+    #[test]
+    fn boundary_zone_index_unmatched_zone_type_returns_error() {
+        let zone = Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(50.0),
+            volume_m3: Some(100.0),
+            attached_wall_ids: vec![],
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        };
+        let building = minimal_building(vec![zone], Vec::new());
+        let result =
+            super::boundary_zone_index(&building, Some("Roof1"), Some(&ZoneType::Attic), 1);
+        assert!(
+            result.is_err(),
+            "expected Err for unmatched Attic zone type, got {result:?}"
+        );
     }
 
     /// Build a minimal DefaultsStore for tests that need one.
@@ -2299,7 +2389,7 @@ mod tests {
         };
         let result = resolve_exterior(&building, &boundary, 1);
         assert_eq!(
-            result,
+            result.unwrap(),
             hares_envelope::ExteriorTarget::Outdoor,
             "None exterior zone must default to Outdoor target"
         );
@@ -2346,7 +2436,7 @@ mod tests {
         };
         let result = resolve_exterior(&building, &boundary, 1);
         assert_eq!(
-            result,
+            result.unwrap(),
             hares_envelope::ExteriorTarget::Outdoor,
             "unrecognised exterior zone type must map to Outdoor target"
         );
