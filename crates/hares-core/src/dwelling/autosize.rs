@@ -895,9 +895,11 @@ fn tank_volume_from_bedrooms_gal(n_bedrooms: f64) -> f64 {
 
 /// Resolve outdoor design dry-bulb temperatures [°C].
 ///
-/// Prefers EPW design conditions (parsed from the "Extremes" section of the
-/// EPW header). Falls back to the nearest ASHRAE 152 climate station when
-/// EPW design conditions are unavailable (e.g., PSM3, TMY3, ResStock CSV).
+/// Prefers EPW design conditions parsed from the ASHRAE `Heating`/`Cooling`
+/// sections of the EPW header (TMY3 files), falling back to the `Extremes`
+/// section for non-TMY3 EPW formats. Falls back to the nearest ASHRAE 152
+/// climate station when EPW design conditions are unavailable (e.g., PSM3,
+/// TMY3 standalone, ResStock CSV).
 fn resolve_design_temperatures(
     design_conditions: Option<DesignConditions>,
     weather_lat: f64,

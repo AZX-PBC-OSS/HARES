@@ -45,14 +45,26 @@ const IDX_WIND_SPEED_M_S: usize = 21;
 const IDX_OPAQUE_SKY_COVER: usize = 23;
 const IDX_LIQUID_PRECIP_DEPTH_MM: usize = 33;
 
-/// Parsed design conditions from EPW header line 2.
+/// Parsed outdoor design dry-bulb temperatures [°C] from EPW header line 2.
 ///
-/// Extracted from the "Extremes" section at the end of the design conditions line.
-/// `heating_design_db_c` is the minimum of all extreme low dry-bulb temperatures;
-/// `cooling_design_db_c` is the maximum of all extreme high dry-bulb temperatures.
+/// Extracted from the ASHRAE `Heating`/`Cooling` sections when available
+/// (TMY3 EPW files): `heating_design_db_c` is the 99.6% heating design
+/// dry-bulb; `cooling_design_db_c` is the 0.4% cooling design dry-bulb.
+///
+/// Falls back to the `Extremes` section for non-TMY3 EPW formats that lack
+/// ASHRAE design condition sections.
+///
+/// EPW Data Dictionary v9.6 §DESIGN CONDITIONS: the design-conditions line
+/// is an informational header. Authoritative design-day data lives in
+/// separate DDY (Design Day) files. The values here provide a design
+/// temperature when DDY data or ASHRAE 152 station data is unavailable.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DesignConditions {
+    /// 99.6% heating design dry-bulb temperature [°C] from ASHRAE Heating
+    /// section, or minimum of extreme lows from the Extremes fallback.
     pub heating_design_db_c: f64,
+    /// 0.4% cooling design dry-bulb temperature [°C] from ASHRAE Cooling
+    /// section, or maximum of extreme highs from the Extremes fallback.
     pub cooling_design_db_c: f64,
 }
 
@@ -1058,44 +1070,59 @@ fn records_to_series(
     }
 }
 
-/// Parse the EPW design-conditions header (line 2) to extract extreme
-/// heating and cooling dry-bulb temperatures.
+/// Parse the EPW design-conditions header (line 2) to extract outdoor
+/// design dry-bulb temperatures [°C] for HVAC equipment sizing.
 ///
-/// The EPW design-conditions line format varies by data source. This parser
-/// handles the common pattern where the line ends with an "Extremes" section
-/// containing pairs of (extreme low, extreme high) temperatures. When the
-/// "Extremes" section is present, `heating_design_db_c` is set to the minimum
-/// of all extreme low dry-bulb temperatures and `cooling_design_db_c` is set
-/// to the maximum of all extreme high dry-bulb temperatures.
+/// Extraction strategy (EPW Data Dictionary v9.6 §DESIGN CONDITIONS):
 ///
-/// Returns `None` when:
-/// - The line does not contain an "Extremes" token.
-/// - No parseable numeric values follow the "Extremes" token.
-/// - The header line has zero design conditions (common for synthetic/test EPWs).
+/// 1. **ASHRAE `Heating`/`Cooling` sections** (TMY3 EPW files). These contain
+///    the ASHRAE HOF 2009 climatic design conditions:
+///    - `Heating,N,{DB99.6},{...}` — field index 2 is the 99.6% heating
+///      design dry-bulb.
+///    - `Cooling,N,{MCWB},{DB0.4},{...}` — field index 3 is the 0.4% cooling
+///      design dry-bulb.
 ///
-/// # EPW Data Dictionary v9.6
+/// 2. **`Extremes` section fallback** (older/non-TMY3 EPW files). The
+///    `Extremes` section contains alternating extreme low/high values for
+///    multiple weather parameters, not just dry-bulb. We collect all
+///    parseable values in the low/high toggle, then take `min(lows)` and
+///    `max(highs)`. This is an approximation — it works because dry-bulb
+///    extremes typically bound other parameters — but can produce
+///    conservative (oversized) results when non-dry-bulb values pollute
+///    the min/max.
 ///
-/// The design-conditions line is an informational header. The authoritative
-/// design-day data lives in separate DDY (Design Day) files. The "Extremes"
-/// summary here provides a fallback design temperature when ASHRAE 152
-/// climate station data is unavailable.
+/// Returns `None` when neither Heating/Cooling nor Extremes sections
+/// yield finite values (common for synthetic/test EPWs with a "0" summary).
 fn parse_design_conditions(line: &str) -> Option<DesignConditions> {
     let fields: Vec<&str> = line.split(',').collect();
     if fields.is_empty() {
         return None;
     }
 
-    // Find the "Extremes" token in the comma-separated fields.
+    // Try ASHRAE Heating/Cooling design conditions (TMY3 EPW).
+    if let (Some(htg_db), Some(clg_db)) = (
+        parse_heating_design_db(&fields),
+        parse_cooling_design_db(&fields),
+    ) {
+        debug!(
+            htg_c = htg_db,
+            clg_c = clg_db,
+            "design conditions from EPW Heating/Cooling sections"
+        );
+        return Some(DesignConditions {
+            heating_design_db_c: htg_db,
+            cooling_design_db_c: clg_db,
+        });
+    }
+
+    // Fall back to the Extremes section when Heating/Cooling are absent.
     let extremes_idx = fields
         .iter()
         .position(|f| f.trim().eq_ignore_ascii_case("Extremes"))?;
 
-    // Parse numeric values after the "Extremes" token.
-    // Format: Extremes,{n},{low1},{high1},{low2},{high2},...
-    // We collect all extreme low and high values.
     let mut heating_candidates: Vec<f64> = Vec::new();
     let mut cooling_candidates: Vec<f64> = Vec::new();
-    let mut is_low = true; // Toggle: low, high, low, high, ...
+    let mut is_low = true;
 
     for raw in fields.iter().skip(extremes_idx + 1) {
         let trimmed = raw.trim();
@@ -1127,10 +1154,43 @@ fn parse_design_conditions(line: &str) -> Option<DesignConditions> {
         return None;
     }
 
+    debug!(
+        htg_c = heating_design_db_c,
+        clg_c = cooling_design_db_c,
+        "design conditions from EPW Extremes section (Heating/Cooling sections not found)"
+    );
+
     Some(DesignConditions {
         heating_design_db_c,
         cooling_design_db_c,
     })
+}
+
+/// Extract the 99.6% heating design dry-bulb [°C] from the EPW `Heating`
+/// design-conditions section.
+///
+/// Format: `Heating,{N},{DB99.6},{...}`
+/// DB99.6 is at field index 2 relative to the "Heating" token.
+fn parse_heating_design_db(fields: &[&str]) -> Option<f64> {
+    let idx = fields
+        .iter()
+        .position(|f| f.trim().eq_ignore_ascii_case("Heating"))?;
+    let val = fields.get(idx + 2)?.trim().parse::<f64>().ok()?;
+    if val.is_finite() { Some(val) } else { None }
+}
+
+/// Extract the 0.4% cooling design dry-bulb [°C] from the EPW `Cooling`
+/// design-conditions section.
+///
+/// Format: `Cooling,{N},{MCWB},{DB0.4},{...}`
+/// DB0.4 is at field index 3 relative to the "Cooling" token (the first
+/// numeric field after N is the mean coincident wet-bulb, not dry-bulb).
+fn parse_cooling_design_db(fields: &[&str]) -> Option<f64> {
+    let idx = fields
+        .iter()
+        .position(|f| f.trim().eq_ignore_ascii_case("Cooling"))?;
+    let val = fields.get(idx + 3)?.trim().parse::<f64>().ok()?;
+    if val.is_finite() { Some(val) } else { None }
 }
 
 #[cfg(test)]
@@ -1144,10 +1204,11 @@ mod tests {
     use super::{
         DOE2_GROUND_DAYS_PER_YEAR, DOE2_GROUND_DIFFUSIVITY, DOE2_GROUND_HOURS_PER_YEAR,
         DOE2_GROUND_PHASE_OFFSET_RAD, DOE2_GROUND_REFERENCE_DEPTH_M, DOE2_MID_MONTH_DAYS,
-        STEFAN_BOLTZMANN, SkyTempModel, WeatherError, berdahl_martin_sky_emissivity,
-        brunt_sky_emissivity, clark_allen_sky_temp_c, compute_sky_temp_c, doe2_ground_temp_monthly,
-        idso_sky_emissivity, monthly_day_counts, parse_epw, parse_epw_str,
-        sky_temp_from_emissivity, walton_cloud_correction,
+        STEFAN_BOLTZMANN, SkyTempModel, WeatherError, DesignConditions,
+        berdahl_martin_sky_emissivity, brunt_sky_emissivity, clark_allen_sky_temp_c,
+        compute_sky_temp_c, doe2_ground_temp_monthly, idso_sky_emissivity, monthly_day_counts,
+        parse_design_conditions, parse_epw, parse_epw_str, sky_temp_from_emissivity,
+        walton_cloud_correction,
     };
 
     fn write_temp_epw(epw_contents: &str) -> PathBuf {
@@ -2421,5 +2482,98 @@ mod tests {
         let parsed = parse_epw_str(&epw).expect("8760+No EPW should parse");
         assert_eq!(parsed.len(), 8760);
         assert!(!parsed.meta.wf_allows_leap_years);
+    }
+
+    #[test]
+    fn design_conditions_from_heating_cooling_sections() {
+        // Denver TMY3 EPW header line 2 with ASHRAE Heating/Cooling sections
+        // and trailing Extremes. Verify parser extracts the 99.6% heating DB
+        // (-17.4°C) and 0.4% cooling DB (34.6°C) from the ASHRAE sections,
+        // not the record extremes (-29.9°C / 40.5°C).
+        let header = concat!(
+            "DESIGN CONDITIONS,1,Climate Design Data 2009 ASHRAE Handbook,,",
+            "Heating,12,-17.4,-14,-21.5,0.7,-11.7,-18.9,0.9,-6.9,14.1,1.8,12,2.4,3.3,160,",
+            "Cooling,7,15.2,34.6,15.7,33.2,15.6,31.8,15.4,18.3,27.3,17.6,27,17,26.5,4.2,80,16,14,19.9,15.2,13.2,19.7,14.1,12.3,19.6,58.3,27,55.9,26.9,53.8,26.3,722,",
+            "Extremes,11.9,10.4,8.8,20.7,-22.7,37.1,2.8,1.3,-24.7,38,-26.3,38.8,-27.9,39.5,-29.9,40.5"
+        );
+
+        let dc = parse_design_conditions(header).expect("should parse design conditions");
+        assert!(
+            (dc.heating_design_db_c - (-17.4)).abs() < 0.01,
+            "expected heating design -17.4°C, got {}°C",
+            dc.heating_design_db_c
+        );
+        assert!(
+            (dc.cooling_design_db_c - 34.6).abs() < 0.01,
+            "expected cooling design 34.6°C, got {}°C",
+            dc.cooling_design_db_c
+        );
+    }
+
+    #[test]
+    fn design_conditions_falls_back_to_extremes() {
+        // Synthetic EPW header without Heating/Cooling sections — only
+        // Extremes. Parser should fall back to min of extreme lows and
+        // max of extreme highs.
+        //
+        // Values chosen so the parameters-mixing toggle bug (low/high
+        // alternation across non-dry-bulb parameters) would produce
+        // incorrect results if the toggle were the *only* path. The
+        // Extremes fallback uses the same toggle as before, but this
+        // test verifies that the fallback path is reached and produces
+        // the expected min/max of the given values.
+        let header = concat!(
+            "DESIGN CONDITIONS,1,Climate Design Data 2009 ASHRAE Handbook,,",
+            "Extremes,-25.0,42.0,-22.0,40.0,-28.0,44.0"
+        );
+
+        let dc = parse_design_conditions(header).expect("should parse from extremes");
+        assert!(
+            (dc.heating_design_db_c - (-28.0)).abs() < 0.01,
+            "fallback heating should be min of lows (-28.0), got {}°C",
+            dc.heating_design_db_c
+        );
+        assert!(
+            (dc.cooling_design_db_c - 44.0).abs() < 0.01,
+            "fallback cooling should be max of highs (44.0), got {}°C",
+            dc.cooling_design_db_c
+        );
+    }
+
+    #[test]
+    fn design_conditions_prefers_heating_cooling_over_extremes() {
+        // When both ASHRAE Heating/Cooling sections and an Extremes section
+        // are present with deliberately different values, the parser must
+        // prefer the Heating/Cooling values.
+        let header = concat!(
+            "DESIGN CONDITIONS,1,any source,,",
+            "Heating,1,-10.0,X,",
+            "Cooling,1,X,30.0,X,",
+            "Extremes,-25.0,45.0"
+        );
+
+        let dc = parse_design_conditions(header).expect("should parse from Heating/Cooling");
+        assert!(
+            (dc.heating_design_db_c - (-10.0)).abs() < 0.01,
+            "should use Heating section -10.0°C, not Extremes -25.0, got {}°C",
+            dc.heating_design_db_c
+        );
+        assert!(
+            (dc.cooling_design_db_c - 30.0).abs() < 0.01,
+            "should use Cooling section 30.0°C, not Extremes 45.0, got {}°C",
+            dc.cooling_design_db_c
+        );
+    }
+
+    #[test]
+    fn design_conditions_none_when_empty_line() {
+        assert!(
+            parse_design_conditions("").is_none(),
+            "empty line yields None"
+        );
+        assert!(
+            parse_design_conditions("DESIGN CONDITIONS,0").is_none(),
+            "design conditions with 0 count yields None"
+        );
     }
 }
