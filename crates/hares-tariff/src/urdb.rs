@@ -209,6 +209,30 @@ fn season_for_months(months: &BTreeSet<u8>, summer_months: &BTreeSet<u8>) -> Sea
     }
 }
 
+/// Detect an explicit season label from a `flatdemandstructure` tier object.
+/// Checks common field names (`season`, `seasonId`, `season_name`, `seasonid`).
+/// Returns `None` if no recognized label is present.
+fn season_from_tier_label(tier: &Value) -> Option<SeasonFilter> {
+    for field in &["season", "seasonId", "season_name", "seasonid"] {
+        if let Some(s) = tier.get(field).and_then(Value::as_str) {
+            return Some(match s.to_lowercase().as_str() {
+                "summer" => SeasonFilter::Summer,
+                "winter" => SeasonFilter::Winter,
+                "all" | "both" => SeasonFilter::All,
+                other => {
+                    tracing::warn!(
+                        field,
+                        value = other,
+                        "unknown season label in flatdemandstructure tier; treating as All"
+                    );
+                    SeasonFilter::All
+                }
+            });
+        }
+    }
+    None
+}
+
 /// Find contiguous hour ranges for a period in a single schedule matrix,
 /// across the months that use that period. Uses the union of all active
 /// hours; warns if months have different hour patterns for the same period.
@@ -477,6 +501,8 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     let summer_months = detect_summer_months(&weekday_sched, &weekend_sched)
         .unwrap_or_else(|| default_summer.clone());
 
+    let tariff_name = root.get("name").and_then(Value::as_str).map(String::from);
+
     // Build TOU periods and energy rates
     let mut tou_schedule = Vec::new();
     let mut energy_rates = Vec::new();
@@ -566,25 +592,53 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
             minimum_fraction: pct / 100.0,
         });
 
-    // Flat demand (non-TOU). URDB outer array index maps to season:
-    // typically index 0 = summer, index 1 = winter for 2-entry structures.
+    // Flat demand (non-TOU). Prefer explicit season labels in tier objects;
+    // fall back to array-position heuristic only when no labels are present.
     if let Some(flat_demand) = extract_rate_tiers(&root, "flatdemandstructure")? {
+        let num_entries = flat_demand.len();
+
+        // Collect explicit season labels from the first tier of each entry.
+        let label_seasons: Vec<Option<SeasonFilter>> = flat_demand
+            .iter()
+            .map(|tiers| tiers.first().and_then(season_from_tier_label))
+            .collect();
+        let has_explicit_labels = label_seasons.iter().any(Option::is_some);
+
         for (idx, tiers) in flat_demand.iter().enumerate() {
             let rate = tiers.first().map(tier_rate).unwrap_or(0.0);
             if rate > 0.0 {
-                let season = match flat_demand.len() {
-                    1 => SeasonFilter::All,
-                    _ => match idx {
-                        0 => SeasonFilter::Summer,
+                let season = if has_explicit_labels {
+                    label_seasons[idx].unwrap_or_else(|| {
+                        tracing::warn!(
+                            index = idx,
+                            "flatdemandstructure entry has no season label while other entries do; using array-position fallback"
+                        );
+                        match idx {
+                            0 => SeasonFilter::Summer,
+                            _ => SeasonFilter::Winter,
+                        }
+                    })
+                } else if num_entries == 1 {
+                    SeasonFilter::All
+                } else {
+                    match idx {
+                        0 => {
+                            tracing::warn!(
+                                tariff = ?tariff_name,
+                                "flatdemandstructure has {} entries; season inferred from array position (entry 0 assumed Summer) because no explicit season labels found",
+                                num_entries
+                            );
+                            SeasonFilter::Summer
+                        }
                         1 => SeasonFilter::Winter,
                         _ => {
                             tracing::warn!(
                                 index = idx,
-                                "flatdemandstructure has >2 entries; assigning All to extra entries"
+                                "flatdemandstructure has >2 entries; assigning All to extra entry"
                             );
                             SeasonFilter::All
                         }
-                    },
+                    }
                 };
                 demand_rates.push(DemandRate {
                     period_name: None,
@@ -660,8 +714,6 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
 
     let minimum_charge = root.get("minmonthlycharge").and_then(Value::as_f64);
 
-    let name = root.get("name").and_then(Value::as_str).map(String::from);
-
     // Determine seasonal split based on whether any period is season-specific
     let has_seasonal = period_seasons
         .values()
@@ -673,7 +725,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     };
 
     let tariff = ElectricTariff {
-        name,
+        name: tariff_name,
         tou_schedule,
         energy_rates,
         demand_rates,
@@ -1093,5 +1145,111 @@ mod tests {
         assert_eq!(tariff.demand_rates.len(), 1);
         // rate=7.5 + adj=2.5 = 10.0, no component fields present
         assert!((tariff.demand_rates[0].rate_per_kw - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn flat_demand_season_from_explicit_label_not_array_position() {
+        // Winter-first, Summer-second ordering. Energy schedule has summer
+        // months June-September (period 2 only in months 6-9).
+        let json = r#"{
+            "energyweekdayschedule": [
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+            ],
+            "energyweekendschedule": [
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+            ],
+            "energyratestructure": [[{"rate":0.10}],[{"rate":0.10}],[{"rate":0.25}]],
+            "flatdemandstructure": [
+                [{"rate":8.0,"season":"Winter"}],
+                [{"rate":15.0,"season":"Summer"}]
+            ]
+        }"#;
+        let tariff = parse(json).unwrap();
+
+        assert_eq!(tariff.demand_rates.len(), 2, "should have two demand rates");
+
+        // The entry with season label "Winter" should be Winter, regardless
+        // of being at array position 0.
+        let winter_rate = tariff
+            .demand_rates
+            .iter()
+            .find(|d| d.season == SeasonFilter::Winter && (d.rate_per_kw - 8.0).abs() < 1e-6)
+            .expect("should have winter demand rate at ~8.0");
+        assert_eq!(winter_rate.season, SeasonFilter::Winter);
+
+        // The entry with season label "Summer" should be Summer.
+        let summer_rate = tariff
+            .demand_rates
+            .iter()
+            .find(|d| d.season == SeasonFilter::Summer && (d.rate_per_kw - 15.0).abs() < 1e-6)
+            .expect("should have summer demand rate at ~15.0");
+        assert_eq!(summer_rate.season, SeasonFilter::Summer);
+    }
+
+    #[test]
+    fn flat_demand_three_entries_without_labels_assigns_all_to_extra() {
+        let json = minimal_valid_json(
+            r#""flatdemandstructure":[[{"rate":12.0}],[{"rate":8.0}],[{"rate":5.0}]]"#,
+        );
+        let tariff = parse(&json).unwrap();
+
+        assert_eq!(
+            tariff.demand_rates.len(),
+            3,
+            "should have three demand rates"
+        );
+
+        // Position 0 = Summer (position heuristic), 1 = Winter, 2 = All (extra)
+        let seasons: Vec<SeasonFilter> = tariff.demand_rates.iter().map(|d| d.season).collect();
+        assert_eq!(seasons[0], SeasonFilter::Summer, "entry 0 should be Summer");
+        assert_eq!(seasons[1], SeasonFilter::Winter, "entry 1 should be Winter");
+        assert_eq!(
+            seasons[2],
+            SeasonFilter::All,
+            "entry 2 (extra) should be All"
+        );
+    }
+
+    #[test]
+    fn flat_demand_two_entries_without_labels_uses_position_heuristic() {
+        let json = minimal_valid_json(r#""flatdemandstructure":[[{"rate":15.0}],[{"rate":8.0}]]"#);
+        let tariff = parse(&json).unwrap();
+
+        assert_eq!(tariff.demand_rates.len(), 2, "should have two demand rates");
+
+        // Without explicit labels, position heuristic applies: 0 = Summer, 1 = Winter
+        let seasons: Vec<SeasonFilter> = tariff.demand_rates.iter().map(|d| d.season).collect();
+        assert_eq!(
+            seasons[0],
+            SeasonFilter::Summer,
+            "entry 0 should be Summer (position heuristic)"
+        );
+        assert_eq!(
+            seasons[1],
+            SeasonFilter::Winter,
+            "entry 1 should be Winter (position heuristic)"
+        );
     }
 }
