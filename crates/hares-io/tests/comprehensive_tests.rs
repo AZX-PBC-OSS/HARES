@@ -179,9 +179,9 @@ fn verbosity_0_column_names_match_ochre() {
 
 #[test]
 fn expected_columns_at_verbosity_2_includes_ochre_temp_format() {
-    let cols = expected_columns_at_verbosity(2);
+    let cols = expected_columns_at_verbosity(2, &[]);
     assert!(
-        cols.contains(&"Temperature - Indoor (C)"),
+        cols.contains(&"Temperature - Indoor (C)".to_string()),
         "expected_columns_at_verbosity(2) must include 'Temperature - Indoor (C)', got: {cols:?}"
     );
 }
@@ -213,13 +213,13 @@ fn context_columns_present_at_all_verbosity_levels() {
 #[test]
 fn expected_columns_at_verbosity_includes_context_columns_at_all_levels() {
     for v in 0..=8u8 {
-        let cols = expected_columns_at_verbosity(v);
+        let cols = expected_columns_at_verbosity(v, &[]);
         assert!(
-            cols.contains(&"Outdoor Dry Bulb (C)"),
+            cols.contains(&"Outdoor Dry Bulb (C)".to_string()),
             "expected_columns_at_verbosity({v}) must include 'Outdoor Dry Bulb (C)'"
         );
         assert!(
-            cols.contains(&"Temperature - Indoor (C)"),
+            cols.contains(&"Temperature - Indoor (C)".to_string()),
             "expected_columns_at_verbosity({v}) must include 'Temperature - Indoor (C)'"
         );
     }

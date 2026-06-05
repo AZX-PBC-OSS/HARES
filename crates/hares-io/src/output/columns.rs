@@ -417,12 +417,25 @@ pub fn build_schema(
     }
 
     if verbosity >= 2 {
-        fields.push(Field::new(
-            format!("{ZONE_TEMP_PREFIX} Attic {ZONE_TEMP_UNIT}"),
-            DataType::Float64,
-            true,
-        ));
+        // Per-zone temperature columns for non-Indoor zones.
+        // Indoor temperature is always present as a context column at every
+        // verbosity level (added above). Attic and other structural zones
+        // are emitted only when present in the zone_names list, eliminating
+        // all-null columns for simulations without those zones.
+        for (_zone_id, zone_name) in zone_names {
+            if zone_name != "Indoor" {
+                fields.push(Field::new(
+                    format!("{ZONE_TEMP_PREFIX} {zone_name} {ZONE_TEMP_UNIT}"),
+                    DataType::Float64,
+                    true,
+                ));
+            }
+        }
         fields.push(Field::new(ZONE_UNMET_LOAD_COL, DataType::Float64, true));
+        // Temperature - Ground (C) is always emitted (not zone-conditional):
+        // it is populated from weather.ground_temp_c which is valid for
+        // every simulation, regardless of zone configuration. OCHRE convention
+        // includes it unconditionally alongside Outdoor Dry Bulb.
         fields.push(Field::new(GROUND_TEMP_COL, DataType::Float64, true));
     }
 
@@ -499,7 +512,7 @@ pub fn build_schema(
     if verbosity >= 6 {
         // Level 6: component loads per boundary.
         // Note: Energy (kWh) columns are already added at verbosity 4.
-        // Envelope component load columns for Indoor zone.
+        // Indoor zone envelope breakdown — always present.
         for label in &[
             "Window Transmitted Solar Gain (W)",
             "Infiltration Heat Gain - Indoor (W)",
@@ -514,11 +527,25 @@ pub fn build_schema(
             "Wall Heat Gain - Indoor (W)",
             "Window Heat Gain - Indoor (W)",
             "Internal Mass Heat Gain - Indoor (W)",
-            // Attic zone envelope breakdown (multi-zone buildings).
-            "Infiltration Heat Gain - Attic (W)",
-            "Interior LWR Exchange - Attic (W)",
         ] {
             fields.push(Field::new(*label, DataType::Float64, true));
+        }
+        // Non-Indoor zone envelope breakdown — conditional on zone presence.
+        // Eliminates all-null columns (see review Finding 3) for simulations
+        // without attic or other structural zones.
+        for (_zone_id, zone_name) in zone_names {
+            if zone_name != "Indoor" {
+                fields.push(Field::new(
+                    format!("Infiltration Heat Gain - {zone_name} (W)"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("Interior LWR Exchange - {zone_name} (W)"),
+                    DataType::Float64,
+                    true,
+                ));
+            }
         }
         // Per-zone HVAC thermal attribution columns.
         // Enables diagnosing how much heating/cooling went to each zone
@@ -725,6 +752,35 @@ pub fn build_schema(
         }
     }
 
+    #[cfg(feature = "observe")]
+    {
+        let zone_temp_count = fields
+            .iter()
+            .filter(|f| {
+                f.name().starts_with("Temperature - ")
+                    && f.name().ends_with("(C)")
+                    && !f.name().starts_with("Temperature - Indoor")
+                    && f.name() != GROUND_TEMP_COL
+            })
+            .count();
+        let zone_inf_lwr_count = fields
+            .iter()
+            .filter(|f| {
+                f.name().starts_with("Infiltration Heat Gain - ")
+                    && !f.name().starts_with("Infiltration Heat Gain - Indoor")
+            })
+            .count();
+        let any_attic = zone_names.iter().any(|(_, n)| n == "Attic");
+        tracing::info!(
+            verbosity,
+            zone_count = zone_names.len(),
+            zone_temp_columns = zone_temp_count,
+            zone_infiltration_lwr_columns = zone_inf_lwr_count,
+            attic_present = any_attic,
+            "output schema constructed"
+        );
+    }
+
     let mut metadata = std::collections::HashMap::new();
     metadata.insert("hares_verbosity".to_string(), verbosity.to_string());
     metadata.insert("hares_mode_map".to_string(), mode_ordinal_json());
@@ -733,33 +789,45 @@ pub fn build_schema(
 }
 
 /// Returns column names that should be present at a given verbosity level
-/// for use in tests. These are the static (equipment-independent) columns only;
-/// per-equipment columns (power, mode, SOC, energy, schedule, etc.) are
+/// for use in tests. These are the equipment-independent columns only;
+/// zone-specific columns (temperature, infiltration, LWR) are conditional
+/// on `zone_names` and are included when the corresponding zone is present.
+/// Per-equipment columns (power, mode, SOC, energy, schedule, etc.) are
 /// generated dynamically by `build_schema` based on the equipment list and
 /// are not covered here.
-pub fn expected_columns_at_verbosity(verbosity: u8) -> Vec<&'static str> {
-    let mut cols = vec![TIMESTAMP_COL];
-    cols.extend_from_slice(LEVEL_0_COLUMNS);
-    cols.push(OUTDOOR_TEMP_COL);
-    cols.push("Temperature - Indoor (C)");
+pub fn expected_columns_at_verbosity(
+    verbosity: u8,
+    zone_names: &[(ZoneId, String)],
+) -> Vec<String> {
+    let mut cols: Vec<String> = vec![TIMESTAMP_COL.to_string()];
+    for &col in LEVEL_0_COLUMNS {
+        cols.push(col.to_string());
+    }
+    cols.push(OUTDOOR_TEMP_COL.to_string());
+    cols.push("Temperature - Indoor (C)".to_string());
 
     if verbosity >= 2 {
-        cols.push("Temperature - Attic (C)");
-        cols.push(ZONE_UNMET_LOAD_COL);
-        cols.push(GROUND_TEMP_COL);
+        // Per-zone temperature columns for non-Indoor zones.
+        for (_zone_id, zone_name) in zone_names {
+            if zone_name != "Indoor" {
+                cols.push(format!("{ZONE_TEMP_PREFIX} {zone_name} {ZONE_TEMP_UNIT}"));
+            }
+        }
+        cols.push(ZONE_UNMET_LOAD_COL.to_string());
+        cols.push(GROUND_TEMP_COL.to_string());
     }
 
     if verbosity >= 5 {
-        cols.push(NET_SENSIBLE_HEAT_GAIN_COL);
-        cols.push(HVAC_DUCT_LOSSES_COL);
+        cols.push(NET_SENSIBLE_HEAT_GAIN_COL.to_string());
+        cols.push(HVAC_DUCT_LOSSES_COL.to_string());
     }
 
     if verbosity >= 7 {
-        cols.push(HOT_WATER_MAINS_TEMP_COL);
-        cols.push(SCHEDULED_HEATING_SETPOINT_COL);
-        cols.push(SCHEDULED_COOLING_SETPOINT_COL);
-        cols.push(RUNTIME_HEATING_SETPOINT_COL);
-        cols.push(RUNTIME_COOLING_SETPOINT_COL);
+        cols.push(HOT_WATER_MAINS_TEMP_COL.to_string());
+        cols.push(SCHEDULED_HEATING_SETPOINT_COL.to_string());
+        cols.push(SCHEDULED_COOLING_SETPOINT_COL.to_string());
+        cols.push(RUNTIME_HEATING_SETPOINT_COL.to_string());
+        cols.push(RUNTIME_COOLING_SETPOINT_COL.to_string());
     }
 
     cols
@@ -932,9 +1000,9 @@ mod tests {
 
     #[test]
     fn verbosity_0_column_names_match_ochre() {
-        let expected = expected_columns_at_verbosity(0);
-        assert!(expected.contains(&"Total Electric Power (kW)"));
-        assert!(expected.contains(&"Total Gas Power (therms/hour)"));
+        let expected = expected_columns_at_verbosity(0, &[]);
+        assert!(expected.contains(&"Total Electric Power (kW)".to_string()));
+        assert!(expected.contains(&"Total Gas Power (therms/hour)".to_string()));
     }
 
     #[test]
@@ -963,10 +1031,23 @@ mod tests {
     }
 
     #[test]
-    fn verbosity_2_adds_attic_and_ground_temp_columns() {
-        let schema = build_schema(&[], 2, &[]);
+    fn verbosity_2_adds_attic_temp_when_attic_zone_present() {
+        let zone_names = vec![
+            (ZoneId(1), "Indoor".to_string()),
+            (ZoneId(2), "Attic".to_string()),
+        ];
+        let schema = build_schema(&[], 2, &zone_names);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Temperature - Attic (C)"));
+        assert!(names.contains(&"Unmet HVAC Load (C)"));
+        assert!(names.contains(&"Temperature - Ground (C)"));
+    }
+
+    #[test]
+    fn verbosity_2_skips_attic_temp_when_no_attic_zone() {
+        let schema = build_schema(&[], 2, &[]);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(!names.contains(&"Temperature - Attic (C)"));
         assert!(names.contains(&"Unmet HVAC Load (C)"));
         assert!(names.contains(&"Temperature - Ground (C)"));
     }
@@ -1043,9 +1124,9 @@ mod tests {
     fn expected_columns_at_verbosity_0_is_subset_of_schema() {
         let schema = build_schema(&[], 0, &[]);
         let schema_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        for col in expected_columns_at_verbosity(0) {
+        for col in expected_columns_at_verbosity(0, &[]) {
             assert!(
-                schema_names.contains(&col),
+                schema_names.contains(&col.as_str()),
                 "expected column '{col}' not in schema"
             );
         }
@@ -1121,6 +1202,142 @@ mod tests {
             names.contains(&"HVAC Duct Losses (W)"),
             "verbosity 5 must include 'HVAC Duct Losses (W)' (OCHRE HVAC.py:588); got: {names:?}"
         );
+    }
+
+    // ── Conditional zone column tests ────────────────────────────────────
+
+    /// Attic-specific columns are present only when an "Attic" zone exists.
+    /// At v2: `Temperature - Attic (C)`. At v6: infiltration, LWR, HVAC attribution.
+    #[test]
+    fn test_attic_columns_conditional() {
+        // Without attic zone: no attic-specific columns.
+        let no_attic = vec![(ZoneId(1), "Indoor".to_string())];
+        let s2 = build_schema(&[], 2, &no_attic);
+        let s6 = build_schema(&[], 6, &no_attic);
+        let n2: Vec<&str> = s2.fields().iter().map(|f| f.name().as_str()).collect();
+        let n6: Vec<&str> = s6.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(
+            !n2.contains(&"Temperature - Attic (C)"),
+            "without attic zone, 'Temperature - Attic (C)' must be absent"
+        );
+        assert!(
+            !n6.contains(&"Infiltration Heat Gain - Attic (W)"),
+            "without attic zone, 'Infiltration Heat Gain - Attic (W)' must be absent"
+        );
+        assert!(
+            !n6.contains(&"Interior LWR Exchange - Attic (W)"),
+            "without attic zone, 'Interior LWR Exchange - Attic (W)' must be absent"
+        );
+
+        // With attic zone: attic-specific columns present.
+        let with_attic = vec![
+            (ZoneId(1), "Indoor".to_string()),
+            (ZoneId(2), "Attic".to_string()),
+        ];
+        let s2 = build_schema(&[], 2, &with_attic);
+        let s6 = build_schema(&[], 6, &with_attic);
+        let n2: Vec<&str> = s2.fields().iter().map(|f| f.name().as_str()).collect();
+        let n6: Vec<&str> = s6.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(
+            n2.contains(&"Temperature - Attic (C)"),
+            "with attic zone, 'Temperature - Attic (C)' must be present"
+        );
+        assert!(
+            n6.contains(&"Infiltration Heat Gain - Attic (W)"),
+            "with attic zone, 'Infiltration Heat Gain - Attic (W)' must be present"
+        );
+        assert!(
+            n6.contains(&"Interior LWR Exchange - Attic (W)"),
+            "with attic zone, 'Interior LWR Exchange - Attic (W)' must be present"
+        );
+    }
+
+    /// Non-Indoor zone columns are conditional on zone presence, covering
+    /// ground/foundation/basement zones whose display name is not "Attic".
+    #[test]
+    fn test_ground_columns_conditional() {
+        // Without ground/basement zone: no per-zone columns for that zone.
+        let no_basement = vec![(ZoneId(1), "Indoor".to_string())];
+        let s2 = build_schema(&[], 2, &no_basement);
+        let s6 = build_schema(&[], 6, &no_basement);
+        let n2: Vec<&str> = s2.fields().iter().map(|f| f.name().as_str()).collect();
+        let n6: Vec<&str> = s6.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(
+            !n2.contains(&"Temperature - Zone_2 (C)"),
+            "without basement zone, 'Temperature - Zone_2 (C)' must be absent; got: {n2:?}"
+        );
+        assert!(
+            !n6.contains(&"Infiltration Heat Gain - Zone_2 (W)"),
+            "without basement zone, 'Infiltration Heat Gain - Zone_2 (W)' must be absent"
+        );
+        // Temperature - Ground (C) is always present (weather data, not zone-conditional).
+        assert!(
+            n2.contains(&"Temperature - Ground (C)"),
+            "'Temperature - Ground (C)' must always be present (weather data)"
+        );
+
+        // With basement zone: per-zone columns for that zone are present.
+        let with_basement = vec![
+            (ZoneId(1), "Indoor".to_string()),
+            (ZoneId(2), "Zone_2".to_string()),
+        ];
+        let s2 = build_schema(&[], 2, &with_basement);
+        let s6 = build_schema(&[], 6, &with_basement);
+        let n2: Vec<&str> = s2.fields().iter().map(|f| f.name().as_str()).collect();
+        let n6: Vec<&str> = s6.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(
+            n2.contains(&"Temperature - Zone_2 (C)"),
+            "with basement zone, 'Temperature - Zone_2 (C)' must be present; got: {n2:?}"
+        );
+        assert!(
+            n6.contains(&"Infiltration Heat Gain - Zone_2 (W)"),
+            "with basement zone, 'Infiltration Heat Gain - Zone_2 (W)' must be present; got: {n6:?}"
+        );
+        assert!(
+            n6.contains(&"Interior LWR Exchange - Zone_2 (W)"),
+            "with basement zone, 'Interior LWR Exchange - Zone_2 (W)' must be present; got: {n6:?}"
+        );
+    }
+
+    /// Regression: single-zone building (indoor-only) produces no non-Indoor
+    /// zone columns at any verbosity level.
+    #[test]
+    fn indoor_only_building_produces_no_non_indoor_zone_columns() {
+        let zone_names = vec![(ZoneId(1), "Indoor".to_string())];
+        for v in 2..=8u8 {
+            let schema = build_schema(&[], v, &zone_names);
+            let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            assert!(
+                !names.contains(&"Temperature - Attic (C)"),
+                "verbosity {v}: 'Temperature - Attic (C)' must be absent for indoor-only building"
+            );
+            assert!(
+                !names.iter().any(|n| n.starts_with("Temperature - Zone_")),
+                "verbosity {v}: no 'Temperature - Zone_N' must exist for indoor-only; got: {names:?}"
+            );
+            if v >= 6 {
+                assert!(
+                    !names.contains(&"Infiltration Heat Gain - Attic (W)"),
+                    "verbosity {v}: attic infiltration must be absent for indoor-only"
+                );
+                assert!(
+                    !names.contains(&"Interior LWR Exchange - Attic (W)"),
+                    "verbosity {v}: attic LWR must be absent for indoor-only"
+                );
+                assert!(
+                    !names
+                        .iter()
+                        .any(|n| n.starts_with("Infiltration Heat Gain - Zone_")),
+                    "verbosity {v}: no 'Infiltration Heat Gain - Zone_N' for indoor-only; got: {names:?}"
+                );
+                assert!(
+                    !names
+                        .iter()
+                        .any(|n| n.starts_with("Interior LWR Exchange - Zone_")),
+                    "verbosity {v}: no 'Interior LWR Exchange - Zone_N' for indoor-only; got: {names:?}"
+                );
+            }
+        }
     }
 
     // ── Per-zone HVAC attribution column tests ────────────────────────────

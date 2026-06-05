@@ -10353,7 +10353,14 @@ occupancy = 1.0
             },
         ];
         let zone_types = vec![ZoneType::Conditioned, ZoneType::Attic];
-        let schema = hares_io::build_schema(&[], 2, &[]);
+        let schema = hares_io::build_schema(
+            &[],
+            2,
+            &[
+                (ZoneId(10), "Indoor".to_string()),
+                (ZoneId(3), "Attic".to_string()),
+            ],
+        );
         let column_index = build_output_column_index(&schema);
         let caches = build_zone_column_caches(&zones, &zone_types, ZoneId(10), &column_index);
 
