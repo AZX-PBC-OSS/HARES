@@ -1093,6 +1093,7 @@ mod tests {
             setpoint_deadband_c: deadband,
             civil_timezone: None,
             site_location: crate::SiteLocationOverride::default(),
+            retain_batches: false,
         }
     }
 

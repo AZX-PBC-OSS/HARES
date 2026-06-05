@@ -14,6 +14,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
+use tracing;
 
 use super::OutputSummary;
 use crate::config::OutputFormat;
@@ -40,7 +41,9 @@ enum Backend {
 
 /// Streaming recorder that buffers rows and flushes to disk in chunks.
 ///
-/// Peak memory is bounded: the buffer holds at most `chunk_size` rows.
+/// When `retain_batches` is `false`, peak memory is bounded at
+/// `O(chunk_size)`. When `true`, all flushed batches are retained in
+/// memory and peak memory is `O(total_rows)`.
 pub struct StreamingRecorder {
     schema: Arc<Schema>,
     chunk_size: usize,
@@ -50,6 +53,11 @@ pub struct StreamingRecorder {
     total_rows: usize,
     output_path: PathBuf,
     flushed_batches: Vec<RecordBatch>,
+    retain_batches: bool,
+    /// Number of batches retained since construction
+    /// (available when feature `observe` is enabled).
+    #[cfg(feature = "observe")]
+    retained_batch_count: usize,
 }
 
 impl StreamingRecorder {
@@ -60,11 +68,16 @@ impl StreamingRecorder {
     /// - `chunk_size` -- Maximum rows to buffer before flushing. Must be > 0.
     /// - `format` -- Output format (CSV or Parquet).
     /// - `output_path` -- Destination file path.
+    /// - `retain_batches` -- When `false`, flushed batches are not retained
+    ///   in memory after writing; `flushed_batches()` returns an empty slice.
+    ///   Set `true` only when post-hoc batch access is required (e.g. Python
+    ///   bindings, metrics computation from in-memory batches).
     pub fn new(
         schema: Schema,
         chunk_size: usize,
         format: OutputFormat,
         output_path: &Path,
+        retain_batches: bool,
     ) -> Result<Self, OutputError> {
         if chunk_size == 0 {
             return Err(OutputError::InvalidChunkSize);
@@ -93,6 +106,16 @@ impl StreamingRecorder {
             }
         };
 
+        if retain_batches {
+            // When enabled, every flush accumulates an in-memory RecordBatch
+            // that is never freed until the recorder is dropped, unbounded
+            // memory growth for long simulations.
+            tracing::warn!(
+                "StreamingRecorder: retain_batches=true — flushed batches \
+                 accumulate in memory (unbounded growth risk for long simulations)"
+            );
+        }
+
         Ok(Self {
             schema,
             chunk_size,
@@ -104,6 +127,9 @@ impl StreamingRecorder {
             total_rows: 0,
             output_path: output_path.to_path_buf(),
             flushed_batches: Vec::new(),
+            retain_batches,
+            #[cfg(feature = "observe")]
+            retained_batch_count: 0,
         })
     }
 
@@ -151,7 +177,13 @@ impl StreamingRecorder {
             None => {}
         }
 
-        self.flushed_batches.push(batch);
+        if self.retain_batches {
+            self.flushed_batches.push(batch);
+            #[cfg(feature = "observe")]
+            {
+                self.retained_batch_count += 1;
+            }
+        }
 
         Ok(())
     }
@@ -180,9 +212,25 @@ impl StreamingRecorder {
     }
 
     /// Returns all batches that have been flushed so far.
+    ///
+    /// When `retain_batches` is `false` (the default), this always
+    /// returns an empty slice — flushed batches are written to disk
+    /// and dropped. When `true`, returns all batches flushed since
+    /// construction.
     #[must_use]
     pub fn flushed_batches(&self) -> &[RecordBatch] {
         &self.flushed_batches
+    }
+
+    /// Number of batches retained since construction.
+    ///
+    /// Available when feature `observe` is enabled; allows an external
+    /// observer to verify that no batches are retained when
+    /// `retain_batches` is `false`.
+    #[cfg(feature = "observe")]
+    #[must_use]
+    pub fn retained_batch_count(&self) -> usize {
+        self.retained_batch_count
     }
 
     /// Flush remaining rows, close the file, and return summary statistics.
@@ -256,7 +304,7 @@ mod tests {
 
         let schema = test_schema();
         let mut recorder =
-            StreamingRecorder::new(schema, 100, OutputFormat::Parquet, &path).unwrap();
+            StreamingRecorder::new(schema, 100, OutputFormat::Parquet, &path, false).unwrap();
 
         let test_values: Vec<(f64, f64)> = vec![
             (1.5, 0.3),
@@ -323,7 +371,8 @@ mod tests {
         let path = tmp.path().to_path_buf();
 
         let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(schema, 100, OutputFormat::Csv, &path).unwrap();
+        let mut recorder =
+            StreamingRecorder::new(schema, 100, OutputFormat::Csv, &path, false).unwrap();
 
         recorder
             .push_row("2024-01-01T00:00:00Z", &[1.0, 2.0])
@@ -349,7 +398,8 @@ mod tests {
         let chunk_size = 10_000;
         let total_rows = 100_000;
         let mut recorder =
-            StreamingRecorder::new(schema, chunk_size, OutputFormat::Parquet, &path).unwrap();
+            StreamingRecorder::new(schema, chunk_size, OutputFormat::Parquet, &path, false)
+                .unwrap();
 
         for i in 0..total_rows {
             recorder
@@ -372,7 +422,8 @@ mod tests {
         let path = tmp.path().to_path_buf();
 
         let schema = test_schema();
-        let recorder = StreamingRecorder::new(schema, 100, OutputFormat::Parquet, &path).unwrap();
+        let recorder =
+            StreamingRecorder::new(schema, 100, OutputFormat::Parquet, &path, false).unwrap();
 
         let summary = recorder.finish().unwrap();
         assert_eq!(summary.row_count, 0);
@@ -400,7 +451,7 @@ mod tests {
 
         let schema = test_schema();
         let mut recorder =
-            StreamingRecorder::new(schema, 100, OutputFormat::Parquet, &path).unwrap();
+            StreamingRecorder::new(schema, 100, OutputFormat::Parquet, &path, false).unwrap();
 
         let result = recorder.push_row("T0", &[1.0]); // 1 value, expects 2
         assert!(result.is_err());
@@ -413,7 +464,7 @@ mod tests {
 
         let schema = test_schema();
         let mut recorder =
-            StreamingRecorder::new(schema, 1000, OutputFormat::Parquet, &path).unwrap();
+            StreamingRecorder::new(schema, 1000, OutputFormat::Parquet, &path, false).unwrap();
 
         for i in 0..5 {
             recorder
@@ -441,7 +492,73 @@ mod tests {
         let path = tmp.path().to_path_buf();
 
         let schema = test_schema();
-        let result = StreamingRecorder::new(schema, 0, OutputFormat::Parquet, &path);
+        let result = StreamingRecorder::new(schema, 0, OutputFormat::Parquet, &path, false);
         assert!(matches!(result, Err(OutputError::InvalidChunkSize)));
+    }
+
+    #[test]
+    fn batch_retention_disabled() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let schema = test_schema();
+        let mut recorder =
+            StreamingRecorder::new(schema, 10, OutputFormat::Parquet, &path, false).unwrap();
+
+        for i in 0..25 {
+            recorder
+                .push_row(&format!("T{i}"), &[i as f64, i as f64 * 2.0])
+                .unwrap();
+        }
+        // 25 rows with chunk_size=10 → 2 full flushes triggered by push_row,
+        // 5 rows remain buffered. When retain_batches=false, flushed_batches
+        // is always empty.
+        assert!(recorder.flushed_batches().is_empty());
+
+        recorder.finish().unwrap();
+    }
+
+    #[test]
+    fn batch_retention_enabled() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let schema = test_schema();
+        let mut recorder =
+            StreamingRecorder::new(schema, 10, OutputFormat::Parquet, &path, true).unwrap();
+
+        for i in 0..25 {
+            recorder
+                .push_row(&format!("T{i}"), &[i as f64, i as f64 * 2.0])
+                .unwrap();
+        }
+        // 25 rows with chunk_size=10 → 2 flushes triggered by push_row.
+        assert_eq!(recorder.flushed_batches().len(), 2);
+
+        recorder.finish().unwrap();
+    }
+
+    #[test]
+    fn retention_disabled_memory_bounded() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let schema = test_schema();
+        let chunk_size = 50;
+        let total_rows = 10 * chunk_size; // exercise 10x chunk_size
+        let mut recorder =
+            StreamingRecorder::new(schema, chunk_size, OutputFormat::Parquet, &path, false)
+                .unwrap();
+
+        for i in 0..total_rows {
+            recorder
+                .push_row(&format!("T{i}"), &[i as f64, 0.0])
+                .unwrap();
+        }
+        // With retain_batches=false, flushed_batches is always empty.
+        assert!(recorder.flushed_batches().is_empty());
+        assert_eq!(recorder.total_rows(), total_rows);
+
+        recorder.finish().unwrap();
     }
 }

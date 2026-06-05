@@ -182,6 +182,7 @@ mod tests {
                 master_seed: 42,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
+                retain_batches: false,
             },
             overrides: None,
             bldg_id: 100,

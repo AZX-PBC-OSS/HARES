@@ -192,6 +192,7 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: false,
         },
         overrides: None,
         bldg_id: 42,

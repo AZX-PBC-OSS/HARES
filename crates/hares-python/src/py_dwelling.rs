@@ -1954,6 +1954,7 @@ fn build_config(
             master_seed,
             civil_timezone,
             site_location,
+            retain_batches: true,
         }
     };
 

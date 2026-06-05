@@ -700,6 +700,7 @@ fn default_resstock_sim_config() -> SimulationConfig {
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
+        retain_batches: true,
     }
 }
 
@@ -847,6 +848,7 @@ mod tests {
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: false,
         }
     }
 

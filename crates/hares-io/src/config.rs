@@ -75,6 +75,12 @@ pub struct SimulationConfig {
     /// Master RNG seed for reproducibility (default: 0).
     #[serde(default)]
     pub master_seed: u64,
+    /// Whether to retain flushed Arrow RecordBatches in memory for
+    /// post-hoc access (e.g. Python dataframes, metrics computation).
+    /// When `false`, peak memory is `O(chunk_size)`; when `true`,
+    /// memory is `O(total_rows)`. Default: `false`.
+    #[serde(default)]
+    pub retain_batches: bool,
     /// IANA timezone for civil-time schedule indexing (e.g. "America/Denver").
     /// When set, occupancy schedules and utility rates are indexed by civil
     /// (wall-clock) time including DST transitions. Weather indexing is unaffected.

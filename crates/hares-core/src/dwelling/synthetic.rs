@@ -299,6 +299,8 @@ pub(crate) struct SyntheticOutputConfig {
     pub(crate) output_chunk_size: usize,
     #[serde(default)]
     pub(crate) master_seed: u64,
+    #[serde(default)]
+    pub(crate) retain_batches: bool,
 }
 
 impl Default for SyntheticOutputConfig {
@@ -310,6 +312,7 @@ impl Default for SyntheticOutputConfig {
             output_format: hares_io::OutputFormat::Csv,
             output_chunk_size: default_output_chunk_size(),
             master_seed: 0,
+            retain_batches: false,
         }
     }
 }

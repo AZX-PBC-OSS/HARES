@@ -1164,6 +1164,7 @@ pub struct Dwelling {
     output_format: hares_io::OutputFormat,
     output_path: PathBuf,
     write_output: bool,
+    retain_batches: bool,
     /// Diagnostic CSV writer, opened when `output_verbosity >= 4`.
     diagnostic_writer: Option<std::io::BufWriter<std::fs::File>>,
     #[cfg(feature = "profiling")]
@@ -1261,6 +1262,7 @@ impl Dwelling {
             master_seed: 0,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: false,
         };
 
         let config = DwellingConfig {
@@ -1331,6 +1333,7 @@ impl Dwelling {
             master_seed: config.output.master_seed,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: config.output.retain_batches,
         };
         validate_sim_config(&sim_config)?;
 
@@ -1894,6 +1897,7 @@ impl Dwelling {
                     config.sim_config.output_chunk_size,
                     config.sim_config.output_format,
                     &output_path,
+                    config.sim_config.retain_batches,
                 )
                 .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?,
             )
@@ -2052,6 +2056,7 @@ impl Dwelling {
             output_format: config.sim_config.output_format,
             output_path: output_path.clone(),
             write_output: config.sim_config.write_output,
+            retain_batches: config.sim_config.retain_batches,
             diagnostic_writer: None,
             #[cfg(feature = "profiling")]
             profiling: DwellingProfilingSummary::default(),
@@ -2881,6 +2886,7 @@ impl Dwelling {
                     self.output_chunk_size,
                     self.output_format,
                     &self.output_path,
+                    self.retain_batches,
                 )
             {
                 self.recorder = Some(recorder);
@@ -9774,6 +9780,7 @@ occupancy = 1.0
             master_seed: config.output.master_seed,
             civil_timezone: None,
             site_location: hares_io::SiteLocationOverride::default(),
+            retain_batches: config.output.retain_batches,
         };
         validate_sim_config(&sim_config).expect("valid sim config");
 

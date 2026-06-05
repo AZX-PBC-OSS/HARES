@@ -118,6 +118,7 @@ fn simulation_config(output_path: PathBuf) -> SimulationConfig {
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
+        retain_batches: true,
     }
 }
 

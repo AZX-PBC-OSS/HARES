@@ -82,6 +82,7 @@ pub struct PySimulationConfig {
     longitude: Option<f64>,
     elevation_m: Option<f64>,
     utc_offset_h: Option<f64>,
+    retain_batches: bool,
 }
 
 #[pymethods]
@@ -104,6 +105,7 @@ impl PySimulationConfig {
             longitude = None,
             elevation_m = None,
             utc_offset_h = None,
+            retain_batches = None,
         )
     )]
     // PyO3 #[new] with kwargs maps 1:1 to Python kwargs; builder adds no value here.
@@ -124,6 +126,7 @@ impl PySimulationConfig {
         longitude: Option<f64>,
         elevation_m: Option<f64>,
         utc_offset_h: Option<f64>,
+        retain_batches: Option<bool>,
     ) -> PyResult<Self> {
         let start_time = start_time
             .map(|s| parse_datetime_str(&s))
@@ -210,6 +213,7 @@ impl PySimulationConfig {
             longitude,
             elevation_m,
             utc_offset_h,
+            retain_batches: retain_batches.unwrap_or(true),
         })
     }
 
@@ -416,15 +420,26 @@ impl PySimulationConfig {
         Ok(())
     }
 
+    #[getter]
+    pub fn retain_batches(&self) -> bool {
+        self.retain_batches
+    }
+
+    #[setter]
+    pub fn set_retain_batches(&mut self, value: bool) {
+        self.retain_batches = value;
+    }
+
     pub fn __repr__(&self) -> String {
         format!(
-            "SimulationConfig(start_time='{}', duration_s={}, time_res_s={}, write_output={}, output_to_parquet={}, master_seed={})",
+            "SimulationConfig(start_time='{}', duration_s={}, time_res_s={}, write_output={}, output_to_parquet={}, master_seed={}, retain_batches={})",
             self.start_time.to_rfc3339(),
             self.duration,
             self.time_res,
             self.write_output,
             self.output_to_parquet,
-            self.master_seed
+            self.master_seed,
+            self.retain_batches
         )
     }
 }
@@ -459,6 +474,7 @@ impl PySimulationConfig {
                 elevation_m: self.elevation_m,
                 utc_offset_h: self.utc_offset_h,
             },
+            retain_batches: self.retain_batches,
         })
     }
 
@@ -482,6 +498,7 @@ impl PySimulationConfig {
             longitude: config.site_location.longitude_deg,
             elevation_m: config.site_location.elevation_m,
             utc_offset_h: config.site_location.utc_offset_h,
+            retain_batches: config.retain_batches,
         }
     }
 }
@@ -694,6 +711,7 @@ impl PyDwellingConfig {
                 master_seed: 0,
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
+                retain_batches: true,
             });
 
         let resample_overrides: Option<ResampleOverrides> = self
