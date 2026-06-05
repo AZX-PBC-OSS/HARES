@@ -65,6 +65,42 @@ pub const MAIN_POWER_SUFFIX: &str = "Main Power (kW)";
 pub const RUNTIME_FRACTION_SUFFIX: &str = "Runtime Fraction (-)";
 pub const LATENT_GAINS_SUFFIX: &str = "Latent Gains (W)";
 
+/// Setpoint chain dwelling-level columns for verbosity 7.
+/// Emitted at dwelling level because setpoint schedules and runtime overrides
+/// are zone-global state, not per-equipment.
+pub const SCHEDULED_HEATING_SETPOINT_COL: &str = "Scheduled Heating Setpoint (C)";
+pub const SCHEDULED_COOLING_SETPOINT_COL: &str = "Scheduled Cooling Setpoint (C)";
+pub const RUNTIME_HEATING_SETPOINT_COL: &str = "Runtime Heating Setpoint (C)";
+pub const RUNTIME_COOLING_SETPOINT_COL: &str = "Runtime Cooling Setpoint (C)";
+
+// ── Verbosity 8: per-equipment telemetry diagnostic columns ─────────────────
+// Each suffix is combined with the equipment instance-qualified name:
+//   `"{equipment_name} {suffix}"`
+
+/// Per-HVAC equipment temperature column suffixes for verbosity 8.
+pub const SUPPLY_TEMP_SUFFIX: &str = "Supply Temperature (C)";
+pub const SUPPLY_AIR_TEMP_SUFFIX: &str = "Supply Air Temperature (C)";
+pub const RETURN_TEMP_SUFFIX: &str = "Return Temperature (C)";
+
+/// Per-HVAC compressor power column suffixes for verbosity 8.
+pub const COMPRESSOR_POWER_W_SUFFIX: &str = "Compressor Power (W)";
+pub const COMPRESSOR_POWER_KW_SUFFIX: &str = "Compressor Power (kW)";
+pub const FAN_ELECTRIC_POWER_SUFFIX: &str = "Fan Electric Power (W)";
+pub const FAN_POWER_W_SUFFIX: &str = "Fan Power (W)";
+
+/// Per-heat-pump detail column suffixes for verbosity 8.
+pub const PAN_HEATER_POWER_SUFFIX: &str = "Pan Heater Power (kW)";
+pub const HP_CAPACITY_SUFFIX: &str = "Heat Pump Capacity (W)";
+pub const ER_CAPACITY_SUFFIX: &str = "ER Capacity (W)";
+
+/// Per-PV diagnostic column suffixes for verbosity 8.
+pub const PV_DC_POWER_SUFFIX: &str = "DC Power (kW)";
+pub const PV_IRRADIANCE_SUFFIX: &str = "Irradiance (W/m2)";
+
+/// Per-EV diagnostic column suffixes for verbosity 8.
+pub const EV_CONNECTION_STATE_SUFFIX: &str = "Connection State (-)";
+pub const EV_CHARGING_LEVEL_SUFFIX: &str = "Charging Level (-)";
+
 /// Maps an equipment spec name to its `EndUse` category based on the canonical
 /// equipment naming conventions used by the HPXML resolver and registry.
 ///
@@ -577,11 +613,116 @@ pub fn build_schema(
             DataType::Float64,
             true,
         ));
+        // Setpoint chain: dwelling-level context columns for control auditing.
+        // Each column reflects a stage in the setpoint resolution pipeline
+        // (schedule → runtime override), enabling diagnosis of DR/override
+        // behaviour without tracing per-equipment telemetry.
+        fields.push(Field::new(
+            SCHEDULED_HEATING_SETPOINT_COL,
+            DataType::Float64,
+            true,
+        ));
+        fields.push(Field::new(
+            SCHEDULED_COOLING_SETPOINT_COL,
+            DataType::Float64,
+            true,
+        ));
+        fields.push(Field::new(
+            RUNTIME_HEATING_SETPOINT_COL,
+            DataType::Float64,
+            true,
+        ));
+        fields.push(Field::new(
+            RUNTIME_COOLING_SETPOINT_COL,
+            DataType::Float64,
+            true,
+        ));
     }
 
     if verbosity >= 8 {
-        // Level 8: all individual equipment state variables.
-        // (Capacity and COP were promoted to v7 to match OCHRE HVAC.py:584,598.)
+        // Level 8: per-equipment telemetry diagnostic columns.
+        // Equipment temperatures, compressor power, PV/EV diagnostics — these
+        // keys are not in CoreOutput and remain telemetry-only below v8.
+        for (name, _fuel) in &names {
+            if is_hvac_or_wh(name) {
+                fields.push(Field::new(
+                    format!("{name} {SUPPLY_TEMP_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {RETURN_TEMP_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {COMPRESSOR_POWER_W_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {COMPRESSOR_POWER_KW_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {FAN_ELECTRIC_POWER_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {FAN_POWER_W_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+            }
+            if is_heat_pump_heater(name) {
+                fields.push(Field::new(
+                    format!("{name} {SUPPLY_AIR_TEMP_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {PAN_HEATER_POWER_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {HP_CAPACITY_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {ER_CAPACITY_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+            }
+            if is_pv(name) {
+                fields.push(Field::new(
+                    format!("{name} {PV_DC_POWER_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {PV_IRRADIANCE_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+            }
+            if is_ev(name) {
+                fields.push(Field::new(
+                    format!("{name} {EV_CONNECTION_STATE_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+                fields.push(Field::new(
+                    format!("{name} {EV_CHARGING_LEVEL_SUFFIX}"),
+                    DataType::Float64,
+                    true,
+                ));
+            }
+        }
     }
 
     let mut metadata = std::collections::HashMap::new();
@@ -615,6 +756,10 @@ pub fn expected_columns_at_verbosity(verbosity: u8) -> Vec<&'static str> {
 
     if verbosity >= 7 {
         cols.push(HOT_WATER_MAINS_TEMP_COL);
+        cols.push(SCHEDULED_HEATING_SETPOINT_COL);
+        cols.push(SCHEDULED_COOLING_SETPOINT_COL);
+        cols.push(RUNTIME_HEATING_SETPOINT_COL);
+        cols.push(RUNTIME_COOLING_SETPOINT_COL);
     }
 
     cols
@@ -722,6 +867,30 @@ pub fn is_cooling_equipment(name: &str) -> bool {
         || lower.contains("dehumidifier")
 }
 
+/// Returns true if the equipment name indicates PV/solar equipment.
+pub fn is_pv(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("pv")
+}
+
+/// Returns true if the equipment name indicates EV/vehicle equipment.
+pub fn is_ev(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("ev") || lower.contains("electric vehicle")
+}
+
+/// Returns true if the equipment name indicates equipment with a compressor
+/// (heat pumps, air conditioners) that should emit compressor power columns at v8.
+pub fn is_compressor_equipment(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("heat pump")
+        || lower.contains("ashp")
+        || lower.contains("mshp")
+        || lower.contains("air conditioner")
+        || lower.contains("room ac")
+        || lower.contains("cooler")
+}
+
 #[cfg(test)]
 mod tests {
     use hares_types::FuelType;
@@ -814,6 +983,11 @@ mod tests {
         let schema = build_schema(&[], 7, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Hot Water Mains Temperature (C)"));
+        // Setpoint chain columns are dwelling-level, independent of equipment list.
+        assert!(names.contains(&"Scheduled Heating Setpoint (C)"));
+        assert!(names.contains(&"Scheduled Cooling Setpoint (C)"));
+        assert!(names.contains(&"Runtime Heating Setpoint (C)"));
+        assert!(names.contains(&"Runtime Cooling Setpoint (C)"));
     }
 
     #[test]
@@ -920,16 +1094,22 @@ mod tests {
     }
 
     /// Capacity and COP promoted from v8 to v7; not duplicated at v8.
+    /// v8 adds additional per-equipment telemetry columns (equipment temps,
+    /// compressor power, etc.) so the schema length increases beyond v7.
     #[test]
     fn capacity_and_cop_promoted_to_v7_not_duplicated_at_v8() {
         let specs = vec![make_spec("Air Conditioner", FuelType::Electric)];
         let s7 = build_schema(&specs, 7, &[]);
         let s8 = build_schema(&specs, 8, &[]);
         let n7: Vec<&str> = s7.fields().iter().map(|f| f.name().as_str()).collect();
+        let n8: Vec<&str> = s8.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(n7.contains(&"Air Conditioner Capacity (W)"));
         assert!(n7.contains(&"Air Conditioner COP (-)"));
-        // v8 must be identical in length to v7 (Capacity and COP are not re-added at v8).
-        assert_eq!(s8.fields().len(), s7.fields().len());
+        // Capacity and COP are at v7 and must also be at v8 (not duplicated, but still present).
+        assert!(n8.contains(&"Air Conditioner Capacity (W)"));
+        assert!(n8.contains(&"Air Conditioner COP (-)"));
+        // v8 adds telemetry diagnostic columns beyond v7.
+        assert!(s8.fields().len() > s7.fields().len());
     }
 
     /// HVAC Duct Losses column present at v5 (OCHRE HVAC.py:588).
@@ -1396,5 +1576,77 @@ mod tests {
             parse_end_use_electric_power_column("Total Electric Power (kW)"),
             None
         );
+    }
+
+    // ── Verbosity 8 per-equipment telemetry column tests ─────────────────
+
+    /// HVAC/WH equipment gets temperature and compressor power columns at v8.
+    #[test]
+    fn hvac_equipment_gets_v8_telemetry_columns() {
+        let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
+        let schema = build_schema(&specs, 8, &[]);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"ASHP Heater Supply Temperature (C)"));
+        assert!(names.contains(&"ASHP Heater Return Temperature (C)"));
+        assert!(names.contains(&"ASHP Heater Compressor Power (W)"));
+        assert!(names.contains(&"ASHP Heater Compressor Power (kW)"));
+        assert!(names.contains(&"ASHP Heater Fan Electric Power (W)"));
+        assert!(names.contains(&"ASHP Heater Fan Power (W)"));
+        // Heat-pump-specific columns.
+        assert!(names.contains(&"ASHP Heater Supply Air Temperature (C)"));
+        assert!(names.contains(&"ASHP Heater Pan Heater Power (kW)"));
+        assert!(names.contains(&"ASHP Heater Heat Pump Capacity (W)"));
+        assert!(names.contains(&"ASHP Heater ER Capacity (W)"));
+    }
+
+    /// PV equipment gets diagnostic columns at v8.
+    #[test]
+    fn pv_equipment_gets_v8_telemetry_columns() {
+        let specs = vec![make_spec("PV", FuelType::Electric)];
+        let schema = build_schema(&specs, 8, &[]);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"PV DC Power (kW)"));
+        assert!(names.contains(&"PV Irradiance (W/m2)"));
+    }
+
+    /// EV equipment gets diagnostic columns at v8.
+    #[test]
+    fn ev_equipment_gets_v8_telemetry_columns() {
+        let specs = vec![make_spec("EV", FuelType::Electric)];
+        let schema = build_schema(&specs, 8, &[]);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"EV Connection State (-)"));
+        assert!(names.contains(&"EV Charging Level (-)"));
+    }
+
+    /// Non-HVAC/PV/EV equipment does NOT get v8 telemetry columns.
+    #[test]
+    fn non_diagnostic_equipment_has_no_v8_telemetry_columns() {
+        let specs = vec![make_spec("Battery", FuelType::Electric)];
+        let s7 = build_schema(&specs, 7, &[]);
+        let s8 = build_schema(&specs, 8, &[]);
+        let n7: Vec<&str> = s7.fields().iter().map(|f| f.name().as_str()).collect();
+        let n8: Vec<&str> = s8.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(!n7.contains(&"Battery Supply Temperature (C)"));
+        assert!(!n8.contains(&"Battery Supply Temperature (C)"));
+        assert!(!n8.contains(&"Battery DC Power (kW)"));
+        assert!(!n8.contains(&"Battery Connection State (-)"));
+        // v8 length equals v7 length for non-diagnostic equipment.
+        assert_eq!(s8.fields().len(), s7.fields().len());
+    }
+
+    /// is_pv / is_ev / is_compressor_equipment correctly classify equipment names.
+    #[test]
+    fn equipment_classification_functions() {
+        assert!(is_pv("PV"));
+        assert!(!is_pv("Battery"));
+        assert!(is_ev("EV"));
+        assert!(is_ev("Electric Vehicle"));
+        assert!(!is_ev("PV"));
+        assert!(is_compressor_equipment("ASHP Heater"));
+        assert!(is_compressor_equipment("Air Conditioner"));
+        assert!(is_compressor_equipment("MSHP Cooler"));
+        assert!(!is_compressor_equipment("Gas Furnace"));
+        assert!(!is_compressor_equipment("Battery"));
     }
 }

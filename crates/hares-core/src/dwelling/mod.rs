@@ -30,14 +30,20 @@ use hares_equipment::{
     SetpointReconciliation, UNegTable,
 };
 use hares_io::{
-    Building, CAPACITY_SUFFIX, COP_SUFFIX, DEFROST_STATE_SUFFIX, DefaultsStore,
-    ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_POWER_SUFFIX, FAN_POWER_SUFFIX, GAS_POWER_SUFFIX,
-    HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX, MODE_SUFFIX, POWER_FACTOR_SUFFIX,
-    PvPanelDefaults, REACTIVE_POWER_SUFFIX, RUNTIME_FRACTION_SUFFIX, SCHEDULE_SUFFIX,
-    SETPOINT_SUFFIX, SHR_SUFFIX, SOC_SUFFIX, SPEED_SUFFIX, ScheduleTimeSeries, SimulationConfig,
-    StreamingRecorder, WeatherTimeSeries, build_schema, end_use_electric_power_column,
-    equipment_name_to_end_use, has_soc, is_cooling_equipment, is_heat_pump_heater, is_hvac_or_wh,
-    parse_hpxml, parse_schedule_csv, parse_weather, resolve_equipment, resolve_site_location,
+    Building, CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
+    DEFROST_STATE_SUFFIX, DefaultsStore, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
+    ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
+    FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, GAS_POWER_SUFFIX,
+    HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX, MODE_SUFFIX,
+    PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX,
+    PvPanelDefaults, REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
+    RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, SCHEDULE_SUFFIX,
+    SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
+    SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, ScheduleTimeSeries,
+    SimulationConfig, StreamingRecorder, WeatherTimeSeries, build_schema,
+    end_use_electric_power_column, equipment_name_to_end_use, has_soc, is_cooling_equipment, is_ev,
+    is_heat_pump_heater, is_hvac_or_wh, is_pv, parse_hpxml, parse_schedule_csv, parse_weather,
+    resolve_equipment, resolve_site_location,
 };
 
 use hares_physics::constants::{
@@ -195,6 +201,9 @@ struct EquipmentColumns {
     runtime_fraction: Option<usize>,
     latent_gains: Option<usize>,
     duct_losses: Option<usize>,
+    /// V8 per-equipment telemetry diagnostic columns. Each entry is
+    /// (telemetry_key, column_index). Populated from telemetry in record_step.
+    v8_columns: Vec<(&'static str, usize)>,
 }
 
 /// Build column index maps for each equipment piece using instance-qualified
@@ -401,6 +410,21 @@ fn build_equipment_column_map(
             let duct_losses =
                 resolve_col(HVAC_DUCT_LOSSES_COL, column_index, &name, verbosity >= 5);
 
+            // V8 per-equipment telemetry diagnostic columns.
+            let v8_columns = if verbosity >= 8 {
+                resolve_v8_columns(
+                    &name,
+                    column_index,
+                    is_hvac,
+                    is_hp_heater,
+                    &desc.name,
+                    is_pv(&desc.name),
+                    is_ev(&desc.name),
+                )
+            } else {
+                Vec::new()
+            };
+
             EquipmentColumns {
                 electric_power,
                 gas_power,
@@ -422,6 +446,7 @@ fn build_equipment_column_map(
                 runtime_fraction,
                 latent_gains,
                 duct_losses,
+                v8_columns,
             }
         })
         .collect()
@@ -448,6 +473,78 @@ fn resolve_col(
         );
     }
     idx
+}
+
+/// Resolves v8 per-equipment telemetry diagnostic columns for the given
+/// equipment instance. Each entry is a (telemetry_key, column_index) pair
+/// populated directly from equipment telemetry in record_step.
+fn resolve_v8_columns(
+    instance_name: &str,
+    column_index: &HashMap<String, usize>,
+    is_hvac: bool,
+    is_hp_heater: bool,
+    _equipment_name: &str,
+    is_pv: bool,
+    is_ev: bool,
+) -> Vec<(&'static str, usize)> {
+    let mut columns = Vec::new();
+
+    if is_hvac {
+        let hvac_defs: &[(&str, &str)] = &[
+            (tk::SUPPLY_TEMP_C, SUPPLY_TEMP_SUFFIX),
+            (tk::RETURN_TEMP_C, RETURN_TEMP_SUFFIX),
+            (tk::COMPRESSOR_POWER_W, COMPRESSOR_POWER_W_SUFFIX),
+            (tk::COMPRESSOR_KW, COMPRESSOR_POWER_KW_SUFFIX),
+            (tk::FAN_ELECTRIC_W, FAN_ELECTRIC_POWER_SUFFIX),
+            (tk::FAN_POWER_W, FAN_POWER_W_SUFFIX),
+        ];
+        for &(key, suffix) in hvac_defs {
+            let col_name = format!("{instance_name} {suffix}");
+            if let Some(&idx) = column_index.get(&col_name) {
+                columns.push((key, idx));
+            }
+        }
+    }
+    if is_hp_heater {
+        let hp_defs: &[(&str, &str)] = &[
+            (tk::SUPPLY_AIR_TEMP_C, SUPPLY_AIR_TEMP_SUFFIX),
+            (tk::PAN_HEATER_KW, PAN_HEATER_POWER_SUFFIX),
+            (tk::HP_CAPACITY_W, HP_CAPACITY_SUFFIX),
+            (tk::ER_CAPACITY_W, ER_CAPACITY_SUFFIX),
+        ];
+        for &(key, suffix) in hp_defs {
+            let col_name = format!("{instance_name} {suffix}");
+            if let Some(&idx) = column_index.get(&col_name) {
+                columns.push((key, idx));
+            }
+        }
+    }
+    if is_pv {
+        let pv_defs: &[(&str, &str)] = &[
+            (tk::DC_POWER_KW, PV_DC_POWER_SUFFIX),
+            (tk::IRRADIANCE_W_M2, PV_IRRADIANCE_SUFFIX),
+        ];
+        for &(key, suffix) in pv_defs {
+            let col_name = format!("{instance_name} {suffix}");
+            if let Some(&idx) = column_index.get(&col_name) {
+                columns.push((key, idx));
+            }
+        }
+    }
+    if is_ev {
+        let ev_defs: &[(&str, &str)] = &[
+            (tk::CONNECTION_STATE, EV_CONNECTION_STATE_SUFFIX),
+            (tk::CHARGING_LEVEL, EV_CHARGING_LEVEL_SUFFIX),
+        ];
+        for &(key, suffix) in ev_defs {
+            let col_name = format!("{instance_name} {suffix}");
+            if let Some(&idx) = column_index.get(&col_name) {
+                columns.push((key, idx));
+            }
+        }
+    }
+
+    columns
 }
 
 fn extend_schema_with_actor_columns(
@@ -3075,6 +3172,78 @@ impl Dwelling {
                 }
             }
 
+            #[cfg(feature = "observe")]
+            {
+                // Runtime diagnostic: report output-scoped telemetry keys that
+                // have no column mapping. This helps operators audit coverage:
+                // if a key is marked scope: output but no equipment publishes it
+                // to a visible column, the signal is silently absent from output.
+                let mut covered: HashSet<&str> = HashSet::new();
+                for cols in &self.equipment_column_map {
+                    for &(key, _idx) in &cols.v8_columns {
+                        covered.insert(key);
+                    }
+                }
+                // Keys resolved via per-equipment named columns (not v8_columns):
+                for cols in &self.equipment_column_map {
+                    if cols.defrost_state.is_some() {
+                        covered.insert(tk::DEFROST_CYCLE_STATE);
+                    }
+                    if cols.er_power.is_some() {
+                        covered.insert(tk::BACKUP_ER_KW);
+                    }
+                    if cols.shr.is_some() {
+                        covered.insert(tk::SHR);
+                    }
+                    if cols.fan_power.is_some() {
+                        covered.insert(tk::FAN_KW);
+                    }
+                    if cols.runtime_fraction.is_some() {
+                        covered.insert(tk::RUNTIME_FRACTION);
+                    }
+                    if cols.latent_gains.is_some() {
+                        covered.insert(tk::LATENT_GAINS_W);
+                    }
+                    if cols.duct_losses.is_some() {
+                        covered.insert(tk::DUCT_LOSS_W);
+                    }
+                }
+                // Setpoint chain columns are dwelling-level, not per-equipment.
+                if self
+                    .output_column_index
+                    .contains_key(SCHEDULED_HEATING_SETPOINT_COL)
+                {
+                    covered.insert(tk::SCHEDULE_HEATING_SETPOINT_C);
+                    covered.insert(tk::SCHEDULE_COOLING_SETPOINT_C);
+                    covered.insert(tk::RUNTIME_HEATING_SETPOINT_C);
+                    covered.insert(tk::RUNTIME_COOLING_SETPOINT_C);
+                }
+                // Actor telemetry pass-through columns cover all keys published
+                // by actors. Any key in any actor's telemetry is covered.
+                for actor in &self.actors {
+                    if let Some(tel) = actor.telemetry() {
+                        for key in tel.0.keys() {
+                            covered.insert(key.as_str());
+                        }
+                    }
+                }
+                for &key in tk::OUTPUT_SCOPE_KEYS {
+                    if !covered.contains(key) {
+                        // Key is output-scoped but has no column mapping at
+                        // the current verbosity level. This is not necessarily
+                        // a bug — the equipment publishing this key may not be
+                        // present in the dwelling, or the verbosity may be too
+                        // low. But it is worth flagging for diagnostic purposes.
+                        tracing::info!(
+                            target: "hares::output::coverage",
+                            key = key,
+                            "output-scoped telemetry key has no output column at verbosity {}",
+                            self.output_verbosity,
+                        );
+                    }
+                }
+            }
+
             let zone_types = self.environment.zone_types().to_vec();
             let zone_caches = build_zone_column_caches(
                 &self.latest_env.zones,
@@ -5319,6 +5488,11 @@ impl Dwelling {
                 // are accumulated into the same row slot.
                 row[idx] += eq.telemetry().get(tk::DUCT_LOSS_W).unwrap_or(0.0); // allowed: duct loss remains telemetry-only until CoreOutput gains a duct loss field.
             }
+            // V8 per-equipment telemetry diagnostic columns: each (key, idx) pair
+            // reads directly from equipment telemetry.
+            for &(key, idx) in &cols.v8_columns {
+                row[idx] = eq.telemetry().get(key).unwrap_or(0.0); // allowed: v8 telemetry pass-through uses pre-resolved tk:: constants bound to `key`.
+            }
         }
 
         // Per-EndUse aggregate electric power columns.
@@ -5420,6 +5594,41 @@ impl Dwelling {
             .get("Hot Water Mains Temperature (C)")
         {
             row[idx] = self.latest_env.weather.mains_temp_c;
+        }
+
+        // Setpoint chain: dwelling-level context columns for control auditing.
+        // Read from the first HVAC equipment that publishes these keys; setpoint
+        // reconciliation writes them to all HVAC equipment telemetry, so any
+        // one carries the correct value.
+        if let Some(first_hvac) = self
+            .equipment
+            .iter()
+            .find(|eq| is_hvac_or_wh(&eq.descriptor().name))
+        {
+            if let Some(&idx) = self.output_column_index.get(SCHEDULED_HEATING_SETPOINT_COL) {
+                row[idx] = first_hvac
+                    .telemetry()
+                    .get(tk::SCHEDULE_HEATING_SETPOINT_C)
+                    .unwrap_or(0.0);
+            }
+            if let Some(&idx) = self.output_column_index.get(SCHEDULED_COOLING_SETPOINT_COL) {
+                row[idx] = first_hvac
+                    .telemetry()
+                    .get(tk::SCHEDULE_COOLING_SETPOINT_C)
+                    .unwrap_or(0.0);
+            }
+            if let Some(&idx) = self.output_column_index.get(RUNTIME_HEATING_SETPOINT_COL) {
+                row[idx] = first_hvac
+                    .telemetry()
+                    .get(tk::RUNTIME_HEATING_SETPOINT_C)
+                    .unwrap_or(0.0);
+            }
+            if let Some(&idx) = self.output_column_index.get(RUNTIME_COOLING_SETPOINT_COL) {
+                row[idx] = first_hvac
+                    .telemetry()
+                    .get(tk::RUNTIME_COOLING_SETPOINT_C)
+                    .unwrap_or(0.0);
+            }
         }
 
         for &(zone, value) in &gains.infiltration_by_zone {
@@ -12633,5 +12842,167 @@ master_seed = 42
         let schema_v4 = hares_io::build_schema(&[], 4, &[]);
         let col_idx_v4 = build_output_column_index(&schema_v4);
         assert!(!col_idx_v4.contains_key(HVAC_DUCT_LOSSES_COL));
+    }
+
+    /// Every output-scoped telemetry key in `OUTPUT_SCOPE_KEYS` has a
+    /// corresponding column mapping in the output schema when the
+    /// relevant equipment type is present at max verbosity (8).
+    ///
+    /// This is the integration-level counterpart to the unit tests in
+    /// `telemetry_keys.rs` — those verify every key constant has a scope
+    /// annotation; this one verifies the scope annotations are backed
+    /// by actual column definitions.
+    #[test]
+    fn all_output_scope_keys_have_column_mappings_at_max_verbosity() {
+        use hares_types::telemetry_keys::{self as tk};
+        let specs: Vec<hares_io::EquipmentSpec> = vec![
+            // HVAC with compressor (heat pump)
+            hares_io::EquipmentSpec {
+                instance_name: Some("ASHP Heater".to_string()),
+                name: "ASHP Heater".to_string(),
+                fuel_type: FuelType::Electric,
+                parameters: serde_json::Map::new(),
+                zip_params: None,
+                typed_config: None,
+                system_id: None,
+                related_hvac_idref: None,
+                primary_role: None,
+            },
+            // PV
+            hares_io::EquipmentSpec {
+                instance_name: Some("PV".to_string()),
+                name: "PV".to_string(),
+                fuel_type: FuelType::Electric,
+                parameters: serde_json::Map::new(),
+                zip_params: None,
+                typed_config: None,
+                system_id: None,
+                related_hvac_idref: None,
+                primary_role: None,
+            },
+            // EV
+            hares_io::EquipmentSpec {
+                instance_name: Some("EV".to_string()),
+                name: "EV".to_string(),
+                fuel_type: FuelType::Electric,
+                parameters: serde_json::Map::new(),
+                zip_params: None,
+                typed_config: None,
+                system_id: None,
+                related_hvac_idref: None,
+                primary_role: None,
+            },
+        ];
+        let schema = hares_io::build_schema(&specs, 8, &[]);
+        let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+
+        // Build the expected column set from the schema and the
+        // equipment column map logic. We can't call build_equipment_column_map
+        // directly because it requires Box<dyn Equipment> instances, so we
+        // verify against the column names in the schema instead.
+        //
+        // For each output-scoped key, check that the schema contains at
+        // least one column whose suffix matches the key's column suffix.
+        // The schema should have per-equipment columns for HVAC, PV, and EV.
+
+        // Per-HVAC columns (including heat pump and compressor):
+        assert!(
+            column_names.contains(&"ASHP Heater Supply Temperature (C)"),
+            "missing HVAC supply temp column; got: {column_names:?}"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater Return Temperature (C)"),
+            "missing HVAC return temp column"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater Compressor Power (W)"),
+            "missing compressor power (W) column"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater Compressor Power (kW)"),
+            "missing compressor power (kW) column"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater Fan Electric Power (W)"),
+            "missing fan electric power column"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater Fan Power (W)"),
+            "missing fan power (W) column"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater Supply Air Temperature (C)"),
+            "missing HP supply air temp column"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater Pan Heater Power (kW)"),
+            "missing pan heater power column"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater Heat Pump Capacity (W)"),
+            "missing HP capacity column"
+        );
+        assert!(
+            column_names.contains(&"ASHP Heater ER Capacity (W)"),
+            "missing ER capacity column"
+        );
+
+        // Per-PV columns:
+        assert!(
+            column_names.contains(&"PV DC Power (kW)"),
+            "missing PV DC power column"
+        );
+        assert!(
+            column_names.contains(&"PV Irradiance (W/m2)"),
+            "missing PV irradiance column"
+        );
+
+        // Per-EV columns:
+        assert!(
+            column_names.contains(&"EV Connection State (-)"),
+            "missing EV connection state column"
+        );
+        assert!(
+            column_names.contains(&"EV Charging Level (-)"),
+            "missing EV charging level column"
+        );
+
+        // Setpoint chain columns (dwelling-level, at v7):
+        assert!(
+            column_names.contains(&"Scheduled Heating Setpoint (C)"),
+            "missing scheduled heating setpoint column"
+        );
+        assert!(
+            column_names.contains(&"Scheduled Cooling Setpoint (C)"),
+            "missing scheduled cooling setpoint column"
+        );
+        assert!(
+            column_names.contains(&"Runtime Heating Setpoint (C)"),
+            "missing runtime heating setpoint column"
+        );
+        assert!(
+            column_names.contains(&"Runtime Cooling Setpoint (C)"),
+            "missing runtime cooling setpoint column"
+        );
+
+        // Verify all 25 output-scope keys are accounted for.
+        // 7 legacy (FAN_KW, SHR, DEFROST_CYCLE_STATE, BACKUP_ER_KW,
+        //   RUNTIME_FRACTION, LATENT_GAINS_W, DUCT_LOSS_W)
+        // + 4 setpoint chain
+        // + 3 HVAC temps
+        // + 4 compressor/fan detail
+        // + 3 HP detail
+        // + 2 PV
+        // + 2 EV
+        // = 25 total keys
+        //
+        // 7 legacy output keys are verified by existing tests
+        // (verbosity_7 tests for fan, SHR, defrost, ER, RTF, latent, duct).
+        // The 18 new keys are verified above.
+        assert_eq!(
+            tk::OUTPUT_SCOPE_KEYS.len(),
+            25,
+            "OUTPUT_SCOPE_KEYS length changed; ensure all are tested above"
+        );
     }
 }
