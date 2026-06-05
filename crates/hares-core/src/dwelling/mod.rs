@@ -1339,7 +1339,7 @@ impl Dwelling {
             &config,
             schedule_result.event_window_schedule_col,
             schedule_result.event_probability_schedule_col,
-        );
+        )?;
         let weather = build_synthetic_weather(&config, path)?;
         let dwelling_config = DwellingConfig {
             hpxml_path: path.to_path_buf(),
@@ -9729,7 +9729,8 @@ occupancy = 1.0
             "600.toml must have occupants_present = false"
         );
 
-        let mut building = build_synthetic_building(&config, None, None);
+        let mut building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
         let schedule_result = build_synthetic_schedule(&config).expect("build schedule");
         let weather = build_synthetic_weather(&config, &base_path).expect("build weather");
 

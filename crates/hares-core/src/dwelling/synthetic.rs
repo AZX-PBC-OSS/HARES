@@ -6,6 +6,7 @@ use std::path::Path;
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
 use hares_physics::solar::{EOT_C0, EOT_C1, EOT_C2, EOT_C3, EOT_C4};
+use hares_types::HaresError;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -466,9 +467,132 @@ pub(crate) fn build_synthetic_building(
     config: &SyntheticTomlConfig,
     event_window_schedule_col: Option<usize>,
     event_probability_schedule_col: Option<usize>,
-) -> Building {
+) -> Result<Building> {
     use hares_io::hpxml::{Boundary, BoundaryType, MaterialLayer, Site, Window, Zone, ZoneType};
     use hares_physics::units as conv;
+
+    // ── Range validation ────────────────────────────────────────────────
+    // Validate material properties before constructing anything so users
+    // get clear error messages referencing their TOML fields rather than
+    // cryptic downstream errors (e.g. NonPositiveResistance in RC network).
+
+    // wall_r_value_m2_k_w > 0.0 — reject 0, negative, NaN
+    {
+        let r_value = config.materials.wall_r_value_m2_k_w;
+        if r_value.is_nan() || r_value <= 0.0 {
+            #[cfg(feature = "observe")]
+            tracing::debug!(
+                synthetic.validation.wall_r_value_failure = true,
+                value = r_value,
+                "wall_r_value_m2_k_w validation failed"
+            );
+            return Err(HaresError::Dwelling(format!(
+                "wall_r_value_m2_k_w must be positive, got {r_value}"
+            )));
+        }
+    }
+
+    // Window validation: u_factor > 0.0, 0.0 <= SHGC <= 1.0
+    if let Some(windows) = &config.windows {
+        for wc in windows {
+            if wc.u_factor_w_m2_k.is_nan() || wc.u_factor_w_m2_k <= 0.0 {
+                #[cfg(feature = "observe")]
+                tracing::debug!(
+                    synthetic.validation.u_factor_failure = true,
+                    window_id = %wc.id,
+                    value = wc.u_factor_w_m2_k,
+                    "u_factor_w_m2_k validation failed"
+                );
+                return Err(HaresError::Dwelling(format!(
+                    "u_factor_w_m2_k must be positive for window '{}', got {}",
+                    wc.id, wc.u_factor_w_m2_k
+                )));
+            }
+            if !(0.0 <= wc.shgc && wc.shgc <= 1.0) {
+                #[cfg(feature = "observe")]
+                tracing::debug!(
+                    synthetic.validation.shgc_failure = true,
+                    window_id = %wc.id,
+                    value = wc.shgc,
+                    "SHGC validation failed"
+                );
+                return Err(HaresError::Dwelling(format!(
+                    "SHGC must be in [0.0, 1.0] for window '{}', got {}",
+                    wc.id, wc.shgc
+                )));
+            }
+        }
+    }
+
+    // Boundary material layer validation
+    if let Some(boundary_configs) = &config.boundaries {
+        for bc in boundary_configs {
+            for ml in &bc.material_layers {
+                // conductivity_w_m_k > 0.0 for layers with positive thickness
+                if ml.thickness_m > 0.0
+                    && (ml.conductivity_w_m_k.is_nan() || ml.conductivity_w_m_k <= 0.0)
+                {
+                    #[cfg(feature = "observe")]
+                    tracing::debug!(
+                        synthetic.validation.conductivity_failure = true,
+                        boundary_id = %bc.id,
+                        thickness_m = ml.thickness_m,
+                        value = ml.conductivity_w_m_k,
+                        "conductivity_w_m_k validation failed"
+                    );
+                    return Err(HaresError::Dwelling(format!(
+                        "conductivity_w_m_k must be positive for boundary '{}' with thickness {:.6} m, got {}",
+                        bc.id, ml.thickness_m, ml.conductivity_w_m_k
+                    )));
+                }
+                // density_kg_m3 >= 0.0 — reject negative
+                if ml.density_kg_m3.is_nan() || ml.density_kg_m3 < 0.0 {
+                    #[cfg(feature = "observe")]
+                    tracing::debug!(
+                        synthetic.validation.density_failure = true,
+                        boundary_id = %bc.id,
+                        value = ml.density_kg_m3,
+                        "density_kg_m3 validation failed"
+                    );
+                    return Err(HaresError::Dwelling(format!(
+                        "density_kg_m3 must be non-negative for boundary '{}', got {}",
+                        bc.id, ml.density_kg_m3
+                    )));
+                }
+                // specific_heat_j_kg_k >= 0.0 — reject negative
+                if ml.specific_heat_j_kg_k.is_nan() || ml.specific_heat_j_kg_k < 0.0 {
+                    #[cfg(feature = "observe")]
+                    tracing::debug!(
+                        synthetic.validation.specific_heat_failure = true,
+                        boundary_id = %bc.id,
+                        value = ml.specific_heat_j_kg_k,
+                        "specific_heat_j_kg_k validation failed"
+                    );
+                    return Err(HaresError::Dwelling(format!(
+                        "specific_heat_j_kg_k must be non-negative for boundary '{}', got {}",
+                        bc.id, ml.specific_heat_j_kg_k
+                    )));
+                }
+                // Warn on zero density or specific_heat for layers with positive thickness
+                if ml.thickness_m > 0.0 && ml.density_kg_m3 == 0.0 {
+                    tracing::warn!(
+                        boundary_id = %bc.id,
+                        thickness_m = ml.thickness_m,
+                        "density_kg_m3 is zero for layer with positive thickness — zero thermal capacitance"
+                    );
+                }
+                if ml.thickness_m > 0.0 && ml.specific_heat_j_kg_k == 0.0 {
+                    tracing::warn!(
+                        boundary_id = %bc.id,
+                        thickness_m = ml.thickness_m,
+                        "specific_heat_j_kg_k is zero for layer with positive thickness — zero thermal capacitance"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── End range validation ────────────────────────────────────────────
 
     // Heating capacity: when explicitly set via TOML, emit as explicit
     // HPXML <HeatingCapacity>; when absent (None), let the dwelling builder's
@@ -1297,7 +1421,7 @@ pub(crate) fn build_synthetic_building(
         .map(|b| b.id.clone())
         .collect();
 
-    Building {
+    let building = Building {
         site: Site {
             elevation_m: Some(1609.0),
             site_type: None,
@@ -1344,7 +1468,66 @@ pub(crate) fn build_synthetic_building(
         mass_multiplier_override: config.geometry.mass_multiplier,
         hvac_deadband_c: config.hvac.deadband_c,
         details_xml,
+    };
+
+    // Post-construction debug assertions: verify ranges hold in the built object
+    // to catch internal construction bugs.  These are redundant with the
+    // pre-construction validation above but guard against regressions where
+    // downstream code mangles the validated values.
+    #[cfg(debug_assertions)]
+    {
+        for boundary in &building.boundaries {
+            if boundary.boundary_type == BoundaryType::Window {
+                continue;
+            }
+            if let Some(r_value) = boundary.assembly_r_value_m2_k_w {
+                assert!(
+                    r_value > 0.0,
+                    "boundary {} assembly_r_value_m2_k_w must be positive after construction, got {r_value}",
+                    boundary.id
+                );
+            }
+            for layer in &boundary.material_layers {
+                if layer.thickness_m > 0.0 {
+                    assert!(
+                        layer.conductivity_w_m_k > 0.0,
+                        "boundary {} material layer conductivity_w_m_k must be positive, got {}",
+                        boundary.id,
+                        layer.conductivity_w_m_k
+                    );
+                }
+                assert!(
+                    layer.density_kg_m3 >= 0.0,
+                    "boundary {} material layer density_kg_m3 must be non-negative, got {}",
+                    boundary.id,
+                    layer.density_kg_m3
+                );
+                assert!(
+                    layer.specific_heat_j_kg_k >= 0.0,
+                    "boundary {} material layer specific_heat_j_kg_k must be non-negative, got {}",
+                    boundary.id,
+                    layer.specific_heat_j_kg_k
+                );
+            }
+        }
+        for window in &building.windows {
+            assert!(
+                0.0 <= window.shgc.unwrap_or(0.0) && window.shgc.unwrap_or(0.0) <= 1.0,
+                "window {} SHGC = {:?} out of [0, 1] range after construction",
+                window.id,
+                window.shgc
+            );
+            if let Some(u) = window.u_factor_w_m2_k {
+                assert!(
+                    u > 0.0,
+                    "window {} U-factor must be positive after construction, got {u}",
+                    window.id
+                );
+            }
+        }
     }
+
+    Ok(building)
 }
 
 /// Spencer (1971) solar altitude for hourly synthetic weather.
@@ -2777,7 +2960,8 @@ shgc = 0.7
 attached_to_wall_id = "wall-1"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         let wall = building
             .boundaries
@@ -2929,7 +3113,8 @@ shgc = 0.789
 attached_to_wall_id = "south-wall"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         let south_wall = building
             .boundaries
@@ -2987,7 +3172,8 @@ wall_r_value_m2_k_w = 2.5
 equipment_name = "None"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         // Exclude windows from the face count (none configured here).
         let non_window: Vec<_> = building
@@ -3129,7 +3315,8 @@ density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         // The builder must use the explicit boundaries, not auto-generate.
         assert_eq!(
@@ -3197,7 +3384,8 @@ output_chunk_size = 1000
 master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         let non_window: Vec<_> = building
             .boundaries
@@ -3281,7 +3469,8 @@ wall_r_value_m2_k_w = 2.0
 equipment_name = "None"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         // Verify each non-window boundary carries exactly one concrete
         // material layer with non-zero density and specific_heat.
@@ -3410,7 +3599,8 @@ wall_r_value_m2_k_w = 2.0
 equipment_name = "None"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         let n_non_window = building
             .boundaries
@@ -3513,7 +3703,8 @@ output_chunk_size = 1000
 master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         let store = hares_io::DefaultsStore::empty();
         let boundary_inputs = crate::dwelling::conversions::building_to_boundary_inputs(
@@ -3606,7 +3797,8 @@ output_chunk_size = 1000
 master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         assert!(
             building.hvac_capacity_w.is_none(),
@@ -3654,7 +3846,8 @@ output_chunk_size = 1000
 master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         let expected_w = hares_physics::units::power_btu_h_to_w(25.0 * 1000.0);
         let actual_w = building
@@ -3707,7 +3900,8 @@ output_chunk_size = 1000
 master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         let hvac = find_xml_child(&building.details_xml.children, "Systems")
             .and_then(|s| find_xml_child(&s.children, "HVAC"))
@@ -3762,7 +3956,8 @@ output_chunk_size = 1000
 master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         let hvac = find_xml_child(&building.details_xml.children, "Systems")
             .and_then(|s| find_xml_child(&s.children, "HVAC"))
@@ -3821,7 +4016,8 @@ output_chunk_size = 1000
 master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let building = build_synthetic_building(&config, None, None);
+        let building =
+            build_synthetic_building(&config, None, None).expect("build synthetic building");
 
         let hvac = find_xml_child(&building.details_xml.children, "Systems")
             .and_then(|s| find_xml_child(&s.children, "HVAC"))
@@ -3838,6 +4034,392 @@ master_seed = 0
         assert!(
             cooling_capacity.is_none(),
             "CoolingCapacity must NOT be present when heating_capacity_kbtu_h is not set"
+        );
+    }
+
+    // ── T-0229: Material property range validation ──────────────────────
+
+    /// Synthetic builder with `wall_r_value_m2_k_w = 0.0` returns a clear error
+    /// referencing the TOML field.
+    #[test]
+    fn wall_r_value_zero_returned_as_error() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 0.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(result.is_err(), "should fail with zero wall_r_value");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("wall_r_value_m2_k_w"),
+            "error message must reference the TOML field, got: {err}"
+        );
+        assert!(
+            err.contains("positive"),
+            "error message must explain the constraint, got: {err}"
+        );
+    }
+
+    /// Synthetic builder with `wall_r_value_m2_k_w = -1.0` (negative) is
+    /// also rejected.
+    #[test]
+    fn wall_r_value_negative_returned_as_error() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = -1.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(result.is_err(), "should fail with negative wall_r_value");
+    }
+
+    /// Synthetic builder with `shgc = 1.5` returns an error.
+    #[test]
+    fn shgc_above_one_returned_as_error() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[[windows]]
+id = "win-1"
+area_m2 = 2.0
+u_factor_w_m2_k = 3.0
+shgc = 1.5
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(result.is_err(), "should fail with shgc = 1.5");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("SHGC"),
+            "error message must reference SHGC, got: {err}"
+        );
+    }
+
+    /// Synthetic builder with `shgc = 1.0` succeeds (boundary value).
+    #[test]
+    fn shgc_at_one_succeeds() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[[windows]]
+id = "win-1"
+area_m2 = 2.0
+u_factor_w_m2_k = 3.0
+shgc = 1.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(
+            result.is_ok(),
+            "shgc = 1.0 should be accepted as a boundary value"
+        );
+    }
+
+    /// Synthetic builder with `shgc = 0.0` succeeds (boundary value).
+    #[test]
+    fn shgc_at_zero_succeeds() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[[windows]]
+id = "win-1"
+area_m2 = 2.0
+u_factor_w_m2_k = 3.0
+shgc = 0.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(
+            result.is_ok(),
+            "shgc = 0.0 should be accepted as a boundary value"
+        );
+    }
+
+    /// Synthetic builder with `conductivity_w_m_k = 0.0` and
+    /// `thickness_m = 0.1` returns an error.
+    #[test]
+    fn zero_conductivity_with_positive_thickness_returned_as_error() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "wall-1"
+boundary_type = "Wall"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.1
+conductivity_w_m_k = 0.0
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(
+            result.is_err(),
+            "should fail with conductivity = 0.0 and thickness = 0.1 m"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("conductivity_w_m_k"),
+            "error message must reference conductivity field, got: {err}"
+        );
+        assert!(
+            err.contains("positive"),
+            "error message must explain the constraint, got: {err}"
+        );
+    }
+
+    /// Zero-density layer with positive thickness succeeds (zero-capacitance
+    /// is a valid steady-state choice) — but emits a warning.
+    #[test]
+    fn zero_density_with_positive_thickness_succeeds() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "wall-1"
+boundary_type = "Wall"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.1
+conductivity_w_m_k = 1.0
+density_kg_m3 = 0.0
+specific_heat_j_kg_k = 900.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(
+            result.is_ok(),
+            "zero density with positive thickness should succeed (warning emitted)"
+        );
+    }
+
+    /// Zero-specific-heat layer with positive thickness succeeds.
+    #[test]
+    fn zero_specific_heat_with_positive_thickness_succeeds() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "wall-1"
+boundary_type = "Wall"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.1
+conductivity_w_m_k = 1.0
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 0.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(
+            result.is_ok(),
+            "zero specific_heat with positive thickness should succeed (warning emitted)"
+        );
+    }
+
+    /// Negative density is rejected outright (physically impossible).
+    #[test]
+    fn negative_density_returned_as_error() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "wall-1"
+boundary_type = "Wall"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.1
+conductivity_w_m_k = 1.0
+density_kg_m3 = -500.0
+specific_heat_j_kg_k = 900.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(result.is_err(), "negative density should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("density_kg_m3"),
+            "error message must reference density field, got: {err}"
+        );
+    }
+
+    /// Negative U-factor is rejected.
+    #[test]
+    fn negative_u_factor_returned_as_error() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[[windows]]
+id = "win-1"
+area_m2 = 2.0
+u_factor_w_m2_k = -0.5
+shgc = 0.7
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let result = build_synthetic_building(&config, None, None);
+        assert!(result.is_err(), "negative u_factor should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("u_factor_w_m2_k"),
+            "error message must reference u_factor field, got: {err}"
         );
     }
 }
