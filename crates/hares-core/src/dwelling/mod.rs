@@ -1916,11 +1916,11 @@ impl Dwelling {
 
         // Read number_of_occupants from the Occupancy spec to scale the raw
         // schedule fraction (0–1) into a person count for internal heat gains.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
         let has_occupancy_spec;
         let occupancy_scale = match equipment_specs.iter().find(|s| s.name == "Occupancy") {
             Some(spec) => {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
                 {
                     has_occupancy_spec = true;
                 }
@@ -1936,7 +1936,7 @@ impl Dwelling {
                 })?
             }
             None => {
-                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
                 {
                     has_occupancy_spec = false;
                 }
@@ -1947,7 +1947,7 @@ impl Dwelling {
         // Invariant: number_of_occupants must be non-negative regardless of
         // derivation path (HPXML NumberofResidents, derived from bedrooms, or default).
         // A negative value indicates a data error in the parser or input.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
         if has_occupancy_spec && occupancy_scale < 0.0 {
             return Err(HaresError::Dwelling(format!(
                 "Occupancy 'number_of_occupants' must be non-negative; got {}; \
@@ -1967,7 +1967,7 @@ impl Dwelling {
         // An absent Occupancy spec is valid (e.g. BESTEST unconditioned structures).
         // ASHRAE HoF 2021 Ch.18 §18.4 — occupant heat gain is a primary driver of
         // cooling load; silently zeroing it produces a systematic underestimate.
-        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
         if has_occupancy_spec && occupancy_column_idx.is_none() {
             let has_hpxml_fractions = equipment_specs
                 .iter()
@@ -3522,7 +3522,10 @@ impl Dwelling {
             }
         }
 
-        #[allow(unused_mut, reason = "telem is mutated only inside cfg(debug_assertions | check_invariants) blocks below")]
+        #[allow(
+            unused_mut,
+            reason = "telem is mutated only inside cfg(debug_assertions | check_invariants) blocks below"
+        )]
         let mut telem = DwellingTelemetry {
             timestep_index: self.clock.current_step(),
             current_time: self.latest_env.current_time,
@@ -6091,7 +6094,7 @@ fn zone_display_name(
 /// programming errors that would cause two EV drivers to share identical
 /// stochastic behaviour — silently correlated streams are a latent data-quality
 /// hazard that is nearly impossible to detect from simulation output alone.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+#[cfg(any(debug_assertions, test, feature = "check_invariants"))]
 fn check_ev_rng_stream_no_collision(
     seen: &mut HashMap<([u8; 32], u64), String>,
     seed: [u8; 32],

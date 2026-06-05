@@ -394,10 +394,8 @@ impl StreamingRecorder {
         #[cfg(feature = "observe")]
         {
             if self.rotated_file_count > 1 {
-                tracing::info!(
-                    file_count = self.rotated_file_count,
-                    "output rotation produced {file_count} files"
-                );
+                let file_count = self.rotated_file_count;
+                tracing::info!(file_count, "output rotation produced {file_count} files");
             }
         }
 

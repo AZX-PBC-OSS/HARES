@@ -1,8 +1,134 @@
-//! Fluid-domain shared state payload types.
+//! Fluid-domain shared state payload types and hydraulic network model.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{FluidType, HaresError, LoopId};
+
+/// Stable fluid node identifier within a loop topology.
+#[derive(
+    Hash, Eq, PartialEq, Copy, Clone, Debug, Default, Ord, PartialOrd, Serialize, Deserialize,
+)]
+pub struct FluidNodeId(pub u16);
+
+/// Role of a node in the hydraulic network topology.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FluidNodeRole {
+    /// Series pass-through node — one inlet, one outlet.
+    Serial,
+    /// Source node — injects heat into the loop (e.g. boiler, heat pump).
+    Source,
+    /// Sink node — extracts heat from the loop (e.g. distribution coil).
+    Sink,
+    /// Splitter — one inlet, multiple outlets (parallel branches).
+    Splitter,
+    /// Mixer — multiple inlets, one outlet (parallel branch convergence).
+    Mixer,
+}
+
+/// A single node in the hydraulic network topology.
+///
+/// Tracks total inflow and outflow mass flow rates [kg/s] for mass-conservation
+/// verification.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FluidNode {
+    pub node_id: FluidNodeId,
+    pub role: FluidNodeRole,
+    /// Sum of inflows [kg/s] from upstream nodes or equipment.
+    pub total_inflow_kg_s: f64,
+    /// Sum of outflows [kg/s] to downstream nodes or equipment.
+    pub total_outflow_kg_s: f64,
+}
+
+impl FluidNode {
+    #[must_use]
+    pub fn new(node_id: FluidNodeId, role: FluidNodeRole) -> Self {
+        Self {
+            node_id,
+            role,
+            total_inflow_kg_s: 0.0,
+            total_outflow_kg_s: 0.0,
+        }
+    }
+
+    /// Returns the absolute mass imbalance at this node [kg/s].
+    #[must_use]
+    pub fn mass_imbalance_kg_s(&self) -> f64 {
+        (self.total_inflow_kg_s - self.total_outflow_kg_s).abs()
+    }
+
+    /// Resets inflow/outflow accumulators to zero for the next timestep.
+    pub fn zero(&mut self) {
+        self.total_inflow_kg_s = 0.0;
+        self.total_outflow_kg_s = 0.0;
+    }
+}
+
+/// Topology of one hydronic loop: the set of nodes and their connections.
+///
+/// Mass-conservation checks iterate all loop nodes, computing
+/// `|∑ inflow − ∑ outflow|` and verifying it is below `MASS_FLOW_TOLERANCE`.
+///
+/// The topology supports a single loop with one pump, one heat source, and one
+/// or more parallel heat sinks (distribution coils). Splitter and mixer nodes
+/// distribute/collect flow across parallel branches.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LoopTopology {
+    pub loop_id: LoopId,
+    pub nodes: Vec<FluidNode>,
+    /// Directed edges: `(from_node_id, to_node_id)`.
+    /// Each edge represents a pipe segment carrying mass flow from the source
+    /// node to the target node. The set of edges defines which accumulators
+    /// feed into and out of each node for conservation checking.
+    pub edges: Vec<(FluidNodeId, FluidNodeId)>,
+}
+
+impl LoopTopology {
+    #[must_use]
+    pub fn new(
+        loop_id: LoopId,
+        nodes: Vec<FluidNode>,
+        edges: Vec<(FluidNodeId, FluidNodeId)>,
+    ) -> Self {
+        Self {
+            loop_id,
+            nodes,
+            edges,
+        }
+    }
+
+    /// Returns the maximum absolute mass imbalance across all nodes [kg/s].
+    #[must_use]
+    pub fn max_mass_imbalance_kg_s(&self) -> f64 {
+        self.nodes
+            .iter()
+            .map(FluidNode::mass_imbalance_kg_s)
+            .fold(0.0, f64::max)
+    }
+
+    /// Returns the number of nodes where imbalance exceeds `MASS_FLOW_TOLERANCE`.
+    #[must_use]
+    pub fn num_conservation_violations(&self) -> u32 {
+        self.nodes
+            .iter()
+            .filter(|n| n.mass_imbalance_kg_s() > MASS_FLOW_TOLERANCE)
+            .count() as u32
+    }
+
+    /// Resets all node flow accumulators to zero.
+    pub fn zero_nodes(&mut self) {
+        for node in &mut self.nodes {
+            node.zero();
+        }
+    }
+}
+
+/// Mass-flow tolerance for conservation checks [kg/s].
+///
+/// EnergyPlus `DataBranchAirLoopPlant::MassFlowTolerance` = 1e-9 kg/s
+/// (`vendors/EnergyPlus/src/EnergyPlus/DataBranchAirLoopPlant.hh:64`).
+/// HARES uses the same tolerance so that conservation enforcement matches
+/// the EnergyPlus reference implementation.
+pub const MASS_FLOW_TOLERANCE: f64 = 1e-9;
 
 /// Fluid loop state resolved each timestep by the fluid domain solver.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

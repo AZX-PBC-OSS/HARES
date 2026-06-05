@@ -1608,10 +1608,7 @@ impl PyDwelling {
         dict.set_item("mains_temp_c", env.weather.mains_temp_c)?;
         dict.set_item("grid_voltage_pu", env.grid.voltage_pu)?;
         dict.set_item("grid_frequency_hz", env.grid.frequency_hz)?;
-        dict.set_item(
-            "current_time",
-            chrono_to_py_datetime(py, env.current_time)?,
-        )?;
+        dict.set_item("current_time", chrono_to_py_datetime(py, env.current_time)?)?;
         let zones: Vec<Py<PyDict>> = env
             .zones
             .iter()

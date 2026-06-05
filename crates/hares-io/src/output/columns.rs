@@ -7,9 +7,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::hpxml::EquipmentSpec;
 use crate::hpxml::equipment::canonical_instance_namer;
-use hares_types::{EndUse, FuelType, ZoneId};
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use hares_types::OperatingMode;
+use hares_types::{EndUse, FuelType, ZoneId};
 #[cfg(any(debug_assertions, feature = "check_invariants"))]
 use strum::IntoEnumIterator;
 

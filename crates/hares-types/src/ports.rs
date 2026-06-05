@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DomainId, FluidType, FuelType, HaresError, LoopId, ZoneId};
+use crate::{DomainId, FluidNodeId, FluidType, FuelType, HaresError, LoopId, ZoneId};
 
 pub const CUSTOM_PAYLOAD_LEN: usize = 16;
 
@@ -357,11 +357,17 @@ impl FuelAccumulator {
     }
 }
 
-/// Fluid contribution totals for one loop and fluid type.
+/// Fluid contribution totals for one loop, fluid type, and hydraulic node.
+///
+/// The `node_id` identifies this accumulator's position in the loop topology.
+/// When no explicit topology is configured, `FluidNodeId(0)` is the implied
+/// default serial node for the entire loop.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FluidAccumulator {
     pub loop_id: LoopId,
     pub fluid_type: FluidType,
+    /// Hydraulic node this accumulator represents within the loop topology.
+    pub node_id: FluidNodeId,
     pub total_flow_kg_s: f64,
     pub mean_supply_temp_c: f64,
     pub mean_return_temp_c: f64,
@@ -372,10 +378,25 @@ pub struct FluidAccumulator {
 }
 
 impl FluidAccumulator {
+    /// Creates a new accumulator for the default serial node (`FluidNodeId(0)`).
     pub fn new(loop_id: LoopId, fluid_type: FluidType) -> Self {
         Self {
             loop_id,
             fluid_type,
+            node_id: FluidNodeId(0),
+            total_flow_kg_s: 0.0,
+            mean_supply_temp_c: 0.0,
+            mean_return_temp_c: 0.0,
+            total_thermal_power_w: 0.0,
+        }
+    }
+
+    /// Creates a new accumulator for a specific hydraulic node.
+    pub fn with_node(loop_id: LoopId, fluid_type: FluidType, node_id: FluidNodeId) -> Self {
+        Self {
+            loop_id,
+            fluid_type,
+            node_id,
             total_flow_kg_s: 0.0,
             mean_supply_temp_c: 0.0,
             mean_return_temp_c: 0.0,
@@ -985,6 +1006,7 @@ mod tests {
             fluid: vec![FluidAccumulator {
                 loop_id: LoopId(9),
                 fluid_type: FluidType::Water,
+                node_id: FluidNodeId(0),
                 total_flow_kg_s: 1.2,
                 mean_supply_temp_c: 45.0,
                 mean_return_temp_c: 40.0,

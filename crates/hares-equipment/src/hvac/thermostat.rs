@@ -239,6 +239,7 @@ pub struct ThermostatFsm {
     /// Count of setpoint overrides rejected by deadband validation.
     /// Gated on `observe` feature for diagnostic CSV output.
     #[cfg(feature = "observe")]
+    #[allow(dead_code)]
     pub setpoint_inversion_rejected_count: u64,
     /// Count of deadband collisions where `heat_turn_on >= cool_turn_on`
     /// in `update_mode()`. Gated on `observe` for diagnostic CSV output.

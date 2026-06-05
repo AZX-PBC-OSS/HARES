@@ -7,8 +7,8 @@ use hares_physics::constants::{
     CP_LIQUID_WATER_J_KG_K, CP_PROP_GLYCOL_50PCT_J_KG_K, CP_R134A_SAT_LIQUID_J_KG_K,
 };
 use hares_types::{
-    DomainId, DomainSolver, DomainUpdate, FLUID, FluidDomainPayload, FluidLoopState, FluidType,
-    HaresError, LoopId, PortSlots,
+    DomainId, DomainSolver, DomainUpdate, FLUID, FluidDomainPayload, FluidLoopState, FluidNodeId,
+    FluidType, HaresError, LoopId, LoopTopology, MASS_FLOW_TOLERANCE, PortSlots,
 };
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
@@ -19,6 +19,15 @@ pub struct FluidSolverConfig {
     ///
     /// Falls back to `CP_LIQUID_WATER_J_KG_K` if a fluid type is not in the map.
     pub fluid_specific_heats: HashMap<FluidType, f64>,
+    /// Optional per-loop hydraulic topology for mass-conservation verification.
+    ///
+    /// When present, the solver verifies that `|∑ inflow − ∑ outflow|`
+    /// at every node in the topology is below `MASS_FLOW_TOLERANCE`.
+    /// When absent for a loop, a basic serial-flow consistency check is
+    /// performed instead: all accumulators on that loop must report the same
+    /// flow rate (within tolerance), since a series hydronic loop cannot
+    /// have diverging flow declarations.
+    pub loop_topologies: HashMap<LoopId, LoopTopology>,
 }
 
 impl Default for FluidSolverConfig {
@@ -42,6 +51,7 @@ impl Default for FluidSolverConfig {
         heats.insert(FluidType::Refrigerant, CP_R134A_SAT_LIQUID_J_KG_K);
         Self {
             fluid_specific_heats: heats,
+            loop_topologies: HashMap::new(),
         }
     }
 }
@@ -57,6 +67,14 @@ pub struct FluidSolver {
     /// Always 0 in a correctly configured simulation.
     #[cfg(feature = "observe")]
     pub loop_fluid_type_mismatch_count: u64,
+    /// Maximum absolute mass imbalance across all nodes in all loops [kg/s].
+    /// Gated on `observe` for diagnostic CSV export.
+    #[cfg(feature = "observe")]
+    pub max_mass_imbalance_kg_s: f64,
+    /// Number of nodes where mass imbalance exceeds `MASS_FLOW_TOLERANCE`.
+    /// Gated on `observe` for diagnostic CSV export.
+    #[cfg(feature = "observe")]
+    pub num_conservation_violations: u64,
 }
 
 impl FluidSolver {
@@ -81,6 +99,10 @@ impl FluidSolver {
             last_known_temps: HashMap::new(),
             #[cfg(feature = "observe")]
             loop_fluid_type_mismatch_count: 0,
+            #[cfg(feature = "observe")]
+            max_mass_imbalance_kg_s: 0.0,
+            #[cfg(feature = "observe")]
+            num_conservation_violations: 0,
         })
     }
 
@@ -137,6 +159,7 @@ impl DomainSolver for FluidSolver {
         FLUID
     }
 
+    #[allow(unused_assignments)]
     fn resolve(
         &mut self,
         ports: &PortSlots,
@@ -204,6 +227,222 @@ impl DomainSolver for FluidSolver {
                 cp_used = cp,
                 "fluid solver cp resolution"
             );
+
+            // ── Mass-conservation check (T-0254) ──────────────────────────
+            //
+            // EnergyPlus `CheckLoopExitNode` (`Plant/Loop.cc:244-265`) enforces
+            // |Outlet.MassFlowRate - Inlet.MassFlowRate| < MassFlowTolerance
+            // where `DataBranchAirLoopPlant::MassFlowTolerance` = 1e-9 kg/s.
+            // HARES's `MASS_FLOW_TOLERANCE` matches this.
+            //
+            // Two check modes:
+            //   1. Topology-based: when `loop_topologies` contains this loop,
+            //      accumulate per-node flows and verify conservation using the
+            //      directed-edge graph (inflows from parents, outflows to children).
+            //   2. Serial-flow consistency: when no topology is configured,
+            //      verify that all accumulators on the same loop report the same
+            //      flow rate — a series loop cannot have diverging flows.
+            {
+                // Build per-node flow totals from the accumulator node_ids.
+                let mut node_flows: HashMap<FluidNodeId, f64> = HashMap::new();
+                for acc in &entries {
+                    *node_flows.entry(acc.node_id).or_default() += acc.total_flow_kg_s;
+                }
+
+                if let Some(topology) = self.config.loop_topologies.get_mut(&loop_id) {
+                    // ── Topology-based conservation check ──
+                    //
+                    // Conservation at each node: total inflow must equal total outflow.
+                    //
+                    // For edge (from, to): the flow is the source node's accumulator
+                    // flow when the source has exactly one child (serial connection),
+                    // and the target (child) node's flow when the source has multiple
+                    // children (splitter). This handles the splitter/mixer case where
+                    // a single source's total flow is distributed across multiple edges.
+                    //
+                    // Equivalent EnergyPlus logic: ResolveParallelFlows
+                    // (LoopSide.cc:1279-1682) distributes pump flow across parallel
+                    // branches; CheckLoopExitNode (Loop.cc:244-265) verifies outlet == inlet.
+
+                    #[cfg(feature = "observe")]
+                    let mut violations = 0u32;
+                    #[cfg(feature = "observe")]
+                    let mut max_imbalance = 0.0_f64;
+
+                    // Precompute child count per node.
+                    let child_count: HashMap<FluidNodeId, usize> = {
+                        let mut map = HashMap::new();
+                        for (from, _) in &topology.edges {
+                            *map.entry(*from).or_default() += 1;
+                        }
+                        map
+                    };
+
+                    // Precompute parent count per node.
+                    let parent_count: HashMap<FluidNodeId, usize> = {
+                        let mut map = HashMap::new();
+                        for (_, to) in &topology.edges {
+                            *map.entry(*to).or_default() += 1;
+                        }
+                        map
+                    };
+
+                    for i in 0..topology.nodes.len() {
+                        let node_id = topology.nodes[i].node_id;
+                        let node_role = topology.nodes[i].role;
+                        let node_flow = node_flows.get(&node_id).copied().unwrap_or(0.0);
+
+                        let n_parents = parent_count.get(&node_id).copied().unwrap_or(0);
+                        let n_children = child_count.get(&node_id).copied().unwrap_or(0);
+
+                        // Compute total inflow:
+                        //   - No parents → inflow = node_flow (flow enters from
+                        //     upstream of the modelled topology).
+                        //   - Single parent → inflow = parent node's flow (serial).
+                        //   - Multiple parents (mixer) → inflow = sum of each
+                        //     parent's own flow (each branch carries itself).
+                        let total_inflow: f64 = if n_parents == 0 {
+                            node_flow
+                        } else {
+                            topology
+                                .edges
+                                .iter()
+                                .filter(|(_, to)| *to == node_id)
+                                .map(|(from, _)| {
+                                    let from_flow = node_flows.get(from).copied().unwrap_or(0.0);
+                                    let from_children = child_count.get(from).copied().unwrap_or(0);
+                                    if from_children == 1 {
+                                        // Serial parent: edge carries parent's total flow
+                                        from_flow
+                                    } else {
+                                        // Splitter parent: edge carries this node's flow
+                                        // (the branch's own flow, not the splitter total)
+                                        node_flow
+                                    }
+                                })
+                                .sum()
+                        };
+
+                        // Compute total outflow:
+                        //   - No children → outflow = node_flow (flow exits to
+                        //     downstream of the modelled topology).
+                        //   - Single child → outflow = node_flow (serial).
+                        //   - Multiple children (splitter) → outflow = sum of
+                        //     each child's own flow.
+                        let total_outflow: f64 = if n_children <= 1 {
+                            node_flow
+                        } else {
+                            topology
+                                .edges
+                                .iter()
+                                .filter(|(from, _)| *from == node_id)
+                                .map(|(_, to)| node_flows.get(to).copied().unwrap_or(0.0))
+                                .sum()
+                        };
+
+                        // Write back computed flow totals to the topology node so
+                        // that `FluidNode::mass_imbalance_kg_s()`,
+                        // `LoopTopology::max_mass_imbalance_kg_s()`, and
+                        // `LoopTopology::num_conservation_violations()` return the
+                        // per-step results rather than always returning 0.
+                        topology.nodes[i].total_inflow_kg_s = total_inflow;
+                        topology.nodes[i].total_outflow_kg_s = total_outflow;
+
+                        let max_local_imbalance = (total_inflow - total_outflow).abs();
+
+                        #[cfg(feature = "observe")]
+                        {
+                            max_imbalance = max_imbalance.max(max_local_imbalance);
+                        }
+
+                        if max_local_imbalance > MASS_FLOW_TOLERANCE {
+                            #[cfg(feature = "observe")]
+                            {
+                                violations += 1;
+                            }
+                            tracing::warn!(
+                                loop_id = loop_id.0,
+                                node_id = node_id.0,
+                                ?node_role,
+                                node_flow_kg_s = node_flow,
+                                total_inflow_kg_s = total_inflow,
+                                total_outflow_kg_s = total_outflow,
+                                imbalance_kg_s = max_local_imbalance,
+                                tolerance_kg_s = MASS_FLOW_TOLERANCE,
+                                "mass conservation violated at fluid node"
+                            );
+                            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                            {
+                                panic!(
+                                    "fluid loop {loop_id:?} node {:?} ({:?}): mass conservation violated — \
+                                     node_flow = {:.6e} kg/s, total_inflow = {:.6e} kg/s, \
+                                     total_outflow = {:.6e} kg/s, imbalance = {:.6e} kg/s, \
+                                     tolerance = {:.6e} kg/s",
+                                    node_id,
+                                    node_role,
+                                    node_flow,
+                                    total_inflow,
+                                    total_outflow,
+                                    max_local_imbalance,
+                                    MASS_FLOW_TOLERANCE
+                                );
+                            }
+                        }
+                    }
+
+                    #[cfg(feature = "observe")]
+                    {
+                        self.max_mass_imbalance_kg_s =
+                            self.max_mass_imbalance_kg_s.max(max_imbalance);
+                        self.num_conservation_violations += u64::from(violations);
+                    }
+                } else {
+                    // ── Serial-flow consistency check (no topology) ──
+                    //
+                    // In a series hydronic loop, all equipment must report the
+                    // same mass flow rate. If accumulator A reports X kg/s and
+                    // accumulator B reports Y kg/s with |X-Y| > tolerance,
+                    // mass is being created or destroyed.
+                    if entries.len() > 1 {
+                        let first_flow = entries[0].total_flow_kg_s;
+                        for acc in &entries[1..] {
+                            let diff = (acc.total_flow_kg_s - first_flow).abs();
+                            if diff > MASS_FLOW_TOLERANCE {
+                                tracing::warn!(
+                                    loop_id = loop_id.0,
+                                    node_a = entries[0].node_id.0,
+                                    flow_a = first_flow,
+                                    node_b = acc.node_id.0,
+                                    flow_b = acc.total_flow_kg_s,
+                                    diff_kg_s = diff,
+                                    "mass conservation violated: inconsistent serial loop flows"
+                                );
+                                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                                {
+                                    panic!(
+                                        "fluid loop {loop_id:?}: mass conservation violated — \
+                                         accumulators report inconsistent flow rates: \
+                                         node {:?} flow = {} kg/s, node {:?} flow = {} kg/s, \
+                                         diff = {:.6e} kg/s, tolerance = {:.6e} kg/s",
+                                        entries[0].node_id,
+                                        first_flow,
+                                        acc.node_id,
+                                        acc.total_flow_kg_s,
+                                        diff,
+                                        MASS_FLOW_TOLERANCE
+                                    );
+                                }
+                            }
+                            #[cfg(feature = "observe")]
+                            if diff > MASS_FLOW_TOLERANCE {
+                                self.num_conservation_violations += 1;
+                                self.max_mass_imbalance_kg_s =
+                                    self.max_mass_imbalance_kg_s.max(diff);
+                            }
+                        }
+                    }
+                }
+            }
 
             let total_flow: f64 = entries.iter().map(|e| e.total_flow_kg_s).sum();
             let net_power_w: f64 = entries
@@ -291,8 +530,10 @@ mod tests {
     use chrono::{FixedOffset, TimeZone};
     use hares_physics::constants::{CP_LIQUID_WATER_J_KG_K, CP_PROP_GLYCOL_50PCT_J_KG_K};
     use hares_types::{
-        DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidType, GridState,
-        LoopId, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+        DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidNode,
+        FluidNodeId, FluidNodeRole, FluidType, GridState, LoopId, LoopTopology,
+        MASS_FLOW_TOLERANCE, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId,
+        ZoneState,
     };
 
     use crate::fluid_solver::{FluidSolver, FluidSolverConfig};
@@ -736,6 +977,7 @@ mod tests {
         let mut solver = FluidSolver::new(
             FluidSolverConfig {
                 fluid_specific_heats: heats,
+                loop_topologies: HashMap::new(),
             },
             &[(LoopId(1), FluidType::Glycol)], // Glycol not in map
         )
@@ -807,6 +1049,445 @@ mod tests {
 
         // resolve() must panic when debug_assertions are enabled
         // (which they are in test builds).
+        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+    }
+
+    // =======================================================================
+    // T-0254: Mass-conservation invariant checks
+    // =======================================================================
+
+    #[test]
+    #[should_panic(expected = "mass conservation violated")]
+    fn serial_loop_divergent_flows_trigger_mass_conservation_panic() {
+        // Two accumulators on the same loop with different flow rates.
+        // In a serial hydronic loop, all equipment must carry the same mass flow.
+        // The invariant check must detect and panic on this violation.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+
+        // Create two accumulators on the same loop with different node_ids
+        // and different flow rates — simulating a boiler at node 0 reporting
+        // 0.5 kg/s and a coil at node 1 reporting 0.3 kg/s.
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 0.5,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 50.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(1),
+                    total_flow_kg_s: 0.3, // mismatched flow — should trigger panic
+                    mean_supply_temp_c: 50.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn serial_loop_consistent_flows_pass_mass_conservation_check() {
+        // Two accumulators on the same loop with identical flow rates.
+        // Mass conservation is satisfied — no panic, no warning.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 0.5,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 50.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(1),
+                    total_flow_kg_s: 0.5, // matching flow — conservation holds
+                    mean_supply_temp_c: 50.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Must not panic.
+        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn single_accumulator_on_loop_no_topology_passes_conservation_check() {
+        // A single accumulator on a loop (e.g. only boiler port declared,
+        // no sinks yet) — the serial-flow consistency check should not fire
+        // (it requires >= 2 accumulators to compare).
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+
+        let ports = PortSlots {
+            fluid: vec![FluidAccumulator {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                node_id: FluidNodeId(0),
+                total_flow_kg_s: 0.5,
+                mean_supply_temp_c: 60.0,
+                mean_return_temp_c: 50.0,
+                total_thermal_power_w: 0.0,
+            }],
+            ..Default::default()
+        };
+
+        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn parallel_loop_splitter_mixer_topology_conservation_check() {
+        // Three-branch parallel loop: splitter → [A, B, C] → mixer.
+        // Topology defines explicit edges for conservation checking.
+        //
+        //   Node 0 (splitter) → Node 1 (branch A)
+        //   Node 0 (splitter) → Node 2 (branch B)
+        //   Node 0 (splitter) → Node 3 (branch C)
+        //   Node 1 (branch A) → Node 4 (mixer)
+        //   Node 2 (branch B) → Node 4 (mixer)
+        //   Node 3 (branch C) → Node 4 (mixer)
+        //
+        // Accumulator flows:
+        //   Node 0 (splitter): 1.0 kg/s  (total flow entering splitter)
+        //   Node 1 (branch A): 0.4 kg/s
+        //   Node 2 (branch B): 0.3 kg/s
+        //   Node 3 (branch C): 0.3 kg/s
+        //   Node 4 (mixer):    1.0 kg/s  (total flow leaving mixer)
+        //
+        // Splitter: 1.0 == 0.4 + 0.3 + 0.3 ✓
+        // Mixer: 0.4 + 0.3 + 0.3 == 1.0 ✓
+
+        let topology = LoopTopology::new(
+            LoopId(1),
+            vec![
+                FluidNode::new(FluidNodeId(0), FluidNodeRole::Splitter),
+                FluidNode::new(FluidNodeId(1), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(2), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(3), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(4), FluidNodeRole::Mixer),
+            ],
+            vec![
+                (FluidNodeId(0), FluidNodeId(1)),
+                (FluidNodeId(0), FluidNodeId(2)),
+                (FluidNodeId(0), FluidNodeId(3)),
+                (FluidNodeId(1), FluidNodeId(4)),
+                (FluidNodeId(2), FluidNodeId(4)),
+                (FluidNodeId(3), FluidNodeId(4)),
+            ],
+        );
+
+        let config = FluidSolverConfig {
+            loop_topologies: [(LoopId(1), topology)].into_iter().collect(),
+            ..FluidSolverConfig::default()
+        };
+
+        let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
+
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 1.0,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 60.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(1),
+                    total_flow_kg_s: 0.4,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(2),
+                    total_flow_kg_s: 0.3,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(3),
+                    total_flow_kg_s: 0.3,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(4),
+                    total_flow_kg_s: 1.0,
+                    mean_supply_temp_c: 40.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Must not panic — flows are consistent.
+        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn topology_node_flow_fields_populated_after_resolve() {
+        // Regression: FluidNode::total_inflow_kg_s / total_outflow_kg_s were
+        // never written by the solver, making LoopTopology::max_mass_imbalance_kg_s,
+        // num_conservation_violations, and FluidNode::mass_imbalance_kg_s always
+        // return 0. After the fix, consistent flows must produce populated node
+        // fields and zero violations; the topology-level diagnostic API must work.
+        let topology = LoopTopology::new(
+            LoopId(1),
+            vec![
+                FluidNode::new(FluidNodeId(0), FluidNodeRole::Splitter),
+                FluidNode::new(FluidNodeId(1), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(2), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(3), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(4), FluidNodeRole::Mixer),
+            ],
+            vec![
+                (FluidNodeId(0), FluidNodeId(1)),
+                (FluidNodeId(0), FluidNodeId(2)),
+                (FluidNodeId(0), FluidNodeId(3)),
+                (FluidNodeId(1), FluidNodeId(4)),
+                (FluidNodeId(2), FluidNodeId(4)),
+                (FluidNodeId(3), FluidNodeId(4)),
+            ],
+        );
+
+        // Before resolve: all node flows are 0
+        assert_eq!(topology.max_mass_imbalance_kg_s(), 0.0);
+        assert_eq!(topology.num_conservation_violations(), 0);
+
+        let config = FluidSolverConfig {
+            loop_topologies: [(LoopId(1), topology)].into_iter().collect(),
+            ..FluidSolverConfig::default()
+        };
+
+        let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
+
+        // Consistent parallel-loop flows: splitter 1.0 = 0.4 + 0.3 + 0.3 → mixer
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 1.0,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(1),
+                    total_flow_kg_s: 0.4,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(2),
+                    total_flow_kg_s: 0.3,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(3),
+                    total_flow_kg_s: 0.3,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(4),
+                    total_flow_kg_s: 1.0,
+                    mean_supply_temp_c: 40.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+
+        // After resolve: node fields must be populated (not all zero)
+        let topology = solver
+            .config
+            .loop_topologies
+            .get(&LoopId(1))
+            .expect("topology present after resolve");
+
+        let splitter = topology
+            .nodes
+            .iter()
+            .find(|n| n.node_id == FluidNodeId(0))
+            .unwrap();
+        assert!(
+            (splitter.total_inflow_kg_s - 1.0).abs() < 1e-12,
+            "splitter inflow = {}, expected 1.0",
+            splitter.total_inflow_kg_s
+        );
+        assert!(
+            (splitter.total_outflow_kg_s - 1.0).abs() < 1e-12,
+            "splitter outflow = {}, expected 1.0",
+            splitter.total_outflow_kg_s
+        );
+
+        let mixer = topology
+            .nodes
+            .iter()
+            .find(|n| n.node_id == FluidNodeId(4))
+            .unwrap();
+        assert!(
+            (mixer.total_inflow_kg_s - 1.0).abs() < 1e-12,
+            "mixer inflow = {}, expected 1.0",
+            mixer.total_inflow_kg_s
+        );
+
+        // No violations with consistent flows
+        assert!(
+            topology.max_mass_imbalance_kg_s() < MASS_FLOW_TOLERANCE,
+            "max imbalance {} should be below tolerance {}",
+            topology.max_mass_imbalance_kg_s(),
+            MASS_FLOW_TOLERANCE
+        );
+        assert_eq!(
+            topology.num_conservation_violations(),
+            0,
+            "no violations with consistent flows"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "mass conservation violated")]
+    fn parallel_loop_splitter_mixer_topology_violation_panics() {
+        // Same topology as above but branch C reports 0.5 kg/s while the
+        // splitter reports 1.0 kg/s. Splitter inflow (1.0) does not equal
+        // sum of branch outflows (0.4 + 0.3 + 0.5 = 1.2) — violation.
+        let topology = LoopTopology::new(
+            LoopId(1),
+            vec![
+                FluidNode::new(FluidNodeId(0), FluidNodeRole::Splitter),
+                FluidNode::new(FluidNodeId(1), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(2), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(3), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(4), FluidNodeRole::Mixer),
+            ],
+            vec![
+                (FluidNodeId(0), FluidNodeId(1)),
+                (FluidNodeId(0), FluidNodeId(2)),
+                (FluidNodeId(0), FluidNodeId(3)),
+                (FluidNodeId(1), FluidNodeId(4)),
+                (FluidNodeId(2), FluidNodeId(4)),
+                (FluidNodeId(3), FluidNodeId(4)),
+            ],
+        );
+
+        let config = FluidSolverConfig {
+            loop_topologies: [(LoopId(1), topology)].into_iter().collect(),
+            ..FluidSolverConfig::default()
+        };
+
+        let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
+
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 1.0,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 60.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(1),
+                    total_flow_kg_s: 0.4,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(2),
+                    total_flow_kg_s: 0.3,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(3),
+                    total_flow_kg_s: 0.5, // mismatched: 1.0 != 0.4 + 0.3 + 0.5
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(4),
+                    total_flow_kg_s: 1.0,
+                    mean_supply_temp_c: 40.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+
         let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
     }
 }

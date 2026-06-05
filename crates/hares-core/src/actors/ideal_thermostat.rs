@@ -136,6 +136,7 @@ pub struct IdealThermostat {
     /// Count of setpoint overrides rejected because heating >= cooling.
     /// Gated on `observe` feature for diagnostic CSV output.
     #[cfg(feature = "observe")]
+    #[allow(dead_code)]
     setpoint_inversion_rejected_count: u64,
 }
 

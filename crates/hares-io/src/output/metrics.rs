@@ -1287,7 +1287,11 @@ mod tests {
     fn test_config_full_year(year: i32, deadband: Option<f64>) -> SimulationConfig {
         // ASHRAE HoF 2021 Ch.15: non-leap year = 8760 h, leap year = 8784 h.
         let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-        let total_hours: i64 = if is_leap { 8_784 } else { HOURS_PER_YEAR as i64 };
+        let total_hours: i64 = if is_leap {
+            8_784
+        } else {
+            HOURS_PER_YEAR as i64
+        };
         SimulationConfig {
             start_time: FixedOffset::east_opt(0)
                 .unwrap()

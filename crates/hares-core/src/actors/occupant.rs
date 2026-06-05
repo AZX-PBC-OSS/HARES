@@ -910,6 +910,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "presence schedule exhausted")]
     fn schedule_exhaustion_panics_in_debug() {
         let schedule = vec![Presence::Home];

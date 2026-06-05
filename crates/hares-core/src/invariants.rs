@@ -25,19 +25,19 @@ pub struct InvariantChecker {
     /// Per-zone accumulated heating energy [Wh]. Used by
     /// [`check_heating_accumulator`] to detect sign errors that produce
     /// persistently negative cumulative totals.
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
     total_heating_wh: HashMap<ZoneId, f64>,
     /// Per-zone accumulated cooling energy [Wh]. See [`total_heating_wh`].
-    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
     total_cooling_wh: HashMap<ZoneId, f64>,
 }
 
 impl InvariantChecker {
     pub fn new() -> Self {
         Self {
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
             total_heating_wh: HashMap::new(),
-            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            #[cfg(any(test, debug_assertions, feature = "check_invariants"))]
             total_cooling_wh: HashMap::new(),
         }
     }
@@ -49,7 +49,7 @@ impl Default for InvariantChecker {
     }
 }
 
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
+#[cfg(any(test, debug_assertions, feature = "check_invariants"))]
 impl InvariantChecker {
     /// Verifies energy conservation across the thermal domain for one zone.
     ///
@@ -571,7 +571,7 @@ impl InvariantChecker {
     }
 }
 
-#[cfg(not(any(debug_assertions, feature = "check_invariants")))]
+#[cfg(not(any(test, debug_assertions, feature = "check_invariants")))]
 impl InvariantChecker {
     pub fn check_thermal(&self, _: &[f64], _: f64, _: f64) -> Result<(), HaresError> {
         Ok(())

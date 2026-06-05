@@ -5,7 +5,11 @@
 
 use hares_envelope::ThermalSolver;
 use hares_equipment::Equipment;
-use hares_types::{DomainSolver, DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneId};
+use hares_types::{
+    DomainSolver, DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneId,
+};
+#[cfg(test)]
+use hares_types::FluidNodeId;
 
 use crate::observer::{
     CustomSolverCapture, CustomSolverObservation, EnvironmentCapture, EquipmentContribution,
@@ -198,6 +202,7 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
 
 /// Captures all four domain solver outputs + envelope component gains,
 /// plus electrical balance observability for ZIP-adjusted invariant checking.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn capture_solvers(
     thermal_update: &DomainUpdate,
     humidity_update: &DomainUpdate,
@@ -389,6 +394,7 @@ mod tests {
             fluid: vec![FluidAccumulator {
                 loop_id,
                 fluid_type: ft,
+                node_id: FluidNodeId(0),
                 total_flow_kg_s: 1.0,
                 mean_supply_temp_c: 40.0,
                 mean_return_temp_c: 30.0,
@@ -403,6 +409,7 @@ mod tests {
             fluid: vec![FluidAccumulator {
                 loop_id,
                 fluid_type: ft,
+                node_id: FluidNodeId(0),
                 total_flow_kg_s: 3.0,
                 mean_supply_temp_c: 45.0,
                 mean_return_temp_c: 35.0,
@@ -426,6 +433,7 @@ mod tests {
             fluid: vec![FluidAccumulator {
                 loop_id,
                 fluid_type: ft,
+                node_id: FluidNodeId(0),
                 total_flow_kg_s: 10.0,
                 mean_supply_temp_c: 50.0,
                 mean_return_temp_c: 40.0,

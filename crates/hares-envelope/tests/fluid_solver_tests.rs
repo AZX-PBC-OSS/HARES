@@ -120,6 +120,7 @@ fn net_power_from_flow_and_temp_delta() {
     let mut solver = FluidSolver::new(
         FluidSolverConfig {
             fluid_specific_heats: [(FluidType::Water, cp)].into_iter().collect(),
+            loop_topologies: std::collections::HashMap::new(),
         },
         &[(LoopId(1), FluidType::Water)],
     )
