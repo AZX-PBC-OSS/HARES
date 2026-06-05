@@ -30,11 +30,16 @@ use hares_equipment::{
     SetpointReconciliation, UNegTable,
 };
 use hares_io::{
-    Building, DefaultsStore, PvPanelDefaults, ScheduleTimeSeries, SimulationConfig,
+    Building, CAPACITY_SUFFIX, COP_SUFFIX, DEFROST_STATE_SUFFIX, DefaultsStore,
+    ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_POWER_SUFFIX, FAN_POWER_SUFFIX, GAS_POWER_SUFFIX,
+    HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX, MODE_SUFFIX, POWER_FACTOR_SUFFIX,
+    PvPanelDefaults, REACTIVE_POWER_SUFFIX, RUNTIME_FRACTION_SUFFIX, SCHEDULE_SUFFIX,
+    SETPOINT_SUFFIX, SHR_SUFFIX, SOC_SUFFIX, SPEED_SUFFIX, ScheduleTimeSeries, SimulationConfig,
     StreamingRecorder, WeatherTimeSeries, build_schema, end_use_electric_power_column,
-    equipment_name_to_end_use, parse_hpxml, parse_schedule_csv, parse_weather, resolve_equipment,
-    resolve_site_location,
+    equipment_name_to_end_use, has_soc, is_cooling_equipment, is_heat_pump_heater, is_hvac_or_wh,
+    parse_hpxml, parse_schedule_csv, parse_weather, resolve_equipment, resolve_site_location,
 };
+
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
     OCCUPANT_RADIATIVE_FRACTION, OCCUPANT_SENSIBLE_GAIN_W, SECONDS_PER_HOUR,
@@ -48,10 +53,10 @@ use hares_types::ControlCapabilities;
 use hares_types::LoopId;
 use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
-    EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
-    ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk, validate_core_contract,
-    validate_fluid_type_consistency,
+    EndUse, EnvironmentState, EquipmentId, ExecutionStage, FuelType, GridState, HaresError,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID,
+    ScheduleSource, ThermalCategory, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
+    validate_core_contract, validate_fluid_type_consistency,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -197,6 +202,7 @@ struct EquipmentColumns {
 fn build_equipment_column_map(
     equipment: &[Box<dyn Equipment>],
     column_index: &HashMap<String, usize>,
+    verbosity: u8,
 ) -> Vec<EquipmentColumns> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for eq in equipment {
@@ -206,7 +212,8 @@ fn build_equipment_column_map(
     equipment
         .iter()
         .map(|eq| {
-            let base = &eq.descriptor().name;
+            let desc = eq.descriptor();
+            let base = &desc.name;
             let name = if counts[base.as_str()] > 1 {
                 let idx = indices.entry(base).or_insert(0);
                 *idx += 1;
@@ -214,46 +221,233 @@ fn build_equipment_column_map(
             } else {
                 base.clone()
             };
+            let fuel = desc.fuel;
+            let has_gas = matches!(fuel, FuelType::Gas | FuelType::Propane | FuelType::Oil);
+            let is_hvac = is_hvac_or_wh(&desc.name);
+            let is_cooling = is_cooling_equipment(&desc.name);
+            let is_hp_heater = is_heat_pump_heater(&desc.name);
+            let has_soc = has_soc(&desc.name);
+
+            let electric_power = resolve_col(
+                &format!("{name} {ELECTRIC_POWER_SUFFIX}"),
+                column_index,
+                &name,
+                verbosity >= 1,
+            );
+            let gas_power = if has_gas {
+                resolve_col(
+                    &format!("{name} {GAS_POWER_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 1,
+                )
+            } else {
+                None
+            };
+            let mode = resolve_col(
+                &format!("{name} {MODE_SUFFIX}"),
+                column_index,
+                &name,
+                verbosity >= 3,
+            );
+            let setpoint = if is_hvac {
+                resolve_col(
+                    &format!("{name} {SETPOINT_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 3,
+                )
+            } else {
+                None
+            };
+            let soc = if has_soc {
+                resolve_col(
+                    &format!("{name} {SOC_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 3,
+                )
+            } else {
+                None
+            };
+            let capacity = if is_hvac {
+                resolve_col(
+                    &format!("{name} {CAPACITY_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let cop = if is_hvac {
+                resolve_col(
+                    &format!("{name} {COP_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let reactive = resolve_col(
+                &format!("{name} {REACTIVE_POWER_SUFFIX}"),
+                column_index,
+                &name,
+                verbosity >= 5 && matches!(fuel, FuelType::Electric),
+            );
+            let pf = if verbosity >= 5 && matches!(fuel, FuelType::Electric) {
+                resolve_col(
+                    &format!("{name} {POWER_FACTOR_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 5 && matches!(fuel, FuelType::Electric),
+                )
+            } else {
+                None
+            };
+            let energy_kwh = resolve_col(
+                &format!("{name} {ENERGY_SUFFIX}"),
+                column_index,
+                &name,
+                verbosity >= 4,
+            );
+            let schedule = resolve_col(
+                &format!("{name} {SCHEDULE_SUFFIX}"),
+                column_index,
+                &name,
+                verbosity >= 7,
+            );
+            let defrost_state = if is_hp_heater {
+                resolve_col(
+                    &format!("{name} {DEFROST_STATE_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let er_power = if is_hp_heater {
+                resolve_col(
+                    &format!("{name} {ER_POWER_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let shr = if is_cooling {
+                resolve_col(
+                    &format!("{name} {SHR_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let speed = if is_hvac {
+                resolve_col(
+                    &format!("{name} {SPEED_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let fan_power = if is_hvac {
+                resolve_col(
+                    &format!("{name} {FAN_POWER_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let main_power = if is_hvac {
+                resolve_col(
+                    &format!("{name} {MAIN_POWER_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let runtime_fraction = if is_hvac {
+                resolve_col(
+                    &format!("{name} {RUNTIME_FRACTION_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let latent_gains = if is_cooling {
+                resolve_col(
+                    &format!("{name} {LATENT_GAINS_SUFFIX}"),
+                    column_index,
+                    &name,
+                    verbosity >= 7,
+                )
+            } else {
+                None
+            };
+            let duct_losses =
+                resolve_col(HVAC_DUCT_LOSSES_COL, column_index, &name, verbosity >= 5);
+
             EquipmentColumns {
-                electric_power: column_index
-                    .get(&format!("{name} Electric Power (kW)"))
-                    .copied(),
-                gas_power: column_index
-                    .get(&format!("{name} Gas Power (therms/hour)"))
-                    .copied(),
-                mode: column_index.get(&format!("{name} Mode (-)")).copied(),
-                setpoint: column_index.get(&format!("{name} Setpoint (C)")).copied(),
-                soc: column_index.get(&format!("{name} SOC (-)")).copied(),
-                capacity: column_index.get(&format!("{name} Capacity (W)")).copied(),
-                cop: column_index.get(&format!("{name} COP (-)")).copied(),
-                reactive_power: column_index
-                    .get(&format!("{name} Reactive Power (kVAR)"))
-                    .copied(),
-                power_factor: column_index
-                    .get(&format!("{name} Power Factor (-)"))
-                    .copied(),
-                energy_kwh: column_index.get(&format!("{name} Energy (kWh)")).copied(),
-                schedule: column_index.get(&format!("{name} Schedule (-)")).copied(),
-                defrost_state: column_index
-                    .get(&format!("{name} Defrost State (-)"))
-                    .copied(),
-                er_power: column_index.get(&format!("{name} ER Power (kW)")).copied(),
-                shr: column_index.get(&format!("{name} SHR (-)")).copied(),
-                speed: column_index.get(&format!("{name} Speed (-)")).copied(),
-                fan_power: column_index.get(&format!("{name} Fan Power (kW)")).copied(),
-                main_power: column_index
-                    .get(&format!("{name} Main Power (kW)"))
-                    .copied(),
-                runtime_fraction: column_index
-                    .get(&format!("{name} Runtime Fraction (-)"))
-                    .copied(),
-                latent_gains: column_index
-                    .get(&format!("{name} Latent Gains (W)"))
-                    .copied(),
-                duct_losses: column_index.get("HVAC Duct Losses (W)").copied(),
+                electric_power,
+                gas_power,
+                mode,
+                setpoint,
+                soc,
+                capacity,
+                cop,
+                reactive_power: reactive,
+                power_factor: pf,
+                energy_kwh,
+                schedule,
+                defrost_state,
+                er_power,
+                shr,
+                speed,
+                fan_power,
+                main_power,
+                runtime_fraction,
+                latent_gains,
+                duct_losses,
             }
         })
         .collect()
+}
+
+/// Resolves a column name in the output column index map.
+fn resolve_col(
+    col_name: &str,
+    column_index: &HashMap<String, usize>,
+    equipment_name: &str,
+    expected: bool,
+) -> Option<usize> {
+    let idx = column_index.get(col_name).copied();
+    if idx.is_none() && expected {
+        tracing::warn!(
+            column_name = %col_name,
+            equipment_name = equipment_name,
+            "output column index not resolved; data will not be emitted for this column"
+        );
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        panic!(
+            "invariant violation: expected output column '{}' for equipment '{}' not found in schema",
+            col_name, equipment_name
+        );
+    }
+    idx
 }
 
 fn extend_schema_with_actor_columns(
@@ -1185,6 +1379,10 @@ pub struct Dwelling {
     /// is non-finite; resets to 0 each step.
     #[cfg(feature = "observe")]
     nan_temperature_count: usize,
+    /// Cumulative count of telemetry-to-column lookups that resolved to `None`
+    /// in `record_step()` during this timestep. Reset to 0 each step.
+    #[cfg(feature = "observe")]
+    unresolved_column_count: usize,
     /// Accumulates per-step data for post-hoc diagnostic checks (unmet hours,
     /// short-cycling, freezing excursions, simultaneous heating/cooling).
     /// Evaluated at end-of-run by `run_post_hoc_checks()`.
@@ -1913,7 +2111,11 @@ impl Dwelling {
         let latitude_deg = building.site.latitude_deg;
         let facility_type = building.residential_facility_type.clone();
 
-        let equipment_column_map = build_equipment_column_map(&equipment, &output_column_index);
+        let equipment_column_map = build_equipment_column_map(
+            &equipment,
+            &output_column_index,
+            config.sim_config.output_verbosity,
+        );
         let end_use_aggregate_indices: Vec<Option<usize>> = equipment_specs
             .iter()
             .map(|spec| {
@@ -2075,6 +2277,8 @@ impl Dwelling {
             rolled_back_port_equipment: 0,
             #[cfg(feature = "observe")]
             nan_temperature_count: 0,
+            #[cfg(feature = "observe")]
+            unresolved_column_count: 0,
             #[cfg(feature = "observe")]
             diagnostic_accum: None,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -2807,13 +3011,21 @@ impl Dwelling {
                     DataType::Float64,
                     true,
                 ));
+                fields.push(arrow::datatypes::Field::new(
+                    "unresolved_column_count",
+                    DataType::Float64,
+                    true,
+                ));
                 schema =
                     arrow::datatypes::Schema::new_with_metadata(fields, schema.metadata().clone());
             }
             self.output_value_count = schema.fields().len() - 1;
             self.output_column_index = build_output_column_index(&schema);
-            self.equipment_column_map =
-                build_equipment_column_map(&self.equipment, &self.output_column_index);
+            self.equipment_column_map = build_equipment_column_map(
+                &self.equipment,
+                &self.output_column_index,
+                self.output_verbosity,
+            );
             self.end_use_aggregate_indices = {
                 // Rebuild using the specs derived from current equipment descriptors.
                 let specs: Vec<hares_io::EquipmentSpec> = self
@@ -3855,6 +4067,7 @@ impl Dwelling {
         {
             self.rolled_back_port_equipment = 0;
             self.nan_temperature_count = 0;
+            self.unresolved_column_count = 0;
         }
 
         // Step 1: update environment at current clock state.
@@ -4961,10 +5174,63 @@ impl Dwelling {
         if let Some(&idx) = self.output_column_index.get("nan_temperature_count") {
             row[idx] = self.nan_temperature_count as f64;
         }
+        #[cfg(feature = "observe")]
+        if let Some(&idx) = self.output_column_index.get("unresolved_column_count") {
+            row[idx] = self.unresolved_column_count as f64;
+        }
 
         // Per-equipment columns via pre-resolved index map.
         for (eq, cols) in self.equipment.iter().zip(&self.equipment_column_map) {
             let co = eq.core_output();
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                let desc = eq.descriptor();
+                let name = &desc.name;
+                let v = self.output_verbosity;
+                let is_hvac = is_hvac_or_wh(name);
+                let is_cooling = is_cooling_equipment(name);
+                let is_hp_heater = is_heat_pump_heater(name);
+                // Telemetry-based columns: assert index is Some when expected.
+                #[cfg(feature = "observe")]
+                {
+                    if is_hp_heater && v >= 7 && cols.defrost_state.is_none() {
+                        self.unresolved_column_count += 1;
+                    }
+                    if is_hp_heater && v >= 7 && cols.er_power.is_none() {
+                        self.unresolved_column_count += 1;
+                    }
+                    if is_cooling && v >= 7 && cols.shr.is_none() {
+                        self.unresolved_column_count += 1;
+                    }
+                    if is_cooling && v >= 7 && cols.latent_gains.is_none() {
+                        self.unresolved_column_count += 1;
+                    }
+                    if is_hvac && v >= 7 && cols.fan_power.is_none() {
+                        self.unresolved_column_count += 1;
+                    }
+                    if is_hvac && v >= 7 && cols.runtime_fraction.is_none() {
+                        self.unresolved_column_count += 1;
+                    }
+                    if v >= 5 && cols.duct_losses.is_none() {
+                        self.unresolved_column_count += 1;
+                    }
+                }
+                if is_hp_heater && v >= 7 {
+                    debug_assert!(cols.defrost_state.is_some());
+                    debug_assert!(cols.er_power.is_some());
+                }
+                if is_cooling && v >= 7 {
+                    debug_assert!(cols.shr.is_some());
+                    debug_assert!(cols.latent_gains.is_some());
+                }
+                if is_hvac && v >= 7 {
+                    debug_assert!(cols.fan_power.is_some());
+                    debug_assert!(cols.runtime_fraction.is_some());
+                }
+                if v >= 5 {
+                    debug_assert!(cols.duct_losses.is_some());
+                }
+            }
             if let Some(idx) = cols.electric_power {
                 row[idx] = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
             }
@@ -6193,8 +6459,11 @@ mod tests {
             .map(|eq| (eq.descriptor().name.clone(), eq.descriptor().id))
             .collect();
         dwelling.equipment_execution_order = compute_equipment_execution_order(&dwelling.equipment);
-        dwelling.equipment_column_map =
-            build_equipment_column_map(&dwelling.equipment, &dwelling.output_column_index);
+        dwelling.equipment_column_map = build_equipment_column_map(
+            &dwelling.equipment,
+            &dwelling.output_column_index,
+            dwelling.output_verbosity,
+        );
         dwelling
             .solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&dwelling.equipment));
@@ -12183,5 +12452,186 @@ master_seed = 42
                 "step {i}: gas_power_w mismatch"
             );
         }
+    }
+
+    // ── Telemetry-to-Column Mapping Tests ──
+
+    /// At verbosity 7, all per-equipment column indices for applicable equipment
+    /// types are resolved to `Some`.
+    #[test]
+    fn build_equipment_column_map_v7_all_columns_resolved_for_applicable_equipment() {
+        let specs = vec![
+            hares_io::EquipmentSpec {
+                instance_name: None,
+                name: "ASHP Heater".to_string(),
+                fuel_type: FuelType::Electric,
+                parameters: Map::new(),
+                zip_params: None,
+                typed_config: None,
+                system_id: None,
+                related_hvac_idref: None,
+                primary_role: None,
+            },
+            hares_io::EquipmentSpec {
+                instance_name: None,
+                name: "Battery".to_string(),
+                fuel_type: FuelType::Electric,
+                parameters: Map::new(),
+                zip_params: None,
+                typed_config: None,
+                system_id: None,
+                related_hvac_idref: None,
+                primary_role: None,
+            },
+        ];
+        let schema = hares_io::build_schema(&specs, 7, &[]);
+        let column_index = build_output_column_index(&schema);
+
+        let mut eq1 = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
+        eq1.descriptor.end_use = EndUse::HVAC_HEATING;
+        eq1.descriptor.fuel = FuelType::Electric;
+        let mut eq2 = TestEquipment::new("Battery", ControlCapabilities::empty());
+        eq2.descriptor.end_use = EndUse::BATTERY;
+        eq2.descriptor.fuel = FuelType::Electric;
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
+        let col_map = build_equipment_column_map(&equipment, &column_index, 7);
+
+        let ashp = &col_map[0];
+        let bat = &col_map[1];
+
+        assert!(ashp.electric_power.is_some());
+        assert!(ashp.mode.is_some());
+        assert!(ashp.setpoint.is_some());
+        assert!(ashp.capacity.is_some());
+        assert!(ashp.cop.is_some());
+        assert!(ashp.energy_kwh.is_some());
+        assert!(ashp.schedule.is_some());
+        assert!(ashp.defrost_state.is_some());
+        assert!(ashp.er_power.is_some());
+        assert!(ashp.speed.is_some());
+        assert!(ashp.fan_power.is_some());
+        assert!(ashp.main_power.is_some());
+        assert!(ashp.runtime_fraction.is_some());
+        assert!(ashp.shr.is_none());
+        assert!(ashp.latent_gains.is_none());
+
+        assert!(bat.electric_power.is_some());
+        assert!(bat.soc.is_some());
+        assert!(bat.energy_kwh.is_some());
+        assert!(bat.mode.is_some());
+        assert!(bat.setpoint.is_none());
+        assert!(bat.capacity.is_none());
+        assert!(bat.cop.is_none());
+    }
+
+    /// At verbosity 0, per-equipment columns are not in the schema.
+    #[test]
+    fn build_equipment_column_map_v0_all_per_equipment_columns_none() {
+        let schema = hares_io::build_schema(&[], 0, &[]);
+        let column_index = build_output_column_index(&schema);
+        let eq = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        let col_map = build_equipment_column_map(&equipment, &column_index, 0);
+        let cols = &col_map[0];
+        assert!(cols.electric_power.is_none());
+        assert!(cols.gas_power.is_none());
+        assert!(cols.mode.is_none());
+        assert!(cols.soc.is_none());
+        assert!(cols.capacity.is_none());
+        assert!(cols.energy_kwh.is_none());
+        assert!(cols.schedule.is_none());
+        assert!(cols.defrost_state.is_none());
+        assert!(cols.duct_losses.is_none());
+    }
+
+    /// Gas-fueled equipment at verbosity ≥ 5 must not resolve Power Factor
+    /// (the column is only present for electric equipment). Regression test
+    /// for the bug where `reactive.is_some() || verbosity >= 5` entered the
+    /// PF branch unconditionally at v≥5, causing spuriously `tracing::warn!`
+    /// in production builds and `panic!` in debug/invariant builds.
+    #[test]
+    fn gas_equipment_power_factor_none_at_verbosity_5() {
+        let specs = vec![hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Gas Furnace".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }];
+        let schema = hares_io::build_schema(&specs, 5, &[]);
+        let column_index = build_output_column_index(&schema);
+        let mut eq = TestEquipment::new("Gas Furnace", ControlCapabilities::empty());
+        eq.descriptor.end_use = EndUse::HVAC_HEATING;
+        eq.descriptor.fuel = FuelType::Gas;
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        let col_map = build_equipment_column_map(&equipment, &column_index, 5);
+        let cols = &col_map[0];
+        assert!(cols.reactive_power.is_none());
+        assert!(cols.power_factor.is_none());
+    }
+
+    /// A typo in a column name string results in `None` index.
+    #[test]
+    fn column_name_typo_results_in_none_column_index() {
+        let specs = vec![hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "ASHP Heater".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }];
+        let schema = hares_io::build_schema(&specs, 1, &[]);
+        let column_index = build_output_column_index(&schema);
+        assert!(column_index.contains_key("ASHP Heater Electric Power (kW)"));
+        assert!(!column_index.contains_key("ASHP Heater Electrix Power (kW)"));
+    }
+
+    /// Column suffix constants produce names matching the schema.
+    #[test]
+    fn column_suffix_constants_match_build_schema_output() {
+        let specs = vec![hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Air Conditioner".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        }];
+        let schema = hares_io::build_schema(&specs, 7, &[]);
+        let column_index = build_output_column_index(&schema);
+        let name = "Air Conditioner";
+        assert!(column_index.contains_key(&format!("{name} {ELECTRIC_POWER_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {MODE_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {SETPOINT_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {CAPACITY_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {COP_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {SHR_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {LATENT_GAINS_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {SPEED_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {FAN_POWER_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {MAIN_POWER_SUFFIX}")));
+        assert!(column_index.contains_key(&format!("{name} {RUNTIME_FRACTION_SUFFIX}")));
+    }
+
+    /// `HVAC_DUCT_LOSSES_COL` constant resolves in the schema at v5+.
+    #[test]
+    fn duct_losses_column_uses_shared_constant() {
+        let schema_v5 = hares_io::build_schema(&[], 5, &[]);
+        let col_idx_v5 = build_output_column_index(&schema_v5);
+        assert!(col_idx_v5.contains_key(HVAC_DUCT_LOSSES_COL));
+        let schema_v4 = hares_io::build_schema(&[], 4, &[]);
+        let col_idx_v4 = build_output_column_index(&schema_v4);
+        assert!(!col_idx_v4.contains_key(HVAC_DUCT_LOSSES_COL));
     }
 }

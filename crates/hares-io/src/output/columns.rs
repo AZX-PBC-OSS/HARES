@@ -22,8 +22,8 @@ const LEVEL_0_COLUMNS: &[&str] = &[
 /// Per-end-use column name suffixes for verbosity 1.
 /// Each equipment contributes `"{name} Electric Power (kW)"` and/or
 /// `"{name} Gas Power (therms/hour)"` depending on its fuel type.
-pub(crate) const ELECTRIC_POWER_SUFFIX: &str = "Electric Power (kW)";
-pub(crate) const GAS_POWER_SUFFIX: &str = "Gas Power (therms/hour)";
+pub const ELECTRIC_POWER_SUFFIX: &str = "Electric Power (kW)";
+pub const GAS_POWER_SUFFIX: &str = "Gas Power (therms/hour)";
 
 /// Zone-level column templates for verbosity 2.
 /// OCHRE convention: `"Temperature - {zone} (C)"` with zone name between dashes.
@@ -36,22 +36,34 @@ const NET_SENSIBLE_HEAT_GAIN_COL: &str = "Net Sensible Heat Gain - Indoor (W)";
 const HOT_WATER_MAINS_TEMP_COL: &str = "Hot Water Mains Temperature (C)";
 
 /// Equipment state column suffixes for verbosity 3.
-const MODE_SUFFIX: &str = "Mode (-)";
-const SETPOINT_SUFFIX: &str = "Setpoint (C)";
-const SOC_SUFFIX: &str = "SOC (-)";
+pub const MODE_SUFFIX: &str = "Mode (-)";
+pub const SETPOINT_SUFFIX: &str = "Setpoint (C)";
+pub const SOC_SUFFIX: &str = "SOC (-)";
 
 /// Energy column suffix for verbosity 4.
-const ENERGY_SUFFIX: &str = "Energy (kWh)";
+pub const ENERGY_SUFFIX: &str = "Energy (kWh)";
 
 /// Reactive power column suffixes for verbosity 5.
-const REACTIVE_POWER_SUFFIX: &str = "Reactive Power (kVAR)";
-const POWER_FACTOR_SUFFIX: &str = "Power Factor (-)";
+pub const REACTIVE_POWER_SUFFIX: &str = "Reactive Power (kVAR)";
+pub const POWER_FACTOR_SUFFIX: &str = "Power Factor (-)";
 
 /// Defrost state column suffix for verbosity 7 (heat pump heaters only).
-const DEFROST_STATE_SUFFIX: &str = "Defrost State (-)";
+pub const DEFROST_STATE_SUFFIX: &str = "Defrost State (-)";
 
 /// Duct losses column for verbosity 5.
-const HVAC_DUCT_LOSSES_COL: &str = "HVAC Duct Losses (W)";
+pub const HVAC_DUCT_LOSSES_COL: &str = "HVAC Duct Losses (W)";
+
+/// HVAC performance column suffixes for verbosity 7.
+pub const CAPACITY_SUFFIX: &str = "Capacity (W)";
+pub const COP_SUFFIX: &str = "COP (-)";
+pub const SCHEDULE_SUFFIX: &str = "Schedule (-)";
+pub const ER_POWER_SUFFIX: &str = "ER Power (kW)";
+pub const SHR_SUFFIX: &str = "SHR (-)";
+pub const SPEED_SUFFIX: &str = "Speed (-)";
+pub const FAN_POWER_SUFFIX: &str = "Fan Power (kW)";
+pub const MAIN_POWER_SUFFIX: &str = "Main Power (kW)";
+pub const RUNTIME_FRACTION_SUFFIX: &str = "Runtime Fraction (-)";
+pub const LATENT_GAINS_SUFFIX: &str = "Latent Gains (W)";
 
 /// Maps an equipment spec name to its `EndUse` category based on the canonical
 /// equipment naming conventions used by the HPXML resolver and registry.
@@ -493,7 +505,7 @@ pub fn build_schema(
         // Level 7: schedule inputs and detailed equipment modes.
         for (name, _fuel) in &names {
             fields.push(Field::new(
-                format!("{name} Schedule (-)"),
+                format!("{name} {SCHEDULE_SUFFIX}"),
                 DataType::Float64,
                 true,
             ));
@@ -506,7 +518,7 @@ pub fn build_schema(
                 // OCHRE HVAC.py:1464-1467: ER Power column for ASHP heaters at v7.
                 // Reports backup electric resistance power during ER-only or HP+ER modes.
                 fields.push(Field::new(
-                    format!("{name} ER Power (kW)"),
+                    format!("{name} {ER_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
@@ -516,45 +528,45 @@ pub fn build_schema(
                 // SHR and Latent Gains are cooling-only (OCHRE HVAC.py:595-596).
                 if is_cooling_equipment(name) {
                     fields.push(Field::new(
-                        format!("{name} SHR (-)"),
+                        format!("{name} {SHR_SUFFIX}"),
                         DataType::Float64,
                         true,
                     ));
                     fields.push(Field::new(
-                        format!("{name} Latent Gains (W)"),
+                        format!("{name} {LATENT_GAINS_SUFFIX}"),
                         DataType::Float64,
                         true,
                     ));
                 }
                 fields.push(Field::new(
-                    format!("{name} Speed (-)"),
+                    format!("{name} {SPEED_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
                 // OCHRE HVAC.py:575: main_power = total_input - fan.
                 fields.push(Field::new(
-                    format!("{name} Main Power (kW)"),
+                    format!("{name} {MAIN_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
                 fields.push(Field::new(
-                    format!("{name} Fan Power (kW)"),
+                    format!("{name} {FAN_POWER_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
                 fields.push(Field::new(
-                    format!("{name} Runtime Fraction (-)"),
+                    format!("{name} {RUNTIME_FRACTION_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
                 // Promoted from v8: OCHRE emits Capacity and COP at v7 (HVAC.py:584,598).
                 fields.push(Field::new(
-                    format!("{name} Capacity (W)"),
+                    format!("{name} {CAPACITY_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
                 fields.push(Field::new(
-                    format!("{name} COP (-)"),
+                    format!("{name} {COP_SUFFIX}"),
                     DataType::Float64,
                     true,
                 ));
@@ -666,7 +678,7 @@ fn instance_qualified_names(specs: &[EquipmentSpec]) -> Vec<(String, FuelType)> 
     result
 }
 
-fn is_hvac_or_wh(name: &str) -> bool {
+pub fn is_hvac_or_wh(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.contains("heater")
         || lower.contains("cooler")
@@ -682,7 +694,7 @@ fn is_hvac_or_wh(name: &str) -> bool {
         || lower.contains("dehumidifier")
 }
 
-fn has_soc(name: &str) -> bool {
+pub fn has_soc(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.contains("battery")
         || lower.contains("electric vehicle")
@@ -691,7 +703,7 @@ fn has_soc(name: &str) -> bool {
         || lower.starts_with("ev#")
 }
 
-fn is_heat_pump_heater(name: &str) -> bool {
+pub fn is_heat_pump_heater(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.contains("ashp heater")
         || lower.contains("mshp heater")
@@ -702,7 +714,7 @@ fn is_heat_pump_heater(name: &str) -> bool {
 /// that should emit SHR and Latent Gains columns at v7.
 /// Heat-pump heaters that also cool are excluded here — the cooler
 /// companion emits those columns under its own name.
-fn is_cooling_equipment(name: &str) -> bool {
+pub fn is_cooling_equipment(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.contains("air conditioner")
         || lower.contains("room ac")
