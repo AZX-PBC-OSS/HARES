@@ -243,6 +243,24 @@ pub const UEF_TO_EF_GAS_SLOPE: f64 = 0.9066;
 /// water heaters.
 pub const UEF_TO_EF_GAS_INTERCEPT: f64 = 0.0711;
 
+// --- Building Materials ---
+
+/// Density of concrete [kg/m³].
+///
+/// ASHRAE HoF 2021 Ch. 33, Table 1 — Structural Concrete, 144 lb/ft³
+/// converted to SI (144 × 16.0185 ≈ 2307 kg/m³). The ASHRAE-recommended
+/// design value for heavyweight concrete with stone aggregate is
+/// 2400 kg/m³, matching EnergyPlus's HeavyWeightConcrete material default.
+pub const CONCRETE_DENSITY_KG_M3: f64 = 2400.0;
+
+/// Specific heat capacity of concrete [J/(kg·K)].
+///
+/// ASHRAE HoF 2021 Ch. 33, Table 1 — standard value for concrete with
+/// stone aggregate. Matches EnergyPlus's HeavyWeightConcrete default.
+/// ASHRAE gives 840–920 J/(kg·K); 880 J/(kg·K) is the mid-range
+/// engineering default used in residential energy simulation.
+pub const CONCRETE_CP_J_KG_K: f64 = 880.0;
+
 // --- Occupant Internal Gains ---
 
 /// Total sensible heat gain per occupant [W/person].

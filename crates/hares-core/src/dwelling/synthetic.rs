@@ -946,6 +946,33 @@ pub(crate) fn build_synthetic_building(
         let wall_area_m2 = side_length_m * ceiling_height_m;
         let r_value = config.materials.wall_r_value_m2_k_w;
 
+        // Concrete-like default material layer for boundaries without
+        // explicit [[boundaries.material_layers]] entries.  Provides
+        // physically plausible thermal capacitance so the RC network has
+        // higher-order dynamics rather than first-order RC decay.
+        //
+        // Use a fixed reference thickness d = 0.15 m and set effective
+        // conductivity k = d / R so the single layer produces the target
+        // R-value (d/k = R).  Density and specific_heat match concrete
+        // (ASHRAE HoF 2021 Ch. 33, Table 1) giving thermal capacitance
+        // C = ρ·c_p·d·A ≈ 317 kJ/(K·m²)·A.
+        //
+        // A fixed thickness avoids the diurnal-criterion sub-layer
+        // explosion that d = R·k (with real concrete k = 1.4) would
+        // produce: 2.8 m / 0.068 m ≈ 42 sub-layers per boundary for a
+        // typical R = 2.0 wall.  The per-layer capacitance is identical
+        // regardless of k because only d, ρ, and c_p control C.
+        const DEFAULT_LAYER_THICKNESS_M: f64 = 0.15;
+        let safe_r_value = r_value.max(1e-6);
+        let effective_concrete_k = DEFAULT_LAYER_THICKNESS_M / safe_r_value;
+        let make_concrete_layer = |area_m2| MaterialLayer {
+            thickness_m: DEFAULT_LAYER_THICKNESS_M,
+            conductivity_w_m_k: effective_concrete_k,
+            density_kg_m3: hares_physics::constants::CONCRETE_DENSITY_KG_M3,
+            specific_heat_j_kg_k: hares_physics::constants::CONCRETE_CP_J_KG_K,
+            area_m2,
+        };
+
         let make_wall = |id: &str, azimuth: f64| Boundary {
             id: id.to_string(),
             boundary_type: BoundaryType::Wall,
@@ -955,7 +982,7 @@ pub(crate) fn build_synthetic_building(
             r_value_layers_m2_k_w: vec![r_value],
             interior_zone: Some(ZoneType::Conditioned),
             exterior_zone: Some(ZoneType::Outdoor),
-            material_layers: Vec::new(),
+            material_layers: vec![make_concrete_layer(wall_area_m2)],
             construction_type: None,
             finish_type: None,
             insulation_details: None,
@@ -981,7 +1008,7 @@ pub(crate) fn build_synthetic_building(
                 r_value_layers_m2_k_w: vec![r_value],
                 interior_zone: Some(ZoneType::Conditioned),
                 exterior_zone: Some(ext_zone),
-                material_layers: Vec::new(),
+                material_layers: vec![make_concrete_layer(config.geometry.floor_area_m2)],
                 construction_type: None,
                 finish_type: None,
                 insulation_details: None,
@@ -1795,6 +1822,7 @@ pub(crate) fn hot_path_alloc_counter() -> u64 {
 mod tests {
     use super::*;
     use hares_io::hpxml::{BoundaryType, ZoneType};
+    use std::collections::HashSet;
 
     // -------------------------------------------------------------------------
     // T-0188: Clear-sky solar irradiance in synthetic weather
@@ -3176,6 +3204,313 @@ master_seed = 0
         assert!(
             (floor_area_envelope - 48.0).abs() < 1e-9,
             "Floor area {floor_area_envelope} != 48.0"
+        );
+    }
+
+    // ── Default boundary thermal mass invariants ───────────────────
+
+    /// Default synthetic building (no `[[boundaries]]` in TOML) produces
+    /// boundaries whose assembled RC network has capacitance-bearing nodes
+    /// from the default concrete material layer.
+    #[test]
+    fn default_synthetic_boundaries_have_capacitance_nodes() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        // Verify each non-window boundary carries exactly one concrete
+        // material layer with non-zero density and specific_heat.
+        let non_window: Vec<_> = building
+            .boundaries
+            .iter()
+            .filter(|b| b.boundary_type != BoundaryType::Window)
+            .collect();
+
+        assert!(
+            !non_window.is_empty(),
+            "Default synthetic building must have non-window boundaries"
+        );
+
+        for b in &non_window {
+            assert_eq!(
+                b.material_layers.len(),
+                1,
+                "boundary '{}' should have exactly one default material layer",
+                b.id
+            );
+            let layer = &b.material_layers[0];
+            assert!(
+                layer.density_kg_m3 > 0.0,
+                "boundary '{}' material layer has zero density",
+                b.id
+            );
+            assert!(
+                layer.specific_heat_j_kg_k > 0.0,
+                "boundary '{}' material layer has zero specific_heat",
+                b.id
+            );
+            assert!(
+                layer.conductivity_w_m_k > 0.0,
+                "boundary '{}' material layer has zero conductivity",
+                b.id
+            );
+            assert!(
+                layer.thickness_m > 0.0,
+                "boundary '{}' material layer has zero thickness",
+                b.id
+            );
+            // The layer area must be non-zero for capacitance contribution.
+            assert!(
+                layer.area_m2 > 0.0,
+                "boundary '{}' material layer has zero area",
+                b.id
+            );
+        }
+
+        // Assemble the RC network and verify capacitance nodes exist
+        // in the diagnostics.
+        let store = hares_io::DefaultsStore::empty();
+        let boundary_inputs = crate::dwelling::conversions::building_to_boundary_inputs(
+            &building, 1, &store, 2.0, 10.0, 10.0,
+        )
+        .expect("building_to_boundary_inputs");
+
+        let zone_inputs = vec![hares_envelope::ZoneInput {
+            floor_area_m2: Some(48.0),
+            volume_m3: None,
+            mass_multiplier: hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER,
+        }];
+        let zone_caps = hares_envelope::derive_zone_capacitances(
+            &zone_inputs,
+            hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
+        )
+        .expect("derive_zone_capacitances");
+
+        let (_rc, diag) = hares_envelope::assemble_building_rc(
+            &boundary_inputs,
+            1,
+            &zone_caps,
+            hares_envelope::InteriorLwrMethod::StarMesh,
+        )
+        .expect("assemble_building_rc");
+
+        // Every non-window boundary must have at least one RC node in
+        // the assembled network. Windows are excluded because their
+        // glass-layer path legitimately produces n_rc_nodes = 0; film
+        // resistance alone does not create a dedicated capacitance node.
+        let non_window_indices: HashSet<usize> = building
+            .boundaries
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.boundary_type != BoundaryType::Window)
+            .map(|(i, _)| i)
+            .collect();
+
+        for bd in &diag.boundaries {
+            if !non_window_indices.contains(&bd.boundary_idx) {
+                continue;
+            }
+            assert!(
+                bd.n_rc_nodes > 0 || bd.capacitance_j_k > 0.0,
+                "boundary idx {} has no capacitance-bearing RC nodes",
+                bd.boundary_idx
+            );
+        }
+    }
+
+    /// Regression: the default building's state-space model has more states
+    /// than the number of thermal zones, confirming higher-order thermal
+    /// dynamics from the default concrete material layers.  A pure first-order
+    /// RC system would have exactly `n_zones` states.
+    #[test]
+    fn default_synthetic_building_has_higher_order_eigenvalue_spectrum() {
+        use nalgebra::DMatrix;
+
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        let n_non_window = building
+            .boundaries
+            .iter()
+            .filter(|b| b.boundary_type != BoundaryType::Window)
+            .count();
+
+        let store = hares_io::DefaultsStore::empty();
+        let boundary_inputs = crate::dwelling::conversions::building_to_boundary_inputs(
+            &building, 1, &store, 2.0, 10.0, 10.0,
+        )
+        .expect("building_to_boundary_inputs");
+
+        let zone_inputs = vec![hares_envelope::ZoneInput {
+            floor_area_m2: Some(48.0),
+            volume_m3: None,
+            mass_multiplier: hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER,
+        }];
+        let zone_caps = hares_envelope::derive_zone_capacitances(
+            &zone_inputs,
+            hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
+        )
+        .expect("derive_zone_capacitances");
+
+        let (rc, _diag) = hares_envelope::assemble_building_rc(
+            &boundary_inputs,
+            1,
+            &zone_caps,
+            hares_envelope::InteriorLwrMethod::StarMesh,
+        )
+        .expect("assemble_building_rc");
+
+        let n_zones = 1;
+        let n_states = rc.a_c.nrows();
+
+        assert!(
+            n_states > n_zones,
+            "Default synthetic building with {} non-window boundaries has {} states \
+             (expected > {} zone nodes).  A first-order RC system would have \
+             exactly {} state(s); {} states confirm higher-order dynamics.",
+            n_non_window,
+            n_states,
+            n_zones,
+            n_zones,
+            n_states
+        );
+
+        // Also check that the continuous system is stable (all eigenvalues
+        // have negative real parts — energy must decay).
+        use hares_envelope::state_space::discretize_zoh;
+        let b_c = DMatrix::<f64>::zeros(n_states, rc.n_ext.max(1));
+        let (a_d, _b_d) = discretize_zoh(&rc.a_c, &b_c, 60.0).expect("ZOH");
+        let discrete_eigs = a_d.complex_eigenvalues();
+        let stable = discrete_eigs.iter().all(|eig| eig.norm() < 1.0);
+        assert!(
+            stable,
+            "Discrete eigenvalue magnitudes must all be < 1.0 (stable)."
+        );
+    }
+
+    /// Regression: the benchmark-style synthetic building produces a
+    /// numerically stable state-space model with all discrete eigenvalue
+    /// magnitudes well within the unit circle.  Uses the actual eigenvalue
+    /// decomposition rather than the conservative Gershgorin bound.
+    #[test]
+    fn benchmark_synthetic_building_is_numerically_stable() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 25.0
+
+[weather]
+outdoor_temp_c = 8.0
+dew_point_c = 4.0
+rel_humidity_pct = 55.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        let store = hares_io::DefaultsStore::empty();
+        let boundary_inputs = crate::dwelling::conversions::building_to_boundary_inputs(
+            &building, 1, &store, 2.0, 10.0, 10.0,
+        )
+        .expect("building_to_boundary_inputs");
+
+        let zone_inputs = vec![hares_envelope::ZoneInput {
+            floor_area_m2: Some(48.0),
+            volume_m3: None,
+            mass_multiplier: hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER,
+        }];
+        let zone_caps = hares_envelope::derive_zone_capacitances(
+            &zone_inputs,
+            hares_physics::constants::SEA_LEVEL_PRESSURE_PA,
+        )
+        .expect("derive_zone_capacitances");
+
+        let (rc, _diag) = hares_envelope::assemble_building_rc(
+            &boundary_inputs,
+            1,
+            &zone_caps,
+            hares_envelope::InteriorLwrMethod::StarMesh,
+        )
+        .expect("assemble_building_rc");
+
+        let a_c = &rc.a_c;
+        let n_states = a_c.nrows();
+        // Empty B_c (no external driving inputs affect eigenvalue stability).
+        let b_c = nalgebra::DMatrix::<f64>::zeros(n_states, rc.n_ext.max(1));
+
+        // Discretize: A_d = expm(A_c · dt).
+        use hares_envelope::state_space::discretize_zoh;
+        let (a_d, _b_d) = discretize_zoh(a_c, &b_c, 60.0).expect("ZOH discretization");
+
+        let discrete_eigs = a_d.complex_eigenvalues();
+        let max_mag = discrete_eigs
+            .iter()
+            .fold(0.0f64, |m, eig| m.max(eig.norm()));
+
+        assert!(
+            max_mag < 1.0 - 1e-9,
+            "Benchmark synthetic building has marginally unstable discrete eigenvalue: \
+             max magnitude = {:.6} (expected < 1.0).",
+            max_mag
         );
     }
 }

@@ -1235,6 +1235,25 @@ pub fn assemble_building_rc(
 
     let node_capacitances = rc.capacitances.clone();
 
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // Only check when boundaries carry explicit material-layer definitions.
+        // Fallback-R-only networks (no material layers, empty precomputed_rc)
+        // legitimately produce zero boundary capacitance nodes — the single
+        // resistance path is intentional.
+        let has_material_layers = boundaries.iter().any(|b| !b.material_layers.is_empty());
+        if has_material_layers {
+            let has_cap_node = boundary_diagnostics.iter().any(|d| d.n_rc_nodes > 0);
+            assert!(
+                has_cap_node,
+                "RC network has no capacitance-bearing boundary nodes despite \
+                 material-layer definitions on at least one boundary. \
+                 Verify that material layers have non-zero density \
+                 (> 0 kg/m³) and specific_heat (> 0 J/(kg·K))."
+            );
+        }
+    }
+
     let boundary_ua: f64 = boundary_diagnostics.iter().map(|d| d.ua_w_per_k).sum();
     #[cfg(feature = "observe")]
     let default_r_fallback_count = boundaries.iter().filter(|b| b.used_default_r).count();

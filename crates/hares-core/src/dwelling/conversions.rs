@@ -206,11 +206,9 @@ pub fn building_to_boundary_inputs(
                 // Density 2400 kg/m³, Cp 880 J/(kg·K), thickness 0.1 m for typical
                 // 4-inch residential slab. Ref: ASHRAE HoF 2021 Ch. 33, Table 1.
                 // C = ρ × Cp × t / 1000 = 2400 × 880 × 0.1 / 1000 ≈ 211.2 kJ/(m²·K).
-                const CONCRETE_DENSITY_KG_M3: f64 = 2400.0;
-                const CONCRETE_CP_J_KG_K: f64 = 880.0;
                 const TYPICAL_SLAB_THICKNESS_M: f64 = 0.1;
-                let slab_cap_kj_m2_k = CONCRETE_DENSITY_KG_M3
-                    * CONCRETE_CP_J_KG_K
+                let slab_cap_kj_m2_k = hares_physics::constants::CONCRETE_DENSITY_KG_M3
+                    * hares_physics::constants::CONCRETE_CP_J_KG_K
                     * TYPICAL_SLAB_THICKNESS_M
                     / 1000.0;
 
