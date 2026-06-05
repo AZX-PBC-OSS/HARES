@@ -6,7 +6,8 @@
 //! building's thermal model and ASHRAE 152 (or EPW) design temperatures.
 //!
 //! Oversizing factors per ACCA Manual S:
-//! - Heating: 1.4x (overridden by HPXML `<HeatingAutosizingFactor>`)
+//! - Heating (furnace/non-HP): 1.4x (overridden by HPXML `<HeatingAutosizingFactor>`)
+//! - Heating (heat pump): 1.25x — ACCA Manual S-2017 §4-5 (overridden by HPXML `<HeatingAutosizingFactor>`)
 //! - Cooling: 1.15x (overridden by HPXML `<CoolingAutosizingFactor>`)
 //!
 //! HPXML `<AutosizingLimits>` elements (Min/Max capacity bounds) are
@@ -51,6 +52,12 @@ const DEFAULT_COOLING_SETPOINT_C: f64 = 23.9; // 75 °F
 /// ACCA Manual S-2017 §4: equipment sizing based on design loads.
 const HEATING_OVERSIZE_FACTOR: f64 = 1.4;
 const COOLING_OVERSIZE_FACTOR: f64 = 1.15;
+
+/// Manual S heat pump heating oversizing factor.
+/// ACCA Manual S-2017 §4-5: heat pump heating mode oversizing is limited
+/// to 1.25× because oversized heat pumps cycle excessively during mild
+/// weather, degrading COP and increasing auxiliary heat runtime.
+const HEATING_OVERSIZE_FACTOR_HEAT_PUMP: f64 = 1.25;
 
 /// Backup heating capacity factor: sized to 100% of design heating load
 /// with no oversizing per ACCA Manual S-2017
@@ -220,6 +227,20 @@ pub fn compute_default_internal_gains(ctx: &AutosizeContext, building: &Building
     }
 }
 
+/// Returns `true` when the equipment spec name indicates a heat pump.
+///
+/// Matches the heat pump name patterns used by `resolve_hvac`:
+/// abbreviated forms (`ASHP`, `GSHP`, `MSHP`, `WSHP`) and long-form
+/// names containing "heat pump" (but excluding heat pump water heaters).
+fn is_heat_pump_equipment(spec: &EquipmentSpec) -> bool {
+    let name_lower = spec.name.to_lowercase();
+    name_lower.contains("ashp")
+        || name_lower.contains("gshp")
+        || name_lower.contains("mshp")
+        || name_lower.contains("wshp")
+        || (name_lower.contains("heat pump") && !name_lower.contains("water"))
+}
+
 /// Autosize HVAC equipment capacities for all specs that are missing
 /// explicit capacity values from HPXML.
 ///
@@ -311,11 +332,58 @@ pub fn autosize_equipment_capacities(
 
             // Oversizing factor: prefer HPXML <HeatingAutosizingFactor>;
             // fall back to ACCA Manual S default 1.4x.
-            let factor = spec
+            let has_factor_override =
+                spec.parameters.get("autosize_heating_factor").is_some();
+            let mut factor = spec
                 .parameters
                 .get("autosize_heating_factor")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(HEATING_OVERSIZE_FACTOR);
+
+            // Heat pumps in heating mode are limited to 1.25× oversizing per
+            // ACCA Manual S-2017 §4-5: oversized heat pumps cycle excessively
+            // during mild weather, degrading COP and increasing auxiliary heat
+            // runtime. The HPXML <HeatingAutosizingFactor> override takes
+            // precedence when present.
+            if is_heat_pump_equipment(spec) {
+                if !has_factor_override {
+                    // Default factor path: cap at 1.25×.
+                    if factor > HEATING_OVERSIZE_FACTOR_HEAT_PUMP + f64::EPSILON {
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            requested = factor,
+                            clamped = HEATING_OVERSIZE_FACTOR_HEAT_PUMP,
+                            "heat pump heating factor clamped to Manual S §4-5 limit (1.25×)"
+                        );
+                        factor = HEATING_OVERSIZE_FACTOR_HEAT_PUMP;
+                    }
+                } else if factor > HEATING_OVERSIZE_FACTOR_HEAT_PUMP + f64::EPSILON {
+                    // HPXML override exceeds Manual S heat pump limit — warn but
+                    // respect override (user explicitly chose a non-standard factor).
+                    warn!(
+                        equipment = %spec.name,
+                        factor,
+                        manual_s_limit = HEATING_OVERSIZE_FACTOR_HEAT_PUMP,
+                        "HPXML <HeatingAutosizingFactor> exceeds ACCA Manual S-2017 §4-5 \
+                         heat pump heating limit of 1.25×; override is respected but may \
+                         cause excessive cycling"
+                    );
+                }
+            }
+
+            // Invariant: heat pump heating factor with default path must not
+            // exceed Manual S §4-5 limit.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                if is_heat_pump_equipment(spec) && !has_factor_override {
+                    assert!(
+                        factor <= HEATING_OVERSIZE_FACTOR_HEAT_PUMP + f64::EPSILON,
+                        "invariant: heat pump heating factor {factor} exceeds Manual S §4-5 \
+                         limit of {HEATING_OVERSIZE_FACTOR_HEAT_PUMP} for equipment {}",
+                        spec.name
+                    );
+                }
+            }
 
             let mut sized_capacity = raw_capacity * factor;
 
@@ -1062,6 +1130,9 @@ mod tests {
     fn oversize_factors_match_manual_s() {
         assert!((HEATING_OVERSIZE_FACTOR - 1.4).abs() < f64::EPSILON);
         assert!((COOLING_OVERSIZE_FACTOR - 1.15).abs() < f64::EPSILON);
+        assert!(
+            (HEATING_OVERSIZE_FACTOR_HEAT_PUMP - 1.25).abs() < f64::EPSILON
+        );
     }
 
     #[test]
@@ -1138,6 +1209,189 @@ mod tests {
         assert!(
             (capacity_w - expected).abs() < 1e-6,
             "with no factor override, capacity {capacity_w} should equal raw {raw_capacity} × Manual S factor {HEATING_OVERSIZE_FACTOR} = {expected}"
+        );
+    }
+
+    #[test]
+    fn autosize_heat_pump_heating_uses_1_25_factor() {
+        // ACCA Manual S-2017 §4-5: heat pump heating mode oversizing is
+        // limited to 1.25× because oversized heat pumps cycle excessively
+        // during mild weather. Verify that the default factor for heat
+        // pumps is 1.25, not the general 1.4.
+        let env = one_zone_env(20.0, 10.0);
+        let thermal = build_1r1c_solver(&env, 20.0);
+
+        let mut params = Map::new();
+        params.insert("autosize_heating".to_string(), json!(true));
+        let spec = EquipmentSpec {
+            name: "ASHP Heater".to_string(),
+            instance_name: None,
+            fuel_type: hares_types::FuelType::Electric,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        };
+        let mut specs = vec![spec];
+
+        let ctx = AutosizeContext {
+            design_conditions: Some(DesignConditions {
+                heating_design_db_c: -10.0,
+                cooling_design_db_c: 35.0,
+            }),
+            weather_lat: 0.0,
+            weather_lon: 0.0,
+            duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
+        };
+        let building = minimal_building();
+
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("heating_capacity_w must be set after autosizing");
+
+        let raw_capacity = thermal
+            .autosize_capacity(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
+            .abs();
+        let expected_heat_pump = raw_capacity * HEATING_OVERSIZE_FACTOR_HEAT_PUMP;
+        let would_be_furnace = raw_capacity * HEATING_OVERSIZE_FACTOR;
+
+        assert!(
+            (capacity_w - expected_heat_pump).abs() < 1e-6,
+            "heat pump heating capacity {capacity_w} should equal raw {raw_capacity} \
+             × Manual S §4-5 factor {HEATING_OVERSIZE_FACTOR_HEAT_PUMP} = {expected_heat_pump}"
+        );
+        assert!(
+            (capacity_w - would_be_furnace).abs() > 1e-6,
+            "heat pump capacity {capacity_w} must NOT equal furnace factor 1.4x result {would_be_furnace}"
+        );
+    }
+
+    #[test]
+    fn autosize_furnace_heating_retains_1_4_factor() {
+        // Regression guard: gas furnaces and other non-heat-pump heating
+        // equipment retain the existing 1.4× Manual S default.
+        let env = one_zone_env(20.0, 10.0);
+        let thermal = build_1r1c_solver(&env, 20.0);
+
+        let mut params = Map::new();
+        params.insert("autosize_heating".to_string(), json!(true));
+        let spec = EquipmentSpec {
+            name: "Gas Furnace".to_string(),
+            instance_name: None,
+            fuel_type: hares_types::FuelType::Gas,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        };
+        let mut specs = vec![spec];
+
+        let ctx = AutosizeContext {
+            design_conditions: Some(DesignConditions {
+                heating_design_db_c: -10.0,
+                cooling_design_db_c: 35.0,
+            }),
+            weather_lat: 0.0,
+            weather_lon: 0.0,
+            duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
+        };
+        let building = minimal_building();
+
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("heating_capacity_w must be set after autosizing");
+
+        let raw_capacity = thermal
+            .autosize_capacity(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
+            .abs();
+        let expected = raw_capacity * HEATING_OVERSIZE_FACTOR;
+
+        assert!(
+            (capacity_w - expected).abs() < 1e-6,
+            "gas furnace heating capacity {capacity_w} should equal raw {raw_capacity} \
+             × Manual S factor {HEATING_OVERSIZE_FACTOR} = {expected}"
+        );
+    }
+
+    #[test]
+    fn heat_pump_override_respects_user_factor() {
+        // When HPXML provides <HeatingAutosizingFactor> = 1.5 on a heat pump,
+        // the override is respected (takes precedence over the Manual S cap).
+        // The system warns but does not clamp user-supplied overrides.
+        let env = one_zone_env(20.0, 10.0);
+        let thermal = build_1r1c_solver(&env, 20.0);
+
+        let mut params = Map::new();
+        params.insert("autosize_heating".to_string(), json!(true));
+        params.insert("autosize_heating_factor".to_string(), json!(1.5));
+        let spec = EquipmentSpec {
+            name: "ASHP Heater".to_string(),
+            instance_name: None,
+            fuel_type: hares_types::FuelType::Electric,
+            parameters: params,
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+        };
+        let mut specs = vec![spec];
+
+        let ctx = AutosizeContext {
+            design_conditions: Some(DesignConditions {
+                heating_design_db_c: -10.0,
+                cooling_design_db_c: 35.0,
+            }),
+            weather_lat: 0.0,
+            weather_lon: 0.0,
+            duct_params: DuctDseParams::default(),
+            internal_gains_w: 0.0,
+            internal_gains_latent_w: 0.0,
+        };
+        let building = minimal_building();
+
+        autosize_equipment_capacities(&mut specs, &thermal, &ctx, &building, ZONE);
+
+        let result = &specs[0];
+        let capacity_w = result
+            .parameters
+            .get("heating_capacity_w")
+            .and_then(|v| v.as_f64())
+            .expect("heating_capacity_w must be set after autosizing");
+
+        let raw_capacity = thermal
+            .autosize_capacity(ZONE, DEFAULT_HEATING_SETPOINT_C, -10.0)
+            .abs();
+        let with_override = raw_capacity * 1.5;
+        let with_cap = raw_capacity * HEATING_OVERSIZE_FACTOR_HEAT_PUMP;
+
+        assert!(
+            (capacity_w - with_override).abs() < 1e-6,
+            "with factor 1.5 override on heat pump, capacity {capacity_w} should equal \
+             raw {raw_capacity} × 1.5 = {with_override} (override takes precedence)"
+        );
+        assert!(
+            (capacity_w - with_cap).abs() > 1e-6,
+            "with factor 1.5 override on heat pump, capacity {capacity_w} must NOT \
+             equal the default cap 1.25x result {with_cap}"
         );
     }
 
