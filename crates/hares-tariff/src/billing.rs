@@ -12,6 +12,8 @@ struct DemandWindow {
     count: usize,
     running_sum: f64,
     push_count: u64,
+    #[cfg(feature = "observe")]
+    partial_window_skips: u64,
 }
 
 impl DemandWindow {
@@ -22,6 +24,8 @@ impl DemandWindow {
             count: 0,
             running_sum: 0.0,
             push_count: 0,
+            #[cfg(feature = "observe")]
+            partial_window_skips: 0,
         }
     }
 
@@ -43,11 +47,15 @@ impl DemandWindow {
         }
     }
 
-    fn average(&self) -> f64 {
-        if self.count == 0 {
-            0.0
+    fn average_full(&mut self) -> Option<f64> {
+        if self.count == self.samples.len() {
+            Some(self.running_sum / self.count as f64)
         } else {
-            self.running_sum / self.count as f64
+            #[cfg(feature = "observe")]
+            {
+                self.partial_window_skips += 1;
+            }
+            None
         }
     }
 
@@ -56,9 +64,11 @@ impl DemandWindow {
         self.head = 0;
         self.count = 0;
         self.running_sum = 0.0;
-        // Resetting push_count is intentional: there's no accumulated drift to
-        // correct after a full reset, so the periodic recomputation guard restarts.
         self.push_count = 0;
+        #[cfg(feature = "observe")]
+        {
+            self.partial_window_skips = 0;
+        }
     }
 }
 
@@ -175,18 +185,40 @@ impl BillingState {
         self.cumulative_energy_cost_usd += import_kwh * import_price;
         self.cumulative_export_credit_usd += export_kwh * export_price;
         self.demand_window.push(net_power_kw.max(0.0));
-        let avg = self.demand_window.average();
-        self.peak_demand_kw = self.peak_demand_kw.max(avg);
-        if let Some(slot) = self.period_peak_demand_kw.get_mut(period_idx as usize) {
-            *slot = slot.max(avg);
-        }
-        if demand_period_idx != period_idx {
-            if let Some(slot) = self
-                .period_peak_demand_kw
-                .get_mut(demand_period_idx as usize)
-            {
+        if let Some(avg) = self.demand_window.average_full() {
+            self.peak_demand_kw = self.peak_demand_kw.max(avg);
+            if let Some(slot) = self.period_peak_demand_kw.get_mut(period_idx as usize) {
                 *slot = slot.max(avg);
             }
+            if demand_period_idx != period_idx {
+                if let Some(slot) = self
+                    .period_peak_demand_kw
+                    .get_mut(demand_period_idx as usize)
+                {
+                    *slot = slot.max(avg);
+                }
+            }
+        } else {
+            tracing::debug!(
+                target: "billing",
+                push_count = self.demand_window.push_count,
+                "skipping peak demand update: demand window not yet full"
+            );
+        }
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            debug_assert!(
+                self.demand_window.count <= self.demand_window.samples.len(),
+                "demand window count {} exceeds capacity {}",
+                self.demand_window.count,
+                self.demand_window.samples.len()
+            );
+            debug_assert!(
+                self.period_peak_demand_kw.len() == self.prior_period_peaks.len(),
+                "period_peak_demand_kw len {} != prior_period_peaks len {}",
+                self.period_peak_demand_kw.len(),
+                self.prior_period_peaks.len()
+            );
         }
     }
 
@@ -400,10 +432,16 @@ mod tests {
         w.push(6.0);
         w.push(3.0);
         w.push(9.0);
-        assert!((w.average() - 6.0).abs() < 1e-10);
+        assert!(
+            (w.average_full().unwrap() - 6.0).abs() < 1e-10,
+            "first full window average should be 6.0"
+        );
         w.push(12.0);
         // Ring buffer evicted oldest (6.0): samples = [12.0, 3.0, 9.0], avg = 8.0
-        assert!((w.average() - 8.0).abs() < 1e-10);
+        assert!(
+            (w.average_full().unwrap() - 8.0).abs() < 1e-10,
+            "rolling average after eviction should be 8.0"
+        );
     }
 
     #[test]
@@ -813,6 +851,93 @@ mod tests {
             (summary.net_bill_usd - 50.0).abs() < 1e-10,
             "expected $50.00 (floor applied to net bill), got {}",
             summary.net_bill_usd
+        );
+    }
+
+    #[test]
+    fn demand_window_average_full_returns_none_when_partial() {
+        let mut w = DemandWindow::new(3);
+        assert!(w.average_full().is_none(), "empty window: count=0, cap=3");
+        w.push(10.0);
+        assert!(w.average_full().is_none(), "count=1 < cap=3");
+        w.push(10.0);
+        assert!(w.average_full().is_none(), "count=2 < cap=3");
+        w.push(10.0);
+        let avg = w.average_full().expect("full window should return Some");
+        assert!((avg - 10.0).abs() < 1e-10, "expected 10.0, got {avg}");
+    }
+
+    #[test]
+    fn demand_window_average_full_after_reset_requires_refill() {
+        let mut w = DemandWindow::new(3);
+        // Fill the window.
+        for _ in 0..3 {
+            w.push(5.0);
+        }
+        assert!(w.average_full().is_some(), "window should be full");
+        // Reset clears all state.
+        w.reset();
+        assert!(
+            w.average_full().is_none(),
+            "after reset, window should be empty"
+        );
+        // Push one sample — still not full.
+        w.push(8.0);
+        assert!(w.average_full().is_none(), "count=1 < cap=3 after reset");
+        // Fill to capacity.
+        w.push(8.0);
+        w.push(8.0);
+        let avg = w.average_full().expect("window should be full");
+        assert!((avg - 8.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn billing_state_post_reset_spike_does_not_set_peak_demand() {
+        // 15-minute demand window with 5-minute intervals → capacity = 3
+        let mut state =
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0);
+        // Push a spike in the first post-reset step (count=1, window not full).
+        state.update(100.0, 300.0, 0.0, 0.0, 0, 0);
+        assert!(
+            state.peak_demand_kw.abs() < 1e-10,
+            "spike in partial window should not set peak; got {}",
+            state.peak_demand_kw
+        );
+        // Push two more normal readings to fill the window.
+        state.update(1.0, 300.0, 0.0, 0.0, 0, 0);
+        state.update(1.0, 300.0, 0.0, 0.0, 0, 0);
+        // Window now contains [100, 1, 1] → avg = 34.0. The spike is part of the
+        // full-window average, so peak reflects the 15-min sliding window average.
+        // Window [100, 1, 1] → (100 + 1 + 1) / 3 = 34.0.
+        let peak = state.peak_demand_kw;
+        assert!(
+            (peak - 34.0).abs() < 1e-10,
+            "after window fills, peak should be 34.0; got {peak}"
+        );
+    }
+
+    #[test]
+    fn billing_state_sustained_peak_across_full_window_is_captured() {
+        // 15-minute demand window with 5-minute intervals → capacity = 3
+        let mut state =
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0);
+        // Push three reads of 10 kW → window fills, avg = 10, peak = 10.
+        for _ in 0..3 {
+            state.update(10.0, 300.0, 0.0, 0.0, 0, 0);
+        }
+        assert!(
+            (state.peak_demand_kw - 10.0).abs() < 1e-10,
+            "expected peak 10.0, got {}",
+            state.peak_demand_kw
+        );
+        // Push three more reads of 20 kW → window fills with [20,20,20], peak = 20.
+        for _ in 0..3 {
+            state.update(20.0, 300.0, 0.0, 0.0, 0, 0);
+        }
+        assert!(
+            (state.peak_demand_kw - 20.0).abs() < 1e-10,
+            "expected peak 20.0, got {}",
+            state.peak_demand_kw
         );
     }
 }

@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+check_invariants = []
+observe = []
+
 [dependencies]
 hares-types = { workspace = true }
 serde = { workspace = true }
