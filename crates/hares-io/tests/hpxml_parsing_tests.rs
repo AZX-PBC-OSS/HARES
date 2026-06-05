@@ -1374,6 +1374,7 @@ fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
           <HeatingSystem>
             <SystemIdentifier id="ElecFurnace"/>
             <HeatingSystemType>ElectricResistance</HeatingSystemType>
+            <HeatingSystemFuel>electricity</HeatingSystemFuel>
             <HeatingCapacity units="W">12000</HeatingCapacity>
             <AnnualHeatingEfficiency>
               <Units>AFUE</Units>

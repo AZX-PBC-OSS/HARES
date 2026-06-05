@@ -11,7 +11,9 @@ use hares_types::{normalize_ascii, parse_trimmed_f64};
 use super::building::XmlNode;
 
 pub(crate) fn parse_fuel(raw: Option<&str>) -> Result<FuelType, super::HpxmlError> {
-    let normalized = normalize_ascii(raw.unwrap_or("electricity"));
+    let raw_str =
+        raw.ok_or_else(|| super::HpxmlError::Parse("FuelType is required but was missing".into()))?;
+    let normalized = normalize_ascii(raw_str);
     match normalized.as_str() {
         "electricity" | "electric" => Ok(FuelType::Electric),
         "natural gas" | "natural_gas" | "gas" => Ok(FuelType::Gas),
@@ -523,10 +525,8 @@ mod tests {
     // ── parse_fuel ──────────────────────────────────────────────────────
 
     #[test]
-    fn parse_fuel_none_returns_electric() {
-        let result = parse_fuel(None);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), FuelType::Electric);
+    fn parse_fuel_none_returns_err() {
+        assert!(parse_fuel(None).is_err());
     }
 
     #[test]
@@ -554,6 +554,22 @@ mod tests {
     #[test]
     fn parse_fuel_solar_returns_err() {
         let result = parse_fuel(Some("solar"));
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("unsupported FuelType"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_fuel_misspelled_returns_err() {
+        let result = parse_fuel(Some("natuarl gas"));
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("unsupported FuelType"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_fuel_hydrogen_returns_err() {
+        let result = parse_fuel(Some("hydrogen"));
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("unsupported FuelType"), "got: {err}");
