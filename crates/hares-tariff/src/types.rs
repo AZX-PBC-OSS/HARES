@@ -201,6 +201,43 @@ impl FixedCharges {
     }
 }
 
+/// Critical peak pricing configuration.
+///
+/// CPP applies an elevated rate during a limited number of event hours per year.
+/// EnergyPlus supports this via `CriticalPeakSchedule` and dedicated CPP rate
+/// fields (`vendors/EnergyPlus/src/EnergyPlus/EconomicTariff.cc:768-930`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CppConfig {
+    /// Rate per kWh during CPP event hours ($/kWh).
+    pub event_rate_per_kwh: f64,
+    /// Maximum number of CPP event hours allowed per year.
+    pub event_count_limit: u32,
+    /// 8760-length vector where non-zero entries indicate CPP event hours.
+    /// Index is hour-of-year (0-8759) in local civil time. The evaluator
+    /// applies the event rate to the first `event_count_limit` non-zero
+    /// entries encountered during the simulation; subsequent event hours
+    /// (even if the schedule says they are events) use the standard rate.
+    pub event_schedule: Vec<i32>,
+}
+
+impl CppConfig {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if !self.event_rate_per_kwh.is_finite() || self.event_rate_per_kwh < 0.0 {
+            return Err(HaresError::Tariff(format!(
+                "cpp event_rate_per_kwh must be finite and >= 0, got {}",
+                self.event_rate_per_kwh
+            )));
+        }
+        if self.event_schedule.len() != 8760 {
+            return Err(HaresError::Tariff(format!(
+                "cpp event_schedule must have 8760 entries, got {}",
+                self.event_schedule.len()
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Complete electric utility tariff.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ElectricTariff {
@@ -230,6 +267,22 @@ pub struct ElectricTariff {
     /// Some utilities use 30 (LADWP commercial) or 5.
     #[serde(default = "default_demand_window_minutes")]
     pub demand_window_minutes: u32,
+    /// Real-time pricing: 8760 hourly prices ($/kWh) indexed by hour-of-year.
+    /// When present, overrides static `energy_rates` and `tou_schedule` for
+    /// energy charges. Export price under `NetMetering` also uses the RTP price.
+    /// EnergyPlus: `RealTimePriceSchedule` (EconomicTariff.cc:2539-2541).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_schedule: Option<Vec<f64>>,
+    /// Critical peak pricing configuration. When present, CPP event hours
+    /// use `event_rate_per_kwh` instead of the standard energy rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpp_config: Option<CppConfig>,
+    /// When `Some`, the evaluator applies the energy rate for this TOU period
+    /// to the EV-charging portion of the load (passed via `ev_power_kw`)
+    /// instead of the standard import rate. The EV rate is resolved from
+    /// `energy_rates` by matching `period_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ev_tou_period_name: Option<String>,
 }
 
 fn default_demand_window_minutes() -> u32 {
@@ -256,6 +309,9 @@ impl Default for ElectricTariff {
             billing_cycle: BillingCycle::default(),
             seasonal_split: None,
             demand_window_minutes: 15,
+            rtp_schedule: None,
+            cpp_config: None,
+            ev_tou_period_name: None,
         }
     }
 }
@@ -325,6 +381,31 @@ impl ElectricTariff {
                         "demand rate references unknown TOU period '{name}'"
                     )));
                 }
+            }
+        }
+        if let Some(ref rtp) = self.rtp_schedule {
+            if rtp.len() < 8760 {
+                return Err(HaresError::Tariff(format!(
+                    "rtp_schedule must have at least 8760 entries, got {}",
+                    rtp.len()
+                )));
+            }
+            for (i, price) in rtp.iter().enumerate() {
+                if !price.is_finite() || *price < 0.0 {
+                    return Err(HaresError::Tariff(format!(
+                        "rtp_schedule[{i}] must be finite and >= 0, got {price}"
+                    )));
+                }
+            }
+        }
+        if let Some(ref cpp) = self.cpp_config {
+            cpp.validate()?;
+        }
+        if let Some(ref ev_name) = self.ev_tou_period_name {
+            if !ev_name.is_empty() && !tou_names.contains(&ev_name.as_str()) {
+                return Err(HaresError::Tariff(format!(
+                    "ev_tou_period_name '{ev_name}' references unknown TOU period"
+                )));
             }
         }
         Ok(())
@@ -479,11 +560,111 @@ mod tests {
             seasonal_split: Some(SeasonalSplit::new(6, 9).unwrap()),
             demand_tou_schedule: Vec::new(),
             demand_window_minutes: 15,
+            rtp_schedule: None,
+            cpp_config: None,
+            ev_tou_period_name: None,
         };
 
         let json = serde_json::to_string(&tariff).unwrap();
         let back: ElectricTariff = serde_json::from_str(&json).unwrap();
         assert_eq!(back, tariff);
+        assert!(tariff.validate().is_ok());
+    }
+
+    #[test]
+    fn cpp_config_validate_rejects_bad_rate() {
+        let config = CppConfig {
+            event_rate_per_kwh: -1.0,
+            event_count_limit: 15,
+            event_schedule: vec![0; 8760],
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn cpp_config_validate_rejects_nan_rate() {
+        let config = CppConfig {
+            event_rate_per_kwh: f64::NAN,
+            event_count_limit: 15,
+            event_schedule: vec![0; 8760],
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn cpp_config_validate_rejects_wrong_length_schedule() {
+        let config = CppConfig {
+            event_rate_per_kwh: 1.50,
+            event_count_limit: 15,
+            event_schedule: vec![0; 100],
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn cpp_config_validate_accepts_valid() {
+        let config = CppConfig {
+            event_rate_per_kwh: 1.50,
+            event_count_limit: 15,
+            event_schedule: vec![0; 8760],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn electric_tariff_rtp_validate_rejects_short_schedule() {
+        let tariff = ElectricTariff {
+            rtp_schedule: Some(vec![0.10; 100]),
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_err());
+    }
+
+    #[test]
+    fn electric_tariff_rtp_validate_rejects_negative_price() {
+        let mut prices = vec![0.10; 8760];
+        prices[500] = -0.05;
+        let tariff = ElectricTariff {
+            rtp_schedule: Some(prices),
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_err());
+    }
+
+    #[test]
+    fn electric_tariff_ev_period_name_unknown_rejected() {
+        let tariff = ElectricTariff {
+            ev_tou_period_name: Some("nonexistent".into()),
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_err());
+    }
+
+    #[test]
+    fn electric_tariff_ev_period_name_valid_accepted() {
+        let tariff = ElectricTariff {
+            tou_schedule: vec![TouPeriod {
+                name: "ev-off-peak".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 480, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "ev-off-peak".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.06,
+            }],
+            ev_tou_period_name: Some("ev-off-peak".into()),
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_ok());
+    }
+
+    #[test]
+    fn electric_tariff_rtp_validate_accepts_valid() {
+        let tariff = ElectricTariff {
+            rtp_schedule: Some(vec![0.10; 8760]),
+            ..Default::default()
+        };
         assert!(tariff.validate().is_ok());
     }
 

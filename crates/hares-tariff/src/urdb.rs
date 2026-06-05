@@ -608,6 +608,9 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
         billing_cycle: BillingCycle::Monthly,
         seasonal_split,
         demand_window_minutes: 15,
+        rtp_schedule: None,
+        cpp_config: None,
+        ev_tou_period_name: None,
     };
 
     tariff.validate().map_err(|e| UrdbParseError {

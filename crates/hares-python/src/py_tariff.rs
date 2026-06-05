@@ -543,6 +543,9 @@ impl PyTariffBuilder {
             billing_cycle: self.billing_cycle,
             seasonal_split: self.seasonal_split,
             demand_window_minutes: self.demand_window_minutes,
+            rtp_schedule: None,
+            cpp_config: None,
+            ev_tou_period_name: None,
         };
         tariff
             .validate()

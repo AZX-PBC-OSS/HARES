@@ -9,6 +9,11 @@ pub struct TariffEvaluator {
     tariff: ElectricTariff,
     price_array: Vec<f64>,
     export_array: Vec<f64>,
+    /// Precomputed EV energy rate per timestep ($/kWh).
+    /// Zero when no EV sub-tariff is configured.
+    ev_price_array: Vec<f64>,
+    /// Precomputed hour-of-year for each timestep (0-8759 in local civil time).
+    hour_of_year_array: Vec<usize>,
     /// Index into a deduplicated period name table per step (energy TOU).
     period_indices: Vec<u16>,
     /// Index into period name table per step for demand TOU periods.
@@ -22,6 +27,19 @@ pub struct TariffEvaluator {
     billing_state: BillingState,
     finished: bool,
     finalized: bool,
+    /// Observer: number of timesteps the RTP price path was taken.
+    #[cfg(feature = "observe")]
+    pub rtp_price_used: u64,
+    /// Observer: number of timesteps a CPP event rate was applied.
+    #[cfg(feature = "observe")]
+    pub cpp_event_triggered: u64,
+    /// Observer: number of timesteps a CPP event was scheduled but the
+    /// annual event-hour limit was already reached.
+    #[cfg(feature = "observe")]
+    pub cpp_event_limit_hit: u64,
+    /// Observer: cumulative kWh billed under the EV-specific rate.
+    #[cfg(feature = "observe")]
+    pub ev_rate_applied_kwh: f64,
 }
 
 impl TariffEvaluator {
@@ -53,6 +71,8 @@ impl TariffEvaluator {
         }
         let mut price_array = Vec::with_capacity(num_steps);
         let mut export_array = Vec::with_capacity(num_steps);
+        let mut ev_price_array = Vec::with_capacity(num_steps);
+        let mut hour_of_year_array = Vec::with_capacity(num_steps);
         let mut period_indices = Vec::with_capacity(num_steps);
         let mut demand_period_indices = Vec::with_capacity(num_steps);
         let mut months = Vec::with_capacity(num_steps);
@@ -92,6 +112,7 @@ impl TariffEvaluator {
             let month = civil.month() as u8;
             let weekday = civil.weekday();
             let minute_of_day = civil.hour() as u16 * 60 + civil.minute() as u16;
+            let hour_of_year = (civil.ordinal0() as usize * 24 + civil.hour() as usize) % 8760;
 
             let mut matched_period: Option<&str> = None;
             for period in &tariff.tou_schedule {
@@ -111,15 +132,39 @@ impl TariffEvaluator {
 
             let (import_price, period_idx) = match matched_period {
                 Some(name) => {
-                    let rate = tariff
-                        .energy_rates
-                        .iter()
-                        .find(|er| er.period_name == name && er.season.contains_month(month))
-                        .map(|er| er.rate_per_kwh)
-                        .unwrap_or(0.0);
+                    let rate = if let Some(ref rtp) = tariff.rtp_schedule {
+                        let hoy = hour_of_year;
+                        rtp.get(hoy).copied().unwrap_or(0.0)
+                    } else {
+                        tariff
+                            .energy_rates
+                            .iter()
+                            .find(|er| er.period_name == name && er.season.contains_month(month))
+                            .map(|er| er.rate_per_kwh)
+                            .unwrap_or(0.0)
+                    };
                     (rate, intern(name))
                 }
-                None => (0.0, 0),
+                None => {
+                    let price = if let Some(ref rtp) = tariff.rtp_schedule {
+                        rtp.get(hour_of_year).copied().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    (price, 0)
+                }
+            };
+
+            // Precompute EV energy rate for this timestep.
+            let ev_price = if let Some(ref ev_name) = tariff.ev_tou_period_name {
+                tariff
+                    .energy_rates
+                    .iter()
+                    .find(|er| er.period_name == *ev_name && er.season.contains_month(month))
+                    .map(|er| er.rate_per_kwh)
+                    .unwrap_or(0.0)
+            } else {
+                0.0
             };
 
             let export_price = match &tariff.export_rate.mode {
@@ -165,6 +210,8 @@ impl TariffEvaluator {
 
             price_array.push(import_price);
             export_array.push(export_price);
+            ev_price_array.push(ev_price);
+            hour_of_year_array.push(hour_of_year);
             period_indices.push(period_idx);
             demand_period_indices.push(demand_idx);
             months.push(month);
@@ -187,6 +234,10 @@ impl TariffEvaluator {
         // warn when the window is longer than the interval but not evenly
         // divisible -- that silently truncates the averaging window.
         let window_seconds = demand_window_minutes as u64 * 60;
+        // Why: clippy::manual_is_multiple_of fires on `a % b != 0` even when the
+        // semantics are "is not evenly divisible" — the guard checks
+        // non-divisibility, not divisibility, and `is_multiple_of()` reads
+        // awkwardly when negated.
         #[allow(clippy::manual_is_multiple_of)]
         if window_seconds > interval_seconds as u64 && window_seconds % interval_seconds as u64 != 0
         {
@@ -206,6 +257,8 @@ impl TariffEvaluator {
         );
 
         debug_assert_eq!(price_array.len(), export_array.len());
+        debug_assert_eq!(price_array.len(), ev_price_array.len());
+        debug_assert_eq!(price_array.len(), hour_of_year_array.len());
         debug_assert_eq!(price_array.len(), period_indices.len());
         debug_assert_eq!(price_array.len(), demand_period_indices.len());
         debug_assert_eq!(price_array.len(), months.len());
@@ -214,6 +267,8 @@ impl TariffEvaluator {
             tariff,
             price_array,
             export_array,
+            ev_price_array,
+            hour_of_year_array,
             period_indices,
             demand_period_indices,
             months,
@@ -224,6 +279,14 @@ impl TariffEvaluator {
             billing_state,
             finished: false,
             finalized: false,
+            #[cfg(feature = "observe")]
+            rtp_price_used: 0,
+            #[cfg(feature = "observe")]
+            cpp_event_triggered: 0,
+            #[cfg(feature = "observe")]
+            cpp_event_limit_hit: 0,
+            #[cfg(feature = "observe")]
+            ev_rate_applied_kwh: 0.0,
         })
     }
 
@@ -293,6 +356,7 @@ impl TariffEvaluator {
     pub fn step(
         &mut self,
         net_power_kw: f64,
+        ev_power_kw: f64,
         dt_seconds: f64,
         current_time: DateTime<Tz>,
     ) -> Option<BillingPeriodSummary> {
@@ -305,17 +369,111 @@ impl TariffEvaluator {
             self.step_index,
             self.price_array.len()
         );
-        let import_price = self.current_price();
+        let mut import_price = self.current_price();
         let export_price = self.current_export_price();
+
+        // Resolve effective import price: CPP event override.
+        let ci = self.clamped_index();
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if let Some(ref cpp) = self.tariff.cpp_config {
+                for (i, &val) in cpp.event_schedule.iter().enumerate() {
+                    debug_assert!(val == 0 || i < 8760, "cpp event_schedule index {i} >= 8760");
+                }
+            }
+        }
+        let _cpp_active = if let Some(ref cpp) = self.tariff.cpp_config {
+            let hoy = self.hour_of_year_array[ci];
+            let is_event = cpp.event_schedule.get(hoy).copied().unwrap_or(0) != 0;
+            if is_event {
+                if self
+                    .billing_state
+                    .try_cpp_event(hoy, true, cpp.event_count_limit)
+                {
+                    import_price = cpp.event_rate_per_kwh;
+                    #[cfg(feature = "observe")]
+                    {
+                        self.cpp_event_triggered += 1;
+                    }
+                    true
+                } else {
+                    #[cfg(feature = "observe")]
+                    {
+                        self.cpp_event_limit_hit += 1;
+                    }
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Compute EV import kWh and effective blended import price.
+        let ev_import_kwh = if self.tariff.ev_tou_period_name.is_some() && ev_power_kw > 0.0 {
+            let ev_import_kw = ev_power_kw.min(net_power_kw).max(0.0);
+            ev_import_kw * dt_seconds / 3600.0
+        } else {
+            0.0
+        };
+
+        let import_kwh = net_power_kw.max(0.0) * dt_seconds / 3600.0;
+        let non_ev_import_kwh = import_kwh - ev_import_kwh;
+
+        // Compute blended import price: non-EV at standard (or CPP/RTP) rate,
+        // EV at EV-specific rate. This preserves total energy cost correctness
+        // while allowing the existing `update()` cost accumulation to work unchanged.
+        let ev_import_price = self.ev_price_array[ci];
+        let effective_import_price = if import_kwh > 0.0 {
+            (non_ev_import_kwh * import_price + ev_import_kwh * ev_import_price) / import_kwh
+        } else {
+            import_price
+        };
+
+        #[cfg(feature = "observe")]
+        {
+            if self.tariff.rtp_schedule.is_some() {
+                self.rtp_price_used += 1;
+            }
+            self.ev_rate_applied_kwh += ev_import_kwh;
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if let Some(ref cpp) = self.tariff.cpp_config {
+                debug_assert!(
+                    self.billing_state.running_cpp_event_hours() <= cpp.event_count_limit,
+                    "CPP event count {} exceeds annual limit {}",
+                    self.billing_state.running_cpp_event_hours(),
+                    cpp.event_count_limit
+                );
+            }
+            if let Some(ref rtp) = self.tariff.rtp_schedule {
+                let hoy = self.hour_of_year_array[ci];
+                debug_assert!(
+                    hoy < rtp.len(),
+                    "hour_of_year {hoy} out of bounds for rtp_schedule (len {})",
+                    rtp.len()
+                );
+                debug_assert!(
+                    rtp[hoy] >= 0.0 && rtp[hoy].is_finite(),
+                    "rtp_schedule[{hoy}] = {} is invalid",
+                    rtp[hoy]
+                );
+            }
+        }
+
         let period_idx = self.period_indices[self.step_index];
         let demand_period_idx = self.demand_period_indices[self.step_index];
         self.billing_state.update(
             net_power_kw,
             dt_seconds,
-            import_price,
+            effective_import_price,
             export_price,
             period_idx,
             demand_period_idx,
+            ev_import_kwh,
         );
 
         let result = if current_time >= self.billing_state.period_end {
@@ -473,7 +631,7 @@ mod tests {
     use chrono_tz::America::New_York;
     use hares_types::{DayFilter, SeasonFilter, TimeWindow, TouPeriod};
 
-    use crate::types::{EnergyRate, ExportRate, FixedCharges, TieredBlock};
+    use crate::types::{CppConfig, EnergyRate, ExportRate, FixedCharges, TieredBlock};
 
     const SUMMER_PEAK: f64 = 0.35;
     const SUMMER_OFFPEAK: f64 = 0.10;
@@ -820,7 +978,7 @@ mod tests {
         let mut summaries = Vec::new();
         for i in 0..total {
             let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            if let Some(s) = ev.step(power_fn(i), interval as f64, step_end) {
+            if let Some(s) = ev.step(power_fn(i), 0.0, interval as f64, step_end) {
                 summaries.push(s);
             }
         }
@@ -1277,7 +1435,7 @@ mod tests {
 
         // Accumulate some load so finalize() has something to return.
         let step_end = start + Duration::seconds(interval as i64);
-        ev.step(5.0, interval as f64, step_end);
+        ev.step(5.0, 0.0, interval as f64, step_end);
 
         let first = ev.finalize(end);
         assert!(first.is_some(), "first finalize() should return Some");
@@ -1307,7 +1465,7 @@ mod tests {
         let steps_15d = 15 * 24;
         for i in 0..steps_15d {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(1.0, interval as f64, t);
+            ev.step(1.0, 0.0, interval as f64, t);
         }
 
         let summary = ev.finalize(sim_end).expect("should have charges");
@@ -1340,7 +1498,7 @@ mod tests {
         let total = ev.total_steps();
         for i in 0..(total - 1) {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(1.0, interval as f64, t);
+            ev.step(1.0, 0.0, interval as f64, t);
         }
 
         let summary = ev.finalize(end).expect("should have charges");
@@ -1365,10 +1523,10 @@ mod tests {
 
         // The single valid step.
         let step_end = start + Duration::seconds(interval as i64);
-        let _ = ev.step(1.0, interval as f64, step_end);
+        let _ = ev.step(1.0, 0.0, interval as f64, step_end);
 
         // Any subsequent call must return None -- the evaluator is finished.
-        let result = ev.step(1.0, interval as f64, step_end + Duration::hours(1));
+        let result = ev.step(1.0, 0.0, interval as f64, step_end + Duration::hours(1));
         assert!(
             result.is_none(),
             "step() after simulation end should return None"
@@ -1412,7 +1570,7 @@ mod tests {
 
         // Run the single step to completion.
         let step_end = start + Duration::seconds(interval as i64);
-        let _ = ev.step(1.0, interval as f64, step_end);
+        let _ = ev.step(1.0, 0.0, interval as f64, step_end);
         assert!(ev.is_finished());
 
         // Accessors must not panic even after step() has finished.
@@ -1442,12 +1600,12 @@ mod tests {
         // Push 6 steps of 10 kW (30 min at 5-min intervals).
         for i in 0..6 {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(10.0, interval as f64, t);
+            ev.step(10.0, 0.0, interval as f64, t);
         }
         // Then push low load.
         for i in 6..12 {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(1.0, interval as f64, t);
+            ev.step(1.0, 0.0, interval as f64, t);
         }
 
         // The peak should be ~10 kW (the 30-min average of the first 6 steps).
@@ -1479,7 +1637,7 @@ mod tests {
         // Push 3 steps of 10 kW (15 min at 5-min intervals).
         for i in 0..3 {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(10.0, interval as f64, t);
+            ev.step(10.0, 0.0, interval as f64, t);
         }
         let peak = ev.billing_state().peak_demand_kw();
         assert!(
@@ -1515,7 +1673,7 @@ mod tests {
 
         // Step with zero load -- no energy, no demand.
         let step_end = start + Duration::seconds(interval as i64);
-        ev.step(0.0, interval as f64, step_end);
+        ev.step(0.0, 0.0, interval as f64, step_end);
 
         let summary = ev
             .finalize(end)
@@ -1534,7 +1692,7 @@ mod tests {
         let interval = 3600u32;
         let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
         let step_end = start + Duration::seconds(interval as i64);
-        ev.step(1.0, interval as f64, step_end);
+        ev.step(1.0, 0.0, interval as f64, step_end);
 
         assert!(!ev.is_finished());
         let _ = ev.finalize(end);
@@ -1674,6 +1832,314 @@ mod tests {
             (s.net_bill_usd - 50.0).abs() < 1e-6,
             "excludes_export=false: net should be floored to $50.00, got ${:.2}",
             s.net_bill_usd
+        );
+    }
+
+    // ── RTP tests ──────────────────────────────────────────────────────────
+
+    fn rtp_tariff(prices: Vec<f64>) -> ElectricTariff {
+        ElectricTariff {
+            name: Some("rtp-test".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "flat".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.10, // fallback — should be overridden by RTP
+            }],
+            rtp_schedule: Some(prices),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rtp_price_lookup_by_hour_of_year() {
+        // Build RTP schedule where price = hour_of_year / 1000.0
+        let prices: Vec<f64> = (0..8760).map(|i| i as f64 / 1000.0).collect();
+        let tariff = rtp_tariff(prices.clone());
+
+        // Test hour 0: Jan 1 midnight → index 0
+        let start = New_York.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let ev = make_evaluator(tariff.clone(), start, start + Duration::hours(1), 3600);
+        assert!(
+            (ev.current_price() - 0.0).abs() < 1e-10,
+            "hour 0 price should be 0.0"
+        );
+
+        // Test hour 12: Jan 1 noon → index 12
+        let start = New_York.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+        let ev = make_evaluator(tariff.clone(), start, start + Duration::hours(1), 3600);
+        assert!(
+            (ev.current_price() - 0.012).abs() < 1e-10,
+            "hour 12 price should be 0.012"
+        );
+
+        // Test hour 8759: Dec 31 23:00 → index 8759
+        let start = New_York.with_ymd_and_hms(2025, 12, 31, 23, 0, 0).unwrap();
+        let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        assert!(
+            (ev.current_price() - 8.759).abs() < 1e-10,
+            "hour 8759 price should be 8.759"
+        );
+    }
+
+    #[test]
+    fn rtp_price_wraparound_at_year_boundary() {
+        // RTP schedule with distinct values at index 0 and 1.
+        let prices: Vec<f64> = (0..8760).map(|i| i as f64 / 1000.0).collect();
+        let tariff = rtp_tariff(prices);
+
+        // Hour 0 of year 2 (Jan 1 2026 00:00) should wrap to index 0.
+        let start = New_York.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        assert!(
+            (ev.current_price() - 0.0).abs() < 1e-10,
+            "wraparound: hour 0 of year 2 should use RTP index 0"
+        );
+    }
+
+    #[test]
+    fn rtp_full_year_total_cost_matches_expected() {
+        // Use a constant RTP price to avoid DST-related index shifts in the
+        // hour-of-year mapping. The test verifies the full integration:
+        // RTP schedule is used for all 8760 steps of a non-leap year.
+        let prices = vec![0.15; 8760];
+        let tariff = rtp_tariff(prices);
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2026, 1, 1);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Import 2 kW every hour → 2 kWh per step.
+        let summaries = run_all_steps(&mut ev, |_| 2.0);
+
+        // 8760 hours × 2 kWh × $0.15/kWh = $2,628.00
+        let total_cost: f64 = summaries.iter().map(|s| s.energy_charge_usd).sum();
+        let expected = 8760.0 * 2.0 * 0.15;
+        assert!(
+            (total_cost - expected).abs() < 1e-6,
+            "full-year RTP cost should match n_steps × kWh × price; expected {expected}, got {total_cost}"
+        );
+    }
+
+    // ── CPP tests ──────────────────────────────────────────────────────────
+
+    fn cpp_tariff(event_rate: f64, event_limit: u32, event_schedule: Vec<i32>) -> ElectricTariff {
+        ElectricTariff {
+            name: Some("cpp-test".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "flat".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.10,
+            }],
+            cpp_config: Some(CppConfig {
+                event_rate_per_kwh: event_rate,
+                event_count_limit: event_limit,
+                event_schedule,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cpp_event_detected_and_rate_applied() {
+        // Mark only hour 6 (6:00 on Jan 1) as a CPP event.
+        let mut schedule = vec![0i32; 8760];
+        schedule[6] = 1;
+        let tariff = cpp_tariff(1.50, 15, schedule);
+
+        // Hour 6:00 → should get CPP rate $1.50
+        let start = New_York.with_ymd_and_hms(2025, 1, 1, 6, 0, 0).unwrap();
+        let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        let step_end = start + Duration::hours(1);
+        ev.step(1.0, 0.0, 3600.0, step_end);
+
+        // The energy cost should be 1 kWh * $1.50 = $1.50
+        let summary = ev.finalize(step_end).expect("should return summary");
+        assert!(
+            (summary.energy_charge_usd - 1.50).abs() < 1e-10,
+            "CPP event at hour 6 should charge $1.50/kWh; got {}",
+            summary.energy_charge_usd
+        );
+        assert_eq!(ev.billing_state().running_cpp_event_hours(), 1);
+    }
+
+    #[test]
+    fn cpp_no_event_hour_uses_standard_rate() {
+        let mut schedule = vec![0i32; 8760];
+        schedule[6] = 1; // only hour 6 is an event
+        let tariff = cpp_tariff(1.50, 15, schedule);
+
+        // Hour 5:00 → not an event, should use standard rate $0.10
+        let start = New_York.with_ymd_and_hms(2025, 1, 1, 5, 0, 0).unwrap();
+        let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        let step_end = start + Duration::hours(1);
+        ev.step(1.0, 0.0, 3600.0, step_end);
+
+        let summary = ev.finalize(step_end).expect("should return summary");
+        assert!(
+            (summary.energy_charge_usd - 0.10).abs() < 1e-10,
+            "non-event hour should use standard rate $0.10/kWh; got {}",
+            summary.energy_charge_usd
+        );
+        assert_eq!(ev.billing_state().running_cpp_event_hours(), 0);
+    }
+
+    #[test]
+    fn cpp_event_counter_enforcement() {
+        // Event hours at 6, 7, 8, 9, 10. Limit is 3.
+        let mut schedule = vec![0i32; 8760];
+        for h in 6..=10 {
+            schedule[h] = 1;
+        }
+        let tariff = cpp_tariff(1.50, 3, schedule);
+
+        // Simulate hours 0 through 11
+        let start = New_York.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let end = start + Duration::hours(12);
+        let mut ev = make_evaluator(tariff, start, end, 3600);
+
+        for i in 0..12 {
+            let step_end = start + Duration::seconds((i as i64 + 1) * 3600);
+            ev.step(1.0, 0.0, 3600.0, step_end);
+        }
+
+        let summary = ev.finalize(end).expect("should return summary");
+        // Hours 0-5: standard rate $0.10 → 6 kWh * $0.10 = $0.60
+        // Hours 6-8: CPP rate $1.50 → 3 kWh * $1.50 = $4.50   (3 events, then limit hit)
+        // Hours 9-10: standard rate $0.10 → 2 kWh * $0.10 = $0.20 (limit exceeded)
+        // Hour 11: standard rate $0.10 → 1 kWh * $0.10 = $0.10
+        // Total: $0.60 + $4.50 + $0.20 + $0.10 = $5.40
+        assert!(
+            (summary.energy_charge_usd - 5.40).abs() < 1e-6,
+            "enforced CPP limit: expected $5.40, got {}",
+            summary.energy_charge_usd
+        );
+        assert_eq!(
+            ev.billing_state().running_cpp_event_hours(),
+            3,
+            "should have exactly 3 CPP event hours counted"
+        );
+    }
+
+    #[test]
+    fn cpp_full_year_event_limit_enforced() {
+        // 15 CPP event hours scattered across the year, but limit is 10.
+        let mut schedule = vec![0i32; 8760];
+        for h in [
+            100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 2000, 3000, 4000, 5000, 6000,
+        ] {
+            schedule[h] = 1;
+        }
+        let tariff = cpp_tariff(1.50, 10, schedule);
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2026, 1, 1);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let summaries = run_all_steps(&mut ev, |_| 1.0);
+
+        // 8760 hours total. 10 CPP hours @ $1.50 (matching the limit first),
+        // 8750 hours @ $0.10. Total: 10*1.50 + 8750*0.10 = 15 + 875 = $890
+        let total: f64 = summaries.iter().map(|s| s.energy_charge_usd).sum();
+        let expected = 10.0 * 1.50 + 8750.0 * 0.10;
+        assert!(
+            (total - expected).abs() < 1e-6,
+            "full-year CPP with limit 10: expected {expected}, got {total}"
+        );
+        assert_eq!(ev.billing_state().running_cpp_event_hours(), 10);
+    }
+
+    // ── EV rate test ───────────────────────────────────────────────────────
+
+    #[test]
+    fn ev_sub_tariff_rate_applied() {
+        let tariff = ElectricTariff {
+            name: Some("ev-test".into()),
+            tou_schedule: vec![
+                TouPeriod {
+                    name: "house".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+                TouPeriod {
+                    name: "ev-off-peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+            ],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "house".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.30,
+                },
+                EnergyRate {
+                    period_name: "ev-off-peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.06,
+                },
+            ],
+            ev_tou_period_name: Some("ev-off-peak".into()),
+            ..Default::default()
+        };
+
+        // Total import 5 kW: 3 kW house + 2 kW EV
+        let start = New_York.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+        let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        let step_end = start + Duration::hours(1);
+        ev.step(5.0, 2.0, 3600.0, step_end);
+
+        let summary = ev.finalize(step_end).expect("should return summary");
+        // 3 kWh house @ $0.30 = $0.90, 2 kWh EV @ $0.06 = $0.12
+        // Total = $1.02
+        assert!(
+            (summary.energy_charge_usd - 1.02).abs() < 1e-10,
+            "blended EV+house cost should be $1.02; got {}",
+            summary.energy_charge_usd
+        );
+    }
+
+    #[test]
+    fn ev_sub_tariff_zero_ev_power_no_effect() {
+        let tariff = ElectricTariff {
+            name: Some("ev-zero-test".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "house".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "house".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.30,
+            }],
+            ev_tou_period_name: Some("house".into()), // EV uses same rate
+            ..Default::default()
+        };
+
+        let start = New_York.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+        let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        let step_end = start + Duration::hours(1);
+        // 5 kW house load, 0 kW EV
+        ev.step(5.0, 0.0, 3600.0, step_end);
+
+        let summary = ev.finalize(step_end).expect("should return summary");
+        // 5 kWh @ $0.30 = $1.50
+        assert!(
+            (summary.energy_charge_usd - 1.50).abs() < 1e-10,
+            "zero EV power should produce standard cost; got {}",
+            summary.energy_charge_usd
         );
     }
 }

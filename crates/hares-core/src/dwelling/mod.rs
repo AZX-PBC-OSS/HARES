@@ -4841,7 +4841,7 @@ impl Dwelling {
             let dt_secs = self.latest_env.time_step_secs();
             let tz = evaluator.simulation_start().timezone();
             let current_tz = self.latest_env.current_time.with_timezone(&tz);
-            if let Some(summary) = evaluator.step(net_kw, dt_secs, current_tz) {
+            if let Some(summary) = evaluator.step(net_kw, 0.0, dt_secs, current_tz) {
                 self.billing_summaries.push(summary);
             }
         }

@@ -88,6 +88,15 @@ pub struct BillingState {
     demand_window: DemandWindow,
     billing_cycle: BillingCycle,
     max_prior_periods: usize,
+    /// Running count of CPP event hours triggered so far this annual cycle.
+    /// Persists across billing period resets; only reset on annual boundary.
+    pub(crate) running_cpp_event_hours: u32,
+    /// Hour-of-year index of the last CPP event hour that was counted toward
+    /// the limit. Used to avoid double-counting within the same hour for
+    /// sub-hour timesteps.
+    last_cpp_hour: Option<usize>,
+    /// Cumulative EV kWh tracked for observer / billing transparency.
+    pub(crate) cumulative_ev_kwh: f64,
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -166,9 +175,17 @@ impl BillingState {
             demand_window: DemandWindow::new(capacity),
             billing_cycle,
             max_prior_periods,
+            running_cpp_event_hours: 0,
+            last_cpp_hour: None,
+            cumulative_ev_kwh: 0.0,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    // Why: clippy::too_many_arguments — update() is the single hot-path
+    // accumulator for all per-step billing inputs (power, prices, period IDs,
+    // EV kWh). Splitting into multiple calls or a parameter struct would add
+    // heap allocation in the ~525k-call/year simulation loop.
     pub fn update(
         &mut self,
         net_power_kw: f64,
@@ -177,6 +194,7 @@ impl BillingState {
         export_price: f64,
         period_idx: u16,
         demand_period_idx: u16,
+        ev_import_kwh: f64,
     ) {
         let import_kwh = net_power_kw.max(0.0) * dt_seconds / 3600.0;
         let export_kwh = (-net_power_kw).max(0.0) * dt_seconds / 3600.0;
@@ -184,6 +202,7 @@ impl BillingState {
         self.cumulative_export_kwh += export_kwh;
         self.cumulative_energy_cost_usd += import_kwh * import_price;
         self.cumulative_export_credit_usd += export_kwh * export_price;
+        self.cumulative_ev_kwh += ev_import_kwh;
         self.demand_window.push(net_power_kw.max(0.0));
         if let Some(avg) = self.demand_window.average_full() {
             self.peak_demand_kw = self.peak_demand_kw.max(avg);
@@ -250,6 +269,44 @@ impl BillingState {
         self.cumulative_export_credit_usd
     }
 
+    pub fn cumulative_ev_kwh(&self) -> f64 {
+        self.cumulative_ev_kwh
+    }
+
+    pub fn running_cpp_event_hours(&self) -> u32 {
+        self.running_cpp_event_hours
+    }
+
+    /// Attempt to trigger a CPP event for the given hour-of-year.
+    /// Returns `true` if the event is within the annual limit and should
+    /// use the CPP event rate. The event is only counted once per hour
+    /// (first sub-hour timestep) to avoid double-counting.
+    ///
+    /// `is_event_hour` should be `true` when `event_schedule[hour_of_year] != 0`.
+    /// `event_count_limit` is the annual limit from the tariff's `CppConfig`.
+    pub fn try_cpp_event(
+        &mut self,
+        hour_of_year: usize,
+        is_event_hour: bool,
+        event_count_limit: u32,
+    ) -> bool {
+        if !is_event_hour {
+            return false;
+        }
+        // Only count the event hour once (first timestep within the hour).
+        if self.last_cpp_hour == Some(hour_of_year) {
+            // Already counted this hour; still active if we haven't exceeded limit.
+            return self.running_cpp_event_hours <= event_count_limit;
+        }
+        self.last_cpp_hour = Some(hour_of_year);
+        if self.running_cpp_event_hours < event_count_limit {
+            self.running_cpp_event_hours += 1;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Coincident peak with a caller-supplied ratchet (used per demand rate).
     pub fn effective_peak_with_ratchet(&self, ratchet: &Option<RatchetConfig>) -> f64 {
         apply_ratchet(self.peak_demand_kw, &self.prior_peaks_kw, ratchet)
@@ -300,6 +357,7 @@ impl BillingState {
         self.peak_demand_kw = 0.0;
         self.period_peak_demand_kw.fill(0.0);
         self.demand_window.reset();
+        self.cumulative_ev_kwh = 0.0;
     }
 }
 
@@ -451,7 +509,7 @@ mod tests {
         // 15-min window with 5-min interval = 3 samples
         // Push sequence: 2, 4, 6 -> avg 4.0, then 8, 10, 12 -> avg 10.0
         for &kw in &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0] {
-            state.update(kw, 300.0, 0.0, 0.0, 0, 0);
+            state.update(kw, 300.0, 0.0, 0.0, 0, 0, 0.0);
         }
         assert!((state.peak_demand_kw - 10.0).abs() < 1e-10);
     }
@@ -461,7 +519,7 @@ mod tests {
         let mut state =
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0);
         // Constant 1 kW for 1 hour (one step of 3600s)
-        state.update(1.0, 3600.0, 0.10, 0.0, 0, 0);
+        state.update(1.0, 3600.0, 0.10, 0.0, 0, 0, 0.0);
         assert!((state.cumulative_import_kwh - 1.0).abs() < 1e-10);
         assert!((state.cumulative_export_kwh).abs() < 1e-10);
         assert!((state.cumulative_energy_cost_usd - 0.10).abs() < 1e-10);
@@ -472,7 +530,7 @@ mod tests {
         let mut state =
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0);
         // Constant -2 kW for 1 hour
-        state.update(-2.0, 3600.0, 0.10, 0.05, 0, 0);
+        state.update(-2.0, 3600.0, 0.10, 0.05, 0, 0, 0.0);
         assert!((state.cumulative_import_kwh).abs() < 1e-10);
         assert!((state.cumulative_export_kwh - 2.0).abs() < 1e-10);
         assert!((state.cumulative_export_credit_usd - 0.10).abs() < 1e-10);
@@ -496,7 +554,7 @@ mod tests {
             1, // need at least 1 month lookback to retain prior peak
             0,
         );
-        state.update(5.0, 3600.0, 0.10, 0.0, 0, 0);
+        state.update(5.0, 3600.0, 0.10, 0.0, 0, 0, 0.0);
         assert!(state.cumulative_import_kwh > 0.0);
         assert!(state.peak_demand_kw > 0.0);
 
@@ -527,7 +585,7 @@ mod tests {
         // Simulate a high prior peak
         state.prior_peaks_kw.push_back(10.0);
         // Current peak is only 2 kW
-        state.update(2.0, 3600.0, 0.0, 0.0, 0, 0);
+        state.update(2.0, 3600.0, 0.0, 0.0, 0, 0, 0.0);
         let effective = state.effective_peak_with_ratchet(&Some(ratchet));
         // 0.85 * 10.0 = 8.5 > 2.0, so ratchet applies
         assert!((effective - 8.5).abs() < 1e-10);
@@ -549,7 +607,7 @@ mod tests {
         );
         state.prior_peaks_kw.push_back(5.0);
         for _ in 0..3 {
-            state.update(10.0, 300.0, 0.0, 0.0, 0, 0);
+            state.update(10.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
         }
         let effective = state.effective_peak_with_ratchet(&Some(ratchet));
         // 0.85 * 5.0 = 4.25 < 10.0, so current peak wins
@@ -600,7 +658,7 @@ mod tests {
         }
         // Lookback 3 → considers [20.0, 25.0, 30.0], max = 30.0
         // Effective = max(2.0, 0.85 * 30.0) = 25.5
-        state.update(2.0, 3600.0, 0.0, 0.0, 0, 0);
+        state.update(2.0, 3600.0, 0.0, 0.0, 0, 0, 0.0);
         let effective = state.effective_peak_with_ratchet(&Some(ratchet));
         assert!((effective - 25.5).abs() < 1e-10);
     }
@@ -674,7 +732,7 @@ mod tests {
         }
 
         // Current period: push a single 5 kW reading (instant window, 1-sample average = 5.0).
-        state.update(5.0, 3600.0, 0.0, 0.0, 1, 1);
+        state.update(5.0, 3600.0, 0.0, 0.0, 1, 1, 0.0);
         assert!((state.period_peak_demand_kw[1] - 5.0).abs() < 1e-10);
 
         // effective_peak_for_period(1) = max(5.0, 0.85 * 20.0) = max(5.0, 17.0) = 17.0
@@ -897,15 +955,15 @@ mod tests {
         let mut state =
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0);
         // Push a spike in the first post-reset step (count=1, window not full).
-        state.update(100.0, 300.0, 0.0, 0.0, 0, 0);
+        state.update(100.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
         assert!(
             state.peak_demand_kw.abs() < 1e-10,
             "spike in partial window should not set peak; got {}",
             state.peak_demand_kw
         );
         // Push two more normal readings to fill the window.
-        state.update(1.0, 300.0, 0.0, 0.0, 0, 0);
-        state.update(1.0, 300.0, 0.0, 0.0, 0, 0);
+        state.update(1.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
+        state.update(1.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
         // Window now contains [100, 1, 1] → avg = 34.0. The spike is part of the
         // full-window average, so peak reflects the 15-min sliding window average.
         // Window [100, 1, 1] → (100 + 1 + 1) / 3 = 34.0.
@@ -923,7 +981,7 @@ mod tests {
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0);
         // Push three reads of 10 kW → window fills, avg = 10, peak = 10.
         for _ in 0..3 {
-            state.update(10.0, 300.0, 0.0, 0.0, 0, 0);
+            state.update(10.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
         }
         assert!(
             (state.peak_demand_kw - 10.0).abs() < 1e-10,
@@ -932,7 +990,7 @@ mod tests {
         );
         // Push three more reads of 20 kW → window fills with [20,20,20], peak = 20.
         for _ in 0..3 {
-            state.update(20.0, 300.0, 0.0, 0.0, 0, 0);
+            state.update(20.0, 300.0, 0.0, 0.0, 0, 0, 0.0);
         }
         assert!(
             (state.peak_demand_kw - 20.0).abs() < 1e-10,
