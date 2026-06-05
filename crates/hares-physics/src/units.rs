@@ -17,10 +17,12 @@ use uom::si::f64::{
 use uom::si::heat_transfer::{
     btu_it_per_hour_square_foot_degree_fahrenheit, watt_per_square_meter_kelvin,
 };
-use uom::si::length::{foot, inch, meter};
+use uom::si::length::{centimeter, foot, inch, meter};
 use uom::si::mass_density::{kilogram_per_cubic_meter, pound_per_cubic_foot};
 use uom::si::pressure::pascal;
-use uom::si::specific_heat_capacity::{btu_per_pound_degree_fahrenheit, joule_per_kilogram_kelvin};
+use uom::si::specific_heat_capacity::{
+    btu_per_pound_degree_fahrenheit, joule_per_kilogram_kelvin, kilojoule_per_kilogram_kelvin,
+};
 use uom::si::thermodynamic_temperature::{degree_celsius, degree_fahrenheit, kelvin};
 use uom::si::volume::{cubic_foot, cubic_meter, gallon, liter};
 
@@ -91,6 +93,11 @@ pub fn length_ft_to_m(ft: f64) -> f64 {
 #[inline]
 pub fn length_in_to_m(inches: f64) -> f64 {
     UomLength::new::<inch>(inches).get::<meter>()
+}
+
+#[inline]
+pub fn length_cm_to_m(cm: f64) -> f64 {
+    UomLength::new::<centimeter>(cm).get::<meter>()
 }
 
 // --- Power (BTU/h ↔ W) ---
@@ -188,6 +195,12 @@ pub fn density_lb_ft3_to_kg_m3(rho: f64) -> f64 {
 #[inline]
 pub fn specific_heat_btu_lb_f_to_j_kg_k(cp: f64) -> f64 {
     UomSpecificHeatCapacity::new::<btu_per_pound_degree_fahrenheit>(cp)
+        .get::<joule_per_kilogram_kelvin>()
+}
+
+#[inline]
+pub fn specific_heat_kj_kg_k_to_j_kg_k(kj: f64) -> f64 {
+    UomSpecificHeatCapacity::new::<kilojoule_per_kilogram_kelvin>(kj)
         .get::<joule_per_kilogram_kelvin>()
 }
 

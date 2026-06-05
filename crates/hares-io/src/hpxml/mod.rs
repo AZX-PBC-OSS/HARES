@@ -142,6 +142,16 @@ pub enum HpxmlError {
         /// Human-readable explanation of the valid range or constraint.
         reason: &'static str,
     },
+    /// A unit attribute on an HPXML numeric element is not recognised.
+    #[error("unrecognised unit `{unit}` for value {value} in {context}")]
+    UnrecognisedUnit {
+        /// The numeric value that was being converted.
+        value: f64,
+        /// The unrecognised unit string as it appeared in the HPXML `units` attribute.
+        unit: String,
+        /// The measurement context (e.g. "area", "volume", "length").
+        context: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, HpxmlError>;

@@ -312,7 +312,7 @@ impl XmlNode {
         }
     }
 
-    pub(crate) fn first_descendant(&self, name: &str) -> Option<&XmlNode> {
+    pub(crate) fn first_descendant<'a>(&'a self, name: &'a str) -> Option<&'a XmlNode> {
         if self.name == name {
             return Some(self);
         }
@@ -473,15 +473,17 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .child("Site")
         .ok_or_else(|| HpxmlError::Parse("missing BuildingSummary/Site".into()))?;
 
-    let elevation_m = parse_value_with_units(site_node.child("Elevation"), ValueKind::Length)
-        .or_else(|| {
-            root.path(&["Building", "Site", "Elevation"])
-                .and_then(|n| parse_value_with_units(Some(n), ValueKind::Length))
-        })
-        .or_else(|| {
-            root.first_descendant("Altitude")
-                .and_then(|n| parse_value_with_units(Some(n), ValueKind::Length))
-        });
+    let elevation_primary =
+        parse_value_with_units(site_node.child("Elevation"), ValueKind::Length)?;
+    let elevation_fallback1 = parse_value_with_units(
+        root.path(&["Building", "Site", "Elevation"]),
+        ValueKind::Length,
+    )?;
+    let elevation_fallback2 =
+        parse_value_with_units(root.first_descendant("Altitude"), ValueKind::Length)?;
+    let elevation_m = elevation_primary
+        .or(elevation_fallback1)
+        .or(elevation_fallback2);
     let site_type = site_node
         .child("SiteType")
         .map(|node| parse_site_type(node.text.trim()));
@@ -489,31 +491,36 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .child("ShieldingOfHome")
         .map(|n| normalize_ascii(&n.text))
         .filter(|s| !s.is_empty());
-    let latitude_deg = root
+    let latitude_primary = root
         .path(&["Building", "Site", "Latitude"])
-        .and_then(XmlNode::text_as_f64)
-        .or_else(|| find_descendant_f64(root, "Latitude", ValueKind::Raw));
-    let longitude_deg = root
+        .and_then(XmlNode::text_as_f64);
+    let latitude_fallback = find_descendant_f64(root, "Latitude", ValueKind::Raw)?;
+    let latitude_deg = latitude_primary.or(latitude_fallback);
+    let longitude_primary = root
         .path(&["Building", "Site", "Longitude"])
-        .and_then(XmlNode::text_as_f64)
-        .or_else(|| find_descendant_f64(root, "Longitude", ValueKind::Raw));
+        .and_then(XmlNode::text_as_f64);
+    let longitude_fallback = find_descendant_f64(root, "Longitude", ValueKind::Raw)?;
+    let longitude_deg = longitude_primary.or(longitude_fallback);
 
     // HPXML Site/TimeZone/UTCOffset — standard-time offset from UTC (no DST).
     // Optional; the site-location resolver falls back to the weather file's
     // timezone or a longitude-derived estimate when this is absent.
-    let utc_offset_h = site_node
+    let utc_offset_primary = site_node
         .child("TimeZone")
         .and_then(|tz| tz.child("UTCOffset"))
-        .and_then(XmlNode::text_as_f64)
-        .or_else(|| find_descendant_f64(root, "UTCOffset", ValueKind::Raw));
+        .and_then(XmlNode::text_as_f64);
+    let utc_offset_fallback = find_descendant_f64(root, "UTCOffset", ValueKind::Raw)?;
+    let utc_offset_h = utc_offset_primary.or(utc_offset_fallback);
 
-    let conditioned_floor_area_m2 = summary
-        .path(&["BuildingConstruction", "ConditionedFloorArea"])
-        .and_then(|node| parse_value_with_units(Some(node), ValueKind::Area));
+    let conditioned_floor_area_m2 = parse_value_with_units(
+        summary.path(&["BuildingConstruction", "ConditionedFloorArea"]),
+        ValueKind::Area,
+    )?;
 
-    let conditioned_volume_m3 = summary
-        .path(&["BuildingConstruction", "ConditionedBuildingVolume"])
-        .and_then(|node| parse_value_with_units(Some(node), ValueKind::Volume));
+    let conditioned_volume_m3 = parse_value_with_units(
+        summary.path(&["BuildingConstruction", "ConditionedBuildingVolume"]),
+        ValueKind::Volume,
+    )?;
 
     let ceiling_height_m = match (conditioned_volume_m3, conditioned_floor_area_m2) {
         (Some(vol), Some(area)) if area > 0.0 => vol / area,
@@ -539,15 +546,17 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     };
 
-    let total_conditioned_floors = summary
-        .path(&["BuildingConstruction", "NumberofConditionedFloors"])
-        .and_then(|node| parse_value_with_units(Some(node), ValueKind::Raw));
-    let floors_above_grade = summary
-        .path(&[
+    let total_conditioned_floors = parse_value_with_units(
+        summary.path(&["BuildingConstruction", "NumberofConditionedFloors"]),
+        ValueKind::Raw,
+    )?;
+    let floors_above_grade = parse_value_with_units(
+        summary.path(&[
             "BuildingConstruction",
             "NumberofConditionedFloorsAboveGrade",
-        ])
-        .and_then(|node| parse_value_with_units(Some(node), ValueKind::Raw));
+        ]),
+        ValueKind::Raw,
+    )?;
 
     let residential_facility_type = summary
         .path(&["BuildingConstruction", "ResidentialFacilityType"])
@@ -562,9 +571,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     }
 
     // InfiltrationHeight lives under AirInfiltrationMeasurement -- HPXML stores it in feet.
-    let infiltration_height_m = details
-        .first_descendant("InfiltrationHeight")
-        .and_then(|node| parse_value_with_units(Some(node), ValueKind::Length));
+    let infiltration_height_m = parse_value_with_units(
+        details.first_descendant("InfiltrationHeight"),
+        ValueKind::Length,
+    )?;
 
     // <EffectiveLeakageArea units="sq-in"> -- convert sq inches to cm² (1 in² = 6.4516 cm²).
     let infiltration_ela_cm2 = details
@@ -643,12 +653,13 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         );
         None
     };
-    let foundation_floor_area_m2 = details
+    let foundation_node = details
         .path(&["Enclosure", "Foundations"])
-        .and_then(|group| group.children_named("Foundation").next())
-        .and_then(|foundation| {
-            parse_value_with_units(foundation.child("FloorArea"), ValueKind::Area)
-        });
+        .and_then(|group| group.children_named("Foundation").next());
+    let foundation_floor_area_m2 = match foundation_node {
+        Some(foundation) => parse_value_with_units(foundation.child("FloorArea"), ValueKind::Area)?,
+        None => None,
+    };
 
     let (mut boundaries, pitch_absent_ids) = parse_boundaries(details)?;
     let windows = parse_windows(details, &mut boundaries)?;
@@ -671,7 +682,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         .child("AttachedToWall")
                         .and_then(|n| n.attrs.get("idref"))
                     {
-                        let area = parse_value_with_units(door.child("Area"), ValueKind::Area)
+                        let area = parse_value_with_units(door.child("Area"), ValueKind::Area)?
                             .unwrap_or(0.0);
                         if area > 0.0 {
                             *wall_reductions.entry(wall_id.clone()).or_default() += area;
@@ -713,7 +724,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 bd.construction_type = Some(fnd_name.clone());
             }
             let (insulation, area_scale, height_m, depth_below_grade) =
-                extract_foundation_wall_insulation(details, &bd.id);
+                extract_foundation_wall_insulation(details, &bd.id)?;
             bd.insulation_details = insulation;
             bd.area_m2 *= area_scale;
             if foundation_height_m.is_none() {
@@ -760,17 +771,20 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                     // Parse exposed perimeter length for F-factor method.
                     // HPXML 4.x <ExposedPerimeter> and 3.x <Perimeter>, in feet;
                     // convert to meters via ValueKind::Length.
-                    bd.perimeter_m = slab_node
-                        .child("ExposedPerimeter")
-                        .or_else(|| slab_node.child("Perimeter"))
-                        .and_then(|n| parse_value_with_units(Some(n), ValueKind::Length));
+                    bd.perimeter_m = parse_value_with_units(
+                        slab_node
+                            .child("ExposedPerimeter")
+                            .or_else(|| slab_node.child("Perimeter")),
+                        ValueKind::Length,
+                    )?;
 
                     // Parse perimeter insulation R-value for F2 coefficient selection.
                     // HPXML NominalRValue is in IP ft²·°F·h/Btu; convert to SI m²·K/W
                     // via ValueKind::RValue.
-                    bd.perimeter_insulation_r_m2_k_w = slab_node
-                        .path(&["PerimeterInsulation", "Layer", "NominalRValue"])
-                        .and_then(|n| parse_value_with_units(Some(n), ValueKind::RValue));
+                    bd.perimeter_insulation_r_m2_k_w = parse_value_with_units(
+                        slab_node.path(&["PerimeterInsulation", "Layer", "NominalRValue"]),
+                        ValueKind::RValue,
+                    )?;
                 }
             }
         }
@@ -799,10 +813,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         _ => conditioned_floor_area_m2,
     };
 
-    let mut zones = build_zone_map(details, indoor_floor_area_m2);
+    let mut zones = build_zone_map(details, indoor_floor_area_m2)?;
     ensure_referenced_zones_exist(&boundaries, &mut zones);
     assign_walls_to_zones(&boundaries, &mut zones);
-    parse_duct_systems(details, &mut zones);
+    parse_duct_systems(details, &mut zones)?;
 
     // Auto-generate interior wall boundary (partition thermal mass).
     // Area = conditioned floor area, same-zone (Conditioned→Conditioned).
@@ -1197,14 +1211,17 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         infiltration_constant_ach: None,
         infiltration_ach_natural,
         infiltration_ach50,
-        hvac_capacity_w: find_descendant_f64(details, "HeatingCapacity", ValueKind::Raw)
-            .or_else(|| find_descendant_f64(details, "CoolingCapacity", ValueKind::Raw))
-            .map(conv::power_btu_h_to_w),
-        seer2: find_descendant_f64(details, "SEER2", ValueKind::Raw),
-        hspf2: find_descendant_f64(details, "HSPF2", ValueKind::Raw),
-        water_heater_setpoint_c: details
-            .first_descendant("WaterHeatingSystem")
-            .and_then(|wh| find_descendant_f64(wh, "HotWaterTemperature", ValueKind::Temperature)),
+        hvac_capacity_w: {
+            let heating = find_descendant_f64(details, "HeatingCapacity", ValueKind::Raw)?;
+            let cooling = find_descendant_f64(details, "CoolingCapacity", ValueKind::Raw)?;
+            heating.or(cooling).map(conv::power_btu_h_to_w)
+        },
+        seer2: find_descendant_f64(details, "SEER2", ValueKind::Raw)?,
+        hspf2: find_descendant_f64(details, "HSPF2", ValueKind::Raw)?,
+        water_heater_setpoint_c: match details.first_descendant("WaterHeatingSystem") {
+            Some(wh) => find_descendant_f64(wh, "HotWaterTemperature", ValueKind::Temperature)?,
+            None => None,
+        },
         heating_weekday_setpoints_c: parse_hvac_setpoints(details, "Heating", true),
         heating_weekend_setpoints_c: parse_hvac_setpoints(details, "Heating", false),
         cooling_weekday_setpoints_c: parse_hvac_setpoints(details, "Cooling", true),
@@ -1213,8 +1230,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             details,
             "RoundTripEfficiency",
             ValueKind::Raw,
-        ),
-        pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw),
+        )?,
+        pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw)?,
         conditioned_volume_m3,
         ceiling_height_m: Some(ceiling_height_m),
         infiltration_height_m,
@@ -1290,7 +1307,7 @@ fn parse_windows(
     for window in group.children_named("Window") {
         let id = element_id(window).unwrap_or_else(|| "unknown".to_string());
         let area_m2 =
-            parse_value_with_units(window.child("Area"), ValueKind::Area).ok_or_else(|| {
+            parse_value_with_units(window.child("Area"), ValueKind::Area)?.ok_or_else(|| {
                 HpxmlError::Parse(
                     format!("window '{}' is missing required Area element", id).into(),
                 )
@@ -1300,8 +1317,8 @@ fn parse_windows(
                 format!("window '{}' has non-positive area: {}", id, area_m2).into(),
             ));
         }
-        let azimuth_deg = parse_value_with_units(window.child("Azimuth"), ValueKind::Raw);
-        let u_factor_w_m2_k = parse_value_with_units(window.child("UFactor"), ValueKind::UValue);
+        let azimuth_deg = parse_value_with_units(window.child("Azimuth"), ValueKind::Raw)?;
+        let u_factor_w_m2_k = parse_value_with_units(window.child("UFactor"), ValueKind::UValue)?;
         let shgc = window.child("SHGC").and_then(XmlNode::text_as_f64);
 
         // InteriorShading/SummerShadingCoefficient is a transmittance multiplier
@@ -1424,13 +1441,15 @@ fn parse_boundary(
 ) -> Result<Boundary, HpxmlError> {
     let id = element_id(node).unwrap_or_else(|| "unknown".to_string());
     let area_m2 = parse_boundary_area(node, &boundary_type, &id)?;
-    let r_value_layers_m2_k_w = parse_nominal_r_layers(node);
-    let assembly_r_value_m2_k_w = parse_value_with_units(
+    let r_value_layers_m2_k_w = parse_nominal_r_layers(node)?;
+    let assembly_r_value_primary = parse_value_with_units(
         node.first_descendant("AssemblyEffectiveRValue"),
         ValueKind::RValue,
-    )
-    .or_else(|| parse_value_with_units(node.first_descendant("RValue"), ValueKind::RValue));
-    let material_layers = parse_material_layers(node, area_m2);
+    )?;
+    let assembly_r_value_fallback =
+        parse_value_with_units(node.first_descendant("RValue"), ValueKind::RValue)?;
+    let assembly_r_value_m2_k_w = assembly_r_value_primary.or(assembly_r_value_fallback);
+    let material_layers = parse_material_layers(node, area_m2)?;
 
     let has_radiant_barrier = node
         .first_descendant("RadiantBarrier")
@@ -1439,10 +1458,10 @@ fn parse_boundary(
 
     // Solar absorptance and emittance from HPXML, validated to [0, 1].
     // Ref: OCHRE hpxml.py:155-158, OCHRE Envelope.py:222.
-    let solar_absorptance = parse_value_with_units(node.child("SolarAbsorptance"), ValueKind::Raw)
+    let solar_absorptance = parse_value_with_units(node.child("SolarAbsorptance"), ValueKind::Raw)?
         .map(|v| v.clamp(0.0, 1.0));
     let emittance =
-        parse_value_with_units(node.child("Emittance"), ValueKind::Raw).map(|v| v.clamp(0.0, 1.0));
+        parse_value_with_units(node.child("Emittance"), ValueKind::Raw)?.map(|v| v.clamp(0.0, 1.0));
 
     // Extract construction metadata for OCHRE LUT matching.
     let (construction_type, finish_type) = extract_construction_metadata(node, &boundary_type);
@@ -1457,7 +1476,7 @@ fn parse_boundary(
 
     let tilt_deg = match boundary_type {
         BoundaryType::Roof => {
-            let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw);
+            let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw)?;
             // `pitch_source` is only used inside `#[cfg(feature = "observe")]`;
             // without that feature the compiler warns it is unused.
             #[allow(unused_variables)]
@@ -1525,13 +1544,13 @@ fn parse_boundary(
         id,
         boundary_type,
         area_m2,
-        azimuth_deg: parse_value_with_units(node.child("Azimuth"), ValueKind::Raw),
+        azimuth_deg: parse_value_with_units(node.child("Azimuth"), ValueKind::Raw)?,
         assembly_r_value_m2_k_w,
         r_value_layers_m2_k_w,
         interior_zone,
         exterior_zone,
         material_layers,
-        framing_factor: parse_framing_factor(node, construction_type.as_deref()),
+        framing_factor: parse_framing_factor(node, construction_type.as_deref())?,
         construction_type,
         finish_type,
         insulation_details,
@@ -1607,23 +1626,25 @@ pub(crate) fn assembly_framing_factor(
 ///
 /// ASHRAE Handbook of Fundamentals Ch. 27.3: parallel-path method requires
 /// the fraction of wall area that is structural framing.
-fn parse_framing_factor(node: &XmlNode, construction_type: Option<&str>) -> Option<f64> {
+fn parse_framing_factor(
+    node: &XmlNode,
+    construction_type: Option<&str>,
+) -> Result<Option<f64>, HpxmlError> {
     // Explicit FramingFactor from HPXML
     // Range (0, 1) excludes boundaries: 0.0 = no framing (equivalent to None),
     // 1.0 = all framing (physically impossible for an insulated wall).
-    if let Some(ff) = find_descendant_f64(node, "FramingFactor", ValueKind::Raw) {
+    if let Some(ff) = find_descendant_f64(node, "FramingFactor", ValueKind::Raw)? {
         if ff > 0.0 && ff < 1.0 {
-            return Some(ff);
+            return Ok(Some(ff));
         }
     }
 
     // Derive assembly framing fraction from stud geometry and wall height.
     // Per ASHRAE HoF 2021 Ch. 27 Table 6: the assembly-level framing fraction
     // includes studs, plates, headers, corners, and miscellaneous members.
-    if let (Some(spacing_in), Some(width_in)) = (
-        find_descendant_f64(node, "StudSpacing", ValueKind::Raw),
-        find_descendant_f64(node, "StudWidth", ValueKind::Raw),
-    ) {
+    let stud_spacing = find_descendant_f64(node, "StudSpacing", ValueKind::Raw)?;
+    let stud_width = find_descendant_f64(node, "StudWidth", ValueKind::Raw)?;
+    if let (Some(spacing_in), Some(width_in)) = (stud_spacing, stud_width) {
         if spacing_in > 0.0 && width_in > 0.0 && width_in < spacing_in {
             // WallHeight defaults to 96 in (8 ft) per ASHRAE/HPXML convention.
             // HPXML WallHeight is typically in feet; convert to inches.
@@ -1661,11 +1682,11 @@ fn parse_framing_factor(node: &XmlNode, construction_type: Option<&str>) -> Opti
                 })
                 .unwrap_or(96.0);
 
-            return Some(assembly_framing_factor(
+            return Ok(Some(assembly_framing_factor(
                 width_in,
                 spacing_in,
                 wall_height_in,
-            ));
+            )));
         }
     }
 
@@ -1680,16 +1701,16 @@ fn parse_framing_factor(node: &XmlNode, construction_type: Option<&str>) -> Opti
     // the zone method cannot be applied, so we return None to prevent
     // the silent use of wood-based parallel-path correction.
     match construction_type {
-        Some("WoodStud") => Some(0.25),
+        Some("WoodStud") => Ok(Some(0.25)),
         Some(other) => {
             tracing::warn!(
                 construction_type = other,
                 "Unrecognized construction type; no framing fraction applied \
                  (SteelFrame requires explicit StudSpacing/StudWidth for zone method)"
             );
-            None
+            Ok(None)
         }
-        None => None,
+        None => Ok(None),
     }
 }
 
@@ -1698,7 +1719,7 @@ fn parse_boundary_area(
     boundary_type: &BoundaryType,
     id: &str,
 ) -> Result<f64, HpxmlError> {
-    let area = parse_value_with_units(node.child("Area"), ValueKind::Area);
+    let area = parse_value_with_units(node.child("Area"), ValueKind::Area)?;
     match boundary_type {
         BoundaryType::FoundationWall => {
             if let Some(a) = area {
@@ -1709,8 +1730,8 @@ fn parse_boundary_area(
                 }
                 return Ok(a);
             }
-            let length = parse_value_with_units(node.child("Length"), ValueKind::Length);
-            let height = parse_value_with_units(node.child("Height"), ValueKind::Length);
+            let length = parse_value_with_units(node.child("Length"), ValueKind::Length)?;
+            let height = parse_value_with_units(node.child("Height"), ValueKind::Length)?;
             match (length, height) {
                 (Some(l), Some(h)) if l > 0.0 && h > 0.0 => {
                     // HPXML 4.2: FoundationWall/Length = "Total length of foundation wall" [ft];
@@ -1824,7 +1845,7 @@ fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
 fn extract_foundation_wall_insulation(
     details: &XmlNode,
     wall_id: &str,
-) -> (Option<String>, f64, Option<f64>, f64) {
+) -> Result<(Option<String>, f64, Option<f64>, f64), HpxmlError> {
     // Find the FoundationWall element matching this boundary's ID.
     let wall_node = details
         .path(&["Enclosure", "FoundationWalls"])
@@ -1837,14 +1858,14 @@ fn extract_foundation_wall_insulation(
             })
         });
     let Some(node) = wall_node else {
-        return (Some("Uninsulated".to_string()), 1.0, None, 0.0);
+        return Ok((Some("Uninsulated".to_string()), 1.0, None, 0.0));
     };
 
     // Area scaling: depth_below_grade / height.
-    let height = parse_value_with_units(node.child("Height"), ValueKind::Length);
+    let height = parse_value_with_units(node.child("Height"), ValueKind::Length)?;
     let height_for_scale = height.unwrap_or(1.0);
     let depth_below_grade =
-        parse_value_with_units(node.child("DepthBelowGrade"), ValueKind::Length)
+        parse_value_with_units(node.child("DepthBelowGrade"), ValueKind::Length)?
             .unwrap_or(height_for_scale);
     let area_scale = if let Some(height_m) = height {
         if height_m > 0.0 && (depth_below_grade - height_m).abs() > 0.01 {
@@ -1878,15 +1899,17 @@ fn extract_foundation_wall_insulation(
                 let dist_bottom = parse_value_with_units(
                     layer.child("DistanceToBottomOfInsulation"),
                     ValueKind::Length,
-                )
+                )?
                 .unwrap_or(height_for_scale);
                 let dist_top = parse_value_with_units(
                     layer.child("DistanceToTopOfInsulation"),
                     ValueKind::Length,
-                )
+                )?
                 .unwrap_or(0.0);
-                dist_bottom - dist_top
+                Ok(dist_bottom - dist_top)
             })
+            .collect::<Result<Vec<_>, HpxmlError>>()?
+            .into_iter()
             .reduce(f64::min)
             .unwrap_or(height_for_scale);
 
@@ -1900,12 +1923,12 @@ fn extract_foundation_wall_insulation(
         "Uninsulated".to_string()
     };
 
-    (
+    Ok((
         Some(insulation_details),
         area_scale,
         height_m,
         depth_below_grade,
-    )
+    ))
 }
 
 /// Extract slab insulation details for LUT matching.
@@ -2021,20 +2044,20 @@ fn extract_insulation_details(_node: &XmlNode) -> Option<String> {
     None
 }
 
-fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Vec<MaterialLayer> {
+fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Result<Vec<MaterialLayer>, HpxmlError> {
     let mut layers = Vec::new();
     let mut layer_nodes = Vec::new();
     node.descendants("Layer", &mut layer_nodes);
 
     for layer in layer_nodes {
-        let thickness_m = parse_value_with_units(layer.child("Thickness"), ValueKind::Length);
+        let thickness_m = parse_value_with_units(layer.child("Thickness"), ValueKind::Length)?;
         let conductivity_w_m_k =
-            parse_value_with_units(layer.child("Conductivity"), ValueKind::Conductivity);
-        let density_kg_m3 = parse_value_with_units(layer.child("Density"), ValueKind::Density);
+            parse_value_with_units(layer.child("Conductivity"), ValueKind::Conductivity)?;
+        let density_kg_m3 = parse_value_with_units(layer.child("Density"), ValueKind::Density)?;
         let specific_heat_j_kg_k =
-            parse_value_with_units(layer.child("SpecificHeat"), ValueKind::SpecificHeat);
+            parse_value_with_units(layer.child("SpecificHeat"), ValueKind::SpecificHeat)?;
         let nominal_r_m2_k_w =
-            parse_value_with_units(layer.child("NominalRValue"), ValueKind::RValue);
+            parse_value_with_units(layer.child("NominalRValue"), ValueKind::RValue)?;
 
         let conductivity = match (conductivity_w_m_k, thickness_m, nominal_r_m2_k_w) {
             (Some(k), _, _) => Some(k),
@@ -2058,7 +2081,7 @@ fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Vec<MaterialLayer> {
         });
     }
 
-    layers
+    Ok(layers)
 }
 
 /// Parse `<VentilationRate>` from an attic or foundation HPXML node.
@@ -2101,7 +2124,7 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
 fn build_zone_map(
     details: &XmlNode,
     conditioned_floor_area_m2: Option<f64>,
-) -> HashMap<String, Zone> {
+) -> Result<HashMap<String, Zone>, HpxmlError> {
     let mut zones: HashMap<String, Zone> = HashMap::new();
 
     zones.insert(
@@ -2145,7 +2168,7 @@ fn build_zone_map(
                 }
 
                 let floor_area_m2 =
-                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area);
+                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area)?;
 
                 // Parse vented status from <AtticType><Attic><Vented>
                 let vented = attic_type_child
@@ -2176,7 +2199,7 @@ fn build_zone_map(
         if let Some(group) = enclosure.child("Garages") {
             for node in group.children_named("Garage") {
                 let floor_area_m2 =
-                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area);
+                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area)?;
                 zones.entry("garage".to_string()).or_insert(Zone {
                     zone_type: ZoneType::Garage,
                     floor_area_m2,
@@ -2194,7 +2217,7 @@ fn build_zone_map(
         if let Some(group) = enclosure.child("Foundations") {
             for node in group.children_named("Foundation") {
                 let floor_area_m2 =
-                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area);
+                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area)?;
 
                 // Determine vented status from <FoundationType>.
                 // OCHRE hpxml.py:689-691: crawlspaces default to vented: true,
@@ -2243,7 +2266,7 @@ fn build_zone_map(
         }
     }
 
-    zones
+    Ok(zones)
 }
 
 fn ensure_referenced_zones_exist(boundaries: &[Boundary], zones: &mut HashMap<String, Zone>) {
@@ -2310,7 +2333,10 @@ fn assign_walls_to_zones(boundaries: &[Boundary], zones: &mut HashMap<String, Zo
     }
 }
 
-fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
+fn parse_duct_systems(
+    details: &XmlNode,
+    zones: &mut HashMap<String, Zone>,
+) -> Result<(), HpxmlError> {
     let mut ducts = Vec::new();
     let mut air_dist_nodes = Vec::new();
     details.descendants("AirDistribution", &mut air_dist_nodes);
@@ -2393,18 +2419,20 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
         let leakage_fraction = leakage_by_type.get(&duct_type_text).copied();
         let leakage_cfm25 = leakage_cfm25_by_type.get(&duct_type_text).copied();
 
-        let insulation_r_value_m2_k_w = duct_node
-            .first_descendant("DuctInsulationRValue")
-            .and_then(|n| parse_value_with_units(Some(n), ValueKind::RValue))
-            .or_else(|| {
-                duct_node
-                    .first_descendant("InsulationRValue")
-                    .and_then(|n| parse_value_with_units(Some(n), ValueKind::RValue))
-            });
+        let insulation_primary = parse_value_with_units(
+            duct_node.first_descendant("DuctInsulationRValue"),
+            ValueKind::RValue,
+        )?;
+        let insulation_fallback = parse_value_with_units(
+            duct_node.first_descendant("InsulationRValue"),
+            ValueKind::RValue,
+        )?;
+        let insulation_r_value_m2_k_w = insulation_primary.or(insulation_fallback);
 
-        let surface_area_m2 = duct_node
-            .first_descendant("DuctSurfaceArea")
-            .and_then(|n| parse_value_with_units(Some(n), ValueKind::Area));
+        let surface_area_m2 = parse_value_with_units(
+            duct_node.first_descendant("DuctSurfaceArea"),
+            ValueKind::Area,
+        )?;
 
         let location_text = duct_node
             .first_descendant("DuctLocation")
@@ -2461,20 +2489,30 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
             });
         }
     }
+    Ok(())
 }
 
-fn parse_nominal_r_layers(node: &XmlNode) -> Vec<f64> {
+fn parse_nominal_r_layers(node: &XmlNode) -> Result<Vec<f64>, HpxmlError> {
     let mut layer_nodes = Vec::new();
     node.descendants("NominalRValue", &mut layer_nodes);
-    layer_nodes
-        .iter()
-        .filter_map(|layer| parse_value_with_units(Some(layer), ValueKind::RValue))
-        .collect()
+    let mut values = Vec::new();
+    for layer in &layer_nodes {
+        if let Some(v) = parse_value_with_units(Some(layer), ValueKind::RValue)? {
+            values.push(v);
+        }
+    }
+    Ok(values)
 }
 
-fn find_descendant_f64(root: &XmlNode, name: &str, kind: ValueKind) -> Option<f64> {
-    root.first_descendant(name)
-        .and_then(|node| parse_value_with_units(Some(node), kind))
+fn find_descendant_f64(
+    root: &XmlNode,
+    name: &str,
+    kind: ValueKind,
+) -> Result<Option<f64>, HpxmlError> {
+    match root.first_descendant(name) {
+        Some(node) => parse_value_with_units(Some(node), kind),
+        None => Ok(None),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2491,9 +2529,14 @@ enum ValueKind {
     Volume,
 }
 
-fn parse_value_with_units(node: Option<&XmlNode>, kind: ValueKind) -> Option<f64> {
-    let node = node?;
-    let value = node.text_as_f64()?;
+fn parse_value_with_units(
+    node: Option<&XmlNode>,
+    kind: ValueKind,
+) -> Result<Option<f64>, HpxmlError> {
+    let Some(node) = node else { return Ok(None) };
+    let Some(value) = node.text_as_f64() else {
+        return Ok(None);
+    };
     let units = node
         .attrs
         .get("units")
@@ -2501,205 +2544,210 @@ fn parse_value_with_units(node: Option<&XmlNode>, kind: ValueKind) -> Option<f64
         .map(|s| normalize_ascii(s));
 
     match kind {
-        ValueKind::Raw => Some(value),
-        ValueKind::Area => Some(convert_area_to_m2(value, units.as_deref())),
-        ValueKind::UValue => Some(convert_u_to_w_m2_k(value, units.as_deref())),
-        ValueKind::RValue => Some(convert_r_to_m2_k_w(value, units.as_deref())),
-        ValueKind::Conductivity => Some(convert_conductivity_to_w_m_k(value, units.as_deref())),
-        ValueKind::Length => Some(convert_length_to_m(value, units.as_deref())),
-        ValueKind::Density => Some(convert_density_to_kg_m3(value, units.as_deref())),
-        ValueKind::SpecificHeat => Some(convert_specific_heat_to_j_kg_k(value, units.as_deref())),
-        ValueKind::Temperature => Some(convert_temperature_to_c(value, units.as_deref())),
-        ValueKind::Volume => Some(convert_volume_to_m3(value, units.as_deref())),
+        ValueKind::Raw => Ok(Some(value)),
+        ValueKind::Area => convert_area_to_m2(value, units.as_deref()).map(Some),
+        ValueKind::UValue => convert_u_to_w_m2_k(value, units.as_deref()).map(Some),
+        ValueKind::RValue => convert_r_to_m2_k_w(value, units.as_deref()).map(Some),
+        ValueKind::Conductivity => convert_conductivity_to_w_m_k(value, units.as_deref()).map(Some),
+        ValueKind::Length => convert_length_to_m(value, units.as_deref()).map(Some),
+        ValueKind::Density => convert_density_to_kg_m3(value, units.as_deref()).map(Some),
+        ValueKind::SpecificHeat => {
+            convert_specific_heat_to_j_kg_k(value, units.as_deref()).map(Some)
+        }
+        ValueKind::Temperature => convert_temperature_to_c(value, units.as_deref()).map(Some),
+        ValueKind::Volume => convert_volume_to_m3(value, units.as_deref()).map(Some),
     }
 }
 
-fn convert_area_to_m2(value: f64, units: Option<&str>) -> f64 {
+fn convert_area_to_m2(value: f64, units: Option<&str>) -> Result<f64, HpxmlError> {
     match units {
         Some("ft2") | Some("ft^2") | Some("ftsq") | Some("ftsq.") | Some("square feet") => {
-            conv::area_ft2_to_m2(value)
+            Ok(conv::area_ft2_to_m2(value))
         }
-        Some(unit) => {
-            tracing::warn!(unit, value, "unrecognized area unit; returning raw value");
-            value
-        }
+        Some("m2") | Some("m^2") | Some("sq m") | Some("square meters") => Ok(value),
+        Some(unit) => Err(HpxmlError::UnrecognisedUnit {
+            value,
+            unit: unit.to_string(),
+            context: "area".to_string(),
+        }),
         None => {
             tracing::debug!(
                 value,
                 "Area value has no units attribute; assuming ft² and converting to m²"
             );
-            conv::area_ft2_to_m2(value)
+            Ok(conv::area_ft2_to_m2(value))
         }
     }
 }
 
-fn convert_volume_to_m3(value: f64, units: Option<&str>) -> f64 {
+fn convert_volume_to_m3(value: f64, units: Option<&str>) -> Result<f64, HpxmlError> {
     match units {
-        Some("ft3") | Some("ft^3") | Some("cubic feet") => conv::volume_ft3_to_m3(value),
-        Some(unit) => {
-            tracing::warn!(unit, value, "unrecognized volume unit; returning raw value");
-            value
-        }
+        Some("ft3") | Some("ft^3") | Some("cubic feet") => Ok(conv::volume_ft3_to_m3(value)),
+        Some("gal") | Some("gallon") | Some("gallons") => Ok(conv::volume_gal_to_m3(value)),
+        Some("m3") | Some("m^3") | Some("cubic meters") => Ok(value),
+        Some(unit) => Err(HpxmlError::UnrecognisedUnit {
+            value,
+            unit: unit.to_string(),
+            context: "volume".to_string(),
+        }),
         None => {
             tracing::warn!(
                 value,
                 "Volume value has no units attribute; assuming ft³ and converting to m³"
             );
-            conv::volume_ft3_to_m3(value)
+            Ok(conv::volume_ft3_to_m3(value))
         }
     }
 }
 
-fn convert_u_to_w_m2_k(value: f64, units: Option<&str>) -> f64 {
+fn convert_u_to_w_m2_k(value: f64, units: Option<&str>) -> Result<f64, HpxmlError> {
     match units {
-        Some("btu/hr-ft2-f") | Some("btu/hr-ft^2-f") | Some("btu/(h*ft2*f)") => {
-            conv::u_value_ip_to_si(value)
-        }
-        Some(unit) => {
-            tracing::warn!(
-                unit,
-                value,
-                "unrecognized U-value unit; returning raw value"
-            );
-            value
-        }
+        Some("btu/hr-ft2-f")
+        | Some("btu/hr-ft^2-f")
+        | Some("btu/(h*ft2*f)")
+        | Some("btu/(h-ft2-f)") => Ok(conv::u_value_ip_to_si(value)),
+        Some("w/(m2*k)") | Some("w/m2-k") | Some("w/m2k") | Some("w/(m^2*k)") => Ok(value),
+        Some(unit) => Err(HpxmlError::UnrecognisedUnit {
+            value,
+            unit: unit.to_string(),
+            context: "U-value".to_string(),
+        }),
         None => {
             tracing::debug!(
                 value,
                 "U-value has no units attribute; assuming BTU/(hr*ft2*F) and converting to W/(m2*K)"
             );
-            conv::u_value_ip_to_si(value)
+            Ok(conv::u_value_ip_to_si(value))
         }
     }
 }
 
-fn convert_r_to_m2_k_w(value: f64, units: Option<&str>) -> f64 {
+fn convert_r_to_m2_k_w(value: f64, units: Option<&str>) -> Result<f64, HpxmlError> {
     match units {
         Some("hr-ft2-f/btu") | Some("hr-ft^2-f/btu") | Some("h*ft2*f/btu") => {
-            conv::r_value_ip_to_si(value)
+            Ok(conv::r_value_ip_to_si(value))
         }
-        Some(unit) => {
-            tracing::warn!(
-                unit,
-                value,
-                "unrecognized R-value unit; returning raw value"
-            );
-            value
-        }
+        Some("m2*k/w") | Some("m2k/w") | Some("m^2*k/w") | Some("k*m2/w") => Ok(value),
+        Some(unit) => Err(HpxmlError::UnrecognisedUnit {
+            value,
+            unit: unit.to_string(),
+            context: "R-value".to_string(),
+        }),
         None => {
             tracing::debug!(
                 value,
                 "R-value has no units attribute; assuming hr*ft2*F/BTU and converting to m2*K/W"
             );
-            conv::r_value_ip_to_si(value)
+            Ok(conv::r_value_ip_to_si(value))
         }
     }
 }
 
-fn convert_conductivity_to_w_m_k(value: f64, units: Option<&str>) -> f64 {
+fn convert_conductivity_to_w_m_k(value: f64, units: Option<&str>) -> Result<f64, HpxmlError> {
     match units {
-        Some("btu/hr-ft-f") | Some("btu/(h*ft*f)") => conv::conductivity_btu_h_ft_f_to_w_m_k(value),
+        Some("btu/hr-ft-f") | Some("btu/(h*ft*f)") => {
+            Ok(conv::conductivity_btu_h_ft_f_to_w_m_k(value))
+        }
         Some("btu-in/hr-ft2-f") | Some("btu in/hr ft2 f") | Some("btu*in/(h*ft2*f)") => {
-            conv::conductivity_btu_in_h_ft2_f_to_w_m_k(value)
+            Ok(conv::conductivity_btu_in_h_ft2_f_to_w_m_k(value))
         }
-        Some(unit) => {
-            tracing::warn!(
-                unit,
-                value,
-                "unrecognized conductivity unit; returning raw value"
-            );
-            value
-        }
+        Some("w/(m*k)") | Some("w/m-k") | Some("w/mk") => Ok(value),
+        Some(unit) => Err(HpxmlError::UnrecognisedUnit {
+            value,
+            unit: unit.to_string(),
+            context: "conductivity".to_string(),
+        }),
         None => {
             tracing::debug!(
                 value,
                 "Conductivity has no units attribute; assuming BTU*in/(hr*ft2*F) and converting"
             );
-            conv::conductivity_btu_in_h_ft2_f_to_w_m_k(value)
+            Ok(conv::conductivity_btu_in_h_ft2_f_to_w_m_k(value))
         }
     }
 }
 
-fn convert_length_to_m(value: f64, units: Option<&str>) -> f64 {
+fn convert_length_to_m(value: f64, units: Option<&str>) -> Result<f64, HpxmlError> {
     match units {
-        Some("in") | Some("inch") | Some("inches") => conv::length_in_to_m(value),
-        Some("ft") | Some("feet") => conv::length_ft_to_m(value),
-        Some(unit) => {
-            tracing::warn!(unit, value, "unrecognized length unit; returning raw value");
-            value
-        }
+        Some("in") | Some("inch") | Some("inches") => Ok(conv::length_in_to_m(value)),
+        Some("ft") | Some("feet") => Ok(conv::length_ft_to_m(value)),
+        Some("m") | Some("meter") | Some("meters") => Ok(value),
+        Some("cm") | Some("centimeters") => Ok(conv::length_cm_to_m(value)),
+        Some(unit) => Err(HpxmlError::UnrecognisedUnit {
+            value,
+            unit: unit.to_string(),
+            context: "length".to_string(),
+        }),
         None => {
             tracing::debug!(
                 value,
                 "Length value has no units attribute; assuming feet and converting to meters"
             );
-            conv::length_ft_to_m(value)
+            Ok(conv::length_ft_to_m(value))
         }
     }
 }
 
-fn convert_density_to_kg_m3(value: f64, units: Option<&str>) -> f64 {
+fn convert_density_to_kg_m3(value: f64, units: Option<&str>) -> Result<f64, HpxmlError> {
     match units {
-        Some("lb/ft3") | Some("lb/ft^3") | Some("lbm/ft3") => conv::density_lb_ft3_to_kg_m3(value),
-        Some(unit) => {
-            tracing::warn!(
-                unit,
-                value,
-                "unrecognized density unit; returning raw value"
-            );
-            value
+        Some("lb/ft3") | Some("lb/ft^3") | Some("lbm/ft3") => {
+            Ok(conv::density_lb_ft3_to_kg_m3(value))
         }
+        Some("kg/m3") | Some("kg/m^3") | Some("kg m^-3") => Ok(value),
+        Some(unit) => Err(HpxmlError::UnrecognisedUnit {
+            value,
+            unit: unit.to_string(),
+            context: "density".to_string(),
+        }),
         None => {
             tracing::debug!(
                 value,
                 "Density has no units attribute; assuming lb/ft3 and converting"
             );
-            conv::density_lb_ft3_to_kg_m3(value)
+            Ok(conv::density_lb_ft3_to_kg_m3(value))
         }
     }
 }
 
-fn convert_specific_heat_to_j_kg_k(value: f64, units: Option<&str>) -> f64 {
+fn convert_specific_heat_to_j_kg_k(value: f64, units: Option<&str>) -> Result<f64, HpxmlError> {
     match units {
-        Some("btu/lb-f") | Some("btu/(lb*f)") => conv::specific_heat_btu_lb_f_to_j_kg_k(value),
-        Some(unit) => {
-            tracing::warn!(
-                unit,
-                value,
-                "unrecognized specific heat unit; returning raw value"
-            );
-            value
+        Some("btu/lb-f") | Some("btu/(lb*f)") => Ok(conv::specific_heat_btu_lb_f_to_j_kg_k(value)),
+        Some("j/(kg*k)") | Some("j/kg-k") | Some("j/kgk") => Ok(value),
+        Some("kj/(kg*k)") | Some("kj/kg-k") | Some("kj/kgk") => {
+            Ok(conv::specific_heat_kj_kg_k_to_j_kg_k(value))
         }
+        Some(unit) => Err(HpxmlError::UnrecognisedUnit {
+            value,
+            unit: unit.to_string(),
+            context: "specific heat".to_string(),
+        }),
         None => {
             tracing::debug!(
                 value,
                 "Specific heat has no units attribute; assuming Btu/(lb*F) and converting"
             );
-            conv::specific_heat_btu_lb_f_to_j_kg_k(value)
+            Ok(conv::specific_heat_btu_lb_f_to_j_kg_k(value))
         }
     }
 }
 
-fn convert_temperature_to_c(value: f64, units: Option<&str>) -> f64 {
+fn convert_temperature_to_c(value: f64, units: Option<&str>) -> Result<f64, HpxmlError> {
     match units {
         Some("F") | Some("f") | Some("degF") | Some("degf") | Some("fahrenheit") => {
-            conv::temperature_f_to_c(value)
+            Ok(conv::temperature_f_to_c(value))
         }
-        Some("C") | Some("c") | Some("degC") | Some("degc") | Some("celsius") => value,
-        Some(unit) => {
-            tracing::warn!(
-                unit,
-                value,
-                "unrecognized temperature unit; returning raw value"
-            );
-            value
-        }
+        Some("C") | Some("c") | Some("degC") | Some("degc") | Some("celsius") => Ok(value),
+        Some(unit) => Err(HpxmlError::UnrecognisedUnit {
+            value,
+            unit: unit.to_string(),
+            context: "temperature".to_string(),
+        }),
         None => {
             tracing::debug!(
                 value,
                 "Temperature value has no units attribute; assuming F and converting to C"
             );
-            conv::temperature_f_to_c(value)
+            Ok(conv::temperature_f_to_c(value))
         }
     }
 }
@@ -6328,59 +6376,59 @@ mod tests {
     }
 
     #[test]
-    fn convert_conductivity_unrecognized_unit_returns_raw() {
+    fn convert_conductivity_unrecognized_unit_returns_err() {
         let val = super::convert_conductivity_to_w_m_k(1.5, Some("bogus"));
-        assert!((val - 1.5).abs() < 1e-12);
+        assert!(matches!(val, Err(HpxmlError::UnrecognisedUnit { .. })));
     }
 
     #[test]
     fn convert_conductivity_none_assumes_ip() {
-        let val = super::convert_conductivity_to_w_m_k(1.0, None);
+        let val = super::convert_conductivity_to_w_m_k(1.0, None).unwrap();
         // Should convert from BTU*in/(hr*ft2*F), not return raw
         assert!(val != 1.0);
     }
 
     #[test]
-    fn convert_density_unrecognized_unit_returns_raw() {
+    fn convert_density_unrecognized_unit_returns_err() {
         let val = super::convert_density_to_kg_m3(2.5, Some("bogus"));
-        assert!((val - 2.5).abs() < 1e-12);
+        assert!(matches!(val, Err(HpxmlError::UnrecognisedUnit { .. })));
     }
 
     #[test]
     fn convert_density_none_assumes_ip() {
-        let val = super::convert_density_to_kg_m3(1.0, None);
+        let val = super::convert_density_to_kg_m3(1.0, None).unwrap();
         assert!(val != 1.0);
     }
 
     #[test]
-    fn convert_specific_heat_unrecognized_unit_returns_raw() {
+    fn convert_specific_heat_unrecognized_unit_returns_err() {
         let val = super::convert_specific_heat_to_j_kg_k(3.0, Some("bogus"));
-        assert!((val - 3.0).abs() < 1e-12);
+        assert!(matches!(val, Err(HpxmlError::UnrecognisedUnit { .. })));
     }
 
     #[test]
     fn convert_specific_heat_none_assumes_ip() {
-        let val = super::convert_specific_heat_to_j_kg_k(1.0, None);
+        let val = super::convert_specific_heat_to_j_kg_k(1.0, None).unwrap();
         assert!(val != 1.0);
     }
 
     #[test]
-    fn convert_temperature_unrecognized_unit_returns_raw() {
+    fn convert_temperature_unrecognized_unit_returns_err() {
         let val = super::convert_temperature_to_c(100.0, Some("kelvin"));
-        assert!((val - 100.0).abs() < 1e-12);
+        assert!(matches!(val, Err(HpxmlError::UnrecognisedUnit { .. })));
     }
 
     #[test]
     fn convert_temperature_known_units_work() {
-        let c = super::convert_temperature_to_c(212.0, Some("F"));
+        let c = super::convert_temperature_to_c(212.0, Some("F")).unwrap();
         assert!((c - 100.0).abs() < 0.1);
-        let c2 = super::convert_temperature_to_c(25.0, Some("C"));
+        let c2 = super::convert_temperature_to_c(25.0, Some("C")).unwrap();
         assert!((c2 - 25.0).abs() < 1e-12);
     }
 
     #[test]
     fn convert_temperature_none_assumes_ip() {
-        let c = super::convert_temperature_to_c(32.0, None);
+        let c = super::convert_temperature_to_c(32.0, None).unwrap();
         assert!(
             (c - 0.0).abs() < 0.1,
             "None units should assume F: 32F == 0C, got {c}"
@@ -6388,21 +6436,51 @@ mod tests {
     }
 
     #[test]
-    fn convert_area_unrecognized_unit_returns_raw() {
+    fn convert_area_unrecognized_unit_returns_err() {
         let val = super::convert_area_to_m2(5.0, Some("bogus"));
-        assert!((val - 5.0).abs() < 1e-12);
+        assert!(matches!(val, Err(HpxmlError::UnrecognisedUnit { .. })));
     }
 
     #[test]
-    fn convert_u_value_unrecognized_unit_returns_raw() {
+    fn convert_u_value_unrecognized_unit_returns_err() {
         let val = super::convert_u_to_w_m2_k(2.0, Some("bogus"));
-        assert!((val - 2.0).abs() < 1e-12);
+        assert!(matches!(val, Err(HpxmlError::UnrecognisedUnit { .. })));
     }
 
     #[test]
-    fn convert_r_value_unrecognized_unit_returns_raw() {
+    fn convert_r_value_unrecognized_unit_returns_err() {
         let val = super::convert_r_to_m2_k_w(10.0, Some("bogus"));
+        assert!(matches!(val, Err(HpxmlError::UnrecognisedUnit { .. })));
+    }
+
+    #[test]
+    fn convert_volume_gal_to_m3() {
+        let val = super::convert_volume_to_m3(264.172, Some("gal")).unwrap();
+        assert!((val - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn convert_area_m2_identity() {
+        let val = super::convert_area_to_m2(10.0, Some("m2")).unwrap();
         assert!((val - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_length_cm_to_m() {
+        let val = super::convert_length_to_m(100.0, Some("cm")).unwrap();
+        assert!((val - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_specific_heat_kj_to_j() {
+        let val = super::convert_specific_heat_to_j_kg_k(1.0, Some("kj/(kg*k)")).unwrap();
+        assert!((val - 1000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn convert_volume_unrecognized_unit_returns_err() {
+        let val = super::convert_volume_to_m3(1.0, Some("barrels"));
+        assert!(matches!(val, Err(HpxmlError::UnrecognisedUnit { .. })));
     }
 
     #[test]
