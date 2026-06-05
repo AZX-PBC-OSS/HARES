@@ -395,7 +395,13 @@ pub(crate) fn zone_type_to_label(
         Some(ZoneType::Ground) => ZoneLabel::Ground,
         Some(ZoneType::Adjacent) => ZoneLabel::Conditioned,
         Some(ZoneType::Outdoor) | None => ZoneLabel::Outdoor,
-        Some(ZoneType::Other(_)) => ZoneLabel::Outdoor,
+        Some(ZoneType::Other(raw)) => {
+            tracing::warn!(
+                zone_type = %raw,
+                "Unrecognised zone type; mapping to ZoneLabel::Outdoor"
+            );
+            ZoneLabel::Outdoor
+        }
     }
 }
 
@@ -484,11 +490,25 @@ pub(crate) fn resolve_exterior(
     match boundary.exterior_zone.as_ref() {
         Some(hares_io::hpxml::ZoneType::Outdoor) => ExteriorTarget::Outdoor,
         Some(hares_io::hpxml::ZoneType::Ground) => ExteriorTarget::Ground,
+        Some(hares_io::hpxml::ZoneType::Other(raw)) => {
+            tracing::warn!(
+                boundary_id = %boundary.id,
+                zone_type = %raw,
+                "Unrecognised exterior zone type; defaulting to Outdoor"
+            );
+            ExteriorTarget::Outdoor
+        }
         Some(zt) => {
             let idx = find_zone_idx(building, Some(&boundary.id), Some(zt), n_zones);
             ExteriorTarget::Zone(idx)
         }
-        None => ExteriorTarget::Outdoor,
+        None => {
+            tracing::warn!(
+                boundary_id = %boundary.id,
+                "Boundary has no exterior zone; defaulting to Outdoor"
+            );
+            ExteriorTarget::Outdoor
+        }
     }
 }
 
@@ -833,7 +853,7 @@ mod tests {
     use super::{
         building_to_boundary_inputs, building_to_zone_inputs, chrono_to_std_duration,
         duration_to_u32_secs, find_zone_idx, mass_multiplier_for_zone, merged_equipment_config,
-        zone_has_furniture_boundaries,
+        resolve_exterior, zone_has_furniture_boundaries, zone_type_to_label,
     };
     use hares_types::HaresError;
 
@@ -2221,6 +2241,114 @@ mod tests {
             matches!(err, HaresError::Io(_)),
             "error must be HaresError::Io, got {:?}",
             err
+        );
+    }
+
+    // ── zone_type_to_label tests ──────────────────────────────────────
+
+    #[test]
+    fn zone_type_to_label_other_maps_to_outdoor() {
+        let result = zone_type_to_label(Some(&ZoneType::Other("Bogus".to_string())));
+        assert_eq!(
+            result,
+            hares_physics::film_coefficients::ZoneLabel::Outdoor,
+            "unrecognised zone type must map to Outdoor label"
+        );
+    }
+
+    // ── resolve_exterior tests ────────────────────────────────────────
+
+    #[test]
+    fn resolve_exterior_none_maps_to_outdoor() {
+        let building = minimal_building(
+            vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: Vec::new(),
+                duct_systems: Vec::new(),
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            Vec::new(),
+        );
+        let boundary = Boundary {
+            id: "none_ext".to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: 10.0,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: None,
+            material_layers: Vec::new(),
+            framing_factor: None,
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(90.0),
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
+        };
+        let result = resolve_exterior(&building, &boundary, 1);
+        assert_eq!(
+            result,
+            hares_envelope::ExteriorTarget::Outdoor,
+            "None exterior zone must default to Outdoor target"
+        );
+    }
+
+    #[test]
+    fn resolve_exterior_other_maps_to_outdoor() {
+        let building = minimal_building(
+            vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: Vec::new(),
+                duct_systems: Vec::new(),
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            Vec::new(),
+        );
+        let boundary = Boundary {
+            id: "other_ext".to_string(),
+            boundary_type: BoundaryType::Wall,
+            area_m2: 10.0,
+            azimuth_deg: None,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Other("Foobar".to_string())),
+            material_layers: Vec::new(),
+            framing_factor: None,
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(90.0),
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
+        };
+        let result = resolve_exterior(&building, &boundary, 1);
+        assert_eq!(
+            result,
+            hares_envelope::ExteriorTarget::Outdoor,
+            "unrecognised exterior zone type must map to Outdoor target"
         );
     }
 }
