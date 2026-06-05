@@ -8,6 +8,27 @@ use thiserror::Error;
 
 const ZIP_SUM_TOLERANCE: f64 = 1e-6;
 
+/// Lower bound for voltage clamping in per-unit.
+///
+/// The [0.9, 1.1] pu modeling range is wider than the ANSI C84.1-2020
+/// Range A [0.95, 1.05] pu service-voltage band and the Range B
+/// [0.917, 1.058] pu utilization-voltage band (ANSI C84.1-2020 §4.1).
+/// The wider modeling range is chosen because:
+/// — HARES simulation scenarios can include fault transients, motor starts,
+///   and islanding events that drive voltage outside normal steady-state
+///   limits, and clamping at tighter bounds would mask the physics of those
+///   events.
+/// — The ±10% envelope is the standard steady-state voltage tolerance for
+///   electrical equipment nameplate ratings (ANSI C84.1-2020 §4.2.2,
+///   "Range A — Service Voltage"). Within this band, the static ZIP
+///   polynomial remains a physically meaningful load model.
+/// — Below 0.9 pu, load compositions change qualitatively (motors stall,
+///   electronics shut down) making the static ZIP model invalid; above
+///   1.1 pu, equipment damage is likely and the ZIP model over-predicts
+///   load.
+const VOLTAGE_PU_MIN: f64 = 0.9;
+const VOLTAGE_PU_MAX: f64 = 1.1;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ZipCoefficients {
     pub z: f64,
@@ -100,13 +121,41 @@ impl ElectricalSolver {
 
     /// Returns the ZIP load scale factor for the given per-unit voltage.
     ///
-    /// Computes `Z·V² + I·V + P` where `V = voltage_pu / nominal_voltage_pu`.
+    /// Clamps `voltage_pu` to the modeling range [0.9, 1.1] pu (see
+    /// `VOLTAGE_PU_MIN` / `VOLTAGE_PU_MAX` constants for rationale) before
+    /// computing `Z·V² + I·V + P` where `V = voltage_pu / nominal_voltage_pu`.
+    /// A `tracing::warn!` fires when the raw value is outside the modeling range.
+    ///
     /// Used internally by `resolve()` and exposed so callers (e.g. the electrical
     /// balance invariant check) can apply the same scaling to port-side load
     /// accumulation for a like-for-like comparison with `net_active_kw()`.
     #[must_use]
     pub fn zip_load_scale(&self, voltage_pu: f64) -> f64 {
+        let raw_voltage_pu = voltage_pu;
+        let voltage_pu = raw_voltage_pu.clamp(VOLTAGE_PU_MIN, VOLTAGE_PU_MAX);
+        if raw_voltage_pu != voltage_pu {
+            tracing::warn!(
+                raw_voltage_pu = raw_voltage_pu,
+                clamped_voltage_pu = voltage_pu,
+                "grid voltage_pu outside modeling range [{}, {}]; clamped",
+                VOLTAGE_PU_MIN,
+                VOLTAGE_PU_MAX,
+            );
+        }
         let v = voltage_pu / self.config.nominal_voltage_pu;
+        #[cfg(debug_assertions)]
+        {
+            let nominal = self.config.nominal_voltage_pu;
+            let v_lower = VOLTAGE_PU_MIN / nominal;
+            let v_upper = VOLTAGE_PU_MAX / nominal;
+            assert!(
+                v >= v_lower - 2.0 * f64::EPSILON && v <= v_upper + 2.0 * f64::EPSILON,
+                "clamped v = voltage_pu / nominal must be in [{}, {}], got {}",
+                v_lower,
+                v_upper,
+                v,
+            );
+        }
         self.config.zip.z * v * v + self.config.zip.i * v + self.config.zip.p
     }
 }
@@ -125,8 +174,6 @@ impl DomainSolver for ElectricalSolver {
     ) {
         let p_load = power_w_to_kw(ports.electrical.load_power_w);
         let p_gen = power_w_to_kw(ports.electrical.generation_power_w);
-        // ZIP correction uses voltage_pu directly per spec (nominal_voltage_pu
-        // defaults to 1.0; non-unity nominal documented as a v2 extension).
         let load_scale = self.zip_load_scale(env.grid.voltage_pu);
 
         let p_load_adj = p_load * load_scale;
@@ -485,5 +532,97 @@ mod tests {
         assert!((solver.zip_load_scale(0.95) - 1.0).abs() <= 1e-10);
         assert!((solver.zip_load_scale(1.0) - 1.0).abs() <= 1e-10);
         assert!((solver.zip_load_scale(1.05) - 1.0).abs() <= 1e-10);
+    }
+
+    /// Helper: run solver with given voltage and ZIP config, return net_active_kw.
+    fn run_with_voltage(zip: ZipCoefficients, voltage_pu: f64, load_w: f64) -> f64 {
+        let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
+            zip,
+            nominal_voltage_pu: 1.0,
+        })
+        .unwrap();
+        let env = env_with_voltage(voltage_pu);
+        let mut ports = PortSlots::default();
+        ports
+            .accumulate(&PortContribution::Electrical {
+                active_power_w: load_w,
+                reactive_power_kvar: 0.0,
+            })
+            .unwrap();
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
+        solver.net_active_kw()
+    }
+
+    #[test]
+    fn test_voltage_clamping() {
+        // ZIP: Z=0.5, I=0.3, P=0.2 — voltage-sensitive so clamping is visible.
+        let zip = ZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let load_w = 10000.0;
+
+        // V=0.5 (below range) → clamped to 0.9.
+        // load_scale at V=0.9: 0.5*0.81 + 0.3*0.9 + 0.2 = 0.875
+        let result_low = run_with_voltage(zip, 0.5, load_w);
+        let expected_low = load_w / 1000.0 * 0.875;
+        assert!((result_low - expected_low).abs() <= 1e-10);
+
+        // V=1.3 (above range) → clamped to 1.1.
+        // load_scale at V=1.1: 0.5*1.21 + 0.3*1.1 + 0.2 = 1.135
+        let result_high = run_with_voltage(zip, 1.3, load_w);
+        let expected_high = load_w / 1000.0 * 1.135;
+        assert!((result_high - expected_high).abs() <= 1e-10);
+
+        // V=1.0 (in range) → passes through unchanged, scale = 1.0.
+        let result_normal = run_with_voltage(zip, 1.0, load_w);
+        let expected_normal = load_w / 1000.0;
+        assert!((result_normal - expected_normal).abs() <= 1e-10);
+    }
+
+    #[test]
+    fn test_zero_voltage_gives_reasonable_load() {
+        // V=0.0 (extreme fault) is clamped to 0.9 pu. The solver produces
+        // the load corresponding to the clamped lower bound, not the raw
+        // V=0 result. With Z=0.5, I=0.3, P=0.2, V=0 raw gives scale=0.2
+        // (2 kW for a 10 kW load), which dramatically understates demand.
+        let zip = ZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let load_w = 10000.0;
+
+        let result_zero = run_with_voltage(zip, 0.0, load_w);
+        let result_bound = run_with_voltage(zip, 0.9, load_w);
+
+        // Clamped result matches the V=0.9 lower-bound result.
+        assert!((result_zero - result_bound).abs() <= 1e-10);
+
+        // Clamped result is non-zero — there is still load at 0.9 pu.
+        assert!(result_zero > 0.0);
+
+        // Sanity check: raw V=0 result would be 2.0 kW (= 10 * 0.2).
+        // The clamped result is substantially larger.
+        assert!(result_zero > 2.1);
+    }
+
+    #[test]
+    fn zip_load_scale_clamps_out_of_range_voltage() {
+        // Verify that zip_load_scale clamps its input to [0.9, 1.1] pu.
+        // Ensures the invariant checker and observer (which call
+        // zip_load_scale directly) get the same scale as resolve()
+        // when facing out-of-range voltages.
+        let zip = ZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
+        let solver = ElectricalSolver::new(ElectricalSolverConfig {
+            zip,
+            nominal_voltage_pu: 1.0,
+        })
+        .unwrap();
+
+        // V=0.5 (below range) → clamped to 0.9.
+        // ZIP at V=0.9: 0.5*0.81 + 0.3*0.9 + 0.2 = 0.875
+        let scale_low = solver.zip_load_scale(0.5);
+        let expected_low = 0.5 * 0.9_f64.powi(2) + 0.3 * 0.9 + 0.2;
+        assert!((scale_low - expected_low).abs() <= 1e-10);
+
+        // V=1.3 (above range) → clamped to 1.1.
+        // ZIP at V=1.1: 0.5*1.21 + 0.3*1.1 + 0.2 = 1.135
+        let scale_high = solver.zip_load_scale(1.3);
+        let expected_high = 0.5 * 1.1_f64.powi(2) + 0.3 * 1.1 + 0.2;
+        assert!((scale_high - expected_high).abs() <= 1e-10);
     }
 }

@@ -1553,6 +1553,80 @@ impl PyDwelling {
             cumulative_energy_cost_usd: billing.cumulative_energy_cost_usd(),
         }))
     }
+
+    /// Drains and returns warning messages accumulated since the previous call.
+    pub fn take_warnings(&self) -> PyResult<Vec<String>> {
+        let mut dwelling = self.acquire()?;
+        Ok(dwelling.take_warnings())
+    }
+
+    /// Injects a warning message into the dwelling's warning buffer.
+    pub fn push_warning(&self, msg: String) -> PyResult<()> {
+        let mut dwelling = self.acquire()?;
+        dwelling.push_warning(msg);
+        Ok(())
+    }
+
+    /// Returns the number of registered actors.
+    pub fn actor_count(&self) -> PyResult<usize> {
+        let dwelling = self.acquire()?;
+        Ok(dwelling.actor_count())
+    }
+
+    /// Removes all equipment from the dwelling.
+    pub fn clear_equipment(&self) -> PyResult<()> {
+        let mut dwelling = self.acquire()?;
+        dwelling.clear_equipment();
+        Ok(())
+    }
+
+    /// Removes all equipment whose end-use matches any of the given set.
+    /// Returns the number of equipment pieces removed.
+    #[pyo3(signature = (end_uses,))]
+    pub fn remove_equipment_by_end_use(
+        &self,
+        end_uses: Vec<crate::py_enums::PyEndUse>,
+    ) -> PyResult<usize> {
+        let rust_end_uses: Vec<hares_types::EndUse> =
+            end_uses.into_iter().map(From::from).collect();
+        let mut dwelling = self.acquire()?;
+        Ok(dwelling.remove_equipment_by_end_use(&rust_end_uses))
+    }
+
+    /// Returns a snapshot of the current environment state.
+    pub fn latest_env(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let dwelling = self.acquire()?;
+        let env = dwelling.latest_env();
+        let dict = PyDict::new(py);
+        dict.set_item("outdoor_temp_c", env.weather.outdoor_temp_c)?;
+        dict.set_item("outdoor_humidity_ratio", env.weather.outdoor_humidity_ratio)?;
+        dict.set_item("ghi_w_m2", env.weather.ghi_w_m2)?;
+        dict.set_item("dni_w_m2", env.weather.dni_w_m2)?;
+        dict.set_item("dhi_w_m2", env.weather.dhi_w_m2)?;
+        dict.set_item("pressure_kpa", env.weather.pressure_kpa)?;
+        dict.set_item("wind_speed_m_s", env.weather.wind_speed_m_s)?;
+        dict.set_item("mains_temp_c", env.weather.mains_temp_c)?;
+        dict.set_item("grid_voltage_pu", env.grid.voltage_pu)?;
+        dict.set_item("grid_frequency_hz", env.grid.frequency_hz)?;
+        dict.set_item(
+            "current_time",
+            chrono_to_py_datetime(py, env.current_time)?,
+        )?;
+        let zones: Vec<Py<PyDict>> = env
+            .zones
+            .iter()
+            .map(|z| {
+                let zd = PyDict::new(py);
+                zd.set_item("id", z.id.0)?;
+                zd.set_item("temperature_c", z.temperature_c)?;
+                zd.set_item("humidity_ratio", z.humidity_ratio)?;
+                zd.set_item("volume_m3", z.volume_m3)?;
+                Ok(zd.into())
+            })
+            .collect::<PyResult<_>>()?;
+        dict.set_item("zones", zones)?;
+        Ok(dict.into())
+    }
 }
 
 impl PyDwelling {

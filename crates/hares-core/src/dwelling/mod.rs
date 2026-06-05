@@ -2252,6 +2252,7 @@ impl Dwelling {
             test_assert_panic_on_step: false,
             #[cfg(debug_assertions)]
             test_thermal_invariant_failure: false,
+            #[cfg(debug_assertions)]
             test_hvac_negative_energy_failure: false,
             equipment,
             equipment_id_by_name,
@@ -3521,6 +3522,7 @@ impl Dwelling {
             }
         }
 
+        #[allow(unused_mut, reason = "telem is mutated only inside cfg(debug_assertions | check_invariants) blocks below")]
         let mut telem = DwellingTelemetry {
             timestep_index: self.clock.current_step(),
             current_time: self.latest_env.current_time,
@@ -4172,6 +4174,10 @@ impl Dwelling {
         // reflect simulation progress.  The value is intentionally discarded;
         // stochastic components use independent sub-RNGs derived from the
         // dwelling RNG's seed via stream partitioning.
+        #[allow(
+            unused_variables,
+            reason = "rng_word_pos_before is only read inside the cfg(debug_assertions) block below"
+        )]
         let rng_word_pos_before = self.rng.get_word_pos();
         let _ = advance_dwelling_rng(&mut self.rng);
 

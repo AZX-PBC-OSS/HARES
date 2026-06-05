@@ -7,7 +7,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::hpxml::EquipmentSpec;
 use crate::hpxml::equipment::canonical_instance_namer;
-use hares_types::{EndUse, FuelType, OperatingMode, ZoneId};
+use hares_types::{EndUse, FuelType, ZoneId};
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use hares_types::OperatingMode;
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
 use strum::IntoEnumIterator;
 
 /// Timestamp column included at every verbosity level.
@@ -991,6 +994,7 @@ mod tests {
     use hares_types::FuelType;
     use hares_types::OperatingMode;
     use serde_json::Map;
+    use strum::IntoEnumIterator;
 
     use super::*;
 

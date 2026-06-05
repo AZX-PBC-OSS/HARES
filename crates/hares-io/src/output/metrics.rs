@@ -870,6 +870,10 @@ impl MetricsCalculator {
 
         // Compute actual simulation duration and coverage.
         let actual_duration_h = self.total_row_count as f64 * self.timestep_h;
+        #[allow(
+            unused_variables,
+            reason = "expected_duration_h is only read inside the cfg(check_invariants) block below"
+        )]
         let expected_duration_h = self.config.duration.num_seconds() as f64 / 3600.0;
 
         // ASHRAE HoF 2021 Ch.15: standard (non-leap) year = 365 d = 8760 h;
@@ -1041,8 +1045,8 @@ fn discover_end_use_columns(
 ///
 /// Used by invariant checks to gate warnings about missing aggregate columns
 /// on the actual presence of equipment for that end-use category.
-#[cfg(any(debug_assertions, feature = "check_invariants"))]
-fn schema_has_equipment_for(schema: &Schema, target: &hares_types::EndUse) -> bool {
+#[cfg(any(debug_assertions, test, feature = "check_invariants"))]
+pub(crate) fn schema_has_equipment_for(schema: &Schema, target: &hares_types::EndUse) -> bool {
     for field in schema.fields() {
         let name = field.name().as_str();
         if name.ends_with(" Electric Power (kW)") {

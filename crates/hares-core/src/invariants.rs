@@ -8,9 +8,11 @@
 //! In production release builds without the feature flag all public functions
 //! compile to nothing -- the compiler eliminates the bodies entirely.
 
+#[cfg(any(debug_assertions, test, feature = "check_invariants"))]
 use std::collections::HashMap;
 
 use hares_types::ports::FuelAccumulator;
+#[cfg(any(debug_assertions, test, feature = "check_invariants"))]
 use hares_types::ports::{ALL_FUEL_TYPES, FUEL_TYPE_COUNT, fuel_index_reverse};
 use hares_types::{ControlCapabilities, HaresError, ZoneId};
 
