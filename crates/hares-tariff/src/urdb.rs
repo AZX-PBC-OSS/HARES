@@ -363,23 +363,86 @@ fn parse_export_mode(root: &Value) -> ExportMode {
 }
 
 fn parse_fixed_charges(root: &Value) -> FixedCharges {
-    let charge = root
-        .get("fixedchargefirstmeter")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
     let units = root
         .get("fixedchargeunits")
         .and_then(Value::as_str)
         .unwrap_or("$/month");
-    match units {
-        "$/day" => FixedCharges {
-            monthly_usd: 0.0,
-            daily_usd: charge,
-        },
-        _ => FixedCharges {
-            monthly_usd: charge,
-            daily_usd: 0.0,
-        },
+
+    let first = root
+        .get("fixedchargefirstmeter")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let second = root
+        .get("fixedchargesecondmeter")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+
+    let has_first = root.get("fixedchargefirstmeter").is_some();
+    let has_second = root.get("fixedchargesecondmeter").is_some();
+
+    let second_units = root
+        .get("fixedchargesecondmeterunits")
+        .and_then(Value::as_str);
+
+    let is_daily = |u: &str| u == "$/day";
+
+    let (daily, monthly) = if has_first && has_second {
+        if let Some(su) = second_units {
+            let (d1, m1) = if is_daily(units) {
+                (first, 0.0)
+            } else {
+                (0.0, first)
+            };
+            let (d2, m2) = if is_daily(su) {
+                (second, 0.0)
+            } else {
+                (0.0, second)
+            };
+            tracing::debug!(
+                first_meter = first,
+                first_units = units,
+                second_meter = second,
+                second_units = su,
+                total_daily = d1 + d2,
+                total_monthly = m1 + m2,
+                "both fixed charge meters parsed with independent units"
+            );
+            (d1 + d2, m1 + m2)
+        } else {
+            let total = first + second;
+            tracing::debug!(
+                first_meter = first,
+                second_meter = second,
+                total,
+                units,
+                "both fixed charge meters parsed and summed"
+            );
+            if is_daily(units) {
+                (total, 0.0)
+            } else {
+                (0.0, total)
+            }
+        }
+    } else {
+        let total = first + second;
+        if is_daily(units) {
+            (total, 0.0)
+        } else {
+            (0.0, total)
+        }
+    };
+
+    if root.get("fixedchargefirstmetergroup").is_some()
+        || root.get("fixedchargesecondmetergroup").is_some()
+    {
+        tracing::warn!(
+            "seasonal fixed charges detected (fixedchargefirstmetergroup or fixedchargesecondmetergroup) but not yet supported; only flat fixed charges are parsed"
+        );
+    }
+
+    FixedCharges {
+        daily_usd: daily,
+        monthly_usd: monthly,
     }
 }
 
@@ -885,6 +948,69 @@ mod tests {
     }
 
     #[test]
+    fn urdb_fixed_charge_both_meters_same_units_summed() {
+        let json = minimal_valid_json(
+            r#""fixedchargefirstmeter":5.00,"fixedchargesecondmeter":3.00,"fixedchargeunits":"$/month""#,
+        );
+        let tariff = parse(&json).unwrap();
+        assert!(
+            (tariff.fixed_charges.monthly_usd - 8.0).abs() < 1e-10,
+            "both meters should be summed: {}",
+            tariff.fixed_charges.monthly_usd
+        );
+        assert!(
+            (tariff.fixed_charges.daily_usd).abs() < 1e-10,
+            "daily should be 0 for monthly units"
+        );
+    }
+
+    #[test]
+    fn urdb_fixed_charge_both_meters_different_units_both_fields_populated() {
+        let json = minimal_valid_json(
+            r#""fixedchargefirstmeter":10.00,"fixedchargeunits":"$/month","fixedchargesecondmeter":0.50,"fixedchargesecondmeterunits":"$/day""#,
+        );
+        let tariff = parse(&json).unwrap();
+        assert!(
+            (tariff.fixed_charges.monthly_usd - 10.0).abs() < 1e-10,
+            "first meter monthly: {}",
+            tariff.fixed_charges.monthly_usd
+        );
+        assert!(
+            (tariff.fixed_charges.daily_usd - 0.50).abs() < 1e-10,
+            "second meter daily: {}",
+            tariff.fixed_charges.daily_usd
+        );
+    }
+
+    #[test]
+    fn urdb_fixed_charge_single_meter_still_works() {
+        let json =
+            minimal_valid_json(r#""fixedchargefirstmeter":10.00,"fixedchargeunits":"$/month""#);
+        let tariff = parse(&json).unwrap();
+        assert!(
+            (tariff.fixed_charges.monthly_usd - 10.0).abs() < 1e-10,
+            "single meter monthly: {}",
+            tariff.fixed_charges.monthly_usd
+        );
+        assert!(
+            (tariff.fixed_charges.daily_usd).abs() < 1e-10,
+            "daily should be 0"
+        );
+    }
+
+    #[test]
+    fn urdb_fixed_charge_seasonal_fields_detected() {
+        let json = minimal_valid_json(
+            r#""fixedchargefirstmeter":10.00,"fixedchargefirstmetergroup":[[{"rate":10.0}]]"#,
+        );
+        let tariff = parse(&json).unwrap();
+        assert!(
+            (tariff.fixed_charges.monthly_usd - 10.0).abs() < 1e-10,
+            "still parses flat charge even with seasonal field"
+        );
+    }
+
+    #[test]
     fn urdb_export_mode_unknown_dgrules() {
         let json = minimal_valid_json(r#""dgrules":"Unknown Mode""#);
         let tariff = parse(&json).unwrap();
@@ -962,9 +1088,7 @@ mod tests {
 
     #[test]
     fn demand_rate_with_only_rate_and_adj_still_parses() {
-        let json = minimal_valid_json(
-            r#""flatdemandstructure":[[{"rate":7.5,"adj":2.5}]]"#,
-        );
+        let json = minimal_valid_json(r#""flatdemandstructure":[[{"rate":7.5,"adj":2.5}]]"#);
         let tariff = parse(&json).unwrap();
         assert_eq!(tariff.demand_rates.len(), 1);
         // rate=7.5 + adj=2.5 = 10.0, no component fields present
