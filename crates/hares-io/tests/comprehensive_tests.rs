@@ -28,6 +28,7 @@ use hares_io::{
     ColumnMapper, OutputFormat, ResStockError, ResStockVersion, SimulationConfig, build_schema,
     expected_columns_at_verbosity, parse_resstock_metadata,
 };
+use hares_physics::units::energy_therms_to_kwh;
 use hares_types::FuelType;
 
 // ---------------------------------------------------------------------------
@@ -345,16 +346,16 @@ fn total_energy_includes_both_electric_and_gas() {
     ]));
     let metrics = calc.finish();
 
-    let electric_kwh = metrics.annual_energy_kwh.total;
+    let electric_kwh = metrics.total_energy_kwh.total;
     let gas = metrics.gas_energy.as_ref().unwrap();
     let gas_therms = gas.total_therms;
     let combined = electric_kwh + gas.total_kwh_equivalent;
 
-    // combined = electric_kwh + gas_therms * 29.3001
-    let expected_combined = electric_kwh + gas_therms * 29.3001;
+    // combined = electric_kwh + energy_therms_to_kwh(gas_therms)
+    let expected_combined = electric_kwh + energy_therms_to_kwh(gas_therms);
     assert!(
         (combined - expected_combined).abs() < 1e-6,
-        "combined total ({combined}) should equal electric ({electric_kwh}) + gas ({gas_therms}) * 29.3001 = {expected_combined}"
+        "combined total ({combined}) should equal electric ({electric_kwh}) + gas ({gas_therms}) therms converted to kWh = {expected_combined}"
     );
     assert!(
         combined > electric_kwh,

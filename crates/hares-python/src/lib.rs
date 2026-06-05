@@ -36,8 +36,8 @@ use py_equipment::{
 };
 use py_fleet::{PyFleet, PyFleetResults, PySteppableFleet};
 use py_metrics::{
-    PyAnnualEnergyKwh, PyEfficiencyMetrics, PyEnvelopeComponentLoadsKwh, PyGasEnergyMetrics,
-    PyGridInteractionMetrics, PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics,
+    PyEfficiencyMetrics, PyEnvelopeComponentLoadsKwh, PyGasEnergyMetrics, PyGridInteractionMetrics,
+    PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics, PyTotalEnergyKwh,
 };
 use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane, PyRoofShape};
 use py_tariff::{PyElectricTariff, PyGasTariff, PyGasTariffBuilder, PyTariffBuilder};
@@ -99,7 +99,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDepartureConstraint>()?;
     m.add_class::<PyExtrapolationStrategy>()?;
     m.add_class::<PySimulationMetrics>()?;
-    m.add_class::<PyAnnualEnergyKwh>()?;
+    m.add_class::<PyTotalEnergyKwh>()?;
     m.add_class::<PyPeakPowerKw>()?;
     m.add_class::<PyRollingPeakKw>()?;
     m.add_class::<PyGridInteractionMetrics>()?;

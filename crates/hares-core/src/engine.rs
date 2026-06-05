@@ -7,8 +7,8 @@ use std::time::{Duration as StdDuration, Instant};
 
 use arrow::record_batch::RecordBatch;
 use hares_io::output::metrics::{
-    AnnualEnergyKwh, GridInteractionMetrics, MetricsCalculator, PeakPowerKw, RollingPeakKw,
-    SimulationMetrics,
+    GridInteractionMetrics, MetricsCalculator, PeakPowerKw, RollingPeakKw, SimulationCoverage,
+    SimulationMetrics, TotalEnergyKwh,
 };
 use hares_io::{OutputFormat, SimulationConfig};
 use hares_types::HaresError;
@@ -494,9 +494,10 @@ fn compute_metrics_from_batches(
 
 fn empty_metrics() -> SimulationMetrics {
     SimulationMetrics {
-        annual_energy_kwh: AnnualEnergyKwh {
+        total_energy_kwh: TotalEnergyKwh {
             total: 0.0,
             per_end_use: BTreeMap::new(),
+            duration_hours: 0.0,
         },
         peak_power_kw: PeakPowerKw {
             per_end_use: BTreeMap::new(),
@@ -516,6 +517,8 @@ fn empty_metrics() -> SimulationMetrics {
         envelope_loads_kwh: None,
         efficiency: hares_io::EfficiencyMetrics::default(),
         rows_with_partial_setpoint_data_fraction: None,
+        simulation_duration_hours: 0.0,
+        coverage: SimulationCoverage::PartialYear,
     }
 }
 

@@ -152,8 +152,8 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
         SimStatus::Ok | SimStatus::Flagged(_)
     ));
     assert!(result.elapsed > std::time::Duration::ZERO);
-    assert!(result.metrics.annual_energy_kwh.total.is_finite());
-    assert!(result.metrics.annual_energy_kwh.total > 0.0);
+    assert!(result.metrics.total_energy_kwh.total.is_finite());
+    assert!(result.metrics.total_energy_kwh.total > 0.0);
     assert!(
         result
             .metrics

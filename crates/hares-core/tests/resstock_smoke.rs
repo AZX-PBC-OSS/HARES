@@ -221,7 +221,7 @@ mod tests {
             !matches!(result.status, SimStatus::Failed(_)),
             "{label}: {result:?}"
         );
-        let kwh = result.metrics.annual_energy_kwh.total;
+        let kwh = result.metrics.total_energy_kwh.total;
         let data = if output.exists() {
             read_output(&output)
         } else {

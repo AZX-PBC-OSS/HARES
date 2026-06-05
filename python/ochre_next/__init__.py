@@ -65,7 +65,7 @@ from ._hares import (
 
 # Metrics types
 from ._hares import SimulationMetrics
-from ._hares import AnnualEnergyKwh
+from ._hares import TotalEnergyKwh
 from ._hares import PeakPowerKw
 from ._hares import RollingPeakKw
 from ._hares import GridInteractionMetrics
@@ -161,7 +161,7 @@ __all__ = [
     "RoofShape",
     # Metrics
     "SimulationMetrics",
-    "AnnualEnergyKwh",
+    "TotalEnergyKwh",
     "PeakPowerKw",
     "RollingPeakKw",
     "GridInteractionMetrics",

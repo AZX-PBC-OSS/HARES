@@ -115,14 +115,14 @@ pub fn dwelling_metrics_to_polars_df(
     py: Python<'_>,
     metrics: &[DwellingMetrics],
 ) -> PyResult<Py<PyAny>> {
-    let mut annual_energy_kwh = Vec::with_capacity(metrics.len());
+    let mut total_energy_kwh = Vec::with_capacity(metrics.len());
     let mut peak_power_kw = Vec::with_capacity(metrics.len());
     let mut sample_weight = Vec::with_capacity(metrics.len());
     let mut status = Vec::with_capacity(metrics.len());
     let mut failed = Vec::with_capacity(metrics.len());
 
     for metric in metrics {
-        annual_energy_kwh.push(metric.annual_energy_kwh);
+        total_energy_kwh.push(metric.total_energy_kwh);
         peak_power_kw.push(metric.peak_power_kw);
         sample_weight.push(metric.sample_weight);
         status.push(sim_status_to_string(&metric.status));
@@ -130,7 +130,7 @@ pub fn dwelling_metrics_to_polars_df(
     }
 
     let data = PyDict::new(py);
-    data.set_item("annual_energy_kwh", annual_energy_kwh)?;
+    data.set_item("total_energy_kwh", total_energy_kwh)?;
     data.set_item("peak_power_kw", peak_power_kw)?;
     data.set_item("sample_weight", sample_weight)?;
     data.set_item("status", status)?;

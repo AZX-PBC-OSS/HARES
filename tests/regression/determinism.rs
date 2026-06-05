@@ -52,7 +52,7 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
                 Ok(result) => {
                     let mut trajectory: Vec<f64> = result
                         .metrics
-                        .annual_energy_kwh
+                        .total_energy_kwh
                         .per_end_use
                         .values()
                         .copied()

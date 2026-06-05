@@ -7,8 +7,11 @@ use arrow::{
     datatypes::{DataType, Schema},
     record_batch::RecordBatch,
 };
+use chrono::Datelike;
 use thiserror::Error;
 
+use hares_physics::constants::HOURS_PER_YEAR;
+use hares_physics::units::energy_therms_to_kwh;
 use hares_types::telemetry_keys as tk;
 
 #[cfg(feature = "observe")]
@@ -22,8 +25,6 @@ const GRID_ELECTRIC_POWER_KW: &str = "Grid Electric Power (kW)";
 const SETPOINT_DEADBAND_C: &str = "Setpoint Deadband (C)";
 const DEADBAND_C: &str = "Deadband (C)";
 
-/// Conversion factor: 1 therm = 29.3001 kWh.
-const THERMS_TO_KWH: f64 = 29.3001;
 const EPSILON: f64 = 1e-9;
 
 /// Errors returned by [`MetricsCalculator::new`].
@@ -37,13 +38,15 @@ pub enum MetricsError {
     InvalidColumnType { column: String },
 }
 
-/// Annual energy metrics.
+/// Total accumulated electric energy over the simulation period.
 #[derive(Debug, Clone, PartialEq)]
-pub struct AnnualEnergyKwh {
-    /// Total annual electric energy (kWh).
+pub struct TotalEnergyKwh {
+    /// Total electric energy accumulated (kWh).
     pub total: f64,
-    /// Annual energy by end-use key.
+    /// Energy by end-use key.
     pub per_end_use: BTreeMap<String, f64>,
+    /// Actual simulation duration in hours.
+    pub duration_hours: f64,
 }
 
 /// Rolling-window peak demand metrics at standard demand intervals.
@@ -80,7 +83,9 @@ pub struct GridInteractionMetrics {
 pub struct GasEnergyMetrics {
     /// Total annual gas energy in therms.
     pub total_therms: f64,
-    /// Gas energy converted to kWh (1 therm = 29.3001 kWh).
+    /// Gas energy converted to kWh via the NIST-exact conversion:
+    /// 1 therm = 100,000 BTU(IT) ≈ 29.3071 kWh
+    /// (see `hares_physics::units::energy_therms_to_kwh`).
     pub total_kwh_equivalent: f64,
 }
 
@@ -130,10 +135,23 @@ pub struct EfficiencyMetrics {
     pub battery_round_trip_efficiency: Option<f64>,
 }
 
+/// Whether the simulation period covers a full calendar year.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulationCoverage {
+    /// Full non-leap calendar year (8760 h).
+    FullYear,
+    /// Full leap calendar year (8784 h); energy totals are normalized to 8760 h.
+    LeapYear,
+    /// Fewer than 8760 hours; totals represent a partial year.
+    PartialYear,
+    /// More than 8784 hours; totals aggregate multiple years.
+    MultiYear,
+}
+
 /// Final simulation metrics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimulationMetrics {
-    pub annual_energy_kwh: AnnualEnergyKwh,
+    pub total_energy_kwh: TotalEnergyKwh,
     pub peak_power_kw: PeakPowerKw,
     pub comfort_hours: Option<f64>,
     pub unmet_load_hours: Option<f64>,
@@ -147,6 +165,10 @@ pub struct SimulationMetrics {
     /// accumulated envelope/HVAC/battery energy. `None` if setpoints
     /// are not configured.
     pub rows_with_partial_setpoint_data_fraction: Option<f64>,
+    /// Actual simulation duration in hours as computed from accumulated rows.
+    pub simulation_duration_hours: f64,
+    /// Whether the simulation period is a full calendar year.
+    pub coverage: SimulationCoverage,
 }
 
 /// Extended metrics returned by [`MetricsCalculator::finish`], including gas tracking.
@@ -174,10 +196,10 @@ impl FullSimulationMetrics {
         self.gas_energy.as_ref()
     }
 
-    /// Combined annual energy: electric kWh + gas kWh equivalent.
+    /// Combined total energy: electric kWh + gas kWh equivalent.
     #[must_use]
-    pub fn combined_annual_energy_kwh(&self) -> f64 {
-        self.metrics.annual_energy_kwh.total
+    pub fn combined_total_energy_kwh(&self) -> f64 {
+        self.metrics.total_energy_kwh.total
             + self
                 .gas_energy
                 .as_ref()
@@ -338,6 +360,9 @@ pub struct MetricsCalculator {
     // Row counters for partial-setpoint diagnostics
     total_row_count: u64,
     setpoint_missing_row_count: u64,
+
+    // Stored config for duration validation and leap-year normalization in finish()
+    config: SimulationConfig,
 
     #[cfg(feature = "observe")]
     end_use_equipment_counts: BTreeMap<String, usize>,
@@ -509,6 +534,7 @@ impl MetricsCalculator {
             battery_energy_out_kwh: 0.0,
             total_row_count: 0,
             setpoint_missing_row_count: 0,
+            config: config.clone(),
             #[cfg(feature = "observe")]
             end_use_equipment_counts: compute_equipment_counts_from_schema(schema),
             #[cfg(feature = "observe")]
@@ -834,14 +860,6 @@ impl MetricsCalculator {
             }
         });
 
-        let gas_energy = self.total_gas_power_idx.map(|_| {
-            let therms = self.total_gas_energy_therms;
-            GasEnergyMetrics {
-                total_therms: therms,
-                total_kwh_equivalent: therms * THERMS_TO_KWH,
-            }
-        });
-
         let rows_with_partial_setpoint_data_fraction = self.setpoints.as_ref().map(|_| {
             if self.total_row_count > 0 {
                 self.setpoint_missing_row_count as f64 / self.total_row_count as f64
@@ -850,11 +868,88 @@ impl MetricsCalculator {
             }
         });
 
+        // Compute actual simulation duration and coverage.
+        let actual_duration_h = self.total_row_count as f64 * self.timestep_h;
+        let expected_duration_h = self.config.duration.num_seconds() as f64 / 3600.0;
+
+        // ASHRAE HoF 2021 Ch.15: standard (non-leap) year = 365 d = 8760 h;
+        // leap year = 366 d = 8784 h.
+        let year = self.config.start_time.year();
+        let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+
+        // Coverage: determined by accumulated row-hours vs a full calendar year.
+        let coverage = if actual_duration_h < 8759.0 {
+            SimulationCoverage::PartialYear
+        } else if actual_duration_h > 8784.0 {
+            SimulationCoverage::MultiYear
+        } else if is_leap && actual_duration_h >= 8759.0 {
+            SimulationCoverage::LeapYear
+        } else {
+            SimulationCoverage::FullYear
+        };
+
+        // Invariant: accumulated timesteps should match config.duration within
+        // one timestep of tolerance (accumulated row count * timestep_h ≈ config duration).
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let diff_h = (actual_duration_h - expected_duration_h).abs();
+            if diff_h > self.timestep_h {
+                tracing::warn!(
+                    actual_duration_h = actual_duration_h,
+                    expected_duration_h = expected_duration_h,
+                    total_rows = self.total_row_count,
+                    timestep_h = self.timestep_h,
+                    "accumulated timesteps do not match config.duration within tolerance"
+                );
+            }
+        }
+
+        // Warn on non-full-year simulations.
+        match coverage {
+            SimulationCoverage::PartialYear => {
+                tracing::warn!(
+                    actual_duration_h = actual_duration_h,
+                    "simulation covers a partial year; energy totals do not represent a full calendar year"
+                );
+            }
+            SimulationCoverage::MultiYear => {
+                tracing::warn!(
+                    actual_duration_h = actual_duration_h,
+                    "simulation covers multiple years; energy totals aggregate more than one calendar year"
+                );
+            }
+            SimulationCoverage::FullYear | SimulationCoverage::LeapYear => {}
+        }
+
+        // Normalize leap-year totals to standard 8760 h year
+        // (ASHRAE HoF 2021 Ch.15). Applies to both electric and gas
+        // energy so that the combined total is on a consistent time base.
+        let leap_factor = if coverage == SimulationCoverage::LeapYear {
+            HOURS_PER_YEAR / actual_duration_h
+        } else {
+            1.0
+        };
+        let total_electric_energy_kwh = self.total_electric_energy_kwh * leap_factor;
+        let energy_by_end_use = self
+            .energy_by_end_use
+            .into_iter()
+            .map(|(k, v)| (k, v * leap_factor))
+            .collect();
+
+        let gas_energy = self.total_gas_power_idx.map(|_| {
+            let therms = self.total_gas_energy_therms * leap_factor;
+            GasEnergyMetrics {
+                total_therms: therms,
+                total_kwh_equivalent: energy_therms_to_kwh(therms),
+            }
+        });
+
         FullSimulationMetrics {
             metrics: SimulationMetrics {
-                annual_energy_kwh: AnnualEnergyKwh {
-                    total: self.total_electric_energy_kwh,
-                    per_end_use: self.energy_by_end_use,
+                total_energy_kwh: TotalEnergyKwh {
+                    total: total_electric_energy_kwh,
+                    per_end_use: energy_by_end_use,
+                    duration_hours: actual_duration_h,
                 },
                 peak_power_kw: PeakPowerKw {
                     per_end_use: peak_by_end_use,
@@ -910,6 +1005,8 @@ impl MetricsCalculator {
                     },
                 },
                 rows_with_partial_setpoint_data_fraction,
+                simulation_duration_hours: actual_duration_h,
+                coverage,
             },
             gas_energy,
         }
@@ -1183,6 +1280,32 @@ mod tests {
         }
     }
 
+    fn test_config_full_year(year: i32, deadband: Option<f64>) -> SimulationConfig {
+        // ASHRAE HoF 2021 Ch.15: non-leap year = 8760 h, leap year = 8784 h.
+        let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let total_hours: i64 = if is_leap { 8_784 } else { HOURS_PER_YEAR as i64 };
+        SimulationConfig {
+            start_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(year, 1, 1, 0, 0, 0)
+                .single()
+                .unwrap(),
+            duration: Duration::hours(total_hours),
+            time_res: Duration::hours(1),
+            output_verbosity: 0,
+            output_path: None,
+            write_output: true,
+            output_format: crate::OutputFormat::Csv,
+            output_chunk_size: 16,
+            master_seed: 0,
+            setpoint_deadband_c: deadband,
+            civil_timezone: None,
+            site_location: crate::SiteLocationOverride::default(),
+            retain_batches: false,
+            rotation: crate::RotationPolicy::None,
+        }
+    }
+
     fn build_batch(columns: Vec<(&str, Vec<f64>)>) -> RecordBatch {
         let fields = columns
             .iter()
@@ -1206,12 +1329,14 @@ mod tests {
     }
 
     #[test]
-    fn annual_energy_total_matches_8760_constant_load() {
+    fn total_energy_matches_accumulated_rows() {
+        // 2026 is not a leap year → full year = 8760 hours.
         let schema = schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "HVAC Heating End Use Electric Power (kW)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let config = test_config_full_year(2026, None);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
 
         let rows = 8_760;
         let batch = build_batch(vec![
@@ -1221,7 +1346,10 @@ mod tests {
         calc.accumulate(&batch);
         let metrics = calc.finish();
 
-        assert!((metrics.annual_energy_kwh.total - 8_760.0).abs() < 1e-9);
+        assert!((metrics.total_energy_kwh.total - 8_760.0).abs() < 1e-9);
+        assert!((metrics.total_energy_kwh.duration_hours - 8_760.0).abs() < 1e-9);
+        assert_eq!(metrics.coverage, SimulationCoverage::FullYear);
+        assert!((metrics.simulation_duration_hours - 8_760.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1373,9 +1501,9 @@ mod tests {
             .as_ref()
             .expect("gas energy should be present");
         assert!((gas.total_therms - 5.0).abs() < 1e-9);
-        assert!((metrics.annual_energy_kwh.total - 2.0).abs() < 1e-9);
-        let expected_combined = 2.0 + 5.0 * 29.3001;
-        assert!((metrics.combined_annual_energy_kwh() - expected_combined).abs() < 1e-6);
+        assert!((metrics.total_energy_kwh.total - 2.0).abs() < 1e-9);
+        let expected_combined = 2.0 + energy_therms_to_kwh(5.0);
+        assert!((metrics.combined_total_energy_kwh() - expected_combined).abs() < 1e-6);
     }
 
     #[test]
@@ -1384,7 +1512,7 @@ mod tests {
         let calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
         let metrics = calc.finish();
         assert!(metrics.gas_energy.is_none());
-        assert!((metrics.combined_annual_energy_kwh() - 0.0).abs() < 1e-9);
+        assert!((metrics.combined_total_energy_kwh() - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1436,7 +1564,7 @@ mod tests {
         let metrics = calc.finish();
 
         assert!(
-            metrics.annual_energy_kwh.total > 0.0,
+            metrics.total_energy_kwh.total > 0.0,
             "annual electric energy must be > 0"
         );
         assert!(
@@ -1684,28 +1812,25 @@ mod tests {
         // (from per-equipment columns).
         assert!(
             metrics
-                .annual_energy_kwh
+                .total_energy_kwh
                 .per_end_use
                 .contains_key("hvac_heating"),
             "per_end_use must contain key 'hvac_heating' from aggregate column"
         );
         assert!(
-            metrics
-                .annual_energy_kwh
-                .per_end_use
-                .contains_key("battery"),
+            metrics.total_energy_kwh.per_end_use.contains_key("battery"),
             "per_end_use must contain key 'battery' from aggregate column"
         );
         assert!(
             !metrics
-                .annual_energy_kwh
+                .total_energy_kwh
                 .per_end_use
                 .contains_key("ASHP Heater"),
             "per_end_use must NOT contain per-equipment key 'ASHP Heater'"
         );
         assert!(
             !metrics
-                .annual_energy_kwh
+                .total_energy_kwh
                 .per_end_use
                 .contains_key("Gas Furnace"),
             "per_end_use must NOT contain per-equipment key 'Gas Furnace'"
@@ -1728,11 +1853,11 @@ mod tests {
         ]));
         let metrics = calc.finish();
         assert!(
-            metrics.annual_energy_kwh.per_end_use["hvac_heating"] > 0.0,
+            metrics.total_energy_kwh.per_end_use["hvac_heating"] > 0.0,
             "hvac_heating energy must be non-zero"
         );
         assert!(
-            (metrics.annual_energy_kwh.per_end_use["hvac_heating"] - 6.0).abs() < 1e-9,
+            (metrics.total_energy_kwh.per_end_use["hvac_heating"] - 6.0).abs() < 1e-9,
             "hvac_heating energy must equal 3 kW × 2 h = 6 kWh"
         );
     }
@@ -1901,14 +2026,14 @@ mod tests {
         let metrics = calc.finish();
 
         assert!(
-            !metrics.annual_energy_kwh.total.is_nan(),
+            !metrics.total_energy_kwh.total.is_nan(),
             "accumulated total must not be NaN"
         );
         // timestep_h = 1.0, so total = 1.0 + 3.0 = 4.0
         assert!(
-            (metrics.annual_energy_kwh.total - 4.0).abs() < 1e-9,
+            (metrics.total_energy_kwh.total - 4.0).abs() < 1e-9,
             "total should be 4.0 kWh, got {}",
-            metrics.annual_energy_kwh.total
+            metrics.total_energy_kwh.total
         );
     }
 
@@ -2212,5 +2337,125 @@ mod tests {
             .rows_with_partial_setpoint_data_fraction
             .expect("fraction present");
         assert!((fraction - 0.5).abs() < 1e-9);
+    }
+
+    // ── Duration coverage and leap-year normalization tests ────────────
+
+    #[test]
+    fn leap_year_energy_is_normalized_to_standard_year() {
+        // 2024 is a leap year (366 d = 8784 h). With 1 kW constant load,
+        // raw accumulated = 8784 kWh; normalized should be 8760 kWh.
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating End Use Electric Power (kW)",
+        ]);
+        let config = test_config_full_year(2024, None);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
+
+        let rows = 8_784;
+        let batch = build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![1.0; rows]),
+            ("HVAC Heating End Use Electric Power (kW)", vec![1.0; rows]),
+        ]);
+        calc.accumulate(&batch);
+        let metrics = calc.finish();
+
+        // Normalized total should be 8760 kWh (not 8784).
+        assert!(
+            (metrics.total_energy_kwh.total - 8_760.0).abs() < 1e-9,
+            "leap-year total should be normalized to 8760 kWh, got {}",
+            metrics.total_energy_kwh.total
+        );
+        assert!(
+            (metrics.total_energy_kwh.duration_hours - 8_784.0).abs() < 1e-9,
+            "duration_hours should reflect actual 8784 h"
+        );
+        assert_eq!(metrics.coverage, SimulationCoverage::LeapYear);
+        // Per-end-use should also be normalized.
+        let hvac = metrics.total_energy_kwh.per_end_use["hvac_heating"];
+        assert!(
+            (hvac - 8_760.0).abs() < 1e-9,
+            "per-end-use leap-year energy should be normalized to 8760 kWh, got {}",
+            hvac
+        );
+    }
+
+    #[test]
+    fn partial_year_is_reported_as_partial_coverage() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config_full_year(2026, None);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
+
+        // 4380 hours = half a year.
+        let rows = 4_380;
+        let batch = build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0; rows])]);
+        calc.accumulate(&batch);
+        let metrics = calc.finish();
+
+        assert_eq!(metrics.coverage, SimulationCoverage::PartialYear);
+        assert!((metrics.total_energy_kwh.total - 4_380.0).abs() < 1e-9);
+        assert!((metrics.simulation_duration_hours - 4_380.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn multi_year_is_reported_as_multi_coverage() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config_full_year(2026, None);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
+
+        // 17520 hours = 2 years.
+        let rows = 17_520;
+        let batch = build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0; rows])]);
+        calc.accumulate(&batch);
+        let metrics = calc.finish();
+
+        assert_eq!(metrics.coverage, SimulationCoverage::MultiYear);
+        // Multi-year data is not normalized.
+        assert!((metrics.total_energy_kwh.total - 17_520.0).abs() < 1e-9);
+        assert!((metrics.simulation_duration_hours - 17_520.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn leap_year_gas_energy_is_normalized_to_standard_year() {
+        // Gas energy must be normalized alongside electric in leap-year
+        // simulations so that combined_total_energy_kwh() is on a
+        // consistent time base.
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, TOTAL_GAS_POWER_THERMS]);
+        let config = test_config_full_year(2024, None); // 2024 = leap year
+        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
+
+        let rows = 8_784;
+        let batch = build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![1.0; rows]),
+            // 1 therm/h for 8784 h → raw = 8784 therms;
+            // normalized (× 8760/8784) → 8760 therms.
+            (TOTAL_GAS_POWER_THERMS, vec![1.0; rows]),
+        ]);
+        calc.accumulate(&batch);
+        let metrics = calc.finish();
+
+        assert_eq!(metrics.coverage, SimulationCoverage::LeapYear);
+
+        let gas = metrics
+            .gas_energy
+            .as_ref()
+            .expect("gas energy should be present");
+        // Normalized gas therms: 8784 × (8760/8784) = 8760 therms.
+        assert!(
+            (gas.total_therms - 8_760.0).abs() < 1e-6,
+            "leap-year gas therms should be normalized to 8760, got {}",
+            gas.total_therms
+        );
+        assert!(
+            (gas.total_kwh_equivalent - energy_therms_to_kwh(8_760.0)).abs() < 1e-3,
+            "leap-year gas kwh equivalent should be normalized to 8760 therms"
+        );
+
+        // Combined total: 8760 (electric) + energy_therms_to_kwh(8760) (gas)
+        let expected_combined = 8_760.0 + energy_therms_to_kwh(8_760.0);
+        assert!(
+            (metrics.combined_total_energy_kwh() - expected_combined).abs() < 1e-3,
+            "combined_total_energy_kwh should sum normalized electric and gas"
+        );
     }
 }

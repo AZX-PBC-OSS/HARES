@@ -36,7 +36,7 @@ class TestMetrics:
 
         assert isinstance(metrics, SimulationMetrics)
 
-        annual = metrics.annual_energy_kwh
+        annual = metrics.total_energy_kwh
         assert annual.total > 0, (
             "January Denver ASHP case must have positive total energy"
         )
@@ -82,7 +82,7 @@ class TestMetrics:
 
         metrics = dw.metrics()
 
-        assert isinstance(repr(metrics.annual_energy_kwh), str)
+        assert isinstance(repr(metrics.total_energy_kwh), str)
         assert isinstance(repr(metrics.peak_power_kw), str)
         assert isinstance(repr(metrics.grid_interaction), str)
         assert isinstance(repr(metrics.efficiency), str)

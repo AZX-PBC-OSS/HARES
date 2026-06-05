@@ -20,7 +20,7 @@ pub enum AggregationResolution {
 /// Per-dwelling scalar rollup used for fleet reporting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DwellingMetrics {
-    pub annual_energy_kwh: f64,
+    pub total_energy_kwh: f64,
     pub peak_power_kw: f64,
     pub sample_weight: f64,
     pub status: SimStatus,
@@ -132,7 +132,7 @@ pub fn aggregate(results: &[DwellingOutcome], resolution: AggregationResolution)
     let per_dwelling_metrics = results
         .iter()
         .map(|outcome| DwellingMetrics {
-            annual_energy_kwh: outcome.result.metrics.annual_energy_kwh.total,
+            total_energy_kwh: outcome.result.metrics.total_energy_kwh.total,
             peak_power_kw: outcome
                 .result
                 .metrics
@@ -413,14 +413,16 @@ mod tests {
     use arrow::datatypes::Schema;
     use hares_core::SimulationResults;
     use hares_io::output::metrics::{
-        AnnualEnergyKwh, GridInteractionMetrics, PeakPowerKw, RollingPeakKw, SimulationMetrics,
+        GridInteractionMetrics, PeakPowerKw, RollingPeakKw, SimulationCoverage, SimulationMetrics,
+        TotalEnergyKwh,
     };
 
     fn sample_metrics(energy: f64, peak: f64) -> SimulationMetrics {
         SimulationMetrics {
-            annual_energy_kwh: AnnualEnergyKwh {
+            total_energy_kwh: TotalEnergyKwh {
                 total: energy,
                 per_end_use: BTreeMap::new(),
+                duration_hours: 0.0,
             },
             peak_power_kw: PeakPowerKw {
                 per_end_use: BTreeMap::new(),
@@ -440,6 +442,8 @@ mod tests {
             envelope_loads_kwh: None,
             efficiency: Default::default(),
             rows_with_partial_setpoint_data_fraction: None,
+            simulation_duration_hours: 0.0,
+            coverage: SimulationCoverage::PartialYear,
         }
     }
 

@@ -3,17 +3,17 @@
 use std::collections::BTreeMap;
 
 use hares_io::output::metrics::{
-    EnvelopeComponentLoadsKwh, FullSimulationMetrics, GasEnergyMetrics,
+    EnvelopeComponentLoadsKwh, FullSimulationMetrics, GasEnergyMetrics, SimulationCoverage,
 };
 use pyo3::prelude::*;
 
-#[pyclass(frozen, name = "AnnualEnergyKwh")]
-pub struct PyAnnualEnergyKwh {
-    pub(crate) inner: hares_io::output::metrics::AnnualEnergyKwh,
+#[pyclass(frozen, name = "TotalEnergyKwh")]
+pub struct PyTotalEnergyKwh {
+    pub(crate) inner: hares_io::output::metrics::TotalEnergyKwh,
 }
 
 #[pymethods]
-impl PyAnnualEnergyKwh {
+impl PyTotalEnergyKwh {
     #[getter]
     fn total(&self) -> f64 {
         self.inner.total
@@ -24,8 +24,16 @@ impl PyAnnualEnergyKwh {
         self.inner.per_end_use.clone()
     }
 
+    #[getter]
+    fn duration_hours(&self) -> f64 {
+        self.inner.duration_hours
+    }
+
     fn __repr__(&self) -> String {
-        format!("AnnualEnergyKwh(total={:.2} kWh)", self.inner.total)
+        format!(
+            "TotalEnergyKwh(total={:.2} kWh, duration={:.1} h)",
+            self.inner.total, self.inner.duration_hours
+        )
     }
 }
 
@@ -250,9 +258,9 @@ pub struct PySimulationMetrics {
 #[pymethods]
 impl PySimulationMetrics {
     #[getter]
-    fn annual_energy_kwh(&self) -> PyAnnualEnergyKwh {
-        PyAnnualEnergyKwh {
-            inner: self.inner.metrics.annual_energy_kwh.clone(),
+    fn total_energy_kwh(&self) -> PyTotalEnergyKwh {
+        PyTotalEnergyKwh {
+            inner: self.inner.metrics.total_energy_kwh.clone(),
         }
     }
 
@@ -307,6 +315,21 @@ impl PySimulationMetrics {
     }
 
     #[getter]
+    fn simulation_duration_hours(&self) -> f64 {
+        self.inner.metrics.simulation_duration_hours
+    }
+
+    #[getter]
+    fn coverage(&self) -> String {
+        match self.inner.metrics.coverage {
+            SimulationCoverage::FullYear => "FullYear".to_string(),
+            SimulationCoverage::LeapYear => "LeapYear".to_string(),
+            SimulationCoverage::PartialYear => "PartialYear".to_string(),
+            SimulationCoverage::MultiYear => "MultiYear".to_string(),
+        }
+    }
+
+    #[getter]
     fn gas_energy(&self) -> Option<PyGasEnergyMetrics> {
         self.inner
             .gas_energy
@@ -315,19 +338,17 @@ impl PySimulationMetrics {
     }
 
     fn __repr__(&self) -> String {
-        let annual = &self.inner.metrics.annual_energy_kwh;
+        let total = &self.inner.metrics.total_energy_kwh;
         let gas = self.inner.gas_energy.as_ref();
         if let Some(g) = gas {
             format!(
                 "SimulationMetrics(electric={:.0} kWh, gas={:.0} therms, peak={:.1} kW)",
-                annual.total,
-                g.total_therms,
-                self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
+                total.total, g.total_therms, self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
             )
         } else {
             format!(
                 "SimulationMetrics(electric={:.0} kWh, peak={:.1} kW)",
-                annual.total, self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
+                total.total, self.inner.metrics.peak_power_kw.rolling.peak_15min_kw
             )
         }
     }

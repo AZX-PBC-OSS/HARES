@@ -196,7 +196,7 @@ def test_fleet_per_dwelling_metrics_schema(fleet):
     df = results.per_dwelling_metrics
 
     expected_columns = {
-        "annual_energy_kwh",
+        "total_energy_kwh",
         "peak_power_kw",
         "sample_weight",
         "status",
