@@ -319,7 +319,19 @@ fn extract_rate_tiers(
 fn tier_rate(tier: &Value) -> f64 {
     let rate = tier.get("rate").and_then(Value::as_f64).unwrap_or(0.0);
     let adj = tier.get("adj").and_then(Value::as_f64).unwrap_or(0.0);
-    rate + adj
+    let mut total = rate + adj;
+
+    // URDB v7 may encode demand charges as separate generation/transmission/distribution
+    // components (e.g. PG&E splits demand into generation and distribution charges).
+    // Each field that is present and parses as an f64 is added to the total.
+    for field in &["genrate", "transrate", "distrate"] {
+        if let Some(val) = tier.get(field).and_then(Value::as_f64) {
+            tracing::debug!(field, val, "URDB additional demand component found");
+            total += val;
+        }
+    }
+
+    total
 }
 
 fn tier_max(tier: &Value) -> Option<f64> {
@@ -935,5 +947,27 @@ mod tests {
 
         // Export mode
         assert_eq!(tariff.export_rate.mode, ExportMode::NetMetering);
+    }
+
+    #[test]
+    fn demand_rate_sums_generation_transmission_distribution_components() {
+        let json = minimal_valid_json(
+            r#""flatdemandstructure":[[{"rate":5.0,"genrate":2.0,"transrate":1.0,"distrate":0.5}]]"#,
+        );
+        let tariff = parse(&json).unwrap();
+        assert_eq!(tariff.demand_rates.len(), 1);
+        // rate=5.0 + genrate=2.0 + transrate=1.0 + distrate=0.5 = 8.5
+        assert!((tariff.demand_rates[0].rate_per_kw - 8.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn demand_rate_with_only_rate_and_adj_still_parses() {
+        let json = minimal_valid_json(
+            r#""flatdemandstructure":[[{"rate":7.5,"adj":2.5}]]"#,
+        );
+        let tariff = parse(&json).unwrap();
+        assert_eq!(tariff.demand_rates.len(), 1);
+        // rate=7.5 + adj=2.5 = 10.0, no component fields present
+        assert!((tariff.demand_rates[0].rate_per_kw - 10.0).abs() < 1e-6);
     }
 }
