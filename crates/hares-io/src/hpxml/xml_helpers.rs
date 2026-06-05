@@ -24,6 +24,7 @@ pub(crate) fn parse_fuel(raw: Option<&str>) -> Result<FuelType, super::HpxmlErro
         "wood pellets" | "wood_pellets" => Ok(FuelType::WoodPellet),
         "coal" | "anthracite coal" | "anthracite_coal" | "bituminous coal" | "bituminous_coal"
         | "coke" => Ok(FuelType::Coal),
+        "none" => Ok(FuelType::None),
         other => Err(super::HpxmlError::Parse(
             format!("unsupported FuelType '{other}'").into(),
         )),
@@ -655,13 +656,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_fuel_none_is_not_electric() {
+    fn parse_fuel_none_maps_to_none() {
         let result = parse_fuel(Some("none"));
         assert!(
-            result.is_err(),
-            "\"none\" is not a valid HPXML fuel type and must be rejected"
+            result.is_ok(),
+            "\"none\" is a valid HPXML fuel type and must map to FuelType::None"
         );
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("unsupported FuelType"), "got: {err}");
+        assert_eq!(result.unwrap(), FuelType::None);
     }
 }

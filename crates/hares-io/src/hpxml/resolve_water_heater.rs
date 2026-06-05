@@ -1388,14 +1388,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_water_heater_fuel_none_is_rejected() {
+    fn parse_water_heater_fuel_none_maps_to_none() {
         let result = parse_water_heater_fuel_from_str("none");
         assert!(
-            result.is_err(),
-            "\"none\" is not a valid HPXML fuel type and must be rejected"
+            result.is_ok(),
+            "\"none\" is a valid HPXML fuel type and must map to FuelType::None"
         );
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("unsupported FuelType"), "got: {err}");
+        assert_eq!(result.unwrap(), FuelType::None);
     }
 
     #[test]
