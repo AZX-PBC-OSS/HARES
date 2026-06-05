@@ -83,6 +83,9 @@ pub enum PortContribution {
         /// None when the contributor does not quantify thermal energy
         /// (e.g. static temperature/flow, or no thermal recovery active).
         thermal_power_w: Option<f64>,
+        /// Hydraulic node within the loop topology.
+        /// `FluidNodeId(0)` is the default serial node.
+        node_id: FluidNodeId,
     },
     Custom {
         domain_id: DomainId,
@@ -113,6 +116,10 @@ pub struct PortDeclaration {
     pub loop_id: Option<LoopId>,
     pub domain_id: Option<DomainId>,
     pub fluid_type: Option<FluidType>,
+    /// When present, declares this fluid port for a specific hydraulic
+    /// node within the loop topology. `None` defaults to `FluidNodeId(0)`
+    /// (serial loop). Set when contributing to a parallel-branch node.
+    pub fluid_node_id: Option<FluidNodeId>,
 }
 
 impl PortDeclaration {
@@ -123,6 +130,7 @@ impl PortDeclaration {
             loop_id: None,
             domain_id: None,
             fluid_type: None,
+            fluid_node_id: None,
         }
     }
 
@@ -133,6 +141,7 @@ impl PortDeclaration {
             loop_id: None,
             domain_id: None,
             fluid_type: None,
+            fluid_node_id: None,
         }
     }
 
@@ -143,6 +152,7 @@ impl PortDeclaration {
             loop_id: None,
             domain_id: None,
             fluid_type: None,
+            fluid_node_id: None,
         }
     }
 
@@ -153,6 +163,21 @@ impl PortDeclaration {
             loop_id: Some(loop_id),
             domain_id: None,
             fluid_type: Some(fluid_type),
+            fluid_node_id: None,
+        }
+    }
+
+    /// Declares a fluid port for a specific hydraulic node within the loop
+    /// topology. Use for parallel-branch equipment that needs per-node flow
+    /// resolution.
+    pub fn fluid_with_node(loop_id: LoopId, fluid_type: FluidType, node_id: FluidNodeId) -> Self {
+        Self {
+            port_type: PortType::Fluid,
+            zone: None,
+            loop_id: Some(loop_id),
+            domain_id: None,
+            fluid_type: Some(fluid_type),
+            fluid_node_id: Some(node_id),
         }
     }
 
@@ -163,6 +188,7 @@ impl PortDeclaration {
             loop_id: None,
             domain_id: Some(domain_id),
             fluid_type: None,
+            fluid_node_id: None,
         }
     }
 
@@ -173,6 +199,7 @@ impl PortDeclaration {
             loop_id: None,
             domain_id: None,
             fluid_type: None,
+            fluid_node_id: None,
         }
     }
 }
@@ -529,10 +556,13 @@ impl PortSlots {
                 }
                 PortType::Fluid => {
                     if let (Some(loop_id), Some(fluid_type)) = (decl.loop_id, decl.fluid_type) {
+                        let node_id = decl.fluid_node_id.unwrap_or(FluidNodeId(0));
                         if !fluid.iter().any(|f: &FluidAccumulator| {
-                            f.loop_id == loop_id && f.fluid_type == fluid_type
+                            f.loop_id == loop_id
+                                && f.fluid_type == fluid_type
+                                && f.node_id == node_id
                         }) {
-                            fluid.push(FluidAccumulator::new(loop_id, fluid_type));
+                            fluid.push(FluidAccumulator::with_node(loop_id, fluid_type, node_id));
                         }
                     }
                 }
@@ -756,12 +786,13 @@ impl PortSlots {
                 return_temp_c,
                 fluid_type,
                 thermal_power_w,
+                node_id,
             } => {
-                if let Some(total) = self
-                    .fluid
-                    .iter_mut()
-                    .find(|entry| entry.loop_id == *loop_id && entry.fluid_type == *fluid_type)
-                {
+                if let Some(total) = self.fluid.iter_mut().find(|entry| {
+                    entry.loop_id == *loop_id
+                        && entry.fluid_type == *fluid_type
+                        && entry.node_id == *node_id
+                }) {
                     total.add(
                         *flow_rate_kg_s,
                         *supply_temp_c,
@@ -771,11 +802,11 @@ impl PortSlots {
                     #[cfg(any(debug_assertions, feature = "check_invariants"))]
                     {
                         self.write_log
-                            .insert(format!("Fluid:{loop_id:?}:{fluid_type:?}"));
+                            .insert(format!("Fluid:{loop_id:?}:{fluid_type:?}:{node_id:?}"));
                     }
                 } else {
                     return Err(HaresError::Equipment(format!(
-                        "undeclared fluid loop: {loop_id:?} with fluid type {fluid_type:?}"
+                        "undeclared fluid loop: {loop_id:?} with fluid type {fluid_type:?} and node {node_id:?}"
                     )));
                 }
             }
@@ -1092,6 +1123,7 @@ mod tests {
                 return_temp_c: 35.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         slots
@@ -1102,6 +1134,7 @@ mod tests {
                 return_temp_c: 45.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         slots
@@ -1183,6 +1216,7 @@ mod tests {
             return_temp_c: 35.0,
             fluid_type: FluidType::Water,
             thermal_power_w: None,
+            node_id: FluidNodeId(0),
         });
         assert!(result.is_err());
     }
@@ -1226,6 +1260,7 @@ mod tests {
                 return_temp_c: 35.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         slots
@@ -1236,6 +1271,7 @@ mod tests {
                 return_temp_c: 45.0,
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         assert_eq!(slots.fluid.len(), 2);
@@ -1291,6 +1327,7 @@ mod tests {
                 return_temp_c: 30.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         approx_eq(slots.fluid[0].total_flow_kg_s, 0.5);
@@ -1587,6 +1624,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: Some(4186.0),
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         approx_eq(slots.fluid[0].total_thermal_power_w, 4186.0);
@@ -1705,6 +1743,7 @@ mod tests {
             return_temp_c: 40.0,
             fluid_type: FluidType::Water,
             thermal_power_w: Some(4186.0),
+            node_id: FluidNodeId(0),
         };
         match fluid {
             PortContribution::Fluid {

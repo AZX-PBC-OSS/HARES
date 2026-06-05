@@ -5,8 +5,8 @@
 //! entire simulated timestep with multiple equipment contributions.
 
 use hares_types::{
-    DomainId, FluidType, FuelType, LoopId, PortContribution, PortDeclaration, PortSlots,
-    ThermalAccumulator, ThermalCategory, ZoneId,
+    DomainId, FluidNodeId, FluidType, FuelType, LoopId, PortContribution, PortDeclaration,
+    PortSlots, ThermalAccumulator, ThermalCategory, ZoneId,
 };
 
 fn approx_eq(left: f64, right: f64) {
@@ -384,6 +384,7 @@ fn undeclared_fluid_loop_rejected() {
         return_temp_c: 35.0,
         fluid_type: FluidType::Water,
         thermal_power_w: None,
+        node_id: FluidNodeId(0),
     });
     assert!(
         result.is_err(),
@@ -525,6 +526,7 @@ fn full_timestep_scenario_all_port_types() {
             return_temp_c: 45.0,
             fluid_type: FluidType::Water,
             thermal_power_w: None,
+            node_id: FluidNodeId(0),
         })
         .unwrap();
 

@@ -7,9 +7,9 @@ use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FLUID, FluidDomainPayload, FluidType, FuelPower, FuelType, HaresError, LoopId,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
-    ThermalCategory,
+    ExecutionStage, FLUID, FluidDomainPayload, FluidNodeId, FluidType, FuelPower, FuelType,
+    HaresError, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
+    TelemetryField, ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -303,6 +303,7 @@ impl Equipment for ElectricBoiler {
                 return_temp_c,
                 fluid_type: self.fluid_type,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })?;
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -658,6 +659,7 @@ impl Equipment for GasBoiler {
                 return_temp_c,
                 fluid_type: self.fluid_type,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })?;
             self.hvac.write_zone_thermal_contributions(
                 ports,

@@ -9,7 +9,7 @@ use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode,
+    ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
     ThermalCategory, ZoneId, telemetry_keys as tk,
 };
@@ -616,6 +616,7 @@ impl Equipment for GasWH {
                 return_temp_c: mains_temp_c,
                 fluid_type: self.fluid_type,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })?;
         }
 

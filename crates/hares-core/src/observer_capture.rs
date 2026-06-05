@@ -5,11 +5,9 @@
 
 use hares_envelope::ThermalSolver;
 use hares_equipment::Equipment;
-use hares_types::{
-    DomainSolver, DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneId,
-};
 #[cfg(test)]
 use hares_types::FluidNodeId;
+use hares_types::{DomainSolver, DomainUpdate, EnvironmentState, FuelType, PortSlots, ZoneId};
 
 use crate::observer::{
     CustomSolverCapture, CustomSolverObservation, EnvironmentCapture, EquipmentContribution,

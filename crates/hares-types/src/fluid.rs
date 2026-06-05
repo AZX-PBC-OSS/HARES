@@ -63,6 +63,67 @@ impl FluidNode {
     }
 }
 
+/// A branch exiting a splitter node, carrying flow to a downstream equipment
+/// or sub-branch node.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SplitterBranch {
+    /// Downstream node that receives flow from this branch.
+    pub node_id: FluidNodeId,
+    /// Requested mass flow rate [kg/s] for this branch, populated by the fluid
+    /// solver at each timestep from per-node accumulator totals (`node_flows`).
+    /// Zero when the branch node has no accumulator contributions.
+    #[serde(skip, default)]
+    pub requested_flow_kg_s: f64,
+    /// Resistance coefficient [dimensionless].
+    ///
+    /// Default 1.0 = equal resistance across all branches. Used for
+    /// proportional allocation; future pump-curve-based allocation will use
+    /// this to weight flow distribution.
+    #[serde(default = "default_resistance")]
+    pub resistance_coefficient: f64,
+}
+
+fn default_resistance() -> f64 {
+    1.0
+}
+
+/// A splitter node in the hydraulic network: one inlet, N outlet branches.
+///
+/// The splitter distributes the incoming mass flow among its outlet branches
+/// according to the flow-splitting resolution algorithm.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SplitterNode {
+    /// The splitter's own FluidNodeId (must match a node in `LoopTopology::nodes`
+    /// with role `FluidNodeRole::Splitter`).
+    pub node_id: FluidNodeId,
+    /// Upstream node feeding the splitter inlet.
+    pub inlet_node_id: FluidNodeId,
+    /// Outlet branches. Each branch leads to a downstream equipment node.
+    pub branches: Vec<SplitterBranch>,
+}
+
+/// A branch entering a mixer node from upstream equipment or sub-branch node.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MixerBranch {
+    /// Upstream node that feeds flow into this mixer inlet branch.
+    pub node_id: FluidNodeId,
+}
+
+/// A mixer node in the hydraulic network: N inlet branches, one outlet.
+///
+/// The mixer combines mass flow from its inlet branches into a single
+/// outlet flow.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MixerNode {
+    /// The mixer's own FluidNodeId (must match a node in `LoopTopology::nodes`
+    /// with role `FluidNodeRole::Mixer`).
+    pub node_id: FluidNodeId,
+    /// Downstream node receiving the mixer outlet flow.
+    pub outlet_node_id: FluidNodeId,
+    /// Inlet branches. Each branch feeds flow from upstream equipment.
+    pub branches: Vec<MixerBranch>,
+}
+
 /// Topology of one hydronic loop: the set of nodes and their connections.
 ///
 /// Mass-conservation checks iterate all loop nodes, computing
@@ -80,9 +141,22 @@ pub struct LoopTopology {
     /// node to the target node. The set of edges defines which accumulators
     /// feed into and out of each node for conservation checking.
     pub edges: Vec<(FluidNodeId, FluidNodeId)>,
+    /// Splitter nodes with branch data for flow-splitting resolution.
+    /// When present, the solver uses this to allocate total pump flow across
+    /// parallel branches. When absent for a loop with no splitters, a simple
+    /// serial-flow model applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub splitters: Vec<SplitterNode>,
+    /// Mixer nodes with branch data for flow convergence verification.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mixers: Vec<MixerNode>,
 }
 
 impl LoopTopology {
+    /// Creates a loop topology with nodes and edges. Use
+    /// [`with_splitters`](Self::with_splitters) and
+    /// [`with_mixers`](Self::with_mixers) to attach branch data for
+    /// flow-splitting resolution.
     #[must_use]
     pub fn new(
         loop_id: LoopId,
@@ -93,7 +167,23 @@ impl LoopTopology {
             loop_id,
             nodes,
             edges,
+            splitters: Vec::new(),
+            mixers: Vec::new(),
         }
+    }
+
+    /// Attaches splitter branch data to this topology.
+    #[must_use]
+    pub fn with_splitters(mut self, splitters: Vec<SplitterNode>) -> Self {
+        self.splitters = splitters;
+        self
+    }
+
+    /// Attaches mixer branch data to this topology.
+    #[must_use]
+    pub fn with_mixers(mut self, mixers: Vec<MixerNode>) -> Self {
+        self.mixers = mixers;
+        self
     }
 
     /// Returns the maximum absolute mass imbalance across all nodes [kg/s].

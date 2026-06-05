@@ -26,7 +26,7 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode,
+    ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
     ZoneId, telemetry_keys as tk,
 };
@@ -1391,6 +1391,7 @@ impl Equipment for Generator {
                     return_temp_c: self.return_temp_c,
                     fluid_type: FluidType::Water,
                     thermal_power_w: Some(q_thermal_effective_w),
+                    node_id: FluidNodeId(0),
                 })?;
             }
         }

@@ -8,7 +8,7 @@ use hares_physics::constants::{
 };
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, FLUID, FluidDomainPayload, FluidLoopState, FluidNodeId,
-    FluidType, HaresError, LoopId, LoopTopology, MASS_FLOW_TOLERANCE, PortSlots,
+    FluidNodeRole, FluidType, HaresError, LoopId, LoopTopology, MASS_FLOW_TOLERANCE, PortSlots,
 };
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
@@ -75,6 +75,22 @@ pub struct FluidSolver {
     /// Gated on `observe` for diagnostic CSV export.
     #[cfg(feature = "observe")]
     pub num_conservation_violations: u64,
+    /// Per-loop total requested flow before resolution [kg/s].
+    /// Sum of all branch requests across all splitters on the loop.
+    #[cfg(feature = "observe")]
+    pub total_requested_flow_kg_s: HashMap<LoopId, f64>,
+    /// Per-loop total allocated flow after resolution [kg/s].
+    /// Sum of all branch allocations; should equal the pump's available flow
+    /// after resolution, unless a deficit exists.
+    #[cfg(feature = "observe")]
+    pub total_allocated_flow_kg_s: HashMap<LoopId, f64>,
+    /// Per-loop flow deficit when demand exceeds supply [kg/s].
+    #[cfg(feature = "observe")]
+    pub flow_deficit_kg_s: HashMap<LoopId, f64>,
+    /// Per-loop, per-branch allocated flow fractions.
+    /// For each loop, a map from branch node_id to its fraction of total loop flow.
+    #[cfg(feature = "observe")]
+    pub branch_flow_fractions: HashMap<LoopId, Vec<(FluidNodeId, f64)>>,
 }
 
 impl FluidSolver {
@@ -103,6 +119,14 @@ impl FluidSolver {
             max_mass_imbalance_kg_s: 0.0,
             #[cfg(feature = "observe")]
             num_conservation_violations: 0,
+            #[cfg(feature = "observe")]
+            total_requested_flow_kg_s: HashMap::new(),
+            #[cfg(feature = "observe")]
+            total_allocated_flow_kg_s: HashMap::new(),
+            #[cfg(feature = "observe")]
+            flow_deficit_kg_s: HashMap::new(),
+            #[cfg(feature = "observe")]
+            branch_flow_fractions: HashMap::new(),
         })
     }
 
@@ -159,6 +183,12 @@ impl DomainSolver for FluidSolver {
         FLUID
     }
 
+    // Why: `total_declared_thermal_w` and observe-gated accumulator
+    // variables are assigned under `#[cfg(any(debug_assertions, ...))]`
+    // or `#[cfg(feature = "observe")]` but not read in release builds
+    // without those features. The compiler sees the assignment as
+    // unused; the suppression is the correct response to cfg-conditional
+    // variable use.
     #[allow(unused_assignments)]
     fn resolve(
         &mut self,
@@ -168,6 +198,14 @@ impl DomainSolver for FluidSolver {
         out: &mut DomainUpdate,
     ) {
         self.loop_states.clear();
+
+        #[cfg(feature = "observe")]
+        {
+            self.total_requested_flow_kg_s.clear();
+            self.total_allocated_flow_kg_s.clear();
+            self.flow_deficit_kg_s.clear();
+            self.branch_flow_fractions.clear();
+        }
 
         let mut grouped: HashMap<LoopId, Vec<&hares_types::FluidAccumulator>> = HashMap::new();
         for acc in &ports.fluid {
@@ -228,41 +266,246 @@ impl DomainSolver for FluidSolver {
                 "fluid solver cp resolution"
             );
 
+            // ── Build per-node flow totals from accumulators ─────────────
+            let mut node_flows: HashMap<FluidNodeId, f64> = HashMap::new();
+            for acc in &entries {
+                *node_flows.entry(acc.node_id).or_default() += acc.total_flow_kg_s;
+            }
+
+            // ── Flow-splitting resolution (T-0255) ──────────────────────
+            //
+            // When the loop topology includes splitter/mixer nodes with
+            // branch data, the solver allocates the pump's total available
+            // flow across parallel branches proportionally to their requested
+            // fractions. This must run BEFORE the conservation check so
+            // that resolved flows (not raw requests) are used for
+            // verification.
+            //
+            // Reference: EnergyPlus `ResolveParallelFlows`
+            // (`Plant/LoopSide.cc:1279-1682`): satisfy active branch requests,
+            // distribute remaining to passive branches proportional to
+            // max-avail, allocate to bypass, and distribute excess when flow
+            // is insufficient by requested fraction.
+            let resolved_node_flows: Option<HashMap<FluidNodeId, f64>> = {
+                let topology_opt = self.config.loop_topologies.get(&loop_id);
+                if let Some(topology) = topology_opt {
+                    if !topology.splitters.is_empty() {
+                        let parent_count: HashMap<FluidNodeId, usize> = {
+                            let mut map = HashMap::new();
+                            for (_, to) in &topology.edges {
+                                *map.entry(*to).or_default() += 1;
+                            }
+                            map
+                        };
+
+                        // Identify pump node: Source role, zero parents.
+                        let pump_node = topology.nodes.iter().find(|n| {
+                            n.role == FluidNodeRole::Source
+                                && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
+                        });
+
+                        if let Some(pump) = pump_node {
+                            let total_available =
+                                node_flows.get(&pump.node_id).copied().unwrap_or(0.0);
+
+                            // Sum requested flows across all splitter branches.
+                            let total_requested: f64 = topology
+                                .splitters
+                                .iter()
+                                .flat_map(|s| &s.branches)
+                                .map(|b| node_flows.get(&b.node_id).copied().unwrap_or(0.0))
+                                .sum();
+
+                            #[cfg(feature = "observe")]
+                            {
+                                *self.total_requested_flow_kg_s.entry(loop_id).or_default() +=
+                                    total_requested;
+                            }
+
+                            let mut resolved = HashMap::new();
+
+                            if total_available <= MIN_FLOW_KG_S || total_requested <= MIN_FLOW_KG_S
+                            {
+                                // No pump flow or no demand — all branches get zero.
+                                for splitter in &topology.splitters {
+                                    for branch in &splitter.branches {
+                                        resolved.insert(branch.node_id, 0.0);
+                                    }
+                                }
+                            } else if total_available >= total_requested {
+                                // Flow supply meets or exceeds demand.
+                                for splitter in &topology.splitters {
+                                    for branch in &splitter.branches {
+                                        let requested =
+                                            node_flows.get(&branch.node_id).copied().unwrap_or(0.0);
+                                        resolved.insert(branch.node_id, requested);
+                                        #[cfg(feature = "observe")]
+                                        {
+                                            let fraction = if total_available > 0.0 {
+                                                requested / total_available
+                                            } else {
+                                                0.0
+                                            };
+                                            self.branch_flow_fractions
+                                                .entry(loop_id)
+                                                .or_default()
+                                                .push((branch.node_id, fraction));
+                                        }
+                                    }
+                                }
+
+                                #[cfg(feature = "observe")]
+                                {
+                                    *self.total_allocated_flow_kg_s.entry(loop_id).or_default() +=
+                                        total_requested;
+                                    self.flow_deficit_kg_s.entry(loop_id).or_insert(0.0);
+                                }
+                            } else {
+                                // Flow insufficient: proportional allocation.
+                                let deficit = total_requested - total_available;
+
+                                tracing::warn!(
+                                    loop_id = loop_id.0,
+                                    total_available_kg_s = total_available,
+                                    total_requested_kg_s = total_requested,
+                                    deficit_kg_s = deficit,
+                                    "parallel-branch flow demand exceeds pump capacity; allocating proportionally"
+                                );
+
+                                for splitter in &topology.splitters {
+                                    for branch in &splitter.branches {
+                                        let requested =
+                                            node_flows.get(&branch.node_id).copied().unwrap_or(0.0);
+                                        let fraction = if total_requested > 0.0 {
+                                            requested / total_requested
+                                        } else {
+                                            0.0
+                                        };
+                                        let allocated = total_available * fraction;
+                                        resolved.insert(branch.node_id, allocated);
+                                        #[cfg(feature = "observe")]
+                                        {
+                                            let branch_fraction = allocated / total_available;
+                                            self.branch_flow_fractions
+                                                .entry(loop_id)
+                                                .or_default()
+                                                .push((branch.node_id, branch_fraction));
+                                        }
+                                    }
+                                }
+
+                                #[cfg(feature = "observe")]
+                                {
+                                    *self.total_allocated_flow_kg_s.entry(loop_id).or_default() +=
+                                        total_available;
+                                    *self.flow_deficit_kg_s.entry(loop_id).or_default() += deficit;
+                                }
+                            }
+
+                            // Keep the pump node flow in resolved map,
+                            // throttled when supply exceeds demand so
+                            // that conservation holds (total available
+                            // becomes total requested).
+                            let pump_resolved = if total_available <= MIN_FLOW_KG_S
+                                || total_requested <= MIN_FLOW_KG_S
+                            {
+                                0.0
+                            } else if total_available >= total_requested {
+                                // Pump throttled to match demand; excess
+                                // is not modelled (no bypass path yet).
+                                // EnergyPlus equivalent: excess
+                                // distributed to bypass
+                                // (LoopSide.cc:1624-1660).
+                                total_requested
+                            } else {
+                                // Pump at max capacity.
+                                total_available
+                            };
+                            resolved.insert(pump.node_id, pump_resolved);
+
+                            // Resolve splitter node flows: each splitter
+                            // carries the pump flow (or parent's flow in
+                            // nested topologies) to maintain conservation.
+                            for splitter in &topology.splitters {
+                                resolved.insert(splitter.node_id, pump_resolved);
+                            }
+
+                            // Resolve mixer node flows: each mixer
+                            // carries the sum of its branch inflows.
+                            for mixer in &topology.mixers {
+                                let mixer_flow: f64 = mixer
+                                    .branches
+                                    .iter()
+                                    .map(|b| resolved.get(&b.node_id).copied().unwrap_or(0.0))
+                                    .sum();
+                                resolved.insert(mixer.node_id, mixer_flow);
+                            }
+
+                            // Also resolve non-splitter branch nodes:
+                            // for mixer arms that are not splitter children,
+                            // keep original accumulator flow.
+                            for (nid, flow) in &node_flows {
+                                if !resolved.contains_key(nid) && *nid != pump.node_id {
+                                    resolved.insert(*nid, *flow);
+                                }
+                            }
+
+                            Some(resolved)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            // Write per-branch requested flows (T-0255 directive 4):
+            // the solver derives branch demand from per-node accumulator
+            // totals; writing it back to SplitterBranch makes the field
+            // useful as a diagnostic snapshot.
+            if let Some(topology) = self.config.loop_topologies.get_mut(&loop_id) {
+                for splitter in &mut topology.splitters {
+                    for branch in &mut splitter.branches {
+                        branch.requested_flow_kg_s =
+                            node_flows.get(&branch.node_id).copied().unwrap_or(0.0);
+                    }
+                }
+            }
+
+            // Build effective flows: resolved values override raw accumulator
+            // flows. Used for both conservation checking and aggregation.
+            let effective_flows: HashMap<FluidNodeId, f64> =
+                if let Some(ref resolved) = resolved_node_flows {
+                    let mut eff = node_flows.clone();
+                    for (nid, flow) in resolved {
+                        eff.insert(*nid, *flow);
+                    }
+                    eff
+                } else {
+                    node_flows.clone()
+                };
+
             // ── Mass-conservation check (T-0254) ──────────────────────────
             //
             // EnergyPlus `CheckLoopExitNode` (`Plant/Loop.cc:244-265`) enforces
             // |Outlet.MassFlowRate - Inlet.MassFlowRate| < MassFlowTolerance
             // where `DataBranchAirLoopPlant::MassFlowTolerance` = 1e-9 kg/s.
+            //
             // HARES's `MASS_FLOW_TOLERANCE` matches this.
             //
             // Two check modes:
             //   1. Topology-based: when `loop_topologies` contains this loop,
-            //      accumulate per-node flows and verify conservation using the
-            //      directed-edge graph (inflows from parents, outflows to children).
+            //      use effective (post-resolution) flows to verify conservation
+            //      across the directed-edge graph.
             //   2. Serial-flow consistency: when no topology is configured,
             //      verify that all accumulators on the same loop report the same
             //      flow rate — a series loop cannot have diverging flows.
             {
-                // Build per-node flow totals from the accumulator node_ids.
-                let mut node_flows: HashMap<FluidNodeId, f64> = HashMap::new();
-                for acc in &entries {
-                    *node_flows.entry(acc.node_id).or_default() += acc.total_flow_kg_s;
-                }
-
                 if let Some(topology) = self.config.loop_topologies.get_mut(&loop_id) {
                     // ── Topology-based conservation check ──
-                    //
-                    // Conservation at each node: total inflow must equal total outflow.
-                    //
-                    // For edge (from, to): the flow is the source node's accumulator
-                    // flow when the source has exactly one child (serial connection),
-                    // and the target (child) node's flow when the source has multiple
-                    // children (splitter). This handles the splitter/mixer case where
-                    // a single source's total flow is distributed across multiple edges.
-                    //
-                    // Equivalent EnergyPlus logic: ResolveParallelFlows
-                    // (LoopSide.cc:1279-1682) distributes pump flow across parallel
-                    // branches; CheckLoopExitNode (Loop.cc:244-265) verifies outlet == inlet.
 
                     #[cfg(feature = "observe")]
                     let mut violations = 0u32;
@@ -290,17 +533,16 @@ impl DomainSolver for FluidSolver {
                     for i in 0..topology.nodes.len() {
                         let node_id = topology.nodes[i].node_id;
                         let node_role = topology.nodes[i].role;
-                        let node_flow = node_flows.get(&node_id).copied().unwrap_or(0.0);
+                        let node_flow = effective_flows.get(&node_id).copied().unwrap_or(0.0);
 
                         let n_parents = parent_count.get(&node_id).copied().unwrap_or(0);
                         let n_children = child_count.get(&node_id).copied().unwrap_or(0);
 
                         // Compute total inflow:
-                        //   - No parents → inflow = node_flow (flow enters from
-                        //     upstream of the modelled topology).
+                        //   - No parents → inflow = node_flow.
                         //   - Single parent → inflow = parent node's flow (serial).
                         //   - Multiple parents (mixer) → inflow = sum of each
-                        //     parent's own flow (each branch carries itself).
+                        //     parent's own flow.
                         let total_inflow: f64 = if n_parents == 0 {
                             node_flow
                         } else {
@@ -309,14 +551,14 @@ impl DomainSolver for FluidSolver {
                                 .iter()
                                 .filter(|(_, to)| *to == node_id)
                                 .map(|(from, _)| {
-                                    let from_flow = node_flows.get(from).copied().unwrap_or(0.0);
+                                    let from_flow =
+                                        effective_flows.get(from).copied().unwrap_or(0.0);
                                     let from_children = child_count.get(from).copied().unwrap_or(0);
                                     if from_children == 1 {
                                         // Serial parent: edge carries parent's total flow
                                         from_flow
                                     } else {
                                         // Splitter parent: edge carries this node's flow
-                                        // (the branch's own flow, not the splitter total)
                                         node_flow
                                     }
                                 })
@@ -324,8 +566,7 @@ impl DomainSolver for FluidSolver {
                         };
 
                         // Compute total outflow:
-                        //   - No children → outflow = node_flow (flow exits to
-                        //     downstream of the modelled topology).
+                        //   - No children → outflow = node_flow.
                         //   - Single child → outflow = node_flow (serial).
                         //   - Multiple children (splitter) → outflow = sum of
                         //     each child's own flow.
@@ -336,15 +577,11 @@ impl DomainSolver for FluidSolver {
                                 .edges
                                 .iter()
                                 .filter(|(from, _)| *from == node_id)
-                                .map(|(_, to)| node_flows.get(to).copied().unwrap_or(0.0))
+                                .map(|(_, to)| effective_flows.get(to).copied().unwrap_or(0.0))
                                 .sum()
                         };
 
-                        // Write back computed flow totals to the topology node so
-                        // that `FluidNode::mass_imbalance_kg_s()`,
-                        // `LoopTopology::max_mass_imbalance_kg_s()`, and
-                        // `LoopTopology::num_conservation_violations()` return the
-                        // per-step results rather than always returning 0.
+                        // Write back computed flow totals to the topology node.
                         topology.nodes[i].total_inflow_kg_s = total_inflow;
                         topology.nodes[i].total_outflow_kg_s = total_outflow;
 
@@ -398,11 +635,6 @@ impl DomainSolver for FluidSolver {
                     }
                 } else {
                     // ── Serial-flow consistency check (no topology) ──
-                    //
-                    // In a series hydronic loop, all equipment must report the
-                    // same mass flow rate. If accumulator A reports X kg/s and
-                    // accumulator B reports Y kg/s with |X-Y| > tolerance,
-                    // mass is being created or destroyed.
                     if entries.len() > 1 {
                         let first_flow = entries[0].total_flow_kg_s;
                         for acc in &entries[1..] {
@@ -444,29 +676,172 @@ impl DomainSolver for FluidSolver {
                 }
             }
 
-            let total_flow: f64 = entries.iter().map(|e| e.total_flow_kg_s).sum();
-            let net_power_w: f64 = entries
-                .iter()
-                .map(|e| cp * e.total_flow_kg_s * (e.mean_supply_temp_c - e.mean_return_temp_c))
-                .sum();
+            // ── Temperature and power aggregation ────────────────────────
+            //
+            // When flow-splitting is active, use per-branch allocated flows
+            // for temperature weighting and net power computation.
+            // When not splitting, fall back to accumulator flows.
+
+            let (total_flow, net_power_w, mean_supply_temp_c, mean_return_temp_c) =
+                if let Some(ref resolved) = resolved_node_flows {
+                    // Use resolved flows per node for weighted aggregation.
+                    let mut sum_supply = 0.0_f64;
+                    let mut sum_return = 0.0_f64;
+                    let mut net_power = 0.0_f64;
+                    let mut total_resolved = 0.0_f64;
+
+                    // Identify pump node for exclusion from temperature
+                    // averaging (pump is plumbing, not a thermal component).
+                    let pump_node_id: Option<FluidNodeId> = {
+                        let topology = self.config.loop_topologies.get(&loop_id);
+                        topology.and_then(|topo| {
+                            let parent_count: HashMap<FluidNodeId, usize> = {
+                                let mut map = HashMap::new();
+                                for (_, to) in &topo.edges {
+                                    *map.entry(*to).or_default() += 1;
+                                }
+                                map
+                            };
+                            topo.nodes
+                                .iter()
+                                .find(|n| {
+                                    n.role == FluidNodeRole::Source
+                                        && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
+                                })
+                                .map(|pump| pump.node_id)
+                        })
+                    };
+
+                    // Collect splitter/mixer node_ids for exclusion from
+                    // temperature averaging.
+                    let plumbing_nodes: std::collections::HashSet<FluidNodeId> = {
+                        let mut set = std::collections::HashSet::new();
+                        if let Some(nid) = pump_node_id {
+                            set.insert(nid);
+                        }
+                        if let Some(topo) = self.config.loop_topologies.get(&loop_id) {
+                            for s in &topo.splitters {
+                                set.insert(s.node_id);
+                            }
+                            for m in &topo.mixers {
+                                set.insert(m.node_id);
+                            }
+                        }
+                        set
+                    };
+
+                    // Use the pump's flow as the total loop flow.
+                    let pump_total: f64 = pump_node_id
+                        .and_then(|nid| resolved.get(&nid).copied())
+                        .unwrap_or_else(|| resolved.values().sum());
+
+                    for acc in &entries {
+                        // Skip plumbing nodes (pump, splitter, mixer) in
+                        // temperature / power aggregation. These nodes carry
+                        // flow but do not represent thermal components —
+                        // their temperature fields are placeholders that
+                        // would skew the flow-weighted average if included.
+                        if plumbing_nodes.contains(&acc.node_id) {
+                            continue;
+                        }
+                        let allocated_flow = resolved
+                            .get(&acc.node_id)
+                            .copied()
+                            .unwrap_or(acc.total_flow_kg_s);
+                        if allocated_flow > MIN_FLOW_KG_S {
+                            sum_supply += allocated_flow * acc.mean_supply_temp_c;
+                            sum_return += allocated_flow * acc.mean_return_temp_c;
+                            net_power += cp
+                                * allocated_flow
+                                * (acc.mean_supply_temp_c - acc.mean_return_temp_c);
+                            total_resolved += allocated_flow;
+                        }
+                    }
+
+                    let (supply_c, return_c) = if total_resolved > MIN_FLOW_KG_S {
+                        (sum_supply / total_resolved, sum_return / total_resolved)
+                    } else {
+                        self.last_known_temps
+                            .get(&loop_id)
+                            .copied()
+                            .unwrap_or((0.0, 0.0))
+                    };
+
+                    (pump_total, net_power, supply_c, return_c)
+                } else {
+                    // No flow-splitting: use accumulator flows directly.
+                    let tf: f64 = entries.iter().map(|e| e.total_flow_kg_s).sum();
+                    let np: f64 = entries
+                        .iter()
+                        .map(|e| {
+                            cp * e.total_flow_kg_s * (e.mean_supply_temp_c - e.mean_return_temp_c)
+                        })
+                        .sum();
+
+                    let (sc, rc) = if tf.abs() <= MIN_FLOW_KG_S {
+                        self.last_known_temps
+                            .get(&loop_id)
+                            .copied()
+                            .unwrap_or((0.0, 0.0))
+                    } else {
+                        let ss = entries
+                            .iter()
+                            .map(|e| e.total_flow_kg_s * e.mean_supply_temp_c)
+                            .sum::<f64>();
+                        let sr = entries
+                            .iter()
+                            .map(|e| e.total_flow_kg_s * e.mean_return_temp_c)
+                            .sum::<f64>();
+                        let temps = (ss / tf, sr / tf);
+                        self.last_known_temps.insert(loop_id, temps);
+                        temps
+                    };
+
+                    (tf, np, sc, rc)
+                };
+
+            // ── Post-resolution invariant (T-0255) ────────────────────────
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            if let Some(ref resolved) = resolved_node_flows {
+                if let Some(topo) = self.config.loop_topologies.get(&loop_id) {
+                    let parent_count: HashMap<FluidNodeId, usize> = {
+                        let mut map = HashMap::new();
+                        for (_, to) in &topo.edges {
+                            *map.entry(*to).or_default() += 1;
+                        }
+                        map
+                    };
+                    if let Some(pump) = topo.nodes.iter().find(|n| {
+                        n.role == FluidNodeRole::Source
+                            && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
+                    }) {
+                        let pump_flow = resolved.get(&pump.node_id).copied().unwrap_or(0.0);
+                        let branch_sum: f64 = topo
+                            .splitters
+                            .iter()
+                            .flat_map(|s| &s.branches)
+                            .map(|b| resolved.get(&b.node_id).copied().unwrap_or(0.0))
+                            .sum();
+                        let diff = (pump_flow - branch_sum).abs();
+                        assert!(
+                            diff < MASS_FLOW_TOLERANCE,
+                            "fluid loop {loop_id:?}: flow resolution invariant violated — \
+                             pump flow = {:.6e} kg/s, sum of branch allocated flows = {:.6e} kg/s, \
+                             diff = {:.6e} kg/s, tolerance = {:.6e} kg/s",
+                            pump_flow,
+                            branch_sum,
+                            diff,
+                            MASS_FLOW_TOLERANCE
+                        );
+                    }
+                }
+            }
+
+            // ── System-level invariant (T-0084) ──────────────────────────
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             let total_declared_thermal_w: f64 =
                 entries.iter().map(|e| e.total_thermal_power_w).sum();
 
-            // System-level invariant: when equipment declares thermal power via
-            // PortContribution::Fluid.thermal_power_w, the total must match the
-            // loop's flow-implied energy balance (T-0084). A mismatch means
-            // equipment is declaring energy that the fluid solver cannot confirm
-            // from flow × Cp × ΔT — an energy routing gap.
-            //
-            // Tolerance is 1e-9 × max(|net_power_w|, |declared|, 1.0) —
-            // essentially machine epsilon for double-precision. This catches any
-            // real mismatch (e.g. equipment writing a dynamic thermal_power_w
-            // alongside static config temperatures) while tolerating only
-            // floating-point drift in the summation of Cp × flow × ΔT across
-            // multiple contributors. A tolerance this tight means the invariant
-            // is a hard equality check: the two quantities must come from the
-            // same computation path to pass.
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             if total_declared_thermal_w > 0.0 {
                 let tol = 1e-9_f64
@@ -483,24 +858,11 @@ impl DomainSolver for FluidSolver {
                 );
             }
 
-            let (mean_supply_temp_c, mean_return_temp_c) = if total_flow.abs() <= MIN_FLOW_KG_S {
+            // Update last_known_temps so zero-flow steps can recall temperature state.
+            if total_flow > MIN_FLOW_KG_S {
                 self.last_known_temps
-                    .get(&loop_id)
-                    .copied()
-                    .unwrap_or((0.0, 0.0))
-            } else {
-                let sum_supply = entries
-                    .iter()
-                    .map(|e| e.total_flow_kg_s * e.mean_supply_temp_c)
-                    .sum::<f64>();
-                let sum_return = entries
-                    .iter()
-                    .map(|e| e.total_flow_kg_s * e.mean_return_temp_c)
-                    .sum::<f64>();
-                let temps = (sum_supply / total_flow, sum_return / total_flow);
-                self.last_known_temps.insert(loop_id, temps);
-                temps
-            };
+                    .insert(loop_id, (mean_supply_temp_c, mean_return_temp_c));
+            }
 
             self.loop_states.insert(
                 loop_id,
@@ -532,8 +894,8 @@ mod tests {
     use hares_types::{
         DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidNode,
         FluidNodeId, FluidNodeRole, FluidType, GridState, LoopId, LoopTopology,
-        MASS_FLOW_TOLERANCE, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId,
-        ZoneState,
+        MASS_FLOW_TOLERANCE, MixerBranch, MixerNode, PortContribution, PortSlots, SplitterBranch,
+        SplitterNode, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
     };
 
     use crate::fluid_solver::{FluidSolver, FluidSolverConfig};
@@ -620,6 +982,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
 
@@ -650,6 +1013,7 @@ mod tests {
                 return_temp_c: 50.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         ports
@@ -660,6 +1024,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
 
@@ -696,6 +1061,7 @@ mod tests {
                 return_temp_c: 45.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
@@ -748,6 +1114,7 @@ mod tests {
                 return_temp_c: 45.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
@@ -803,6 +1170,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: Some(0.5 * CP_LIQUID_WATER_J_KG_K * 20.0),
+                node_id: FluidNodeId(0),
             })
             .unwrap();
 
@@ -834,6 +1202,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: Some(0.3 * CP_LIQUID_WATER_J_KG_K * 15.0),
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         // Contributor B: no thermal_power_w declaration (None)
@@ -845,6 +1214,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
 
@@ -897,6 +1267,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
 
@@ -944,6 +1315,7 @@ mod tests {
                 return_temp_c: 50.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         // Glycol loop: 0.5 kg/s, ΔT=20 K, cp=3800 → 38 000 W
@@ -955,6 +1327,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
 
@@ -994,6 +1367,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
 
@@ -1034,6 +1408,7 @@ mod tests {
                 return_temp_c: 40.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
         ports
@@ -1044,6 +1419,7 @@ mod tests {
                 return_temp_c: 45.0,
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
 
@@ -1489,5 +1865,377 @@ mod tests {
         };
 
         let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+    }
+
+    // =======================================================================
+    // T-0255: Flow-splitting resolution tests
+    // =======================================================================
+
+    #[test]
+    fn parallel_branches_proportional_allocation_with_deficit() {
+        // Two parallel boilers each requesting 0.3 kg/s from a pump providing
+        // 0.5 kg/s. Flow is proportional: each gets 0.25 kg/s, deficit = 0.1 kg/s.
+        //
+        // Topology: pump(0) → splitter(1) → [branch A(2), branch B(3)] → mixer(4)
+        //
+        // Accumulator flows (pre-resolution):
+        //   Node 0 (pump):    0.5 kg/s  (total available)
+        //   Node 2 (boiler A): 0.3 kg/s (requested)
+        //   Node 3 (boiler B): 0.3 kg/s (requested)
+
+        let splitter = SplitterNode {
+            node_id: FluidNodeId(1),
+            inlet_node_id: FluidNodeId(0),
+            branches: vec![
+                SplitterBranch {
+                    node_id: FluidNodeId(2),
+                    requested_flow_kg_s: 0.0,
+                    resistance_coefficient: 1.0,
+                },
+                SplitterBranch {
+                    node_id: FluidNodeId(3),
+                    requested_flow_kg_s: 0.0,
+                    resistance_coefficient: 1.0,
+                },
+            ],
+        };
+
+        let mixer = MixerNode {
+            node_id: FluidNodeId(4),
+            outlet_node_id: FluidNodeId(0), // not used downstream in this test
+            branches: vec![
+                MixerBranch {
+                    node_id: FluidNodeId(2),
+                },
+                MixerBranch {
+                    node_id: FluidNodeId(3),
+                },
+            ],
+        };
+
+        let topology = LoopTopology::new(
+            LoopId(1),
+            vec![
+                FluidNode::new(FluidNodeId(0), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(1), FluidNodeRole::Splitter),
+                FluidNode::new(FluidNodeId(2), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(3), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(4), FluidNodeRole::Mixer),
+            ],
+            vec![
+                (FluidNodeId(0), FluidNodeId(1)),
+                (FluidNodeId(1), FluidNodeId(2)),
+                (FluidNodeId(1), FluidNodeId(3)),
+                (FluidNodeId(2), FluidNodeId(4)),
+                (FluidNodeId(3), FluidNodeId(4)),
+            ],
+        )
+        .with_splitters(vec![splitter])
+        .with_mixers(vec![mixer]);
+
+        let config = FluidSolverConfig {
+            loop_topologies: [(LoopId(1), topology)].into_iter().collect(),
+            ..FluidSolverConfig::default()
+        };
+
+        let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
+
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 0.5,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 60.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(2),
+                    total_flow_kg_s: 0.3,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(3),
+                    total_flow_kg_s: 0.3,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+
+        // Verify net power uses proportional allocation:
+        // Each boiler gets 0.25 kg/s * (60-40)K * Cp = 0.25 * 20 * Cp
+        // Total = 2 * 0.25 * 20 * Cp = 10 * Cp
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        let expected_power = 2.0 * 0.25 * CP_LIQUID_WATER_J_KG_K * 20.0;
+        approx_eq(states[0].net_power_w, expected_power);
+
+        // Loop-level supply temp should be flow-weighted: both branches at 60°C
+        approx_eq(states[0].mean_supply_temp_c, 60.0);
+        // Loop-level return temp should be flow-weighted: both branches at 40°C
+        approx_eq(states[0].mean_return_temp_c, 40.0);
+    }
+
+    #[test]
+    fn parallel_branches_excess_flow_meets_demand() {
+        // Two parallel boilers each requesting 0.2 kg/s from a pump providing
+        // 0.5 kg/s. Supply exceeds demand. Each gets its requested 0.2 kg/s,
+        // excess 0.1 kg/s is unused. No flow created or destroyed.
+
+        let splitter = SplitterNode {
+            node_id: FluidNodeId(1),
+            inlet_node_id: FluidNodeId(0),
+            branches: vec![
+                SplitterBranch {
+                    node_id: FluidNodeId(2),
+                    requested_flow_kg_s: 0.0,
+                    resistance_coefficient: 1.0,
+                },
+                SplitterBranch {
+                    node_id: FluidNodeId(3),
+                    requested_flow_kg_s: 0.0,
+                    resistance_coefficient: 1.0,
+                },
+            ],
+        };
+
+        let mixer = MixerNode {
+            node_id: FluidNodeId(4),
+            outlet_node_id: FluidNodeId(0),
+            branches: vec![
+                MixerBranch {
+                    node_id: FluidNodeId(2),
+                },
+                MixerBranch {
+                    node_id: FluidNodeId(3),
+                },
+            ],
+        };
+
+        let topology = LoopTopology::new(
+            LoopId(1),
+            vec![
+                FluidNode::new(FluidNodeId(0), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(1), FluidNodeRole::Splitter),
+                FluidNode::new(FluidNodeId(2), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(3), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(4), FluidNodeRole::Mixer),
+            ],
+            vec![
+                (FluidNodeId(0), FluidNodeId(1)),
+                (FluidNodeId(1), FluidNodeId(2)),
+                (FluidNodeId(1), FluidNodeId(3)),
+                (FluidNodeId(2), FluidNodeId(4)),
+                (FluidNodeId(3), FluidNodeId(4)),
+            ],
+        )
+        .with_splitters(vec![splitter])
+        .with_mixers(vec![mixer]);
+
+        let config = FluidSolverConfig {
+            loop_topologies: [(LoopId(1), topology)].into_iter().collect(),
+            ..FluidSolverConfig::default()
+        };
+
+        let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
+
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 0.5,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 60.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(2),
+                    total_flow_kg_s: 0.2,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(3),
+                    total_flow_kg_s: 0.2,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        // Each branch gets its requested 0.2 kg/s — net power = 2 * 0.2 * Cp * 20K
+        let expected_power = 2.0 * 0.2 * CP_LIQUID_WATER_J_KG_K * 20.0;
+        approx_eq(states[0].net_power_w, expected_power);
+
+        approx_eq(states[0].mean_supply_temp_c, 60.0);
+        approx_eq(states[0].mean_return_temp_c, 40.0);
+    }
+
+    #[test]
+    fn series_only_loop_with_no_splitters_still_works() {
+        // Regression: a serial loop (one accumulator, no splitters) must
+        // continue to work correctly with the new resolution path. Flow is
+        // conserved end-to-end via the existing serial-flow consistency check.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+
+        let mut ports = PortSlots {
+            fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            ..Default::default()
+        };
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 60.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: None,
+                node_id: FluidNodeId(0),
+            })
+            .unwrap();
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        approx_eq(states[0].net_power_w, 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0);
+        approx_eq(states[0].mean_supply_temp_c, 60.0);
+        approx_eq(states[0].mean_return_temp_c, 40.0);
+    }
+
+    #[test]
+    fn two_parallel_distribution_coils_flow_split_and_heating_output() {
+        // Integration test: two parallel distribution coils on one hydronic
+        // loop. Coil A requests 0.15 kg/s, coil B requests 0.10 kg/s.
+        // Pump provides 0.20 kg/s (insufficient, proportional allocation).
+        //
+        // Allocation: coil A gets 0.20 * (0.15/0.25) = 0.12 kg/s
+        //              coil B gets 0.20 * (0.10/0.25) = 0.08 kg/s
+        //
+        // Coil A: dt=10K, power = 0.12 * Cp * 10
+        // Coil B: dt=15K, power = 0.08 * Cp * 15
+
+        let splitter = SplitterNode {
+            node_id: FluidNodeId(1),
+            inlet_node_id: FluidNodeId(0),
+            branches: vec![
+                SplitterBranch {
+                    node_id: FluidNodeId(2),
+                    requested_flow_kg_s: 0.0,
+                    resistance_coefficient: 1.0,
+                },
+                SplitterBranch {
+                    node_id: FluidNodeId(3),
+                    requested_flow_kg_s: 0.0,
+                    resistance_coefficient: 1.0,
+                },
+            ],
+        };
+
+        let mixer = MixerNode {
+            node_id: FluidNodeId(4),
+            outlet_node_id: FluidNodeId(0),
+            branches: vec![
+                MixerBranch {
+                    node_id: FluidNodeId(2),
+                },
+                MixerBranch {
+                    node_id: FluidNodeId(3),
+                },
+            ],
+        };
+
+        let topology = LoopTopology::new(
+            LoopId(1),
+            vec![
+                FluidNode::new(FluidNodeId(0), FluidNodeRole::Source),
+                FluidNode::new(FluidNodeId(1), FluidNodeRole::Splitter),
+                FluidNode::new(FluidNodeId(2), FluidNodeRole::Sink),
+                FluidNode::new(FluidNodeId(3), FluidNodeRole::Sink),
+                FluidNode::new(FluidNodeId(4), FluidNodeRole::Mixer),
+            ],
+            vec![
+                (FluidNodeId(0), FluidNodeId(1)),
+                (FluidNodeId(1), FluidNodeId(2)),
+                (FluidNodeId(1), FluidNodeId(3)),
+                (FluidNodeId(2), FluidNodeId(4)),
+                (FluidNodeId(3), FluidNodeId(4)),
+            ],
+        )
+        .with_splitters(vec![splitter])
+        .with_mixers(vec![mixer]);
+
+        let config = FluidSolverConfig {
+            loop_topologies: [(LoopId(1), topology)].into_iter().collect(),
+            ..FluidSolverConfig::default()
+        };
+
+        let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
+
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 0.2,
+                    mean_supply_temp_c: 55.0,
+                    mean_return_temp_c: 55.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(2),
+                    total_flow_kg_s: 0.15,
+                    mean_supply_temp_c: 55.0,
+                    mean_return_temp_c: 45.0,
+                    total_thermal_power_w: 0.0,
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(3),
+                    total_flow_kg_s: 0.10,
+                    mean_supply_temp_c: 55.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+
+        // Coil A: 0.12 kg/s * 10K * Cp, Coil B: 0.08 kg/s * 15K * Cp
+        let expected_power = (0.12 * 10.0 + 0.08 * 15.0) * CP_LIQUID_WATER_J_KG_K;
+        approx_eq(states[0].net_power_w, expected_power);
     }
 }

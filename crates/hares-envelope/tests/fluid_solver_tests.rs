@@ -8,8 +8,9 @@ use std::time::Duration;
 use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{FluidSolver, FluidSolverConfig};
 use hares_types::{
-    DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidType, GridState,
-    LoopId, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidNodeId, FluidType,
+    GridState, LoopId, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId,
+    ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -91,6 +92,7 @@ fn make_ports_with_flow(
             return_temp_c,
             fluid_type,
             thermal_power_w: None,
+            node_id: FluidNodeId(0),
         })
         .expect("accumulate must not fail for valid contribution");
     ports

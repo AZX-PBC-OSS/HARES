@@ -8,9 +8,9 @@ use chrono::Datelike;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId, telemetry_keys as tk,
+    EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
+    TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -1123,6 +1123,7 @@ impl WetAppliance {
                 return_temp_c: 0.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })?;
         }
 

@@ -354,7 +354,7 @@ fn validate_zip_terms(
 mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        BoundaryPolicy, DomainUpdate, EnvironmentState, GridState, SCHEDULE_DOMAIN_ID,
+        BoundaryPolicy, DomainUpdate, EnvironmentState, FluidNodeId, GridState, SCHEDULE_DOMAIN_ID,
         ScheduleSource, WeatherState,
     };
 
@@ -655,8 +655,8 @@ mod dhw_integration_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        DomainUpdate, EnvironmentState, FluidType, GridState, PortContribution, PortSlots,
-        SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
+        DomainUpdate, EnvironmentState, FluidNodeId, FluidType, GridState, PortContribution,
+        PortSlots, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
     };
 
     use super::DHW_DEMAND_LOOP;
@@ -880,6 +880,7 @@ mod dhw_integration_tests {
                     return_temp_c: 0.0,
                     fluid_type: FluidType::Water,
                     thermal_power_w: None,
+                    node_id: FluidNodeId(0),
                 })
                 .unwrap();
         }
@@ -1002,6 +1003,7 @@ mod dhw_integration_tests {
                 return_temp_c: 0.0,
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })
             .unwrap();
 

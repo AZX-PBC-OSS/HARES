@@ -8,9 +8,9 @@ use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
-    telemetry_keys as tk,
+    ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError, LoopId, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -620,6 +620,7 @@ impl Equipment for ResistanceWH {
                 return_temp_c: mains_temp_c,
                 fluid_type: self.fluid_type,
                 thermal_power_w: None,
+                node_id: FluidNodeId(0),
             })?;
         }
 
