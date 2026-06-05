@@ -202,6 +202,7 @@ mod tests {
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
                 retain_batches: true,
+                rotation: hares_io::RotationPolicy::None,
             },
             overrides: None,
             bldg_id: 200,

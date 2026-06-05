@@ -23,6 +23,31 @@ pub enum OutputFormat {
     Parquet,
 }
 
+/// File rotation policy for long simulations.
+///
+/// When set to a value other than [`None`](RotationPolicy::None), output files
+/// are split at time interval boundaries. Each rotated file gets its own schema
+/// header and a timestamp suffix derived from the base output path.
+///
+/// # Reference design
+/// EnergyPlus's `ReportFreq` enum:
+/// `vendors/EnergyPlus/src/EnergyPlus/OutputProcessor.cc:347-355`
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RotationPolicy {
+    /// Single output file (default).
+    #[default]
+    None,
+    /// Rotate every hour.
+    Hourly,
+    /// Rotate every day.
+    Daily,
+    /// Rotate every month.
+    Monthly,
+    /// Rotate every year.
+    Yearly,
+}
+
 /// Errors produced during config deserialization and validation.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -88,6 +113,15 @@ pub struct SimulationConfig {
     /// field will produce a runtime error.
     #[serde(default)]
     pub civil_timezone: Option<String>,
+    /// Output file rotation policy for long simulations.
+    ///
+    /// When set to [`RotationPolicy::Hourly`], [`RotationPolicy::Daily`],
+    /// [`RotationPolicy::Monthly`], or [`RotationPolicy::Yearly`], output
+    /// is split into multiple files at the specified time interval boundary.
+    /// Each file gets a timestamp suffix derived from the first timestamp
+    /// written to it (e.g. `dwelling_42_2024-01-01.parquet`).
+    #[serde(default)]
+    pub rotation: RotationPolicy,
     /// Explicit site-location override. Any field set here takes precedence
     /// over both the HPXML `Site` element and the weather file's embedded
     /// metadata during site-location resolution (see
@@ -320,5 +354,26 @@ setpoint_deadband_c = -0.1
             matches!(err, ConfigError::Validation(ref msg) if msg.contains("setpoint_deadband_c")),
             "expected deadband validation error, got: {err}"
         );
+    }
+
+    #[test]
+    fn rotation_defaults_to_none() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse config");
+        assert_eq!(cfg.rotation, RotationPolicy::None);
+    }
+
+    #[test]
+    fn rotation_daily_parses() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+rotation = "daily"
+"#;
+        let cfg = SimulationConfig::from_toml(toml).expect("parse config");
+        assert_eq!(cfg.rotation, RotationPolicy::Daily);
     }
 }

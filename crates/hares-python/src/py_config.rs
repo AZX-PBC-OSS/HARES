@@ -60,8 +60,21 @@ fn python_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
 }
 
 fn default_start_time() -> DateTime<FixedOffset> {
-    // SAFETY: DEFAULT_START is a hardcoded constant known to be valid ISO 8601.
     DateTime::parse_from_rfc3339(DEFAULT_START).expect("valid default start time")
+}
+
+pub(crate) fn parse_rotation_policy(value: &str) -> PyResult<hares_io::RotationPolicy> {
+    match value.to_lowercase().as_str() {
+        "none" => Ok(hares_io::RotationPolicy::None),
+        "hourly" => Ok(hares_io::RotationPolicy::Hourly),
+        "daily" => Ok(hares_io::RotationPolicy::Daily),
+        "monthly" => Ok(hares_io::RotationPolicy::Monthly),
+        "yearly" => Ok(hares_io::RotationPolicy::Yearly),
+        other => Err(PyValueError::new_err(format!(
+            "invalid rotation '{}': expected none, hourly, daily, monthly, or yearly",
+            other
+        ))),
+    }
 }
 
 #[pyclass(name = "SimulationConfig", from_py_object)]
@@ -83,6 +96,7 @@ pub struct PySimulationConfig {
     elevation_m: Option<f64>,
     utc_offset_h: Option<f64>,
     retain_batches: bool,
+    rotation: Option<String>,
 }
 
 #[pymethods]
@@ -106,6 +120,7 @@ impl PySimulationConfig {
             elevation_m = None,
             utc_offset_h = None,
             retain_batches = None,
+            rotation = None,
         )
     )]
     // PyO3 #[new] with kwargs maps 1:1 to Python kwargs; builder adds no value here.
@@ -127,6 +142,7 @@ impl PySimulationConfig {
         elevation_m: Option<f64>,
         utc_offset_h: Option<f64>,
         retain_batches: Option<bool>,
+        rotation: Option<String>,
     ) -> PyResult<Self> {
         let start_time = start_time
             .map(|s| parse_datetime_str(&s))
@@ -197,6 +213,10 @@ impl PySimulationConfig {
 
         let output_chunk_size = output_chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
 
+        if let Some(ref rot) = rotation {
+            let _ = parse_rotation_policy(rot)?;
+        }
+
         Ok(Self {
             start_time,
             duration,
@@ -214,6 +234,7 @@ impl PySimulationConfig {
             elevation_m,
             utc_offset_h,
             retain_batches: retain_batches.unwrap_or(true),
+            rotation,
         })
     }
 
@@ -430,16 +451,31 @@ impl PySimulationConfig {
         self.retain_batches = value;
     }
 
+    #[getter]
+    pub fn rotation(&self) -> Option<String> {
+        self.rotation.clone()
+    }
+
+    #[setter]
+    pub fn set_rotation(&mut self, value: Option<String>) -> PyResult<()> {
+        if let Some(ref rot) = value {
+            parse_rotation_policy(rot)?;
+        }
+        self.rotation = value;
+        Ok(())
+    }
+
     pub fn __repr__(&self) -> String {
         format!(
-            "SimulationConfig(start_time='{}', duration_s={}, time_res_s={}, write_output={}, output_to_parquet={}, master_seed={}, retain_batches={})",
+            "SimulationConfig(start_time='{}', duration_s={}, time_res_s={}, write_output={}, output_to_parquet={}, master_seed={}, retain_batches={}, rotation={})",
             self.start_time.to_rfc3339(),
             self.duration,
             self.time_res,
             self.write_output,
             self.output_to_parquet,
             self.master_seed,
-            self.retain_batches
+            self.retain_batches,
+            self.rotation.as_deref().unwrap_or("none"),
         )
     }
 }
@@ -475,6 +511,12 @@ impl PySimulationConfig {
                 utc_offset_h: self.utc_offset_h,
             },
             retain_batches: self.retain_batches,
+            rotation: self
+                .rotation
+                .as_deref()
+                .map(parse_rotation_policy)
+                .transpose()?
+                .unwrap_or(hares_io::RotationPolicy::None),
         })
     }
 
@@ -499,6 +541,13 @@ impl PySimulationConfig {
             elevation_m: config.site_location.elevation_m,
             utc_offset_h: config.site_location.utc_offset_h,
             retain_batches: config.retain_batches,
+            rotation: match config.rotation {
+                hares_io::RotationPolicy::None => None,
+                hares_io::RotationPolicy::Hourly => Some("hourly".to_string()),
+                hares_io::RotationPolicy::Daily => Some("daily".to_string()),
+                hares_io::RotationPolicy::Monthly => Some("monthly".to_string()),
+                hares_io::RotationPolicy::Yearly => Some("yearly".to_string()),
+            },
         }
     }
 }
@@ -712,6 +761,7 @@ impl PyDwellingConfig {
                 civil_timezone: None,
                 site_location: hares_io::SiteLocationOverride::default(),
                 retain_batches: true,
+                rotation: hares_io::RotationPolicy::None,
             });
 
         let resample_overrides: Option<ResampleOverrides> = self

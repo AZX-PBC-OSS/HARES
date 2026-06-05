@@ -43,6 +43,7 @@ pyo3::create_exception!(_hares, FatalDwellingError, pyo3::exceptions::PyRuntimeE
 use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
 use crate::py_actor::PyActor;
 use crate::py_config::PySimulationConfig;
+use crate::py_config::parse_rotation_policy;
 use crate::py_control::PyControlSignal;
 use crate::py_enums::PyLutType;
 use crate::py_enums::{PyEvArchetypeId, PyVehicleId};
@@ -1746,6 +1747,7 @@ const KNOWN_KWARGS: &[&str] = &[
     "longitude",
     "elevation_m",
     "utc_offset_h",
+    "rotation",
 ];
 
 /// Extract an explicit [`SiteLocationOverride`] from the `latitude`,
@@ -1929,6 +1931,20 @@ fn build_config(
 
         let site_location = extract_site_location_override(kwargs.as_ref())?;
 
+        let rotation = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("rotation").ok().flatten())
+            .map(|obj| obj.extract::<String>())
+            .transpose()?;
+        if let Some(ref rot) = rotation {
+            parse_rotation_policy(rot)?;
+        }
+        let rotation_policy = rotation
+            .as_deref()
+            .map(parse_rotation_policy)
+            .transpose()?
+            .unwrap_or(hares_io::RotationPolicy::None);
+
         if duration.num_milliseconds() % time_res.num_milliseconds() != 0 {
             return Err(PyValueError::new_err(format!(
                 "duration ({}s) must be an exact multiple of time_res ({}s)",
@@ -1955,6 +1971,7 @@ fn build_config(
             civil_timezone,
             site_location,
             retain_batches: true,
+            rotation: rotation_policy,
         }
     };
 

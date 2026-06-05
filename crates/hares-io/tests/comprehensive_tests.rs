@@ -49,6 +49,7 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
         retain_batches: false,
+        rotation: hares_io::RotationPolicy::None,
     }
 }
 
@@ -488,8 +489,15 @@ fn csv_writer_finish_flushes_all_data() {
         Field::new("Time", DataType::Utf8, false),
         Field::new("Total Electric Power (kW)", DataType::Float64, true),
     ]);
-    let mut recorder =
-        hares_io::StreamingRecorder::new(schema, 1000, OutputFormat::Csv, &path, false).unwrap();
+    let mut recorder = hares_io::StreamingRecorder::new(
+        schema,
+        1000,
+        OutputFormat::Csv,
+        &path,
+        false,
+        hares_io::RotationPolicy::None,
+    )
+    .unwrap();
 
     // Write fewer rows than chunk_size to ensure finish() triggers flush.
     for i in 0..5 {
@@ -533,8 +541,15 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
 
     // Create recorder targeting a path inside a read-only directory
     // after initial creation succeeds.
-    let mut recorder =
-        hares_io::StreamingRecorder::new(schema, 1000, OutputFormat::Csv, &path, false).unwrap();
+    let mut recorder = hares_io::StreamingRecorder::new(
+        schema,
+        1000,
+        OutputFormat::Csv,
+        &path,
+        false,
+        hares_io::RotationPolicy::None,
+    )
+    .unwrap();
     recorder.push_row("2024-01-01T00:00:00Z", &[1.0]).unwrap();
 
     // finish() should succeed here -- the main path works.

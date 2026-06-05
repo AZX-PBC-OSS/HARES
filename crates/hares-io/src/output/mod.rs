@@ -24,10 +24,13 @@ pub use writer::{OutputError, StreamingRecorder};
 /// Summary returned by [`StreamingRecorder::finish`].
 #[derive(Debug, Clone)]
 pub struct OutputSummary {
-    /// Total number of rows written.
+    /// Total number of rows written across all files.
     pub row_count: usize,
-    /// Size of the output file in bytes.
+    /// Total size of all output files in bytes.
     pub byte_size: u64,
-    /// Path to the output file.
+    /// Path to the first (or only) output file.
     pub path: PathBuf,
+    /// Paths to all output files, including rotated successors.
+    /// When `rotation` is `None`, this contains only the primary path.
+    pub rotated_paths: Vec<PathBuf>,
 }

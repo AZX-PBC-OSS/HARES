@@ -1094,6 +1094,7 @@ mod tests {
             civil_timezone: None,
             site_location: crate::SiteLocationOverride::default(),
             retain_batches: false,
+            rotation: crate::RotationPolicy::None,
         }
     }
 

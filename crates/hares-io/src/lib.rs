@@ -18,7 +18,7 @@ pub mod site_location;
 pub mod tmy3;
 pub mod weather;
 
-pub use config::{ConfigError, OutputFormat, SimulationConfig};
+pub use config::{ConfigError, OutputFormat, RotationPolicy, SimulationConfig};
 pub use defaults::{
     BiquadraticCoefficients, DefaultsCategory, DefaultsError, DefaultsStore, EquipmentDefaults,
     HvacCurveSet, HvacCurveVariant, PvPanelDefaults, ZipParameters,

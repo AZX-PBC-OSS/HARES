@@ -301,6 +301,8 @@ pub(crate) struct SyntheticOutputConfig {
     pub(crate) master_seed: u64,
     #[serde(default)]
     pub(crate) retain_batches: bool,
+    #[serde(default)]
+    pub(crate) rotation: hares_io::RotationPolicy,
 }
 
 impl Default for SyntheticOutputConfig {
@@ -313,6 +315,7 @@ impl Default for SyntheticOutputConfig {
             output_chunk_size: default_output_chunk_size(),
             master_seed: 0,
             retain_batches: false,
+            rotation: hares_io::RotationPolicy::None,
         }
     }
 }
