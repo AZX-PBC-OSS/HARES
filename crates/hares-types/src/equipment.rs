@@ -211,7 +211,9 @@ pub enum ExecutionStage {
 
 /// Runtime operating mode reported by equipment.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumIter)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumIter,
+)]
 pub enum OperatingMode {
     #[default]
     Off = 0,

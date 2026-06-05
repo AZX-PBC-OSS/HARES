@@ -333,6 +333,8 @@ pub struct MetricsCalculator {
 
     #[cfg(feature = "observe")]
     end_use_equipment_counts: BTreeMap<String, usize>,
+    #[cfg(feature = "observe")]
+    nan_skip_count: u64,
 }
 
 #[derive(Debug)]
@@ -499,6 +501,8 @@ impl MetricsCalculator {
             battery_energy_out_kwh: 0.0,
             #[cfg(feature = "observe")]
             end_use_equipment_counts: compute_equipment_counts_from_schema(schema),
+            #[cfg(feature = "observe")]
+            nan_skip_count: 0,
         })
     }
 
@@ -738,6 +742,50 @@ impl MetricsCalculator {
                 tracing::info!(
                     end_use_diagnostics = %parts.join(", "),
                     "end-use metrics at batch boundary"
+                );
+            }
+        }
+
+        #[cfg(feature = "observe")]
+        {
+            let nan_in = |arr: &Float64Array| {
+                (0..batch.num_rows())
+                    .filter(|&i| !arr.is_null(i) && arr.value(i).is_nan())
+                    .count() as u64
+            };
+            let batch_nan = nan_in(total_arr);
+            self.nan_skip_count += batch_nan;
+            if batch_nan > 0 {
+                tracing::debug!(
+                    batch_nan,
+                    total_skipped = self.nan_skip_count,
+                    "NaN values detected and skipped in total electric power column"
+                );
+            }
+        }
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            assert!(
+                !self.total_electric_energy_kwh.is_nan(),
+                "total_electric_energy_kwh is NaN — a NaN value contaminated the accumulator"
+            );
+            assert!(
+                !self.total_consumption_kwh.is_nan(),
+                "total_consumption_kwh is NaN"
+            );
+            assert!(
+                !self.total_gas_energy_therms.is_nan(),
+                "total_gas_energy_therms is NaN"
+            );
+            if self.has_envelope_columns {
+                assert!(
+                    !self.envelope_hvac_heating_wh.is_nan(),
+                    "envelope_hvac_heating_wh is NaN"
+                );
+                assert!(
+                    !self.envelope_hvac_cooling_wh.is_nan(),
+                    "envelope_hvac_cooling_wh is NaN"
                 );
             }
         }
@@ -1059,10 +1107,13 @@ fn as_f64_array(batch: &RecordBatch, index: usize) -> &Float64Array {
 
 fn value_at(arr: &Float64Array, row: usize) -> Option<f64> {
     if arr.is_null(row) {
-        None
-    } else {
-        Some(arr.value(row))
+        return None;
     }
+    let v = arr.value(row);
+    if v.is_nan() {
+        return None;
+    }
+    Some(v)
 }
 
 #[cfg(test)]
@@ -1786,6 +1837,86 @@ mod tests {
             calc.end_use_equipment_counts.get("hvac_heating"),
             Some(&1),
             "must count 1 HVAC_HEATING equipment"
+        );
+    }
+
+    // ── NaN propagation tests ──────────────────────────────────────────
+
+    #[test]
+    fn value_at_returns_none_for_nan() {
+        let arr = Float64Array::from(vec![f64::NAN]);
+        assert_eq!(value_at(&arr, 0), None);
+    }
+
+    #[test]
+    fn value_at_returns_value_for_normal_finite_value() {
+        let arr = Float64Array::from(vec![42.0]);
+        assert_eq!(value_at(&arr, 0), Some(42.0));
+    }
+
+    #[test]
+    fn accumulate_ignores_nan_timestep() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // Row 0: NaN → skipped. Rows 1-2: valid → accumulated.
+        calc.accumulate(&build_batch(vec![(
+            TOTAL_ELECTRIC_POWER_KW,
+            vec![f64::NAN, 1.0, 3.0],
+        )]));
+        let metrics = calc.finish();
+
+        assert!(
+            !metrics.annual_energy_kwh.total.is_nan(),
+            "accumulated total must not be NaN"
+        );
+        // timestep_h = 1.0, so total = 1.0 + 3.0 = 4.0
+        assert!(
+            (metrics.annual_energy_kwh.total - 4.0).abs() < 1e-9,
+            "total should be 4.0 kWh, got {}",
+            metrics.annual_energy_kwh.total
+        );
+    }
+
+    #[test]
+    fn nan_in_power_does_not_poison_envelope() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating Delivered (W)",
+            "HVAC Cooling Delivered (W)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // NaN in total electric power; HVAC columns are valid.
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 1.0]),
+            ("HVAC Heating Delivered (W)", vec![5000.0, 5000.0]),
+            ("HVAC Cooling Delivered (W)", vec![-3000.0, -3000.0]),
+        ]));
+        let metrics = calc.finish();
+
+        let loads = metrics
+            .metrics
+            .envelope_loads_kwh
+            .expect("envelope loads present");
+        assert!(
+            !loads.hvac_heating_kwh.is_nan(),
+            "envelope hvac_heating_kwh must not be NaN"
+        );
+        assert!(
+            !loads.hvac_cooling_kwh.is_nan(),
+            "envelope hvac_cooling_kwh must not be NaN"
+        );
+        // Both rows have valid HVAC data → 2 × 5000 Wh = 10000 Wh = 10 kWh
+        assert!(
+            (loads.hvac_heating_kwh - 10.0).abs() < 1e-9,
+            "hvac heating should be 10.0 kWh, got {}",
+            loads.hvac_heating_kwh
+        );
+        assert!(
+            (loads.hvac_cooling_kwh - (-6.0)).abs() < 1e-9,
+            "hvac cooling should be -6.0 kWh, got {}",
+            loads.hvac_cooling_kwh
         );
     }
 }
