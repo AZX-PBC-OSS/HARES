@@ -142,10 +142,17 @@ pub fn power_w_to_kw(w: f64) -> f64 {
 // 1 therm = 100,000 BTU (IT). uom converts BTU → joule → kWh.
 use uom::si::energy::{btu_it, kilowatt_hour};
 
-/// Convert therms to kilowatt-hours. 1 therm = 100,000 BTU(IT) ≈ 29.3001 kWh.
+/// Convert therms to kilowatt-hours. 1 therm = 100,000 BTU(IT) ≈ 29.3071 kWh.
 #[inline]
 pub fn energy_therms_to_kwh(therms: f64) -> f64 {
     UomEnergy::new::<btu_it>(therms * 100_000.0).get::<kilowatt_hour>()
+}
+
+/// Convert kilowatt-hours to therms. Inverse of `energy_therms_to_kwh`.
+/// 1 therm = 100,000 BTU(IT) ≈ 29.3071 kWh.
+#[inline]
+pub fn energy_kwh_to_therms(kwh: f64) -> f64 {
+    UomEnergy::new::<kilowatt_hour>(kwh).get::<btu_it>() / 100_000.0
 }
 
 // --- Thermal resistance (R-value) and transmittance (U-value) ---
@@ -474,5 +481,23 @@ mod tests {
         approx_eq(power_btuh_to_therms_per_year(100_000.0), 8760.0, 1e-10);
         // 1 Btuh * 8760 / 100000 = 0.08760 therms/year
         approx_eq(power_btuh_to_therms_per_year(1.0), 0.0876, 1e-12);
+    }
+
+    #[test]
+    fn energy_therms_to_kwh_converts() {
+        // 1 therm = 100,000 BTU(IT) ≈ 29.3071 kWh (uom IT BTU → J conversion)
+        let kwh = energy_therms_to_kwh(1.0);
+        approx_eq(kwh, 29.307_1, 1e-3);
+    }
+
+    #[test]
+    fn energy_kwh_to_therms_converts() {
+        // Inverse of therms → kWh; round-trip must hold.
+        let original = 100.0;
+        approx_eq(
+            energy_kwh_to_therms(energy_therms_to_kwh(original)),
+            original,
+            1e-10,
+        );
     }
 }

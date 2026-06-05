@@ -99,6 +99,7 @@ pub(crate) fn child_energy_kwh(node: &XmlNode, child_name: &str) -> Option<f64> 
     match units.as_str() {
         "kwh" | "kwh/year" | "kwh/yr" => Some(value),
         "wh" | "wh/year" | "wh/yr" => Some(value / 1000.0),
+        "therm" | "therm/year" | "therm/yr" => Some(conv::energy_therms_to_kwh(value)),
         other => {
             tracing::warn!(
                 units = other,
@@ -499,6 +500,84 @@ mod tests {
     fn child_load_therms_rejects_unrecognized_unit() {
         let node = load_node(100.0, Some("MW"));
         assert!(child_load_therms(&node).is_none());
+    }
+
+    #[test]
+    fn child_load_kwh_rejects_therm_units() {
+        // cross-unit conversion intentionally NOT added here:
+        // callers use child_load_kwh→Electric, child_load_therms→Gas for fuel type detection.
+        let node = load_node(100.0, Some("therm/year"));
+        assert!(child_load_kwh(&node).is_none());
+    }
+
+    #[test]
+    fn child_load_therms_rejects_kwh_units() {
+        // cross-unit conversion intentionally NOT added here:
+        // callers use child_load_kwh→Electric, child_load_therms→Gas for fuel type detection.
+        let node = load_node(2930.0, Some("kWh"));
+        assert!(child_load_therms(&node).is_none());
+    }
+
+    // --- child_energy_kwh tests ---
+
+    fn energy_node(child_name: &str, value: f64, units: Option<&str>) -> XmlNode {
+        let mut children = vec![XmlNode {
+            name: "Value".to_string(),
+            attrs: HashMap::new(),
+            text: value.to_string(),
+            children: vec![],
+        }];
+        if let Some(u) = units {
+            children.push(XmlNode {
+                name: "Units".to_string(),
+                attrs: HashMap::new(),
+                text: u.to_string(),
+                children: vec![],
+            });
+        }
+        XmlNode {
+            name: "Parent".to_string(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![XmlNode {
+                name: child_name.to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children,
+            }],
+        }
+    }
+
+    #[test]
+    fn child_energy_kwh_parses_kwh() {
+        let node = energy_node("Usage", 100.0, Some("kWh"));
+        assert!((child_energy_kwh(&node, "Usage").unwrap() - 100.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn child_energy_kwh_parses_wh() {
+        let node = energy_node("Usage", 5000.0, Some("Wh"));
+        assert!((child_energy_kwh(&node, "Usage").unwrap() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn child_energy_kwh_converts_therms() {
+        let node = energy_node("Usage", 10.0, Some("therm"));
+        let expected = conv::energy_therms_to_kwh(10.0);
+        assert!((child_energy_kwh(&node, "Usage").unwrap() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn child_energy_kwh_converts_therm_per_year() {
+        let node = energy_node("Usage", 10.0, Some("therm/year"));
+        let expected = conv::energy_therms_to_kwh(10.0);
+        assert!((child_energy_kwh(&node, "Usage").unwrap() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn child_energy_kwh_returns_none_for_unrecognized_unit() {
+        let node = energy_node("Usage", 100.0, Some("gigajoules"));
+        assert!(child_energy_kwh(&node, "Usage").is_none());
     }
 
     #[test]
