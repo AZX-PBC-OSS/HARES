@@ -1118,7 +1118,9 @@ impl CoolingCore {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
                 reactive_power_kvar: None,
                 fuel_w: None,
-                thermal_output_w: Some(-(post_dse_sensible_w + post_dse_latent_w)),
+                thermal_output_w: Some(
+                    -(post_dse_sensible_w + post_dse_latent_w) + fan_heat_w * dse,
+                ),
                 sensible_cooling_w: Some(-post_dse_sensible_w),
                 latent_cooling_w: Some(-post_dse_latent_w),
             },

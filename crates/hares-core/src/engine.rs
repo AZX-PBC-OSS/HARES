@@ -589,7 +589,7 @@ mod tests {
         // Outer catch_unwind: simulates catching a simulation panic.
         let outer = panic::catch_unwind(AssertUnwindSafe(|| {
             let sim_payload: Box<dyn std::any::Any + Send> = Box::new("sim panic");
-            let warnings: Vec<String> = Vec::new();
+            let _warnings: Vec<String> = Vec::new();
 
             // Inner catch_unwind: guards the error-handling block.
             let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {

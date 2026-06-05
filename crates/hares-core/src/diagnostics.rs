@@ -904,7 +904,7 @@ fn zone_name_for(id: ZoneId, zone_names: &[String]) -> String {
 mod tests {
     use std::io::Cursor;
 
-    use chrono::{DateTime, Duration, FixedOffset};
+    use chrono::{DateTime, Duration};
 
     use hares_types::{EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState};
 

@@ -32,8 +32,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hares_core::Dwelling;
 use hares_core::actors::IdealThermostat;
-use hares_core::{Actor, Dwelling};
 
 // ---------------------------------------------------------------------------
 // Helpers

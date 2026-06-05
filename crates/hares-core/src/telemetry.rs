@@ -32,9 +32,38 @@ pub struct DwellingTelemetry {
     /// 0/1 flag indicating whether the dwelling has been marked as permanently
     /// failed after a prior panic and will not be stepped again.
     pub dwelling_failed: bool,
+    /// False when telemetry self-consistency checks (electrical sum, per-zone
+    /// thermal totals) detect a mismatch. Consumers should inspect this flag
+    /// before using the snapshot. Always `true` in release builds where the
+    /// checks are not compiled in.
+    pub telemetry_consistency_flag: bool,
 }
 
 impl DwellingTelemetry {
+    /// Verifies that `sum(equipment_power_kw) ≈ total_power_kw` within
+    /// `max(0.001, 1e-6 * |total_power_kw|)`. Sets `telemetry_consistency_flag`
+    /// to `false` and emits a `tracing::warn!` on mismatch.
+    ///
+    /// Gated behind `debug_assertions` or `check_invariants` for zero
+    /// production overhead.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    pub fn verify_consistency(&mut self, step: u64) {
+        let sum_equip: f64 = self.equipment_power_kw.iter().sum();
+        let total = self.total_power_kw;
+        let tolerance = 0.001_f64.max(1e-6 * total.abs());
+        let diff = (sum_equip - total).abs();
+        if diff > tolerance {
+            self.telemetry_consistency_flag = false;
+            tracing::warn!(
+                step = step,
+                sum_equipment_power_kw = sum_equip,
+                total_power_kw = total,
+                diff_kw = diff,
+                "Telemetry consistency: sum(equipment_power_kw) does not match total_power_kw"
+            );
+        }
+    }
+
     /// Selects named observation channels into a flat contiguous vector.
     pub fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError> {
         let mut out = Vec::with_capacity(fields.len());
@@ -179,6 +208,7 @@ mod tests {
             outdoor_humidity_ratio: 0.008,
             actor_telemetry: HashMap::new(),
             dwelling_failed: false,
+            telemetry_consistency_flag: true,
         }
     }
 
@@ -238,5 +268,67 @@ mod tests {
         let t = sample();
         let err = t.to_observation_vec(&["outdoor_rh"]).unwrap_err();
         assert!(err.to_string().contains("unknown telemetry field"));
+    }
+
+    #[test]
+    fn consistency_flag_defaults_true() {
+        let t = sample();
+        assert!(t.telemetry_consistency_flag);
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn consistency_check_flags_mismatched_electrical_power() {
+        let mut t = sample();
+        t.equipment_power_kw = vec![1.0, 2.0];
+        t.total_power_kw = 10.0;
+        t.telemetry_consistency_flag = true;
+        t.verify_consistency(0);
+        assert!(
+            !t.telemetry_consistency_flag,
+            "consistency flag should be false when sum(equipment_power) != total_power"
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn consistency_check_passes_when_power_matches() {
+        let mut t = sample();
+        t.equipment_power_kw = vec![1.0, 2.0, 3.0];
+        t.total_power_kw = 6.0;
+        t.telemetry_consistency_flag = true;
+        t.verify_consistency(0);
+        assert!(
+            t.telemetry_consistency_flag,
+            "consistency flag should remain true when sum(equipment_power) == total_power"
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn consistency_check_detects_small_mismatch() {
+        let mut t = sample();
+        t.equipment_power_kw = vec![10.0];
+        t.total_power_kw = 10.1;
+        t.telemetry_consistency_flag = true;
+        t.verify_consistency(0);
+        assert!(
+            !t.telemetry_consistency_flag,
+            "0.1 kW mismatch exceeds 0.001 kW tolerance and should be flagged"
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn consistency_check_tolerates_sub_milliwatt_error() {
+        let mut t = sample();
+        t.equipment_power_kw = vec![100.0];
+        t.total_power_kw = 100.0001;
+        t.telemetry_consistency_flag = true;
+        t.verify_consistency(0);
+        assert!(
+            t.telemetry_consistency_flag,
+            "0.0001 kW error is within 0.001 kW absolute tolerance"
+        );
     }
 }

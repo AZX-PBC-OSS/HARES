@@ -1146,6 +1146,11 @@ pub struct Dwelling {
         any(debug_assertions, feature = "check_invariants")
     ))]
     invariant_moisture_capture: Vec<MoistureZoneInvariant>,
+    /// Thermal consistency flag computed during `run_timestep` before ports
+    /// are zeroed, then consumed by `telemetry()` to populate
+    /// `telemetry_consistency_flag`.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    thermal_consistency_flag: bool,
     /// Set to `true` when `load_checkpoint` restores state. The first
     /// post-restore `run_timestep` asserts that `equipment_core` is populated
     /// for every equipment instance, then resets this flag to `false`.
@@ -1974,6 +1979,8 @@ impl Dwelling {
             custom_update_bufs: Vec::new(),
             #[cfg(debug_assertions)]
             stage_snapshot: None,
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            thermal_consistency_flag: true,
             equipment_column_map,
             end_use_aggregate_indices,
             output_column_index,
@@ -3120,7 +3127,7 @@ impl Dwelling {
             }
         }
 
-        DwellingTelemetry {
+        let mut telem = DwellingTelemetry {
             timestep_index: self.clock.current_step(),
             current_time: self.latest_env.current_time,
             zone_names,
@@ -3138,7 +3145,96 @@ impl Dwelling {
             outdoor_humidity_ratio: self.latest_env.weather.outdoor_humidity_ratio,
             actor_telemetry,
             dwelling_failed: self.failed,
+            telemetry_consistency_flag: true,
+        };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let step = self.clock.current_step();
+            telem.verify_consistency(step);
+            telem.telemetry_consistency_flag =
+                telem.telemetry_consistency_flag && self.thermal_consistency_flag;
         }
+
+        telem
+    }
+
+    /// Per-zone thermal consistency check: compares HVAC heating and cooling
+    /// port-accumulated totals (sensible + radiant + latent) against the sum
+    /// of equipment `thermal_output_w` for HVAC equipment assigned to each zone.
+    ///
+    /// Only `HvacHeating` and `HvacCooling` categories are compared. All
+    /// other thermal categories (`InternalGain`, `JacketLoss`, `DuctLoss`,
+    /// `HvacDehumidification`) are intentionally excluded: occupant gains,
+    /// appliance waste heat, and non-HVAC equipment deposits do not
+    /// correspond to any equipment's `thermal_output_w` and would produce
+    /// false-positive mismatches on every timestep in realistic residential
+    /// simulations.
+    ///
+    /// Only equipment with `end_use == HVAC_HEATING` or `end_use ==
+    /// HVAC_COOLING` is included in the equipment-side sum.  Water heaters,
+    /// scheduled loads, EV chargers, batteries, PV, and other non-HVAC
+    /// equipment are excluded even when they have a zone assigned and set
+    /// `thermal_output_w`, because they do not deposit via `HvacHeating` or
+    /// `HvacCooling` ports.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn verify_per_zone_thermal_consistency(&self, step: u64) -> bool {
+        let port_by_zone: HashMap<ZoneId, f64> = self
+            .ports
+            .thermal
+            .iter()
+            .map(|a| {
+                let cat_total: f64 = [ThermalCategory::HvacHeating, ThermalCategory::HvacCooling]
+                    .into_iter()
+                    .map(|cat| {
+                        a.sensible_for_category(cat)
+                            + a.radiant_for_category(cat)
+                            + a.latent_for_category(cat)
+                    })
+                    .sum();
+                (a.zone, cat_total)
+            })
+            .collect();
+
+        let equip_by_zone: HashMap<ZoneId, f64> = {
+            let mut map: HashMap<ZoneId, f64> = HashMap::new();
+            for eq in &self.equipment {
+                let desc = eq.descriptor();
+                if let Some(zone) = desc.zone {
+                    if desc.end_use == EndUse::HVAC_HEATING || desc.end_use == EndUse::HVAC_COOLING
+                    {
+                        let thermal_w = eq.core_output().flows.thermal_output_w.unwrap_or(0.0);
+                        *map.entry(zone).or_insert(0.0) += thermal_w;
+                    }
+                }
+            }
+            map
+        };
+
+        let all_zones: HashSet<ZoneId> = port_by_zone
+            .keys()
+            .chain(equip_by_zone.keys())
+            .copied()
+            .collect();
+
+        for zone in all_zones {
+            let port_total = port_by_zone.get(&zone).copied().unwrap_or(0.0);
+            let equip_total = equip_by_zone.get(&zone).copied().unwrap_or(0.0);
+            let tolerance = 1.0_f64.max(1e-6 * port_total.abs());
+            let diff = (port_total - equip_total).abs();
+            if diff > tolerance {
+                tracing::warn!(
+                    step = step,
+                    zone = ?zone,
+                    port_total_w = port_total,
+                    equip_total_w = equip_total,
+                    diff_w = diff,
+                    "Telemetry consistency: per-zone thermal totals do not match equipment contributions"
+                );
+                return false;
+            }
+        }
+        true
     }
 
     /// Drains and returns warning messages accumulated since the previous call.
@@ -4797,6 +4893,11 @@ impl Dwelling {
         // ORDERING: ports.zero() must come AFTER check_invariants() (called above)
         // because the electrical balance check reads self.ports.electrical.load_power_w
         // and generation_power_w to compute the ZIP-adjusted port net.
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            self.thermal_consistency_flag =
+                self.verify_per_zone_thermal_consistency(self.clock.current_step());
+        }
         self.ports.zero();
         let _ = self.clock.next();
 
@@ -6353,6 +6454,116 @@ mod tests {
         }
     }
 
+    /// Test equipment that correctly deposits power into ports but
+    /// under-reports electric power in `core_output()`, used to verify
+    /// the telemetry consistency check catches the discrepancy.
+    struct UnderReportingEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        true_power_kw: f64,
+        reported_power_kw: f64,
+        ports: Vec<PortDeclaration>,
+    }
+
+    impl UnderReportingEquipment {
+        fn new(name: &str, true_power_kw: f64, reported_power_kw: f64) -> Self {
+            let mut co = CoreOutput::default();
+            co.flows.electric_kw =
+                Some(hares_types::ElectricPower::consumption(reported_power_kw).unwrap());
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(99),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("UnderReportingEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Independent,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::ELECTRIC,
+                    telemetry_fields: vec![TelemetryField {
+                        name: "power_kw".to_string(),
+                        unit: "kW".to_string(),
+                        description: "electrical power".to_string(),
+                    }],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::with_capacity(1),
+                core_output: co,
+                true_power_kw,
+                reported_power_kw,
+                ports: vec![PortDeclaration::electrical()],
+            }
+        }
+    }
+
+    impl Equipment for UnderReportingEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.telemetry.insert("power_kw", self.reported_power_kw);
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_w: self.true_power_kw * 1000.0,
+                reactive_power_kvar: 0.0,
+            })?;
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+    }
+
     struct DispatchAwareThermalEquipment {
         descriptor: EquipmentDescriptor,
         mode_override: Option<OperatingMode>,
@@ -6455,6 +6666,344 @@ mod tests {
         }
     }
 
+    struct ThermalUnderReportingEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        deposited_thermal_w: f64,
+        ports: Vec<PortDeclaration>,
+    }
+
+    impl ThermalUnderReportingEquipment {
+        fn new(name: &str, deposited_thermal_w: f64, reported_thermal_w: f64) -> Self {
+            let mut co = CoreOutput::default();
+            co.flows.thermal_output_w = Some(reported_thermal_w);
+            co.flows.electric_kw = Some(hares_types::ElectricPower::consumption(0.0).unwrap());
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(100),
+                    name: name.to_string(),
+                    end_use: EndUse::HVAC_HEATING,
+                    equipment_type: Cow::Borrowed("ThermalUnderReportingEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Thermal,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::THERMAL,
+                    telemetry_fields: vec![TelemetryField {
+                        name: "thermal_output_w".to_string(),
+                        unit: "W".to_string(),
+                        description: "thermal output".to_string(),
+                    }],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::with_capacity(1),
+                core_output: co,
+                deposited_thermal_w,
+                ports: vec![
+                    PortDeclaration::electrical(),
+                    PortDeclaration::thermal(ZoneId(1)),
+                ],
+            }
+        }
+    }
+
+    impl Equipment for ThermalUnderReportingEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.telemetry.insert(
+                "thermal_output_w",
+                self.core_output.flows.thermal_output_w.unwrap_or(0.0),
+            );
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Heating
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            ports.accumulate(&PortContribution::Thermal {
+                zone: ZoneId(1),
+                sensible_gain_w: self.deposited_thermal_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::HvacHeating,
+            })?;
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+    }
+
+    struct WaterHeatingEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        thermal_w: f64,
+        ports: Vec<PortDeclaration>,
+    }
+
+    impl WaterHeatingEquipment {
+        fn new(name: &str, thermal_w: f64) -> Self {
+            let mut co = CoreOutput::default();
+            co.flows.thermal_output_w = Some(thermal_w);
+            co.flows.electric_kw = Some(hares_types::ElectricPower::consumption(0.0).unwrap());
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(200),
+                    name: name.to_string(),
+                    end_use: EndUse::WATER_HEATING,
+                    equipment_type: Cow::Borrowed("WaterHeatingEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Thermal,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::THERMAL,
+                    telemetry_fields: vec![TelemetryField {
+                        name: "thermal_output_w".to_string(),
+                        unit: "W".to_string(),
+                        description: "thermal output".to_string(),
+                    }],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::with_capacity(1),
+                core_output: co,
+                thermal_w,
+                ports: vec![
+                    PortDeclaration::electrical(),
+                    PortDeclaration::thermal(ZoneId(1)),
+                ],
+            }
+        }
+    }
+
+    impl Equipment for WaterHeatingEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), HaresError> {
+            self.telemetry.insert(
+                "thermal_output_w",
+                self.core_output.flows.thermal_output_w.unwrap_or(0.0),
+            );
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), HaresError> {
+            ports.accumulate(&PortContribution::Thermal {
+                zone: ZoneId(1),
+                sensible_gain_w: self.thermal_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })?;
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(&mut self, _state: &[u8]) -> std::result::Result<(), HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), HaresError> {
+            Ok(())
+        }
+    }
+
+    struct CoolingWithLatentEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+        sensible_w: f64,
+        latent_w: f64,
+        ports: Vec<PortDeclaration>,
+    }
+
+    impl CoolingWithLatentEquipment {
+        fn new(name: &str, sensible_w: f64, latent_w: f64, reported_thermal_w: f64) -> Self {
+            let mut co = CoreOutput::default();
+            co.flows.thermal_output_w = Some(reported_thermal_w);
+            co.flows.electric_kw = Some(hares_types::ElectricPower::consumption(0.0).unwrap());
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(201),
+                    name: name.to_string(),
+                    end_use: EndUse::HVAC_COOLING,
+                    equipment_type: Cow::Borrowed("CoolingWithLatentEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Thermal,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::THERMAL,
+                    telemetry_fields: vec![TelemetryField {
+                        name: "thermal_output_w".to_string(),
+                        unit: "W".to_string(),
+                        description: "thermal output".to_string(),
+                    }],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::with_capacity(1),
+                core_output: co,
+                sensible_w,
+                latent_w,
+                ports: vec![
+                    PortDeclaration::electrical(),
+                    PortDeclaration::thermal(ZoneId(1)),
+                ],
+            }
+        }
+    }
+
+    impl Equipment for CoolingWithLatentEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), HaresError> {
+            self.telemetry.insert(
+                "thermal_output_w",
+                self.core_output.flows.thermal_output_w.unwrap_or(0.0),
+            );
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), HaresError> {
+            ports.accumulate(&PortContribution::Thermal {
+                zone: ZoneId(1),
+                sensible_gain_w: self.sensible_w,
+                radiant_gain_w: 0.0,
+                latent_gain_w: self.latent_w,
+                category: ThermalCategory::HvacCooling,
+            })?;
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(&mut self, _state: &[u8]) -> std::result::Result<(), HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), HaresError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn stage_rank_orders_execution_stages() {
         assert!(stage_rank(ExecutionStage::Independent) < stage_rank(ExecutionStage::Electrical));
@@ -6479,6 +7028,128 @@ mod tests {
         let telemetry = dwelling.telemetry();
 
         assert!((telemetry.reactive_power_kvar - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn telemetry_consistency_flag_goes_false_when_equipment_under_reports_power() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let mut eq = UnderReportingEquipment::new("UnderReporter", 3.0, 1.0);
+        eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init under-reporting equipment");
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+
+        dwelling.run_timestep(false).expect("dwelling step");
+        let telemetry = dwelling.telemetry();
+
+        assert!(
+            !telemetry.telemetry_consistency_flag,
+            "consistency check should detect equipment reporting 1.0 kW while depositing 3.0 kW into electrical port"
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn telemetry_consistency_flag_goes_false_when_thermal_equipment_under_reports() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let mut eq = ThermalUnderReportingEquipment::new("ThermalUnderReporter", 1000.0, 50.0);
+        eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init thermal under-reporting equipment");
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+
+        dwelling.run_timestep(false).expect("dwelling step");
+        let telemetry = dwelling.telemetry();
+
+        assert!(
+            !telemetry.telemetry_consistency_flag,
+            "thermal consistency check should detect equipment reporting 50 W while depositing 1000 W into HvacHeating port"
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn thermal_consistency_excludes_water_heating_by_end_use() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let mut eq = WaterHeatingEquipment::new("IndirectTank", 1000.0);
+        eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init water heating equipment");
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+
+        dwelling.run_timestep(false).expect("dwelling step");
+        let telemetry = dwelling.telemetry();
+
+        assert!(
+            telemetry.telemetry_consistency_flag,
+            "water heating equipment depositing 1000 W via JacketLoss with thermal_output_w=1000 W \
+             should be excluded from thermal consistency check (end_use != HVAC_HEATING/COOLING)"
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn thermal_consistency_accounts_for_latent_cooling() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        // Deposit -1000 W sensible + -200 W latent = -1200 W total cooling.
+        // Reported thermal_output_w = -1200 W matches total port deposit.
+        let mut eq = CoolingWithLatentEquipment::new("CoolingEq", -1000.0, -200.0, -1200.0);
+        eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init cooling equipment");
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+
+        dwelling.run_timestep(false).expect("dwelling step");
+        let telemetry = dwelling.telemetry();
+
+        assert!(
+            telemetry.telemetry_consistency_flag,
+            "cooling equipment depositing -1000 W sensible + -200 W latent with \
+             thermal_output_w=-1200 W should match when latent is included in port comparison"
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn thermal_consistency_detects_cooling_latent_mismatch() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        // Deposit -1000 W sensible + -200 W latent = -1200 W total cooling.
+        // Reported thermal_output_w = -1000 W omits latent and under-reports.
+        let mut eq = CoolingWithLatentEquipment::new("CoolingEq", -1000.0, -200.0, -1000.0);
+        eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init cooling equipment");
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+
+        dwelling.run_timestep(false).expect("dwelling step");
+        let telemetry = dwelling.telemetry();
+
+        assert!(
+            !telemetry.telemetry_consistency_flag,
+            "thermal consistency should detect -200 W latent mismatch when equipment \
+             reports thermal_output_w=-1000 W but ports receive -1200 W total"
+        );
     }
 
     #[test]
