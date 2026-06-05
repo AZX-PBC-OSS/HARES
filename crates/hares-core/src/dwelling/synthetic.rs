@@ -132,6 +132,11 @@ pub(crate) struct SyntheticGeometryConfig {
     pub(crate) floor_area_m2: f64,
     pub(crate) zone_volume_m3: f64,
     #[serde(default = "default_wall_area_m2")]
+    #[allow(dead_code)]
+    // Why: wall_area_m2 is parsed from 30+ existing TOML configs and test
+    // fixtures for backward compatibility but is no longer read by
+    // build_synthetic_building — T-0226 replaces the single-wall default
+    // with geometry-derived wall areas from floor_area and zone_volume.
     pub(crate) wall_area_m2: f64,
     #[serde(default)]
     pub(crate) mass_multiplier: Option<f64>,
@@ -921,13 +926,33 @@ pub(crate) fn build_synthetic_building(
             })
             .collect()
     } else {
-        vec![Boundary {
-            id: "wall-1".to_string(),
+        // Auto-generate a closed six-face thermal envelope from geometry
+        // when no [[boundaries]] are specified.  Each face uses the
+        // configured wall R-value and connects the conditioned zone to
+        // outdoor (walls + roof) or ground (floor).
+        //
+        // Footprint is square (aspect ratio 1.0).  Ceiling height is
+        // inferred from zone volume / floor area.  This replaces the
+        // pre-T-0226 single-wall default which produced a non-physical
+        // open envelope with one vertical surface.
+        let ceiling_height_m = if config.geometry.floor_area_m2 > 0.0 {
+            config.geometry.zone_volume_m3 / config.geometry.floor_area_m2
+        } else {
+            // Fallback to a reasonable ceiling height when floor area
+            // is zero (should not occur in normal configs).
+            2.5
+        };
+        let side_length_m = config.geometry.floor_area_m2.sqrt();
+        let wall_area_m2 = side_length_m * ceiling_height_m;
+        let r_value = config.materials.wall_r_value_m2_k_w;
+
+        let make_wall = |id: &str, azimuth: f64| Boundary {
+            id: id.to_string(),
             boundary_type: BoundaryType::Wall,
-            area_m2: config.geometry.wall_area_m2,
-            azimuth_deg: Some(180.0),
-            assembly_r_value_m2_k_w: Some(config.materials.wall_r_value_m2_k_w),
-            r_value_layers_m2_k_w: vec![config.materials.wall_r_value_m2_k_w],
+            area_m2: wall_area_m2,
+            azimuth_deg: Some(azimuth),
+            assembly_r_value_m2_k_w: Some(r_value),
+            r_value_layers_m2_k_w: vec![r_value],
             interior_zone: Some(ZoneType::Conditioned),
             exterior_zone: Some(ZoneType::Outdoor),
             material_layers: Vec::new(),
@@ -944,7 +969,42 @@ pub(crate) fn build_synthetic_building(
             perimeter_m: None,
             perimeter_insulation_r_m2_k_w: None,
             foundation_depth_m: None,
-        }]
+        };
+
+        let make_horizontal =
+            |id: &str, btype: BoundaryType, ext_zone: ZoneType, tilt: f64| Boundary {
+                id: id.to_string(),
+                boundary_type: btype,
+                area_m2: config.geometry.floor_area_m2,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: Some(r_value),
+                r_value_layers_m2_k_w: vec![r_value],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ext_zone),
+                material_layers: Vec::new(),
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(tilt),
+                framing_factor: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            };
+
+        vec![
+            make_wall("wall-north", 0.0),
+            make_wall("wall-east", 90.0),
+            make_wall("wall-south", 180.0),
+            make_wall("wall-west", 270.0),
+            make_horizontal("roof", BoundaryType::Roof, ZoneType::Outdoor, 0.0),
+            make_horizontal("floor", BoundaryType::Floor, ZoneType::Ground, 180.0),
+        ]
     };
 
     let windows: Vec<Window> = config
@@ -1064,6 +1124,54 @@ pub(crate) fn build_synthetic_building(
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        // Verify the synthetic building has a closed thermal envelope.
+        // A single-boundary envelope (the pre-T-0226 default) is an open,
+        // non-physical geometry.  We require at minimum two of the three
+        // structural face categories (Wall, Roof, Floor) when the zone
+        // volume is non-zero.
+        if config.geometry.zone_volume_m3 > 0.0 {
+            let non_window: Vec<&Boundary> = boundaries
+                .iter()
+                .filter(|b| b.boundary_type != BoundaryType::Window)
+                .collect();
+            let has_wall = non_window
+                .iter()
+                .any(|b| b.boundary_type == BoundaryType::Wall);
+            let has_roof = non_window
+                .iter()
+                .any(|b| b.boundary_type == BoundaryType::Roof);
+            let has_floor = non_window
+                .iter()
+                .any(|b| b.boundary_type == BoundaryType::Floor);
+            let face_categories = [has_wall, has_roof, has_floor]
+                .iter()
+                .filter(|&&x| x)
+                .count();
+            if face_categories < 2 {
+                tracing::error!(
+                    zone_volume_m3 = config.geometry.zone_volume_m3,
+                    boundary_count = non_window.len(),
+                    has_wall,
+                    has_roof,
+                    has_floor,
+                    "Synthetic building envelope is incomplete: fewer than 2 of 3 required \
+                     face categories (Wall, Roof, Floor) are present"
+                );
+            }
+            if non_window.len() == 1 {
+                tracing::error!(
+                    zone_volume_m3 = config.geometry.zone_volume_m3,
+                    single_boundary_id = %non_window[0].id,
+                    single_boundary_type = ?non_window[0].boundary_type,
+                    "Synthetic building has only one non-window boundary with non-zero \
+                     zone volume; thermal envelope is open and non-physical"
+                );
             }
         }
     }
@@ -1686,6 +1794,7 @@ pub(crate) fn hot_path_alloc_counter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hares_io::hpxml::{BoundaryType, ZoneType};
 
     // -------------------------------------------------------------------------
     // T-0188: Clear-sky solar irradiance in synthetic weather
@@ -2774,6 +2883,299 @@ attached_to_wall_id = "south-wall"
         assert!(
             (total - expected_total).abs() < 1e-9,
             "Total boundary area should be {expected_total} m² (no double-counting), got {total}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // T-0226: Auto-generated six-face envelope
+    // -------------------------------------------------------------------------
+
+    /// When no `[[boundaries]]` are configured, the builder auto-generates a
+    /// closed six-face envelope: four vertical walls, a horizontal roof, and a
+    /// horizontal floor.  Wall area is derived from floor area and ceiling
+    /// height with a square footprint (aspect ratio 1.0).
+    #[test]
+    fn default_no_boundaries_auto_generates_six_face_envelope() {
+        let toml = r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+[materials]
+wall_r_value_m2_k_w = 2.5
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        // Exclude windows from the face count (none configured here).
+        let non_window: Vec<_> = building
+            .boundaries
+            .iter()
+            .filter(|b| b.boundary_type != BoundaryType::Window)
+            .collect();
+
+        // Must have exactly 6 faces: 4 walls + roof + floor.
+        assert_eq!(
+            non_window.len(),
+            6,
+            "Expected 6 envelope faces, got {}: {:?}",
+            non_window.len(),
+            non_window.iter().map(|b| &b.id).collect::<Vec<_>>()
+        );
+
+        let walls: Vec<_> = non_window
+            .iter()
+            .filter(|b| b.boundary_type == BoundaryType::Wall)
+            .collect();
+        assert_eq!(walls.len(), 4, "Expected 4 walls, got {}", walls.len());
+
+        let roof = non_window
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof)
+            .expect("roof must exist");
+        let floor = non_window
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Floor)
+            .expect("floor must exist");
+
+        // Ceiling height = 120 / 48 = 2.5 m.
+        // Side length = sqrt(48) ≈ 6.9282 m.
+        // Each wall area = 6.9282 * 2.5 ≈ 17.3205 m².
+        let expected_wall_area = (48.0_f64).sqrt() * (120.0 / 48.0);
+        for wall in &walls {
+            assert!(
+                (wall.area_m2 - expected_wall_area).abs() < 1e-9,
+                "Wall {} area {:.6} != expected {:.6}",
+                wall.id,
+                wall.area_m2,
+                expected_wall_area
+            );
+        }
+
+        // Roof and floor area = floor_area_m2 = 48.0 m².
+        assert!(
+            (roof.area_m2 - 48.0).abs() < 1e-9,
+            "Roof area {:.6} != 48.0",
+            roof.area_m2
+        );
+        assert!(
+            (floor.area_m2 - 48.0).abs() < 1e-9,
+            "Floor area {:.6} != 48.0",
+            floor.area_m2
+        );
+
+        // All faces share the configured R-value.
+        for face in &non_window {
+            assert_eq!(
+                face.assembly_r_value_m2_k_w,
+                Some(config.materials.wall_r_value_m2_k_w),
+                "Face {} has wrong R-value",
+                face.id
+            );
+        }
+
+        // Wall azimuths must be 0°, 90°, 180°, 270°.
+        let mut azimuths: Vec<f64> = walls.iter().map(|w| w.azimuth_deg.unwrap()).collect();
+        azimuths.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(
+            azimuths,
+            vec![0.0, 90.0, 180.0, 270.0],
+            "Wall azimuths should be N/E/S/W"
+        );
+
+        // All walls are vertical, roof is horizontal facing up, floor is
+        // horizontal facing down.
+        for wall in &walls {
+            assert_eq!(
+                wall.tilt_deg,
+                Some(90.0),
+                "Wall {} tilt should be 90°",
+                wall.id
+            );
+        }
+        assert_eq!(roof.tilt_deg, Some(0.0), "Roof tilt should be 0°");
+        assert_eq!(floor.tilt_deg, Some(180.0), "Floor tilt should be 180°");
+
+        // Wall exterior = Outdoor, floor exterior = Ground, roof exterior = Outdoor.
+        assert_eq!(roof.exterior_zone, Some(ZoneType::Outdoor));
+        assert_eq!(floor.exterior_zone, Some(ZoneType::Ground));
+        for wall in &walls {
+            assert_eq!(wall.exterior_zone, Some(ZoneType::Outdoor));
+        }
+    }
+
+    /// When explicit `[[boundaries]]` are configured, the auto-generation
+    /// path is skipped and the explicit boundaries are used unchanged.
+    #[test]
+    fn explicit_boundaries_not_affected_by_auto_generation() {
+        let toml = r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 86400
+[geometry]
+floor_area_m2 = 100.0
+zone_volume_m3 = 300.0
+[materials]
+wall_r_value_m2_k_w = 3.0
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "custom-wall"
+boundary_type = "Wall"
+area_m2 = 25.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "custom-roof"
+boundary_type = "Roof"
+area_m2 = 100.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        // The builder must use the explicit boundaries, not auto-generate.
+        assert_eq!(
+            building.boundaries.len(),
+            2,
+            "Should have exactly 2 explicit boundaries"
+        );
+        assert!(building.boundaries.iter().any(|b| b.id == "custom-wall"));
+        assert!(building.boundaries.iter().any(|b| b.id == "custom-roof"));
+
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "custom-wall")
+            .expect("custom-wall must exist");
+        assert!(
+            (wall.area_m2 - 25.0).abs() < 1e-9,
+            "Custom wall area should be 25.0 m², got {}",
+            wall.area_m2
+        );
+    }
+
+    /// Benchmark-style TOML (matching `benches/common.rs::synthetic_toml_case`)
+    /// produces a six-face envelope with total wall area consistent with
+    /// floor area and volume-derived ceiling height.  The pre-T-0226 single-wall
+    /// path produced a non-physical envelope; this test guards against
+    /// regression of that behavior.
+    #[test]
+    fn benchmark_style_default_produces_physically_closed_envelope() {
+        // Mirror the TOML from benches/common.rs::synthetic_toml_case exactly.
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 25.0
+
+[weather]
+outdoor_temp_c = 8.0
+dew_point_c = 4.0
+rel_humidity_pct = 55.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        let non_window: Vec<_> = building
+            .boundaries
+            .iter()
+            .filter(|b| b.boundary_type != BoundaryType::Window)
+            .collect();
+
+        // Six-face envelope expected.
+        assert_eq!(
+            non_window.len(),
+            6,
+            "Benchmark-style default should produce 6 envelope faces"
+        );
+
+        // Total wall area should be 4 * sqrt(48) * (120/48) ≈ 69.28 m²,
+        // not the 145 m² `wall_area_m2` from the old single-wall path.
+        let ceiling_height_m = 120.0 / 48.0;
+        let side_m = 48.0_f64.sqrt();
+        let expected_wall_area_total = 4.0 * side_m * ceiling_height_m;
+        let actual_wall_area_total: f64 = non_window
+            .iter()
+            .filter(|b| b.boundary_type == BoundaryType::Wall)
+            .map(|b| b.area_m2)
+            .sum();
+        assert!(
+            (actual_wall_area_total - expected_wall_area_total).abs() < 1e-9,
+            "Total wall area {actual_wall_area_total} != expected {expected_wall_area_total}"
+        );
+
+        // The old single-wall area (145 m²) must NOT match — this proves
+        // the envelope is no longer a single inflated wall.
+        assert!(
+            (actual_wall_area_total - 145.0).abs() > 1.0,
+            "Total wall area {actual_wall_area_total} should not match the old 145 m² default"
+        );
+
+        // Roof + floor = 2 * floor_area = 96 m².
+        let roof_area = non_window
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof)
+            .map(|b| b.area_m2)
+            .unwrap();
+        let floor_area_envelope = non_window
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Floor)
+            .map(|b| b.area_m2)
+            .unwrap();
+        assert!(
+            (roof_area - 48.0).abs() < 1e-9,
+            "Roof area {roof_area} != 48.0"
+        );
+        assert!(
+            (floor_area_envelope - 48.0).abs() < 1e-9,
+            "Floor area {floor_area_envelope} != 48.0"
         );
     }
 }
