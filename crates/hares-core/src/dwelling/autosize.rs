@@ -332,8 +332,7 @@ pub fn autosize_equipment_capacities(
 
             // Oversizing factor: prefer HPXML <HeatingAutosizingFactor>;
             // fall back to ACCA Manual S default 1.4x.
-            let has_factor_override =
-                spec.parameters.get("autosize_heating_factor").is_some();
+            let has_factor_override = spec.parameters.get("autosize_heating_factor").is_some();
             let mut factor = spec
                 .parameters
                 .get("autosize_heating_factor")
@@ -1132,9 +1131,7 @@ mod tests {
     fn oversize_factors_match_manual_s() {
         assert!((HEATING_OVERSIZE_FACTOR - 1.4).abs() < f64::EPSILON);
         assert!((COOLING_OVERSIZE_FACTOR - 1.15).abs() < f64::EPSILON);
-        assert!(
-            (HEATING_OVERSIZE_FACTOR_HEAT_PUMP - 1.25).abs() < f64::EPSILON
-        );
+        assert!((HEATING_OVERSIZE_FACTOR_HEAT_PUMP - 1.25).abs() < f64::EPSILON);
     }
 
     #[test]

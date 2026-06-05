@@ -177,6 +177,9 @@ pub fn exterior_longwave_w(
     t_air_c: f64,
     t_surface_c: f64,
 ) -> f64 {
+    if surface.area_m2 == 0.0 {
+        return 0.0;
+    }
     debug_assert!(
         surface.area_m2 > 0.0,
         "exterior_longwave_w: area_m2={} must be positive",

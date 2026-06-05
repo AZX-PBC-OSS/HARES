@@ -37,7 +37,6 @@ pub(crate) struct SyntheticTomlConfig {
     #[serde(default)]
     pub(crate) infiltration: Option<SyntheticInfiltrationConfig>,
     #[serde(default)]
-    #[allow(dead_code)] // parsed from TOML, wired in future ticket
     pub(crate) internal_gains_w: Option<f64>,
     #[serde(default)]
     pub(crate) internal_gains_constant: Option<bool>,
@@ -996,6 +995,102 @@ pub(crate) fn build_synthetic_building(
             perimeter_insulation_r_m2_k_w: None,
             foundation_depth_m: None,
         });
+    }
+
+    // Deduct window areas from host wall areas so the wall's opaque
+    // conduction path uses only the actual opaque area.  Without this,
+    // the wall and window areas are double-counted in the envelope,
+    // inflating overall UA and producing biased heating/cooling loads.
+    let mut wall_original_area: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+    for win in &windows {
+        if let Some(ref wall_id) = win.attached_to_wall_id {
+            if let Some(wall) = boundaries.iter_mut().find(|b| b.id == *wall_id) {
+                wall_original_area
+                    .entry(wall_id.clone())
+                    .or_insert(wall.area_m2);
+                wall.area_m2 -= win.area_m2;
+                if wall.area_m2 < 0.0 {
+                    tracing::warn!(
+                        window_id = %win.id,
+                        host_wall_id = %wall_id,
+                        window_area_m2 = win.area_m2,
+                        host_wall_original_area_m2 = *wall_original_area.get(wall_id).unwrap_or(&0.0),
+                        "Window area exceeds host wall area; clamping wall opaque area to 0.0"
+                    );
+                    wall.area_m2 = 0.0;
+                }
+            }
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    {
+        for boundary in &boundaries {
+            assert!(
+                boundary.area_m2 >= 0.0,
+                "boundary {} has negative area_m2 = {}",
+                boundary.id,
+                boundary.area_m2
+            );
+        }
+        for boundary in &boundaries {
+            if boundary.boundary_type == BoundaryType::Window {
+                continue;
+            }
+            let attached_window_area: f64 = windows
+                .iter()
+                .filter(|w| w.attached_to_wall_id.as_deref() == Some(boundary.id.as_str()))
+                .map(|w| w.area_m2)
+                .sum();
+            if attached_window_area > 0.0 {
+                let reconstructed_original = boundary.area_m2 + attached_window_area;
+                if let Some(&stored_original) = wall_original_area.get(&boundary.id) {
+                    if boundary.area_m2 > 0.0 {
+                        // Normal case: opaque area remaining, so reconstructed
+                        // should equal stored original.
+                        assert!(
+                            (reconstructed_original - stored_original).abs() < 1e-9,
+                            "boundary {}: reconstructed original {reconstructed_original} != stored original {stored_original}",
+                            boundary.id
+                        );
+                    } else {
+                        // Clamped case: reconstructed will be >= stored original
+                        // because window area exceeded wall area.
+                        assert!(
+                            reconstructed_original >= stored_original - 1e-9,
+                            "boundary {}: reconstructed original {reconstructed_original} < stored original {stored_original}",
+                            boundary.id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "observe")]
+    {
+        for boundary in &boundaries {
+            if boundary.boundary_type == BoundaryType::Window {
+                continue;
+            }
+            let window_area: f64 = windows
+                .iter()
+                .filter(|w| w.attached_to_wall_id.as_deref() == Some(boundary.id.as_str()))
+                .map(|w| w.area_m2)
+                .sum();
+            let original_area = boundary.area_m2 + window_area;
+            if original_area > 0.0 {
+                let wwr = window_area / original_area;
+                tracing::debug!(
+                    boundary_id = %boundary.id,
+                    window_to_wall_ratio = wwr,
+                    opaque_area_m2 = boundary.area_m2,
+                    window_area_m2 = window_area,
+                    "Per-boundary WWR diagnostic"
+                );
+            }
+        }
     }
 
     // Build 24-hour setpoint vectors when setpoints are configured.
@@ -2451,6 +2546,234 @@ seasonal_modulation = 0.4
             july_range > jan_range,
             "July daily range ({july_range:.2}) must exceed January daily range ({jan_range:.2}) \
              with seasonal_modulation = 0.4"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // T-0225: Window area deducted from host wall in synthetic builder
+    // -------------------------------------------------------------------------
+
+    /// Window with `attached_to_wall_id` must have its area subtracted from the
+    /// host wall's `area_m2` so the wall's opaque conduction path uses only the
+    /// actual opaque area.
+    #[test]
+    fn window_area_deducted_from_host_wall() {
+        let toml = r#"
+building_id = 1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "wall-1"
+boundary_type = "Wall"
+area_m2 = 10.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[windows]]
+id = "win-1"
+area_m2 = 2.0
+u_factor_w_m2_k = 3.0
+shgc = 0.7
+attached_to_wall_id = "wall-1"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "wall-1")
+            .expect("host wall exists");
+        assert!(
+            (wall.area_m2 - 8.0).abs() < 1e-9,
+            "Wall area after window deduction should be 8.0 m², got {}",
+            wall.area_m2
+        );
+
+        // The window boundary should still exist with its own area.
+        let win_boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "win-1")
+            .expect("window boundary exists");
+        assert!(
+            (win_boundary.area_m2 - 2.0).abs() < 1e-9,
+            "Window boundary area should be 2.0 m², got {}",
+            win_boundary.area_m2
+        );
+
+        // Total boundary area: 8.0 (wall) + 2.0 (window) = 10.0.
+        let total: f64 = building.boundaries.iter().map(|b| b.area_m2).sum();
+        assert!(
+            (total - 10.0).abs() < 1e-9,
+            "Total area should be 10.0 m², got {}",
+            total
+        );
+    }
+
+    /// BESTEST 600 south wall (9.6 m²) has two 6.0 m² windows (12 m² total).
+    /// The south wall opaque area must be clamped to 0.0 when window area
+    /// exceeds wall area, rather than going negative.
+    #[test]
+    fn bestest600_south_wall_area_clamped_to_zero() {
+        let toml = r#"
+building_id = 600
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 3600
+duration_s = 3600
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+[materials]
+wall_r_value_m2_k_w = 2.0
+[hvac]
+equipment_name = "None"
+
+[[boundaries]]
+id = "south-wall"
+boundary_type = "Wall"
+area_m2 = 9.6
+azimuth_deg = 180.0
+tilt_deg = 90.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "north-wall"
+boundary_type = "Wall"
+area_m2 = 21.6
+azimuth_deg = 0.0
+tilt_deg = 90.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "east-wall"
+boundary_type = "Wall"
+area_m2 = 16.2
+azimuth_deg = 90.0
+tilt_deg = 90.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "west-wall"
+boundary_type = "Wall"
+area_m2 = 16.2
+azimuth_deg = 270.0
+tilt_deg = 90.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "roof"
+boundary_type = "Roof"
+area_m2 = 48.0
+tilt_deg = 0.0
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries]]
+id = "floor"
+boundary_type = "Floor"
+area_m2 = 48.0
+tilt_deg = 180.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+[[boundaries.material_layers]]
+thickness_m = 0.01
+conductivity_w_m_k = 0.1
+density_kg_m3 = 500.0
+specific_heat_j_kg_k = 900.0
+
+[[windows]]
+id = "south-window-1"
+area_m2 = 6.0
+azimuth_deg = 180.0
+u_factor_w_m2_k = 3.0
+shgc = 0.789
+attached_to_wall_id = "south-wall"
+
+[[windows]]
+id = "south-window-2"
+area_m2 = 6.0
+azimuth_deg = 180.0
+u_factor_w_m2_k = 3.0
+shgc = 0.789
+attached_to_wall_id = "south-wall"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        let building = build_synthetic_building(&config, None, None);
+
+        let south_wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "south-wall")
+            .expect("south wall exists");
+        assert!(
+            south_wall.area_m2 == 0.0,
+            "South wall area with two 6.0 m² windows should be clamped to 0.0, got {}",
+            south_wall.area_m2
+        );
+
+        // Verify that total envelope area is no longer overestimated.
+        // Walls/roof/floor after deduction:
+        //   south: 9.6 - 12.0 = -2.4 → 0.0
+        //   north: 21.6
+        //   east:  16.2
+        //   west:  16.2
+        //   roof:  48.0
+        //   floor: 48.0
+        // Windows as boundaries:
+        //   south-window-1: 6.0
+        //   south-window-2: 6.0
+        // Total = 0.0+21.6+16.2+16.2+48.0+48.0+6.0+6.0 = 162.0
+        let total: f64 = building.boundaries.iter().map(|b| b.area_m2).sum();
+        let expected_total = 162.0;
+        assert!(
+            (total - expected_total).abs() < 1e-9,
+            "Total boundary area should be {expected_total} m² (no double-counting), got {total}"
         );
     }
 }

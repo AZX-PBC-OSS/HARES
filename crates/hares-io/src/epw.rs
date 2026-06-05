@@ -1204,7 +1204,7 @@ mod tests {
     use super::{
         DOE2_GROUND_DAYS_PER_YEAR, DOE2_GROUND_DIFFUSIVITY, DOE2_GROUND_HOURS_PER_YEAR,
         DOE2_GROUND_PHASE_OFFSET_RAD, DOE2_GROUND_REFERENCE_DEPTH_M, DOE2_MID_MONTH_DAYS,
-        STEFAN_BOLTZMANN, SkyTempModel, WeatherError, DesignConditions,
+        DesignConditions, STEFAN_BOLTZMANN, SkyTempModel, WeatherError,
         berdahl_martin_sky_emissivity, brunt_sky_emissivity, clark_allen_sky_temp_c,
         compute_sky_temp_c, doe2_ground_temp_monthly, idso_sky_emissivity, monthly_day_counts,
         parse_design_conditions, parse_epw, parse_epw_str, sky_temp_from_emissivity,
