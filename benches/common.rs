@@ -1,3 +1,6 @@
+// Each benchmark binary (single_building, fleet, rl_step) uses a different
+// subset of these helpers; unused-per-binary items are not dead code —
+// they are used by sibling binaries that share this module.
 #![allow(dead_code)]
 
 use std::fs;
@@ -126,7 +129,9 @@ pub fn build_dwelling_config(
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
+            retain_batches: false,
             civil_timezone: None,
+            rotation: hares_io::RotationPolicy::default(),
             site_location: hares_io::SiteLocationOverride::default(),
         },
         defaults_path: None,
@@ -134,6 +139,7 @@ pub fn build_dwelling_config(
         bldg_id,
         initialization_duration: None,
         resample_overrides: None,
+        patches: None,
     }
 }
 

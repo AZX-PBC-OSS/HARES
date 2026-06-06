@@ -80,3 +80,80 @@ jobs:
           files: ./coverage.xml
           fail_ci_if_error: false
           verbose: true
+
+  bench:
+    name: "benchmark regression"
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install critcmp
+        run: cargo install critcmp --quiet
+      - name: Get main branch SHA
+        run: |
+          echo "MAIN_SHA=$(git ls-remote origin refs/heads/main | cut -f1 | cut -c1-10)" >> $GITHUB_ENV
+      - name: Cache main benchmark baseline
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: baseline.json
+          key: bench-baseline-${{ env.MAIN_SHA }}-${{ hashFiles('.github/workflows/ci.yml', 'benches/**', 'crates/*/benches/**') }}
+      - name: Generate main baseline
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          git checkout main
+          cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver -- --save-baseline main
+          critcmp --export main > baseline.json
+      - name: Restore PR branch
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: git checkout ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Run PR benchmarks
+        run: cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver -- --save-baseline pr
+      - name: Compare with baseline
+        run: |
+          if [ ! -f baseline.json ]; then
+            echo "::notice::No baseline data available — comparison skipped"
+            exit 0
+          fi
+          critcmp --export pr > current.json
+
+          echo '## Benchmark Comparison' >> "$GITHUB_STEP_SUMMARY"
+          critcmp baseline.json current.json >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+
+          echo "::group::Benchmark Comparison"
+          critcmp baseline.json current.json 2>&1 | tee compare.txt
+          echo "::endgroup::"
+
+          # Compare baseline.json and current.json directly: fail if any
+          # benchmark is >20% slower (current_ns / baseline_ns > 1.20).
+          # critcmp --export produces JSON with benchmark timings at .benchmarks.<name>.criterion_estimates_v1.mean.point_estimate.
+          # jq joins the two exports on benchmark name and computes the ratio.
+          REGRESSIONS_JSON=$(jq -n \
+            --slurpfile base baseline.json \
+            --slurpfile curr current.json \
+            '{ regressions:
+               [ $base[0].benchmarks | to_entries[] |
+                 . as $entry |
+                 ($curr[0].benchmarks[$entry.key].criterion_estimates_v1.mean.point_estimate // empty) as $cns |
+                 ($entry.value.criterion_estimates_v1.mean.point_estimate) as $bns |
+                 select($cns / $bns > 1.20) |
+                 { name: $entry.key,
+                   baseline_ns: $bns,
+                   current_ns: $cns,
+                   pct_slower: ((($cns / $bns - 1) * 1000) | round) / 10 } ]
+            }')
+
+          REGRESSION_COUNT=$(echo "$REGRESSIONS_JSON" | jq '.regressions | length')
+
+          if [ "$REGRESSION_COUNT" -gt 0 ]; then
+            echo "::error::${REGRESSION_COUNT} benchmark(s) regressed more than 20%"
+            echo ""
+            echo "Affected benchmarks:"
+            echo "$REGRESSIONS_JSON" | jq -r '.regressions[] | "  \(.name): +\(.pct_slower)% (\(.current_ns)ns vs baseline \(.baseline_ns)ns)"'
+            exit 1
+          fi
+          echo "No benchmark regressions exceed 20% threshold"
