@@ -27,15 +27,15 @@ eliminates the body entirely.
 
 ### Available Checks (InvariantChecker)
 
-These are the conservation-law checks defined in `InvariantChecker`. Not all
-are wired into `Dwelling::check_invariants` yet — the table notes which are
-currently active.
+These are the conservation-law checks defined in `InvariantChecker`. All are
+currently wired into `Dwelling::check_invariants`.
 
 | Check                     | Equation                                            | Tolerance                          | Fatal? | Wired? |
 |---------------------------|-----------------------------------------------------|------------------------------------|--------|--------|
 | `thermal_balance`         | \|Σ (B_d·u contributions) − Σ C_i·ΔT_i/dt + Σ (A_d−I)·x contributions\| < tol | max(1.0, 1e-6 × gross_flux) | Yes    | Yes    |
-| `electrical_balance`      | \|P_grid + Σ P_equipment\| < tol                    | 0.001 kW                          | Yes    | Yes    |
-| `moisture_balance`        | \|Δm_water − Σ(Q_latent·dt / h_fg)\| < tol         | 1e-6 kg                           | Yes    | No     |
+| `electrical_balance`      | \|P_grid + Σ P_equipment\| < tol                    | max(0.001, 1e-6 × gross_flux) kW  | Yes    | Yes    |
+| `moisture_balance`        | \|Δm_water − Σ(Q_latent·dt / h_fg)\| < tol         | max(5e-4, 1e-4 × gross_moisture_mass_kg) | Yes    | Yes    |
+| `moisture_sorption`       | \|independent_physical_kg − actual_delta_kg\| < tol | max(1.0, 5.0 × gross_moisture_mass_kg) | Yes    | Yes    |
 | `zone_temperature_bounds` | T_conditioned ∈ [−50, 80] °C, finite               | —                                  | Yes    | Yes    |
 | `unconditioned_zone_temperature_bounds` | T_unconditioned ∈ [−50, 120] °C, finite | —                                  | Yes    | Yes    |
 | `tank_temperature_bounds` | T_tank ∈ [0, 100] °C, finite                       | —                                  | Yes    | Yes    |
@@ -52,19 +52,31 @@ floor prevents division-by-zero when gains are near zero.
 
 These fire every timestep after solver resolution but before port zeroing:
 
-| Check                      | What it validates                                              |
-|----------------------------|----------------------------------------------------------------|
-| `timestep_dt`              | dt > 0 and finite                                              |
-| `zone_temperature_bounds`  | Conditioned zone temps within [−50, 80] °C; unconditioned within [−50, 120] °C |
-| `electrical_net_finite`    | `electrical_solver.net_active_kw()` is finite                  |
-| `electrical_balance`       | Solver net matches port accumulation: \|solver + ports\| < 0.001 kW |
-| `thermal_balance`          | Full-system energy conservation: external (B_d·u) + coupling (h) = stored (C·ΔT/dt) + envelope conduction ((A_d−I)·x) |
-| `humidity_payload_finite`  | Every value in humidity domain payload is finite               |
-| `soc_bounds`               | Battery/EV SoC ∈ [0, 1]; warns if out of range (non-fatal)    |
+| Check                               | Error Variant             | What it validates                                              |
+|-------------------------------------|---------------------------|----------------------------------------------------------------|
+| `timestep_dt`                       | `InvariantViolation`      | dt > 0 and finite                                              |
+| `zone_temperature_bounds`           | `InvariantViolation`      | Conditioned zone temps within [−50, 80] °C; unconditioned within [−50, 120] °C |
+| `electrical_net_finite`             | `InvariantViolation`      | `electrical_solver.net_active_kw()` is finite (always-on; fires in all builds) |
+| `zone_temperature_nan`              | `InvariantViolation`      | All zone temperatures are finite — NaN propagates silently through output recording and control (always-on; fires in all builds) |
+| `electrical_balance`                | `InvariantViolation`      | Solver net matches port accumulation: \|solver + ports\| < max(0.001, 1e-6 × gross_flux) kW |
+| `thermal_balance`                   | `InvariantViolation`      | Full-system energy conservation: external (B_d·u) + coupling (h) = stored (C·ΔT/dt) + envelope conduction ((A_d−I)·x) |
+| `humidity_payload_finite`           | `InvariantViolation`      | Every value in humidity domain payload is finite               |
+| `moisture_balance`                  | `InvariantViolation`      | Moisture mass conservation: independently-tracked sources/sinks match solver output |
+| `soc_bounds`                        | none (warn-only)          | Battery/EV SoC ∈ [0, 1]; warns if out of range (non-fatal)    |
+| `electric_fuel_in_fuel_accumulator` | `InvariantViolation`      | Electric power routes through ElectricalAccumulator, never fuel accumulator |
+| `fuel_observer_coverage`            | `InvariantViolation`      | All non-zero fuel accumulator slots have observer coverage     |
+| `hvac_power_non_negative`           | `NegativeDeliveredEnergy` | HVAC heating ≥ 0 W, cooling ≤ 0 W (signed convention)         |
+| `hvac_accumulator`                  | `NegativeDeliveredEnergy` | Per-zone cumulative heating/cooling sign-consistency           |
+| `nan_screen`                        | `NanDetected`             | Key float values screened for NaN before residual computation |
 
 ### Error Reporting
 
-All fatal violations produce:
+Fatal violations produce one of three error variants, depending on the check:
+
+**`HaresError::InvariantViolation`** — used by most checks:
+`thermal_balance`, `electrical_balance`, `moisture_balance`, `moisture_sorption`,
+`equipment_step_order`, `electric_fuel_in_fuel_accumulator`, `fuel_observer_coverage`,
+`tank_temperature_bounds`, and all temperature / finite-value checks.
 
 ```rust
 HaresError::InvariantViolation {
@@ -74,8 +86,31 @@ HaresError::InvariantViolation {
 }
 ```
 
-This halts the dwelling simulation with a descriptive error — no silent
-corruption.
+**`HaresError::NanDetected`** — used by `nan_screen`:
+
+```rust
+HaresError::NanDetected {
+    step_index: u64,         // timestep where NaN was detected
+    zone_id: Option<ZoneId>, // affected zone, if known
+    value_name: String,      // name of the NaN-bearing value
+}
+```
+
+**`HaresError::NegativeDeliveredEnergy`** — used by `hvac_power_non_negative` and `hvac_accumulator`:
+
+```rust
+HaresError::NegativeDeliveredEnergy {
+    zone_id: Option<ZoneId>, // affected zone
+    field: String,           // e.g. "hvac_heating_w", "total_cooling_wh"
+    value: f64,              // violating value
+    step_index: u64,         // timestep where violation was detected
+}
+```
+
+A caller that pattern-matches only on `HaresError::InvariantViolation` will
+silently miss violations from `nan_screen`, `hvac_power_non_negative`, and
+`hvac_accumulator`. All three variants halt the dwelling simulation — no
+silent corruption.
 
 ### Ordering Contract
 
