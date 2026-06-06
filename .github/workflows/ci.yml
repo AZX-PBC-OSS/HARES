@@ -33,3 +33,27 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --workspace -- -D warnings
+
+  test:
+    name: "test (${{ matrix.crate }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - hares-types
+          - hares-physics
+          - hares-envelope
+          - hares-control
+          - hares-equipment
+          - hares-io
+          - hares-core
+          - hares-tariff
+          - hares-fleet
+          - hares-python
+    steps:
+      - uses: actions/checkout@v4
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p ${{ matrix.crate }}
