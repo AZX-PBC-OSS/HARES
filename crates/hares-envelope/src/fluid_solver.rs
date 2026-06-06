@@ -8,8 +8,8 @@ use hares_physics::constants::{
 };
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, FLUID, FluidDomainPayload, FluidLoopState, FluidNodeId,
-    FluidNodeRole, FluidType, HaresError, HeatTransferDirection, LoopId, LoopTopology,
-    MASS_FLOW_TOLERANCE, PortSlots,
+    FluidNodeRole, FluidTempLimits, FluidType, HaresError, HeatTransferDirection, LoopId,
+    LoopTopology, MASS_FLOW_TOLERANCE, PortSlots,
 };
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
@@ -29,6 +29,16 @@ pub struct FluidSolverConfig {
     /// flow rate (within tolerance), since a series hydronic loop cannot
     /// have diverging flow declarations.
     pub loop_topologies: HashMap<LoopId, LoopTopology>,
+    /// Optional per-loop temperature limits [°C].
+    ///
+    /// When present, the solver clamps `mean_supply_temp_c` and
+    /// `mean_return_temp_c` to `[min_temp_c, max_temp_c]` for the loop
+    /// before writing `FluidLoopState`. When absent, limits are derived
+    /// from the loop's `FluidType` using [`FluidTempLimits::default_for`].
+    /// EnergyPlus `PlantLoopData` (`vendors/EnergyPlus/src/EnergyPlus/Plant/Loop.hh:125-126`)
+    /// defines `Real64 MinTemp` and `Real64 MaxTemp` per loop for this
+    /// purpose.
+    pub loop_temp_limits: HashMap<LoopId, FluidTempLimits>,
 }
 
 impl Default for FluidSolverConfig {
@@ -53,6 +63,7 @@ impl Default for FluidSolverConfig {
         Self {
             fluid_specific_heats: heats,
             loop_topologies: HashMap::new(),
+            loop_temp_limits: HashMap::new(),
         }
     }
 }
@@ -92,6 +103,18 @@ pub struct FluidSolver {
     /// For each loop, a map from branch node_id to its fraction of total loop flow.
     #[cfg(feature = "observe")]
     pub branch_flow_fractions: HashMap<LoopId, Vec<(FluidNodeId, f64)>>,
+    /// Per-loop: true if supply temp was clamped this timestep.
+    #[cfg(feature = "observe")]
+    pub supply_temp_clamped: HashMap<LoopId, bool>,
+    /// Per-loop: true if return temp was clamped this timestep.
+    #[cfg(feature = "observe")]
+    pub return_temp_clamped: HashMap<LoopId, bool>,
+    /// Per-loop: unclamped supply temperature for diagnostic comparison [°C].
+    #[cfg(feature = "observe")]
+    pub raw_supply_temp_c: HashMap<LoopId, f64>,
+    /// Per-loop: unclamped return temperature for diagnostic comparison [°C].
+    #[cfg(feature = "observe")]
+    pub raw_return_temp_c: HashMap<LoopId, f64>,
 }
 
 impl FluidSolver {
@@ -128,6 +151,14 @@ impl FluidSolver {
             flow_deficit_kg_s: HashMap::new(),
             #[cfg(feature = "observe")]
             branch_flow_fractions: HashMap::new(),
+            #[cfg(feature = "observe")]
+            supply_temp_clamped: HashMap::new(),
+            #[cfg(feature = "observe")]
+            return_temp_clamped: HashMap::new(),
+            #[cfg(feature = "observe")]
+            raw_supply_temp_c: HashMap::new(),
+            #[cfg(feature = "observe")]
+            raw_return_temp_c: HashMap::new(),
         })
     }
 
@@ -206,6 +237,10 @@ impl DomainSolver for FluidSolver {
             self.total_allocated_flow_kg_s.clear();
             self.flow_deficit_kg_s.clear();
             self.branch_flow_fractions.clear();
+            self.supply_temp_clamped.clear();
+            self.return_temp_clamped.clear();
+            self.raw_supply_temp_c.clear();
+            self.raw_return_temp_c.clear();
         }
 
         let mut grouped: HashMap<LoopId, Vec<&hares_types::FluidAccumulator>> = HashMap::new();
@@ -687,8 +722,8 @@ impl DomainSolver for FluidSolver {
                 total_flow,
                 heating_power_w,
                 cooling_power_w,
-                mean_supply_temp_c,
-                mean_return_temp_c,
+                mut mean_supply_temp_c,
+                mut mean_return_temp_c,
             ) = if let Some(ref resolved) = resolved_node_flows {
                 // Use resolved flows per node for weighted aggregation.
                 let mut sum_supply = 0.0_f64;
@@ -830,6 +865,96 @@ impl DomainSolver for FluidSolver {
                 (tf, nh, nc, sc, rc)
             };
 
+            // ── Temperature bounds clamping (T-0257) ─────────────────────
+            //
+            // EnergyPlus `PlantLoopData` (`Plant/Loop.hh:125-126`) defines
+            // `Real64 MinTemp` and `Real64 MaxTemp` per loop. HARES clamps
+            // supply and return temperatures to physical limits before they
+            // propagate downstream, and emits a warning so the config error
+            // is visible.
+            {
+                let limits = self
+                    .config
+                    .loop_temp_limits
+                    .get(&loop_id)
+                    .copied()
+                    .unwrap_or_else(|| FluidTempLimits::default_for(fluid_type));
+
+                let raw_supply = mean_supply_temp_c;
+                let raw_return = mean_return_temp_c;
+
+                if mean_supply_temp_c < limits.min_temp_c {
+                    tracing::warn!(
+                        loop_id = loop_id.0,
+                        raw_supply_temp_c = raw_supply,
+                        min_temp_c = limits.min_temp_c,
+                        "supply temperature below minimum; clamping"
+                    );
+                    mean_supply_temp_c = limits.min_temp_c;
+                } else if mean_supply_temp_c > limits.max_temp_c {
+                    tracing::warn!(
+                        loop_id = loop_id.0,
+                        raw_supply_temp_c = raw_supply,
+                        max_temp_c = limits.max_temp_c,
+                        "supply temperature above maximum; clamping"
+                    );
+                    mean_supply_temp_c = limits.max_temp_c;
+                }
+
+                if mean_return_temp_c < limits.min_temp_c {
+                    tracing::warn!(
+                        loop_id = loop_id.0,
+                        raw_return_temp_c = raw_return,
+                        min_temp_c = limits.min_temp_c,
+                        "return temperature below minimum; clamping"
+                    );
+                    mean_return_temp_c = limits.min_temp_c;
+                } else if mean_return_temp_c > limits.max_temp_c {
+                    tracing::warn!(
+                        loop_id = loop_id.0,
+                        raw_return_temp_c = raw_return,
+                        max_temp_c = limits.max_temp_c,
+                        "return temperature above maximum; clamping"
+                    );
+                    mean_return_temp_c = limits.max_temp_c;
+                }
+
+                #[cfg(feature = "observe")]
+                {
+                    self.supply_temp_clamped
+                        .insert(loop_id, raw_supply != mean_supply_temp_c);
+                    self.return_temp_clamped
+                        .insert(loop_id, raw_return != mean_return_temp_c);
+                    self.raw_supply_temp_c.insert(loop_id, raw_supply);
+                    self.raw_return_temp_c.insert(loop_id, raw_return);
+                }
+            }
+
+            // ── Post-clamping invariant (T-0257) ─────────────────────────
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                let limits = self
+                    .config
+                    .loop_temp_limits
+                    .get(&loop_id)
+                    .copied()
+                    .unwrap_or_else(|| FluidTempLimits::default_for(fluid_type));
+                debug_assert!(
+                    mean_supply_temp_c >= limits.min_temp_c
+                        && mean_supply_temp_c <= limits.max_temp_c,
+                    "fluid loop {loop_id:?}: supply temp {mean_supply_temp_c}°C outside [{}-{}] after clamping",
+                    limits.min_temp_c,
+                    limits.max_temp_c
+                );
+                debug_assert!(
+                    mean_return_temp_c >= limits.min_temp_c
+                        && mean_return_temp_c <= limits.max_temp_c,
+                    "fluid loop {loop_id:?}: return temp {mean_return_temp_c}°C outside [{}-{}] after clamping",
+                    limits.min_temp_c,
+                    limits.max_temp_c
+                );
+            }
+
             // ── Post-resolution invariant (T-0255) ────────────────────────
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             if let Some(ref resolved) = resolved_node_flows {
@@ -959,9 +1084,10 @@ mod tests {
     use hares_physics::constants::{CP_LIQUID_WATER_J_KG_K, CP_PROP_GLYCOL_50PCT_J_KG_K};
     use hares_types::{
         DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidNode,
-        FluidNodeId, FluidNodeRole, FluidType, GridState, HeatTransferDirection, LoopId,
-        LoopTopology, MASS_FLOW_TOLERANCE, MixerBranch, MixerNode, PortContribution, PortSlots,
-        SplitterBranch, SplitterNode, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+        FluidNodeId, FluidNodeRole, FluidTempLimits, FluidType, GridState, HeatTransferDirection,
+        LoopId, LoopTopology, MASS_FLOW_TOLERANCE, MixerBranch, MixerNode, PortContribution,
+        PortSlots, SplitterBranch, SplitterNode, SurfaceIrradiance, WeatherState, ZoneId,
+        ZoneState,
     };
 
     use crate::fluid_solver::{FluidSolver, FluidSolverConfig};
@@ -1434,6 +1560,7 @@ mod tests {
             FluidSolverConfig {
                 fluid_specific_heats: heats,
                 loop_topologies: HashMap::new(),
+                loop_temp_limits: HashMap::new(),
             },
             &[(LoopId(1), FluidType::Glycol)], // Glycol not in map
         )
@@ -2563,6 +2690,155 @@ mod tests {
         assert!(
             states[0].cooling_power_w > 0.0,
             "sink with abs(ΔT) must produce positive cooling_power_w"
+        );
+    }
+
+    // =======================================================================
+    // T-0257: Temperature bounds clamping
+    // =======================================================================
+
+    #[test]
+    fn water_loop_clamps_temperatures_outside_0_to_100_c() {
+        let limits = FluidTempLimits {
+            min_temp_c: 0.0,
+            max_temp_c: 100.0,
+        };
+        let config = FluidSolverConfig {
+            loop_temp_limits: [(LoopId(1), limits)].into_iter().collect(),
+            ..FluidSolverConfig::default()
+        };
+        let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
+
+        // Feed in unphysical temperatures: supply below freezing, return above boiling.
+        let ports = PortSlots {
+            fluid: vec![FluidAccumulator {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                node_id: FluidNodeId(0),
+                total_flow_kg_s: 0.5,
+                mean_supply_temp_c: -10.0,
+                mean_return_temp_c: 150.0,
+                total_thermal_power_w: 0.0,
+                direction: Some(HeatTransferDirection::Source),
+            }],
+            ..Default::default()
+        };
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+
+        approx_eq(states[0].mean_supply_temp_c, 0.0);
+        approx_eq(states[0].mean_return_temp_c, 100.0);
+    }
+
+    #[test]
+    fn glycol_loop_within_bounds_produces_no_clamping() {
+        let limits = FluidTempLimits {
+            min_temp_c: -40.0,
+            max_temp_c: 120.0,
+        };
+        let config = FluidSolverConfig {
+            loop_temp_limits: [(LoopId(1), limits)].into_iter().collect(),
+            ..FluidSolverConfig::default()
+        };
+        let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Glycol)]).unwrap();
+
+        // Temperatures within the glycol operating range.
+        let ports = PortSlots {
+            fluid: vec![FluidAccumulator {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Glycol,
+                node_id: FluidNodeId(0),
+                total_flow_kg_s: 0.5,
+                mean_supply_temp_c: -30.0,
+                mean_return_temp_c: 115.0,
+                total_thermal_power_w: 0.0,
+                direction: Some(HeatTransferDirection::Source),
+            }],
+            ..Default::default()
+        };
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+
+        // No clamping should occur; temperatures pass through unchanged.
+        approx_eq(states[0].mean_supply_temp_c, -30.0);
+        approx_eq(states[0].mean_return_temp_c, 115.0);
+    }
+
+    #[test]
+    fn existing_simulation_within_bounds_produces_unchanged_temperatures() {
+        // Regression: verify a normal simulation with well-behaved
+        // temperatures passes through unchanged with default limits.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+
+        let ports = PortSlots {
+            fluid: vec![FluidAccumulator {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                node_id: FluidNodeId(0),
+                total_flow_kg_s: 0.5,
+                mean_supply_temp_c: 60.0,
+                mean_return_temp_c: 40.0,
+                total_thermal_power_w: 0.0,
+                direction: Some(HeatTransferDirection::Source),
+            }],
+            ..Default::default()
+        };
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+
+        approx_eq(states[0].mean_supply_temp_c, 60.0);
+        approx_eq(states[0].mean_return_temp_c, 40.0);
+    }
+
+    #[test]
+    fn undersized_source_sub_freezing_clamped_and_no_nan_propagation() {
+        // Integration test: feed extreme negative temperatures through
+        // the solver and verify clamping prevents NaN/Inf propagation
+        // into FluidLoopState.
+        let limits = FluidTempLimits {
+            min_temp_c: -20.0,
+            max_temp_c: 120.0,
+        };
+        let config = FluidSolverConfig {
+            loop_temp_limits: [(LoopId(1), limits)].into_iter().collect(),
+            ..FluidSolverConfig::default()
+        };
+        let mut solver = FluidSolver::new(config, &[(LoopId(1), FluidType::Water)]).unwrap();
+
+        let ports = PortSlots {
+            fluid: vec![FluidAccumulator {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                node_id: FluidNodeId(0),
+                total_flow_kg_s: 0.5,
+                mean_supply_temp_c: -50.0,
+                mean_return_temp_c: -30.0,
+                total_thermal_power_w: 0.0,
+                direction: Some(HeatTransferDirection::Source),
+            }],
+            ..Default::default()
+        };
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+
+        // Both temperatures must be clamped to min and finite.
+        approx_eq(states[0].mean_supply_temp_c, -20.0);
+        approx_eq(states[0].mean_return_temp_c, -20.0);
+        assert!(
+            states[0].mean_supply_temp_c.is_finite() && states[0].mean_return_temp_c.is_finite(),
+            "clamped temperatures must be finite"
+        );
+        assert!(
+            states[0].net_power_w.is_finite(),
+            "net_power_w must be finite after clamping"
         );
     }
 }

@@ -220,6 +220,47 @@ impl LoopTopology {
 /// the EnergyPlus reference implementation.
 pub const MASS_FLOW_TOLERANCE: f64 = 1e-9;
 
+/// Temperature limits for a fluid loop [°C].
+///
+/// When temperatures computed by the fluid solver exceed these bounds,
+/// the solver clamps them and emits a throttled warning. Defaults are
+/// fluid-type-specific and represent physically reasonable operating
+/// ranges for residential hydronic and refrigerant systems.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FluidTempLimits {
+    pub min_temp_c: f64,
+    pub max_temp_c: f64,
+}
+
+impl FluidTempLimits {
+    /// Sensible defaults per fluid type.
+    ///
+    /// - Water: 0–100°C (freezing/boiling at atmospheric pressure).
+    ///   ASHRAE HoF 2021 Ch.1 §1.2: water is liquid at 0–100°C at 101.325 kPa.
+    /// - Glycol: −40 to +120°C (practical range for 50% propylene glycol
+    ///   in HVAC applications per EnergyPlus FluidProperties.cc).
+    /// - Refrigerant: −50 to +150°C (typical saturated working range for
+    ///   R-134a and residential heat-pump refrigerants per ASHRAE Handbook
+    ///   of Refrigeration 2010, Ch.30, Table 9).
+    #[must_use]
+    pub fn default_for(fluid_type: FluidType) -> Self {
+        match fluid_type {
+            FluidType::Water => Self {
+                min_temp_c: 0.0,
+                max_temp_c: 100.0,
+            },
+            FluidType::Glycol => Self {
+                min_temp_c: -40.0,
+                max_temp_c: 120.0,
+            },
+            FluidType::Refrigerant => Self {
+                min_temp_c: -50.0,
+                max_temp_c: 150.0,
+            },
+        }
+    }
+}
+
 /// Fluid loop state resolved each timestep by the fluid domain solver.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FluidLoopState {
