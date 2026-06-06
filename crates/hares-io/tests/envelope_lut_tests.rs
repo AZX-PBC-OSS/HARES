@@ -391,3 +391,157 @@ fn gypsum_board_specific_heat_matches_ashrae_literature() {
     }
     panic!("GYPSUM BOARD row not found in Envelope Materials.csv");
 }
+
+/// Verify R = t/k consistency for all STUD AND CAVITY material rows.
+///
+/// STUD AND CAVITY materials are composites whose t and k represent
+/// effective properties from a parallel-path model. R must equal t/k for
+/// these rows because the simulation reads R from the CSV and any
+/// discordance produces physically inconsistent results.
+///
+/// Non-STUD-AND-CAVITY rows may have R values rounded or independently
+/// sourced and are not checked at 1e-3 tolerance here — those R values
+/// may have independent physical justification (e.g. ASHRAE Handbook tables)
+/// and changing them would alter simulation outputs without verified physical basis.
+#[test]
+fn stud_and_cavity_rows_satisfy_r_equals_t_over_k() {
+    let path = defaults_envelope_dir().join("Envelope Materials.csv");
+    let mut rdr = csv::Reader::from_path(&path).expect("open CSV");
+    let headers = rdr.headers().expect("read headers").clone();
+
+    let t_idx = headers
+        .iter()
+        .position(|h| h == "Thickness (m)")
+        .expect("Thickness (m) column");
+    let k_idx = headers
+        .iter()
+        .position(|h| h == "Conductivity (W/m-K)")
+        .expect("Conductivity (W/m-K) column");
+    let r_idx = headers
+        .iter()
+        .position(|h| h == "Resistance (m^2-K/W)")
+        .expect("Resistance (m^2-K/W) column");
+    let mat_idx = headers
+        .iter()
+        .position(|h| h == "Material Name")
+        .expect("Material Name column");
+
+    let mut failures: Vec<String> = Vec::new();
+    for (i, result) in rdr.records().enumerate() {
+        let record = result.expect("valid CSV row");
+        let material = record.get(mat_idx).unwrap_or("");
+        if !material.contains("STUD AND CAVITY") {
+            continue;
+        }
+
+        let t_str = record.get(t_idx).unwrap_or("");
+        let k_str = record.get(k_idx).unwrap_or("");
+        let r_str = record.get(r_idx).unwrap_or("");
+
+        if t_str.is_empty() || k_str.is_empty() || r_str.is_empty() {
+            continue;
+        }
+        let t: f64 = match t_str.parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let k: f64 = match k_str.parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let r: f64 = match r_str.parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if t <= 0.0 || k <= 0.0 {
+            continue;
+        }
+
+        let r_computed = t / k;
+        let rel_err = (r - r_computed).abs() / r_computed.max(f64::EPSILON);
+        if rel_err >= 1e-3 {
+            let line = i + 2;
+            failures.push(format!(
+                "Line {line}: {material}: R={r} does not match t/k={r_computed:.6} (rel_err={rel_err:.4})"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} STUD AND CAVITY rows fail R = t/k within 1e-3:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Regression: the three STUD AND CAVITY rows that had discordant R/k values
+/// (T-0269) now satisfy R = t/k.
+#[test]
+fn minimal_stud_and_cavity_rows_satisfy_r_equals_t_over_k() {
+    let path = defaults_envelope_dir().join("Envelope Materials.csv");
+    let mut rdr = csv::Reader::from_path(&path).expect("open CSV");
+
+    let mut found_ceiling = false;
+    let mut found_attic_wall = false;
+    let mut found_exterior_wall = false;
+
+    for result in rdr.records() {
+        let record = result.expect("valid CSV row");
+        let boundary = record.get(0).unwrap_or("");
+        let boundary_type = record.get(1).unwrap_or("");
+        let material = record.get(5).unwrap_or("");
+        let t_str = record.get(6).unwrap_or("");
+        let k_str = record.get(7).unwrap_or("");
+        let r_str = record.get(10).unwrap_or("");
+
+        if !material.contains("STUD AND CAVITY") || boundary_type != "Minimal" {
+            continue;
+        }
+        if t_str.is_empty() || k_str.is_empty() || r_str.is_empty() {
+            continue;
+        }
+
+        let t: f64 = t_str.parse().expect("parse thickness");
+        let k: f64 = k_str.parse().expect("parse conductivity");
+        let r: f64 = r_str.parse().expect("parse resistance");
+
+        if t <= 0.0 || k <= 0.0 {
+            continue;
+        }
+
+        let r_computed = t / k;
+        let rel_err = (r - r_computed).abs() / r_computed.max(f64::EPSILON);
+        assert!(
+            rel_err < 1e-3,
+            "{} / {} / {}: R={} does not match t/k={} (rel_err={:.4})",
+            boundary,
+            boundary_type,
+            material,
+            r,
+            r_computed,
+            rel_err
+        );
+
+        match (boundary, material) {
+            ("Attic Floor", "CEILING STUD AND CAVITY") => found_ceiling = true,
+            ("Attic Wall", "WALL STUD AND CAVITY") => found_attic_wall = true,
+            ("Exterior Wall", "WALL STUD AND CAVITY") => found_exterior_wall = true,
+            _ => {}
+        }
+    }
+
+    assert!(
+        found_ceiling,
+        "did not find Attic Floor Minimal CEILING STUD AND CAVITY"
+    );
+    assert!(
+        found_attic_wall,
+        "did not find Attic Wall Minimal WALL STUD AND CAVITY"
+    );
+    assert!(
+        found_exterior_wall,
+        "did not find Exterior Wall Minimal WALL STUD AND CAVITY"
+    );
+}
