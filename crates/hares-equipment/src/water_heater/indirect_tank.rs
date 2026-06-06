@@ -16,9 +16,9 @@ use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
-    FluidNodeId, FluidType, FuelType, HaresError, LoopId, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
-    telemetry_keys as tk,
+    FluidNodeId, FluidType, FuelType, HaresError, HeatTransferDirection, LoopId, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
@@ -482,6 +482,7 @@ impl Equipment for IndirectTank {
                 fluid_type: self.fluid_type,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })?;
         }
 
@@ -495,6 +496,7 @@ impl Equipment for IndirectTank {
                 fluid_type: self.fluid_type,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })?;
         }
 

@@ -52,6 +52,23 @@ impl ThermalCategory {
 /// Number of `ThermalCategory` variants -- size of the per-category array.
 pub const THERMAL_CATEGORY_COUNT: usize = 6;
 
+/// Whether equipment acts as a heat source (injects heat into the fluid) or a
+/// heat sink (extracts heat from the fluid).
+///
+/// Used to sign fluid port contributions so that `net_power_w` correctly
+/// reflects the algebraic sum of heat injected and extracted, rather than
+/// conflating both with the same sign convention.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HeatTransferDirection {
+    /// Equipment injects heat into the fluid loop (e.g. boiler, heat pump in
+    /// heating mode).
+    #[default]
+    Source,
+    /// Equipment extracts heat from the fluid loop (e.g. distribution coil,
+    /// radiant floor, cooling coil).
+    Sink,
+}
+
 /// Per-step equipment contribution into a typed simulation port.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PortContribution {
@@ -86,6 +103,10 @@ pub enum PortContribution {
         /// Hydraulic node within the loop topology.
         /// `FluidNodeId(0)` is the default serial node.
         node_id: FluidNodeId,
+        /// Whether this equipment is a heat source (injecting heat) or a
+        /// heat sink (extracting heat). Used to correctly sign the power
+        /// contribution when computing `net_power_w`.
+        direction: HeatTransferDirection,
     },
     Custom {
         domain_id: DomainId,
@@ -402,6 +423,12 @@ pub struct FluidAccumulator {
     /// targeting this loop. None-aware: when a contributor sets
     /// `thermal_power_w = None` that contribution contributes zero here.
     pub total_thermal_power_w: f64,
+    /// Whether the equipment writing to this accumulator is a heat source
+    /// (injecting heat into the fluid) or a heat sink (extracting heat).
+    /// `None` when the accumulator was created from a declaration and has
+    /// not yet received a contribution; set to `Some(direction)` on the
+    /// first call to [`add`](Self::add).
+    pub direction: Option<HeatTransferDirection>,
 }
 
 impl FluidAccumulator {
@@ -415,6 +442,7 @@ impl FluidAccumulator {
             mean_supply_temp_c: 0.0,
             mean_return_temp_c: 0.0,
             total_thermal_power_w: 0.0,
+            direction: None,
         }
     }
 
@@ -428,6 +456,7 @@ impl FluidAccumulator {
             mean_supply_temp_c: 0.0,
             mean_return_temp_c: 0.0,
             total_thermal_power_w: 0.0,
+            direction: None,
         }
     }
 
@@ -437,9 +466,28 @@ impl FluidAccumulator {
         supply_temp_c: f64,
         return_temp_c: f64,
         thermal_power_w: Option<f64>,
+        direction: HeatTransferDirection,
     ) -> Result<(), HaresError> {
         if flow_rate_kg_s < 0.0 {
             return Err(HaresError::Equipment("negative flow rate".to_string()));
+        }
+        // When the accumulator was created from a declaration without direction
+        // info, the first contribution sets the direction. Subsequent
+        // contributions must match (same node = same equipment = same role).
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            if let Some(existing) = self.direction {
+                if existing != direction {
+                    return Err(HaresError::Equipment(format!(
+                        "direction mismatch on fluid accumulator {:?}/{:?}/{:?}: \
+                         got {direction:?}, expected {existing:?}",
+                        self.loop_id, self.fluid_type, self.node_id
+                    )));
+                }
+            }
+        }
+        if self.direction.is_none() {
+            self.direction = Some(direction);
         }
         const MIN_FLOW_KG_S: f64 = 1e-9;
         let new_total_flow = self.total_flow_kg_s + flow_rate_kg_s;
@@ -787,6 +835,7 @@ impl PortSlots {
                 fluid_type,
                 thermal_power_w,
                 node_id,
+                direction,
             } => {
                 if let Some(total) = self.fluid.iter_mut().find(|entry| {
                     entry.loop_id == *loop_id
@@ -798,6 +847,7 @@ impl PortSlots {
                         *supply_temp_c,
                         *return_temp_c,
                         *thermal_power_w,
+                        *direction,
                     )?;
                     #[cfg(any(debug_assertions, feature = "check_invariants"))]
                     {
@@ -1042,6 +1092,7 @@ mod tests {
                 mean_supply_temp_c: 45.0,
                 mean_return_temp_c: 40.0,
                 total_thermal_power_w: 0.0,
+                direction: None,
             }],
             custom: vec![CustomAccumulator {
                 domain_id: DomainId(12),
@@ -1083,8 +1134,12 @@ mod tests {
     #[test]
     fn fluid_accumulator_zero_resets_state() {
         let mut fluid = FluidAccumulator::new(LoopId(2), FluidType::Glycol);
-        fluid.add(0.4, 50.0, 45.0, None).unwrap();
-        fluid.add(0.6, 46.0, 41.0, None).unwrap();
+        fluid
+            .add(0.4, 50.0, 45.0, None, HeatTransferDirection::Source)
+            .unwrap();
+        fluid
+            .add(0.6, 46.0, 41.0, None, HeatTransferDirection::Source)
+            .unwrap();
 
         approx_eq(fluid.total_flow_kg_s, 1.0);
         approx_eq(fluid.mean_supply_temp_c, 47.6);
@@ -1124,6 +1179,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         slots
@@ -1135,6 +1191,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         slots
@@ -1161,7 +1218,9 @@ mod tests {
     #[test]
     fn fluid_accumulator_zero_flow_on_fresh() {
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
-        fluid.add(0.0, 50.0, 40.0, None).unwrap();
+        fluid
+            .add(0.0, 50.0, 40.0, None, HeatTransferDirection::Source)
+            .unwrap();
         approx_eq(fluid.total_flow_kg_s, 0.0);
         approx_eq(fluid.mean_supply_temp_c, 0.0);
         approx_eq(fluid.mean_return_temp_c, 0.0);
@@ -1217,6 +1276,7 @@ mod tests {
             fluid_type: FluidType::Water,
             thermal_power_w: None,
             node_id: FluidNodeId(0),
+            direction: HeatTransferDirection::Source,
         });
         assert!(result.is_err());
     }
@@ -1261,6 +1321,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         slots
@@ -1272,6 +1333,7 @@ mod tests {
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         assert_eq!(slots.fluid.len(), 2);
@@ -1328,6 +1390,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         approx_eq(slots.fluid[0].total_flow_kg_s, 0.5);
@@ -1346,7 +1409,7 @@ mod tests {
     #[test]
     fn fluid_accumulator_rejects_negative_flow() {
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
-        let result = fluid.add(-1.0, 50.0, 40.0, None);
+        let result = fluid.add(-1.0, 50.0, 40.0, None, HeatTransferDirection::Source);
         assert!(result.is_err());
     }
 
@@ -1587,23 +1650,33 @@ mod tests {
     #[test]
     fn fluid_accumulator_sums_thermal_power_w() {
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
-        fluid.add(0.5, 60.0, 40.0, Some(4186.0)).unwrap();
-        fluid.add(0.5, 60.0, 40.0, Some(4186.0)).unwrap();
+        fluid
+            .add(0.5, 60.0, 40.0, Some(4186.0), HeatTransferDirection::Source)
+            .unwrap();
+        fluid
+            .add(0.5, 60.0, 40.0, Some(4186.0), HeatTransferDirection::Source)
+            .unwrap();
         approx_eq(fluid.total_thermal_power_w, 8372.0);
     }
 
     #[test]
     fn fluid_accumulator_ignores_none_thermal_power_w() {
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
-        fluid.add(0.5, 60.0, 40.0, None).unwrap();
-        fluid.add(0.5, 60.0, 40.0, Some(5000.0)).unwrap();
+        fluid
+            .add(0.5, 60.0, 40.0, None, HeatTransferDirection::Source)
+            .unwrap();
+        fluid
+            .add(0.5, 60.0, 40.0, Some(5000.0), HeatTransferDirection::Source)
+            .unwrap();
         approx_eq(fluid.total_thermal_power_w, 5000.0);
     }
 
     #[test]
     fn fluid_accumulator_zero_clears_thermal_power_w() {
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
-        fluid.add(0.5, 60.0, 40.0, Some(4186.0)).unwrap();
+        fluid
+            .add(0.5, 60.0, 40.0, Some(4186.0), HeatTransferDirection::Source)
+            .unwrap();
         approx_eq(fluid.total_thermal_power_w, 4186.0);
         fluid.zero();
         approx_eq(fluid.total_thermal_power_w, 0.0);
@@ -1625,6 +1698,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: Some(4186.0),
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         approx_eq(slots.fluid[0].total_thermal_power_w, 4186.0);
@@ -1744,6 +1818,7 @@ mod tests {
             fluid_type: FluidType::Water,
             thermal_power_w: Some(4186.0),
             node_id: FluidNodeId(0),
+            direction: HeatTransferDirection::Source,
         };
         match fluid {
             PortContribution::Fluid {

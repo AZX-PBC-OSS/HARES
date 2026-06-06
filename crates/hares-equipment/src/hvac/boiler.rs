@@ -8,8 +8,8 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FLUID, FluidDomainPayload, FluidNodeId, FluidType, FuelPower, FuelType,
-    HaresError, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
-    TelemetryField, ThermalCategory,
+    HaresError, HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -304,6 +304,7 @@ impl Equipment for ElectricBoiler {
                 fluid_type: self.fluid_type,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })?;
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -660,6 +661,7 @@ impl Equipment for GasBoiler {
                 fluid_type: self.fluid_type,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })?;
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -1143,6 +1145,8 @@ mod tests {
             custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
                 loop_id: LoopId(1),
                 fluid_type: FluidType::Water,
+                heating_power_w: 0.0,
+                cooling_power_w: 0.0,
                 net_power_w: 0.0,
                 mean_supply_temp_c: 45.0,
                 mean_return_temp_c: 40.0,

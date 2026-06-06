@@ -655,8 +655,8 @@ mod dhw_integration_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        DomainUpdate, EnvironmentState, FluidNodeId, FluidType, GridState, PortContribution,
-        PortSlots, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
+        DomainUpdate, EnvironmentState, FluidNodeId, FluidType, GridState, HeatTransferDirection,
+        PortContribution, PortSlots, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
     };
 
     use super::DHW_DEMAND_LOOP;
@@ -881,6 +881,7 @@ mod dhw_integration_tests {
                     fluid_type: FluidType::Water,
                     thermal_power_w: None,
                     node_id: FluidNodeId(0),
+                    direction: HeatTransferDirection::Source,
                 })
                 .unwrap();
         }
@@ -1004,6 +1005,7 @@ mod dhw_integration_tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 

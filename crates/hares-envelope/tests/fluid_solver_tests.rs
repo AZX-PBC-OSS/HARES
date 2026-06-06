@@ -9,8 +9,8 @@ use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{FluidSolver, FluidSolverConfig};
 use hares_types::{
     DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidNodeId, FluidType,
-    GridState, LoopId, PortContribution, PortSlots, SurfaceIrradiance, WeatherState, ZoneId,
-    ZoneState,
+    GridState, HeatTransferDirection, LoopId, PortContribution, PortSlots, SurfaceIrradiance,
+    WeatherState, ZoneId, ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,6 +93,7 @@ fn make_ports_with_flow(
             fluid_type,
             thermal_power_w: None,
             node_id: FluidNodeId(0),
+            direction: HeatTransferDirection::Source,
         })
         .expect("accumulate must not fail for valid contribution");
     ports

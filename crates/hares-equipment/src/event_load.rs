@@ -9,8 +9,8 @@ use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
+    HeatTransferDirection, OperatingMode, PortContribution, PortDeclaration, PortSlots,
+    ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -1124,6 +1124,7 @@ impl WetAppliance {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })?;
         }
 

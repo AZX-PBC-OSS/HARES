@@ -8,7 +8,8 @@ use hares_physics::constants::{
 };
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, FLUID, FluidDomainPayload, FluidLoopState, FluidNodeId,
-    FluidNodeRole, FluidType, HaresError, LoopId, LoopTopology, MASS_FLOW_TOLERANCE, PortSlots,
+    FluidNodeRole, FluidType, HaresError, HeatTransferDirection, LoopId, LoopTopology,
+    MASS_FLOW_TOLERANCE, PortSlots,
 };
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
@@ -682,123 +683,152 @@ impl DomainSolver for FluidSolver {
             // for temperature weighting and net power computation.
             // When not splitting, fall back to accumulator flows.
 
-            let (total_flow, net_power_w, mean_supply_temp_c, mean_return_temp_c) =
-                if let Some(ref resolved) = resolved_node_flows {
-                    // Use resolved flows per node for weighted aggregation.
-                    let mut sum_supply = 0.0_f64;
-                    let mut sum_return = 0.0_f64;
-                    let mut net_power = 0.0_f64;
-                    let mut total_resolved = 0.0_f64;
+            let (
+                total_flow,
+                heating_power_w,
+                cooling_power_w,
+                mean_supply_temp_c,
+                mean_return_temp_c,
+            ) = if let Some(ref resolved) = resolved_node_flows {
+                // Use resolved flows per node for weighted aggregation.
+                let mut sum_supply = 0.0_f64;
+                let mut sum_return = 0.0_f64;
+                let mut net_heating = 0.0_f64;
+                let mut net_cooling = 0.0_f64;
+                let mut total_resolved = 0.0_f64;
 
-                    // Identify pump node for exclusion from temperature
-                    // averaging (pump is plumbing, not a thermal component).
-                    let pump_node_id: Option<FluidNodeId> = {
-                        let topology = self.config.loop_topologies.get(&loop_id);
-                        topology.and_then(|topo| {
-                            let parent_count: HashMap<FluidNodeId, usize> = {
-                                let mut map = HashMap::new();
-                                for (_, to) in &topo.edges {
-                                    *map.entry(*to).or_default() += 1;
-                                }
-                                map
-                            };
-                            topo.nodes
-                                .iter()
-                                .find(|n| {
-                                    n.role == FluidNodeRole::Source
-                                        && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
-                                })
-                                .map(|pump| pump.node_id)
-                        })
-                    };
-
-                    // Collect splitter/mixer node_ids for exclusion from
-                    // temperature averaging.
-                    let plumbing_nodes: std::collections::HashSet<FluidNodeId> = {
-                        let mut set = std::collections::HashSet::new();
-                        if let Some(nid) = pump_node_id {
-                            set.insert(nid);
-                        }
-                        if let Some(topo) = self.config.loop_topologies.get(&loop_id) {
-                            for s in &topo.splitters {
-                                set.insert(s.node_id);
+                // Identify pump node for exclusion from temperature
+                // averaging (pump is plumbing, not a thermal component).
+                let pump_node_id: Option<FluidNodeId> = {
+                    let topology = self.config.loop_topologies.get(&loop_id);
+                    topology.and_then(|topo| {
+                        let parent_count: HashMap<FluidNodeId, usize> = {
+                            let mut map = HashMap::new();
+                            for (_, to) in &topo.edges {
+                                *map.entry(*to).or_default() += 1;
                             }
-                            for m in &topo.mixers {
-                                set.insert(m.node_id);
-                            }
-                        }
-                        set
-                    };
+                            map
+                        };
+                        topo.nodes
+                            .iter()
+                            .find(|n| {
+                                n.role == FluidNodeRole::Source
+                                    && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
+                            })
+                            .map(|pump| pump.node_id)
+                    })
+                };
 
-                    // Use the pump's flow as the total loop flow.
-                    let pump_total: f64 = pump_node_id
-                        .and_then(|nid| resolved.get(&nid).copied())
-                        .unwrap_or_else(|| resolved.values().sum());
-
-                    for acc in &entries {
-                        // Skip plumbing nodes (pump, splitter, mixer) in
-                        // temperature / power aggregation. These nodes carry
-                        // flow but do not represent thermal components —
-                        // their temperature fields are placeholders that
-                        // would skew the flow-weighted average if included.
-                        if plumbing_nodes.contains(&acc.node_id) {
-                            continue;
+                // Collect splitter/mixer node_ids for exclusion from
+                // temperature averaging.
+                let plumbing_nodes: std::collections::HashSet<FluidNodeId> = {
+                    let mut set = std::collections::HashSet::new();
+                    if let Some(nid) = pump_node_id {
+                        set.insert(nid);
+                    }
+                    if let Some(topo) = self.config.loop_topologies.get(&loop_id) {
+                        for s in &topo.splitters {
+                            set.insert(s.node_id);
                         }
-                        let allocated_flow = resolved
-                            .get(&acc.node_id)
-                            .copied()
-                            .unwrap_or(acc.total_flow_kg_s);
-                        if allocated_flow > MIN_FLOW_KG_S {
-                            sum_supply += allocated_flow * acc.mean_supply_temp_c;
-                            sum_return += allocated_flow * acc.mean_return_temp_c;
-                            net_power += cp
-                                * allocated_flow
-                                * (acc.mean_supply_temp_c - acc.mean_return_temp_c);
-                            total_resolved += allocated_flow;
+                        for m in &topo.mixers {
+                            set.insert(m.node_id);
                         }
                     }
-
-                    let (supply_c, return_c) = if total_resolved > MIN_FLOW_KG_S {
-                        (sum_supply / total_resolved, sum_return / total_resolved)
-                    } else {
-                        self.last_known_temps
-                            .get(&loop_id)
-                            .copied()
-                            .unwrap_or((0.0, 0.0))
-                    };
-
-                    (pump_total, net_power, supply_c, return_c)
-                } else {
-                    // No flow-splitting: use accumulator flows directly.
-                    let tf: f64 = entries.iter().map(|e| e.total_flow_kg_s).sum();
-                    let np: f64 = entries
-                        .iter()
-                        .map(|e| {
-                            cp * e.total_flow_kg_s * (e.mean_supply_temp_c - e.mean_return_temp_c)
-                        })
-                        .sum();
-
-                    let (sc, rc) = if tf.abs() <= MIN_FLOW_KG_S {
-                        self.last_known_temps
-                            .get(&loop_id)
-                            .copied()
-                            .unwrap_or((0.0, 0.0))
-                    } else {
-                        let ss = entries
-                            .iter()
-                            .map(|e| e.total_flow_kg_s * e.mean_supply_temp_c)
-                            .sum::<f64>();
-                        let sr = entries
-                            .iter()
-                            .map(|e| e.total_flow_kg_s * e.mean_return_temp_c)
-                            .sum::<f64>();
-                        let temps = (ss / tf, sr / tf);
-                        self.last_known_temps.insert(loop_id, temps);
-                        temps
-                    };
-
-                    (tf, np, sc, rc)
+                    set
                 };
+
+                // Use the pump's flow as the total loop flow.
+                let pump_total: f64 = pump_node_id
+                    .and_then(|nid| resolved.get(&nid).copied())
+                    .unwrap_or_else(|| resolved.values().sum());
+
+                for acc in &entries {
+                    // Skip plumbing nodes (pump, splitter, mixer) in
+                    // temperature / power aggregation. These nodes carry
+                    // flow but do not represent thermal components —
+                    // their temperature fields are placeholders that
+                    // would skew the flow-weighted average if included.
+                    if plumbing_nodes.contains(&acc.node_id) {
+                        continue;
+                    }
+                    let allocated_flow = resolved
+                        .get(&acc.node_id)
+                        .copied()
+                        .unwrap_or(acc.total_flow_kg_s);
+                    if allocated_flow > MIN_FLOW_KG_S {
+                        sum_supply += allocated_flow * acc.mean_supply_temp_c;
+                        sum_return += allocated_flow * acc.mean_return_temp_c;
+                        let delta_t = acc.mean_supply_temp_c - acc.mean_return_temp_c;
+                        let power = cp * allocated_flow * delta_t;
+                        // Use the direction reported by the equipment to sign the
+                        // contribution. Source (boiler, heat pump) injects heat:
+                        // contribution is positive. Sink (distribution coil, radiator)
+                        // extracts heat: contribution is negative.
+                        // Default to Source behaviour when direction is unknown
+                        // (accumulator created from a declaration without a write).
+                        match acc.direction.unwrap_or(HeatTransferDirection::Source) {
+                            HeatTransferDirection::Source => {
+                                net_heating += power;
+                            }
+                            HeatTransferDirection::Sink => {
+                                // Tickets T-0256: use abs(ΔT) to guarantee sinks always
+                                // contribute negatively, regardless of temperature
+                                // ordering convention.
+                                net_cooling += cp * allocated_flow * delta_t.abs();
+                            }
+                        }
+                        total_resolved += allocated_flow;
+                    }
+                }
+
+                let (supply_c, return_c) = if total_resolved > MIN_FLOW_KG_S {
+                    (sum_supply / total_resolved, sum_return / total_resolved)
+                } else {
+                    self.last_known_temps
+                        .get(&loop_id)
+                        .copied()
+                        .unwrap_or((0.0, 0.0))
+                };
+
+                (pump_total, net_heating, net_cooling, supply_c, return_c)
+            } else {
+                // No flow-splitting: use accumulator flows directly.
+                let tf: f64 = entries.iter().map(|e| e.total_flow_kg_s).sum();
+                let (nh, nc): (f64, f64) = entries
+                    .iter()
+                    .map(|e| {
+                        let delta_t = e.mean_supply_temp_c - e.mean_return_temp_c;
+                        let power = cp * e.total_flow_kg_s * delta_t;
+                        match e.direction.unwrap_or(HeatTransferDirection::Source) {
+                            HeatTransferDirection::Source => (power, 0.0),
+                            HeatTransferDirection::Sink => {
+                                (0.0, cp * e.total_flow_kg_s * delta_t.abs())
+                            }
+                        }
+                    })
+                    .fold((0.0, 0.0), |(h, c), (dh, dc)| (h + dh, c + dc));
+
+                let (sc, rc) = if tf.abs() <= MIN_FLOW_KG_S {
+                    self.last_known_temps
+                        .get(&loop_id)
+                        .copied()
+                        .unwrap_or((0.0, 0.0))
+                } else {
+                    let ss = entries
+                        .iter()
+                        .map(|e| e.total_flow_kg_s * e.mean_supply_temp_c)
+                        .sum::<f64>();
+                    let sr = entries
+                        .iter()
+                        .map(|e| e.total_flow_kg_s * e.mean_return_temp_c)
+                        .sum::<f64>();
+                    let temps = (ss / tf, sr / tf);
+                    self.last_known_temps.insert(loop_id, temps);
+                    temps
+                };
+
+                (tf, nh, nc, sc, rc)
+            };
 
             // ── Post-resolution invariant (T-0255) ────────────────────────
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
@@ -842,19 +872,53 @@ impl DomainSolver for FluidSolver {
             let total_declared_thermal_w: f64 =
                 entries.iter().map(|e| e.total_thermal_power_w).sum();
 
+            let net_power_w = heating_power_w - cooling_power_w;
+
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             if total_declared_thermal_w > 0.0 {
+                // All declared thermal power should be from sources (heating),
+                // so compare against heating_power_w rather than net.
                 let tol = 1e-9_f64
-                    * net_power_w
+                    * heating_power_w
                         .abs()
                         .max(total_declared_thermal_w.abs())
                         .max(1.0);
                 debug_assert!(
-                    (net_power_w - total_declared_thermal_w).abs() <= tol,
+                    (heating_power_w - total_declared_thermal_w).abs() <= tol,
                     "fluid loop {loop_id:?}: declared thermal power ({total_declared_thermal_w} W) \
-                     does not match flow-implied energy balance ({net_power_w} W); \
+                     does not match flow-implied source power ({heating_power_w} W); \
                      diff = {} W, tol = {tol:e} W",
-                    (net_power_w - total_declared_thermal_w).abs()
+                    (heating_power_w - total_declared_thermal_w).abs()
+                );
+            }
+
+            // ── Energy balance invariant (T-0256) ─────────────────────────
+            // Warn when net power imbalance exceeds 1.0 W in steady-state
+            // conditions, as this indicates a physics violation.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            if net_power_w.abs() > 1.0 {
+                tracing::warn!(
+                    loop_id = loop_id.0,
+                    heating_power_w,
+                    cooling_power_w,
+                    net_power_w,
+                    imbalance_w = net_power_w.abs(),
+                    "fluid loop energy balance violation: |net_power_w| > 1.0 W"
+                );
+            }
+
+            // ── Observer captures (T-0256) ────────────────────────────────
+            #[cfg(feature = "observe")]
+            {
+                // Per-loop heating/cooling power for diagnostic CSV export.
+                tracing::info!(
+                    loop_id = loop_id.0,
+                    ?fluid_type,
+                    heating_power_w,
+                    cooling_power_w,
+                    net_power_w,
+                    power_imbalance_w = (heating_power_w - cooling_power_w).abs(),
+                    "fluid loop power balance"
                 );
             }
 
@@ -869,6 +933,8 @@ impl DomainSolver for FluidSolver {
                 FluidLoopState {
                     loop_id,
                     fluid_type,
+                    heating_power_w,
+                    cooling_power_w,
                     net_power_w,
                     mean_supply_temp_c,
                     mean_return_temp_c,
@@ -893,9 +959,9 @@ mod tests {
     use hares_physics::constants::{CP_LIQUID_WATER_J_KG_K, CP_PROP_GLYCOL_50PCT_J_KG_K};
     use hares_types::{
         DomainSolver, EnvironmentState, FluidAccumulator, FluidDomainPayload, FluidNode,
-        FluidNodeId, FluidNodeRole, FluidType, GridState, LoopId, LoopTopology,
-        MASS_FLOW_TOLERANCE, MixerBranch, MixerNode, PortContribution, PortSlots, SplitterBranch,
-        SplitterNode, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+        FluidNodeId, FluidNodeRole, FluidType, GridState, HeatTransferDirection, LoopId,
+        LoopTopology, MASS_FLOW_TOLERANCE, MixerBranch, MixerNode, PortContribution, PortSlots,
+        SplitterBranch, SplitterNode, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
     };
 
     use crate::fluid_solver::{FluidSolver, FluidSolverConfig};
@@ -983,6 +1049,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 
@@ -1014,6 +1081,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         ports
@@ -1025,6 +1093,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 
@@ -1062,6 +1131,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
@@ -1115,6 +1185,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
@@ -1171,6 +1242,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: Some(0.5 * CP_LIQUID_WATER_J_KG_K * 20.0),
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 
@@ -1203,6 +1275,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: Some(0.3 * CP_LIQUID_WATER_J_KG_K * 15.0),
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         // Contributor B: no thermal_power_w declaration (None)
@@ -1215,6 +1288,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 
@@ -1233,7 +1307,13 @@ mod tests {
         // After accumulating, zeroing the accumulator must clear thermal_power_w.
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
         fluid
-            .add(0.5, 60.0, 40.0, Some(CP_LIQUID_WATER_J_KG_K))
+            .add(
+                0.5,
+                60.0,
+                40.0,
+                Some(CP_LIQUID_WATER_J_KG_K),
+                HeatTransferDirection::Source,
+            )
             .unwrap();
         assert!(fluid.total_thermal_power_w > 0.0);
         fluid.zero();
@@ -1268,6 +1348,7 @@ mod tests {
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 
@@ -1316,6 +1397,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         // Glycol loop: 0.5 kg/s, ΔT=20 K, cp=3800 → 38 000 W
@@ -1328,6 +1410,7 @@ mod tests {
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 
@@ -1368,6 +1451,7 @@ mod tests {
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 
@@ -1409,6 +1493,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
         ports
@@ -1420,6 +1505,7 @@ mod tests {
                 fluid_type: FluidType::Glycol,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 
@@ -1457,6 +1543,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 50.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1466,6 +1553,7 @@ mod tests {
                     mean_supply_temp_c: 50.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
             ],
             ..Default::default()
@@ -1494,6 +1582,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 50.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1503,6 +1592,7 @@ mod tests {
                     mean_supply_temp_c: 50.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
             ],
             ..Default::default()
@@ -1532,6 +1622,7 @@ mod tests {
                 mean_supply_temp_c: 60.0,
                 mean_return_temp_c: 50.0,
                 total_thermal_power_w: 0.0,
+                direction: None,
             }],
             ..Default::default()
         };
@@ -1597,6 +1688,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 60.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1606,6 +1698,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1615,6 +1708,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1624,6 +1718,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1633,6 +1728,7 @@ mod tests {
                     mean_supply_temp_c: 40.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
             ],
             ..Default::default()
@@ -1690,6 +1786,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1699,6 +1796,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1708,6 +1806,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1717,6 +1816,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1726,6 +1826,7 @@ mod tests {
                     mean_supply_temp_c: 40.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
             ],
             ..Default::default()
@@ -1823,6 +1924,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 60.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1832,6 +1934,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1841,6 +1944,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1850,6 +1954,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1859,6 +1964,7 @@ mod tests {
                     mean_supply_temp_c: 40.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
             ],
             ..Default::default()
@@ -1950,6 +2056,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 60.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1959,6 +2066,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -1968,6 +2076,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
             ],
             ..Default::default()
@@ -2061,6 +2170,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 60.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -2070,6 +2180,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -2079,6 +2190,7 @@ mod tests {
                     mean_supply_temp_c: 60.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
             ],
             ..Default::default()
@@ -2119,6 +2231,7 @@ mod tests {
                 fluid_type: FluidType::Water,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })
             .unwrap();
 
@@ -2208,6 +2321,7 @@ mod tests {
                     mean_supply_temp_c: 55.0,
                     mean_return_temp_c: 55.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -2217,6 +2331,7 @@ mod tests {
                     mean_supply_temp_c: 55.0,
                     mean_return_temp_c: 45.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
                 FluidAccumulator {
                     loop_id: LoopId(1),
@@ -2226,6 +2341,7 @@ mod tests {
                     mean_supply_temp_c: 55.0,
                     mean_return_temp_c: 40.0,
                     total_thermal_power_w: 0.0,
+                    direction: None,
                 },
             ],
             ..Default::default()
@@ -2237,5 +2353,216 @@ mod tests {
         // Coil A: 0.12 kg/s * 10K * Cp, Coil B: 0.08 kg/s * 15K * Cp
         let expected_power = (0.12 * 10.0 + 0.08 * 15.0) * CP_LIQUID_WATER_J_KG_K;
         approx_eq(states[0].net_power_w, expected_power);
+    }
+
+    // =======================================================================
+    // T-0256: Net power direction-aware signed computation
+    // =======================================================================
+
+    #[test]
+    fn balanced_source_and_sink_net_power_near_zero() {
+        // A loop with one Source (boiler, injecting heat) and one Sink
+        // (distribution coil, extracting heat). Both contribute the same
+        // magnitude of thermal power. net_power_w should be near zero
+        // because heating_power_w ≈ cooling_power_w.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+
+        let boiler_power = 0.5 * CP_LIQUID_WATER_J_KG_K * 10.0; // 0.5 kg/s, ΔT=10K
+        let coil_power = 0.5 * CP_LIQUID_WATER_J_KG_K * 10.0; // same magnitude
+
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 0.5,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 50.0,
+                    total_thermal_power_w: 0.0,
+                    direction: Some(HeatTransferDirection::Source),
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(1),
+                    total_flow_kg_s: 0.5,
+                    mean_supply_temp_c: 50.0,
+                    mean_return_temp_c: 40.0,
+                    total_thermal_power_w: 0.0,
+                    direction: Some(HeatTransferDirection::Sink),
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Serial-flow consistency check requires matching flow rates when no
+        // topology is configured. Both accumulators have the same flow.
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        assert_eq!(states.len(), 1);
+
+        approx_eq(states[0].heating_power_w, boiler_power);
+        approx_eq(states[0].cooling_power_w, coil_power);
+        approx_eq(states[0].net_power_w, 0.0);
+    }
+
+    #[test]
+    fn imbalanced_source_exceeds_sink_net_power_positive() {
+        // A loop with one Source (boiler) and one Sink (coil) where the
+        // source injects more heat than the sink extracts.
+        // net_power_w should be positive, reflecting net heating of the fluid.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+
+        // Both must have the same flow for serial-flow consistency.
+        let flow = 0.5;
+        let boiler_dt = 10.0; // supply=60, return=50
+        let coil_dt = 8.0; // supply=50, return=42
+        let boiler_power = flow * CP_LIQUID_WATER_J_KG_K * boiler_dt;
+        let coil_power = flow * CP_LIQUID_WATER_J_KG_K * coil_dt;
+        let expected_net = boiler_power - coil_power;
+
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: flow,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 60.0 - boiler_dt,
+                    total_thermal_power_w: 0.0,
+                    direction: Some(HeatTransferDirection::Source),
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(1),
+                    total_flow_kg_s: flow,
+                    mean_supply_temp_c: 50.0,
+                    mean_return_temp_c: 50.0 - coil_dt,
+                    total_thermal_power_w: 0.0,
+                    direction: Some(HeatTransferDirection::Sink),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        assert_eq!(states.len(), 1);
+
+        approx_eq(states[0].heating_power_w, boiler_power);
+        approx_eq(states[0].cooling_power_w, coil_power);
+        approx_eq(states[0].net_power_w, expected_net);
+        assert!(
+            states[0].net_power_w > 0.0,
+            "imbalanced loop with excess source must have positive net_power_w"
+        );
+    }
+
+    #[test]
+    fn single_source_loop_heating_power_w_matches_net_power_w() {
+        // Regression: a single-boiler loop (no sinks) should produce
+        // heating_power_w equal to net_power_w and cooling_power_w = 0.
+        // This verifies the magnitude is unchanged from the pre-T-0256
+        // behaviour.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+        let mut ports = PortSlots {
+            fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            ..Default::default()
+        };
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 60.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: None,
+                node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
+            })
+            .unwrap();
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+        let expected = 0.5 * CP_LIQUID_WATER_J_KG_K * 20.0;
+
+        approx_eq(states[0].heating_power_w, expected);
+        approx_eq(states[0].cooling_power_w, 0.0);
+        approx_eq(states[0].net_power_w, expected);
+    }
+
+    #[test]
+    fn heating_and_cooling_power_never_negative() {
+        // Integration: run a full simulation step with mixed source and sink.
+        // Both heating_power_w and cooling_power_w must be non-negative
+        // regardless of temperature sign conventions.
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+
+        // Sink with inverted ΔT (return_temp > supply_temp): abs() in the
+        // sink formula guarantees positive cooling_power_w magnitude.
+        let ports = PortSlots {
+            fluid: vec![
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(0),
+                    total_flow_kg_s: 0.5,
+                    mean_supply_temp_c: 60.0,
+                    mean_return_temp_c: 50.0,
+                    total_thermal_power_w: 0.0,
+                    direction: Some(HeatTransferDirection::Source),
+                },
+                FluidAccumulator {
+                    loop_id: LoopId(1),
+                    fluid_type: FluidType::Water,
+                    node_id: FluidNodeId(1),
+                    total_flow_kg_s: 0.5,
+                    // Inverted: supply=40, return=50 (water leaves cooler than it entered)
+                    mean_supply_temp_c: 40.0,
+                    mean_return_temp_c: 50.0,
+                    total_thermal_power_w: 0.0,
+                    direction: Some(HeatTransferDirection::Sink),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
+        let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
+
+        assert!(
+            states[0].heating_power_w >= 0.0,
+            "heating_power_w must be non-negative, got {}",
+            states[0].heating_power_w
+        );
+        assert!(
+            states[0].cooling_power_w >= 0.0,
+            "cooling_power_w must be non-negative, got {}",
+            states[0].cooling_power_w
+        );
+        // Sink with abs(ΔT): |40-50| = 10 → 0.5*4180*10 > 0
+        assert!(
+            states[0].cooling_power_w > 0.0,
+            "sink with abs(ΔT) must produce positive cooling_power_w"
+        );
     }
 }

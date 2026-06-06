@@ -10,8 +10,8 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, DutyCycleComponent, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError,
-    LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId, telemetry_keys as tk,
+    HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots,
+    Telemetry, TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
@@ -841,6 +841,7 @@ impl Equipment for HeatPumpWH {
                 fluid_type: self.fluid_type,
                 thermal_power_w: None,
                 node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
             })?;
         }
 

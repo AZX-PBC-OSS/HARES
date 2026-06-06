@@ -225,6 +225,14 @@ pub const MASS_FLOW_TOLERANCE: f64 = 1e-9;
 pub struct FluidLoopState {
     pub loop_id: LoopId,
     pub fluid_type: FluidType,
+    /// Total heat injected by heat sources (boilers, heat pumps in heating
+    /// mode) [W]. Always non-negative.
+    pub heating_power_w: f64,
+    /// Total heat extracted by heat sinks (distribution coils, radiators,
+    /// cooling coils) [W]. Always non-negative.
+    pub cooling_power_w: f64,
+    /// Algebraic sum `heating_power_w - cooling_power_w` [W]. Should be near
+    /// zero for a balanced loop and reflect the net imbalance otherwise.
     pub net_power_w: f64,
     pub mean_supply_temp_c: f64,
     pub mean_return_temp_c: f64,
@@ -233,7 +241,8 @@ pub struct FluidLoopState {
 /// Encode/decode `Vec<FluidLoopState>` to/from `Vec<f64>` for `DomainUpdate::custom_payload`.
 ///
 /// Layout per loop:
-/// `[loop_id as f64, fluid_type as f64, net_power_w, mean_supply_temp_c, mean_return_temp_c]`.
+/// `[loop_id as f64, fluid_type as f64, heating_power_w, cooling_power_w,
+///   net_power_w, mean_supply_temp_c, mean_return_temp_c]`.
 pub struct FluidDomainPayload;
 
 impl FluidDomainPayload {
@@ -242,10 +251,12 @@ impl FluidDomainPayload {
         if states.is_empty() {
             return None;
         }
-        let mut payload = Vec::with_capacity(states.len() * 5);
+        let mut payload = Vec::with_capacity(states.len() * 7);
         for state in states {
             payload.push(f64::from(state.loop_id.0));
             payload.push(fluid_type_to_f64(state.fluid_type));
+            payload.push(state.heating_power_w);
+            payload.push(state.cooling_power_w);
             payload.push(state.net_power_w);
             payload.push(state.mean_supply_temp_c);
             payload.push(state.mean_return_temp_c);
@@ -254,22 +265,24 @@ impl FluidDomainPayload {
     }
 
     pub fn decode(payload: &[f64]) -> Result<Vec<FluidLoopState>, HaresError> {
-        if !payload.len().is_multiple_of(5) {
+        if !payload.len().is_multiple_of(7) {
             return Err(HaresError::Envelope(format!(
-                "invalid fluid payload length {}, expected multiple of 5",
+                "invalid fluid payload length {}, expected multiple of 7",
                 payload.len()
             )));
         }
-        let mut states = Vec::with_capacity(payload.len() / 5);
-        for chunk in payload.chunks_exact(5) {
+        let mut states = Vec::with_capacity(payload.len() / 7);
+        for chunk in payload.chunks_exact(7) {
             let loop_id = f64_to_loop_id(chunk[0])?;
             let fluid_type = f64_to_fluid_type(chunk[1])?;
             states.push(FluidLoopState {
                 loop_id,
                 fluid_type,
-                net_power_w: chunk[2],
-                mean_supply_temp_c: chunk[3],
-                mean_return_temp_c: chunk[4],
+                heating_power_w: chunk[2],
+                cooling_power_w: chunk[3],
+                net_power_w: chunk[4],
+                mean_supply_temp_c: chunk[5],
+                mean_return_temp_c: chunk[6],
             });
         }
         Ok(states)
@@ -316,6 +329,8 @@ mod tests {
             FluidLoopState {
                 loop_id: LoopId(1),
                 fluid_type: FluidType::Water,
+                heating_power_w: 41860.0,
+                cooling_power_w: 0.0,
                 net_power_w: 41860.0,
                 mean_supply_temp_c: 60.0,
                 mean_return_temp_c: 40.0,
@@ -323,6 +338,8 @@ mod tests {
             FluidLoopState {
                 loop_id: LoopId(2),
                 fluid_type: FluidType::Glycol,
+                heating_power_w: 1200.0,
+                cooling_power_w: 0.0,
                 net_power_w: 1200.0,
                 mean_supply_temp_c: 45.0,
                 mean_return_temp_c: 42.5,
@@ -346,8 +363,8 @@ mod tests {
 
     #[test]
     fn decode_rejects_invalid_fluid_type_discriminator() {
-        // Valid length (5), but fluid_type discriminator 99.0 is invalid
-        let payload = vec![1.0, 99.0, 500.0, 60.0, 40.0];
+        // Valid length (7), but fluid_type discriminator 99.0 is invalid
+        let payload = vec![1.0, 99.0, 500.0, 0.0, 500.0, 60.0, 40.0];
         let err = FluidDomainPayload::decode(&payload).unwrap_err();
         assert!(
             err.to_string().contains("invalid fluid type discriminator"),
