@@ -40,7 +40,7 @@ pub struct Site {
     pub utc_offset_h: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ZoneType {
     Conditioned,
     Attic,
@@ -55,7 +55,7 @@ pub enum ZoneType {
     Other(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BoundaryType {
     Wall,
     Roof,

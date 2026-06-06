@@ -112,7 +112,6 @@ pub fn building_to_boundary_inputs(
     avg_ground_c: f64,
 ) -> Result<Vec<BoundaryInput>> {
     use hares_envelope::PrecomputedRCLayer;
-    use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use hares_physics::film_coefficients::{film_resistances, surface_roughness_from_finish_type};
     use hares_physics::ground::f2_coefficient;
@@ -224,7 +223,7 @@ pub fn building_to_boundary_inputs(
                 envelope_lut
                     .and_then(|lut| {
                         let boundary_name = bd.lut_boundary_name.as_deref().or_else(|| {
-                            resolve_boundary_name(
+                            lut.resolve_name(
                                 &bd.boundary_type,
                                 bd.interior_zone.as_ref(),
                                 bd.exterior_zone.as_ref(),

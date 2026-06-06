@@ -1,9 +1,12 @@
 //! Envelope LUT parser for loading OCHRE's pre-computed RC values from CSV files.
 //!
-//! Parses three CSV files from the `defaults/envelope/` directory:
-//! - `Envelope Boundaries.csv` -- zone label mappings per boundary name
+//! Parses CSV files from the `defaults/envelope/` directory:
+//! - `Envelope Boundaries.csv` -- zone label mappings for `(BoundaryType, ZoneType, ZoneType) → boundary name`
 //! - `Envelope Boundary Types.csv` -- construction variants with assembly R-values
 //! - `Envelope Materials.csv` -- per-layer resistance and capacitance values
+//!
+//! If `Envelope Boundaries.csv` is absent, boundary name resolution falls back to
+//! a built-in hardcoded mapping (see `resolve_boundary_name`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -75,6 +78,73 @@ struct MaterialRow {
     capacitance: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct BoundaryRow {
+    #[serde(rename = "Boundary Name")]
+    boundary_name: String,
+    #[serde(rename = "Boundary Label")]
+    #[allow(dead_code)]
+    // Why: field must exist for serde to match the CSV column header;
+    // the label is not used in the Rust lookup but is part of the OCHRE schema.
+    boundary_label: String,
+    #[serde(rename = "Exterior Zone Label")]
+    exterior_zone_label: String,
+    #[serde(rename = "Interior Zone Label")]
+    interior_zone_label: String,
+}
+
+/// Map OCHRE short zone label to HARES `ZoneType`.
+fn zone_label_to_type(label: &str) -> Option<ZoneType> {
+    match label {
+        "LIV" => Some(ZoneType::Conditioned),
+        "EXT" => Some(ZoneType::Outdoor),
+        "GND" => Some(ZoneType::Ground),
+        "FND" => Some(ZoneType::Foundation),
+        "ATC" => Some(ZoneType::Attic),
+        "GAR" => Some(ZoneType::Garage),
+        _ => None,
+    }
+}
+
+/// Map an OCHRE boundary name to the associated HPXML `BoundaryType`.
+///
+/// OCHRE defines boundary names that are more specific than HPXML's
+/// generic `Wall`/`Roof`/`Floor` types. This function classifies an
+/// OCHRE name into its HPXML type for the CSV-derived lookup table.
+fn boundary_type_from_boundary_name(name: &str) -> Option<BoundaryType> {
+    match name {
+        // Wall boundaries
+        "Exterior Wall"
+        | "Interior Wall"
+        | "Attic Wall"
+        | "Garage Wall"
+        | "Garage Attached Wall"
+        | "Adjacent Wall"
+        | "Adjacent Attic Wall"
+        | "Adjacent Garage Wall" => Some(BoundaryType::Wall),
+        // Roof boundaries
+        "Roof" | "Attic Roof" | "Garage Roof" | "Adjacent Ceiling" => Some(BoundaryType::Roof),
+        // Floor boundaries (horizontal, exposed to unconditioned spaces)
+        "Raised Floor"
+        | "Attic Floor"
+        | "Foundation Ceiling"
+        | "Garage Interior Ceiling"
+        | "Garage Ceiling"
+        | "Adjacent Floor" => Some(BoundaryType::Floor),
+        // Slab boundaries (on-grade, ground contact)
+        "Floor" | "Foundation Floor" | "Garage Floor" => Some(BoundaryType::Slab),
+        "Window" => Some(BoundaryType::Window),
+        "Door" | "Garage Door" => Some(BoundaryType::Door),
+        "Foundation Wall" | "Adjacent Foundation Wall" => Some(BoundaryType::FoundationWall),
+        "Rim Joist" | "Adjacent Rim Joist" => Some(BoundaryType::RimJoist),
+        // Same-zone furniture entries — not real boundary types
+        "Indoor Furniture" | "Foundation Furniture" | "Attic Furniture" | "Garage Furniture" => {
+            None
+        }
+        _ => None,
+    }
+}
+
 // ── Film R-value constants ──────────────────────────────────────────────────
 
 /// Boundary names that use the higher film R-value (floors/ceilings).
@@ -101,13 +171,21 @@ pub struct EnvelopeLookup {
     boundary_types: HashMap<String, Vec<BoundaryTypeRow>>,
     /// Material rows grouped by (boundary_name, boundary_type).
     materials: HashMap<(String, String), Vec<MaterialRow>>,
+    /// CSV-derived boundary name map: `(BoundaryType, interior_zone, exterior_zone) → boundary_name`.
+    /// Populated from `Envelope Boundaries.csv`. Empty when the file is absent.
+    boundary_names: HashMap<(BoundaryType, ZoneType, ZoneType), String>,
 }
 
 impl EnvelopeLookup {
-    /// Parse the three envelope CSV files from `dir`.
+    /// Parse the envelope CSV files from `dir`.
+    ///
+    /// `Envelope Boundary Types.csv` and `Envelope Materials.csv` are required.
+    /// `Envelope Boundaries.csv` is optional — when absent, boundary name
+    /// resolution falls back to the built-in hardcoded mapping.
     pub fn load(dir: &Path) -> Result<Self, EnvelopeLutError> {
         let bt_path = dir.join("Envelope Boundary Types.csv");
         let mat_path = dir.join("Envelope Materials.csv");
+        let boundaries_path = dir.join("Envelope Boundaries.csv");
 
         if !bt_path.exists() {
             return Err(EnvelopeLutError::MissingFile(bt_path));
@@ -118,15 +196,120 @@ impl EnvelopeLookup {
 
         let boundary_types = Self::load_boundary_types(&bt_path)?;
         let materials = Self::load_materials(&mat_path)?;
+        let boundary_names = if boundaries_path.exists() {
+            let names = Self::load_boundaries(&boundaries_path)?;
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            {
+                let check_lut = Self {
+                    boundary_types: boundary_types.clone(),
+                    materials: materials.clone(),
+                    boundary_names: names.clone(),
+                };
+                check_lut.check_csv_vs_hardcoded_consistency();
+            }
+            names
+        } else {
+            tracing::warn!(
+                path = %boundaries_path.display(),
+                "Envelope Boundaries.csv not found; falling back to hardcoded boundary name mapping"
+            );
+            HashMap::new()
+        };
 
         Ok(Self {
             boundary_types,
             materials,
+            boundary_names,
         })
     }
 
-    /// Look up pre-computed RC layers for a boundary.
+    /// Resolve a boundary name from the CSV-derived lookup table.
     ///
+    /// When `Envelope Boundaries.csv` was loaded, this returns the boundary
+    /// name for the given `(BoundaryType, ZoneType, ZoneType)` triple.
+    /// Falls back to the hardcoded `resolve_boundary_name()` when the CSV
+    /// does not contain a matching entry or was not loaded.
+    pub fn resolve_name(
+        &self,
+        boundary_type: &BoundaryType,
+        interior_zone: Option<&ZoneType>,
+        exterior_zone: Option<&ZoneType>,
+    ) -> Option<&str> {
+        let default_int = ZoneType::Conditioned;
+        let default_ext = match boundary_type {
+            BoundaryType::Roof
+            | BoundaryType::Wall
+            | BoundaryType::Door
+            | BoundaryType::RimJoist => ZoneType::Outdoor,
+            BoundaryType::Slab | BoundaryType::FoundationWall => ZoneType::Ground,
+            BoundaryType::Floor => ZoneType::Attic,
+            _ => ZoneType::Outdoor,
+        };
+        let int = interior_zone.unwrap_or(&default_int);
+        let ext = exterior_zone.unwrap_or(&default_ext);
+
+        // Same-zone → furniture (thermal mass). These are not in the CSV's
+        // boundary_name map because they don't correspond to a single boundary type.
+        if int == ext {
+            return match int {
+                ZoneType::Conditioned => Some("Indoor Furniture"),
+                ZoneType::Foundation => Some("Foundation Furniture"),
+                ZoneType::Garage => Some("Garage Furniture"),
+                _ => None,
+            };
+        }
+
+        // Adjacent (adiabatic) boundaries — multifamily party walls/floors.
+        if *int == ZoneType::Adjacent || *ext == ZoneType::Adjacent {
+            let other = if *int == ZoneType::Adjacent { ext } else { int };
+            return match (boundary_type, other) {
+                (BoundaryType::Wall, ZoneType::Attic) => Some("Adjacent Attic Wall"),
+                (BoundaryType::Wall, ZoneType::Garage) => Some("Adjacent Wall"),
+                (BoundaryType::Wall, _) => Some("Adjacent Wall"),
+                (BoundaryType::Floor, _) => Some("Adjacent Floor"),
+                (BoundaryType::Roof, _) => Some("Adjacent Ceiling"),
+                (BoundaryType::FoundationWall, _) => Some("Adjacent Foundation Wall"),
+                (BoundaryType::RimJoist, _) => Some("Adjacent Rim Joist"),
+                _ => None,
+            };
+        }
+
+        // Try CSV-derived lookup first (the single source of truth when available).
+        if !self.boundary_names.is_empty() {
+            let key = (boundary_type.clone(), int.clone(), ext.clone());
+            if let Some(name) = self.boundary_names.get(&key) {
+                return Some(name.as_str());
+            }
+        }
+
+        // Fall back to hardcoded mapping.
+        resolve_boundary_name(boundary_type, Some(int), Some(ext))
+    }
+
+    /// Verify CSV-derived boundary names match the hardcoded mapping.
+    ///
+    /// Logs a warning for each `(BoundaryType, ZoneType, ZoneType)` triple
+    /// where the CSV name and the hardcoded name disagree. Activation is
+    /// gated on `debug_assertions` or `check_invariants` to avoid runtime
+    /// cost in release builds.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn check_csv_vs_hardcoded_consistency(&self) {
+        for ((bt, int, ext), csv_name) in &self.boundary_names {
+            if let Some(hardcoded_name) = resolve_boundary_name(bt, Some(int), Some(ext)) {
+                if csv_name != hardcoded_name {
+                    tracing::warn!(
+                        boundary_type = ?bt,
+                        interior_zone = ?int,
+                        exterior_zone = ?ext,
+                        csv_name = %csv_name,
+                        hardcoded_name = %hardcoded_name,
+                        "Boundary name mismatch between CSV and hardcoded mapping"
+                    );
+                }
+            }
+        }
+    }
+
     /// Implements OCHRE's `get_boundary_rc_values` matching algorithm.
     pub fn lookup(
         &self,
@@ -277,6 +460,85 @@ impl EnvelopeLookup {
         }
         Ok(map)
     }
+
+    /// Parse `Envelope Boundaries.csv` into a `(BoundaryType, ZoneType, ZoneType) → boundary_name` map.
+    fn load_boundaries(
+        path: &Path,
+    ) -> Result<HashMap<(BoundaryType, ZoneType, ZoneType), String>, EnvelopeLutError> {
+        let mut rdr = csv::Reader::from_path(path).map_err(|e| EnvelopeLutError::CsvParse {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+
+        let mut map: HashMap<(BoundaryType, ZoneType, ZoneType), String> = HashMap::new();
+        for result in rdr.deserialize() {
+            let row: BoundaryRow = result.map_err(|e| EnvelopeLutError::CsvParse {
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+
+            let ext = match zone_label_to_type(&row.exterior_zone_label) {
+                Some(z) => z,
+                None => {
+                    tracing::warn!(
+                        label = %row.exterior_zone_label,
+                        boundary = %row.boundary_name,
+                        "unrecognized exterior zone label in Envelope Boundaries.csv; skipping row"
+                    );
+                    continue;
+                }
+            };
+            let int = match zone_label_to_type(&row.interior_zone_label) {
+                Some(z) => z,
+                None => {
+                    tracing::warn!(
+                        label = %row.interior_zone_label,
+                        boundary = %row.boundary_name,
+                        "unrecognized interior zone label in Envelope Boundaries.csv; skipping row"
+                    );
+                    continue;
+                }
+            };
+            let bt = match boundary_type_from_boundary_name(&row.boundary_name) {
+                Some(b) => b,
+                None => {
+                    // Furniture and other non-boundary entries are expected
+                    // and deliberately excluded from the lookup table.
+                    continue;
+                }
+            };
+
+            // Adjacent zone resolution is handled by the hardcoded path
+            // (resolve_name / resolve_boundary_name), not the CSV-derived map.
+            // The Adjacent rows in the CSV use same-zone pairs (LIV/LIV, FND/FND etc.)
+            // because OCHRE's CSV schema has no Adjacent zone label. Inserting them
+            // as (BoundaryType, ZoneType, ZoneType) entries would silently overwrite
+            // interior/conditioned-space entries with no observable effect (the
+            // early-return guards in resolve_name intercept every Adjacent key before
+            // the CSV map is consulted). Skip them explicitly so the map accurately
+            // reflects the architecture: the CSV handles non-adjacent boundaries;
+            // the hardcoded path handles adjacent ones.
+            if row.boundary_name.starts_with("Adjacent") {
+                tracing::debug!(
+                    boundary = %row.boundary_name,
+                    "skipping Adjacent boundary row; adjacent zone resolution is handled by the hardcoded path, not the CSV"
+                );
+                continue;
+            }
+
+            // Key ordering matches resolve_boundary_name: (boundary_type, interior, exterior).
+            let key = (bt.clone(), int.clone(), ext.clone());
+            if let Some(previous) = map.insert(key, row.boundary_name.clone()) {
+                tracing::warn!(
+                    key = ?(bt, int, ext),
+                    previous = %previous,
+                    new = %row.boundary_name,
+                    "boundary name collision in Envelope Boundaries.csv; overwriting entry"
+                );
+            }
+        }
+        Ok(map)
+    }
 }
 
 // ── Boundary name resolution ────────────────────────────────────────────────
@@ -363,7 +625,10 @@ pub fn resolve_boundary_name(
         },
         BoundaryType::FoundationWall => Some("Foundation Wall"),
         BoundaryType::RimJoist => Some("Rim Joist"),
-        BoundaryType::Door => Some("Door"),
+        BoundaryType::Door => match (int, ext) {
+            (ZoneType::Garage, ZoneType::Outdoor) => Some("Garage Door"),
+            _ => Some("Door"),
+        },
         BoundaryType::Window | BoundaryType::Other(_) => None,
     }
 }

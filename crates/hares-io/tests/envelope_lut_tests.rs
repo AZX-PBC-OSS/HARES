@@ -545,3 +545,243 @@ fn minimal_stud_and_cavity_rows_satisfy_r_equals_t_over_k() {
         "did not find Exterior Wall Minimal WALL STUD AND CAVITY"
     );
 }
+
+// ── Envelope Boundaries.csv loading ─────────────────────────────────────────
+
+/// Verify that `Envelope Boundaries.csv` loads successfully and produces
+/// known correct entries in the resolved name map.
+#[test]
+fn envelope_boundaries_csv_loads_successfully() {
+    let lut = EnvelopeLookup::load(&defaults_envelope_dir()).expect("load LUT");
+
+    // Spot-check several known entries from the CSV.
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Wall,
+            Some(&ZoneType::Conditioned),
+            Some(&ZoneType::Outdoor),
+        ),
+        Some("Exterior Wall")
+    );
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Roof,
+            Some(&ZoneType::Conditioned),
+            Some(&ZoneType::Outdoor),
+        ),
+        Some("Roof")
+    );
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Slab,
+            Some(&ZoneType::Conditioned),
+            Some(&ZoneType::Ground),
+        ),
+        Some("Floor")
+    );
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::FoundationWall,
+            Some(&ZoneType::Foundation),
+            Some(&ZoneType::Ground),
+        ),
+        Some("Foundation Wall")
+    );
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::RimJoist,
+            Some(&ZoneType::Foundation),
+            Some(&ZoneType::Outdoor),
+        ),
+        Some("Rim Joist")
+    );
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Wall,
+            Some(&ZoneType::Attic),
+            Some(&ZoneType::Outdoor),
+        ),
+        Some("Attic Wall")
+    );
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Floor,
+            Some(&ZoneType::Conditioned),
+            Some(&ZoneType::Outdoor),
+        ),
+        Some("Raised Floor")
+    );
+}
+
+/// Verify that the CSV-derived boundary names match the hardcoded mapping
+/// for every combination where both produce a result.
+#[test]
+fn csv_names_match_hardcoded_names() {
+    use hares_io::hpxml::building::{BoundaryType, ZoneType};
+
+    let lut = EnvelopeLookup::load(&defaults_envelope_dir()).expect("load LUT");
+
+    let all_zones = [
+        ZoneType::Conditioned,
+        ZoneType::Attic,
+        ZoneType::Garage,
+        ZoneType::Foundation,
+        ZoneType::Outdoor,
+        ZoneType::Ground,
+        ZoneType::Adjacent,
+    ];
+    let all_bts = [
+        BoundaryType::Wall,
+        BoundaryType::Roof,
+        BoundaryType::Floor,
+        BoundaryType::Window,
+        BoundaryType::Door,
+        BoundaryType::FoundationWall,
+        BoundaryType::RimJoist,
+        BoundaryType::Slab,
+    ];
+
+    // Window is intentionally excluded: the hardcoded `resolve_boundary_name`
+    // returns None for Window boundaries because they use a separate U-factor
+    // code path, while the CSV includes "Window" as a valid boundary name.
+    // This is a known, intentional divergence — the CSV is correct as a zone
+    // mapping; the caller's decision to skip LUT lookup for Windows is a
+    // code-path concern, not a mapping concern.
+    let mut mismatches = Vec::new();
+    for bt in &all_bts {
+        if *bt == BoundaryType::Window {
+            continue;
+        }
+        for int in &all_zones {
+            for ext in &all_zones {
+                let csv_name = lut.resolve_name(bt, Some(int), Some(ext));
+                let hc_name =
+                    hares_io::envelope_lut::resolve_boundary_name(bt, Some(int), Some(ext));
+                match (csv_name, hc_name) {
+                    (Some(c), Some(h)) if c != h => {
+                        mismatches.push(format!(
+                            "({bt:?}, {int:?}, {ext:?}): CSV={c:?}, hardcoded={h:?}"
+                        ));
+                    }
+                    (Some(_), None) | (None, Some(_)) => {
+                        mismatches.push(format!(
+                            "({bt:?}, {int:?}, {ext:?}): one has result, other doesn't"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if !mismatches.is_empty() {
+        // Sort for deterministic output.
+        mismatches.sort();
+        panic!(
+            "{} mismatches between CSV-derived and hardcoded boundary names:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+}
+
+/// Regression: editing a zone label in `Envelope Boundaries.csv` changes
+/// the resolved boundary name.
+#[test]
+fn csv_edit_changes_resolved_boundary_name() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+
+    // Copy the two required CSVs
+    let env_dir = defaults_envelope_dir();
+    for file_name in &["Envelope Boundary Types.csv", "Envelope Materials.csv"] {
+        std::fs::copy(env_dir.join(file_name), dir.path().join(file_name))
+            .expect("copy required CSV");
+    }
+
+    // Write a minimal Boundaries.csv with a known entry.
+    let boundaries_content = "\
+Boundary Name,Boundary Label,Exterior Zone Label,Interior Zone Label
+Exterior Wall,EW,EXT,LIV
+Garage Wall,GW,EXT,GAR
+";
+    let boundaries_path = dir.path().join("Envelope Boundaries.csv");
+    std::fs::write(&boundaries_path, boundaries_content).expect("write CSV");
+
+    let lut = EnvelopeLookup::load(dir.path()).expect("load LUT");
+
+    // Garage Wall should resolve from CSV
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Wall,
+            Some(&ZoneType::Garage),
+            Some(&ZoneType::Outdoor),
+        ),
+        Some("Garage Wall")
+    );
+
+    // Now edit the CSV — change the boundary name for EXT/GAR from
+    // "Garage Wall" to "Attic Wall" (still recognized by the classifier).
+    let boundaries_content_v2 = "\
+Boundary Name,Boundary Label,Exterior Zone Label,Interior Zone Label
+Exterior Wall,EW,EXT,LIV
+Attic Wall,AW,EXT,GAR
+";
+    std::fs::write(&boundaries_path, boundaries_content_v2).expect("rewrite CSV");
+
+    let lut2 = EnvelopeLookup::load(dir.path()).expect("reload LUT");
+    assert_eq!(
+        lut2.resolve_name(
+            &BoundaryType::Wall,
+            Some(&ZoneType::Garage),
+            Some(&ZoneType::Outdoor),
+        ),
+        Some("Attic Wall"),
+        "CSV edit should change the resolved name"
+    );
+}
+
+/// Verify that `resolve_name` returns "Window" for Window boundaries
+/// (the CSV is the source of truth; callers that skip LUT lookup for
+/// Windows do so at the code-path level, not the mapping level).
+#[test]
+fn resolve_name_returns_window_from_csv() {
+    let lut = EnvelopeLookup::load(&defaults_envelope_dir()).expect("load LUT");
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Window,
+            Some(&ZoneType::Conditioned),
+            Some(&ZoneType::Outdoor),
+        ),
+        Some("Window")
+    );
+}
+
+/// Verify that `resolve_name` returns furniture names for same-zone combinations.
+#[test]
+fn resolve_name_returns_furniture_for_same_zone() {
+    let lut = EnvelopeLookup::load(&defaults_envelope_dir()).expect("load LUT");
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Wall,
+            Some(&ZoneType::Conditioned),
+            Some(&ZoneType::Conditioned),
+        ),
+        Some("Indoor Furniture")
+    );
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Floor,
+            Some(&ZoneType::Foundation),
+            Some(&ZoneType::Foundation),
+        ),
+        Some("Foundation Furniture")
+    );
+    assert_eq!(
+        lut.resolve_name(
+            &BoundaryType::Roof,
+            Some(&ZoneType::Garage),
+            Some(&ZoneType::Garage),
+        ),
+        Some("Garage Furniture")
+    );
+}
