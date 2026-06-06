@@ -164,6 +164,35 @@ const FILM_R_WALL_ROOF: f64 = 0.1585;
 
 // ── EnvelopeLookup ──────────────────────────────────────────────────────────
 
+/// Split a variant label into (prefix, insulation_rank).
+///
+/// "Ceiling R-13" → Some(("Ceiling ", 13))
+/// "WoodStud, aluminum siding, R-11" → Some(("WoodStud, aluminum siding, ", 11))
+/// "Uninsulated" → Some(("", 0))
+/// "Minimal" or unrecognised → None
+///
+/// This allows monotonicity checks to group variants that differ only in
+/// insulation level, not in construction type or siding material.
+fn split_r_variant(variant: &str) -> Option<(&str, u32)> {
+    if variant.eq_ignore_ascii_case("Uninsulated") {
+        return Some(("", 0));
+    }
+    // Find "R-<digits>" pattern. Look for "R-" followed by at least one digit.
+    if let Some(r_pos) = variant.find("R-") {
+        let after_r = &variant[r_pos + 2..];
+        let digits_end = after_r
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(after_r.len());
+        let digits_str = &after_r[..digits_end];
+        if let Ok(rank) = digits_str.parse::<f64>() {
+            let int_rank = rank as u32;
+            let prefix = &variant[..r_pos];
+            return Some((prefix, int_rank));
+        }
+    }
+    None
+}
+
 /// Loaded and indexed envelope lookup tables.
 #[derive(Debug, Clone)]
 pub struct EnvelopeLookup {
@@ -206,6 +235,7 @@ impl EnvelopeLookup {
                     boundary_names: names.clone(),
                 };
                 check_lut.check_csv_vs_hardcoded_consistency();
+                check_lut.check_material_invariants(&mat_path);
             }
             names
         } else {
@@ -215,6 +245,16 @@ impl EnvelopeLookup {
             );
             HashMap::new()
         };
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if boundary_names.is_empty() {
+            let check_lut = Self {
+                boundary_types: boundary_types.clone(),
+                materials: materials.clone(),
+                boundary_names: HashMap::new(),
+            };
+            check_lut.check_material_invariants(&mat_path);
+        }
 
         Ok(Self {
             boundary_types,
@@ -304,6 +344,157 @@ impl EnvelopeLookup {
                         csv_name = %csv_name,
                         hardcoded_name = %hardcoded_name,
                         "Boundary name mismatch between CSV and hardcoded mapping"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Verify STUD AND CAVITY R-values are monotonic within each boundary-name
+    /// group and flag layers whose conductivity exceeds a physically plausible
+    /// threshold for insulated cavities.
+    ///
+    /// Activation is gated on `debug_assertions` or `check_invariants`.
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    fn check_material_invariants(&self, mat_path: &Path) {
+        let mut rdr = match csv::Reader::from_path(mat_path) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(path = %mat_path.display(), error = %e, "cannot open materials CSV for invariant check");
+                return;
+            }
+        };
+        let headers = match rdr.headers() {
+            Ok(h) => h.clone(),
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot read materials CSV headers");
+                return;
+            }
+        };
+
+        let boundary_name_idx = match headers.iter().position(|h| h == "Boundary Name") {
+            Some(i) => i,
+            None => return,
+        };
+        let boundary_type_idx = match headers.iter().position(|h| h == "Boundary Type") {
+            Some(i) => i,
+            None => return,
+        };
+        let material_name_idx = match headers.iter().position(|h| h == "Material Name") {
+            Some(i) => i,
+            None => return,
+        };
+        let resistance_idx = match headers.iter().position(|h| h == "Resistance (m^2-K/W)") {
+            Some(i) => i,
+            None => return,
+        };
+        let conductivity_idx = match headers.iter().position(|h| h == "Conductivity (W/m-K)") {
+            Some(i) => i,
+            None => return,
+        };
+
+        // Group rows by (boundary_name, variant_prefix) where variant_prefix is
+        // the portion of the Boundary Type that excludes the R-value label.
+        // This ensures we only compare variants that differ in insulation level,
+        // not in construction type or siding material.
+        use std::collections::BTreeMap;
+        let mut groups: BTreeMap<(String, String), BTreeMap<u32, (f64, f64)>> = BTreeMap::new();
+        //     (boundary_name, prefix) → insulation_rank → (resistance, conductivity)
+
+        for result in rdr.records() {
+            let record = match result {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let material = record.get(material_name_idx).unwrap_or("");
+            if !material.contains("STUD AND CAVITY") {
+                continue;
+            }
+            let boundary_name = record.get(boundary_name_idx).unwrap_or("");
+            let boundary_type = record.get(boundary_type_idx).unwrap_or("");
+            let r_str = record.get(resistance_idx).unwrap_or("");
+            let k_str = record.get(conductivity_idx).unwrap_or("");
+
+            if boundary_name.is_empty()
+                || boundary_type.is_empty()
+                || r_str.is_empty()
+                || k_str.is_empty()
+            {
+                continue;
+            }
+            let r: f64 = match r_str.parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let k: f64 = match k_str.parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Split variant into (prefix, insulation_rank).
+            // "Ceiling R-13" → ("Ceiling ", 13)
+            // "WoodStud, aluminum siding, R-11" → ("WoodStud, aluminum siding, ", 11)
+            // "Uninsulated" → ("", 0)
+            // "Minimal" or unrecognised → skip
+            let (prefix, rank) = match split_r_variant(boundary_type) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let key = (boundary_name.to_string(), prefix.to_string());
+            groups.entry(key).or_default().insert(rank, (r, k));
+        }
+
+        // Check monotonicity within each (boundary_name, prefix) group.
+        for ((boundary_name, prefix), variants) in &groups {
+            if variants.len() < 2 {
+                continue;
+            }
+            let ordered: Vec<(u32, f64, f64)> = variants
+                .iter()
+                .map(|(rank, &(r, k))| (*rank, r, k))
+                .collect();
+            // Already sorted by BTreeMap key.
+
+            for window in ordered.windows(2) {
+                let (prev_rank, prev_r, _prev_k) = window[0];
+                let (next_rank, next_r, _next_k) = window[1];
+                if next_r < prev_r {
+                    tracing::warn!(
+                        boundary = %boundary_name,
+                        prefix = %prefix,
+                        from_rank = prev_rank,
+                        to_rank = next_rank,
+                        from_r = prev_r,
+                        to_r = next_r,
+                        "Non-monotonic stud cavity R-value within variant group: rank {} (R={:.4}) → rank {} (R={:.4})",
+                        prev_rank,
+                        prev_r,
+                        next_rank,
+                        next_r,
+                    );
+                }
+            }
+
+            // Check conductivities: flag insulated stud-cavity layers with
+            // implausibly high k (> 0.5 W/m·K). Uninsulated cavities (rank 0)
+            // naturally have higher k due to air convection and are excluded.
+            // ASHRAE HoF 2021 Ch.26: still air k ≈ 0.026 W/m·K. An insulated
+            // stud cavity typically has k_eff ≈ 0.04–0.10 W/m·K. Values above
+            // 0.5 W/m·K for an insulated cavity indicate a back-calculation
+            // forced the layer to act as a near-zero-resistance thermal short.
+            const MAX_PLAUSIBLE_CAVITY_K: f64 = 0.5;
+            for (&rank, &(_r, k)) in variants.iter() {
+                if rank > 0 && k > MAX_PLAUSIBLE_CAVITY_K {
+                    tracing::warn!(
+                        boundary = %boundary_name,
+                        prefix = %prefix,
+                        rank = rank,
+                        conductivity = k,
+                        threshold = MAX_PLAUSIBLE_CAVITY_K,
+                        "Insulated stud cavity conductivity {:.4} W/m·K exceeds plausible maximum {:.4} W/m·K; back-calculation may have produced physically wrong per-layer properties",
+                        k,
+                        MAX_PLAUSIBLE_CAVITY_K,
                     );
                 }
             }

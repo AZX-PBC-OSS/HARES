@@ -860,3 +860,272 @@ fn window_boundary_type_rows_in_csv() {
         );
     }
 }
+
+// ── Stud cavity R-value monotonicity ─────────────────────────────────────
+
+/// Split a variant label into (prefix, insulation_rank).
+fn split_r_variant(variant: &str) -> Option<(&str, u32)> {
+    if variant.eq_ignore_ascii_case("Uninsulated") {
+        return Some(("", 0));
+    }
+    if let Some(r_pos) = variant.find("R-") {
+        let after_r = &variant[r_pos + 2..];
+        let digits_end = after_r
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(after_r.len());
+        let digits_str = &after_r[..digits_end];
+        if let Ok(rank) = digits_str.parse::<f64>() {
+            let int_rank = rank as u32;
+            let prefix = &variant[..r_pos];
+            return Some((prefix, int_rank));
+        }
+    }
+    None
+}
+
+/// Verify that for Foundation Ceiling, Garage Interior Ceiling, and
+/// Raised Floor groups (the boundary names fixed in T-0272), the stud
+/// cavity R-value increases monotonically with insulation level.
+#[test]
+fn stud_cavity_r_values_are_monotonic() {
+    let path = defaults_envelope_dir().join("Envelope Materials.csv");
+    let mut rdr = csv::Reader::from_path(&path).expect("open CSV");
+    let headers = rdr.headers().expect("read headers").clone();
+
+    let name_idx = headers
+        .iter()
+        .position(|h| h == "Boundary Name")
+        .expect("Boundary Name column");
+    let bt_idx = headers
+        .iter()
+        .position(|h| h == "Boundary Type")
+        .expect("Boundary Type column");
+    let mat_idx = headers
+        .iter()
+        .position(|h| h == "Material Name")
+        .expect("Material Name column");
+    let r_idx = headers
+        .iter()
+        .position(|h| h == "Resistance (m^2-K/W)")
+        .expect("Resistance column");
+
+    let target_names = [
+        "Foundation Ceiling",
+        "Garage Interior Ceiling",
+        "Raised Floor",
+    ];
+
+    use std::collections::BTreeMap;
+    // (boundary_name, variant_prefix) → rank → resistance
+    let mut groups: BTreeMap<(String, String), BTreeMap<u32, f64>> = BTreeMap::new();
+
+    for result in rdr.records() {
+        let record = result.expect("valid CSV row");
+        let boundary_name = record.get(name_idx).unwrap_or("");
+        if !target_names.contains(&boundary_name) {
+            continue;
+        }
+        let material = record.get(mat_idx).unwrap_or("");
+        if !material.contains("STUD AND CAVITY") {
+            continue;
+        }
+        let boundary_type = record.get(bt_idx).unwrap_or("");
+        let r_str = record.get(r_idx).unwrap_or("");
+
+        if boundary_type.is_empty() || r_str.is_empty() {
+            continue;
+        }
+        let r: f64 = match r_str.parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let (prefix, rank) = match split_r_variant(boundary_type) {
+            Some(v) => v,
+            None => continue,
+        };
+        groups
+            .entry((boundary_name.to_string(), prefix.to_string()))
+            .or_default()
+            .insert(rank, r);
+    }
+
+    assert!(
+        !groups.is_empty(),
+        "should find at least one group with STUD AND CAVITY rows in the fixed boundary names"
+    );
+
+    let mut failures = Vec::new();
+    for ((boundary_name, prefix), variants) in &groups {
+        if variants.len() < 2 {
+            continue;
+        }
+        let ordered: Vec<(u32, f64)> = variants.iter().map(|(rank, r)| (*rank, *r)).collect();
+        for window in ordered.windows(2) {
+            let (prev_rank, prev_r) = window[0];
+            let (next_rank, next_r) = window[1];
+            if next_r < prev_r {
+                failures.push(format!(
+                    "{boundary_name} / \"{prefix}\": rank {prev_rank} (R={prev_r:.4}) → rank {next_rank} (R={next_r:.4})"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} boundary name/prefix groups have non-monotonic stud cavity R-values:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Regression: Foundation Ceiling, Garage Interior Ceiling, and Raised Floor
+/// R-38 stud cavity layers have R-values >= their R-19 counterparts.
+#[test]
+fn r38_stud_cavity_r_gte_r19() {
+    let path = defaults_envelope_dir().join("Envelope Materials.csv");
+    let headers = {
+        let mut rdr = csv::Reader::from_path(&path).expect("open CSV");
+        rdr.headers().expect("read headers").clone()
+    };
+
+    let name_idx = headers
+        .iter()
+        .position(|h| h == "Boundary Name")
+        .expect("Boundary Name column");
+    let bt_idx = headers
+        .iter()
+        .position(|h| h == "Boundary Type")
+        .expect("Boundary Type column");
+    let mat_idx = headers
+        .iter()
+        .position(|h| h == "Material Name")
+        .expect("Material Name column");
+    let r_idx = headers
+        .iter()
+        .position(|h| h == "Resistance (m^2-K/W)")
+        .expect("Resistance column");
+
+    let target_names = [
+        "Foundation Ceiling",
+        "Garage Interior Ceiling",
+        "Raised Floor",
+    ];
+
+    for &target_name in &target_names {
+        let mut r38_r: Option<f64> = None;
+        let mut r19_r: Option<f64> = None;
+
+        let mut rdr2 = csv::Reader::from_path(&path).expect("reopen CSV");
+        for result in rdr2.records() {
+            let record = result.expect("valid CSV row");
+            let boundary_name = record.get(name_idx).unwrap_or("");
+            if boundary_name != target_name {
+                continue;
+            }
+            let material = record.get(mat_idx).unwrap_or("");
+            if !material.contains("STUD AND CAVITY") {
+                continue;
+            }
+            let boundary_type = record.get(bt_idx).unwrap_or("");
+            let r_str = record.get(r_idx).unwrap_or("");
+            if r_str.is_empty() {
+                continue;
+            }
+            let r: f64 = r_str.parse().expect("parse resistance");
+            if let Some((_, rank)) = split_r_variant(boundary_type) {
+                if rank == 38 {
+                    r38_r = Some(r);
+                }
+                if rank == 19 {
+                    r19_r = Some(r);
+                }
+            }
+        }
+
+        let r38 = r38_r.expect(&format!("{target_name} should have an R-38 variant"));
+        let r19 = r19_r.expect(&format!("{target_name} should have an R-19 variant"));
+        assert!(
+            r38 >= r19,
+            "{target_name}: R-38 stud cavity R={r38:.4} should be >= R-19 stud cavity R={r19:.4}"
+        );
+    }
+}
+
+/// Verify that no INSULATED stud cavity layer in the fixed boundary names
+/// (Foundation Ceiling, Garage Interior Ceiling, Raised Floor) has implausibly
+/// high conductivity.
+///
+/// ASHRAE HoF 2021 Ch.26: still air k ≈ 0.026 W/m·K. An insulated stud
+/// cavity typically has k_eff ≈ 0.04–0.10 W/m·K. Values above 0.5 W/m·K
+/// for an insulated cavity are physically implausible and indicate the
+/// back-calculation forced the layer to act as a thermal short.
+#[test]
+fn no_insulated_stud_cavity_conductivity_exceeds_plausible_maximum() {
+    let path = defaults_envelope_dir().join("Envelope Materials.csv");
+    let mut rdr = csv::Reader::from_path(&path).expect("open CSV");
+    let headers = rdr.headers().expect("read headers").clone();
+
+    let mat_idx = headers
+        .iter()
+        .position(|h| h == "Material Name")
+        .expect("Material Name column");
+    let k_idx = headers
+        .iter()
+        .position(|h| h == "Conductivity (W/m-K)")
+        .expect("Conductivity column");
+    let name_idx = headers
+        .iter()
+        .position(|h| h == "Boundary Name")
+        .expect("Boundary Name column");
+    let bt_idx = headers
+        .iter()
+        .position(|h| h == "Boundary Type")
+        .expect("Boundary Type column");
+
+    let target_names = [
+        "Foundation Ceiling",
+        "Garage Interior Ceiling",
+        "Raised Floor",
+    ];
+
+    let max_plausible_k: f64 = 0.5;
+    let mut violations: Vec<String> = Vec::new();
+
+    for result in rdr.records() {
+        let record = result.expect("valid CSV row");
+        let boundary_name = record.get(name_idx).unwrap_or("");
+        if !target_names.contains(&boundary_name) {
+            continue;
+        }
+        let material = record.get(mat_idx).unwrap_or("");
+        if !material.contains("STUD AND CAVITY") {
+            continue;
+        }
+        let boundary_type = record.get(bt_idx).unwrap_or("");
+        // Skip uninsulated cavities — they naturally have high k.
+        if let Some((_, rank)) = split_r_variant(boundary_type) {
+            if rank == 0 {
+                continue;
+            }
+        }
+        let k_str = record.get(k_idx).unwrap_or("");
+        if k_str.is_empty() {
+            continue;
+        }
+        let k: f64 = k_str.parse().expect("parse conductivity");
+        if k > max_plausible_k {
+            violations.push(format!(
+                "{boundary_name} / {boundary_type} / {material}: k={k:.5} W/m·K > {max_plausible_k}"
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "{} insulated STUD AND CAVITY layers in fixed boundary names exceed plausible maximum conductivity {} W/m·K:\n{}",
+        violations.len(),
+        max_plausible_k,
+        violations.join("\n")
+    );
+}
