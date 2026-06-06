@@ -1015,11 +1015,9 @@ dependencies = [
 name = "hares-control"
 version = "0.1.0"
 dependencies = [
- "bitflags",
  "hares-types",
  "serde",
  "serde_json",
- "thiserror",
  "tracing",
 ]
 
