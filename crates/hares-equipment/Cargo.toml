@@ -12,16 +12,13 @@ hares-control = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
 postcard = { workspace = true }
 crc = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 parquet = { workspace = true }
 arrow = { workspace = true }
-
 serde_json = { workspace = true }
-uom = { workspace = true }
 
 [features]
 observe = []
@@ -29,3 +26,4 @@ check_invariants = []
 
 [dev-dependencies]
 proptest = { workspace = true }
+uom = { workspace = true }
