@@ -399,3 +399,7 @@ Roof,"wood shingles or shakes, Finished, R-7, Flat",wood shingles or shakes,Flat
 Roof,"wood shingles or shakes, Finished, R-7, Pitched",wood shingles or shakes,Pitched,"Finished, R-7",res3.1_ochre_500 - bldg0000118,1.6356875512
 Roof,"wood shingles or shakes, Finished, Uninsulated, Flat",wood shingles or shakes,Flat,"Finished, Uninsulated",res3.1_ochre_500 - bldg0000500,0.4821098361
 Roof,"wood shingles or shakes, Finished, Uninsulated, Pitched",wood shingles or shakes,Pitched,"Finished, Uninsulated",res3.1_ochre_500 - bldg0000362,0.4911079568
+Window,Single-Pane Aluminum,Uninsulated,,,,0.1761
+Window,Double-Pane Clear,Uninsulated,,,,0.3460
+Window,Double-Pane Low-E,Uninsulated,,,,0.5650
+Window,Triple-Pane Low-E,Uninsulated,,,,1.0204

@@ -351,6 +351,24 @@ pub fn building_to_boundary_inputs(
                 )));
             }
 
+            // Window boundaries must not receive pre-computed RC layers from
+            // the envelope LUT. Windows use the Window struct's U-factor code
+            // path (EnergyPlus Simple Window Model Step 1), not the LUT.
+            // This assertion catches the case where Window material rows are
+            // added to Envelope Materials.csv, which would silently cause the
+            // LUT to return layers for windows and bypass the correct U-factor
+            // decomposition.
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            if bd.boundary_type == BoundaryType::Window {
+                debug_assert!(
+                    precomputed_rc.is_empty(),
+                    "Window boundary '{}' received pre-computed RC layers from envelope LUT; \
+                     windows must use the Window struct U-factor path (EnergyPlus Simple \
+                     Window Model Step 1), not the LUT",
+                    bd.id,
+                );
+            }
+
             Ok(BoundaryInput {
                 area_m2: bd.area_m2,
                 interior_zone_idx,

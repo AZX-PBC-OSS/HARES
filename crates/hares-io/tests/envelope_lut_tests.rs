@@ -785,3 +785,78 @@ fn resolve_name_returns_furniture_for_same_zone() {
         Some("Garage Furniture")
     );
 }
+
+/// Verify that `Envelope Boundary Types.csv` contains Window assembly rows
+/// with physically correct R-values (R = 1/U for typical window U-factors).
+/// The rows document reference window thermal performance by vintage; actual
+/// window modelling uses the Window struct U-factor path (EnergyPlus Simple
+/// Window Model Step 1), not the LUT. This test ensures the data completeness
+/// gap is closed and the values are physically plausible.
+///
+/// ASHRAE HoF 2021 Ch.15 Table 4: typical center-of-glass U-factors.
+#[test]
+fn window_boundary_type_rows_in_csv() {
+    let path = defaults_envelope_dir().join("Envelope Boundary Types.csv");
+    let mut rdr = csv::Reader::from_path(&path).expect("open CSV");
+    let headers = rdr.headers().expect("read headers").clone();
+
+    let name_idx = headers
+        .iter()
+        .position(|h| h == "Boundary Name")
+        .expect("Boundary Name column");
+    let r_idx = headers
+        .iter()
+        .position(|h| h == "Assembly R Value")
+        .expect("Assembly R Value column");
+
+    let mut window_rows: Vec<(String, f64)> = Vec::new();
+    for result in rdr.records() {
+        let record = result.expect("valid CSV row");
+        let name = record.get(name_idx).unwrap_or("");
+        if name != "Window" {
+            continue;
+        }
+        // Column 1 is the boundary type (window vintage label).
+        let bt = record.get(1).unwrap_or("");
+        let r_str = record.get(r_idx).unwrap_or("");
+        let r: f64 = r_str.parse().expect("parse Assembly R Value");
+        window_rows.push((bt.to_string(), r));
+    }
+
+    assert!(
+        !window_rows.is_empty(),
+        "Envelope Boundary Types.csv must contain Window rows"
+    );
+
+    // Verify the four expected vintage rows with physically correct R-values.
+    // R = 1/U for each window type; U-factors from ASHRAE HoF 2021 Ch.15.
+    let expected: &[(&str, f64)] = &[
+        // U ≈ 5.68 W/m²K → R = 1/5.678 = 0.1761 m²K/W
+        ("Single-Pane Aluminum", 0.1761),
+        // U ≈ 2.89 W/m²K → R = 1/2.890 = 0.3460 m²K/W
+        ("Double-Pane Clear", 0.3460),
+        // U ≈ 1.77 W/m²K → R = 1/1.770 = 0.5650 m²K/W
+        ("Double-Pane Low-E", 0.5650),
+        // U ≈ 0.98 W/m²K → R = 1/0.980 = 1.0204 m²K/W
+        ("Triple-Pane Low-E", 1.0204),
+    ];
+
+    for &(exp_name, exp_r) in expected {
+        let found = window_rows.iter().find(|(bt, _)| bt == exp_name);
+        assert!(
+            found.is_some(),
+            "Window row '{}' not found in Boundary Types CSV",
+            exp_name
+        );
+        let (_, actual_r) = found.unwrap();
+        let rel_err = (actual_r - exp_r).abs() / exp_r.max(f64::EPSILON);
+        assert!(
+            rel_err < 1e-3,
+            "Window '{}': Assembly R Value {:.6} differs from expected {:.6} (rel_err={:.4})",
+            exp_name,
+            actual_r,
+            exp_r,
+            rel_err,
+        );
+    }
+}
