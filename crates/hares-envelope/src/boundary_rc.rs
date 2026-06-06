@@ -271,6 +271,11 @@ pub struct BoundaryDiagnostic {
     /// boundaries. Used by solver_builder to attach depth-aware
     /// `DrivingTemp::Ground { depth_m }` to boundary diagnostics.
     pub foundation_depth_m: f64,
+    /// For same-zone precomputed boundaries: which half of the layer stack
+    /// was kept ("interior" or "exterior"). `None` for non-same-zone or
+    /// non-precomputed boundaries.
+    #[cfg(feature = "observe")]
+    pub same_zone_kept_half: Option<&'static str>,
 }
 
 /// Diagnostics captured during RC network construction.
@@ -701,6 +706,8 @@ pub fn assemble_building_rc(
                 inner_node,
                 interior_emissivity: bd.interior_emissivity,
                 foundation_depth_m: bd.foundation_depth_m,
+                #[cfg(feature = "observe")]
+                same_zone_kept_half: if same_zone { Some("interior") } else { None },
             });
             continue;
         }
@@ -803,6 +810,8 @@ pub fn assemble_building_rc(
                 inner_node,
                 interior_emissivity: bd.interior_emissivity,
                 foundation_depth_m: bd.foundation_depth_m,
+                #[cfg(feature = "observe")]
+                same_zone_kept_half: if same_zone { Some("interior") } else { None },
             });
         } else if !same_zone {
             // Fallback: single lumped resistance. fallback_r_m2_k_w is typically
@@ -948,6 +957,8 @@ pub fn assemble_building_rc(
                 inner_node: None,
                 interior_emissivity: bd.interior_emissivity,
                 foundation_depth_m: bd.foundation_depth_m,
+                #[cfg(feature = "observe")]
+                same_zone_kept_half: None,
             });
         }
     }
@@ -1252,6 +1263,45 @@ pub fn assemble_building_rc(
                  (> 0 kg/m³) and specific_heat (> 0 J/(kg·K))."
             );
         }
+
+        // Verify same-zone precomputed boundaries have correct RC chain topology:
+        // the outermost (cut-surface) node must NOT connect directly to zone air
+        // (it is the dead end of the fin), and the innermost node must connect to
+        // zone air through a single path. This guards against wiring bugs that
+        // would short-circuit the fin or leave it disconnected.
+        for diag in &boundary_diagnostics {
+            if diag.path == RCPath::Precomputed
+                && diag.n_rc_nodes > 0
+                && diag.exterior_target == ExteriorTarget::Zone(diag.interior_zone_idx)
+            {
+                if let Some(info) = layer_info.get(&diag.boundary_idx) {
+                    let zone_node = NodeId((diag.interior_zone_idx + 1) as u32);
+                    // Innermost node must connect to zone air.
+                    assert!(
+                        rc.resistances.contains_key(&(info.inner_node, zone_node))
+                            || rc.resistances.contains_key(&(zone_node, info.inner_node)),
+                        "same-zone precomputed boundary {}: inner node {:?} \
+                         not connected to zone {:?}",
+                        diag.boundary_idx,
+                        info.inner_node,
+                        zone_node
+                    );
+                    // Outermost (cut-surface) node must NOT connect directly to
+                    // zone air — the fin dead-ends there.
+                    if info.outer_node != info.inner_node {
+                        assert!(
+                            !rc.resistances.contains_key(&(info.outer_node, zone_node))
+                                && !rc.resistances.contains_key(&(zone_node, info.outer_node)),
+                            "same-zone precomputed boundary {}: outer (cut-surface) node \
+                             {:?} incorrectly connected directly to zone {:?}",
+                            diag.boundary_idx,
+                            info.outer_node,
+                            zone_node
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let boundary_ua: f64 = boundary_diagnostics.iter().map(|d| d.ua_w_per_k).sum();
@@ -1511,7 +1561,15 @@ impl RcGraphState {
         let mut res_list: Vec<f64> = layers.iter().map(|l| l.resistance_m2_k_w).collect();
         let mut nodes = cap_list.len();
 
-        // Step 1: same-zone boundaries -- cut in half, keeping the interior (last) half
+        // Step 1: same-zone boundaries -- cut in half, keeping the interior (last) half.
+        //
+        // This diverges from OCHRE's `create_rc_data` (envelope.py:312-314), which
+        // keeps the *first* (exterior-facing) half via `[:new_nodes]`. OCHRE's
+        // Boundary.__init__ then reverses the node and resistor lists (`[::-1]` at
+        // Envelope.py:404-405) to make the cut-surface layer closest to the zone.
+        // HARES keeps the interior half directly, matching the material-path
+        // convention (`build_layered_boundary` lines 1388-1398), and skips the
+        // reversal — the two approaches are topologically equivalent.
         if params.same_zone {
             let new_nodes = nodes / 2;
             if nodes.is_multiple_of(2) {
@@ -1558,9 +1616,25 @@ impl RcGraphState {
             }
         }
 
-        // Step 4: remove first resistor if same zones (dead-end exterior side)
+        // Step 4: remove last resistor for same-zone boundaries.
+        //
+        // The padding/averaging step (Step 2) produces N+1 resistors for N
+        // capacitors: the first resistor is the cut-surface half-resistance,
+        // the last is the interior-most half-resistance. For same-zone
+        // dead-end fins we remove the interior-most half-resistance so the
+        // zone air connects through the inter-layer resistance between the
+        // two innermost kept layers, consistent with the material-path
+        // topology where the cut-surface side faces the zone and the
+        // innermost layer is the dead end.
+        //
+        // This corrects a bug where res_list.remove(0) (removing the
+        // cut-surface half-resistance) was used instead of OCHRE's
+        // res_list = res_list[:-1] (envelope.py:336-337) which removes
+        // the last resistor. The previous code made the chain connect to
+        // zone air through the interior-most half-resistance, reversing
+        // the intended topology.
         if params.same_zone && !res_list.is_empty() {
-            res_list.remove(0);
+            res_list.pop();
         }
 
         if nodes == 0 {
@@ -2643,6 +2717,154 @@ mod tests {
 
         // 1 zone + 1 precomputed layer (not 2 raw layers).
         assert_eq!(rc.a_c.nrows(), 2);
+    }
+
+    // ── Same-zone precomputed path tests ─────────────────────────────────
+
+    #[test]
+    fn build_precomputed_boundary_same_zone_correct_topology() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        // 4 precomputed layers simulating: gypsum, insulation, sheathing, siding
+        // (exterior → interior). same_zone=true keeps the interior half (2 layers).
+        let precomputed = vec![
+            PrecomputedRCLayer {
+                resistance_m2_k_w: 0.5, // gypsum (exterior)
+                capacitance_kj_m2_k: 15.0,
+            },
+            PrecomputedRCLayer {
+                resistance_m2_k_w: 2.0, // insulation
+                capacitance_kj_m2_k: 5.0,
+            },
+            PrecomputedRCLayer {
+                resistance_m2_k_w: 1.5, // sheathing (interior half start)
+                capacitance_kj_m2_k: 8.0,
+            },
+            PrecomputedRCLayer {
+                resistance_m2_k_w: 0.3, // siding (innermost)
+                capacitance_kj_m2_k: 12.0,
+            },
+        ];
+        let boundaries = vec![BoundaryInput {
+            area_m2: 25.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Zone(0),
+            material_layers: vec![],
+            precomputed_rc: precomputed,
+            fallback_r_m2_k_w: 2.5,
+            r_film_interior_m2_k_w: 0.12,
+            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
+            framing_factor: None,
+            interior_emissivity: crate::longwave_radiation::EMISSIVITY_DEFAULT,
+            foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
+        }];
+        let (rc, diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        // 1 zone air + 2 kept layers (interior half of 4) = 3 states.
+        assert_eq!(rc.a_c.nrows(), 3);
+
+        // The diagnostic should record 2 precomputed RC nodes for this boundary.
+        let bd = &diag.boundaries[0];
+        assert_eq!(bd.path, RCPath::Precomputed);
+        assert_eq!(bd.n_rc_nodes, 2);
+
+        // Verify the RC chain topology: the innermost layer node connects to
+        // zone air; the cut-surface (outer) node is the dead end of the fin.
+        let info = &rc.layer_info[&0];
+        let zone_node = NodeId(1u32);
+        assert_ne!(
+            info.inner_node, info.outer_node,
+            "inner and outer nodes must differ for multi-layer same-zone"
+        );
+
+        let zone_row = rc.node_index[&zone_node];
+        let inner_row = rc.node_index[&info.inner_node];
+        let outer_row = rc.node_index[&info.outer_node];
+
+        // Innermost node ↔ zone coupling must exist (positive A_c entry).
+        let g_inner_zone = rc.a_c[(inner_row, zone_row)];
+        assert!(
+            g_inner_zone > 0.0,
+            "innermost-node (row {inner_row}) to zone (row {zone_row}) coupling \
+             must be positive, got {g_inner_zone}"
+        );
+
+        // Cut-surface (outer) node must NOT couple directly to zone air.
+        // The fin dead-ends there; coupling is only through inter-layer resistors.
+        let g_outer_zone = rc.a_c[(outer_row, zone_row)];
+        assert!(
+            g_outer_zone == 0.0,
+            "outer (cut-surface) node (row {outer_row}) must not couple directly \
+             to zone air (row {zone_row}), got {g_outer_zone}"
+        );
+
+        // Inter-layer coupling between the two kept layers must exist.
+        let g_inter_layer = rc.a_c[(inner_row, outer_row)];
+        assert!(
+            g_inter_layer > 0.0,
+            "inter-layer coupling between inner and outer nodes must be positive, \
+             got {g_inter_layer}"
+        );
+    }
+
+    #[test]
+    fn precomputed_same_zone_node_count_matches_material_path() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+
+        // Use low-density materials (density < SPLIT_MIN_DENSITY=100) to avoid
+        // diurnal-criterion auto-splitting in the material path, so both paths
+        // produce the same number of capacitor nodes.
+        let thickness = 0.10;
+        let conductivity = 1.0;
+        let density = 50.0; // < SPLIT_MIN_DENSITY → no auto-splitting
+        let cp = 900.0;
+        // R = thickness / k = 0.10, C_per_area = density*cp*thickness/1000 = 4.5 kJ/(m²·K)
+
+        // Material-path boundary: 4 layers, same_zone → keep last 2.
+        let material_layers: Vec<LayerInput> = (0..4)
+            .map(|_| make_layer(thickness, conductivity, density, cp, 0.0))
+            .collect();
+        let mat_boundary = make_boundary(20.0, 0, ExteriorTarget::Zone(0), material_layers, 2.5);
+        let (rc_mat, _) =
+            assemble_building_rc(&[mat_boundary], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        // Precomputed-path boundary: equivalent 4 layers, same_zone → keep last 2.
+        let precomputed: Vec<PrecomputedRCLayer> = (0..4)
+            .map(|_| PrecomputedRCLayer {
+                resistance_m2_k_w: thickness / conductivity,
+                capacitance_kj_m2_k: density * cp * thickness / 1000.0,
+            })
+            .collect();
+        let pre_boundary =
+            make_precomputed_boundary(20.0, 0, ExteriorTarget::Zone(0), precomputed, 2.5);
+        let (rc_pre, _) =
+            assemble_building_rc(&[pre_boundary], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        // Both paths should produce the same number of RC states:
+        // 1 zone air + 2 kept layers = 3.
+        assert_eq!(rc_mat.a_c.nrows(), 3, "material-path node count");
+        assert_eq!(rc_pre.a_c.nrows(), 3, "precomputed-path node count");
+        assert_eq!(
+            rc_mat.a_c.nrows(),
+            rc_pre.a_c.nrows(),
+            "material and precomputed paths must produce same node count for equivalent layers"
+        );
     }
 
     // ── Framing factor parallel-path tests ─────────────────────────
