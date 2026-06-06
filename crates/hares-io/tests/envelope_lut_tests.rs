@@ -323,3 +323,71 @@ fn high_r_clamps_to_minimal_regardless_of_construction_type() {
         result.matched_r_value
     );
 }
+
+// ── CSV data integrity ──────────────────────────────────────────────────────
+
+/// Regression test: column 9 (0-indexed; column 10 1-indexed) header
+/// must read `Specific Heat (J/kg-K)` after the fix for T-0268.
+/// The original header `Specific Heat (kJ/kg-K)` was mislabeled — the
+/// actual values in that column are in J/kg-K, not kJ/kg-K.
+#[test]
+fn specific_heat_column_9_header_is_j_per_kg_k() {
+    let path = defaults_envelope_dir().join("Envelope Materials.csv");
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_path(&path)
+        .expect("open CSV");
+    let headers = rdr.headers().expect("read headers");
+    let col9 = headers.get(9).expect("column 9 exists");
+    assert_eq!(
+        col9, "Specific Heat (J/kg-K)",
+        "column 9 header must read 'Specific Heat (J/kg-K)' after T-0268 fix"
+    );
+}
+
+/// Verify that specific heat of GYPSUM BOARD in the envelope materials
+/// CSV matches the ASHRAE literature value (~837 J/(kg·K)) within 1%.
+/// ASHRAE HoF 2021 Ch.26 Table 4 lists gypsum specific heat at 837 J/(kg·K).
+#[test]
+fn gypsum_board_specific_heat_matches_ashrae_literature() {
+    let path = defaults_envelope_dir().join("Envelope Materials.csv");
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_path(&path)
+        .expect("open CSV");
+    let headers = rdr.headers().expect("read headers").clone();
+
+    // Column 13 (0-indexed) / 14 (1-indexed) = "Specific Heat (J/kg-K)"
+    // — the original J/kg-K column where gypsum's value lives.
+    let j_col_idx = headers
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| *h == "Specific Heat (J/kg-K)")
+        .map(|(i, _)| i)
+        .last()
+        .expect("should find column 'Specific Heat (J/kg-K)'");
+
+    for result in rdr.records() {
+        let record = result.expect("valid CSV row");
+        let material = record.get(5).unwrap_or(""); // Material Name col 6 (1-idx)
+        if material.to_uppercase().contains("GYPSUM BOARD") {
+            let cp_str = record.get(j_col_idx).unwrap_or("");
+            if cp_str.is_empty() {
+                continue;
+            }
+            let cp: f64 = cp_str.parse().expect("parse specific heat");
+            let expected = 837.0;
+            let tolerance = expected * 0.01; // 1%
+            assert!(
+                (cp - expected).abs() <= tolerance,
+                "GYPSUM BOARD specific heat {} J/kg-K differs from ASHRAE literature value {} by more than 1%",
+                cp,
+                expected
+            );
+            return;
+        }
+    }
+    panic!("GYPSUM BOARD row not found in Envelope Materials.csv");
+}

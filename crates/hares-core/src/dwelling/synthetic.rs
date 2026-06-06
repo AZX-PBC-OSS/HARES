@@ -5,6 +5,8 @@ use std::path::Path;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use hares_physics::check_specific_heat_plausible;
 use hares_physics::solar::{EOT_C0, EOT_C1, EOT_C2, EOT_C3, EOT_C4};
 use hares_types::HaresError;
 use serde::Deserialize;
@@ -578,6 +580,13 @@ pub(crate) fn build_synthetic_building(
                         "specific_heat_j_kg_k must be non-negative for boundary '{}', got {}",
                         bc.id, ml.specific_heat_j_kg_k
                     )));
+                }
+                // Plausibility check for non-zero specific heat values.
+                // Catches unit mismatches (kJ vs J) that pass the non-negative gate
+                // but produce physically impossible values for building materials.
+                #[cfg(any(debug_assertions, feature = "check_invariants"))]
+                if ml.specific_heat_j_kg_k > 0.0 {
+                    check_specific_heat_plausible(ml.specific_heat_j_kg_k, &bc.id);
                 }
                 // Warn on zero density or specific_heat for layers with positive thickness
                 if ml.thickness_m > 0.0 && ml.density_kg_m3 == 0.0 {

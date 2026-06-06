@@ -7,6 +7,8 @@ use quick_xml::events::Event;
 
 use hares_types::{normalize_ascii, parse_trimmed_f64};
 
+#[cfg(any(debug_assertions, feature = "check_invariants"))]
+use hares_physics::check_specific_heat_plausible;
 use hares_physics::infiltration::{NATURAL_TO_50PA_EXPONENT, ach_nat_to_ach50};
 use hares_physics::units as conv;
 
@@ -2079,6 +2081,13 @@ fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Result<Vec<MaterialLay
             specific_heat_j_kg_k: specific_heat_j_kg_k.unwrap_or(0.0),
             area_m2,
         });
+
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        if let Some(cp) = specific_heat_j_kg_k {
+            if cp > 0.0 {
+                check_specific_heat_plausible(cp, "HPXML material layer");
+            }
+        }
     }
 
     Ok(layers)

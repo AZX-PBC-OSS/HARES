@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-check_invariants = []
+check_invariants = ["hares-physics/check_invariants"]
 observe = []
 
 [dependencies]

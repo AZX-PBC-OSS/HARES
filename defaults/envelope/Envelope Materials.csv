@@ -1,4 +1,4 @@
-Boundary Name,Boundary Type,Finish Type,Construction Type,Insulation Details,Material Name,Thickness (m),Conductivity (W/m-K),Density (kg/m^3),Specific Heat (kJ/kg-K),Resistance (m^2-K/W),Capacitance (kJ/m^2-K),Received From,Specific Heat (J/kg-K)
+Boundary Name,Boundary Type,Finish Type,Construction Type,Insulation Details,Material Name,Thickness (m),Conductivity (W/m-K),Density (kg/m^3),Specific Heat (J/kg-K),Resistance (m^2-K/W),Capacitance (kJ/m^2-K),Received From,Specific Heat (J/kg-K)
 Adjacent Attic Wall,Standard,,,,OSB SHEATHING 0.5 IN.,0.0127,0.115,512.64,,0.11,7.905278413,,1214.23
 Adjacent Attic Wall,Standard,,,,WALL STUD AND CAVITY,0.1397,0.394,139.054,,0.3549,22.7328606,,1170.238
 Adjacent Ceiling,Standard,,,,CEILING STUD AND CAVITY,0.0889,1.052,20.986,,0.08452,2.029200618,,1087.661

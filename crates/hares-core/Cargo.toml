@@ -10,7 +10,7 @@ profiling = []
 actor_profiling = []
 observe = ["hares-types/observe", "hares-io/observe", "hares-equipment/observe", "hares-envelope/observe", "hares-physics/observe", "hares-tariff/observe"]
 observe_detailed = ["observe", "hares-envelope/observe_detailed"]
-check_invariants = ["hares-io/check_invariants", "hares-equipment/check_invariants", "hares-envelope/check_invariants", "hares-tariff/check_invariants"]
+check_invariants = ["hares-io/check_invariants", "hares-equipment/check_invariants", "hares-envelope/check_invariants", "hares-tariff/check_invariants", "hares-physics/check_invariants"]
 dst = []
 
 [dependencies]
