@@ -643,18 +643,18 @@ pub fn assemble_building_rc(
                 } else {
                     bd.r_film_exterior_m2_k_w
                 };
-            debug_assert!(
+            assert!(
                 r_total > 0.0,
-                "boundary {bd_idx}: precomputed R_total must be > 0"
+                "boundary {bd_idx}: precomputed R_total must be > 0, got {r_total}"
             );
             let cap_total: f64 = bd
                 .precomputed_rc
                 .iter()
                 .map(|l| l.capacitance_kj_m2_k * 1000.0 * bd.area_m2)
                 .sum();
-            debug_assert!(
+            assert!(
                 cap_total >= 0.0,
-                "boundary {bd_idx}: capacitance must be >= 0"
+                "boundary {bd_idx}: capacitance must be >= 0, got {cap_total}"
             );
             let inner_node = if n_cap_nodes > 0 {
                 let inner = NodeId(nodes_before + n_cap_nodes as u32 - 1);
@@ -759,9 +759,9 @@ pub fn assemble_building_rc(
                     l.density_kg_m3 * l.specific_heat_j_kg_k * l.thickness_m * a
                 })
                 .sum();
-            debug_assert!(
+            assert!(
                 cap_total >= 0.0,
-                "boundary {bd_idx}: capacitance must be >= 0"
+                "boundary {bd_idx}: capacitance must be >= 0, got {cap_total}"
             );
             let inner_node = if n_cap_nodes > 0 {
                 let inner = NodeId(nodes_before + n_cap_nodes as u32 - 1);
@@ -820,9 +820,9 @@ pub fn assemble_building_rc(
             // (the RC graph also doesn't add films separately here).
             let r_total =
                 bd.fallback_r_m2_k_w + bd.r_film_interior_m2_k_w + bd.r_film_exterior_m2_k_w;
-            debug_assert!(
+            assert!(
                 r_total > 0.0,
-                "boundary {bd_idx}: fallback R_total must be > 0"
+                "boundary {bd_idx}: fallback R_total must be > 0, got {r_total}"
             );
 
             if interior_lwr_method == InteriorLwrMethod::StarMesh {
@@ -3789,6 +3789,87 @@ mod tests {
                 info.outer_node
             );
         }
+    }
+
+    // ── Assertion retention in release builds ───────────────────────────
+
+    #[test]
+    #[should_panic(expected = "capacitance must be >= 0, got")]
+    fn precomputed_negative_capacitance_asserts() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        let precomputed = vec![PrecomputedRCLayer {
+            resistance_m2_k_w: 2.0,
+            capacitance_kj_m2_k: -5.0,
+        }];
+        let boundaries = vec![make_precomputed_boundary(
+            20.0,
+            0,
+            ExteriorTarget::Outdoor,
+            precomputed,
+            2.5,
+        )];
+        let _ = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF);
+    }
+
+    #[test]
+    #[should_panic(expected = "precomputed R_total must be > 0, got")]
+    fn precomputed_zero_r_total_asserts() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        let precomputed = vec![PrecomputedRCLayer {
+            resistance_m2_k_w: 0.0,
+            capacitance_kj_m2_k: 10.0,
+        }];
+        let mut bd = make_precomputed_boundary(20.0, 0, ExteriorTarget::Outdoor, precomputed, 2.5);
+        bd.r_film_interior_m2_k_w = 0.0;
+        bd.r_film_exterior_m2_k_w = 0.0;
+        let _ = assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF);
+    }
+
+    #[test]
+    #[should_panic(expected = "capacitance must be >= 0, got")]
+    fn material_negative_cap_asserts() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        let layers = vec![make_layer(0.1, 0.5, -1000.0, 800.0, 50.0)];
+        let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
+        let _ = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF);
+    }
+
+    #[test]
+    #[should_panic(expected = "fallback R_total must be > 0, got")]
+    fn fallback_zero_r_total_asserts() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        let mut bd = make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 0.0);
+        bd.r_film_interior_m2_k_w = 0.0;
+        bd.r_film_exterior_m2_k_w = 0.0;
+        let _ = assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF);
     }
 
     #[test]
