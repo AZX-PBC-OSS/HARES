@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
+use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
 use hares_equipment::hvac::cooling_config::DehumidifierConfig;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
@@ -327,4 +328,145 @@ fn dehumidifier_capacity_pints_to_liters_conversion_uses_correct_factor() {
         "Dehumidifier capacity pints→liters conversion is wrong: \
          expected {expected_l_day:.6} L/day (40 pints × 0.473176473), got {actual_l_day:.6} L/day"
     );
+}
+
+#[test]
+fn central_ac_seer_18_two_stage_populates_per_stage_data() {
+    let systems_xml = r#"
+    <Systems>
+      <HVAC>
+        <HVACPlant>
+          <CoolingSystem>
+            <SystemIdentifier id='AC1'/>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingSystemFuel>electricity</CoolingSystemFuel>
+            <CoolingCapacity>36000.0</CoolingCapacity>
+            <CompressorType>two stage</CompressorType>
+            <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+            <AnnualCoolingEfficiency>
+              <Units>SEER</Units>
+              <Value>18.0</Value>
+            </AnnualCoolingEfficiency>
+            <SensibleHeatFraction>0.73</SensibleHeatFraction>
+          </CoolingSystem>
+        </HVACPlant>
+        <HVACControl>
+          <SystemIdentifier id='Ctrl1'/>
+          <SetpointTempHeatingSeason>68.0</SetpointTempHeatingSeason>
+          <SetpointTempCoolingSeason>78.0</SetpointTempCoolingSeason>
+        </HVACControl>
+      </HVAC>
+    </Systems>"#;
+
+    let xml = minimal_hpxml_with_systems(systems_xml);
+    let mut building = parse_building(&xml).expect("AC fixture should parse");
+    building.site.latitude_deg = Some(39.75);
+    building.site.longitude_deg = Some(-104.99);
+
+    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        .expect("AC equipment should resolve");
+
+    let ac_spec = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("Air Conditioner spec should be present");
+
+    let typed_config = ac_spec
+        .typed_config
+        .as_ref()
+        .expect("Air Conditioner should resolve to a typed config");
+
+    let cfg: CentralAirConditionerConfig = typed_config
+        .typed()
+        .expect("typed config should downcast to CentralAirConditionerConfig");
+
+    assert!(
+        cfg.number_of_speeds > 1,
+        "two-stage compressor should yield number_of_speeds > 1, got {}",
+        cfg.number_of_speeds
+    );
+
+    let stage_caps = cfg
+        .stage_capacities_w
+        .as_ref()
+        .expect("stage_capacities_w should be populated from CSV multi-speed parameters");
+    assert_eq!(
+        stage_caps.len(),
+        cfg.number_of_speeds as usize,
+        "stage_capacities_w length should match number_of_speeds"
+    );
+    assert!(
+        stage_caps.iter().all(|&c| c > 0.0),
+        "all per-stage capacities should be > 0"
+    );
+}
+
+#[test]
+fn central_ac_seer_22_fallback_4_speed_populates_per_stage_data() {
+    // SEER > 21 without explicit CompressorType → fallback heuristic assigns
+    // 4 speeds, and multi-speed CSV entries should populate per-stage data.
+    let systems_xml = r#"
+    <Systems>
+      <HVAC>
+        <HVACPlant>
+          <CoolingSystem>
+            <SystemIdentifier id='AC2'/>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingSystemFuel>electricity</CoolingSystemFuel>
+            <CoolingCapacity>48000.0</CoolingCapacity>
+            <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+            <AnnualCoolingEfficiency>
+              <Units>SEER</Units>
+              <Value>22.0</Value>
+            </AnnualCoolingEfficiency>
+            <SensibleHeatFraction>0.73</SensibleHeatFraction>
+          </CoolingSystem>
+        </HVACPlant>
+        <HVACControl>
+          <SystemIdentifier id='Ctrl2'/>
+          <SetpointTempHeatingSeason>68.0</SetpointTempHeatingSeason>
+          <SetpointTempCoolingSeason>78.0</SetpointTempCoolingSeason>
+        </HVACControl>
+      </HVAC>
+    </Systems>"#;
+
+    let xml = minimal_hpxml_with_systems(systems_xml);
+    let mut building = parse_building(&xml).expect("AC 4-speed fixture should parse");
+    building.site.latitude_deg = Some(39.75);
+    building.site.longitude_deg = Some(-104.99);
+
+    let specs = resolve_equipment(&building, &repo_defaults(), &json!({}), None)
+        .expect("AC 4-speed equipment should resolve");
+
+    let ac_spec = specs
+        .iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("Air Conditioner spec should be present");
+
+    let typed_config = ac_spec
+        .typed_config
+        .as_ref()
+        .expect("Air Conditioner should resolve to a typed config");
+
+    let cfg: CentralAirConditionerConfig = typed_config
+        .typed()
+        .expect("typed config should downcast to CentralAirConditionerConfig");
+
+    assert_eq!(
+        cfg.number_of_speeds, 4,
+        "SEER 22 without CompressorType should fall back to 4 speeds"
+    );
+
+    let stage_caps = cfg
+        .stage_capacities_w
+        .as_ref()
+        .expect("stage_capacities_w should be populated for 4-speed AC");
+    assert_eq!(stage_caps.len(), 4);
+    assert!(stage_caps.iter().all(|&c| c > 0.0));
+
+    let stage_eirs = cfg
+        .stage_eirs
+        .as_ref()
+        .expect("stage_eirs should be populated for 4-speed AC");
+    assert_eq!(stage_eirs.len(), 4);
 }

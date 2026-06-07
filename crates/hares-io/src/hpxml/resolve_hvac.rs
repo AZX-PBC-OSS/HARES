@@ -340,6 +340,16 @@ pub fn rebuild_hvac_typed_config(
                 .ok()
                 .flatten()
         }
+        "GSHP Heater" | "WSHP Heater" => {
+            try_build_heat_pump_heater_config(name, params, duct_params, false)
+                .ok()
+                .flatten()
+        }
+        "GSHP Cooler" | "WSHP Cooler" => {
+            try_build_heat_pump_cooler_config(name, params, duct_params, false)
+                .ok()
+                .flatten()
+        }
         "Dehumidifier" => try_build_dehumidifier_config(name, params),
         other => {
             tracing::warn!(
@@ -3208,6 +3218,38 @@ fn remap_minisplit_stages(
     }
 }
 
+/// Invariant check: when equipment has multiple speeds but no per-stage
+/// capacity data was populated, the equipment will silently behave as
+/// single-speed despite its `number_of_speeds > 1` configuration.
+///
+/// Only fires under `debug_assertions` or `check_invariants` feature.
+fn check_multispeed_invariant(params: &Map<String, Value>, n_speeds: usize) {
+    let (_cap_prefix, _eir_prefix) = if params.contains_key("heating_capacity_w") {
+        ("heating_capacity_w_stage", "heating_eir_stage")
+    } else {
+        ("cooling_capacity_w_stage", "cooling_eir_stage")
+    };
+    let has_any_stage = (0..n_speeds).any(|i| {
+        params
+            .get(&format!("{_cap_prefix}_{i}"))
+            .and_then(Value::as_f64)
+            .map(|v| v > 0.0)
+            .unwrap_or(false)
+    });
+    if !has_any_stage {
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        tracing::warn!(
+            equipment = name,
+            n_speeds,
+            "equipment has {n_speeds} speeds but no per-stage capacity data applied; \
+             system will behave as single-speed"
+        );
+    }
+}
+
 fn apply_multispeed_parameters(
     params: &mut Map<String, Value>,
     defaults: &DefaultsStore,
@@ -3219,38 +3261,111 @@ fn apply_multispeed_parameters(
         .and_then(Value::as_u64)
         .unwrap_or(1) as usize;
 
+    if n_speeds <= 1 {
+        return;
+    }
+
     let is_mshp = matches!(equipment_name, "MSHP Heater" | "MSHP Cooler");
 
-    let (eff_key, eff_kind, cap_key, stage_cap_prefix, stage_eir_prefix, curves) = if is_heating {
-        (
-            "efficiency_hspf",
-            "HSPF",
-            "heating_capacity_w",
-            "heating_capacity_w_stage",
-            "heating_eir_stage",
-            defaults.hvac_heating_curves(equipment_name),
-        )
-    } else {
-        (
-            "efficiency_seer",
-            "SEER",
-            "cooling_capacity_w",
-            "cooling_capacity_w_stage",
-            "cooling_eir_stage",
-            defaults.hvac_cooling_curves(equipment_name),
-        )
-    };
+    let (primary_eff_key, eff_kinds, cap_key, stage_cap_prefix, stage_eir_prefix, curves) =
+        if is_heating {
+            (
+                "efficiency_hspf",
+                &["HSPF", "COP"][..],
+                "heating_capacity_w",
+                "heating_capacity_w_stage",
+                "heating_eir_stage",
+                defaults.hvac_heating_curves(equipment_name),
+            )
+        } else {
+            (
+                "efficiency_seer",
+                &["SEER", "EER"][..],
+                "cooling_capacity_w",
+                "cooling_capacity_w_stage",
+                "cooling_eir_stage",
+                defaults.hvac_cooling_curves(equipment_name),
+            )
+        };
 
     let Some(rated_capacity_w) = params.get(cap_key).and_then(Value::as_f64) else {
         return;
     };
-    let Some(efficiency_value) = params.get(eff_key).and_then(Value::as_f64) else {
+
+    // Try primary efficiency key, then fall back to generic efficiency key
+    // with its companion units key to derive the correct eff_kind.
+    // HPXML Ground-source heat pumps commonly use COP for heating and
+    // EER for cooling rather than HSPF/SEER; the generic efficiency field
+    // carries the value while the companion _units field names the kind.
+    let efficiency_key_and_kind: Option<(&str, String, f64)> = params
+        .get(primary_eff_key)
+        .and_then(Value::as_f64)
+        .map(|v| (primary_eff_key, eff_kinds[0].to_string(), v))
+        .or_else(|| {
+            let generic_key = if is_heating {
+                "heating_efficiency"
+            } else {
+                "cooling_efficiency"
+            };
+            let units_key = if is_heating {
+                "heating_efficiency_units"
+            } else {
+                "cooling_efficiency_units"
+            };
+            let value = params.get(generic_key).and_then(Value::as_f64)?;
+            let units = params
+                .get(units_key)
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_ascii_uppercase())
+                .unwrap_or_else(|| eff_kinds[0].to_string());
+            Some((generic_key, units, value))
+        });
+
+    let Some((_eff_key_used, eff_kind_used, efficiency_value)) = efficiency_key_and_kind else {
+        let eff_label = if is_heating { "heating" } else { "cooling" };
+        tracing::warn!(
+            equipment = equipment_name,
+            n_speeds,
+            "equipment has {n_speeds} speeds but no {eff_label} efficiency found; \
+             cannot apply per-stage data"
+        );
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        check_multispeed_invariant(params, n_speeds);
         return;
     };
 
-    let Some(multispeed) =
-        defaults.hvac_multispeed_parameters(equipment_name, eff_kind, n_speeds, efficiency_value)
-    else {
+    // Try the derived efficiency kind first, then fall back through
+    // alternative kinds (e.g., COP→HSPF for heating, EER→SEER for cooling).
+    let mut multispeed = defaults.hvac_multispeed_parameters(
+        equipment_name,
+        &eff_kind_used,
+        n_speeds,
+        efficiency_value,
+    );
+    for kind in eff_kinds {
+        if multispeed.is_some() {
+            break;
+        }
+        if *kind != eff_kind_used {
+            multispeed = defaults.hvac_multispeed_parameters(
+                equipment_name,
+                kind,
+                n_speeds,
+                efficiency_value,
+            );
+        }
+    }
+
+    let Some(multispeed) = multispeed else {
+        tracing::warn!(
+            equipment = equipment_name,
+            n_speeds,
+            eff_kind = %eff_kind_used,
+            "equipment has {n_speeds} speeds but no multi-speed CSV entry found \
+             for efficiency kind '{eff_kind_used}'; per-stage data will be absent"
+        );
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        check_multispeed_invariant(params, n_speeds);
         return;
     };
 
