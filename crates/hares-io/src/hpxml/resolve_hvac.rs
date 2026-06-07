@@ -3194,6 +3194,94 @@ fn apply_multispeed_furnace_parameters(
     }
 }
 
+/// SEER-dependent SHR scaling for MSHP Cooler equipment.
+///
+/// Higher SEER mini-split equipment achieves its efficiency rating through
+/// larger indoor coil surface area, improved compressor isentropic efficiency,
+/// and electronic expansion valves that maintain tighter superheat control.
+/// The larger coil surface directly improves dehumidification (lowers SHR):
+/// a larger coil operates at a lower apparatus dew point for the same sensible
+/// capacity, increasing latent removal.
+///
+/// This relationship is strongest at rated speed (where the coil is properly
+/// matched to the load) and weakest at minimum speed (where the coil is already
+/// oversized relative to the load regardless of SEER tier).
+///
+/// Model: SHR_i(SEER) = SHR_i(20 SEER) - alpha_i * (SEER - 20)
+/// where the magnitude of alpha_i increases with speed index (stronger effect
+/// at higher speeds).  ALPHA_i values are negative; the formula subtracts a
+/// positive quantity alpha_i for readability.
+///
+/// Reference: ASHRAE HoF 2021 Ch.4 §4.2-4.4 (cooling coil bypass factor and
+/// apparatus dew point), Ch.18 §18.3.3 (variable-speed refrigerant system
+/// part-load characteristics).
+/// EnergyPlus ERM 26.1, 'Variable Speed DX Cooling Coil': DX coil SHR depends
+/// on coil sizing and entering conditions; larger coils for efficiency-grade
+/// equipment produce lower apparatus dew point and thus lower SHR at rated
+/// conditions.
+fn scale_mshp_cooler_shrs_for_seer(seer: f64, shrs: &[f64]) -> Vec<f64> {
+    const REFERENCE_SEER: f64 = 20.0;
+    // Per-speed SHR decrement coefficients [SEER⁻¹].  Higher index = rated
+    // speed where coil-sizing effect is strongest.  The magnitude of ALPHA
+    // increases with speed index (stronger SHR reduction at higher speed).
+    // These are engineering estimates with no primary-source derivation;
+    // the values are calibrated to produce ~0.05 SHR difference across a
+    // 20-SEER span at rated speed, consistent with the qualitative range
+    // described in EnergyPlus ERM 26.1 'Variable Speed DX Cooling Coil'
+    // (larger coils → lower apparatus dew point → lower SHR).  See
+    // ### Known Limitations in the ticket for citation status.
+    const ALPHA: [f64; 4] = [-0.0008, -0.0014, -0.0020, -0.0026];
+    let delta = seer - REFERENCE_SEER;
+    shrs.iter()
+        .enumerate()
+        .map(|(i, &shr)| {
+            let idx = i.min(ALPHA.len() - 1);
+            (shr + ALPHA[idx] * delta).clamp(0.6, 0.95)
+        })
+        .collect()
+}
+
+/// SEER-dependent capacity ratio scaling for MSHP Cooler equipment.
+///
+/// Higher SEER inverter-driven compressors can modulate to lower minimum
+/// capacities due to wider compressor speed ranges, improved inverter
+/// electronics, and better refrigerant management at low speeds.
+///
+/// Model: ratio_i(SEER) = 1.0 - (1.0 - ratio_i(20 SEER)) * (SEER / 20)^β
+/// where β = 0.35 controls turndown improvement with SEER.
+///
+/// The maximum speed (index N-1) stays at 1.0 (rated capacity).  Lower speeds
+/// spread their distance from 1.0 proportionally, so higher SEER units have
+/// lower minimum capacity ratios (better turndown).
+///
+/// Reference: ASHRAE HoF 2021 Ch.18 §18.3 (variable-speed compressor modulation
+/// range).  EnergyPlus ERM 26.1, 'Variable Speed DX Cooling Coil': minimum
+/// capacity ratios for variable-speed DX coils typically range from 0.25-0.40
+/// for high-efficiency inverter equipment versus 0.40-0.55 for conventional
+/// multi-speed units.
+fn scale_mshp_cooler_capacity_ratios_for_seer(seer: f64, caps: &[f64]) -> Vec<f64> {
+    const REFERENCE_SEER: f64 = 20.0;
+    // Turndown exponent.  Engineering estimate chosen to span the 0.25–0.40
+    // minimum capacity ratio range cited in EnergyPlus ERM 26.1, 'Variable
+    // Speed DX Cooling Coil': at SEER 33 with the reference 0.40741 minimum,
+    // BETA=0.35 produces ~0.287 (within the cited range).  No primary source
+    // provides this specific exponent; it was calibrated to the ERM-quoted
+    // range.
+    const BETA: f64 = 0.35;
+    let scale = (seer / REFERENCE_SEER).powf(BETA);
+    caps.iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            // Last entry (max speed) is always 1.0 — rated capacity anchor.
+            if i == caps.len() - 1 {
+                return 1.0;
+            }
+            let distance = 1.0 - c;
+            (1.0 - distance * scale).clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
 /// OCHRE MinisplitHVAC 10-to-4 speed remap: when the defaults CSV provides
 /// exactly 10 entries and the equipment needs 4 speeds, subsample at
 /// indices [1, 3, 5, 9] (0-indexed).  Applied to capacity_ratios, COPs,
@@ -3382,6 +3470,23 @@ fn apply_multispeed_parameters(
             multispeed.cops.clone(),
             multispeed.shrs.clone(),
         )
+    };
+
+    // MSHP Cooler: apply SEER-dependent SHR and capacity ratio scaling.
+    // The defaults CSV contains identical SHR/capacity-ratio values across
+    // all SEER tiers for MSHP Cooler rows because the data originated from
+    // a single reference unit.  This scaling model adjusts SHR profiles and
+    // turndown ratios based on SEER tier using known relationships between
+    // coil size, compressor modulation range, and latent/sensible split.
+    // Reference: ASHRAE HoF 2021 Ch.4 §4.2-4.4, Ch.18 §18.3.3;
+    // EnergyPlus ERM 26.1, 'Variable Speed DX Cooling Coil'.
+    let (capacity_ratios, shrs) = if is_mshp && !is_heating {
+        let scaled_caps =
+            scale_mshp_cooler_capacity_ratios_for_seer(efficiency_value, &capacity_ratios);
+        let scaled_shrs = scale_mshp_cooler_shrs_for_seer(efficiency_value, &shrs);
+        (scaled_caps, scaled_shrs)
+    } else {
+        (capacity_ratios, shrs)
     };
 
     let stage_count = capacity_ratios.len().min(cops.len()).min(n_speeds);
@@ -6935,5 +7040,159 @@ mod tests {
             (value - 0.01).abs() < 1e-9,
             "0.01 fraction must pass through unchanged, got {value}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // MSHP Cooler SEER-dependent SHR and capacity ratio scaling tests
+    // -----------------------------------------------------------------------
+
+    /// Reference SHR vector for MSHP Cooler at 20 SEER (per CSV).
+    const REF_SHR: [f64; 4] = [0.86256, 0.7987, 0.75709, 0.70255];
+
+    /// Reference capacity ratio vector for MSHP Cooler at 20 SEER (per CSV).
+    const REF_CAPS: [f64; 4] = [0.40741, 0.55556, 0.70370, 1.0];
+
+    #[test]
+    fn mshp_cooler_shr_differentiates_at_least_three_seer_tiers() {
+        let shr_13 = scale_mshp_cooler_shrs_for_seer(13.0, &REF_SHR);
+        let shr_20 = scale_mshp_cooler_shrs_for_seer(20.0, &REF_SHR);
+        let shr_33 = scale_mshp_cooler_shrs_for_seer(33.0, &REF_SHR);
+
+        // At the reference SEER, SHR values should be close to the CSV originals.
+        for (i, (s, r)) in shr_20.iter().zip(REF_SHR.iter()).enumerate() {
+            assert!(
+                (s - r).abs() < 1e-6,
+                "SEER 20 speed {i}: scaling should preserve reference SHR at reference SEER; \
+                 got {s}, expected {r}"
+            );
+        }
+
+        // Higher SEER → lower SHR (more dehumidification) at every speed.
+        for i in 0..4 {
+            assert!(
+                shr_33[i] < shr_20[i],
+                "SEER 33 speed {i}: expected SHR ({}) < SEER 20 SHR ({})",
+                shr_33[i],
+                shr_20[i]
+            );
+            assert!(
+                shr_13[i] > shr_20[i],
+                "SEER 13 speed {i}: expected SHR ({}) > SEER 20 SHR ({})",
+                shr_13[i],
+                shr_20[i]
+            );
+        }
+
+        // The SHR spread is measurable (≥ 0.01 at rated speed).
+        let rated_spread = shr_13[3] - shr_33[3];
+        assert!(
+            rated_spread >= 0.01,
+            "rated SHR spread {rated_spread} across 13-33 SEER too small to distinguish"
+        );
+
+        // All SHR values are bounded in the valid range.
+        for (i, s) in shr_13.iter().enumerate() {
+            assert!(
+                (0.6..=1.0).contains(s),
+                "SEER 13 speed {i}: SHR {s} out of valid [0.6, 1.0] range"
+            );
+        }
+        for (i, s) in shr_33.iter().enumerate() {
+            assert!(
+                (0.6..=1.0).contains(s),
+                "SEER 33 speed {i}: SHR {s} out of valid [0.6, 1.0] range"
+            );
+        }
+    }
+
+    #[test]
+    fn mshp_cooler_capacity_ratios_not_bit_identical_across_seer_tiers() {
+        let caps_13 = scale_mshp_cooler_capacity_ratios_for_seer(13.0, &REF_CAPS);
+        let caps_20 = scale_mshp_cooler_capacity_ratios_for_seer(20.0, &REF_CAPS);
+        let caps_33 = scale_mshp_cooler_capacity_ratios_for_seer(33.0, &REF_CAPS);
+
+        // At reference SEER, ratios are unchanged.
+        for (i, (c, r)) in caps_20.iter().zip(REF_CAPS.iter()).enumerate() {
+            assert!(
+                (c - r).abs() < 1e-6,
+                "SEER 20 speed {i}: scaling should preserve reference cap ratio at reference SEER; \
+                 got {c}, expected {r}"
+            );
+        }
+
+        // Higher SEER → lower capacity ratio (better turndown) for non-max speeds.
+        for i in 0..3 {
+            assert!(
+                caps_33[i] < caps_20[i],
+                "SEER 33 speed {i}: expected cap ratio ({}) < SEER 20 cap ratio ({})",
+                caps_33[i],
+                caps_20[i]
+            );
+            assert!(
+                caps_13[i] > caps_20[i],
+                "SEER 13 speed {i}: expected cap ratio ({}) > SEER 20 cap ratio ({})",
+                caps_13[i],
+                caps_20[i]
+            );
+        }
+
+        // Max speed (index 3) stays at 1.0 for all SEER tiers.
+        for seer_label in ["13", "20", "33"] {
+            let caps = match seer_label {
+                "13" => &caps_13,
+                "20" => &caps_20,
+                _ => &caps_33,
+            };
+            assert!(
+                (caps[3] - 1.0).abs() < 1e-9,
+                "SEER {seer_label} max speed cap ratio must be 1.0, got {}",
+                caps[3]
+            );
+        }
+
+        // Minimum capacity ratio (speed 0) spreads measurably.
+        let turndown_spread = caps_13[0] - caps_33[0];
+        assert!(
+            turndown_spread >= 0.05,
+            "minimum capacity ratio spread {turndown_spread} across 13-33 SEER too small; \
+             turndown should differ measurably"
+        );
+
+        // All ratios are in the valid range.
+        for caps in [&caps_13, &caps_20, &caps_33] {
+            for (i, c) in caps.iter().enumerate() {
+                assert!(
+                    (0.0..=1.0).contains(c),
+                    "speed {i}: capacity ratio {c} out of valid range"
+                );
+            }
+            // Monotonic: ratios increase with each speed.
+            for i in 1..caps.len() {
+                assert!(
+                    caps[i] > caps[i - 1],
+                    "capacity ratios must be monotonically increasing; \
+                     speed {i} = {} ≤ speed {} = {}",
+                    caps[i],
+                    i - 1,
+                    caps[i - 1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mshp_cooler_single_element_cap_ratio_treated_as_rated_speed_anchor() {
+        // Single-speed equipment: the single SHR element is scaled normally.
+        let shrs_1 = [0.75];
+        let scaled = scale_mshp_cooler_shrs_for_seer(25.0, &shrs_1);
+        assert_eq!(scaled.len(), 1);
+        // With a single element (i=0), ALPHA[0] = -0.0008 applies, so:
+        // 0.75 + (-0.0008)*(25-20) = 0.75 - 0.004 = 0.746
+        assert!((scaled[0] - 0.746).abs() < 1e-6);
+
+        let caps_1 = [0.85];
+        let scaled_caps = scale_mshp_cooler_capacity_ratios_for_seer(25.0, &caps_1);
+        // Single element = last element = max speed → stays at 1.0
+        assert!((scaled_caps[0] - 1.0).abs() < 1e-9);
     }
 }

@@ -699,6 +699,18 @@ impl CoolingCore {
                 self.rated_shr = self.stage_shrs[0].clamp(0.0, 1.0);
             }
 
+            // Per-stage SHR telemetry for diagnostic CSV output.
+            // Gated on `observe` feature — these fields are diagnostic-only
+            // and document which SEER-scaled SHR profile was applied to each
+            // MSHP Cooler instance, enabling verification that distinct SHR
+            // profiles are in use across SEER tiers.
+            #[cfg(feature = "observe")]
+            {
+                for (i, shr) in self.stage_shrs.iter().enumerate() {
+                    self.telemetry.set(&format!("cooler_shr_stage_{i}"), *shr);
+                }
+            }
+
             self.apply_cooling_startup_cd(cfg.derived_cooling_startup_cd());
 
             // EnergyPlus Coil:Cooling:DX field N11 (Nominal Time for Condensate
