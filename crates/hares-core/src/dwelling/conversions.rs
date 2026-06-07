@@ -272,12 +272,18 @@ pub fn building_to_boundary_inputs(
                     .unwrap_or_default()
             };
 
-            // Window U-factor decomposition: EnergyPlus Simple Window Model Step 1.
-            // Overrides fallback_r and film resistances for window boundaries.
-            let (fallback_r, r_film_int, r_film_ext) = if bd.boundary_type == BoundaryType::Window {
+            // Window / Skylight U-factor decomposition: EnergyPlus Simple Window
+            // Model Step 1. Overrides fallback_r and film resistances for
+            // fenestration boundaries.
+            let is_fenestration = matches!(
+                bd.boundary_type,
+                BoundaryType::Window | BoundaryType::Skylight
+            );
+            let (fallback_r, r_film_int, r_film_ext) = if is_fenestration {
                 let u_factor = building
                     .windows
                     .iter()
+                    .chain(building.skylights.iter())
                     .find(|w| w.id == bd.id)
                     .and_then(|w| w.u_factor_w_m2_k);
                 if let Some(u) = u_factor.filter(|&u| u > 0.0) {
@@ -286,7 +292,7 @@ pub fn building_to_boundary_inputs(
                 } else {
                     tracing::warn!(
                         boundary = %bd.id,
-                        "window boundary has no U-factor -- using generic film resistances"
+                        "fenestration boundary has no U-factor -- using generic film resistances"
                     );
                     (fallback_r, r_film_int, r_film_ext)
                 }
@@ -322,7 +328,10 @@ pub fn building_to_boundary_inputs(
             // model that underlies the window boundary.
             // Reference: E+ Eng.Ref §Window Heat Transfer Calculations;
             // OCHRE Envelope.py uses ε = 0.84 for window radiation_frac.
-            let interior_emissivity = if bd.boundary_type == BoundaryType::Window {
+            let interior_emissivity = if matches!(
+                bd.boundary_type,
+                BoundaryType::Window | BoundaryType::Skylight
+            ) {
                 EMISSIVITY_WINDOW // 0.84 glass thermal emissivity (NFRC)
             } else if bd.has_radiant_barrier && bd.interior_zone.as_ref() == Some(&ZoneType::Attic)
             {
@@ -351,20 +360,21 @@ pub fn building_to_boundary_inputs(
                 )));
             }
 
-            // Window boundaries must not receive pre-computed RC layers from
-            // the envelope LUT. Windows use the Window struct's U-factor code
-            // path (EnergyPlus Simple Window Model Step 1), not the LUT.
-            // This assertion catches the case where Window material rows are
-            // added to Envelope Materials.csv, which would silently cause the
-            // LUT to return layers for windows and bypass the correct U-factor
-            // decomposition.
+            // Fenestration boundaries (windows, skylights) must not receive
+            // pre-computed RC layers from the envelope LUT.  They use the
+            // Window struct's U-factor code path (EnergyPlus Simple Window
+            // Model Step 1), not the LUT.
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
-            if bd.boundary_type == BoundaryType::Window {
+            if matches!(
+                bd.boundary_type,
+                BoundaryType::Window | BoundaryType::Skylight
+            ) {
                 debug_assert!(
                     precomputed_rc.is_empty(),
-                    "Window boundary '{}' received pre-computed RC layers from envelope LUT; \
-                     windows must use the Window struct U-factor path (EnergyPlus Simple \
+                    "{} boundary '{}' received pre-computed RC layers from envelope LUT; \
+                     fenestration must use the Window struct U-factor path (EnergyPlus Simple \
                      Window Model Step 1), not the LUT",
+                    if bd.boundary_type == BoundaryType::Window { "Window" } else { "Skylight" },
                     bd.id,
                 );
             }
@@ -932,6 +942,7 @@ mod tests {
             zones,
             boundaries,
             windows: Vec::new(),
+            skylights: Vec::new(),
             infiltration_ach50: None,
             infiltration_cfm50: None,
             infiltration_ach_natural: None,
@@ -2155,6 +2166,83 @@ mod tests {
         assert!(
             msg.contains("EnergyPlus"),
             "error message must mention EnergyPlus correlation range, got: {msg}"
+        );
+    }
+
+    /// Skylight U-factor decomposition follows the same EnergyPlus Simple
+    /// Window Model Step 1 path as a Window, verifying that the fenestration
+    /// code path is wired for the new `BoundaryType::Skylight` variant.
+    #[test]
+    fn skylight_u_factor_decomposition_uses_fenestration_path() {
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "SK1".to_string(),
+                boundary_type: BoundaryType::Skylight,
+                area_m2: 2.0,
+                azimuth_deg: Some(0.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: Vec::new(),
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(0.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            skylights: vec![Window {
+                id: "SK1".to_string(),
+                area_m2: 2.0,
+                azimuth_deg: Some(0.0),
+                u_factor_w_m2_k: Some(0.55),
+                shgc: Some(0.30),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let result = building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0);
+        let inputs = result.expect("skylight with U=0.55 should produce valid boundary inputs");
+        assert_eq!(inputs.len(), 1, "building has one boundary (the skylight)");
+        let sk_input = &inputs[0];
+        // Verify the skylight uses the fenestration U-factor path (r_glass > 0)
+        // rather than the opaque fallback-R path.
+        assert!(
+            sk_input.fallback_r_m2_k_w > 0.0,
+            "skylight fallback_r should be derived from U-factor, got {}",
+            sk_input.fallback_r_m2_k_w
+        );
+        // Interior emissivity should be 0.84 (EMISSIVITY_WINDOW = NFRC glass)
+        assert!(
+            (sk_input.interior_emissivity - 0.84).abs() < 1e-9,
+            "skylight interior emissivity should be 0.84 (NFRC), got {}",
+            sk_input.interior_emissivity
         );
     }
 

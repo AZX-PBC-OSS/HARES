@@ -960,10 +960,18 @@ fn build_surface_geometry(
                 None => {
                     let is_exterior = matches!(boundary.exterior_zone, Some(ZoneType::Outdoor));
                     match (&boundary.boundary_type, is_exterior) {
-                        (BoundaryType::Window, _) => {
+                        (BoundaryType::Window, _) | (BoundaryType::Skylight, _) => {
                             return Err(EnvironmentManagerError::MissingAzimuth {
                                 boundary_idx: idx,
-                                surface_type: "Window".to_string(),
+                                surface_type: if matches!(
+                                    boundary.boundary_type,
+                                    BoundaryType::Skylight
+                                ) {
+                                    "Skylight"
+                                } else {
+                                    "Window"
+                                }
+                                .to_string(),
                             });
                         }
                         (BoundaryType::Wall, true) => {
@@ -1374,6 +1382,7 @@ mod tests {
                 },
             ],
             windows: Vec::<Window>::new(),
+            skylights: Vec::<Window>::new(),
             infiltration_ach50: None,
             infiltration_cfm50: None,
             infiltration_ach_natural: None,

@@ -403,3 +403,7 @@ Window,Single-Pane Aluminum,Uninsulated,,,,0.1761
 Window,Double-Pane Clear,Uninsulated,,,,0.3460
 Window,Double-Pane Low-E,Uninsulated,,,,0.5650
 Window,Triple-Pane Low-E,Uninsulated,,,,1.0204
+Skylight,Single-Pane Aluminum,Uninsulated,,,,0.1761
+Skylight,Double-Pane Clear,Uninsulated,,,,0.3460
+Skylight,Double-Pane Low-E,Uninsulated,,,,0.5650
+Skylight,Triple-Pane Low-E,Uninsulated,,,,1.0204

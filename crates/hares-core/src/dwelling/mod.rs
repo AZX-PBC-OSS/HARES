@@ -10595,6 +10595,7 @@ occupancy = 1.0
             ],
             boundaries: vec![],
             windows: vec![],
+            skylights: vec![],
             infiltration_ach50: None,
             infiltration_cfm50: None,
             infiltration_ach_natural: None,

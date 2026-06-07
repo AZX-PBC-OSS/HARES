@@ -1279,7 +1279,10 @@ pub(crate) fn build_synthetic_building(
             );
         }
         for boundary in &boundaries {
-            if boundary.boundary_type == BoundaryType::Window {
+            if matches!(
+                boundary.boundary_type,
+                BoundaryType::Window | BoundaryType::Skylight
+            ) {
                 continue;
             }
             let attached_window_area: f64 = windows
@@ -1322,7 +1325,12 @@ pub(crate) fn build_synthetic_building(
         if config.geometry.zone_volume_m3 > 0.0 {
             let non_window: Vec<&Boundary> = boundaries
                 .iter()
-                .filter(|b| b.boundary_type != BoundaryType::Window)
+                .filter(|b| {
+                    !matches!(
+                        b.boundary_type,
+                        BoundaryType::Window | BoundaryType::Skylight
+                    )
+                })
                 .collect();
             let has_wall = non_window
                 .iter()
@@ -1363,7 +1371,10 @@ pub(crate) fn build_synthetic_building(
     #[cfg(feature = "observe")]
     {
         for boundary in &boundaries {
-            if boundary.boundary_type == BoundaryType::Window {
+            if matches!(
+                boundary.boundary_type,
+                BoundaryType::Window | BoundaryType::Skylight
+            ) {
                 continue;
             }
             let window_area: f64 = windows
@@ -1432,7 +1443,12 @@ pub(crate) fn build_synthetic_building(
 
     let wall_ids: Vec<String> = boundaries
         .iter()
-        .filter(|b| b.boundary_type != BoundaryType::Window)
+        .filter(|b| {
+            !matches!(
+                b.boundary_type,
+                BoundaryType::Window | BoundaryType::Skylight
+            )
+        })
         .map(|b| b.id.clone())
         .collect();
 
@@ -1457,6 +1473,7 @@ pub(crate) fn build_synthetic_building(
         }],
         boundaries,
         windows,
+        skylights: Vec::new(),
         infiltration_ach50: None,
         infiltration_cfm50: None,
         infiltration_ach_natural: None,
@@ -1492,7 +1509,10 @@ pub(crate) fn build_synthetic_building(
     #[cfg(debug_assertions)]
     {
         for boundary in &building.boundaries {
-            if boundary.boundary_type == BoundaryType::Window {
+            if matches!(
+                boundary.boundary_type,
+                BoundaryType::Window | BoundaryType::Skylight
+            ) {
                 continue;
             }
             if let Some(r_value) = boundary.assembly_r_value_m2_k_w {
@@ -3194,7 +3214,12 @@ equipment_name = "None"
         let non_window: Vec<_> = building
             .boundaries
             .iter()
-            .filter(|b| b.boundary_type != BoundaryType::Window)
+            .filter(|b| {
+                !matches!(
+                    b.boundary_type,
+                    BoundaryType::Window | BoundaryType::Skylight
+                )
+            })
             .collect();
 
         // Must have exactly 6 faces: 4 walls + roof + floor.
@@ -3405,7 +3430,12 @@ master_seed = 0
         let non_window: Vec<_> = building
             .boundaries
             .iter()
-            .filter(|b| b.boundary_type != BoundaryType::Window)
+            .filter(|b| {
+                !matches!(
+                    b.boundary_type,
+                    BoundaryType::Window | BoundaryType::Skylight
+                )
+            })
             .collect();
 
         // Six-face envelope expected.
@@ -3492,7 +3522,12 @@ equipment_name = "None"
         let non_window: Vec<_> = building
             .boundaries
             .iter()
-            .filter(|b| b.boundary_type != BoundaryType::Window)
+            .filter(|b| {
+                !matches!(
+                    b.boundary_type,
+                    BoundaryType::Window | BoundaryType::Skylight
+                )
+            })
             .collect();
 
         assert!(
@@ -3571,7 +3606,12 @@ equipment_name = "None"
             .boundaries
             .iter()
             .enumerate()
-            .filter(|(_, b)| b.boundary_type != BoundaryType::Window)
+            .filter(|(_, b)| {
+                !matches!(
+                    b.boundary_type,
+                    BoundaryType::Window | BoundaryType::Skylight
+                )
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -3620,7 +3660,12 @@ equipment_name = "None"
         let n_non_window = building
             .boundaries
             .iter()
-            .filter(|b| b.boundary_type != BoundaryType::Window)
+            .filter(|b| {
+                !matches!(
+                    b.boundary_type,
+                    BoundaryType::Window | BoundaryType::Skylight
+                )
+            })
             .count();
 
         let store = hares_io::DefaultsStore::empty();

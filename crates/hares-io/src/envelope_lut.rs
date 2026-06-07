@@ -134,6 +134,7 @@ fn boundary_type_from_boundary_name(name: &str) -> Option<BoundaryType> {
         // Slab boundaries (on-grade, ground contact)
         "Floor" | "Foundation Floor" | "Garage Floor" => Some(BoundaryType::Slab),
         "Window" => Some(BoundaryType::Window),
+        "Skylight" => Some(BoundaryType::Skylight),
         "Door" | "Garage Door" => Some(BoundaryType::Door),
         "Foundation Wall" | "Adjacent Foundation Wall" => Some(BoundaryType::FoundationWall),
         "Rim Joist" | "Adjacent Rim Joist" => Some(BoundaryType::RimJoist),
@@ -820,7 +821,7 @@ pub fn resolve_boundary_name(
             (ZoneType::Garage, ZoneType::Outdoor) => Some("Garage Door"),
             _ => Some("Door"),
         },
-        BoundaryType::Window | BoundaryType::Other(_) => None,
+        BoundaryType::Window | BoundaryType::Skylight | BoundaryType::Other(_) => None,
     }
 }
 
@@ -895,6 +896,29 @@ mod tests {
             resolve_boundary_name(
                 &BoundaryType::Window,
                 Some(&ZoneType::Conditioned),
+                Some(&ZoneType::Outdoor),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn skylight_returns_none() {
+        // Skylights, like windows, bypass the LUT and use the Window struct's
+        // U-factor/SHGC code path (EnergyPlus Simple Window Model Step 1).
+        assert_eq!(
+            resolve_boundary_name(
+                &BoundaryType::Skylight,
+                Some(&ZoneType::Conditioned),
+                Some(&ZoneType::Outdoor),
+            ),
+            None
+        );
+        // Attic skylight also returns None
+        assert_eq!(
+            resolve_boundary_name(
+                &BoundaryType::Skylight,
+                Some(&ZoneType::Attic),
                 Some(&ZoneType::Outdoor),
             ),
             None

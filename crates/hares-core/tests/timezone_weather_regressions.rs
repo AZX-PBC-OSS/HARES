@@ -74,6 +74,7 @@ fn minimal_building() -> hares_io::Building {
             foundation_depth_m: None,
         }],
         windows: Vec::<Window>::new(),
+        skylights: Vec::<Window>::new(),
         infiltration_ach50: None,
         infiltration_cfm50: None,
         infiltration_ach_natural: None,

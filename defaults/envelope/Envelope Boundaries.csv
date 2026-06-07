@@ -3,6 +3,7 @@ Exterior Wall,EW,EXT,LIV
 Roof,RF,EXT,LIV
 Floor,FL,GND,LIV
 Window,WD,EXT,LIV
+Skylight,SK,EXT,LIV
 Door,DR,EXT,LIV
 Raised Floor,IF,EXT,LIV
 Interior Wall,IW,LIV,LIV

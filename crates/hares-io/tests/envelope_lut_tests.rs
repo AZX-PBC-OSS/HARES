@@ -649,7 +649,7 @@ fn csv_names_match_hardcoded_names() {
     // code-path concern, not a mapping concern.
     let mut mismatches = Vec::new();
     for bt in &all_bts {
-        if *bt == BoundaryType::Window {
+        if matches!(*bt, BoundaryType::Window | BoundaryType::Skylight) {
             continue;
         }
         for int in &all_zones {

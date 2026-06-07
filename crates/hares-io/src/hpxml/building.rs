@@ -61,6 +61,7 @@ pub enum BoundaryType {
     Roof,
     Floor,
     Window,
+    Skylight,
     Door,
     FoundationWall,
     RimJoist,
@@ -234,6 +235,7 @@ pub struct Building {
     pub zones: Vec<Zone>,
     pub boundaries: Vec<Boundary>,
     pub windows: Vec<Window>,
+    pub skylights: Vec<Window>,
     /// Blower-door result at 50 Pa in ACH (air changes per hour).
     pub infiltration_ach50: Option<f64>,
     /// Blower-door result at 50 Pa in CFM (cubic feet per minute).
@@ -665,15 +667,21 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     let (mut boundaries, pitch_absent_ids) = parse_boundaries(details)?;
     let windows = parse_windows(details, &mut boundaries)?;
+    let skylights = parse_skylights(details, &mut boundaries)?;
 
-    // Subtract window and door areas from their attached walls.
+    // Subtract window, skylight, and door areas from their attached boundaries.
     // OCHRE hpxml.py:118-126: ext_walls[wall]["Area"] -= boundary["Area"]
     {
-        let mut wall_reductions: std::collections::HashMap<String, f64> =
+        let mut boundary_reductions: std::collections::HashMap<String, f64> =
             std::collections::HashMap::new();
         for win in &windows {
             if let Some(ref wall_id) = win.attached_to_wall_id {
-                *wall_reductions.entry(wall_id.clone()).or_default() += win.area_m2;
+                *boundary_reductions.entry(wall_id.clone()).or_default() += win.area_m2;
+            }
+        }
+        for skylight in &skylights {
+            if let Some(ref roof_id) = skylight.attached_to_wall_id {
+                *boundary_reductions.entry(roof_id.clone()).or_default() += skylight.area_m2;
             }
         }
         // Doors also have AttachedToWall in HPXML.
@@ -687,21 +695,21 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         let area = parse_value_with_units(door.child("Area"), ValueKind::Area)?
                             .unwrap_or(0.0);
                         if area > 0.0 {
-                            *wall_reductions.entry(wall_id.clone()).or_default() += area;
+                            *boundary_reductions.entry(wall_id.clone()).or_default() += area;
                         }
                     }
                 }
             }
         }
         for bd in &mut boundaries {
-            if let Some(&reduction) = wall_reductions.get(&bd.id) {
+            if let Some(&reduction) = boundary_reductions.get(&bd.id) {
                 let new_area = (bd.area_m2 - reduction).max(0.0);
                 if new_area <= 0.0 {
                     tracing::warn!(
                         wall = %bd.id,
                         original = bd.area_m2,
                         reduction,
-                        "wall area reduced to zero by window/door subtraction"
+                        "boundary area reduced to zero by window/skylight/door subtraction"
                     );
                 }
                 bd.area_m2 = new_area;
@@ -1207,6 +1215,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         zones: zones_vec,
         boundaries,
         windows,
+        skylights,
         infiltration_cfm50,
         infiltration_cfm_natural,
         infiltration_ela_cm2,
@@ -1273,6 +1282,10 @@ fn parse_boundaries(details: &XmlNode) -> Result<(Vec<Boundary>, Vec<String>), H
         ),
         ("Slabs", "Slab", BoundaryType::Slab),
     ];
+    // Skylights are NOT in this list — they are parsed separately via
+    // parse_skylights() because, like windows, they have a dual representation
+    // (Window struct in building.skylights + Boundary in building.boundaries)
+    // and use fenestration-specific parsing (UFactor, SHGC, shading, etc.).
 
     let enclosure = match details.child("Enclosure") {
         Some(node) => node,
@@ -1436,6 +1449,160 @@ fn parse_windows(
     Ok(windows)
 }
 
+/// Parse `<Enclosure>/<Skylights>/<Skylight>` elements.
+///
+/// HPXML 4.x defines Skylight as an extension of the Window base type, so the
+/// schema is identical: `Area`, `Azimuth`, `UFactor`, `SHGC`, `InteriorShading`,
+/// `ExteriorShading`, `FractionOperable`, and `AttachedToWall`.  The key
+/// difference is the tilt: skylights are roof-mounted (horizontal, 0° tilt)
+/// rather than wall-mounted (vertical, 90° tilt).
+///
+/// Ref: HPXML 4.2 §6.5 "Windows"; Skylight extends Window base type.
+fn parse_skylights(
+    details: &XmlNode,
+    boundaries: &mut Vec<Boundary>,
+) -> Result<Vec<Window>, HpxmlError> {
+    let mut skylights = Vec::new();
+    let Some(enclosure) = details.child("Enclosure") else {
+        return Ok(skylights);
+    };
+    let Some(group) = enclosure.child("Skylights") else {
+        return Ok(skylights);
+    };
+
+    for skylight in group.children_named("Skylight") {
+        let id = element_id(skylight).unwrap_or_else(|| "unknown".to_string());
+        let area_m2 =
+            parse_value_with_units(skylight.child("Area"), ValueKind::Area)?.ok_or_else(|| {
+                HpxmlError::Parse(
+                    format!("skylight '{}' is missing required Area element", id).into(),
+                )
+            })?;
+        if area_m2 <= 0.0 {
+            return Err(HpxmlError::Parse(
+                format!("skylight '{}' has non-positive area: {}", id, area_m2).into(),
+            ));
+        }
+        let azimuth_deg = parse_value_with_units(skylight.child("Azimuth"), ValueKind::Raw)?;
+        let u_factor_w_m2_k = parse_value_with_units(skylight.child("UFactor"), ValueKind::UValue)?;
+        let shgc = skylight.child("SHGC").and_then(XmlNode::text_as_f64);
+
+        // InteriorShading/SummerShadingCoefficient — same defaults as windows.
+        let (interior_shading_fraction, winter_shading_fraction) =
+            match skylight.child("InteriorShading") {
+                Some(shading) => {
+                    let summer = shading
+                        .child("SummerShadingCoefficient")
+                        .and_then(XmlNode::text_as_f64)
+                        .unwrap_or(0.70)
+                        .clamp(0.0, 1.0);
+                    let winter = shading
+                        .child("WinterShadingCoefficient")
+                        .and_then(XmlNode::text_as_f64)
+                        .unwrap_or(0.85)
+                        .clamp(0.0, 1.0);
+                    (summer, winter)
+                }
+                None => (1.0, 1.0),
+            };
+
+        let fraction_operable = skylight
+            .child("FractionOperable")
+            .and_then(XmlNode::text_as_f64)
+            .unwrap_or(0.67)
+            .clamp(0.0, 1.0);
+
+        let (exterior_shading_summer, exterior_shading_winter) =
+            match skylight.child("ExteriorShading") {
+                Some(shading) => {
+                    let summer = shading
+                        .child("SummerShadingCoefficient")
+                        .and_then(XmlNode::text_as_f64)
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 1.0);
+                    let winter = shading
+                        .child("WinterShadingCoefficient")
+                        .and_then(XmlNode::text_as_f64)
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 1.0);
+                    (summer, winter)
+                }
+                None => (1.0, 1.0),
+            };
+
+        let attached_to_wall_id = skylight
+            .child("AttachedToWall")
+            .and_then(|n| n.attrs.get("idref").cloned());
+
+        skylights.push(Window {
+            id: id.clone(),
+            area_m2,
+            azimuth_deg,
+            u_factor_w_m2_k,
+            shgc,
+            interior_shading_fraction,
+            winter_shading_fraction,
+            fraction_operable,
+            exterior_shading_summer,
+            exterior_shading_winter,
+            attached_to_wall_id,
+        });
+
+        let skylight_interior = parse_zone_ref(skylight.child("InteriorAdjacentTo"));
+        let skylight_exterior = parse_zone_ref(skylight.child("ExteriorAdjacentTo"))
+            .or_else(|| infer_exterior_zone(&BoundaryType::Skylight));
+
+        #[cfg(feature = "observe")]
+        if skylight_interior == Some(ZoneType::Adjacent)
+            || skylight_exterior == Some(ZoneType::Adjacent)
+        {
+            tracing::info!(
+                target: "observe",
+                column = "adjacent_boundary_rewrite",
+                boundary_id = id,
+                interior_before = ?skylight_interior,
+                exterior_before = ?skylight_exterior,
+                "rewriting Adjacent zone reference to match non-Adjacent zone"
+            );
+        }
+
+        let (skylight_interior, skylight_exterior) =
+            rewrite_adjacent_zone_pair(skylight_interior, skylight_exterior);
+
+        // Skylight tilt defaults to 0° (horizontal, roof-mounted).
+        // Per IECC 2021 Table R402.1.2, skylights have different U-factor
+        // requirements than vertical fenestration because of their orientation —
+        // horizontal surfaces receive more diffuse sky radiation and higher
+        // peak solar gains.
+        boundaries.push(Boundary {
+            id,
+            boundary_type: BoundaryType::Skylight,
+            area_m2,
+            azimuth_deg,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: skylight_interior,
+            exterior_zone: skylight_exterior,
+            material_layers: Vec::new(),
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(0.0),
+            framing_factor: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            perimeter_m: None,
+            perimeter_insulation_r_m2_k_w: None,
+            foundation_depth_m: None,
+        });
+    }
+
+    Ok(skylights)
+}
+
 fn parse_boundary(
     node: &XmlNode,
     boundary_type: BoundaryType,
@@ -1522,6 +1689,7 @@ fn parse_boundary(
         BoundaryType::Slab => Some(180.0),
         BoundaryType::Door => Some(90.0),
         BoundaryType::Window => Some(90.0),
+        BoundaryType::Skylight => Some(0.0),
         BoundaryType::Other(_) => {
             tracing::warn!("Unknown boundary type; no tilt inferred");
             None
@@ -1809,6 +1977,7 @@ fn boundary_type_label(boundary_type: &BoundaryType) -> &str {
         BoundaryType::Roof => "roof",
         BoundaryType::Floor => "floor",
         BoundaryType::Window => "window",
+        BoundaryType::Skylight => "skylight",
         BoundaryType::Door => "door",
         BoundaryType::FoundationWall => "foundation wall",
         BoundaryType::RimJoist => "rim joist",
@@ -1823,9 +1992,10 @@ fn boundary_type_label(boundary_type: &BoundaryType) -> &str {
 /// exterior adjacency (e.g. Roof → outdoor, Slab → ground).
 fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
     match boundary_type {
-        BoundaryType::Roof | BoundaryType::RimJoist | BoundaryType::Window => {
-            Some(ZoneType::Outdoor)
-        }
+        BoundaryType::Roof
+        | BoundaryType::RimJoist
+        | BoundaryType::Window
+        | BoundaryType::Skylight => Some(ZoneType::Outdoor),
         BoundaryType::Slab => Some(ZoneType::Ground),
         // Floor/FrameFloor: HPXML requires <ExteriorAdjacentTo>, so exterior
         // zone is always parsed from the element rather than inferred here.
@@ -2033,7 +2203,7 @@ fn extract_construction_metadata(
                 .map(|child| child.name.clone());
             (construction_type, None)
         }
-        BoundaryType::Window | BoundaryType::Door => (None, None),
+        BoundaryType::Window | BoundaryType::Skylight | BoundaryType::Door => (None, None),
         BoundaryType::Other(_) => (None, None),
     }
 }
@@ -4225,6 +4395,34 @@ mod tests {
         )
     }
 
+    fn xml_with_skylight(skylight_xml: &str) -> String {
+        format!(
+            r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Skylights>
+          {skylight_xml}
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#
+        )
+    }
+
+    // ── Skylight parsing tests ──────────────────────────────────────────
+
     #[test]
     fn window_no_interior_shading_fraction_is_1() {
         let xml = xml_with_window(
@@ -5368,6 +5566,213 @@ mod tests {
             (effective_winter - 0.272).abs() < 1e-10,
             "effective winter SHGC = 0.40*0.85*0.80 = 0.272, got {}",
             effective_winter,
+        );
+    }
+
+    // ── Skylight tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn skylight_parsed_with_correct_type_and_properties() {
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <Area units="m2">5.0</Area>
+                <Azimuth>0</Azimuth>
+                <UFactor>0.35</UFactor>
+                <SHGC>0.30</SHGC>
+            </Skylight>"#,
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.skylights.len(), 1);
+        let s = &building.skylights[0];
+        assert!((s.area_m2 - 5.0).abs() < f64::EPSILON);
+        // UFactor 0.35 BTU/(hr·ft²·°F) → 0.35 × 5.678 ≈ 1.9874 W/(m²·K)
+        assert!((s.u_factor_w_m2_k.unwrap() - 1.9874).abs() < 1e-4);
+        assert!((s.shgc.unwrap() - 0.30).abs() < f64::EPSILON);
+        // Verify it created a boundary with BoundaryType::Skylight
+        let boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Skylight)
+            .expect("skylight boundary expected");
+        assert_eq!(boundary.id, "SK1");
+        assert!((boundary.area_m2 - 5.0).abs() < f64::EPSILON);
+        // Skylight tilt defaults to 0° (horizontal roof-mounted)
+        assert_eq!(boundary.tilt_deg, Some(0.0));
+    }
+
+    #[test]
+    fn skylight_missing_area_errors() {
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <UFactor>0.35</UFactor>
+                <SHGC>0.30</SHGC>
+            </Skylight>"#,
+        );
+        let err = parse_building(&xml).expect_err("skylight missing Area should error");
+        assert!(matches!(err, HpxmlError::Parse(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("skylight 'SK1' is missing required Area element"));
+    }
+
+    #[test]
+    fn skylight_zero_area_errors() {
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <Area>0</Area>
+                <UFactor>0.35</UFactor>
+                <SHGC>0.30</SHGC>
+            </Skylight>"#,
+        );
+        let err = parse_building(&xml).expect_err("skylight with zero area should error");
+        assert!(matches!(err, HpxmlError::Parse(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("skylight 'SK1' has non-positive area"));
+    }
+
+    #[test]
+    fn skylight_with_summer_shading_coefficient() {
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <Area units="m2">5.0</Area>
+                <UFactor>0.35</UFactor>
+                <SHGC>0.30</SHGC>
+                <InteriorShading>
+                    <SystemIdentifier id="SK1Shade"/>
+                    <SummerShadingCoefficient>0.60</SummerShadingCoefficient>
+                    <WinterShadingCoefficient>0.80</WinterShadingCoefficient>
+                </InteriorShading>
+            </Skylight>"#,
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let s = &building.skylights[0];
+        assert!((s.interior_shading_fraction - 0.60).abs() < f64::EPSILON);
+        assert!((s.winter_shading_fraction - 0.80).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn skylight_exterior_zone_defaults_to_outdoor() {
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+                <Area units="m2">5.0</Area>
+                <UFactor>0.55</UFactor>
+                <SHGC>0.35</SHGC>
+            </Skylight>"#,
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Skylight)
+            .expect("skylight boundary expected");
+        assert_eq!(boundary.interior_zone, Some(ZoneType::Conditioned));
+        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
+    }
+
+    #[test]
+    fn skylight_interior_adjacent_to_attic_parsed() {
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
+                <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+                <Area units="m2">3.0</Area>
+                <UFactor>0.55</UFactor>
+                <SHGC>0.35</SHGC>
+            </Skylight>"#,
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Skylight)
+            .expect("skylight boundary expected");
+        assert_eq!(boundary.interior_zone, Some(ZoneType::Attic));
+        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
+    }
+
+    #[test]
+    fn multiple_skylights_parsed() {
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <Area units="m2">2.0</Area>
+                <UFactor>0.35</UFactor>
+                <SHGC>0.30</SHGC>
+            </Skylight>
+            <Skylight>
+                <SystemIdentifier id="SK2"/>
+                <Area units="m2">3.0</Area>
+                <UFactor>0.55</UFactor>
+                <SHGC>0.35</SHGC>
+            </Skylight>"#,
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.skylights.len(), 2);
+        assert_eq!(
+            building
+                .boundaries
+                .iter()
+                .filter(|b| b.boundary_type == BoundaryType::Skylight)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn skylight_attached_to_roof_subtracts_area() {
+        // Skylight with AttachedToWall pointing to a Roof boundary.
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+        <Skylights>
+          <Skylight>
+            <SystemIdentifier id="SK1"/>
+            <Area units="m2">5.0</Area>
+            <UFactor>0.55</UFactor>
+            <SHGC>0.35</SHGC>
+            <AttachedToWall idref="Roof1"/>
+          </Skylight>
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(xml).expect("parse should succeed");
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof)
+            .expect("roof expected");
+        assert!(
+            (roof.area_m2 - 95.0).abs() < f64::EPSILON,
+            "roof area should be reduced by skylight area: expected 95, got {}",
+            roof.area_m2
         );
     }
 

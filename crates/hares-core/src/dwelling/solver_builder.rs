@@ -88,15 +88,6 @@ fn build_solver_boundaries(
     rc: &RCContext<'_>,
     env: &EnvironmentState,
 ) -> Result<(Vec<SolverBoundary>, usize, usize)> {
-    // Group windows by wall they're attached to (for wall→window aggregation).
-    let mut windows_by_wall: HashMap<&str, Vec<&hares_io::hpxml::building::Window>> =
-        HashMap::new();
-    for w in &building.windows {
-        if let Some(wall_id) = w.attached_to_wall_id.as_deref() {
-            windows_by_wall.entry(wall_id).or_default().push(w);
-        }
-    }
-
     // Index diagnostics by boundary_idx for O(1) lookup.
     let diag_by_idx: HashMap<usize, &BoundaryDiagnostic> = rc
         .envelope_diagnostics
@@ -236,38 +227,40 @@ fn build_solver_boundaries(
         // Same-zone boundaries (interior == exterior) are internal thermal mass.
         let is_same_zone =
             boundary.interior_zone == boundary.exterior_zone && boundary.interior_zone.is_some();
-        let boundary_category = if is_same_zone {
-            Some(BoundaryCategory::InternalMass)
-        } else {
-            match boundary.boundary_type {
-                hares_io::hpxml::BoundaryType::Wall
-                | hares_io::hpxml::BoundaryType::FoundationWall
-                | hares_io::hpxml::BoundaryType::RimJoist => Some(BoundaryCategory::Wall),
-                hares_io::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
-                hares_io::hpxml::BoundaryType::Floor | hares_io::hpxml::BoundaryType::Slab => {
-                    // Attic floor (exterior = Attic) represents heat flow from roof/attic
-                    // path into the conditioned zone -- categorize as Roof for OCHRE parity.
-                    let is_attic_floor = boundary
-                        .exterior_zone
-                        .as_ref()
-                        .is_some_and(|z| *z == hares_io::hpxml::ZoneType::Attic);
-                    if is_attic_floor {
-                        Some(BoundaryCategory::Roof)
-                    } else {
-                        Some(BoundaryCategory::Floor)
+        let boundary_category =
+            if is_same_zone {
+                Some(BoundaryCategory::InternalMass)
+            } else {
+                match boundary.boundary_type {
+                    hares_io::hpxml::BoundaryType::Wall
+                    | hares_io::hpxml::BoundaryType::FoundationWall
+                    | hares_io::hpxml::BoundaryType::RimJoist => Some(BoundaryCategory::Wall),
+                    hares_io::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
+                    hares_io::hpxml::BoundaryType::Floor | hares_io::hpxml::BoundaryType::Slab => {
+                        // Attic floor (exterior = Attic) represents heat flow from roof/attic
+                        // path into the conditioned zone -- categorize as Roof for OCHRE parity.
+                        let is_attic_floor = boundary
+                            .exterior_zone
+                            .as_ref()
+                            .is_some_and(|z| *z == hares_io::hpxml::ZoneType::Attic);
+                        if is_attic_floor {
+                            Some(BoundaryCategory::Roof)
+                        } else {
+                            Some(BoundaryCategory::Floor)
+                        }
                     }
+                    hares_io::hpxml::BoundaryType::Window
+                    | hares_io::hpxml::BoundaryType::Skylight => Some(BoundaryCategory::Window),
+                    hares_io::hpxml::BoundaryType::Door
+                    | hares_io::hpxml::BoundaryType::Other(_) => None,
                 }
-                hares_io::hpxml::BoundaryType::Window => Some(BoundaryCategory::Window),
-                hares_io::hpxml::BoundaryType::Door | hares_io::hpxml::BoundaryType::Other(_) => {
-                    None
-                }
-            }
-        };
+            };
 
         // Tilt: use parsed value from HPXML, fall back to type-based default.
         let tilt_deg = boundary.tilt_deg.unwrap_or(match boundary.boundary_type {
             hares_io::hpxml::BoundaryType::Roof => 0.0,
             hares_io::hpxml::BoundaryType::Slab | hares_io::hpxml::BoundaryType::Floor => 180.0,
+            hares_io::hpxml::BoundaryType::Skylight => 0.0,
             _ => 90.0,
         });
 
@@ -336,23 +329,37 @@ fn build_solver_boundaries(
             1.0
         };
 
-        // Window solar data -- only for Window boundary types.
+        // Window / Skylight solar data -- fenestration boundary types that
+        // share the same physics (U-factor, SHGC, solar transmittance).
         // Wall boundaries receive opaque solar via ExteriorSurfaceInfo.absorptance.
-        let window_solar = if is_exterior
-            && boundary.boundary_type == hares_io::hpxml::BoundaryType::Window
-        {
-            if let Some(win) = building.windows.iter().find(|w| w.id == boundary.id) {
+        let is_fenestration = matches!(
+            boundary.boundary_type,
+            hares_io::hpxml::BoundaryType::Window | hares_io::hpxml::BoundaryType::Skylight
+        );
+        let window_solar = if is_exterior && is_fenestration {
+            // Look up the fenestration in both windows and skylights (they share
+            // the same Window struct because both extend HPXML's Window base type).
+            let fen = building
+                .windows
+                .iter()
+                .chain(building.skylights.iter())
+                .find(|w| w.id == boundary.id);
+            if let Some(win) = fen {
+                let fen_type = match boundary.boundary_type {
+                    hares_io::hpxml::BoundaryType::Skylight => "skylight",
+                    _ => "window",
+                };
                 let u_factor = win.u_factor_w_m2_k.ok_or_else(|| {
                     HaresError::Dwelling(format!(
-                        "window '{}' is missing required u_factor_w_m2_k (U-factor); \
-                         <UFactor> must be present for every <Window> element per HPXML §6.5",
+                        "{fen_type} '{}' is missing required u_factor_w_m2_k (U-factor); \
+                         <UFactor> must be present for every <Window>/<Skylight> element per HPXML §6.5",
                         win.id
                     ))
                 })?;
                 let base_shgc = win.shgc.ok_or_else(|| {
                     HaresError::Dwelling(format!(
-                        "window '{}' is missing required shgc (SHGC); \
-                         <SHGC> must be present for every <Window> element per HPXML §6.5",
+                        "{fen_type} '{}' is missing required shgc (SHGC); \
+                         <SHGC> must be present for every <Window>/<Skylight> element per HPXML §6.5",
                         win.id
                     ))
                 })?;
@@ -373,20 +380,11 @@ fn build_solver_boundaries(
                     u_factor,
                     r_glass,
                 );
-                let total_window_area: f64 = if boundary.boundary_type
-                    == hares_io::hpxml::BoundaryType::Window
-                {
-                    // Window boundary: use its own area directly.
-                    boundary.area_m2
-                } else {
-                    // Wall boundary: sum all attached windows' areas.
-                    building
-                        .windows
-                        .iter()
-                        .filter(|w| w.attached_to_wall_id.as_deref() == Some(boundary.id.as_str()))
-                        .map(|w| w.area_m2)
-                        .sum()
-                };
+                // Fenestration boundary: use its own area directly.
+                // (The host-boundary summation path for wall-attached windows
+                // was removed — it was unreachable dead code because the outer
+                // condition already filters on fenestration boundary types.)
+                let total_window_area = boundary.area_m2;
                 Some(WindowSolarData {
                     base_shgc,
                     shgc_summer,
@@ -471,7 +469,10 @@ fn build_solver_boundaries(
 }
 
 fn exterior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
-    if boundary.boundary_type == hares_io::hpxml::BoundaryType::Window {
+    if matches!(
+        boundary.boundary_type,
+        hares_io::hpxml::BoundaryType::Window | hares_io::hpxml::BoundaryType::Skylight
+    ) {
         boundary.emittance.unwrap_or(EMISSIVITY_WINDOW)
     } else {
         boundary.emittance.unwrap_or(EMISSIVITY_DEFAULT)
@@ -1583,7 +1584,7 @@ mod tests {
     use hares_envelope::INTERIOR_SOLAR_ABSORPTANCE_DEFAULT;
     use hares_envelope::InfiltrationMethod;
     use hares_envelope::ThermalSolverConfig;
-    use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
+    use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
     use hares_physics::infiltration::{
         N_I_DEFAULT, SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
         garage_ela_coefficients,
@@ -2390,6 +2391,7 @@ mod tests {
                 foundation_depth_m: None,
             }],
             windows: vec![],
+            skylights: vec![],
             infiltration_ach50: None,
             infiltration_cfm50: None,
             infiltration_ach_natural: None,
@@ -2577,6 +2579,7 @@ mod tests {
                 foundation_depth_m: None,
             }],
             windows: vec![],
+            skylights: vec![],
             infiltration_ach50: None,
             infiltration_cfm50: None,
             infiltration_ach_natural: None,
@@ -2709,6 +2712,274 @@ mod tests {
         );
         assert_eq!(ext_cols, 0, "no exterior surface columns for fallback-R");
         assert_eq!(int_cols, 0, "no interior surface columns for fallback-R");
+    }
+
+    /// Skylight solar data is populated in `build_solver_boundaries` when the
+    /// fenestration is found in `building.skylights`.  This is the regression
+    /// test for the finding: the `.chain(building.skylights.iter())` path in the
+    /// `window_solar` lookup must resolve correctly for `BoundaryType::Skylight`,
+    /// matching the same behaviour as `BoundaryType::Window`.  If the lookup
+    /// returned `None` (ID mismatch, missing `skylights` entry, etc.) the
+    /// skylight would silently contribute zero solar gain.
+    #[test]
+    fn skylight_window_solar_populated_in_solver_boundaries() {
+        use super::{RCContext, build_solver_boundaries};
+        use chrono::TimeZone;
+        use hares_envelope::{
+            BoundaryCategory, BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics,
+            ExteriorTarget,
+        };
+        use hares_io::hpxml::{Boundary, BoundaryType, Site};
+        use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
+        use std::collections::HashMap;
+
+        let skylight_id = "SK1";
+
+        let building = hares_io::Building {
+            site: Site {
+                elevation_m: None,
+                site_type: None,
+                shielding_of_home: None,
+                latitude_deg: None,
+                longitude_deg: None,
+                utc_offset_h: None,
+            },
+            zones: vec![Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: None,
+                volume_m3: None,
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            }],
+            boundaries: vec![Boundary {
+                id: skylight_id.to_string(),
+                boundary_type: BoundaryType::Skylight,
+                area_m2: 2.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: vec![],
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![],
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                tilt_deg: Some(0.0),
+                framing_factor: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            windows: vec![],
+            skylights: vec![Window {
+                id: skylight_id.to_string(),
+                area_m2: 2.0,
+                azimuth_deg: Some(180.0),
+                u_factor_w_m2_k: Some(2.0),
+                shgc: Some(0.5),
+                interior_shading_fraction: 1.0,
+                winter_shading_fraction: 1.0,
+                fraction_operable: 0.0,
+                exterior_shading_summer: 1.0,
+                exterior_shading_winter: 1.0,
+                attached_to_wall_id: None,
+            }],
+            infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ach_natural: None,
+            infiltration_cfm_natural: None,
+            infiltration_ela_cm2: None,
+            infiltration_constant_ach: None,
+            hvac_capacity_w: None,
+            seer2: None,
+            hspf2: None,
+            water_heater_setpoint_c: None,
+            heating_weekday_setpoints_c: None,
+            heating_weekend_setpoints_c: None,
+            cooling_weekday_setpoints_c: None,
+            cooling_weekend_setpoints_c: None,
+            battery_round_trip_efficiency: None,
+            pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
+            foundation_name: None,
+            residential_facility_type: None,
+            mass_multiplier_override: None,
+            hvac_deadband_c: None,
+            details_xml: hares_io::hpxml::building::XmlNode {
+                name: String::new(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![],
+            },
+        };
+
+        let boundary_inputs = vec![BoundaryInput {
+            area_m2: 2.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: vec![],
+            precomputed_rc: vec![],
+            fallback_r_m2_k_w: 0.5,
+            r_film_interior_m2_k_w: 0.12,
+            r_film_exterior_m2_k_w: 0.03,
+            framing_factor: None,
+            interior_emissivity: 0.84,
+            foundation_depth_m: 0.0,
+            #[cfg(feature = "observe")]
+            used_default_r: false,
+        }];
+
+        let layer_info: HashMap<usize, hares_envelope::SurfaceLayerInfo> = HashMap::new();
+        let node_index: HashMap<hares_envelope::NodeId, usize> = HashMap::new();
+
+        let envelope_diagnostics = EnvelopeDiagnostics {
+            boundaries: vec![BoundaryDiagnostic {
+                boundary_idx: 0,
+                ua_w_per_k: 0.0,
+                r_total_m2_k_w: 0.0,
+                capacitance_j_k: 0.0,
+                n_rc_nodes: 0,
+                interior_zone_idx: 0,
+                exterior_target: ExteriorTarget::Outdoor,
+                area_m2: 2.0,
+                r_film_int_m2_k_w: 0.12,
+                r_film_ext_m2_k_w: 0.03,
+                r_zone_to_inner_m2_k_w: None,
+                r_outer_half_m2_k_w: None,
+                r_inner_half_m2_k_w: None,
+                path: hares_envelope::RCPath::FallbackR,
+                inner_node: None,
+                interior_emissivity: 0.84,
+                foundation_depth_m: 0.0,
+                #[cfg(feature = "observe")]
+                same_zone_kept_half: None,
+            }],
+            zone_capacitances_j_k: vec![1000.0],
+            total_ua_w_per_k: 0.0,
+            #[cfg(feature = "observe")]
+            default_r_fallback_count: 0,
+        };
+
+        let rc = RCContext {
+            layer_info: &layer_info,
+            node_index: &node_index,
+            envelope_diagnostics: &envelope_diagnostics,
+            n_zones: 1,
+            n_ext: 1,
+        };
+
+        let env = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 20.0,
+                humidity_ratio: 0.01,
+                volume_m3: 250.0,
+            }],
+            weather: Default::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: chrono::FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .unwrap(),
+            time_res: chrono::Duration::minutes(1),
+            price_signal: PriceSignal {
+                electricity_price: None,
+                export_price: None,
+                ghg_intensity: None,
+            },
+            electrical: Default::default(),
+        };
+
+        let (boundaries, _ext_cols, _int_cols) =
+            build_solver_boundaries(&building, &boundary_inputs, &rc, &env)
+                .expect("build_solver_boundaries should succeed for skylight fenestration");
+
+        assert_eq!(
+            boundaries.len(),
+            1,
+            "building has one boundary (the skylight)"
+        );
+        let sb = &boundaries[0];
+
+        assert_eq!(
+            sb.boundary_category,
+            Some(BoundaryCategory::Window),
+            "skylight must map to BoundaryCategory::Window"
+        );
+        assert!(
+            (sb.tilt_deg - 0.0).abs() < 1e-9,
+            "skylight tilt must default to 0° (horizontal); got {}",
+            sb.tilt_deg
+        );
+        assert!(
+            (sb.azimuth_deg - 180.0).abs() < 1e-9,
+            "skylight azimuth must be 180°; got {}",
+            sb.azimuth_deg
+        );
+
+        let ws = sb.window_solar.as_ref().expect(
+            "skylight window_solar must be Some — the fenestration was found in \
+             building.skylights and had valid U-factor/SHGC",
+        );
+
+        assert!(
+            (ws.base_shgc - 0.5).abs() < 1e-9,
+            "skylight base_shgc must be 0.5; got {}",
+            ws.base_shgc
+        );
+        assert!(
+            (ws.u_factor_w_m2_k - 2.0).abs() < 1e-9,
+            "skylight u_factor_w_m2_k must be 2.0; got {}",
+            ws.u_factor_w_m2_k
+        );
+        assert!(
+            (ws.window_area_m2 - 2.0).abs() < 1e-9,
+            "skylight window_area_m2 must be 2.0; got {}",
+            ws.window_area_m2
+        );
+        assert!(
+            ws.shgc_summer > 0.0,
+            "summer SHGC must be > 0 for non-zero solar gain; got {}",
+            ws.shgc_summer
+        );
+        assert!(
+            ws.shgc_winter > 0.0,
+            "winter SHGC must be > 0 for non-zero solar gain; got {}",
+            ws.shgc_winter
+        );
+        assert!(
+            ws.transmittance_summer > 0.0,
+            "summer transmittance must be > 0; got {}",
+            ws.transmittance_summer
+        );
+        assert!(
+            ws.transmittance_winter > 0.0,
+            "winter transmittance must be > 0; got {}",
+            ws.transmittance_winter
+        );
+        assert!(
+            ws.radiation_frac >= 0.0,
+            "radiation_frac must be >= 0; got {}",
+            ws.radiation_frac
+        );
     }
 
     #[test]
