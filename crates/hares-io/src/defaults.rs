@@ -2673,4 +2673,24 @@ Setpoint,T_set,60.0,degC
             );
         }
     }
+
+    #[test]
+    fn ev_defaults_directory_documents_file_schemas() {
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let ev_dir = defaults_dir.join("ev");
+        assert!(ev_dir.exists(), "defaults/ev/ directory must exist");
+
+        let has_readme = ev_dir.join("README.md").exists();
+        let has_vehicle_specs = ev_dir.join("vehicle_specs.csv").exists();
+        assert!(
+            has_readme || has_vehicle_specs,
+            "defaults/ev/ must contain either README.md or vehicle_specs.csv \
+             documenting file schemas and vehicle-to-type relationships"
+        );
+    }
 }
